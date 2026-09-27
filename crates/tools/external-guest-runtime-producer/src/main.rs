@@ -7,6 +7,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 use anyhow::{Context as _, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use lillux::crypto::VerifyingKey;
 use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
 use ryeos_external_execution::guest_runtime_product::produce_guest_owner_runtime;
@@ -31,21 +32,22 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
     );
     let project_path = args.next().context("producer project path is absent")?;
     ensure!(
-        args.next().as_deref() == Some(OsStr::new("--controller-root-hex")),
-        "producer requires --controller-root-hex"
+        args.next().as_deref() == Some(OsStr::new("--controller-public-key")),
+        "producer requires --controller-public-key"
     );
-    let root_hex = args.next().context("producer controller root is absent")?;
-    let root_hex = root_hex
+    let public_key = args.next().context("producer controller root is absent")?;
+    let public_key = public_key
         .to_str()
         .context("producer controller root is not UTF-8")?;
+    let encoded = public_key
+        .strip_prefix("ed25519:")
+        .context("producer controller root is not an Ed25519 public key")?;
+    let root_bytes = STANDARD.decode(encoded)?;
     ensure!(
-        root_hex.len() == 64
-            && root_hex
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "producer controller root is not canonical lowercase hex"
+        STANDARD.encode(&root_bytes) == encoded,
+        "producer controller root is not canonical base64"
     );
-    let root_bytes: [u8; 32] = hex::decode(root_hex)?
+    let root_bytes: [u8; 32] = root_bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("producer controller root changed length"))?;
     let controller_root = VerifyingKey::from_bytes(&root_bytes)?;
@@ -188,12 +190,26 @@ mod tests {
         let arguments = vec![
             "--project-path".into(),
             "/private".into(),
-            "--controller-root-hex".into(),
-            hex::encode(root.to_bytes()).into(),
+            "--controller-public-key".into(),
+            format!("ed25519:{}", STANDARD.encode(root.to_bytes())).into(),
             "--profile-json".into(),
             "{\"schema\":1}".into(),
         ];
-        assert!(parse_arguments(arguments).is_err());
+        assert!(parse_arguments(arguments.clone()).is_err());
+        let mut wrong_key = arguments;
+        wrong_key[3] = format!("ed25519:{} ", STANDARD.encode(root.to_bytes())).into();
+        assert!(parse_arguments(wrong_key).is_err());
+        let canonical_profile =
+            lillux::canonical_json(&serde_json::to_value(profile()).unwrap()).unwrap();
+        let valid = vec![
+            "--project-path".into(),
+            "/private".into(),
+            "--controller-public-key".into(),
+            format!("ed25519:{}", STANDARD.encode(root.to_bytes())).into(),
+            "--profile-json".into(),
+            canonical_profile.into(),
+        ];
+        assert_eq!(parse_arguments(valid).unwrap().controller_root, root);
         let source = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         std::fs::set_permissions(project.path(), std::fs::Permissions::from_mode(0o700)).unwrap();

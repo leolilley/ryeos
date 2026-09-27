@@ -3,7 +3,8 @@
 This is an unactivated source-product command. Its future signed Tool must
 declare one exact pinned external-content file mounted as
 `/ryeos/realizations/guest-owner-input`, pass the current node's **public**
-assignment root and a canonical signed owner profile, and provide a retained
+`ed25519:<base64>` signing key from `service:identity/public_key` and a
+canonical signed owner profile, and provide a retained
 private project workspace. The command never reads an installed Bundle path,
 provider credential, or Render API. It creates
 `products/external-guest-owner-runtime` once and reports its observed content
