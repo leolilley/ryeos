@@ -20,6 +20,13 @@ are **not yet complete**, and the Render adapter must still return
 `SupervisorPending`. This owner has no Kaggle, project signing, provider, or
 controller credential.
 
+`ryeos-external-execution::guest_runtime_product` can now create a fresh,
+credential-free runtime tree from an admitted owner-executable descriptor,
+the controller **public** key, and a validated profile. It returns the content
+manifest hash calculated from the exact tree the guest later measures. This
+is a source product only: the signed authoring tool, provider snapshot
+lineage, restored-tree measurement, and installed qualification remain open.
+
 Inbound import and package files must be current-owner pinned regular files
 beneath the owner-private `0700` activation directory. Their modes may be
 `0600`, `0640`, or `0644`, with no special or executable bits: only the owner

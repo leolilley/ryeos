@@ -28,7 +28,7 @@ pub struct GuestOwnerRuntimeProfile {
 }
 
 impl GuestOwnerRuntimeProfile {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             self.schema == 1,
             "unsupported installed guest-owner profile"

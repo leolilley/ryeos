@@ -9,6 +9,7 @@ pub mod guest_installation;
 pub mod guest_import_authorization;
 pub mod guest_package_producer;
 pub mod guest_content;
+pub mod guest_runtime_product;
 pub mod guest_staging;
 pub mod launcher;
 pub mod launcher_protocol;
