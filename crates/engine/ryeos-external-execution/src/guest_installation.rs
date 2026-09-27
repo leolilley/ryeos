@@ -22,7 +22,7 @@ use ryeos_external_execution_contract::staging_package::{
 use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
 use serde::{Deserialize, Serialize};
 
-use crate::guest_import_authorization::VerifiedGuestImportAuthorization;
+use crate::guest_import_authorization::{ObservedGuestRuntime, VerifiedGuestImportAuthorization};
 use crate::guest_staging::{
     GuestStageIdentity, TicketedGuestImport, stage_ticketed_uploaded_guest_package,
 };
@@ -327,6 +327,49 @@ pub struct HeldGuestMountedSandbox {
     _controls: [lillux::InheritedDescriptorAuthority; 5],
     _network_inputs: [lillux::InheritedDescriptorAuthority; 2],
     request: lillux::LinuxSandboxRequest,
+}
+
+/// Compose the admitted occurrence's sole import, installation and native
+/// preparation under one still-owned process. The installed runtime must be
+/// independently qualified and writer-excluded by its caller; observing it
+/// here does not establish either fact. Failure after the owner record is
+/// created never grants a replacement import or launch.
+///
+/// The result is held, not running or Ready. Its caller must inspect Lillux's
+/// mount receipt, release exactly once, join the authenticated supervisor
+/// channel, and retain the owner through scope and writer settlement.
+pub fn prepare_authorized_held_guest_supervisor_once(
+    occurrence: &lillux::PinnedDirectory,
+    upload: &lillux::PinnedRegularFile,
+    installed_runtime: &ObservedGuestRuntime,
+    signed_import_bytes: &[u8],
+    signed_assignment_bytes: &[u8],
+    source: lillux::sandbox::LinuxPrivateSourceFilesystem,
+    import_deadline: lillux::time::MonotonicDeadline,
+    owner_timeout_seconds: f64,
+) -> Result<HeldGuestMountedSandbox> {
+    ensure!(
+        owner_timeout_seconds.is_finite() && (1.0..=5_400.0).contains(&owner_timeout_seconds),
+        "guest owner timeout exceeds the fixed runtime ceiling"
+    );
+    let verified =
+        installed_runtime.verify_import_documents(signed_import_bytes, signed_assignment_bytes)?;
+    verified.require_fresh_admission()?;
+    let authority = verified.authorization().clone();
+    let context = authority.context();
+    let inputs = &authority.guest_inputs;
+    let owner = GuestOccurrenceOwner::begin_authorized(occurrence, verified)?;
+    let staged = owner.stage_uploaded_once(upload, source, &context, inputs, import_deadline)?;
+    let installed = staged.install_base_once(&context, inputs)?;
+    let prepared = installed
+        .prepare_content_for_adoption(&context, inputs)?
+        .create_private_scratch_once(&context, inputs)?
+        .prepare_launch_artifacts_once(&context, inputs)?
+        .prepare_supervisor_request(&context, inputs, owner_timeout_seconds)?;
+    let committed = prepared.commit_outer_launch_intent(&context, inputs)?;
+    committed
+        .prepare_mounted_sandbox_request(&context, inputs)?
+        .prepare_held_in_dedicated_owner()
 }
 
 /// The sole released native supervisor attempt. Applied launch is still only

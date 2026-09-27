@@ -11,11 +11,12 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_external_execution::guest_import_authorization::{
-    sign_guest_import_authorization, sign_guest_occurrence_assignment,
+    ObservedGuestRuntime, sign_guest_import_authorization, sign_guest_occurrence_assignment,
     verify_guest_import_documents,
 };
 use ryeos_external_execution::guest_installation::{
-    GuestOccurrenceOwner, GuestOccurrenceRecoveryPhase, recover_guest_occurrence_authorized,
+    GuestOccurrenceOwner, GuestOccurrenceRecoveryPhase,
+    prepare_authorized_held_guest_supervisor_once, recover_guest_occurrence_authorized,
 };
 use ryeos_external_execution_contract::guest_import_authorization::{
     GUEST_IMPORT_AUTHORIZATION_SCHEMA, GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
@@ -136,10 +137,11 @@ fn supervisor_bootstrap(
     .canonical_bytes()
 }
 
-fn occurrence_assignment(
-    base_snapshot_hash: &str,
+fn occurrence_assignment<'a>(
+    base_snapshot_hash: &'a str,
     attachment_deadline_ms: i64,
-) -> GuestOccurrenceAssignment<'_> {
+    guest_runtime_manifest_hash: &'a str,
+) -> GuestOccurrenceAssignment<'a> {
     GuestOccurrenceAssignment {
         placement_thread_id: "T-native-test",
         admitted_capsule_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -149,7 +151,7 @@ fn occurrence_assignment(
         occurrence_id: "occ-native-test",
         activation_request_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         supervisor_runtime_hash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-        guest_runtime_manifest_hash: "9999999999999999999999999999999999999999999999999999999999999999",
+        guest_runtime_manifest_hash,
         attachment_deadline_ms,
     }
 }
@@ -398,9 +400,23 @@ fn run(
     )?;
     let parsed_bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap =
         serde_json::from_slice(&bootstrap)?;
+    let guest_runtime_path = fixture_path.join("guest-runtime");
+    std::fs::create_dir(&guest_runtime_path)?;
+    std::fs::write(
+        guest_runtime_path.join("controller-root.hex"),
+        hex::encode(
+            lillux::crypto::SigningKey::from_bytes(&[43; 32])
+                .verifying_key()
+                .to_bytes(),
+        ),
+    )?;
+    let guest_runtime = lillux::PinnedDirectory::open(&guest_runtime_path)?
+        .context("installed native fixture runtime vanished")?;
+    let observed_runtime = ObservedGuestRuntime::observe(&guest_runtime)?;
     let assignment = occurrence_assignment(
         &measurement.snapshot_hash,
         parsed_bootstrap.attachment_deadline_ms,
+        observed_runtime.manifest_hash(),
     );
     let authorization = GuestImportAuthorization {
         schema: GUEST_IMPORT_AUTHORIZATION_SCHEMA,
@@ -434,12 +450,6 @@ fn run(
         fixture_path.join("assignment-deadline.txt"),
         assignment.attachment_deadline_ms.to_string(),
     )?;
-    let verified = verify_native_import(
-        &signed,
-        &signed_assignment,
-        assignment.guest_runtime_manifest_hash,
-    )?;
-    let owner = GuestOccurrenceOwner::begin_authorized(&occurrence, verified)?;
     // No test-harness thread exists here. The old /tmp is replaced, while the
     // exact upload and durable occurrence remain pinned outside that mount.
     let source = lillux::sandbox::enter_linux_private_source_filesystem(
@@ -450,51 +460,71 @@ fn run(
     )
     .map_err(anyhow::Error::msg)?;
     let source_root = source.root().try_clone()?;
-    let staged = owner.stage_uploaded_once(
-        &upload,
-        source,
-        &context,
-        &inputs,
-        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
-    )?;
-    let installed = staged.install_base_once(&context, &inputs)?;
-    let observation = installed.recheck_for_adoption(&context, &inputs)?;
-    ensure!(
-        observation.occurrence_id == context.occurrence_id,
-        "native owner changed occurrence"
-    );
-    ensure!(
-        observation.stage.manifest_sha256() == ticket.manifest_sha256,
-        "native stage changed manifest"
-    );
-    ensure!(
-        lillux::PinnedDirectory::open(std::path::Path::new("/tmp"))?
-            .context("private source disappeared")?
-            .identity()?
-            == source_root.identity()?,
-        "sealed source is no longer the exact private mount"
-    );
-    ensure!(
-        std::fs::create_dir("/tmp/post-seal-write")
-            .err()
-            .and_then(|error| error.raw_os_error())
-            == Some(libc::EROFS),
-        "native private source did not refuse a new directory with EROFS"
-    );
-    ensure!(
-        source_root
-            .create_child(OsStr::new("post-seal-write"), 0o700)
-            .is_err(),
-        "installed source remained writable"
-    );
-    let prepared = installed
-        .prepare_content_for_adoption(&context, &inputs)?
-        .create_private_scratch_once(&context, &inputs)?
-        .prepare_launch_artifacts_once(&context, &inputs)?
-        .prepare_supervisor_request(&context, &inputs, 10.0)?;
-    let committed = prepared.commit_outer_launch_intent(&context, &inputs)?;
-    let mounted = committed.prepare_mounted_sandbox_request(&context, &inputs)?;
-    let mut held = mounted.prepare_held_in_dedicated_owner()?;
+    let mut held = if release {
+        let verified = verify_native_import(
+            &signed,
+            &signed_assignment,
+            assignment.guest_runtime_manifest_hash,
+        )?;
+        let owner = GuestOccurrenceOwner::begin_authorized(&occurrence, verified)?;
+        let staged = owner.stage_uploaded_once(
+            &upload,
+            source,
+            &context,
+            &inputs,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+        )?;
+        let installed = staged.install_base_once(&context, &inputs)?;
+        let observation = installed.recheck_for_adoption(&context, &inputs)?;
+        ensure!(
+            observation.occurrence_id == context.occurrence_id,
+            "native owner changed occurrence"
+        );
+        ensure!(
+            observation.stage.manifest_sha256() == ticket.manifest_sha256,
+            "native stage changed manifest"
+        );
+        ensure!(
+            lillux::PinnedDirectory::open(std::path::Path::new("/tmp"))?
+                .context("private source disappeared")?
+                .identity()?
+                == source_root.identity()?,
+            "sealed source is no longer the exact private mount"
+        );
+        ensure!(
+            std::fs::create_dir("/tmp/post-seal-write")
+                .err()
+                .and_then(|error| error.raw_os_error())
+                == Some(libc::EROFS),
+            "native private source did not refuse a new directory with EROFS"
+        );
+        ensure!(
+            source_root
+                .create_child(OsStr::new("post-seal-write"), 0o700)
+                .is_err(),
+            "installed source remained writable"
+        );
+        let prepared = installed
+            .prepare_content_for_adoption(&context, &inputs)?
+            .create_private_scratch_once(&context, &inputs)?
+            .prepare_launch_artifacts_once(&context, &inputs)?
+            .prepare_supervisor_request(&context, &inputs, 10.0)?;
+        let committed = prepared.commit_outer_launch_intent(&context, &inputs)?;
+        committed
+            .prepare_mounted_sandbox_request(&context, &inputs)?
+            .prepare_held_in_dedicated_owner()?
+    } else {
+        prepare_authorized_held_guest_supervisor_once(
+            &occurrence,
+            &upload,
+            &observed_runtime,
+            &ryeos_external_execution_contract::canonical_json(&signed)?,
+            &signed_assignment,
+            source,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            10.0,
+        )?
+    };
     let receipt = held.mount_preparation_receipt()?;
     ensure!(
         receipt.mount_count == 3,
@@ -698,8 +728,11 @@ fn main() {
                 .expect("retained fixture assignment deadline")
                 .parse()
                 .expect("decode fixture assignment deadline");
-        let assignment =
-            occurrence_assignment(&inputs.base_snapshot.snapshot_hash, attachment_deadline_ms);
+        let assignment = occurrence_assignment(
+            &inputs.base_snapshot.snapshot_hash,
+            attachment_deadline_ms,
+            &signed.authorization.guest_runtime_manifest_hash,
+        );
         let controller = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
         let signed_assignment = std::fs::read(fixture.path().join("signed-assignment.json"))
             .expect("retained root-signed native occurrence assignment");
