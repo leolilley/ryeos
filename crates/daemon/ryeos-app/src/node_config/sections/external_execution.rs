@@ -118,6 +118,9 @@ struct BindingDocument {
     backend_artifact_bytes: u64,
     supervisor_artifact_hash: String,
     supervisor_artifact_bytes: u64,
+    /// Expected independently qualified guest-owner runtime, not the
+    /// candidate's structured-session runtime or a provider snapshot ID.
+    guest_runtime_manifest_hash: String,
     launcher_artifact_hash: String,
     launcher_artifact_bytes: u64,
     network_policy: String,
@@ -140,7 +143,7 @@ struct BindingDocument {
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 10,
+            self.kind == "node" && self.schema == 11,
             "unsupported external placement binding schema"
         );
         self.workload.validate()?;
@@ -164,6 +167,7 @@ impl BindingDocument {
             &self.settings_digest,
             &self.backend_artifact_hash,
             &self.supervisor_artifact_hash,
+            &self.guest_runtime_manifest_hash,
             &self.launcher_artifact_hash,
         ] {
             validate_content_identity(value)?;
@@ -244,6 +248,7 @@ impl BindingDocument {
             backend_artifact_bytes: self.backend_artifact_bytes,
             supervisor_artifact_hash: self.supervisor_artifact_hash.clone(),
             supervisor_artifact_bytes: self.supervisor_artifact_bytes,
+            guest_runtime_manifest_hash: self.guest_runtime_manifest_hash.clone(),
             launcher_artifact_hash: self.launcher_artifact_hash.clone(),
             launcher_artifact_bytes: self.launcher_artifact_bytes,
             network_policy: self.network_policy.clone(),
@@ -282,6 +287,7 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) backend_artifact_bytes: u64,
     pub(crate) supervisor_artifact_hash: String,
     pub(crate) supervisor_artifact_bytes: u64,
+    pub(crate) guest_runtime_manifest_hash: String,
     pub(crate) launcher_artifact_hash: String,
     pub(crate) launcher_artifact_bytes: u64,
     pub(crate) network_policy: String,
@@ -498,7 +504,7 @@ impl RetainedExternalExecutionBinding {
             vec![STANDARD.encode(b"fixture controller TLS root")];
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 10,
+            schema: 11,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
             workload: ExternalWorkloadBinding::StructuredSession(ExternalStructuredSessionBinding {
                 provider_declaration_id: "codex-hosted".into(),
@@ -527,6 +533,7 @@ impl RetainedExternalExecutionBinding {
             backend_artifact_bytes: 4096,
             supervisor_artifact_hash: "1".repeat(64),
             supervisor_artifact_bytes: 4096,
+            guest_runtime_manifest_hash: "4".repeat(64),
             launcher_artifact_hash: "e".repeat(64),
             launcher_artifact_bytes: 4096,
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
@@ -656,7 +663,7 @@ impl RetainedExternalExecutionBinding {
         );
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 10,
+            schema: 11,
             protocol: program.requirement.protocol.clone(),
             workload: ExternalWorkloadBinding::StructuredSession(
                 ExternalStructuredSessionBinding {
@@ -685,6 +692,7 @@ impl RetainedExternalExecutionBinding {
             backend_artifact_bytes,
             supervisor_artifact_hash,
             supervisor_artifact_bytes,
+            guest_runtime_manifest_hash: "4".repeat(64),
             launcher_artifact_hash,
             launcher_artifact_bytes,
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
@@ -1046,6 +1054,40 @@ mod workload_binding_tests {
 
     fn document() -> BindingDocument {
         RetainedExternalExecutionBinding::test_fixture().document
+    }
+
+    #[test]
+    fn guest_owner_runtime_is_a_distinct_required_signed_identity() {
+        let document = document();
+        document.validate().unwrap();
+        let contract = document.backend_contract();
+        assert_eq!(
+            contract.guest_runtime_manifest_hash,
+            document.guest_runtime_manifest_hash
+        );
+        assert_ne!(
+            contract.guest_runtime_manifest_hash,
+            contract
+                .workload
+                .structured_session()
+                .unwrap()
+                .runtime_manifest_hash
+        );
+
+        let mut missing = serde_json::to_value(&document).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("guest_runtime_manifest_hash");
+        assert!(serde_json::from_value::<BindingDocument>(missing).is_err());
+
+        let mut old_schema = document.clone();
+        old_schema.schema = 10;
+        assert!(old_schema.validate().is_err());
+
+        let mut malformed = document;
+        malformed.guest_runtime_manifest_hash = "not-a-content-identity".into();
+        assert!(malformed.validate().is_err());
     }
 
     #[test]
