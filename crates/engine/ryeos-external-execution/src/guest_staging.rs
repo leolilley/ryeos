@@ -2373,6 +2373,9 @@ mod tests {
             .unwrap();
         let committed_bytes = committed_file.read_bounded(8 * 1024).unwrap();
         assert_eq!(committed.record_sha256(), lillux::sha256_hex(&committed_bytes));
+        let sealed = committed.seal_record_for_supervisor().unwrap();
+        let (sealed_bytes, _) = sealed.read_regular_file_stable_bounded(8 * 1024).unwrap();
+        assert_eq!(sealed_bytes, committed_bytes);
         assert_eq!(
             committed.record_file(),
             &lillux::pinned_regular_file_identity(
@@ -2396,6 +2399,32 @@ mod tests {
             .unwrap()
             .phase(),
             &crate::guest_installation::GuestOccurrenceRecoveryPhase::LaunchUncertain,
+        );
+        let (changed_dir, _changed_source, _changed_occurrence, prepared) =
+            prepare_launch_occurrence();
+        let changed = prepared.commit_outer_launch_intent(&context, &inputs).unwrap();
+        std::fs::write(
+            changed_dir
+                .path()
+                .join("guest-import-owner/guest-supervisor-launch-intent.json"),
+            b"changed after commit",
+        )
+        .unwrap();
+        assert!(
+            changed.seal_record_for_supervisor().is_err(),
+            "changed committed launch bytes cannot be sealed for the supervisor"
+        );
+        let (replaced_dir, _replaced_source, _replaced_occurrence, prepared) =
+            prepare_launch_occurrence();
+        let replaced = prepared.commit_outer_launch_intent(&context, &inputs).unwrap();
+        let original = replaced_dir
+            .path()
+            .join("guest-import-owner/guest-supervisor-launch-intent.json");
+        std::fs::rename(&original, replaced_dir.path().join("detached-launch-record")).unwrap();
+        std::fs::write(&original, &committed_bytes).unwrap();
+        assert!(
+            replaced.seal_record_for_supervisor().is_err(),
+            "same-byte replacement launch inode cannot be sealed for the supervisor"
         );
         for child in ["candidate-private", "supervisor-state"] {
             let (occurrence_dir, _source_dir, occurrence, prepared) =

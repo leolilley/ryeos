@@ -246,6 +246,51 @@ impl CommittedGuestSupervisorLaunchIntent {
     pub fn record_sha256(&self) -> &str {
         &self.record_sha256
     }
+
+    /// Seal the already committed one-way record for supervisor adoption.
+    /// This passes the retained stage identity across the exec boundary; it
+    /// does not attest the applied mount, release a held target, or grant a
+    /// second launch after uncertainty.
+    pub fn seal_record_for_supervisor(&self) -> Result<lillux::InheritedDescriptorAuthority> {
+        let owner = &self._prepared._artifacts.private.content._installed.owner;
+        owner.root.require_owner_private_directory()?;
+        let file = owner
+            .root
+            .open_pinned_regular(OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME), false)?
+            .context("committed supervisor launch record is absent")?;
+        ensure!(
+            lillux::pinned_regular_file_identity(&file.try_clone_descriptor()?)?
+                == self.record_file,
+            "committed supervisor launch record inode changed"
+        );
+        let observation = file.observation()?;
+        ensure!(
+            observation.size() <= MAX_RECORD_BYTES,
+            "committed supervisor launch record exceeds bound"
+        );
+        let bytes = file.read_stable_bounded(&observation, MAX_RECORD_BYTES)?;
+        ensure!(
+            lillux::sha256_hex(&bytes) == self.record_sha256,
+            "committed supervisor launch record bytes changed"
+        );
+        let parsed: GuestSupervisorLaunchIntent = serde_json::from_slice(&bytes)?;
+        ensure!(
+            canonical_launch_record(&parsed)? == bytes
+                && parsed.stage == *self._source_mount.stage()
+                && parsed.install_record_file
+                    == self
+                        ._prepared
+                        ._artifacts
+                        .private
+                        .content
+                        ._installed
+                        .intent_identity
+                        .record_file,
+            "committed supervisor launch record changed retained source authority"
+        );
+        lillux::sealed_memfd(c"ryeos-guest-supervisor-launch-intent", &bytes)
+            .map_err(anyhow::Error::msg)
+    }
 }
 
 impl PreparedGuestSupervisorRequest {
