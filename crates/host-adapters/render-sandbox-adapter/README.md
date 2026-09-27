@@ -50,8 +50,10 @@ support, signing, installation, or provider qualification.
   state remains unknown and requires operator quarantine or review.
 - Termination uses `POST /v1/sandboxes/{id}/terminate?ownerId=...` once, then
   requires an exact `GET /v1/sandboxes/{id}?ownerId=...` response with matching
-  ID, `status: terminated`,
-  and a valid `terminatedAt` before returning terminal evidence. The evidence
+  ID, the protected plan and region, `deny-all` network policy,
+  `status: terminated`, and a valid `terminatedAt` before returning terminal
+  evidence. The termination request does not carry the allocation lifetime,
+  so this GET cannot independently recheck `timeoutSeconds` against it. The evidence
   digest binds the operation, binding, allocation request, occurrence,
   termination request, terminal state, timestamp, and provider response hash.
   Terminate acknowledgement, 404, timeout, or malformed response alone is
@@ -213,7 +215,7 @@ is negative architecture evidence, not installed Render qualification.
 | Create Sandbox | W2 supplies the retained operation ID, binding hash, allocation request digest, and reservation before invoking this adapter. The provider request has no create-correlation or idempotency token. | Only this request's complete, valid `201` response can bind its returned Sandbox ID after the configured fields match. | A lost/malformed response or any failure after request transmission stays pending. No retry or list search is allowed. `NoRequestSent` is locally authoritative. The three typed snapshot rejection shapes remain pending until provider-authoritative semantics are established. An uncertain create may exist and consume capacity/spend, so its original reservation remains quarantined. |
 | Allocation observation | The original allocation identity remains the coordinate; no Sandbox ID is invented. | Allocation reconciliation is unsupported without a retained provider ID. This adapter does not list or guess. | A list miss or `404` is not a negative proof. Unresolved occurrence and spend remain unknown under the original reservation. |
 | Bootstrap and readiness | W2's activation request identity remains authoritative; this adapter does not create a Render execution token. | No bootstrap/readiness proof is emitted. Activation and its reconciliation remain pending. | The pinned CLI's token-mint response would carry the execution ID and operation-scoped proxy URI; a lost response leaves no exact ID to query. This adapter does not mint, retry, invoke, or guess from a list. |
-| Terminate | W2 supplies the retained operation ID, bound occurrence ID, and termination request digest before invocation. | One termination `POST` is followed by a `GET` for that exact ID. Only a matching ID with `status: terminated` and a valid `terminatedAt` is terminal observation. Recovery is GET-only. | A lost POST response is reconciled by exact-ID GET; the POST is not repeated. A timeout, `404`, malformed response, or missing terminal fields remains pending. Until exact terminal observation, remaining capacity/spend is unknown. |
+| Terminate | W2 supplies the retained operation ID, bound occurrence ID, and termination request digest before invocation. | One termination `POST` is followed by a `GET` for that exact ID. Only a matching ID, protected plan/region, `deny-all` policy, `status: terminated`, and a valid `terminatedAt` are terminal observation; allocation lifetime parity is not rechecked. Recovery is GET-only. | A lost POST response is reconciled by exact-ID GET; the POST is not repeated. A timeout, `404`, malformed response, or missing terminal fields remains pending. Until exact terminal observation, remaining capacity/spend is unknown. |
 | Provider Sandbox death and writer exclusion | Bound to the exact Sandbox occurrence, but distinct from the termination request coordinate. | The current adapter does not establish guest descendant settlement, writer exclusion, or a frozen export. | Provider `terminated` status is not installed qualification or proof of RyeOS guest-writer death. No candidate execution or export is enabled by this adapter. |
 
 The dormant proxy URL check still needs a live provider-shape qualification;

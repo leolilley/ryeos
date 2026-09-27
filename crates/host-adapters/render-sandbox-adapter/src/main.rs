@@ -48,7 +48,7 @@ const MAX_OPERATION_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Settings {
     schema: u32,
@@ -642,10 +642,19 @@ fn create_response_matches(
 fn exact_terminal_timestamp<'a>(
     sandbox: &'a RenderSandbox,
     occurrence_id: &str,
+    settings: &Settings,
 ) -> Option<&'a str> {
+    let expected_plan = match settings.plan {
+        RenderPlan::Starter => RenderSandboxPlan::Starter,
+        RenderPlan::Standard => RenderSandboxPlan::Standard,
+        RenderPlan::Pro => RenderSandboxPlan::Pro,
+    };
     if sandbox.id != occurrence_id
         || sandbox.status != RenderSandboxStatus::Terminated
         || DateTime::parse_from_rfc3339(&sandbox.created_at).is_err()
+        || sandbox.plan != expected_plan
+        || sandbox.region != settings.region
+        || sandbox.network_policy.default != RenderNetworkPolicyDefault::DenyAll
     {
         return None;
     }
@@ -859,7 +868,7 @@ fn observe_termination_with_network(
         Ok(value) => value,
         Err(_) => return pending(),
     };
-    let Some(terminated_at) = exact_terminal_timestamp(&sandbox, &occurrence.occurrence_id) else {
+    let Some(terminated_at) = exact_terminal_timestamp(&sandbox, &occurrence.occurrence_id, settings) else {
         return pending();
     };
     let response_sha256 = lillux::sha256_hex(&bytes);
@@ -1329,10 +1338,32 @@ mod offline_fixture_tests {
             MAX_API_RESPONSE_BYTES as usize,
         )
         .unwrap();
+        let settings = Settings {
+            schema: 2,
+            owner_id: "owner-fixture".into(),
+            plan: RenderPlan::Standard,
+            region: "oregon".into(),
+            snapshot_id: "snp-fixture-001".into(),
+            tls_roots_der_base64: vec!["AA==".into()],
+        };
         assert_eq!(
-            exact_terminal_timestamp(&response, "sbx-fixture-001"),
+            exact_terminal_timestamp(&response, "sbx-fixture-001", &settings),
             Some("2026-09-24T00:01:00Z")
         );
-        assert_eq!(exact_terminal_timestamp(&response, "sbx-other"), None);
+        assert_eq!(exact_terminal_timestamp(&response, "sbx-other", &settings), None);
+        let mut altered = settings.clone();
+        altered.region = "different-region".into();
+        assert_eq!(exact_terminal_timestamp(&response, "sbx-fixture-001", &altered), None);
+        altered = settings.clone();
+        altered.plan = RenderPlan::Pro;
+        assert_eq!(exact_terminal_timestamp(&response, "sbx-fixture-001", &altered), None);
+        let mut altered_response: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../fixtures/terminated-response.json")).unwrap();
+        altered_response["networkPolicy"]["default"] = serde_json::json!("allow-all");
+        let altered_response: RenderSandbox = serde_json::from_value(altered_response).unwrap();
+        assert_eq!(
+            exact_terminal_timestamp(&altered_response, "sbx-fixture-001", &settings),
+            None
+        );
     }
 }
