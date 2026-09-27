@@ -127,7 +127,7 @@ fn supervisor_bootstrap(
     .canonical_bytes()
 }
 
-fn run(fixture_path: &std::path::Path, release: bool) -> Result<()> {
+fn run(fixture_path: &std::path::Path, release: bool, natural_probe: bool) -> Result<()> {
     // Keep durable fixture paths outside /tmp: Lillux replaces /tmp with the
     // process-private source mount after all uploaded bytes are pinned. The
     // invocation's writable working tree is also available on hosts where
@@ -390,26 +390,39 @@ fn run(fixture_path: &std::path::Path, release: bool) -> Result<()> {
     if release {
         let mut released = held.release_once()?;
         let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5));
-        let applied = loop {
-            if let Some(receipt) = released.try_observe_applied_launch()? {
-                break receipt;
-            }
+        if !natural_probe {
+            let applied = loop {
+                if let Some(receipt) = released.try_observe_applied_launch()? {
+                    break receipt;
+                }
+                ensure!(
+                    !deadline.has_elapsed(),
+                    "released supervisor produced no child-origin applied-launch receipt"
+                );
+                lillux::time::sleep(lillux::time::Duration::from_millis(10));
+            };
             ensure!(
-                !deadline.has_elapsed(),
-                "released supervisor produced no child-origin applied-launch receipt"
+                applied.owned_child_pid == receipt.owned_child_pid,
+                "released supervisor changed its held process identity"
             );
-            lillux::time::sleep(lillux::time::Duration::from_millis(10));
-        };
-        ensure!(
-            applied.owned_child_pid == receipt.owned_child_pid,
-            "released supervisor changed its held process identity"
-        );
-        ensure!(
-            released.try_observe_applied_launch()? == Some(applied),
-            "repeated applied-launch point read changed the sole target receipt"
-        );
+            ensure!(
+                released.try_observe_applied_launch()? == Some(applied),
+                "repeated applied-launch point read changed the sole target receipt"
+            );
+        }
         let dead = loop {
-            match released.refuse_if_target_exited() {
+            let observation = if natural_probe {
+                released.try_observe_natural_settlement().map(|settled| {
+                    ensure!(
+                        settled.is_none(),
+                        "placeholder supervisor settled successfully"
+                    );
+                    Ok(())
+                })
+            } else {
+                released.refuse_if_target_exited().map(|()| Ok(()))
+            };
+            match observation.and_then(|result| result) {
                 Ok(()) => {}
                 Err(error) => break error,
             }
@@ -419,19 +432,33 @@ fn run(fixture_path: &std::path::Path, release: bool) -> Result<()> {
             );
             lillux::time::sleep(lillux::time::Duration::from_millis(10));
         };
-        ensure!(
-            dead.to_string()
-                .contains("exited before authenticated attachment")
-                && dead.to_string().contains("launch_failure=true"),
-            "released supervisor had an unrelated terminal refusal: {dead:#}"
-        );
+        if natural_probe {
+            ensure!(
+                dead.to_string()
+                    .contains("did not settle successfully after applied launch"),
+                "natural settlement accepted or misclassified placeholder launch: {dead:#}"
+            );
+            ensure!(
+                released.try_observe_natural_settlement().is_err(),
+                "consumed terminal target was observed a second time"
+            );
+        } else {
+            ensure!(
+                dead.to_string()
+                    .contains("exited before authenticated attachment")
+                    && dead.to_string().contains("launch_failure=true"),
+                "released supervisor had an unrelated terminal refusal: {dead:#}"
+            );
+        }
         drop(released);
     } else {
         drop(held);
     }
     // Native preparation changes this process's mount namespace. The parent
     // test driver retains the host-side fixture and cleans it after exit.
-    println!("native guest sealed-source preparation passed; release={release}");
+    println!(
+        "native guest sealed-source preparation passed; release={release}; natural_probe={natural_probe}"
+    );
     Ok(())
 }
 
@@ -444,13 +471,15 @@ fn main() {
         let root = std::env::var_os("RYEOS_GUEST_OCCURRENCE_FIXTURE_ROOT")
             .expect("native child fixture root is absent");
         let release = std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE_RELEASE").as_deref() == Ok("1");
-        if let Err(error) = run(std::path::Path::new(&root), release) {
+        let natural_probe =
+            std::env::var("RYEOS_GUEST_OCCURRENCE_NATURAL_PROBE").as_deref() == Ok("1");
+        if let Err(error) = run(std::path::Path::new(&root), release, natural_probe) {
             eprintln!("native guest occurrence probe failed: {error:#}");
             std::process::exit(1);
         }
         return;
     }
-    for release in [false, true] {
+    for (release, natural_probe) in [(false, false), (true, false), (true, true)] {
         let fixture = tempfile::Builder::new()
             .prefix("ryeos-guest-occurrence-native-")
             .tempdir_in(std::env::current_dir().expect("current test directory"))
@@ -469,6 +498,10 @@ fn main() {
                 (
                     "RYEOS_GUEST_OCCURRENCE_NATIVE_RELEASE".into(),
                     if release { "1" } else { "0" }.into(),
+                ),
+                (
+                    "RYEOS_GUEST_OCCURRENCE_NATURAL_PROBE".into(),
+                    if natural_probe { "1" } else { "0" }.into(),
                 ),
                 (
                     "RYEOS_GUEST_OCCURRENCE_FIXTURE_ROOT".into(),

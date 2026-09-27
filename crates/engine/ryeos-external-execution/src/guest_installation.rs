@@ -448,6 +448,34 @@ impl ReleasedGuestMountedSandbox {
         }
         Ok(())
     }
+
+    /// Observe natural namespace death after the separate authenticated
+    /// channel has finished. This returns Lillux's descendant-writer
+    /// exclusion, not a Ready, successful protocol, or cloud-termination
+    /// claim. An applied-launch receipt from the exact target and mounts is
+    /// required before a code-zero exit can be accepted. The exit observation
+    /// consumes the sole live process handle; this is not a replayable point
+    /// read after terminal settlement or refusal.
+    pub fn try_observe_natural_settlement(
+        &mut self,
+    ) -> Result<Option<lillux::LinuxSandboxTermination>> {
+        let Some(_applied) = self.try_observe_applied_launch()? else {
+            return Ok(None);
+        };
+        let Some(exit) = self
+            .held
+            .held()
+            .try_observe_target_exit()
+            .map_err(anyhow::Error::msg)?
+        else {
+            return Ok(None);
+        };
+        ensure!(
+            exit.launch_failure().is_none() && exit.exit() == lillux::LinuxSandboxExit::Code(0),
+            "released supervisor did not settle successfully after applied launch"
+        );
+        Ok(Some(exit.into_termination()))
+    }
 }
 
 fn check_applied_supervisor_receipt(
