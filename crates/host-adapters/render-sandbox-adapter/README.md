@@ -291,16 +291,23 @@ coordinates and the controller public root must meet in one independently
 verified qualification before a new Sandbox can be allocated for RyeOS work.
 
 The source product should be authored through an ordinary retained-output
-recipe. Its producer needs the exact owner executable as a **data input** from
-the signed Bundle generation, captured by the existing verified binary
-resolver into a sealed descriptor. The producer also needs the node's public
-assignment-verification root and a signed owner profile. It writes a fresh
-credential-free tree; RyeOS captures that tree as a product and checks its
-manifest against the guest's `ObservedGuestRuntime` algorithm. A pathname
-under an installed `.ai/bin`, a caller-selected executable, and a second
-external-content pin over the same Bundle source are not equivalent input
-authority. The current product recipe/tool input contract cannot yet pass a
-Bundle executable as data, so this authoring graph is not installed.
+recipe. Its producer needs the exact owner executable as a **data input**, the
+node's public assignment-verification root, and a signed owner profile. It
+writes a fresh credential-free tree; RyeOS captures that tree as a product
+and checks its manifest against the guest's `ObservedGuestRuntime` algorithm.
+The current recipe/tool input contract cannot yet pass a signed Bundle
+executable as data. The initial path therefore uses a separately published,
+exactly pinned external-content file, admitted under the Tool's normal
+realization mount. `ryeos-external-guest-runtime-producer` consumes only that
+fixed input, verifies its executable shape and stable digest, and creates the
+private output once. The independent qualification must join the resulting
+owner digest to the executable actually installed in the Render snapshot.
+It must not infer that equality merely because the pin and a Bundle binary
+have similar names. Reading an installed `.ai/bin` path or selecting an
+arbitrary host executable is not an alternative. A future generic signed
+Bundle-artifact data input can replace the separate publication without
+changing the product or snapshot qualification contract. No exact owner pin
+or signed producer Tool/graph is installed yet.
 
 The provider-installed qualification must then bind, at minimum, the exact
 product witness and manifest, Bundle/source generation, node public root,
@@ -315,8 +322,8 @@ placement binding are still missing. A self-described `qualified` field, a
 matching create response, or a signed expectation alone must not grant
 startup capability.
 
-The required implementation order is: admit the Bundle-artifact data input;
-capture the owner runtime product; run and retain the installed independent
+The required implementation order is: publish and pin the exact owner input;
+sign the bounded producer Tool and capture its runtime product; run and retain the installed independent
 snapshot qualification; join its exact evidence to the current placement
 binding before allocation; then enable the signed activation operation and
 prove one-shot contact, ambiguous-response quarantine, authenticated `Ready`,

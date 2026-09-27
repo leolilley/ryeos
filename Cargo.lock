@@ -3076,6 +3076,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-external-guest-runtime-producer"
+version = "0.5.99"
+dependencies = [
+ "anyhow",
+ "hex",
+ "lillux",
+ "ryeos-external-execution",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ryeos-graph-definition"
 version = "0.1.0"
 dependencies = [
