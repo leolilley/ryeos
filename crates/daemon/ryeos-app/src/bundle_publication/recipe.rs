@@ -130,7 +130,13 @@ impl AuthorizeSubstrateBuildRecipeRequest {
                     "consumer":{"canonical_ref":SUBSTRATE_QUALIFIER,"declaration_id":"subject"},
                     "required_product":{"shape":"tree","storage":"content","bounds":bounds},
                     "qualification":{"policy_ref":"config:bundle-release/substrate-qualification",
-                        "required_claims":["substrate_release_checks_v1"]}}]
+                        "required_claims":["substrate_release_checks_v1"]}}, {
+                    "name":"substrate_release_to_qualifier_input",
+                    "producer":{"canonical_ref":SUBSTRATE_BUILD_GRAPH,"recipe_binding":"product_recipe",
+                        "product_name":"substrate_release","parameters":self.parameters()},
+                    "consumer":{"canonical_ref":SUBSTRATE_QUALIFIER,"declaration_id":"subject"},
+                    "required_product":{"shape":"tree","storage":"content","bounds":bounds},
+                    "qualification":{"policy_ref":null,"required_claims":[]}}]
             }
         });
         let relationships: ryeos_state::external_content::products::composition::ProductRelationships =
@@ -154,6 +160,7 @@ impl AuthorizeSubstrateBuildRecipeRequest {
             .context("substrate recipe is not an object")?
             .remove("release_recipe_authorization");
         expected["product_relationships"]["relationships"][0]["producer"]["parameters"] = json!({});
+        expected["product_relationships"]["relationships"][1]["producer"]["parameters"] = json!({});
         let actual: Value = serde_yaml::from_str(signed_source)?;
         anyhow::ensure!(
             actual == expected,
@@ -305,6 +312,7 @@ impl AuthorizeCaptureRecipeRequest {
             product_name,
             product_path,
             relationship_name,
+            qualifier_input_relationship_name,
             qualification_policy,
             qualification_claim,
         ) = if AdmittedReleaseInput::from_value(&self.release_input)?.requires_binary_build {
@@ -313,6 +321,7 @@ impl AuthorizeCaptureRecipeRequest {
                 "signed_native_bundle",
                 "products/signed-native-bundle/tree",
                 "signed_native_bundle_to_release_qualification",
+                "signed_native_bundle_to_qualifier_input",
                 "config:bundle-release/native-qualification",
                 "native_bundle_release_checks_v1",
             )
@@ -322,6 +331,7 @@ impl AuthorizeCaptureRecipeRequest {
                 "signed_portable_bundle",
                 "products/signed-native-bundle/tree",
                 "signed_portable_bundle_to_release_qualification",
+                "signed_portable_bundle_to_qualifier_input",
                 "config:bundle-release/portable-qualification",
                 "portable_bundle_release_checks_v1",
             )
@@ -352,6 +362,12 @@ impl AuthorizeCaptureRecipeRequest {
                     "consumer":{"canonical_ref":qualifier,"declaration_id":"subject"},
                     "required_product":{"shape":"tree","storage":"content","bounds":bounds},
                     "qualification":{"policy_ref":qualification_policy,"required_claims":[qualification_claim]}
+                }, {
+                    "name":qualifier_input_relationship_name,
+                    "producer":{"canonical_ref":capture_graph,"recipe_binding":"product_recipe","product_name":product_name, "parameters":self.graph_parameters()},
+                    "consumer":{"canonical_ref":qualifier,"declaration_id":"subject"},
+                    "required_product":{"shape":"tree","storage":"content","bounds":bounds},
+                    "qualification":{"policy_ref":null,"required_claims":[]}
                 }]
             }
         });
@@ -535,7 +551,7 @@ impl AuthorizeBuildRecipeRequest {
             declarations,
             relationships,
         }
-        .validate()?;
+        .runtime_fact_value()?;
         Ok(encoded)
     }
 }
@@ -696,6 +712,15 @@ mod tests {
             body["product_relationships"]["relationships"][0]["producer"]["parameters"],
             request.parameters()
         );
+        let qualifier_input = &body["product_relationships"]["relationships"][1];
+        assert_eq!(
+            qualifier_input["name"],
+            "substrate_release_to_qualifier_input"
+        );
+        assert_eq!(
+            qualifier_input["qualification"],
+            json!({"policy_ref":null,"required_claims":[]})
+        );
         let mut changed = request.clone();
         changed.receipt.core_generation_hash = "d".repeat(64);
         assert_ne!(
@@ -822,9 +847,60 @@ mod tests {
             relationship["name"],
             "signed_portable_bundle_to_release_qualification"
         );
+        let qualifier_input = &body["product_relationships"]["relationships"][1];
+        assert_eq!(
+            qualifier_input["name"],
+            "signed_portable_bundle_to_qualifier_input"
+        );
+        assert_eq!(qualifier_input["consumer"], relationship["consumer"]);
+        assert_eq!(
+            qualifier_input["qualification"],
+            json!({"policy_ref":null,"required_claims":[]})
+        );
         let mut changed = request;
         changed.signed_manifest.push('x');
         assert!(changed.validate().is_err());
+    }
+
+    #[test]
+    fn native_capture_recipe_keeps_a_separate_unqualified_qualifier_input() {
+        let mut request = capture_request();
+        request.release_input["bundle_name"] = json!("web");
+        request.release_input["authored_manifest"]["name"] = json!("web");
+        request.release_input["target"] =
+            json!({"kind":"triple","triple":"x86_64-unknown-linux-gnu"});
+        request.release_input["payloads"] = json!([{
+            "bundle":"web",
+            "binary":"ryeos-web-tools",
+            "cargo_package":"ryeos-web-tools",
+            "build_class":"release",
+            "bundle_sets":["release-authority"]
+        }]);
+        request.release_input["cargo_packages"] = json!(["ryeos-web-tools"]);
+        request.release_input["build_classes"] = json!(["release"]);
+        request.release_input["requires_binary_build"] = json!(true);
+
+        let body: Value = serde_json::from_str(&request.config_body().unwrap()).unwrap();
+        let relationships = body["product_relationships"]["relationships"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            relationships[0]["name"],
+            "signed_native_bundle_to_release_qualification"
+        );
+        assert_eq!(
+            relationships[0]["qualification"],
+            json!({"policy_ref":"config:bundle-release/native-qualification","required_claims":["native_bundle_release_checks_v1"]})
+        );
+        assert_eq!(
+            relationships[1]["name"],
+            "signed_native_bundle_to_qualifier_input"
+        );
+        assert_eq!(relationships[1]["consumer"], relationships[0]["consumer"]);
+        assert_eq!(
+            relationships[1]["qualification"],
+            json!({"policy_ref":null,"required_claims":[]})
+        );
     }
 
     #[test]

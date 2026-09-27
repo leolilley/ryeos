@@ -67,15 +67,25 @@ class SubstrateQualificationTests(unittest.TestCase):
         verifier_ref = "tool:ryeos/bundle-release/substrate-qualify"
         self.assertEqual(policy["product_qualification_policy"]["verifier_ref"], verifier_ref)
         for recipe in (products, calibration_products):
-            relationship, = recipe["product_relationships"]["relationships"]
-            self.assertEqual(relationship["name"], "substrate_release_to_qualification")
+            relationships = {
+                relationship["name"]: relationship
+                for relationship in recipe["product_relationships"]["relationships"]
+            }
+            relationship = relationships["substrate_release_to_qualification"]
+            qualifier_input = relationships["substrate_release_to_qualifier_input"]
             self.assertEqual(relationship["producer"]["canonical_ref"], "graph:ryeos/bundle-release/substrate-build")
             self.assertEqual(relationship["consumer"], {"canonical_ref": verifier_ref, "declaration_id": "subject"})
             self.assertEqual(relationship["qualification"]["policy_ref"], "config:bundle-release/substrate-qualification")
+            self.assertEqual(qualifier_input["producer"], relationship["producer"])
+            self.assertEqual(qualifier_input["consumer"], relationship["consumer"])
+            self.assertEqual(qualifier_input["qualification"], {
+                "policy_ref": None,
+                "required_claims": [],
+            })
         slots = {slot["id"]: slot for slot in tool["external_product_slots"]}
         self.assertEqual(set(slots), {"python", "subject"})
         self.assertEqual(slots["subject"]["relationship_ref"], "config:bundle-release/substrate-build-products")
-        self.assertEqual(slots["subject"]["relationship"], "substrate_release_to_qualification")
+        self.assertEqual(slots["subject"]["relationship"], "substrate_release_to_qualifier_input")
         self.assertEqual(slots["subject"]["mount"], "substrate-release")
         self.assertEqual(slots["python"]["relationship_ref"], "config:bundle-release/execution-environment-products")
         self.assertEqual(slots["python"]["relationship"], "python_to_substrate_qualify")
@@ -86,7 +96,7 @@ class SubstrateQualificationTests(unittest.TestCase):
         handler = (ROOT / "crates/daemon/ryeos-api/src/handlers/bundle_release.rs").read_text()
         self.assertIn(f'const SUBSTRATE_QUALIFY_TOOL_REF: &str = "{verifier_ref}";', handler)
         self.assertNotIn("SUBSTRATE_QUALIFY_GRAPH_REF", handler)
-        self.assertEqual(handler.count("SUBSTRATE_QUALIFY_TOOL_REF"), 4)
+        self.assertEqual(handler.count("SUBSTRATE_QUALIFY_TOOL_REF"), 5)
 
     def test_canonical_receipt_only_tree_is_qualified(self):
         with tempfile.TemporaryDirectory() as directory:

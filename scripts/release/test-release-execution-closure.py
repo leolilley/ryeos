@@ -514,7 +514,7 @@ class BundleReleaseExecutionClosureTests(unittest.TestCase):
         qualifier_slots = slots_by_mount(qualifier)
         self.assertEqual(
             qualifier_slots["native-bundle"]["relationship"],
-            "signed_portable_bundle_to_release_qualification",
+            "signed_portable_bundle_to_qualifier_input",
         )
         self.assertEqual(
             qualifier_slots["native-bundle"]["relationship_ref"],
@@ -530,6 +530,111 @@ class BundleReleaseExecutionClosureTests(unittest.TestCase):
                 self.assertNotIn("platform", slots)
                 self.assertNotIn("cargo-vendor", slots)
                 self.assertNotIn("static-link-inputs", slots)
+
+    def test_qualifier_subject_is_unqualified_while_publication_relation_keeps_policy(self):
+        lanes = (
+            (
+                "portable",
+                "portable-qualify",
+                "portable-signed-capture-products",
+                "signed_portable_bundle_to_release_qualification",
+                "signed_portable_bundle_to_qualifier_input",
+                "native-bundle",
+            ),
+            (
+                "portable",
+                "portable-qualify",
+                "calibration-portable-capture-products",
+                "signed_portable_bundle_to_release_qualification",
+                "signed_portable_bundle_to_qualifier_input",
+                "native-bundle",
+            ),
+            (
+                "native",
+                "native-qualify",
+                "calibration-native-capture-products",
+                "signed_native_bundle_to_release_qualification",
+                "signed_native_bundle_to_qualifier_input",
+                "native-bundle",
+            ),
+            (
+                "core-seed",
+                "core-seed-qualify",
+                "core-seed-capture-products",
+                "signed_core_seed_to_qualification",
+                "signed_core_seed_to_qualifier_input",
+                "core-seed",
+            ),
+            (
+                "core-seed",
+                "core-seed-qualify",
+                "calibration-core-capture-products",
+                "signed_core_seed_to_qualification",
+                "signed_core_seed_to_qualifier_input",
+                "core-seed",
+            ),
+            (
+                "substrate",
+                "substrate-qualify",
+                "substrate-build-products",
+                "substrate_release_to_qualification",
+                "substrate_release_to_qualifier_input",
+                "substrate-release",
+            ),
+            (
+                "substrate",
+                "substrate-qualify",
+                "calibration-substrate-build-products",
+                "substrate_release_to_qualification",
+                "substrate_release_to_qualifier_input",
+                "substrate-release",
+            ),
+        )
+        for lane, tool_name, recipe_name, policy_name, input_name, mount in lanes:
+            with self.subTest(lane=lane, recipe=recipe_name):
+                recipe = load_yaml(ASSET / f"config/bundle-release/{recipe_name}.yaml")
+                relationships = {
+                    value["name"]: value
+                    for value in recipe["product_relationships"]["relationships"]
+                }
+                self.assertIn(policy_name, relationships)
+                self.assertIn(input_name, relationships)
+                policy_relation = relationships[policy_name]
+                input_relation = relationships[input_name]
+                self.assertEqual(input_relation["producer"], policy_relation["producer"])
+                self.assertEqual(input_relation["consumer"], policy_relation["consumer"])
+                self.assertEqual(input_relation["required_product"], policy_relation["required_product"])
+                self.assertEqual(
+                    input_relation["qualification"],
+                    {"policy_ref": None, "required_claims": []},
+                )
+                self.assertIsNotNone(policy_relation["qualification"]["policy_ref"])
+                tool = load_yaml(TOOLS / f"{tool_name}.yaml")
+                slot = slots_by_mount(tool)[mount]
+                self.assertEqual(slot["relationship"], input_name)
+                slot_recipe = {
+                    "calibration-portable-capture-products": "portable-signed-capture-products",
+                    "calibration-native-capture-products": "signed-capture-products",
+                    "calibration-core-capture-products": "core-seed-capture-products",
+                    "calibration-substrate-build-products": "substrate-build-products",
+                }.get(recipe_name, recipe_name)
+                self.assertEqual(
+                    slot["relationship_ref"],
+                    f"config:bundle-release/{slot_recipe}",
+                )
+
+    def test_calibration_publishes_qualification_against_policy_relationships(self):
+        handler = (
+            ROOT / "crates/daemon/ryeos-api/src/handlers/bundle_release.rs"
+        ).read_text()
+        for relationship in (
+            "signed_portable_bundle_to_release_qualification",
+            "signed_native_bundle_to_release_qualification",
+            "signed_core_seed_to_qualification",
+            "substrate_release_to_qualification",
+        ):
+            with self.subTest(relationship=relationship):
+                self.assertIn(f'"{relationship}"', handler)
 
     def test_validator_rejects_the_previous_ambient_python_shape(self):
         with self.assertRaises(AssertionError):

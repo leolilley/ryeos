@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T10:50:14Z:23d34ee71c52728851c9d4d6d43433ed34010f3e5b1a744162e347a30c20c95d:g45rpJ7NPPkrfDQRBGeHahnAiiNgB5WoN7MPNUONa24ZormqVnNQpFzizSo1mZ3+BQl/EopVrwNKZEEbMIIDCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T08:05:56Z:d5235e945f960928b742a233b7c06aec74f36469a0d7a07943f36c6eb3ff85a7:TzsruAzhmbjO274A006lTpUZ/xjydy145XQ4eNQfITn6nUAHFPdYMnNNx35h50XGuc2djn5unyFOjLWNudTmCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: substrate-qualify
 version: "1.0.0"
@@ -12,7 +12,7 @@ external_product_slots:
   - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_substrate_qualify, kind: tree, mount_root: execution_runtime, mount: python-gnu}
   - id: subject
     relationship_ref: config:bundle-release/substrate-build-products
-    relationship: substrate_release_to_qualification
+    relationship: substrate_release_to_qualifier_input
     kind: tree
     mount_root: execution_runtime
     mount: substrate-release

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T10:50:14Z:8010e37d4891cd572f7dbc586004e1140ef38e67a6b6500cd279a8e8ac2a0df7:2rS2qF5PhHgE1JHOR2+oI7vXhuvnC/GYNB7/h645uvBb1y9U/E3J7AomTOJOsI+CVt9RQSfuYhJd0y/aYP1wCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T08:05:55Z:dae9a40a8b228a0e20664f34f83bb2ab70f162341d08080dc4ab759720e67731:I6Z88Cv42ulW9hVXAlMYpmlz780UF8w056RYjy2yNqCaHPg1WpmtK9cXkPTN+BZ/VnYeqe5vgMTZJsz0KyrOAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: core-seed-qualify
 version: "1.0.0"
@@ -12,7 +12,7 @@ external_product_slots:
   - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_core_seed_qualify, kind: tree, mount_root: execution_runtime, mount: python-gnu}
   - id: subject
     relationship_ref: config:bundle-release/core-seed-capture-products
-    relationship: signed_core_seed_to_qualification
+    relationship: signed_core_seed_to_qualifier_input
     kind: tree
     mount_root: execution_runtime
     mount: core-seed

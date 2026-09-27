@@ -817,14 +817,6 @@ impl RyeOsCore {
         }
     }
 
-    /// Insert into the canonical layout and emit motion only after acceptance.
-    pub(crate) fn add_tile_motions(&mut self, view: ViewSpec) -> Option<TileId> {
-        let attachment_id = self
-            .insertion_attachment_id(self.view_sets[self.active_view_set].id)?
-            .to_string();
-        self.add_tile_motions_under_binding(view, &attachment_id)
-    }
-
     pub(crate) fn add_tile_motions_under_binding(
         &mut self,
         view: ViewSpec,

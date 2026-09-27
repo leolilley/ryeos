@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T10:50:14Z:86998882ba564756a37bdf6fe260fe1459fb07c1d4ee64b2c92cf34dfe6372ee:Cv9bAqhSz/xM1iwIwASo0ikQv0SBNfP2idDlZit4seVuiY8BLtiypzh99nSNLfV866qWaud/NuP7pbjlwsDwAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T08:05:55Z:ba86b49dd6faab8cfd99e529badd579a1ef9c9f17a8d9c59815e59a78ff9a82c:ubLT5sdNal4D0m942yl/JSfHKQd5Mc+OtUF5/WIWHu186TQQ9KkG3AahzHydxoem9C2nPIxms6K+9Ovve1mWCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: portable-qualify
 version: "1.0.0"
@@ -12,7 +12,7 @@ external_product_slots:
   - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_portable_qualify, kind: tree, mount_root: execution_runtime, mount: python-gnu}
   - id: subject
     relationship_ref: config:bundle-release/portable-signed-capture-products
-    relationship: signed_portable_bundle_to_release_qualification
+    relationship: signed_portable_bundle_to_qualifier_input
     kind: tree
     mount_root: execution_runtime
     mount: native-bundle

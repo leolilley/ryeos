@@ -41,6 +41,9 @@ pub fn admit_root_product_selections(
     owner: Option<&str>,
     context: Option<&HandlerContext>,
     inputs: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    project_context_resolver: Option<
+        &dyn super::product_qualification::QualificationProjectContextResolver,
+    >,
     recovered: bool,
 ) -> anyhow::Result<()> {
     use ryeos_state::external_content::products::composition::ProductSelectionTarget;
@@ -112,8 +115,15 @@ pub fn admit_root_product_selections(
         if context.fingerprint != owner {
             bail!("root product selection ingress differs from its admitted owner");
         }
-        select_products(
-            state, context, engine, roots, subject, resolution, &selectors,
+        select_products_with_project_context_resolver(
+            state,
+            context,
+            engine,
+            roots,
+            subject,
+            resolution,
+            &selectors,
+            project_context_resolver,
         )?;
         Ok(())
     }
@@ -230,8 +240,33 @@ pub fn select_products(
     resolution: &mut ResolutionOutput,
     selectors: &[ProductSelection],
 ) -> anyhow::Result<ResolvedExternalProductSelections> {
+    select_products_with_project_context_resolver(
+        state, context, engine, roots, subject, resolution, selectors, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn select_products_with_project_context_resolver(
+    state: &AppState,
+    context: &HandlerContext,
+    engine: &ryeos_engine::engine::Engine,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    subject: &SubjectResolutionAuthority,
+    resolution: &mut ResolutionOutput,
+    selectors: &[ProductSelection],
+    project_context_resolver: Option<
+        &dyn super::product_qualification::QualificationProjectContextResolver,
+    >,
+) -> anyhow::Result<ResolvedExternalProductSelections> {
     select_products_verified(
-        state, context, engine, roots, subject, resolution, selectors,
+        state,
+        context,
+        engine,
+        roots,
+        subject,
+        resolution,
+        selectors,
+        project_context_resolver,
     )
     .map(|(selections, _)| selections)
 }
@@ -245,6 +280,9 @@ fn select_products_verified(
     subject: &SubjectResolutionAuthority,
     resolution: &mut ResolutionOutput,
     selectors: &[ProductSelection],
+    project_context_resolver: Option<
+        &dyn super::product_qualification::QualificationProjectContextResolver,
+    >,
 ) -> anyhow::Result<(
     ResolvedExternalProductSelections,
     BTreeMap<String, ryeos_state::external_content::products::publication::VerifiedProductWitness>,
@@ -293,8 +331,18 @@ fn select_products_verified(
             super::product_receipt::ProductSourceVerification::Fresh,
         )?;
         let selection = select_verified_product(
-            state, context, engine, roots, subject, resolution, selector, &authority, &guard,
-            &witness, limits,
+            state,
+            context,
+            engine,
+            roots,
+            subject,
+            resolution,
+            selector,
+            &authority,
+            &guard,
+            &witness,
+            limits,
+            project_context_resolver,
         )?;
         proofs.insert(selector.declaration_id.clone(), selection);
         witnesses.insert(selector.declaration_id.clone(), witness);
@@ -314,6 +362,9 @@ pub fn select_and_import_products(
     engine: &ryeos_engine::engine::Engine,
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     resolution: &mut ResolutionOutput,
+    project_context_resolver: Option<
+        &dyn super::product_qualification::QualificationProjectContextResolver,
+    >,
 ) -> anyhow::Result<PreparedProductImports> {
     request.validate()?;
     if resolution.root.resolved_ref != request.consumer_ref {
@@ -329,6 +380,7 @@ pub fn select_and_import_products(
         &subject,
         resolution,
         &request.selections,
+        project_context_resolver,
     )?;
     let import_policy = state.node_policy.require::<crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?;
     if request.maximum_bytes > import_policy.limits.max_total_bytes {
@@ -428,6 +480,9 @@ fn select_verified_product(
     guard: &ryeos_state::CasMutationGuard,
     witness: &ryeos_state::external_content::products::publication::VerifiedProductWitness,
     closure_limits: ryeos_state::object_closure::ObjectClosureLimits,
+    project_context_resolver: Option<
+        &dyn super::product_qualification::QualificationProjectContextResolver,
+    >,
 ) -> anyhow::Result<ResolvedExternalProductSelection> {
     selector.validate()?;
     authority.ensure_guard(guard)?;
@@ -505,6 +560,7 @@ fn select_verified_product(
         selector,
         &relationship,
         witness,
+        project_context_resolver,
     )?;
     ryeos_state::external_content::products::publication::verify_product_manifest_against_bounds(
         authority,
@@ -549,6 +605,9 @@ fn admit_selected_qualification(
     selector: &ProductSelection,
     relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
     product: &ryeos_state::external_content::products::publication::VerifiedProductWitness,
+    project_context_resolver: Option<
+        &dyn super::product_qualification::QualificationProjectContextResolver,
+    >,
 ) -> anyhow::Result<
     Option<ryeos_state::external_content::products::composition::AdmittedProductQualification>,
 > {
@@ -588,6 +647,7 @@ fn admit_selected_qualification(
         &current_policy.policy.verifier_ref,
         &current_policy.policy.verifier_parameters,
         &proof.evidence,
+        project_context_resolver,
     )?;
     proof.evidence.validate_current_policy(
         &current_policy,
@@ -604,6 +664,7 @@ fn admit_selected_qualification(
         context,
         &proof.evidence,
         &current_verifier,
+        project_context_resolver,
     )?;
     Ok(Some(AdmittedProductQualification {
         attestation_hash: proof.attestation_hash,
@@ -920,6 +981,11 @@ mod tests {
     fn composition_request_is_exact_and_does_not_carry_derived_authority() {
         let request = request();
         request.validate().unwrap();
+        assert!(matches!(
+            request.subject_resolution_authority(),
+            SubjectResolutionAuthority::PinnedGeneration { ref snapshot_hash }
+                if snapshot_hash == &"b".repeat(64)
+        ));
         assert_eq!(
             serde_json::to_value(&request.selections).unwrap(),
             json!([{
@@ -942,6 +1008,14 @@ mod tests {
         let mut value = serde_json::to_value(&request).unwrap();
         value.as_object_mut().unwrap().remove("project_context");
         assert!(serde_json::from_value::<ComposeRetainedProductsRequest>(value).is_err());
+        let mut value = serde_json::to_value(&request).unwrap();
+        value["project_context"] = json!(null);
+        let projectless: ComposeRetainedProductsRequest = serde_json::from_value(value).unwrap();
+        projectless.validate().unwrap();
+        assert_eq!(
+            projectless.subject_resolution_authority(),
+            SubjectResolutionAuthority::Projectless
+        );
         let mut value = serde_json::to_value(&request).unwrap();
         value["selections"][0]
             .as_object_mut()

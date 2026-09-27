@@ -741,6 +741,7 @@ fn selected_launch_is_target_local_without_erasing_remote_operator_origin() {
                 Some(&context.fingerprint),
                 Some(&context),
                 &inputs,
+                None,
                 recovered,
             )
             .unwrap_err();
@@ -764,6 +765,7 @@ fn selected_launch_is_target_local_without_erasing_remote_operator_origin() {
                     Some(&context.fingerprint),
                     Some(&context),
                     &inputs,
+                    None,
                     recovered,
                 )
                 .unwrap();
@@ -785,6 +787,7 @@ fn selected_launch_is_target_local_without_erasing_remote_operator_origin() {
             target: ProductSelectionTarget::Root {},
             selection,
         }],
+        None,
         false,
     )
     .unwrap_err();

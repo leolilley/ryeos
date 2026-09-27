@@ -2412,21 +2412,6 @@ impl RyeOsCore {
         })
     }
 
-    pub(crate) fn facet_storage_key_for_instance(
-        &self,
-        instance: &RyeOsViewInstanceKey,
-        logical_facet: &str,
-    ) -> Option<String> {
-        if logical_facet == super::seat::KEY_SELECTION || logical_facet.starts_with("selection.") {
-            super::seat::selection_storage_key(
-                self.followed_selection_view_set(instance)?,
-                logical_facet,
-            )
-        } else {
-            Some(logical_facet.to_string())
-        }
-    }
-
     /// Move focus to the default input edge, the one rule shared by
     /// session start and the explicit `FocusInput` event. `false` when
     /// no visible slot owns input.

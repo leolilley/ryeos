@@ -2271,6 +2271,8 @@ mod tests {
             confirm_project_heads: false,
             dry_run,
             json: false,
+            schema_cut_from: None,
+            schema_cut_to: None,
         }
     }
 

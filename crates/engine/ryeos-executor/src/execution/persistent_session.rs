@@ -1497,7 +1497,9 @@ fn prepare_product_selections(
                     "product content dependency `{name}` is executable; select its products through root execution admission"
                 );
             }
-            ryeos_app::operator_external_content::product_composition::select_products(
+            let qualification_project_context_resolver =
+                super::project_source::qualification_project_context_resolver(state);
+            ryeos_app::operator_external_content::product_composition::select_products_with_project_context_resolver(
                 state,
                 context,
                 engine,
@@ -1505,6 +1507,7 @@ fn prepare_product_selections(
                 subject,
                 &mut resolution,
                 &dependency.product_selections,
+                Some(qualification_project_context_resolver.as_ref()),
             )?;
             dependency.resolution =
                 ryeos_engine::resolution::RetainedResolutionOutput::capture(&resolution);

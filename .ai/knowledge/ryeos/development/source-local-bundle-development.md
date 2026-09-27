@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-24T04:14:28Z:66f96de75ff355181cb2464a1b083f38256868c805c8f42d56ab3e2e30c962fa:RkKMCv5miWa03QS7/MWroaAXC7TZk4xdby0CI6FriioQDCieTte6GjzpdhHq/4I3sScnag4l2S1iu6jW8jWNDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-26T23:42:58Z:ca87c452f3f5c3f339cbe1f4a93fa9ecf4454bbff5598abb7be89c7277d05dce:QeDG26sDfj+oO1y3gEogEML2vz8Pd9icuL+vae3xi2e+0E2ak1NE49YL2yrVab7+0N6lM2TOJ+e5S0Y9y5v7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -70,18 +70,123 @@ bundle publication. Neither is established as the bundle-source service.
 The controlling execution state is section 0 of
 `.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
 Current local release-authority candidates are `ryeosd` SHA-256
-`9a266b287629a5cacb9e8b5f03029ac9bb56a2d83d8b2bf41508121451b6a4d8`, CLI
-`8e59853649e2f601f6b2219df47d2503cc8eb099a9d2f3647875aa4593aa6cc8`, and
+`8092dec603a7edb3210bc5e18a6969dad8935cdd6bde6004eb671522216ee102`, CLI
+`db96b2137de1ae2548e8b616da51463940cbc591d4ae9a56fde852415c132096`, and
 publisher `f191ed3bb693fda203e789e577db374087b303c6129f508622fb4fcac422dcd9`.
-Do not repopulate or reset signed node policy. The live release-authority,
-installed hashes, policy preflight, supervision, and eleven signed refs are now
-verified. Capture a new clean exact source snapshot only after the remaining
-source/deployment coordinates are resolved and all source-writing corrections
-are included. The installer, its signing envelope, and deployment contract
-must precede that snapshot.
+The scoped `ryeosd` population installed those exact daemon/CLI candidates
+without resetting policy; initialization explicitly preserved the existing
+signed node-policy generation, strict policy preflight exited successfully,
+and release-authority is running supervised on 127.0.0.1:7401. Do not reset
+policy. The preceding clean source head
+`b6885229171eb40ab9af0fd825a48bf5aa14c2f20496fd4c87a21611e29965e3` advanced
+to `150d7a17e0c7bf2a8014126f66a32526624cb073068f135e6ad4bab5c43b77e3` after
+the retained-terminal correction and knowledge update (3,296 entries; tree
+hash `3c6cb8d1374cfee92b6dd4394bd099fa7f6a6bfd84263c76fbea1aa19506d60dcc38`).
+The follow-up status reported a complete scan, `dirty: false`, and unchanged
+effective-policy hash `a4f959db8559b9b19707431477e20557d06c1a5a136897fa610dac4199021894`.
+Snapshot status also found the independently added
+`.ai/knowledge/ryeos/future/nested-execution-ownership-and-evidence.md`; leave
+that file untouched and include the present worktree state in the next
+operator-authorized RyeOS source snapshot. Its bytes were included in the new
+head, unchanged; do not edit it in this release task. The four exact retained
+qualification pairs are inputs to the calibration's current-node attestation,
+witness, producer-recipe and policy checks.
+
+The first calibration attempt on source head
+`3bacd88d08efebb0185f6f67bca81cdaa926a4c067b4fe30835e68b07838e4db` failed
+before any lane at the CAS capacity reservation: 2,313,879,552 bytes were
+required and 1,443,823,616 observed. This is a precondition/resource failure,
+not evidence against any retained product, qualification or lane. The scoped
+release-authority GC dry-run found only 11,306,865 bytes reclaimable and
+preserved all nine rooted large objects. The focused API test had generated
+5.9 GiB in this checkout's `target/debug`; after confirming `CARGO_TARGET_DIR`
+was unset and the protected
+`.worktrees/external-candidate-execution/target` was a different path, only
+this main-checkout dev-profile cache was removed. `target/release` and the
+other worktree's build data were left intact. `/home` now has 6.6 GiB free,
+and source status for head `3bacd88d08efebb0185f6f67bca81cdaa926a4c067b4fe30835e68b07838e4db`
+remains clean. Record this recovery checkpoint in a fresh ProjectSnapshot
+before retrying the one-shot calibration.
 Calibration, measured policy application, authority/catalog bootstrap, data
 and native publication, cross-node activation, restart/recovery, unaffected
 consumer behavior, and exported-closure acceptance remain unproven.
+
+### Bundle-source schema-cut source closure — 2026-09-24
+
+The first reset attempt used the checkout's `bundles/` root before
+`bundle-source` had a published generation. `ryeos-node::init::discover_bundles`
+intentionally admits only immediate children with `.ai/manifest.yaml`; the
+source tree had that file for `core` and `central-auth`, but only
+`.ai/manifest.source.yaml` for `bundle-source`. Init reserialized the existing
+public identity and pinned trust before discovery failed, but did not replace
+policy or install bundles. This failed attempt was not side-effect free.
+
+The correction was the canonical RyeOS `ryeos-core-tools build` operation on
+only `bundles/bundle-source`, using the already-published byte-identical
+`bundles/core/.ai/bin/x86_64-unknown-linux-gnu/ryeos-core-tools` and
+`bundles/core` as registry. `--owner` is a display/trust label, not key
+selection: the publisher reads the signing key from
+`$RYEOS_APP_ROOT/.ai/config/keys/signing/private_key.pem`. Therefore a build
+must use an explicitly isolated signing-only app root containing the
+authorized Development key and verify its derived fingerprint against source
+trust before invocation. This temporary key context is not a node home or a
+build environment. Never allow this authoring command to fall back to the
+operator's default key. The published manifest signer must be checked after
+the build as well.
+
+On 2026-09-24 this published only `bundle-source`; the generated source
+manifest hash was
+`44a561f2da1b69e9223d9c1baeac7fb0e0567dad1bdeba1d9eb24f9f0768e174`, signed
+by Development fingerprint
+`741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea`.
+RyeOS `bundle-verify` then passed for `core`, `central-auth`, and
+`bundle-source` with zero warnings. Verification uses a registered isolation
+policy and may create derived data in the app-root verified-code cache; select
+a real current node policy context and an execution context permitted to use
+that cache. A sandbox ownership rewrite of `/` is not host evidence and must
+not be “fixed” by changing app-root ownership.
+
+The stopped bundle-source node's signed policy generation was reset through
+RyeOS for exactly `core`, `central-auth`, and `bundle-source`; strict preflight
+then passed. Private node-key SHA-256
+`78afaf82c8ec271eec30064107caab30db37e8a45c72a4140986a162a3481684` and
+substrate-identity SHA-256
+`7b6555ebfe3f89dd1098074918efc35e30b532e574812955e99dff181a260bdb` were
+unchanged. Init may reserialize the public identity document, so its file hash
+is not the invariant. The direct node is now running via `ryeos start` at
+`127.0.0.1:7402`; it remains unsupervised (`host-upgrade --inspect: direct`).
+This closes only source-node setup. Authority measurement/calibration,
+publisher deployment/key custody, catalog bootstrap, publication, consumer
+activation, and recovery acceptance remain open in the controlling
+implementation plan.
+
+### Full-consumer live boundary — 2026-09-24
+
+The default full app root `/home/leo/.local/share/ryeos` is live at
+`127.0.0.1:7400` (PID 307), but it is not yet an eligible current consumer.
+Its running process still holds a deleted old `/usr/bin/ryeosd` inode
+(SHA-256 `b73544655f1003c8542f385671675e7727fb0185c804c8ccdf02d972bb029c12`),
+while the replaced installed path is the newer candidate. Strict current
+policy preflight rejects its schema-1 publication section; explicit
+schema-cut preflight succeeds; host-upgrade inspection reports `direct`.
+Its substrate identity is still image digest
+`sha256:be21e37940c7f75d84285361aeeb28b3f967b6affd5651a99d3c141dceac729b`,
+protocol 1, profile `full`; its installed directory names match the ten
+members of the signed `full` profile, but the signed ref contents still need
+verification. All ten source bundles selected by the signed `full` profile
+have passed `bundle-verify` under release-authority's current isolation policy
+with zero warnings; this verifies source candidates, not the consumer's
+installed refs.
+
+Updating it is not merely rerunning preflight: `ryeos node reset
+policy-generation` replaces one complete signed policy generation and exact
+bundle inventory, and its lifecycle contract requires a stopped node. A stop,
+reset, and restart would interrupt this default live app root. Do not stop it
+without an explicit maintenance window or an independently confirmed
+alternate consumer. Replaced executable paths do not change already-running
+process images; inspect `/proc/<pid>/exe` and hash the live inode when checking
+what code a node actually runs. The controlling execution plan records this
+as a current gate; it is not permission to reset the node.
 
 ### Calibration manifest authority correction — 2026-09-24
 
@@ -168,6 +273,73 @@ Its read-only policy schema-cut preflight passed. The installed daemon remains
 gates. Preserve the four qualified inputs; do not rebuild unchanged Stage-0,
 use host `site-packages`, or promote a source/host smoke to publication
 acceptance.
+
+#### Bundle-publication calibration checkpoint — 2026-09-26
+
+The compact runtime-fact correction is installed and one fresh calibration
+attempt against RyeOS ProjectSnapshot
+`8de8932989f972e9df640b87a12d4993b2a7aac85c0506758b5ae11803aa940e` stopped
+before any build lane. It rejected four retained qualification attestations
+because their direct-execution-evidence projector executable digest
+(`1631e839...`) differs from the currently installed signed Core projector
+(`103d7338...`). The verifier contract correctly pins executable bytes and
+signer while allowing unrelated Core binaries to change. Preserve the four
+subject products; do not weaken this check or rebuild/import/rebind them.
+Re-run only their four independent signed qualification Tools against those
+same exact subjects and publish fresh attestations from the exact verifier
+thread roots. Then revalidate all four pairs before a single calibration
+retry. Exact failure root/child and the full audited continuation are recorded
+in section 0 of
+`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
+
+The managed execution shell subsequently refused local `ryeos bundle verify`
+while preparing its protected `verified-code` cache and refused `node status`
+because its mount view treats pinned `/` as unsafe. This does not establish a
+host node failure. Resume RyeOS stateful verification/requalification only
+from an authorized host execution context; do not work around the check or
+start another calibration with stale evidence.
+
+The first verifier launch then failed before process start with
+`external-content consumer has no active operator binding` (accepted launch
+thread `T-1ab2f7bc-703b-fe2d-1492-d1ce163ffa63`). The `gnu-python` verifier
+declares the fixed `producer-python` manifest as ordinary pinned
+`external_content`, in addition to its selected product slot. With a project
+root selection, this verifier is a generation-scoped `PinnedProject`
+consumer, so the exact active binding for the pinned bootstrap content must
+exist for that verifier and ProjectSnapshot. A prior installed-bundle
+activation or a project binding for another snapshot does not grant this
+authority. Product slots have a separate binding path: compose each exact
+retained product with `external-content compose-product` for the consumer and
+snapshot. A later RyeOS bind completed for the exact bootstrap manifest
+`800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf`.
+The retained subject witness
+`40688684ef88af5b23904dcc3af610fa63a6e70f177c842766950c1f3d564c17` was
+composed as the verifier's `subject` slot against snapshot
+`2e17ce199aeeff755d46b78894a5fb4ab7436dbd5a7666c4be7d5a86a60f3c13`,
+yielding subject manifest
+`9bbe57a9fbde797bc0b99a09be779dd3462a4f46cbe569181af9d9ba14dc3ce8` and a
+`PinnedProject` consumer binding. The signed verifier completed with the
+expected claims under that same pinned snapshot, but qualification did not
+publish: projectless qualification reconstruction produced a different
+execution-plan identity.
+
+A live RyeOS re-audit confirmed that the successful subject binding is not
+projectless authority: its retained composition result is explicitly
+`consumer.kind: pinned_project` for snapshot `2e17ce...`. The separate
+projectless bind covers only `producer-python`, not the subject manifest. The
+prior actual `--no-project` verifier launch failed before process start for
+lack of an active consumer binding. Also, `gnu-python-products` is a
+project-owned Config absent from `bundles/standard`; product-relationship
+resolution under `Projectless` uses bundle roots only. Do not relabel the
+pinned binding as `InstalledBundle`, rerun the verifier with `--no-project`,
+move this development Config into `standard`, or weaken identity/authority
+checks. The source-level correction is to retain the exact sealed pinned
+snapshot through verifier re-admission using the RyeOS snapshot lease; this
+candidate is not yet installed or live-verified. Publish qualification only
+through policy-bearing `runtime_to_qualified_runtime` after verifier
+consistency checks pass. Precise live receipts and schema-install status are
+recorded in section 0 of
+`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
 
 For **every** unforeseen failure, stop at the first failed boundary. Retain
 the exact terminal/snapshot/install/product identities, state the assumption
@@ -294,6 +466,15 @@ terminal rather than treating the managed Graph's live wrapper as a direct Tool
 terminal. It rejects absent, non-final and contradictory success evidence while
 preserving bounded child failure diagnostics.
 
+Release-specific normalization must account for the retained outcome
+vocabulary of a direct subprocess Tool: a successful process is
+`ThreadStatus::Completed` with `outcome_code: "exit:0"` and no error, while a
+soft-failing process can also exit zero but is retained as `Failed` with an
+error. Normalize only the exact retained, completed, error-free `exit:0`
+terminal into the bundle-release adapter's `success` vocabulary. Do not make
+`exit:0` globally authoritative or trust the live dispatch payload; preserve
+failed/contradictory terminal diagnostics and result content.
+
 Focused source validation passed: 16 release-asset checks, 8 portable
 data-only checks, 5 Cargo-recipe checks, 3 engine source-member tests, 1
 application spawn-copy test, 7 executor source-closure tests and 9 API release
@@ -345,6 +526,107 @@ it does for the other source bundles. Capture a fresh exact source snapshot,
 recheck the retained prerequisite bindings, then retry live calibration. Only
 the subsequent measured policy, catalog bootstrap and distinct-consumer
 updates can close the release proof.
+
+On 2026-09-25, the accepted authority-calibration graph failed at Core-capture
+recipe admission, not while still running. Projection events show portable and
+native build/capture/qualification completed, Core-seed build completed at
+00:09:09Z, and Core manifest signing completed at 00:09:19Z; the service then
+failed at 00:09:19Z with `admitted product recipe exceeds the runtime-fact
+budget`. No Core-capture graph was created, and substrate calibration was not
+reached. The child terminal record and event chain retain the budget error,
+but not the generated capture request or signed Config bytes. Its raw dynamic
+inputs can nevertheless be reconstructed from separate retained evidence:
+the Core build witness carries the exact release input; the calibration
+manifest attestation and CAS blob carry the materialization/tree/item hashes
+and 1,360-byte signed manifest; and the parent calibration's sealed request
+carries the Python product selection. Independent reconstruction gives a
+4,905-byte canonical release input, a 7,866-byte canonical-shaped capture
+parameter object, about 15,732 bytes for its repeated parameter values alone,
+and a 9,575-byte compact fact estimate (excluding the Config trailing
+newline). These are reconstructed values, not a Rust serialization of the
+historical failed request: its complete runtime fact and exact signed overlay
+were not retained. The estimate supports compaction but does not prove live
+admission; the fresh calibration result must prove that.
+
+Keep the relationship roles precise. A Core-seed *build* has separate Graph
+and Tool consumer edges for the unsigned Core input. A Core-seed *capture*
+uses two same-producer, same-qualifier-slot relationships: the policy-qualified
+relationship binds qualification evidence, while the unqualified relationship
+is the exact `external_product_slots` subject input required by the verifier.
+The signed portable/native and substrate capture recipes use the same
+qualified-evidence plus unqualified-subject pattern. Both edges are required;
+they are not two different consumers, and the unqualified input does not
+replace or weaken the qualified evidence relationship.
+
+The current source candidate leaves one-off producer parameters inline and
+interns only repeated values in a digest-sorted compact runtime-fact table,
+referenced by bounded relationship indexes. The decoder verifies table
+canonicality and reconstructs and validates the original full recipe before
+evidence or policy checks. Limits and logical witness format remain unchanged;
+no expanded-fact compatibility fallback is added. Focused state, Graph-launch,
+managed-capsule JSON-wire/current-decoder, coupled release, and API regression
+checks pass. The API test
+uses the checked-in Core-capture template and a boundary-sized manifest value;
+it is a source regression, not live acceptance. The capsule regression does
+not exercise a CAS write/reload or runtime-DB restart; those remain separate
+recovery acceptance. Runtime-fact budget errors now report the canonical
+encoded byte count and the unchanged 16,384-byte ceiling; a focused state test
+proves that diagnostic for both encoding and decoding rejection. This does not
+replay the old request or replace live calibration evidence. The compact-fact
+correction is not installed. The
+release-authority node is online with the current 11-bundle generation. The
+main-checkout target was recreated for focused validation; the 11 GiB
+`.worktrees/external-candidate-execution/target` remains protected and was not
+touched. The previous graph is terminal failed, not running; its exact state was
+recovered through read-only projection/CAS inspection because the CLI's thread
+reader rejects the node's stale bundle-publication policy schema. Before one
+retry, install only the reviewed compact-fact generation, qualify the
+release-authority node, capture a fresh source snapshot, and revalidate all four
+retained prerequisite product bindings. Do not reset node policy unless
+preflight proves that necessary.
+
+On 2026-09-25 the reviewed compact-fact source was built and the signed
+release-authority bundle set was repopulated through the scoped one-job local
+installer path. No Stage-0 or static-link input build ran. The installer then
+stopped at its privileged host-install transition with `sudo: a password is
+required`, before installed binaries, node lifecycle or policy state changed.
+The populated source and release artifacts are ready for a no-populate host
+install; do not repeat `--populate` or clear build caches. The exact next host
+command is recorded in the current bundle-release execution checkpoint. After
+it succeeds, verify the candidate through the live node before refreshing the
+source snapshot and submitting one calibration retry. At that handoff,
+`/home` retained about 5.8 GiB free; unrelated builds and Docker data were not
+cleaned.
+
+Focused revalidation on 2026-09-25 exposed and corrected an integration
+regression in the oversize diagnostic: Graph-launch error classification
+recognizes the stable `runtime-fact budget` marker, so adding the byte count
+must preserve that marker. The first Graph-launch run returned
+`product_recipe_admission_invalid` instead of the existing
+`product_recipe_admission_too_large`; the diagnostic was corrected without
+changing either ceiling or error policy. A second review found that storing a
+64-character digest on every relationship unnecessarily enlarged recipes with
+unique parameter values. The encoder now leaves one-offs inline and indexes
+only repeated values in its digest-sorted table; decoding requires at least
+two uses per table entry and rejects mixed inline/indexed duplicates. Current
+focused results pass: 16 state compact tests, 8 Graph-launch tests, the
+Core-capture API regression,
+3 Core-seed builder tests, 8 release-recipe tests, the retained direct-Tool
+terminal normalization test, and the three focused release-asset suites
+(7/19/6). Formatting and `git diff --check` pass. These checks remain source
+evidence only. The installed release-authority files currently hash to daemon
+`8092dec603a7edb3210bc5e18a6969dad8935cdd6bde6004eb671522216ee102`, CLI
+`db96b2137de1ae2548e8b616da51463940cbc591d4ae9a56fde852415c132096`, and
+publisher `b4092e434af08c6fb75b12be2b1945181e0adb9ad6d9663b9945899bc28ea916`;
+both installed-daemon and candidate-daemon strict policy-generation preflight
+exit successfully. A host-equivalent read-only check confirms the live
+release-authority node is running and supervised on port 7401. Its node-owned
+bundle verification reports the populated `bundle-release` source as
+`verified`, with no warnings. Earlier verification errors came from selecting
+the default full-consumer app root and then from the sandbox's inability to
+protect the live node's verified-code cache; the corrected exact-root,
+host-equivalent invocation passed. No source-correction install, lifecycle
+change, policy reset, or new calibration has occurred yet.
 
 #### Retained prerequisite evidence and ownership
 
@@ -1408,6 +1690,25 @@ qualified Python, platform and Cargo-vendor evidence; the portable bundle
 graph's smaller runtime requirements do not remove those calibration gates.
 The bootstrap helper neither changes policy nor proves consumer activation.
 
+Verifier ownership determines the consumer context. If a verifier Tool selects
+a project-owned Config or relationship, its admitted consumer is the exact
+pinned project generation even when the product bytes themselves were imported
+from a local capture. Do not retry qualification as projectless merely because
+that path is shorter: qualification must re-admit the verifier from the sealed
+launch capsule's snapshot and retain the verified materialization for the
+whole evidence check. Validate request shape and handler requirements from
+the local contract before invoking live composition or qualification; rejected
+pre-authorization payloads prove nothing about binding authority.
+
+For lightweight service input schemas, a trailing `?` means the field may be
+omitted; it does not mean a present value may be null. A DTO field using
+required-nullable deserialization therefore needs the explicit `object|null`
+form (or its matching nullable type), not `object?`. Keep these independent:
+omission must not silently become projectless authority, and a pinned object
+must still carry the exact canonical snapshot hash. Test the signed service
+schema through the shared CLI input normalizer and the typed handler DTO before
+calling a live node.
+
 For durable input evidence, place the complete acquired directory at
 `stage0-acquisition` in the selected project generation and execute
 `graph:ryeos/development/stage0-acquisition-capture`. Its
@@ -1604,3 +1905,35 @@ remains an explicit gate. Keep the verified authoring environment unchanged
 while independently qualifying fresh utility build support and compilation.
 Completed operator-driven Cargo evidence remains distinct from still-open
 worker edit/child/completion-fence/candidate/restart/remote acceptance.
+
+## Project snapshots: pinned is not necessarily read-only
+
+Independent qualification must reject verifier runs whose sealed
+`ExecutionProjectAuthority` is `PinnedGeneration` with `PinnedProjectRealization::Cow`,
+even when `base_snapshot_hash`, `snapshot_hash`, and final
+`result_project_snapshot_hash` are equal. A COW verifier could observe a
+temporary input edit and restore the tree before terminal capture. A
+`RetainCurrentHead` expected-hash fence constrains publication; it does not
+attest that project bytes were immutable during execution.
+
+The qualification bridge accepts only projectless or exact
+`PinnedGeneration + ReadOnly` authority and resolves the capsule's exact
+snapshot through a retained RyeOS materialization lease. Do not broaden this
+to COW, infer read-only from a pinned snapshot hash, or retry a failed
+qualification against the same capsule. Preserve the exact product and its
+existing pinned consumer/bootstrap bindings; rerun the verifier read-only
+against the same immutable snapshot (or against a separately captured COW
+result if that result is intentionally the subject), verify the new capsule's
+realization, then qualify.
+
+The authenticated `/execute` policy model and executor already support
+`PinnedSource::Snapshot { hash }` with `PinnedRealization::ReadOnly`; this is
+the required lane for re-running the verifier. The authenticated root CLI
+selector is `ryeos execute --project-snapshot <hash> <item-ref> ...`: it retains the
+project path as identity but sends the exact snapshot hash and read-only
+realization through normal `/execute` admission. It rejects projectless use,
+repeated snapshot selectors, conflicting pin selectors, and `--state-root`.
+Use a newly admitted verifier capsule and inspect its recorded authority before qualification; do
+not reuse a COW capsule. Keep default live worker execution and existing COW
+semantics unchanged. This source-control selector is not itself a qualification
+or authority bypass.

@@ -225,22 +225,23 @@ pub(super) fn prove(
     current: &CurrentBundleVerifierIdentity,
     subject_id: &str,
     subject_hash: &str,
+    project_context_resolver: Option<&dyn super::QualificationProjectContextResolver>,
 ) -> anyhow::Result<(Value, ProductQualificationExecutionProof)> {
     require_terminal_invocation(terminal, capsule)?;
     let (contract_ref, contract_digest) = projection_owner(&capsule.artifact_identity);
-    let projector = state
-        .engine
+    let projector = current
+        .request_engine
         .resolve_execution_evidence_projector(contract_ref, contract_digest)?
         .context("admitted execution contract declares no evidence projector")?;
     let effective_program = program(admitted, &current.effective_definition_digest)?;
-    let required = described(state.engine.describe_execution_evidence(
+    let required = described(current.request_engine.describe_execution_evidence(
         &projector,
         ExecutionEvidenceDescribeRequest {
             config: projector.declaration.config.clone(),
             effective_program: effective_program.clone(),
         },
     )?)?;
-    let current_required = described(state.engine.describe_execution_evidence(
+    let current_required = described(current.request_engine.describe_execution_evidence(
         &projector,
         ExecutionEvidenceDescribeRequest {
             config: projector.declaration.config.clone(),
@@ -251,7 +252,7 @@ pub(super) fn prove(
         bail!("current execution contract changed its required participants");
     }
     let events = history(authority, guard, terminal, projector.declaration.limits)?;
-    let response = state.engine.project_execution_evidence(
+    let response = current.request_engine.project_execution_evidence(
         &projector,
         ExecutionEvidenceProjectRequest {
             config: projector.declaration.config.clone(),
@@ -304,6 +305,7 @@ pub(super) fn prove(
             subject_hash,
             required_call,
             call,
+            project_context_resolver,
         )?);
     }
     // Callback-free subprocesses cannot hide daemon-dispatched participants.
@@ -317,7 +319,7 @@ pub(super) fn prove(
         else {
             bail!("zero-participant qualification requires a callback-free subprocess contract");
         };
-        let protocol = state.engine.protocols.require(protocol_ref)?;
+        let protocol = current.request_engine.protocols.require(protocol_ref)?;
         if protocol.descriptor.callback_channel
             != ryeos_engine::protocol_vocabulary::CallbackChannel::None
         {
@@ -348,6 +350,7 @@ fn prove_participant(
     subject_hash: &str,
     required: &ExecutionEvidenceRequiredCallWire,
     call: &ExecutionEvidenceCandidateCallWire,
+    project_context_resolver: Option<&dyn super::QualificationProjectContextResolver>,
 ) -> anyhow::Result<ProductQualificationParticipant> {
     let action = static_action(required)?;
     if ryeos_runtime::callback::dispatch_action_digest(&action)? != call.action_digest {
@@ -455,6 +458,8 @@ fn prove_participant(
             content: CurrentVerifierContent::Inherited(inherited),
             logical_project_root: logical_root.as_deref(),
             binding_subject_authority: Some(sealed.resolution_subject_authority()),
+            sealed_request: Some(&sealed),
+            project_context_resolver,
         },
         Some(resolution),
     )?;
@@ -470,8 +475,8 @@ fn prove_participant(
     else {
         bail!("qualification participant contract is not callback-free direct execution");
     };
-    if state
-        .engine
+    if current
+        .request_engine
         .protocols
         .require(protocol_ref)?
         .descriptor
@@ -480,8 +485,11 @@ fn prove_participant(
     {
         bail!("qualification participant protocol admits callbacks");
     }
-    let _source =
-        crate::source_closure_admission::recover_source_closure(state, &state.engine, resolution)?;
+    let _source = crate::source_closure_admission::recover_source_closure(
+        state,
+        current.request_engine.as_ref(),
+        resolution,
+    )?;
     Ok(ProductQualificationParticipant {
         call_id: required.call_id.clone(),
         operation_id: call.operation_id.clone(),
@@ -534,10 +542,11 @@ pub(in crate::operator_external_content) fn verify_current(
     context: &HandlerContext,
     evidence: &ProductQualificationEvidence,
     current: &CurrentBundleVerifierIdentity,
+    project_context_resolver: Option<&dyn super::QualificationProjectContextResolver>,
 ) -> anyhow::Result<()> {
     let proof = &evidence.execution_proof;
-    let projector = state
-        .engine
+    let projector = current
+        .request_engine
         .resolve_execution_evidence_projector(
             &proof.projection_contract_ref,
             &proof.projection_contract_digest,
@@ -546,7 +555,7 @@ pub(in crate::operator_external_content) fn verify_current(
     if !compatible_projector_identity(&projector_identity(&projector.projector), &proof.projector) {
         bail!("qualification evidence projector identity changed");
     }
-    let required = described(state.engine.describe_execution_evidence(
+    let required = described(current.request_engine.describe_execution_evidence(
         &projector,
         ExecutionEvidenceDescribeRequest {
             config: projector.declaration.config.clone(),
@@ -570,6 +579,26 @@ pub(in crate::operator_external_content) fn verify_current(
         {
             bail!("qualification participant's current request or inputs changed");
         }
+        let limits = state
+            .node_policy
+            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .closure_limits()?;
+        let child_capsule = AdmittedLaunchCapsule::from_current_value(
+            ryeos_state::object_closure::load_exact_cas_object_with_cas(
+                &authority.cas_store()?,
+                &retained.verifier.admitted_launch_capsule_hash,
+                limits.max_object_bytes,
+            )?,
+        )?;
+        let child_sealed =
+            crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+                &child_capsule,
+            )?;
+        if child_sealed.item_ref() != action.item_id
+            || child_sealed.admitted_parameters_digest()? != canonical_value_digest(&action.params)?
+        {
+            bail!("qualification participant capsule differs from its current action");
+        }
         let child = super::resolve_current_bundle_verifier_identity_against_admitted(
             state,
             authority,
@@ -580,7 +609,9 @@ pub(in crate::operator_external_content) fn verify_current(
             CurrentVerifierContext {
                 content: CurrentVerifierContent::Inherited(&current.realizations),
                 logical_project_root: retained.verifier.admitted_project_root.as_deref(),
-                binding_subject_authority: None,
+                binding_subject_authority: Some(child_sealed.resolution_subject_authority()),
+                sealed_request: Some(&child_sealed),
+                project_context_resolver,
             },
             None,
         )?;

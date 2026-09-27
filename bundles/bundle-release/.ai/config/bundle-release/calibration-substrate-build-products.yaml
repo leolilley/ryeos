@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:cea878a477536e5e9adf388d4d93460b0644216bb2275ec925a534f701e21138:lzbil+li5ufboEDiwYIOY8fpIfz2n4Wem2rUALaqPn6Mfxv51pR1wVc885EwWIaVmra4gYmWK4Z9CN2Xt+MzBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T08:05:52Z:50dfb9171668c2b72e592c56aa5840e0480442c58859da736ae16c0d9f829cb0:zPneD8AJybiACdysR0T6VxF4Q9A144EUlfhpgcObwfcDDma3qRa1shzVYhH0mpN6Ll8kcB2RSuunsp0niXUGAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Purpose-separated installed-substrate authority-calibration producer.
@@ -28,3 +28,8 @@ product_relationships:
       qualification:
         policy_ref: config:bundle-release/substrate-qualification
         required_claims: [substrate_release_checks_v1]
+    - name: substrate_release_to_qualifier_input
+      producer: {canonical_ref: graph:ryeos/bundle-release/substrate-build, recipe_binding: product_recipe, product_name: substrate_release, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/bundle-release/substrate-qualify, declaration_id: subject}
+      required_product: {shape: tree, storage: content, bounds: *bounds}
+      qualification: {policy_ref: null, required_claims: []}

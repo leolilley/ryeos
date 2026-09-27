@@ -207,7 +207,13 @@ pub struct InvocationInputContract {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvocationInputField {
     pub ty: InvocationInputType,
+    /// Whether the lightweight declaration omits the trailing `?`. Most
+    /// requiredness remains handler-owned; the normalizer enforces presence
+    /// only when a field is both required and nullable, where omission must
+    /// not be conflated with an explicit authority-bearing null.
     pub required: bool,
+    /// Whether the declaration explicitly includes `|null`.
+    pub nullable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,7 +229,9 @@ pub enum InvocationInputType {
 
 impl InvocationInputContract {
     /// Parse the lightweight effective-item schema used by command help, e.g.
-    /// `{ "limit": "integer?" }`. The trailing `?` marks optionality.
+    /// `{ "limit": "integer?", "project_context": "object|null" }`.
+    /// A trailing `?` marks field optionality; the explicit `|null` suffix
+    /// marks a nullable value. These are independent wire-contract properties.
     pub fn from_lightweight_schema_value(value: &Value) -> Result<Option<Self>, String> {
         let Some(schema) = value.as_object() else {
             if value.is_null() {
@@ -245,7 +253,21 @@ impl InvocationInputContract {
                 return Err(format!("schema field '{name}' has an empty type"));
             }
             let required = !raw.ends_with('?');
-            let ty = raw.strip_suffix('?').unwrap_or(raw).trim();
+            let raw = raw.strip_suffix('?').unwrap_or(raw).trim();
+            let (ty, nullable) = match raw.strip_suffix("|null") {
+                Some(ty) if !ty.trim().is_empty() => (ty.trim(), true),
+                Some(_) => {
+                    return Err(format!(
+                        "schema field '{name}' has an empty type before '|null'"
+                    ));
+                }
+                None if raw.contains("|null") || raw.starts_with("null|") => {
+                    return Err(format!(
+                        "schema field '{name}' has malformed nullable type '{raw}'"
+                    ));
+                }
+                None => (raw, false),
+            };
             let array_element = ty.strip_suffix("[]").map(str::trim);
             let scalar_ty = array_element.unwrap_or(ty);
             let ty = match scalar_ty {
@@ -267,7 +289,14 @@ impl InvocationInputContract {
             } else {
                 ty
             };
-            fields.insert(name.clone(), InvocationInputField { ty, required });
+            fields.insert(
+                name.clone(),
+                InvocationInputField {
+                    ty,
+                    required,
+                    nullable,
+                },
+            );
         }
 
         Ok(Some(Self { fields }))
@@ -317,6 +346,9 @@ pub enum ControlFlagBinding {
     /// Presence → resolve the caller's already-published principal project
     /// HEAD at admission and run from a daemon-owned copy-on-write generation.
     PinCurrentHeadAtAdmission,
+    /// Takes an exact published snapshot hash and executes that snapshot as
+    /// an immutable read-only realization.
+    ProjectSnapshot,
     /// Presence → authorize project-backed child roots to receive independent
     /// private COW generations retained for explicit owner disposition.
     RetainChildResults,
@@ -351,6 +383,7 @@ impl ControlFlagBinding {
                 | Self::StateRoot
                 | Self::RefBinding
                 | Self::ProductSelections
+                | Self::ProjectSnapshot
         )
     }
 }
@@ -987,6 +1020,7 @@ mod tests {
         assert!(!contract.fields["limit"].required);
         assert_eq!(contract.fields["enabled"].ty, InvocationInputType::Boolean);
         assert!(contract.fields["enabled"].required);
+        assert!(!contract.fields["enabled"].nullable);
     }
 
     #[test]
@@ -1012,5 +1046,33 @@ mod tests {
 
         assert_eq!(contract.fields["scopes"].ty, InvocationInputType::Array);
         assert!(!contract.fields["scopes"].required);
+    }
+
+    #[test]
+    fn invocation_contract_separates_requiredness_from_nullability() {
+        let schema = serde_json::json!({
+            "project_context": "object|null",
+            "optional_context": "object|null?",
+        });
+
+        let contract = InvocationInputContract::from_lightweight_schema_value(&schema)
+            .unwrap()
+            .unwrap();
+
+        assert!(contract.fields["project_context"].required);
+        assert!(contract.fields["project_context"].nullable);
+        assert!(!contract.fields["optional_context"].required);
+        assert!(contract.fields["optional_context"].nullable);
+    }
+
+    #[test]
+    fn invocation_contract_rejects_malformed_nullable_types() {
+        for ty in ["|null", "null|object", "object|null|null", "object|null??"] {
+            let schema = serde_json::json!({"project_context": ty});
+            assert!(
+                InvocationInputContract::from_lightweight_schema_value(&schema).is_err(),
+                "unexpectedly accepted {ty}"
+            );
+        }
     }
 }

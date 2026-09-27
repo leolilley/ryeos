@@ -341,6 +341,8 @@ async fn compose_pinned_release_consumer(
     let preparation_state = Arc::clone(&state);
     let preparation_context = context.clone();
     let preparation_request = composition.clone();
+    let qualification_project_context_resolver =
+        super::qualification_project_context::resolver(state.as_ref());
     let (prepared, imported) = tokio::task::spawn_blocking(move || {
         let mut prepared =
             ryeos_executor::execution::project_source::prepare_external_product_consumer(
@@ -353,6 +355,7 @@ async fn compose_pinned_release_consumer(
             preparation_state,
             preparation_context,
             &preparation_request,
+            Some(qualification_project_context_resolver),
         )?;
         anyhow::Ok((prepared, imported))
     })
@@ -641,7 +644,7 @@ fn normalize_retained_dispatch_terminal(
             "release dispatch returned another thread identity"
         );
     }
-    let (status, terminal) = load(thread_id)?.with_context(|| {
+    let (status, mut terminal) = load(thread_id)?.with_context(|| {
         format!("release execution {thread_id} has no retained terminal result")
     })?;
     let status = ryeos_state::objects::ThreadStatus::from_str_lossy(&status)
@@ -649,6 +652,17 @@ fn normalize_retained_dispatch_terminal(
             status.is_terminal() && *status != ryeos_state::objects::ThreadStatus::Continued
         })
         .with_context(|| format!("release execution {thread_id} has no final terminal status"))?;
+    // Direct subprocess Tools persist their successful process outcome as
+    // `exit:0`; native/managed execution uses `success`. Adapt only this exact
+    // retained terminal, and only when lifecycle authority independently says
+    // completed with no error. In particular, a soft-failing Tool can also
+    // have `exit:0`, but retains Failed status and a non-null error.
+    if terminal.outcome_code.as_deref() == Some("exit:0")
+        && status == ryeos_state::objects::ThreadStatus::Completed
+        && terminal.error.as_ref().is_none_or(Value::is_null)
+    {
+        terminal.outcome_code = Some("success".to_owned());
+    }
     anyhow::ensure!(
         terminal.outcome_code.as_deref() != Some("success")
             || (status == ryeos_state::objects::ThreadStatus::Completed
@@ -732,7 +746,8 @@ pub(crate) async fn publish_qualification(
 ) -> anyhow::Result<
     ryeos_app::operator_external_content::product_qualification::ProductQualificationResponse,
 > {
-    ryeos_app::operator_external_content::product_qualification::qualify(
+    let project_context_resolver = super::qualification_project_context::resolver(state.as_ref());
+    ryeos_app::operator_external_content::product_qualification::qualify_with_project_context_resolver(
         state,
         context,
         ryeos_app::operator_external_content::product_qualification::ProductQualificationRequest {
@@ -742,6 +757,7 @@ pub(crate) async fn publish_qualification(
             verifier_chain_root_id,
             verifier_thread_id,
         },
+        Some(project_context_resolver),
     )
     .await
 }
@@ -755,17 +771,13 @@ mod tests {
     use serde_json::json;
 
     fn retained_terminal(
+        status: &str,
         outcome: &str,
         result: serde_json::Value,
         error: serde_json::Value,
     ) -> (String, ryeos_app::thread_lifecycle::ExecuteResponseResult) {
         (
-            if outcome == "success" {
-                "completed"
-            } else {
-                "failed"
-            }
-            .to_owned(),
+            status.to_owned(),
             ryeos_app::thread_lifecycle::ExecuteResponseResult {
                 outcome_code: Some(outcome.to_owned()),
                 result: Some(result),
@@ -785,6 +797,7 @@ mod tests {
             normalize_retained_dispatch_terminal(live.clone(), Some("T-producer"), |id| {
                 assert_eq!(id, "T-producer");
                 Ok(Some(retained_terminal(
+                    "completed",
                     "success",
                     json!({"schema":"retained"}),
                     json!(null),
@@ -798,6 +811,7 @@ mod tests {
 
         let failed = normalize_retained_dispatch_terminal(live, None, |_| {
             Ok(Some(retained_terminal(
+                "failed",
                 "failed",
                 json!({"outcome_code":"success","result":{"schema":"spoof"}}),
                 json!("spawn item: inspect source-backed sandbox mount target ENOENT"),
@@ -834,7 +848,7 @@ mod tests {
         let normalized = normalize_retained_dispatch_terminal(
             json!({"thread":{"thread_id":"T-producer"},"result":{"success":true}}),
             None,
-            |_| Ok(Some(retained_terminal("failed", json!({
+            |_| Ok(Some(retained_terminal("failed", "failed", json!({
                 "error":"é".repeat(8192), "outcome_code":"success", "artifacts":["do-not-dump"]
             }), json!(null)))),
         ).unwrap();
@@ -851,13 +865,100 @@ mod tests {
             let live = json!({"thread":{"thread_id":"T-producer"},"result":{"success":true}});
             assert!(
                 normalize_retained_dispatch_terminal(live, None, |_| {
-                    let (_, terminal) = retained_terminal("success", json!({}), json!(null));
+                    let (_, terminal) =
+                        retained_terminal("completed", "success", json!({}), json!(null));
                     Ok(Some((status.to_owned(), terminal)))
                 })
                 .is_err(),
                 "{status}"
             );
         }
+    }
+
+    #[test]
+    fn direct_tool_exit_zero_is_adapted_only_with_completed_error_free_authority() {
+        let live = json!({
+            "thread":{"thread_id":"T-producer"},
+            "result":{"outcome_code":"exit:99","result":{"schema":"untrusted"}}
+        });
+        let normalized =
+            normalize_retained_dispatch_terminal(live.clone(), Some("T-producer"), |_| {
+                Ok(Some(retained_terminal(
+                    "completed",
+                    "exit:0",
+                    json!({"schema":"retained"}),
+                    json!(null),
+                )))
+            })
+            .unwrap();
+        assert_eq!(
+            normalized
+                .pointer("/result/outcome_code")
+                .and_then(serde_json::Value::as_str),
+            Some("success")
+        );
+        assert_eq!(
+            successful_dispatch_result(&normalized).unwrap()["schema"],
+            "retained"
+        );
+
+        // A process exit code alone does not authorize success: Tools that
+        // report a soft failure can exit 0, but retain Failed + an error.
+        let soft_failure =
+            normalize_retained_dispatch_terminal(live.clone(), Some("T-producer"), |_| {
+                Ok(Some(retained_terminal(
+                    "failed",
+                    "exit:0",
+                    json!({"schema":"must-not-be-accepted"}),
+                    json!({"soft_failure":true}),
+                )))
+            })
+            .unwrap();
+        assert_eq!(
+            soft_failure
+                .pointer("/result/outcome_code")
+                .and_then(serde_json::Value::as_str),
+            Some("exit:0")
+        );
+        assert!(successful_dispatch_result(&soft_failure).is_err());
+
+        // Contradictory Completed+error authority is not normalized either.
+        let contradictory =
+            normalize_retained_dispatch_terminal(live.clone(), Some("T-producer"), |_| {
+                Ok(Some(retained_terminal(
+                    "completed",
+                    "exit:0",
+                    json!({"schema":"must-not-be-accepted"}),
+                    json!({"reported_failure":true}),
+                )))
+            })
+            .unwrap();
+        assert_eq!(
+            contradictory
+                .pointer("/result/outcome_code")
+                .and_then(serde_json::Value::as_str),
+            Some("exit:0")
+        );
+        assert!(successful_dispatch_result(&contradictory).is_err());
+
+        // A nonzero exit stays a failure even if a corrupted terminal claims
+        // Completed; the strict downstream checker never accepts it.
+        let nonzero = normalize_retained_dispatch_terminal(live, Some("T-producer"), |_| {
+            Ok(Some(retained_terminal(
+                "completed",
+                "exit:1",
+                json!({"schema":"must-not-be-accepted"}),
+                json!(null),
+            )))
+        })
+        .unwrap();
+        assert_eq!(
+            nonzero
+                .pointer("/result/outcome_code")
+                .and_then(serde_json::Value::as_str),
+            Some("exit:1")
+        );
+        assert!(successful_dispatch_result(&nonzero).is_err());
     }
 
     #[test]

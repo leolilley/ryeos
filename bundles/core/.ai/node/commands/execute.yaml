@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T03:28:05Z:769b6351f11a97a05c4b2afce3a1580b34a4a3274598c4fdd310f22c487b1ff6:VJLahdZDpQsBezTsqDhO650a9Nzm3GtY7aPh4GeHwFa8v7bSOOCLiaxBg0G4lTN6vS0zxc/k99qv2qOC3QGNBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-26T23:32:10Z:21a551b36707ac40619e5f7873912996a6f1b53369a2c2064d486f792fea5777:D0onB8eCJts/bMUfpIdTUEmhtEFzk/Y3GrjXt4IHIAt4q1I1tlPtEUX8k9iOrR9G9L87TK7FiBylDeO0Xec2Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - execute
 description: "Execute an item (tool, directive, service, graph). On a terminal, streams the live execution log then prints the final result; --no-stream/--json print only the buffered JSON result (also the default when piped), and --stream forces streaming even when piped."
@@ -42,6 +42,9 @@ control_flags:
 - flag: current-head
   help: "Execute from the current principal project HEAD in a retained daemon-owned copy-on-write generation"
   binding: pin_current_head_at_admission
+- flag: project-snapshot
+  help: "Execute from this exact published project snapshot as a read-only pinned realization"
+  binding: project_snapshot
 - flag: retain-child-results
   help: "Give project-backed child roots independent copy-on-write generations retained for explicit owner disposition"
   binding: retain_child_results

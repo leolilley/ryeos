@@ -173,6 +173,14 @@ impl CoreSeedRecipeRequest {
                 "required_product":{"shape":"tree","storage":"content","bounds":bounds},
                 "qualification":{"policy_ref":null,"required_claims":[]}
             }));
+        } else {
+            relationships.push(json!({
+                "name":"signed_core_seed_to_qualifier_input",
+                "producer":{"canonical_ref":producer,"recipe_binding":"product_recipe","product_name":product,"parameters":self.parameters()},
+                "consumer":{"canonical_ref":consumer,"declaration_id":slot},
+                "required_product":{"shape":"tree","storage":"content","bounds":bounds},
+                "qualification":{"policy_ref":null,"required_claims":[]}
+            }));
         }
         let value = json!({"category":"bundle-release","version":"1.0.0","description":"Exact substrate Core seed producer recipe.",
             "recipe_purpose":"bundle_release_v1",
@@ -201,7 +209,7 @@ impl CoreSeedRecipeRequest {
             declarations,
             relationships,
         }
-        .validate()?;
+        .runtime_fact_value()?;
         Ok(body)
     }
     pub fn validate_response(&self, value: &Value, publisher: &str) -> anyhow::Result<()> {
@@ -299,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn core_capture_selects_only_distinct_core_qualification() {
+    fn core_capture_preserves_policy_and_separate_unqualified_input() {
         let signed = "# fixed fixture\n{}\n".to_owned();
         let recipe = CoreSeedRecipeRequest::Capture(CoreSeedCaptureRecipeRequest {
             build: build(),
@@ -316,5 +324,15 @@ mod tests {
             json!({"policy_ref":QUALIFICATION_POLICY,"required_claims":[QUALIFICATION_CLAIM]})
         );
         assert_eq!(relation["producer"]["parameters"], recipe.parameters());
+        let qualifier_input = &body["product_relationships"]["relationships"][1];
+        assert_eq!(
+            qualifier_input["name"],
+            "signed_core_seed_to_qualifier_input"
+        );
+        assert_eq!(qualifier_input["consumer"], relation["consumer"]);
+        assert_eq!(
+            qualifier_input["qualification"],
+            json!({"policy_ref":null,"required_claims":[]})
+        );
     }
 }

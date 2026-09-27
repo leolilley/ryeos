@@ -559,8 +559,7 @@ mod tests {
             Some(serde_json::json!({"thread": "T-one"}))
         );
         assert!(
-            core.facet_storage_key_for_instance(&instance, "selection.work")
-                .is_none(),
+            core.followed_selection_view_set(&instance).is_none(),
             "a pinned snapshot is not a mutable selection owner"
         );
     }

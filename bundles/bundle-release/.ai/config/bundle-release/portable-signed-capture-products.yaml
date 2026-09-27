@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-21T01:02:19Z:513c4e41bf9d466d37479eaa1b1f3416a81f11cfa4c9c5fc8578a7f43f58f160:vH0RGDzvg05fwW1PyyeenmqTQ2naUNW2BAUAnirjCGE/mqPj2euzLLwj94Yb516vhUp0vhWCvqPotagqoB8xAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T08:05:53Z:187a23b200604d301558342e056e71b49182ee6c21218da5c51d3de1195cb64f:yorAJqJkJO93XhjhavzGEEVWuAEAK6k7mLKJ4qJE1HwM9gsl1LwLDmI67RSPgu6CW8MvjxoAsMRwJmUabqAPCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Captured signed output contract for an admitted portable bundle producer.
@@ -32,3 +32,8 @@ product_relationships:
       qualification:
         policy_ref: config:bundle-release/portable-qualification
         required_claims: [portable_bundle_release_checks_v1]
+    - name: signed_portable_bundle_to_qualifier_input
+      producer: {canonical_ref: graph:ryeos/bundle-release/portable-signed-capture, recipe_binding: product_recipe, product_name: signed_portable_bundle, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/bundle-release/portable-qualify, declaration_id: subject}
+      required_product: {shape: tree, storage: content, bounds: *bounds}
+      qualification: {policy_ref: null, required_claims: []}

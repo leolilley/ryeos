@@ -4813,6 +4813,7 @@ async fn prepare_managed_launch_authority(
             params.resolved.requested_by.as_deref(),
             params.handler_context,
             &params.resolved.product_selections,
+            None,
             true,
         )
         .map_err(BuildAndLaunchError::Internal)?;

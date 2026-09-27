@@ -109,7 +109,12 @@ class CoreSeedAssetTests(unittest.TestCase):
                               if relation["name"] == "core_seed_to_signed_capture")
         tool_relation = next(relation for relation in build["product_relationships"]["relationships"]
                              if relation["name"] == "core_seed_to_signed_capture_tool")
-        capture_relation, = capture["product_relationships"]["relationships"]
+        capture_relationships = {
+            relation["name"]: relation
+            for relation in capture["product_relationships"]["relationships"]
+        }
+        capture_relation = capture_relationships["signed_core_seed_to_qualification"]
+        qualifier_input = capture_relationships["signed_core_seed_to_qualifier_input"]
         self.assertEqual(build_relation["producer"]["canonical_ref"],
                          "graph:ryeos/bundle-release/core-seed-build")
         self.assertEqual(build_relation["consumer"], {
@@ -130,6 +135,12 @@ class CoreSeedAssetTests(unittest.TestCase):
             "policy_ref": "config:bundle-release/core-seed-qualification",
             "required_claims": ["substrate_core_seed_checks_v1"],
         })
+        self.assertEqual(qualifier_input["producer"], capture_relation["producer"])
+        self.assertEqual(qualifier_input["consumer"], capture_relation["consumer"])
+        self.assertEqual(qualifier_input["qualification"], {
+            "policy_ref": None,
+            "required_claims": [],
+        })
         self.assertEqual(policy["product_qualification_policy"]["allowed_claims"],
                          ["substrate_core_seed_checks_v1"])
         self.assertEqual(build_graph["product_recipe"],
@@ -138,7 +149,7 @@ class CoreSeedAssetTests(unittest.TestCase):
                          "config:bundle-release/core-seed-capture-products")
         for owner, slot_id, relationship, mount in (
             (capture_graph, "unsigned_core", "core_seed_to_signed_capture", "unsigned-core-seed"),
-            (qualifier, "subject", "signed_core_seed_to_qualification", "core-seed"),
+            (qualifier, "subject", "signed_core_seed_to_qualifier_input", "core-seed"),
         ):
             slot, = [candidate for candidate in owner["external_product_slots"]
                      if candidate["id"] == slot_id]

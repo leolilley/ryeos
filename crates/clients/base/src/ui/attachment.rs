@@ -351,8 +351,7 @@ mod tests {
         );
         assert!(matches!(pinned, SelectionAttachment::Pinned { .. }));
         assert!(
-            core.facet_storage_key_for_instance(&instance, "selection.work")
-                .is_none()
+            core.followed_selection_view_set(&instance).is_none()
         );
         let preferences = core.export_layout_preferences().unwrap();
         assert!(!preferences.contains("selection_attachments"));

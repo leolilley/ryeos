@@ -1,10 +1,10 @@
-# ryeos:signed:2026-09-08T03:28:13Z:ec142a8f5a0f91c551e6f63880221e523c5e22a18b103ea26fe00dda9d0c76f9:8CYxXeMMrpwva8Cho9MZDKTPCNjMVMxkntAQ5LT0J7max5IS7xAPUFLyf+iMpZJ7aAmhLwLCuPNx2JdrFYjPAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-26T07:04:25Z:2eef52d93a8a0cbd5d9fd3e27ed02d75d67862a01620fd19fb5e56b12c79e728:6XUNkqQrGMlZ3ek/jb4mAVJyrbiqoWzeoljMI7S4yFsjDdrYR3YdqgyM+YX3ozVEp65CRW9tT7iCVzCLLl/iCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.compose-product
 required_caps: ["ryeos.execute.service.external-content/compose-product"]
 schema:
   consumer_ref: string
-  project_context: object?
+  project_context: object|null
   selections: array
   maximum_bytes: integer
-description: Bind a complete bounded product selection to one exact signed consumer using an optional pinned project context
+description: Bind a complete bounded product selection to one exact signed consumer using an explicit nullable project context (null means projectless)

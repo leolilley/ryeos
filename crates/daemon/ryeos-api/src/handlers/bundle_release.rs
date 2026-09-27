@@ -318,7 +318,9 @@ fn authority_measure_handler(
             .node_policy
             .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
-        let portable_measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority(
+        let qualification_project_context_resolver =
+            super::qualification_project_context::resolver(state.as_ref());
+        let portable_measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority_with_project_context_resolver(
             &state,
             &context,
             &authority,
@@ -326,8 +328,9 @@ fn authority_measure_handler(
             limits,
             &request.portable_qualification_owner_principal,
             &request.portable_qualification_attestation_hash,
+            Some(qualification_project_context_resolver.as_ref()),
         )?;
-        let native_measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority(
+        let native_measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority_with_project_context_resolver(
             &state,
             &context,
             &authority,
@@ -335,8 +338,9 @@ fn authority_measure_handler(
             limits,
             &request.native_qualification_owner_principal,
             &request.native_qualification_attestation_hash,
+            Some(qualification_project_context_resolver.as_ref()),
         )?;
-        let substrate_measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority(
+        let substrate_measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority_with_project_context_resolver(
             &state,
             &context,
             &authority,
@@ -344,8 +348,9 @@ fn authority_measure_handler(
             limits,
             &request.substrate_qualification_owner_principal,
             &request.substrate_qualification_attestation_hash,
+            Some(qualification_project_context_resolver.as_ref()),
         )?;
-        let core_seed_measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority(
+        let core_seed_measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority_with_project_context_resolver(
             &state,
             &context,
             &authority,
@@ -353,6 +358,7 @@ fn authority_measure_handler(
             limits,
             &request.core_seed_qualification_owner_principal,
             &request.core_seed_qualification_attestation_hash,
+            Some(qualification_project_context_resolver.as_ref()),
         )?;
         anyhow::ensure!(
             [
@@ -754,7 +760,7 @@ fn calibration_invocation_recipe_body(
         declarations,
         relationships,
     }
-    .validate()?;
+    .runtime_fact_value()?;
     Ok(body)
 }
 
@@ -1024,7 +1030,9 @@ fn verified_calibration_product(
     )?;
     let untrusted = ProductQualificationEvidence::from_value(&qualification_attestation.evidence)?;
     let owner_principal = untrusted.product_coordinate.owner_principal.clone();
-    let measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority(
+    let qualification_project_context_resolver =
+        super::qualification_project_context::resolver(state);
+    let measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority_with_project_context_resolver(
         state,
         context,
         &authority,
@@ -1032,6 +1040,7 @@ fn verified_calibration_product(
         limits,
         &owner_principal,
         &selection.qualification_attestation_hash,
+        Some(qualification_project_context_resolver.as_ref()),
     )?;
     anyhow::ensure!(
         measured.qualified_product_witness_hash == selection.product_witness_hash
@@ -4348,8 +4357,8 @@ mod tests {
 
     #[test]
     fn calibration_invocation_recipes_bind_exact_parameters_and_keep_template_shape() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../bundles/bundle-release/.ai/config/bundle-release");
+        let root = ryeos_engine::test_support::workspace_root()
+            .join("bundles/bundle-release/.ai/config/bundle-release");
         for (source, overlay, producer) in [
             (
                 "calibration-portable-build-products.yaml",
@@ -4434,6 +4443,122 @@ mod tests {
     }
 
     #[test]
+    fn core_capture_runtime_fact_compacts_the_calibration_parameter_shape() {
+        use ryeos_state::external_content::products::{
+            ProductDeclarations, ProductRecipePurpose,
+            admission::{
+                AdmittedProductRecipeBinding, MAX_ADMITTED_PRODUCT_RECIPE_BYTES,
+                PRODUCT_RECIPE_BINDING_SCHEMA, admitted_product_recipe_from_runtime_fact,
+            },
+            composition::ProductRelationships,
+        };
+
+        let root = ryeos_engine::test_support::workspace_root()
+            .join("bundles/bundle-release/.ai/config/bundle-release");
+        let signed =
+            std::fs::read_to_string(root.join("calibration-core-capture-products.yaml")).unwrap();
+        let (_, template_body) = signed.split_once('\n').unwrap();
+        let mut accepted = None;
+
+        // Exercise the production capture parameter fields and both production
+        // consumer edges. Grow only the opaque signed-manifest field until the
+        // complete fact crosses the old 16 KiB encoding while each signed
+        // relationship remains within its existing independent bound.
+        for manifest_payload_bytes in (4_000..8_000).step_by(100) {
+            let parameters = json!({
+                "release_input": {"bundle": "core", "release_id": "calibration-core-seed"},
+                "materialization_result_hash": "a".repeat(64),
+                "signed_tree_manifest_hash": "b".repeat(64),
+                "manifest_item_hash": "c".repeat(64),
+                "signed_manifest": "x".repeat(manifest_payload_bytes),
+                "child_product_selections": [{"declaration_id": "python", "witness_hash": "d".repeat(64)}]
+            });
+            let Ok(body) = calibration_invocation_recipe_body(
+                template_body,
+                "core-seed-capture-products.yaml",
+                ryeos_app::bundle_publication::core_seed::CAPTURE_GRAPH,
+                &parameters,
+            ) else {
+                continue;
+            };
+            let value: Value = serde_json::from_str(&body).unwrap();
+            let declarations =
+                ProductDeclarations::from_value(value["build_products"].clone()).unwrap();
+            let relationships: ProductRelationships =
+                serde_json::from_value(value["product_relationships"].clone()).unwrap();
+            let binding = AdmittedProductRecipeBinding {
+                schema: PRODUCT_RECIPE_BINDING_SCHEMA.to_owned(),
+                binding_name: "product_recipe".to_owned(),
+                recipe_ref: "config:bundle-release/core-seed-capture".to_owned(),
+                recipe_raw_content_digest: sha256_bytes(body.as_bytes()),
+                purpose: ProductRecipePurpose::AuthorityCalibrationV1,
+                declarations_hash: declarations.content_hash().unwrap(),
+                declarations,
+                relationships,
+            };
+            let expanded_bytes = lillux::canonical_json(&serde_json::to_value(&binding).unwrap())
+                .unwrap()
+                .len();
+            if expanded_bytes <= MAX_ADMITTED_PRODUCT_RECIPE_BYTES {
+                continue;
+            }
+            let Ok(compact) = binding.runtime_fact_value() else {
+                continue;
+            };
+            accepted = Some((binding, compact, value));
+            break;
+        }
+
+        let (binding, compact, recipe) = accepted.expect(
+            "Core-capture production relationships should fit by interning their identical parameters",
+        );
+        assert!(
+            lillux::canonical_json(&compact).unwrap().len() <= MAX_ADMITTED_PRODUCT_RECIPE_BYTES
+        );
+        let decoded = admitted_product_recipe_from_runtime_fact(&compact).unwrap();
+        assert_eq!(decoded, binding);
+
+        let matching = recipe["product_relationships"]["relationships"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|relationship| {
+                relationship["producer"]["canonical_ref"]
+                    == ryeos_app::bundle_publication::core_seed::CAPTURE_GRAPH
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 2);
+        assert!(matching.iter().all(|relationship| {
+            relationship["producer"]["parameters"] == matching[0]["producer"]["parameters"]
+        }));
+        let names = matching
+            .iter()
+            .map(|relationship| relationship["name"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from([
+                "signed_core_seed_to_qualification",
+                "signed_core_seed_to_qualifier_input",
+            ])
+        );
+        assert!(matching.iter().all(|relationship| {
+            relationship["consumer"]["canonical_ref"]
+                == "tool:ryeos/bundle-release/core-seed-qualify"
+        }));
+        assert!(matching.iter().any(|relationship| {
+            relationship["qualification"]["policy_ref"]
+                == "config:bundle-release/core-seed-qualification"
+                && relationship["qualification"]["required_claims"]
+                    == json!(["substrate_core_seed_checks_v1"])
+        }));
+        assert!(matching.iter().any(|relationship| {
+            relationship["qualification"]["policy_ref"].is_null()
+                && relationship["qualification"]["required_claims"] == json!([])
+        }));
+    }
+
+    #[test]
     fn static_inputs_are_selected_for_native_builds_only() {
         use ryeos_app::bundle_publication::calibration::{
             CalibrationEnvironmentSelection, CalibrationProductSelection,
@@ -4464,7 +4589,7 @@ mod tests {
         let portable_lane = CalibrationLaneEnvironment::portable(&environment);
         let native_lane = CalibrationLaneEnvironment::native(&environment);
         let assets =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../bundles/bundle-release/.ai");
+            ryeos_engine::test_support::workspace_root().join("bundles/bundle-release/.ai");
         for (item, selected, subject) in [
             (
                 "graphs/ryeos/bundle-release/portable-build.yaml",
@@ -4565,8 +4690,8 @@ mod tests {
 
     #[test]
     fn compiled_release_capabilities_match_signed_services() {
-        let service_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../bundles/bundle-release/.ai/services/bundle-release");
+        let service_root = ryeos_engine::test_support::workspace_root()
+            .join("bundles/bundle-release/.ai/services/bundle-release");
         for descriptor in [
             AUTHORITY_CALIBRATE,
             CORE_SEED_BUILD,

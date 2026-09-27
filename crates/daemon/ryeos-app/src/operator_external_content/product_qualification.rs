@@ -41,6 +41,7 @@ use ryeos_state::objects::{
     ThreadSnapshot, ThreadStatus,
 };
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::handler_context::HandlerContext;
 use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
@@ -53,6 +54,10 @@ const QUALIFICATION_POLICY_FIELD: &str = "product_qualification_policy";
 pub(super) struct CurrentBundleVerifierIdentity {
     pub effective_definition_digest: String,
     pub artifact_identity: ryeos_state::objects::AdmittedLaunchArtifactIdentity,
+    pub request_engine: Arc<ryeos_engine::engine::Engine>,
+    // The snapshot path and overlay Engine remain valid through downstream
+    // evidence projection and participant identity checks.
+    _project_context_lease: Option<Box<dyn QualificationProjectContextLease>>,
     resolution: ResolutionOutput,
     realizations: ExternalContentRealizationSet,
 }
@@ -84,6 +89,9 @@ struct CurrentVerifierContext<'a> {
     /// A Bundle-owned executable can still have generation-scoped product
     /// bindings when its relationship Configs came from a pinned project.
     binding_subject_authority: Option<&'a ryeos_engine::contracts::SubjectResolutionAuthority>,
+    /// Exact sealed launch request owning project and engine authority.
+    sealed_request: Option<&'a crate::thread_lifecycle::SealedRootExecutionRequest>,
+    project_context_resolver: Option<&'a dyn QualificationProjectContextResolver>,
 }
 
 pub(super) mod execution_evidence;
@@ -108,6 +116,31 @@ pub struct ProductQualificationResponse {
     pub idempotent: bool,
 }
 
+/// App-owned boundary for rebuilding a current verifier against the exact
+/// immutable project generation sealed by its admitted launch capsule.
+/// `ryeos-app` deliberately does not depend on the executor crate; the API
+/// implements this using executor's existing read-only snapshot resolver.
+pub trait QualificationProjectContextResolver: Send + Sync + 'static {
+    fn resolve_read_only_snapshot(
+        &self,
+        snapshot_hash: &str,
+        display_path: &Path,
+        operation_id: &str,
+    ) -> anyhow::Result<Box<dyn QualificationProjectContextLease>>;
+}
+
+/// A retained read-only snapshot materialization. The lease must outlive all
+/// current resolution and artifact-identity checks that consume its Engine or
+/// path; returning only a pathname would discard the cache-generation guard.
+pub trait QualificationProjectContextLease {
+    fn snapshot_hash(&self) -> &str;
+    fn original_path(&self) -> &Path;
+    fn effective_path(&self) -> &Path;
+    fn request_engine(&self) -> &Arc<ryeos_engine::engine::Engine>;
+    fn pinned_materialization(&self) -> &ryeos_state::PinnedProjectMaterialization;
+    fn workspace_lifeline(&self) -> &Arc<crate::temp_dir_guard::TempDirGuard>;
+}
+
 impl ProductQualificationRequest {
     fn validate(&self) -> anyhow::Result<()> {
         require_canonical_hash("product witness", &self.witness_hash)?;
@@ -128,9 +161,18 @@ pub async fn prove(
     context: HandlerContext,
     request: ProductQualificationRequest,
 ) -> anyhow::Result<ProductQualificationEvidence> {
+    prove_with_project_context_resolver(state, context, request, None).await
+}
+
+pub async fn prove_with_project_context_resolver(
+    state: Arc<AppState>,
+    context: HandlerContext,
+    request: ProductQualificationRequest,
+    resolver: Option<Arc<dyn QualificationProjectContextResolver>>,
+) -> anyhow::Result<ProductQualificationEvidence> {
     crate::operator_authority::require_admitted_operator(&state, &context)?;
     request.validate()?;
-    tokio::task::spawn_blocking(move || prove_blocking(state, context, request))
+    tokio::task::spawn_blocking(move || prove_blocking(state, context, request, resolver))
         .await
         .context("product qualification proof task stopped")?
 }
@@ -143,9 +185,18 @@ pub async fn qualify(
     context: HandlerContext,
     request: ProductQualificationRequest,
 ) -> anyhow::Result<ProductQualificationResponse> {
+    qualify_with_project_context_resolver(state, context, request, None).await
+}
+
+pub async fn qualify_with_project_context_resolver(
+    state: Arc<AppState>,
+    context: HandlerContext,
+    request: ProductQualificationRequest,
+    resolver: Option<Arc<dyn QualificationProjectContextResolver>>,
+) -> anyhow::Result<ProductQualificationResponse> {
     crate::operator_authority::require_admitted_operator(&state, &context)?;
     request.validate()?;
-    tokio::task::spawn_blocking(move || qualify_blocking(state, context, request))
+    tokio::task::spawn_blocking(move || qualify_blocking(state, context, request, resolver))
         .await
         .context("product qualification publication task stopped")?
 }
@@ -154,6 +205,7 @@ fn prove_blocking(
     state: Arc<AppState>,
     context: HandlerContext,
     request: ProductQualificationRequest,
+    resolver: Option<Arc<dyn QualificationProjectContextResolver>>,
 ) -> anyhow::Result<ProductQualificationEvidence> {
     crate::operator_authority::require_admitted_operator(&state, &context)?;
     request.validate()?;
@@ -163,13 +215,22 @@ fn prove_blocking(
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    prove_with_guard(&state, &context, &request, &authority, &guard, limits)
+    prove_with_guard(
+        &state,
+        &context,
+        &request,
+        &authority,
+        &guard,
+        limits,
+        resolver.as_deref(),
+    )
 }
 
 fn qualify_blocking(
     state: Arc<AppState>,
     context: HandlerContext,
     request: ProductQualificationRequest,
+    resolver: Option<Arc<dyn QualificationProjectContextResolver>>,
 ) -> anyhow::Result<ProductQualificationResponse> {
     crate::operator_authority::require_admitted_operator(&state, &context)?;
     request.validate()?;
@@ -179,7 +240,15 @@ fn qualify_blocking(
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    let evidence = prove_with_guard(&state, &context, &request, &authority, &guard, limits)?;
+    let evidence = prove_with_guard(
+        &state,
+        &context,
+        &request,
+        &authority,
+        &guard,
+        limits,
+        resolver.as_deref(),
+    )?;
     let coordinate = QualificationCoordinate::from_evidence(&evidence)?;
     let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let attestation = evidence.sign_attestation(&signer, lillux::time::iso8601_now(), None)?;
@@ -213,6 +282,7 @@ fn prove_with_guard(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
+    project_context_resolver: Option<&dyn QualificationProjectContextResolver>,
 ) -> anyhow::Result<ProductQualificationEvidence> {
     authority.ensure_guard(guard)?;
     let product = super::product_receipt::load_product_source(
@@ -296,15 +366,6 @@ fn prove_with_guard(
             &root_selectors,
         )?;
     }
-    // A direct Tool's executable source is a first-class admitted closure.
-    // Validate that retained closure before comparing it with the freshly
-    // re-admitted current Bundle definition below; the capsule hash alone is
-    // not permission to trust missing or contradictory source objects.
-    let _retained_source = crate::source_closure_admission::recover_source_closure(
-        state,
-        &state.engine,
-        &admitted_resolution,
-    )?;
     let current_verifier = resolve_current_bundle_verifier_identity_against_admitted(
         state,
         authority,
@@ -319,8 +380,19 @@ fn prove_with_guard(
             )?
             .as_deref(),
             binding_subject_authority: Some(sealed.resolution_subject_authority()),
+            sealed_request: Some(&sealed),
+            project_context_resolver,
         },
         Some(&admitted_resolution),
+    )?;
+    // A direct Tool's executable source is a first-class admitted closure.
+    // Validate it against the Engine reconstructed from the verifier's exact
+    // sealed project snapshot, not the node's base Engine. The capsule hash
+    // alone is not permission to trust missing or contradictory source objects.
+    let _retained_source = crate::source_closure_admission::recover_source_closure(
+        state,
+        current_verifier.request_engine.as_ref(),
+        &admitted_resolution,
     )?;
     let current_artifact_identity = &current_verifier.artifact_identity;
     let admitted_parameters_digest = sealed.admitted_parameters_digest()?;
@@ -393,6 +465,7 @@ fn prove_with_guard(
         &current_verifier,
         &policy_source.policy.subject_declaration_id,
         product.evidence.manifest_hash.as_str(),
+        project_context_resolver,
     )?;
     let result = ProductQualificationResult::from_value(&projected_result)?;
     result.validate_claims_for(
@@ -623,6 +696,7 @@ pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
     verifier_ref: &str,
     verifier_parameters: &serde_json::Value,
     evidence: &ProductQualificationEvidence,
+    project_context_resolver: Option<&dyn QualificationProjectContextResolver>,
 ) -> anyhow::Result<CurrentBundleVerifierIdentity> {
     evidence.validate()?;
     let cas = authority.cas_store()?;
@@ -665,6 +739,8 @@ pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
             content: CurrentVerifierContent::Root(retained_selections.as_ref()),
             logical_project_root: evidence.verifier.admitted_project_root.as_deref(),
             binding_subject_authority: Some(sealed.resolution_subject_authority()),
+            sealed_request: Some(&sealed),
+            project_context_resolver,
         },
         Some(&admitted_resolution),
     )
@@ -750,38 +826,150 @@ fn resolve_current_bundle_verifier_identity_in_generation(
         CurrentVerifierContent::Root(selections) => (selections, None),
         CurrentVerifierContent::Inherited(realizations) => (None, Some(realizations)),
     };
+    let product_selections = current_root_selection_inputs(verifier_root_selections)?;
+    let mut project_context_lease: Option<Box<dyn QualificationProjectContextLease>> = None;
+    let (request_engine, plan_context, project_binding, project_root) = if let Some(sealed) =
+        verifier_context.sealed_request
+    {
+        if sealed.item_ref() != verifier_ref {
+            bail!("qualification verifier ref differs from its sealed launch request");
+        }
+        if sealed.admitted_parameters_digest()?
+            != ryeos_state::objects::canonical_value_digest(verifier_parameters)?
+        {
+            bail!("qualification verifier parameters differ from its sealed launch request");
+        }
+        let exact_authority = sealed.project_authority().clone();
+        exact_authority.validate()?;
+        match &exact_authority {
+            ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
+                let plan_context = sealed.qualification_plan_context(None)?;
+                let EffectivePrincipal::Local(principal) = &plan_context.requested_by else {
+                    bail!(
+                        "independent product qualification rejects delegated verifier principals"
+                    );
+                };
+                context.validate_execution_authority(
+                    &principal.fingerprint,
+                    &principal.scopes,
+                    &plan_context.current_site_id,
+                    &plan_context.origin_site_id,
+                )?;
+                if plan_context.current_site_id != state.threads.site_id() {
+                    bail!("projectless verifier current site differs from the serving node");
+                }
+                let engine = Arc::clone(&state.engine);
+                let binding =
+                    crate::thread_lifecycle::AdmittedProjectBinding::explicit_projectless(
+                        &engine,
+                        &plan_context,
+                    )?;
+                (engine, plan_context, binding, None)
+            }
+            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                display_path: Some(display_path),
+                snapshot_hash,
+                realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                ..
+            } => {
+                let resolver = verifier_context
+                    .project_context_resolver
+                    .context("pinned qualification verifier has no snapshot resolver")?;
+                let lease = resolver.resolve_read_only_snapshot(
+                    snapshot_hash,
+                    display_path,
+                    &format!("qualification-verifier-{}", uuid::Uuid::new_v4()),
+                )?;
+                if lease.snapshot_hash() != snapshot_hash
+                    || lease.original_path() != display_path
+                    || lease.pinned_materialization().snapshot_hash() != snapshot_hash
+                    || lease.pinned_materialization().path() != lease.effective_path()
+                    || lease.workspace_lifeline().path().is_none()
+                    || !lease
+                        .workspace_lifeline()
+                        .owns_effective_path(lease.effective_path())
+                    || !lease
+                        .pinned_materialization()
+                        .owns_path(lease.effective_path())?
+                {
+                    bail!("qualification snapshot resolver returned a contradictory lease");
+                }
+                lease.pinned_materialization().ensure_path_binding()?;
+                let engine = Arc::clone(lease.request_engine());
+                let plan_context =
+                    sealed.qualification_plan_context(Some(lease.effective_path()))?;
+                let EffectivePrincipal::Local(principal) = &plan_context.requested_by else {
+                    bail!(
+                        "independent product qualification rejects delegated verifier principals"
+                    );
+                };
+                context.validate_execution_authority(
+                    &principal.fingerprint,
+                    &principal.scopes,
+                    &plan_context.current_site_id,
+                    &plan_context.origin_site_id,
+                )?;
+                if plan_context.current_site_id != state.threads.site_id() {
+                    bail!("pinned verifier current site differs from the serving node");
+                }
+                let binding =
+                    crate::thread_lifecycle::AdmittedProjectBinding::from_qualification_snapshot(
+                        &engine,
+                        &plan_context,
+                        exact_authority.clone(),
+                        lease.original_path(),
+                        lease.effective_path(),
+                        lease.pinned_materialization(),
+                        Arc::clone(lease.workspace_lifeline()),
+                    )?;
+                let project_root = lease.effective_path().to_path_buf();
+                project_context_lease = Some(lease);
+                (engine, plan_context, binding, Some(project_root))
+            }
+            _ => bail!(
+                "qualification verifier project authority is not projectless or read-only pinned"
+            ),
+        }
+    } else {
+        // Legacy in-memory callers are retained for projectless unit
+        // fixtures only. Production evidence paths always carry a sealed
+        // capsule and cannot invent project authority here.
+        let plan_context = PlanContext {
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: context.fingerprint.clone(),
+                scopes: context.scopes.clone(),
+            }),
+            project_context: ProjectContext::None,
+            subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+            current_site_id: state.threads.site_id().to_owned(),
+            origin_site_id: context.execution_origin(state.threads.site_id()),
+            execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
+            validate_only: false,
+        };
+        let engine = Arc::clone(&state.engine);
+        let binding = crate::thread_lifecycle::AdmittedProjectBinding::explicit_projectless(
+            &engine,
+            &plan_context,
+        )?;
+        (engine, plan_context, binding, None)
+    };
     let projectless_binding_authority = SubjectResolutionAuthority::Projectless;
     let binding_subject_authority = current_verifier_binding_subject_authority(
         verifier_context.binding_subject_authority,
         &projectless_binding_authority,
     );
-    let product_selections = current_root_selection_inputs(verifier_root_selections)?;
-    let plan_context = PlanContext {
-        requested_by: EffectivePrincipal::Local(Principal {
-            fingerprint: context.fingerprint.clone(),
-            scopes: context.scopes.clone(),
-        }),
-        project_context: ProjectContext::None,
-        subject_resolution_authority: SubjectResolutionAuthority::Projectless,
-        current_site_id: state.threads.site_id().to_owned(),
-        // Configured-operator forwarding is not delegated execution. Retain
-        // the authenticated source site without manufacturing local origin.
-        origin_site_id: context.execution_origin(state.threads.site_id()),
-        execution_hints: ExecutionHints::default(),
-        scheduled_fire: None,
-        // This remains a threadless proof, but plan reconstruction must use
-        // execution semantics rather than a validation-only plan variant.
-        validate_only: false,
-    };
-    let project_binding = crate::thread_lifecycle::AdmittedProjectBinding::explicit_projectless(
-        &state.engine,
-        &plan_context,
-    )?;
+    if let Some(sealed) = verifier_context.sealed_request
+        && verifier_context.binding_subject_authority != Some(sealed.resolution_subject_authority())
+    {
+        bail!("qualification binding subject authority differs from its sealed verifier capsule");
+    }
+    let roots = request_engine.resolution_roots(project_root.clone());
     // Admit the exact current subject before choosing its execution route.
     // A signed delegated runtime need not declare a root executor chain.
     let preflight = crate::thread_lifecycle::preflight_root_execution(
         crate::thread_lifecycle::ResolveRootExecutionParams {
-            engine: &state.engine,
+            engine: &request_engine,
             plan_context,
             project_binding,
             node_history_policy: state.node_history_policy()?,
@@ -816,8 +1004,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     // locators, captured content and prepared content dependencies remain
     // unsupported; root product selections are retained typed recipe facts,
     // not a request to reopen their historical Config sources.
-    let contract = state
-        .engine
+    let contract = request_engine
         .kinds
         .get(&kind)
         .and_then(|schema| schema.external_content_contract());
@@ -852,7 +1039,6 @@ fn resolve_current_bundle_verifier_identity_in_generation(
             );
         }
     }
-    let roots = state.engine.resolution_roots(None);
     let staged_roots = authority
         .require_recovery()?
         .begin_staged_cas_roots_admitted(guard, "qualification-verifier-recheck")?;
@@ -860,8 +1046,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
         authority.try_clone()?,
         staged_roots,
     ));
-    let source_contract = state
-        .engine
+    let source_contract = request_engine
         .kinds
         .get(&kind)
         .and_then(|schema| schema.execution.as_ref())
@@ -877,11 +1062,11 @@ fn resolve_current_bundle_verifier_identity_in_generation(
             executor_id,
             &resolution.root.source_path,
             &kind,
-            &state.engine.kinds,
-            &state.engine.parser_dispatcher,
+            &request_engine.kinds,
+            &request_engine.parser_dispatcher,
             &roots,
-            &state.engine.trust_store,
-            &state.engine.node_trust_store,
+            &request_engine.trust_store,
+            &request_engine.node_trust_store,
             None,
         )?
     } else {
@@ -895,7 +1080,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     // disagreement in either direction.
     let captured_source = crate::source_closure_admission::admit_source_closure_in_publication(
         state,
-        &state.engine,
+        &request_engine,
         &kind,
         &mut resolution,
         &roots,
@@ -906,11 +1091,11 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     )?;
     let preselection_snapshots =
         crate::effective_program_preparation::prepare_preselection_effective_program(
-            &state.engine,
+            &request_engine,
             &verified.resolved,
             &mut resolution,
             &roots,
-            &state.engine.trust_store,
+            &request_engine.trust_store,
             None,
         )?;
     if let Some(admitted) = admitted_resolution
@@ -952,11 +1137,11 @@ fn resolve_current_bundle_verifier_identity_in_generation(
         }
         None => crate::external_content_admission::admit_external_realizations_in_publication(
             state,
-            &state.engine,
+            &request_engine,
             &kind,
             &mut resolution,
             &roots,
-            &SubjectResolutionAuthority::Projectless,
+            binding_subject_authority,
             inherited,
             &mut publication,
         )?
@@ -964,8 +1149,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     };
     let semantic_projection =
         ryeos_engine::effective_program::take_recovered_effective_program_derived(&mut resolution);
-    let validation = state
-        .engine
+    let validation = request_engine
         .effective_validators
         .validate(&kind, &resolution)?;
     let candidate = ryeos_engine::effective_program::relock_recovered_effective_program(
@@ -973,7 +1157,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
         validation,
         semantic_projection,
     )?;
-    let config_roots = state.engine.launch_config_roots(&roots);
+    let config_roots = request_engine.launch_config_roots(&roots);
     let config_proofs = preselection_snapshots
         .as_ref()
         .map(|snapshots| std::slice::from_ref(&snapshots.dependency_proof))
@@ -991,8 +1175,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     )?;
     let finalized =
         ryeos_engine::effective_program::finalize_effective_program(candidate, finalization)?;
-    let execution = state
-        .engine
+    let execution = request_engine
         .kinds
         .get(&kind)
         .and_then(|schema| schema.execution())
@@ -1009,6 +1192,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
                 authority,
                 guard,
                 context,
+                &request_engine,
                 &resolved_request,
                 &finalized,
                 verifier_context.logical_project_root,
@@ -1030,9 +1214,9 @@ fn resolve_current_bundle_verifier_identity_in_generation(
                 );
             }
             let selection =
-                managed::resolve_current_managed_runtime_selection(&state.engine, None, &kind)?;
+                managed::resolve_current_managed_runtime_selection(&request_engine, None, &kind)?;
             let executor =
-                managed::resolve_current_managed_executor_identity(&state.engine, &selection)?;
+                managed::resolve_current_managed_executor_identity(&request_engine, &selection)?;
             managed::managed_runtime_artifact_identity(&selection, &executor)?
         }
         _ => bail!("qualification verifier execution route has no reproducible launch artifact"),
@@ -1057,6 +1241,8 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     Ok(CurrentBundleVerifierIdentity {
         effective_definition_digest,
         artifact_identity,
+        request_engine,
+        _project_context_lease: project_context_lease,
         resolution: finalized.resolution().clone(),
         realizations,
     })
@@ -1206,66 +1392,6 @@ pub(crate) fn load_current_qualification_with_key(
     Ok(witness)
 }
 
-/// Re-admit one published qualification against today's exact signed policy,
-/// verifier definition, runtime artifact and retained execution evidence.
-pub fn verify_current_qualification_for_release(
-    state: &AppState,
-    context: &HandlerContext,
-    authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
-    limits: ryeos_state::object_closure::ObjectClosureLimits,
-    owner_principal: &str,
-    qualification_hash: &str,
-    expected_product_witness: &str,
-    expected_subject_manifest: &str,
-    required_claims: &[String],
-) -> anyhow::Result<()> {
-    let proof = load_current_qualification(
-        state,
-        authority,
-        guard,
-        limits,
-        owner_principal,
-        qualification_hash,
-    )?;
-    if proof.evidence.product_witness_hash != expected_product_witness {
-        bail!("qualification attests a different release product witness");
-    }
-    if proof.evidence.result.subject_manifest_hash != expected_subject_manifest {
-        bail!("qualification attests a different release manifest");
-    }
-    let current_policy = resolve_current_bundle_qualification_policy(
-        state,
-        &proof.evidence.policy_source.canonical_ref,
-    )?;
-    let current_verifier = resolve_current_bundle_verifier_identity_for_evidence(
-        state,
-        authority,
-        guard,
-        limits,
-        context,
-        &current_policy.policy.verifier_ref,
-        &current_policy.policy.verifier_parameters,
-        &proof.evidence,
-    )?;
-    proof.evidence.validate_current_policy(
-        &current_policy,
-        &current_verifier.effective_definition_digest,
-        required_claims,
-    )?;
-    proof
-        .evidence
-        .validate_current_artifact(&current_verifier.artifact_identity)?;
-    execution_evidence::verify_current(
-        state,
-        authority,
-        guard,
-        context,
-        &proof.evidence,
-        &current_verifier,
-    )
-}
-
 /// Re-admit one retained qualification and return the exact current authority
 /// pins an operator must review before enabling bundle publication. This is a
 /// read-only measurement: it neither authors policy nor publishes CAS state.
@@ -1277,6 +1403,28 @@ pub fn measure_current_qualification_authority(
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     owner_principal: &str,
     qualification_hash: &str,
+) -> anyhow::Result<MeasuredQualificationAuthority> {
+    measure_current_qualification_authority_with_project_context_resolver(
+        state,
+        context,
+        authority,
+        guard,
+        limits,
+        owner_principal,
+        qualification_hash,
+        None,
+    )
+}
+
+pub fn measure_current_qualification_authority_with_project_context_resolver(
+    state: &AppState,
+    context: &HandlerContext,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    owner_principal: &str,
+    qualification_hash: &str,
+    project_context_resolver: Option<&dyn QualificationProjectContextResolver>,
 ) -> anyhow::Result<MeasuredQualificationAuthority> {
     let proof = load_current_qualification(
         state,
@@ -1299,6 +1447,7 @@ pub fn measure_current_qualification_authority(
         &current_policy.policy.verifier_ref,
         &current_policy.policy.verifier_parameters,
         &proof.evidence,
+        project_context_resolver,
     )?;
     proof.evidence.validate_current_policy(
         &current_policy,

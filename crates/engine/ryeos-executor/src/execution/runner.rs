@@ -4169,6 +4169,8 @@ pub(crate) fn finalize_direct_effective_program(
         item_kind,
         &mut resolution,
     )?;
+    let qualification_project_context_resolver =
+        super::project_source::qualification_project_context_resolver(state);
     ryeos_app::operator_external_content::product_composition::admit_root_product_selections(
         state,
         &resolved.current_site_id,
@@ -4179,6 +4181,7 @@ pub(crate) fn finalize_direct_effective_program(
         resolved.requested_by.as_deref(),
         handler_context,
         &resolved.product_selections,
+        Some(qualification_project_context_resolver.as_ref()),
         false,
     )?;
     let captured_external =
@@ -8161,6 +8164,7 @@ async fn run_existing_recovered_thread(
         params.resolved.requested_by.as_deref(),
         params.handler_context.as_ref(),
         &params.resolved.product_selections,
+        None,
         true,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;

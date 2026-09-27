@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:aabd58bfd33721b6b334b4750cae91f4cd300cd9e4b7da3b169973d021e87809:F4Ifs4yxNTpaWy0NZPGqxedKRGZelSjqZmIWkXSQgdV/cYCfj+wLpWoceZIfjAqM25xsRnWgfS+WjBECVoTxBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T08:05:53Z:53acff5e7d31dfc81431f9afc328a2e890bb8301d4c04b5874afeded78c51ccd:O6dlt1EiXgsn9YeHn4ZBRweIH8PRShwpFkQjPln3FNzkwpSebRHY+OqeRrFWVgjA0yYEvpfvDGZMNFt3cvJTBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Receipt-only captured product contract for one measured RyeOS substrate release.
@@ -49,3 +49,21 @@ product_relationships:
       qualification:
         policy_ref: config:bundle-release/substrate-qualification
         required_claims: [substrate_release_checks_v1]
+    - name: substrate_release_to_qualifier_input
+      producer:
+        canonical_ref: graph:ryeos/bundle-release/substrate-build
+        recipe_binding: product_recipe
+        product_name: substrate_release
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/bundle-release/substrate-qualify
+        declaration_id: subject
+      required_product:
+        shape: tree
+        storage: content
+        bounds:
+          maximum_entries: 2
+          maximum_depth: 2
+          maximum_file_bytes: 65536
+          maximum_total_bytes: 65536
+      qualification: {policy_ref: null, required_claims: []}

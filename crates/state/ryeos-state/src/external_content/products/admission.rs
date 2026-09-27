@@ -7,13 +7,20 @@
 use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 
-use super::composition::ProductRelationships;
+use super::composition::{
+    ProductRelationship, ProductRelationshipConsumer, ProductRelationshipProducer,
+    ProductRelationshipQualification, ProductRelationshipRequiredProduct, ProductRelationships,
+};
 use super::{
     ProductDeclarations, ProductProducerAdmission, ProductRecipePurpose, validate_binding_name,
 };
 use crate::objects::{AdmittedExecutionClosure, AdmittedLaunchCapsule};
 
 pub const PRODUCT_RECIPE_BINDING_SCHEMA: &str = "ryeos.admitted_product_recipe_binding.v2";
+/// The runtime-fact wire format interns repeated producer parameter values.
+/// It expands to `PRODUCT_RECIPE_BINDING_SCHEMA` before any product testimony
+/// or operator-side validation sees the recipe.
+pub const PRODUCT_RECIPE_BINDING_FACT_SCHEMA: &str = "ryeos.admitted_product_recipe_fact.v1";
 pub const MAX_ADMITTED_PRODUCT_RECIPE_BYTES: usize = 16 * 1024;
 
 /// Derive the compact producer projection exclusively from one validated
@@ -99,12 +106,249 @@ impl AdmittedProductRecipeBinding {
         }
         self.relationships
             .validate_against(&self.declarations, &self.binding_name)?;
-        if lillux::canonical_json(&serde_json::to_value(self)?)?.len()
-            > MAX_ADMITTED_PRODUCT_RECIPE_BYTES
-        {
-            bail!("admitted product recipe exceeds the runtime-fact budget");
-        }
         Ok(())
+    }
+
+    /// Encode this complete recipe as the bounded launch runtime fact. Equal
+    /// producer-parameter values are stored once only when shared by multiple
+    /// relationships; one-off values remain inline. Decoding reconstructs
+    /// this full type before product evidence or consumer policy code runs.
+    pub fn runtime_fact_value(&self) -> anyhow::Result<serde_json::Value> {
+        self.validate()?;
+        let fact = CompactAdmittedProductRecipeFact::from_binding(self)?;
+        let value = serde_json::to_value(fact)?;
+        let bytes = lillux::canonical_json(&value)?.len();
+        if bytes > MAX_ADMITTED_PRODUCT_RECIPE_BYTES {
+            bail!(
+                "admitted product recipe exceeds the runtime-fact budget: encoded size is {bytes} bytes; limit is {MAX_ADMITTED_PRODUCT_RECIPE_BYTES} bytes"
+            );
+        }
+        Ok(value)
+    }
+}
+
+/// Decode only the current compact fact format. There is deliberately no
+/// fallback to expanded/legacy launch facts: new producers must pass the
+/// bounded, canonical projection before the complete recipe is recovered.
+pub fn admitted_product_recipe_from_runtime_fact(
+    value: &serde_json::Value,
+) -> anyhow::Result<AdmittedProductRecipeBinding> {
+    let encoded_bytes = lillux::canonical_json(value)?.len();
+    if encoded_bytes > MAX_ADMITTED_PRODUCT_RECIPE_BYTES {
+        bail!(
+            "admitted product recipe exceeds the runtime-fact budget: encoded size is {encoded_bytes} bytes; limit is {MAX_ADMITTED_PRODUCT_RECIPE_BYTES} bytes"
+        );
+    }
+    let fact: CompactAdmittedProductRecipeFact = serde_json::from_value(value.clone())
+        .context("decode compact admitted product recipe fact")?;
+    fact.into_binding()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactAdmittedProductRecipeFact {
+    schema: String,
+    binding_name: String,
+    recipe_ref: String,
+    recipe_raw_content_digest: String,
+    purpose: ProductRecipePurpose,
+    declarations: ProductDeclarations,
+    declarations_hash: String,
+    relationships: CompactProductRelationships,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactProductRelationships {
+    schema: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    parameter_values: Vec<CompactProducerParameters>,
+    relationships: Vec<CompactProductRelationship>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactProducerParameters {
+    digest: String,
+    value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactProductRelationship {
+    name: String,
+    producer: CompactProductRelationshipProducer,
+    consumer: ProductRelationshipConsumer,
+    required_product: ProductRelationshipRequiredProduct,
+    qualification: ProductRelationshipQualification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactProductRelationshipProducer {
+    canonical_ref: String,
+    recipe_binding: String,
+    product_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parameters: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parameters_index: Option<usize>,
+}
+
+impl CompactAdmittedProductRecipeFact {
+    fn from_binding(binding: &AdmittedProductRecipeBinding) -> anyhow::Result<Self> {
+        let mut values = std::collections::BTreeMap::<String, (serde_json::Value, usize)>::new();
+        for relationship in &binding.relationships.relationships {
+            let value = relationship.producer.parameters.clone();
+            let digest = crate::objects::canonical_value_digest(&value)?;
+            if let Some((previous, count)) = values.get_mut(&digest) {
+                if previous != &value {
+                    bail!("producer parameter digest collision in admitted recipe");
+                }
+                *count += 1;
+            } else {
+                values.insert(digest, (value, 1));
+            }
+        }
+        let repeated_values = values
+            .iter()
+            .filter(|(_, (_, count))| *count > 1)
+            .map(|(digest, (value, _))| (digest.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let parameter_indexes = repeated_values
+            .iter()
+            .enumerate()
+            .map(|(index, (digest, _))| (digest.clone(), index))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let parameter_values = repeated_values
+            .into_iter()
+            .map(|(digest, value)| CompactProducerParameters { digest, value })
+            .collect::<Vec<_>>();
+        let relationships = binding
+            .relationships
+            .relationships
+            .iter()
+            .map(|relationship| {
+                let digest =
+                    crate::objects::canonical_value_digest(&relationship.producer.parameters)?;
+                let parameters_index = parameter_indexes.get(&digest).copied();
+                Ok(CompactProductRelationship {
+                    name: relationship.name.clone(),
+                    producer: CompactProductRelationshipProducer {
+                        canonical_ref: relationship.producer.canonical_ref.clone(),
+                        recipe_binding: relationship.producer.recipe_binding.clone(),
+                        product_name: relationship.producer.product_name.clone(),
+                        parameters: parameters_index
+                            .is_none()
+                            .then(|| relationship.producer.parameters.clone()),
+                        parameters_index,
+                    },
+                    consumer: relationship.consumer.clone(),
+                    required_product: relationship.required_product.clone(),
+                    qualification: relationship.qualification.clone(),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Self {
+            schema: PRODUCT_RECIPE_BINDING_FACT_SCHEMA.to_owned(),
+            binding_name: binding.binding_name.clone(),
+            recipe_ref: binding.recipe_ref.clone(),
+            recipe_raw_content_digest: binding.recipe_raw_content_digest.clone(),
+            purpose: binding.purpose.clone(),
+            declarations: binding.declarations.clone(),
+            declarations_hash: binding.declarations_hash.clone(),
+            relationships: CompactProductRelationships {
+                schema: binding.relationships.schema.clone(),
+                parameter_values,
+                relationships,
+            },
+        })
+    }
+
+    fn into_binding(self) -> anyhow::Result<AdmittedProductRecipeBinding> {
+        if self.schema != PRODUCT_RECIPE_BINDING_FACT_SCHEMA {
+            bail!("unsupported compact admitted product recipe fact schema");
+        }
+        let CompactProductRelationships {
+            schema: relationships_schema,
+            parameter_values,
+            relationships: compact_relationships,
+        } = self.relationships;
+        let mut values = Vec::with_capacity(parameter_values.len());
+        let mut previous_digest: Option<String> = None;
+        for entry in parameter_values {
+            if !lillux::valid_hash(&entry.digest)
+                || entry.digest.bytes().any(|byte| byte.is_ascii_uppercase())
+                || previous_digest
+                    .as_ref()
+                    .is_some_and(|previous| previous >= &entry.digest)
+                || crate::objects::canonical_value_digest(&entry.value)? != entry.digest
+            {
+                bail!("compact producer parameter table is not canonical");
+            }
+            previous_digest = Some(entry.digest.clone());
+            values.push((entry.digest, entry.value));
+        }
+        let mut indexed_uses = vec![0usize; values.len()];
+        let mut inline_uses = std::collections::BTreeMap::<String, usize>::new();
+        let mut relationships = Vec::with_capacity(compact_relationships.len());
+        for relationship in compact_relationships {
+            let parameters = match (
+                relationship.producer.parameters,
+                relationship.producer.parameters_index,
+            ) {
+                (Some(parameters), None) => {
+                    let digest = crate::objects::canonical_value_digest(&parameters)?;
+                    *inline_uses.entry(digest).or_default() += 1;
+                    parameters
+                }
+                (None, Some(index)) => {
+                    let (_, parameters) = values
+                        .get(index)
+                        .context("compact product relationship names an absent parameter value")?;
+                    indexed_uses[index] += 1;
+                    parameters.clone()
+                }
+                _ => bail!("compact product relationship must select exactly one parameter value"),
+            };
+            relationships.push(ProductRelationship {
+                name: relationship.name,
+                producer: ProductRelationshipProducer {
+                    canonical_ref: relationship.producer.canonical_ref,
+                    recipe_binding: relationship.producer.recipe_binding,
+                    product_name: relationship.producer.product_name,
+                    parameters,
+                },
+                consumer: relationship.consumer,
+                required_product: relationship.required_product,
+                qualification: relationship.qualification,
+            });
+        }
+        if indexed_uses.iter().any(|count| *count < 2)
+            || inline_uses.values().any(|count| *count > 1)
+            || inline_uses.keys().any(|digest| {
+                values
+                    .iter()
+                    .any(|(table_digest, _)| table_digest == digest)
+            })
+        {
+            bail!("compact producer parameter table is not canonical");
+        }
+        let binding = AdmittedProductRecipeBinding {
+            schema: PRODUCT_RECIPE_BINDING_SCHEMA.to_owned(),
+            binding_name: self.binding_name,
+            recipe_ref: self.recipe_ref,
+            recipe_raw_content_digest: self.recipe_raw_content_digest,
+            purpose: self.purpose,
+            declarations: self.declarations,
+            declarations_hash: self.declarations_hash,
+            relationships: ProductRelationships {
+                schema: relationships_schema,
+                relationships,
+            },
+        };
+        binding.validate()?;
+        Ok(binding)
     }
 }
 
@@ -145,9 +389,7 @@ pub fn admitted_product_recipe_from_prepared(
         .with_context(|| {
             format!("producer did not admit product recipe binding `{binding_name}`")
         })?;
-    let admitted: AdmittedProductRecipeBinding =
-        serde_json::from_value(fact).context("decode admitted product recipe binding")?;
-    admitted.validate()?;
+    let admitted = admitted_product_recipe_from_runtime_fact(&fact)?;
     if admitted.binding_name != binding_name {
         bail!("admitted product recipe fact belongs to a different binding");
     }
@@ -228,7 +470,7 @@ mod tests {
     fn prepared(admitted: &AdmittedProductRecipeBinding) -> serde_json::Value {
         json!({
             "runtime_facts": {
-                "product_recipe": serde_json::to_value(admitted).unwrap(),
+                "product_recipe": admitted.runtime_fact_value().unwrap(),
             },
             "binding_records": {
                 "product_recipe": {
@@ -261,6 +503,188 @@ mod tests {
         assert_eq!(
             admitted_product_recipe_from_prepared(&prepared(&expected), "product_recipe").unwrap(),
             expected
+        );
+    }
+
+    fn two_consumer_recipe(parameters: serde_json::Value) -> AdmittedProductRecipeBinding {
+        let mut recipe = admitted();
+        recipe.relationships = serde_json::from_value(json!({
+            "schema": super::super::composition::PRODUCT_RELATIONSHIPS_SCHEMA,
+            "relationships": [
+                {
+                    "name": "to_graph",
+                    "producer": {
+                        "canonical_ref": "graph:test/producer",
+                        "recipe_binding": "product_recipe",
+                        "product_name": "runtime",
+                        "parameters": parameters.clone()
+                    },
+                    "consumer": {"canonical_ref": "graph:test/consumer", "declaration_id": "subject"},
+                    "required_product": {
+                        "shape": "tree", "storage": "content",
+                        "bounds": {"maximum_entries":8,"maximum_depth":4,"maximum_file_bytes":1024,"maximum_total_bytes":4096}
+                    },
+                    "qualification": {"policy_ref": null, "required_claims": []}
+                },
+                {
+                    "name": "to_tool",
+                    "producer": {
+                        "canonical_ref": "graph:test/producer",
+                        "recipe_binding": "product_recipe",
+                        "product_name": "runtime",
+                        "parameters": parameters
+                    },
+                    "consumer": {"canonical_ref": "tool:test/consumer", "declaration_id": "subject"},
+                    "required_product": {
+                        "shape": "tree", "storage": "content",
+                        "bounds": {"maximum_entries":8,"maximum_depth":4,"maximum_file_bytes":1024,"maximum_total_bytes":4096}
+                    },
+                    "qualification": {"policy_ref": null, "required_claims": []}
+                }
+            ]
+        }))
+        .unwrap();
+        recipe
+    }
+
+    #[test]
+    fn compact_runtime_fact_interns_parameters_and_round_trips_exact_relationships() {
+        let mut selected = None;
+        for bytes in (4_000..10_000).step_by(100) {
+            let candidate = two_consumer_recipe(json!({"signed_manifest": "x".repeat(bytes)}));
+            if candidate.validate().is_ok()
+                && lillux::canonical_json(&serde_json::to_value(&candidate).unwrap())
+                    .unwrap()
+                    .len()
+                    > MAX_ADMITTED_PRODUCT_RECIPE_BYTES
+            {
+                selected = Some(candidate);
+                break;
+            }
+        }
+        let expected = selected.expect("fixture must cross only the expanded fact limit");
+        let compact = expected.runtime_fact_value().unwrap();
+        assert_eq!(compact["schema"], PRODUCT_RECIPE_BINDING_FACT_SCHEMA);
+        assert_eq!(
+            compact
+                .pointer("/relationships/parameter_values")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            lillux::canonical_json(&compact).unwrap().len() <= MAX_ADMITTED_PRODUCT_RECIPE_BYTES
+        );
+        let decoded = admitted_product_recipe_from_runtime_fact(&compact).unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(
+            decoded.relationships.relationships[0]
+                .consumer
+                .canonical_ref,
+            "graph:test/consumer"
+        );
+        assert_eq!(
+            decoded.relationships.relationships[1]
+                .consumer
+                .canonical_ref,
+            "tool:test/consumer"
+        );
+    }
+
+    #[test]
+    fn compact_runtime_fact_keeps_one_off_parameters_inline() {
+        let mut expected = two_consumer_recipe(json!({"request":"first"}));
+        expected.relationships.relationships[1].producer.parameters = json!({"request":"second"});
+
+        let compact = expected.runtime_fact_value().unwrap();
+        let compact_relationships = compact
+            .pointer("/relationships/relationships")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(compact.pointer("/relationships/parameter_values").is_none());
+        for (relationship, expected_relationship) in compact_relationships
+            .iter()
+            .zip(&expected.relationships.relationships)
+        {
+            assert_eq!(
+                relationship["producer"]["parameters"],
+                expected_relationship.producer.parameters
+            );
+            assert!(relationship["producer"].get("parameters_index").is_none());
+        }
+        assert_eq!(
+            admitted_product_recipe_from_runtime_fact(&compact).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn compact_runtime_fact_rejects_tampered_or_unused_parameter_entries() {
+        let expected = two_consumer_recipe(json!({"request":"exact"}));
+        let compact = expected.runtime_fact_value().unwrap();
+
+        let mut wrong_digest = compact.clone();
+        wrong_digest["relationships"]["relationships"][0]["producer"]["parameters_index"] =
+            json!(usize::MAX);
+        assert!(admitted_product_recipe_from_runtime_fact(&wrong_digest).is_err());
+
+        let mut unused = compact.clone();
+        let unused_value = json!({"unused": true});
+        let unused_entry = json!({
+            "digest": crate::objects::canonical_value_digest(&unused_value).unwrap(),
+            "value": unused_value,
+        });
+        let unused_values = unused["relationships"]["parameter_values"]
+            .as_array_mut()
+            .unwrap();
+        unused_values.push(unused_entry);
+        unused_values.sort_by(|left, right| left["digest"].as_str().cmp(&right["digest"].as_str()));
+        assert!(admitted_product_recipe_from_runtime_fact(&unused).is_err());
+
+        let mut old_expanded = serde_json::to_value(&expected).unwrap();
+        old_expanded["schema"] = json!(PRODUCT_RECIPE_BINDING_SCHEMA);
+        assert!(admitted_product_recipe_from_runtime_fact(&old_expanded).is_err());
+    }
+
+    #[test]
+    fn compact_runtime_fact_budget_error_reports_actual_encoded_size() {
+        let mut oversized = None;
+        for payload_bytes in (4_000..8_000).step_by(100) {
+            let mut candidate = two_consumer_recipe(json!({
+                "signed_manifest": "x".repeat(payload_bytes)
+            }));
+            candidate.relationships.relationships[1].producer.parameters = json!({
+                "signed_manifest": "y".repeat(payload_bytes)
+            });
+            if !candidate.validate().is_ok() {
+                continue;
+            }
+            let fact = CompactAdmittedProductRecipeFact::from_binding(&candidate).unwrap();
+            let value = serde_json::to_value(fact).unwrap();
+            let encoded_bytes = lillux::canonical_json(&value).unwrap().len();
+            if encoded_bytes > MAX_ADMITTED_PRODUCT_RECIPE_BYTES {
+                oversized = Some((candidate, value, encoded_bytes));
+                break;
+            }
+        }
+        let (oversized, value, encoded_bytes) = oversized
+            .expect("valid distinct relationship parameters must exceed compact-fact limit");
+
+        let expected_error = format!(
+            "admitted product recipe exceeds the runtime-fact budget: encoded size is {encoded_bytes} bytes; limit is {MAX_ADMITTED_PRODUCT_RECIPE_BYTES} bytes"
+        );
+        assert_eq!(
+            oversized.runtime_fact_value().unwrap_err().to_string(),
+            expected_error
+        );
+        assert_eq!(
+            admitted_product_recipe_from_runtime_fact(&value)
+                .unwrap_err()
+                .to_string(),
+            expected_error
         );
     }
 

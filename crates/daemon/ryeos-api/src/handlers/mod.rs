@@ -68,6 +68,7 @@ pub mod project_apply_snapshot;
 pub mod project_snapshot_status;
 pub mod project_status;
 pub mod push_head;
+pub(crate) mod qualification_project_context;
 pub mod rebuild;
 pub mod remote_admit;
 pub mod remote_authorize;
