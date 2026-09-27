@@ -753,6 +753,8 @@ fn publish_external_runtime_product_witness(
         result_project_snapshot_hash: "6".repeat(64),
         workspace_output_capture_hash: None,
         producer_partition_identity: None,
+        recipe_purpose:
+            ryeos_state::external_content::products::ProductRecipePurpose::GeneralProductV1,
         recipe_binding: relationship.producer.recipe_binding.clone(),
         recipe_ref: relationship_resolution.root.resolved_ref.clone(),
         recipe_raw_content_digest: relationship_resolution.root.raw_content_digest.clone(),
