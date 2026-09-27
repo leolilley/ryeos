@@ -958,6 +958,48 @@ pub struct LifecycleAdapterInspectionResponse {
     pub artifacts: BTreeMap<LifecycleArtifactRole, LifecycleArtifactInspection>,
 }
 
+/// Credential-free interpretation input for a product witness already
+/// authenticated by the controller. No provider request is authorized here.
+/// The exact settings are supplied by a separate sealed descriptor and must
+/// hash to `settings_digest` before the adapter interprets the probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleRuntimeProbeRequest {
+    pub schema: u32,
+    pub protocol: String,
+    pub adapter_id: String,
+    pub adapter_artifact_hash: String,
+    pub settings_digest: String,
+    pub binding_hash: String,
+    pub qualification_attestation_hash: String,
+    pub product_witness_hash: String,
+    pub account: String,
+    pub source: LifecycleRuntimeProbeSource,
+    pub probe_evidence: Value,
+}
+
+/// These values come from the authenticated product manifest and controller
+/// public key, never from the provider's probe JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleRuntimeProbeSource {
+    pub manifest_hash: String,
+    pub owner_executable_sha256: String,
+    pub controller_root_blob_sha256: String,
+    pub controller_public_root: String,
+}
+
+/// A signed adapter's positive offline interpretation of exactly one sealed
+/// request. Absence, nonzero exit, deadline, or changed request is refusal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleRuntimeProbeResponse {
+    pub schema: u32,
+    pub protocol: String,
+    pub adapter_id: String,
+    pub request_digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LifecycleAdapterRequest {
@@ -1177,6 +1219,91 @@ impl LifecycleAdapterInspectionResponse {
                     .is_subset(&request.declared_capabilities)
                 && self.artifacts == request.artifacts,
             "lifecycle adapter inspection contradicts its declaration"
+        );
+        Ok(())
+    }
+}
+
+impl LifecycleRuntimeProbeSource {
+    pub fn validate(&self) -> Result<()> {
+        for (label, value) in [
+            ("runtime probe product manifest", &self.manifest_hash),
+            (
+                "runtime probe owner executable",
+                &self.owner_executable_sha256,
+            ),
+            (
+                "runtime probe controller-root file",
+                &self.controller_root_blob_sha256,
+            ),
+        ] {
+            digest(value, label)?;
+        }
+        ensure!(
+            self.controller_public_root.starts_with("ed25519:")
+                && self.controller_public_root.len() <= 128,
+            "runtime probe controller public root is invalid"
+        );
+        Ok(())
+    }
+}
+
+impl LifecycleRuntimeProbeRequest {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == 1 && self.protocol == LIFECYCLE_ADAPTER_PROTOCOL,
+            "unsupported lifecycle runtime probe protocol"
+        );
+        bounded_identifier(&self.adapter_id, 128, "runtime probe adapter")?;
+        bounded_identifier(&self.account, 128, "runtime probe account")?;
+        for (label, value) in [
+            (
+                "runtime probe adapter artifact",
+                &self.adapter_artifact_hash,
+            ),
+            ("runtime probe settings", &self.settings_digest),
+            ("runtime probe binding", &self.binding_hash),
+            (
+                "runtime probe qualification",
+                &self.qualification_attestation_hash,
+            ),
+            ("runtime probe product witness", &self.product_witness_hash),
+        ] {
+            digest(value, label)?;
+        }
+        self.source.validate()?;
+        ensure!(
+            self.probe_evidence.is_object()
+                && canonical_json(&self.probe_evidence)?.len() <= 8 * 1024,
+            "lifecycle runtime probe evidence is not a bounded object"
+        );
+        Ok(())
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let bytes = canonical_json(self)?;
+        ensure!(
+            bytes.len() <= MAX_LIFECYCLE_REQUEST_BYTES,
+            "lifecycle runtime probe request exceeds its byte bound"
+        );
+        Ok(bytes)
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        Ok(hex::encode(Sha256::digest(self.canonical_bytes()?)))
+    }
+}
+
+impl LifecycleRuntimeProbeResponse {
+    pub fn validate_for(&self, request: &LifecycleRuntimeProbeRequest) -> Result<()> {
+        request.validate()?;
+        ensure!(
+            self.schema == 1
+                && self.protocol == LIFECYCLE_ADAPTER_PROTOCOL
+                && self.adapter_id == request.adapter_id
+                && self.request_digest == request.digest()?,
+            "lifecycle runtime probe response contradicts its sealed request"
         );
         Ok(())
     }
@@ -1743,6 +1870,59 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_probe_reply_is_bound_to_one_credential_free_request() {
+        let request = LifecycleRuntimeProbeRequest {
+            schema: 1,
+            protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
+            adapter_id: "render-sandbox-early-access".into(),
+            adapter_artifact_hash: "a".repeat(64),
+            settings_digest: "b".repeat(64),
+            binding_hash: "c".repeat(64),
+            qualification_attestation_hash: "d".repeat(64),
+            product_witness_hash: "e".repeat(64),
+            account: "render-account".into(),
+            source: LifecycleRuntimeProbeSource {
+                manifest_hash: "f".repeat(64),
+                owner_executable_sha256: "1".repeat(64),
+                controller_root_blob_sha256: "2".repeat(64),
+                controller_public_root: "ed25519:controller-root".into(),
+            },
+            probe_evidence: serde_json::json!({"schema": 1}),
+        };
+        let encoded = request.canonical_bytes().unwrap();
+        assert_eq!(
+            from_json_slice_strict::<LifecycleRuntimeProbeRequest>(
+                &encoded,
+                MAX_LIFECYCLE_REQUEST_BYTES
+            )
+            .unwrap(),
+            request
+        );
+        let response = LifecycleRuntimeProbeResponse {
+            schema: 1,
+            protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
+            adapter_id: request.adapter_id.clone(),
+            request_digest: request.digest().unwrap(),
+        };
+        response.validate_for(&request).unwrap();
+        let mut changed = request.clone();
+        changed.source.owner_executable_sha256 = "3".repeat(64);
+        assert!(response.validate_for(&changed).is_err());
+        changed = request.clone();
+        changed.probe_evidence = serde_json::json!({"schema": 2});
+        assert!(response.validate_for(&changed).is_err());
+        let mut malformed = serde_json::to_value(&request).unwrap();
+        malformed["credential"] = serde_json::json!("ambient");
+        assert!(
+            from_json_slice_strict::<LifecycleRuntimeProbeRequest>(
+                &canonical_json(&malformed).unwrap(),
+                MAX_LIFECYCLE_REQUEST_BYTES,
+            )
+            .is_err()
+        );
+    }
 
     fn direct_mode() -> ExternalExecutionMode {
         ExternalExecutionMode::DirectCommand {

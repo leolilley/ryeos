@@ -18,16 +18,16 @@ use lillux::network::{NetworkCancellation, NetworkContext};
 use lillux::time::{Duration, MonotonicDeadline};
 use provider_spec::{PlanValue, ProviderSpec, RouteName, RouteTarget};
 use ryeos_external_execution_contract::{
-    LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_CREDENTIAL_FD_ENV,
-    LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
-    LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
-    LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_RESOLVER_FD_ENV,
-    LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
-    LIFECYCLE_SIGNED_IMPORT_FD_ENV, LifecycleAdapterInspectionRequest,
-    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
-    LifecycleArtifactInspection, LifecycleArtifactRole, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES,
-    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES, canonical_json,
-    from_json_slice_strict,
+    LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
+    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV,
+    LIFECYCLE_NETWORK_POLICY_SHA256_ENV, LIFECYCLE_PROVIDER_SPEC_FD_ENV,
+    LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REMAINING_TIMEOUT_MS_ENV,
+    LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
+    LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
+    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
+    LifecycleRuntimeProbeRequest, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, MAX_LIFECYCLE_REQUEST_BYTES,
+    MAX_LIFECYCLE_RESPONSE_BYTES, canonical_json, from_json_slice_strict,
 };
 use ryeos_http_transport::{
     ContactState, Deadlines, Header, HttpClient, HttpError, HttpRequest, HttpResponse, Limits,
@@ -250,9 +250,58 @@ fn run() -> Result<()> {
     .map_err(anyhow::Error::msg)?;
     match std::env::args().nth(1).as_deref() {
         Some("inspect") => inspect(&adapter),
+        Some("verify-runtime-probe") => verify_runtime_probe(&adapter),
         Some("operate") => operate(),
         _ => anyhow::bail!("unsupported lifecycle invocation"),
     }
+}
+
+fn verify_runtime_probe(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
+    ensure!(
+        [
+            LIFECYCLE_CREDENTIAL_FD_ENV,
+            LIFECYCLE_RESOLVER_FD_ENV,
+            LIFECYCLE_HOSTS_FD_ENV,
+            LIFECYCLE_PROVIDER_SPEC_FD_ENV,
+            LIFECYCLE_BOOTSTRAP_FD_ENV,
+            LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+        ]
+        .into_iter()
+        .all(|name| std::env::var_os(name).is_none()),
+        "runtime probe interpretation received contact authority"
+    );
+    let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_LIFECYCLE_REQUEST_BYTES)?;
+    let request: LifecycleRuntimeProbeRequest =
+        from_json_slice_strict(&request_bytes, MAX_LIFECYCLE_REQUEST_BYTES)?;
+    request.validate()?;
+    ensure!(
+        request.canonical_bytes()? == request_bytes
+            && request.adapter_id == ADAPTER_ID
+            && request.source.manifest_hash
+                == request
+                    .probe_evidence
+                    .get("guest_runtime_manifest_hash")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+        "runtime probe request differs from exact Render adapter or source"
+    );
+    verify_artifact(adapter, &request.adapter_artifact_hash, None)?;
+    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
+    ensure!(
+        lillux::sha256_hex(&settings_bytes) == request.settings_digest,
+        "runtime probe settings digest changed"
+    );
+    let settings_value: serde_json::Value =
+        from_json_slice_strict(&settings_bytes, MAX_SETTINGS_BYTES)?;
+    ensure!(
+        canonical_json(&settings_value)? == settings_bytes,
+        "runtime probe settings are noncanonical"
+    );
+    let settings: Settings = serde_json::from_value(settings_value)?;
+    validate_settings(&settings)?;
+    let response = snapshot_qualification::interpret_authenticated_request(&request, &settings)?;
+    write_response(&response)
 }
 
 fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {

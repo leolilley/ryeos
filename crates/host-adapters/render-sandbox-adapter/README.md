@@ -358,9 +358,12 @@ context is constructed.
 The lifecycle backend now has a credential-free, provider-neutral runtime-probe
 interpretation hook. Fresh admission and retained placement call it only after
 RyeOS authenticates the corresponding proof. The hook defaults to refusal; the
-installed Render adapter has not implemented its sealed offline invocation,
-and the separate allocation gate still refuses qualified bindings. Neither
-the hook nor a successful probe parse is an activation claim.
+exact Render adapter now implements a sealed offline invocation with no
+credential or network descriptors. It compares source-derived owner, tree and
+controller-root identities with the bounded independent probe and returns a
+request-digest-bound response. The separate allocation gate still refuses
+qualified bindings: neither this interpretation nor a successful probe parse
+alone is an activation claim.
 
 The remaining provider-probe join has two separate owners. RyeOS authenticates the binding's exact
 qualification attestation from current published CAS, its product witness,
@@ -372,17 +375,20 @@ The Render adapter interprets the bounded `probe_evidence` against the same
 binding's owner/account/snapshot/plan/region, controller public root, owner
 executable and runtime manifest. Neither a caller-provided JSON probe nor a
 synthetic `HandlerContext` may stand in for RyeOS's authenticated witness.
-Before wiring that comparison, derive `installed_owner_hash` from the exact
-captured product manifest and give `bundle_generation_hash` an explicit
-authenticated producer-source meaning. The signed placement binding does not
-name that latter field; copying it from `probe_evidence` into the expectation
-would compare the provider claim with itself and prove nothing.
+The exact product-witness hash is the source-lineage join: its authenticated
+capture evidence already retains the producer and root-producer admissions,
+including effective definition, project snapshot and launch authority. The
+removed `bundle_generation_hash` probe field had no independent installed
+observation or signed-binding source; copying it from `probe_evidence` into its
+own expectation would have proved nothing.
 RyeOS now re-verifies the retained product witness and its complete content
 closure, then derives the expected owner executable digest and controller-root
 file digest from the exact product manifest under the node's current public
 key. Both ordinary and large-content manifest tiers are supported. The
 credential-free adapter hook receives these source-derived values; the Render
-executable still defaults to refusal until its sealed invocation is implemented.
+executable's sealed offline invocation now compares them with the probe. It
+still cannot authorize allocation while the signed provider spec declares
+activation `unsupported_pending` and joined installed qualification is absent.
 The proof must be rechecked at the fresh reservation/contact cut, while
 recovery of an already contacted occurrence uses its retained exact proof and
 does not select a newer witness. The existing `guest-runtime` Worker slot

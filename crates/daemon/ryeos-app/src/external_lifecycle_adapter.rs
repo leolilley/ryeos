@@ -17,7 +17,8 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
     LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
     LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleGuestPackageDelivery,
-    LifecycleOperationCommon, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
+    LifecycleOperationCommon, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
+    LifecycleRuntimeProbeSource, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
     SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
 };
 
@@ -479,6 +480,78 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             "signed external lifecycle generation contradicts the protected placement binding"
         );
         Ok(())
+    }
+
+    fn verify_runtime_probe(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+        source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
+        binding_hash: &str,
+    ) -> Result<()> {
+        ensure!(
+            contract.backend == self.declaration.id
+                && contract.backend_artifact_hash == self.adapter_hash
+                && contract.backend_artifact_bytes == self.adapter_bytes
+                && contract.settings_schema_digest == self.declaration.settings_schema_digest
+                && source.manifest_hash == contract.guest_runtime_manifest_hash
+                && source.manifest_hash == proof.evidence.result.subject_manifest_hash,
+            "runtime probe changed its signed adapter or authenticated product"
+        );
+        let settings_bytes = ryeos_external_execution_contract::canonical_json(&contract.settings)?;
+        ensure!(
+            lillux::sha256_hex(&settings_bytes) == contract.settings_digest,
+            "runtime probe settings changed their signed digest"
+        );
+        let request = LifecycleRuntimeProbeRequest {
+            schema: 1,
+            protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
+            adapter_id: self.declaration.id.clone(),
+            adapter_artifact_hash: self.adapter_hash.clone(),
+            settings_digest: contract.settings_digest.clone(),
+            binding_hash: binding_hash.to_owned(),
+            qualification_attestation_hash: proof.attestation_hash.clone(),
+            product_witness_hash: proof.evidence.product_witness_hash.clone(),
+            account: contract.account.clone(),
+            source: LifecycleRuntimeProbeSource {
+                manifest_hash: source.manifest_hash.clone(),
+                owner_executable_sha256: source.owner_executable_sha256.clone(),
+                controller_root_blob_sha256: source.controller_root_blob_sha256.clone(),
+                controller_public_root: source.controller_public_root.clone(),
+            },
+            probe_evidence: proof.evidence.result.probe_evidence.clone(),
+        };
+        let request_handle = lillux::sealed_memfd(
+            c"ryeos-lifecycle-runtime-probe-request",
+            &request.canonical_bytes()?,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let settings_handle =
+            lillux::sealed_memfd(c"ryeos-lifecycle-runtime-probe-settings", &settings_bytes)
+                .map_err(anyhow::Error::msg)?;
+        let deadline = lillux::time::MonotonicDeadline::after(
+            lillux::time::Duration::from_secs_f64(LIFECYCLE_ADAPTER_INSPECTION_TIMEOUT_SECONDS),
+        );
+        let response = run_lifecycle_adapter(
+            &self.adapter,
+            LifecycleAdapterInvocation::VerifyRuntimeProbe,
+            &request_handle,
+            vec![settings_handle.clone()],
+            vec![(
+                LIFECYCLE_SETTINGS_FD_ENV.into(),
+                settings_handle
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            )],
+            deadline,
+        )?;
+        let decoded: LifecycleRuntimeProbeResponse =
+            from_json_slice_strict(&response.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+                .map_err(|_| anyhow::anyhow!("invalid lifecycle runtime probe response"))?;
+        decoded
+            .validate_for(&request)
+            .map_err(|_| anyhow::anyhow!("invalid lifecycle runtime probe response"))
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -8,7 +8,61 @@ use anyhow::{Result, ensure};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::{RenderPlan, Settings};
+use ryeos_external_execution_contract::{
+    LIFECYCLE_ADAPTER_PROTOCOL, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
+};
+
+use crate::{ADAPTER_ID, RenderPlan, Settings};
+
+pub(crate) fn interpret_authenticated_request(
+    request: &LifecycleRuntimeProbeRequest,
+    settings: &Settings,
+) -> Result<LifecycleRuntimeProbeResponse> {
+    request.validate()?;
+    ensure!(
+        request.adapter_id == ADAPTER_ID
+            && request.source.manifest_hash
+                == request
+                    .probe_evidence
+                    .get("guest_runtime_manifest_hash")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+        "runtime probe request differs from exact Render adapter or source"
+    );
+    let root_b64 = request
+        .source
+        .controller_public_root
+        .strip_prefix("ed25519:")
+        .ok_or_else(|| anyhow::anyhow!("runtime probe source has no controller public root"))?;
+    let root_bytes = base64::engine::general_purpose::STANDARD.decode(root_b64)?;
+    let root_bytes: [u8; 32] = root_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("runtime probe controller root has wrong length"))?;
+    ensure!(
+        base64::engine::general_purpose::STANDARD.encode(root_bytes) == root_b64
+            && lillux::sha256_hex(hex::encode(root_bytes).as_bytes())
+                == request.source.controller_root_blob_sha256,
+        "runtime probe controller root differs from authenticated product"
+    );
+    let probe = RenderSnapshotProbe::from_probe_evidence(&request.probe_evidence)?;
+    probe.validate_for(
+        settings,
+        &SnapshotExpectation {
+            product_witness_hash: &request.product_witness_hash,
+            guest_runtime_manifest_hash: &request.source.manifest_hash,
+            controller_public_root: &request.source.controller_public_root,
+            account: &request.account,
+            binding_hash: &request.binding_hash,
+            installed_owner_hash: &request.source.owner_executable_sha256,
+        },
+    )?;
+    Ok(LifecycleRuntimeProbeResponse {
+        schema: 1,
+        protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
+        adapter_id: ADAPTER_ID.into(),
+        request_digest: request.digest()?,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,7 +70,6 @@ pub(crate) struct RenderSnapshotProbe {
     pub schema: u32,
     pub product_witness_hash: String,
     pub guest_runtime_manifest_hash: String,
-    pub bundle_generation_hash: String,
     pub controller_public_root: String,
     pub owner_id: String,
     pub account: String,
@@ -38,7 +91,6 @@ pub(crate) struct RenderSnapshotProbe {
 pub(crate) struct SnapshotExpectation<'a> {
     pub product_witness_hash: &'a str,
     pub guest_runtime_manifest_hash: &'a str,
-    pub bundle_generation_hash: &'a str,
     pub controller_public_root: &'a str,
     pub account: &'a str,
     pub binding_hash: &'a str,
@@ -65,7 +117,6 @@ impl RenderSnapshotProbe {
         for hash in [
             &self.product_witness_hash,
             &self.guest_runtime_manifest_hash,
-            &self.bundle_generation_hash,
             &self.binding_hash,
             &self.restored_tree_manifest_hash,
             &self.installed_owner_hash,
@@ -98,7 +149,6 @@ impl RenderSnapshotProbe {
         ensure!(
             self.product_witness_hash == expected.product_witness_hash
                 && self.guest_runtime_manifest_hash == expected.guest_runtime_manifest_hash
-                && self.bundle_generation_hash == expected.bundle_generation_hash
                 && self.controller_public_root == expected.controller_public_root
                 && self.owner_id == settings.owner_id
                 && self.account == expected.account
@@ -134,7 +184,6 @@ mod tests {
             schema: 1,
             product_witness_hash: "1".repeat(64),
             guest_runtime_manifest_hash: "2".repeat(64),
-            bundle_generation_hash: "3".repeat(64),
             controller_public_root: public_root(),
             owner_id: "owner".into(),
             account: "account".into(),
@@ -167,7 +216,6 @@ mod tests {
         let expected = SnapshotExpectation {
             product_witness_hash: &"1".repeat(64),
             guest_runtime_manifest_hash: &"2".repeat(64),
-            bundle_generation_hash: &"3".repeat(64),
             controller_public_root: &public_root(),
             account: "account",
             binding_hash: &"4".repeat(64),
@@ -193,5 +241,50 @@ mod tests {
         untrusted = serde_json::to_value(probe()).unwrap();
         untrusted["region"] = serde_json::Value::String("x".repeat(32 * 1024));
         assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
+    }
+
+    #[test]
+    fn offline_probe_interpretation_joins_protected_source_and_settings() {
+        let public_root = public_root();
+        let root_bytes = base64::engine::general_purpose::STANDARD
+            .decode(public_root.strip_prefix("ed25519:").unwrap())
+            .unwrap();
+        let settings = Settings {
+            schema: 2,
+            owner_id: "owner".into(),
+            plan: RenderPlan::Starter,
+            region: "oregon".into(),
+            snapshot_id: "snp-exact".into(),
+            tls_roots_der_base64: Vec::new(),
+        };
+        let request = LifecycleRuntimeProbeRequest {
+            schema: 1,
+            protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
+            adapter_id: ADAPTER_ID.into(),
+            adapter_artifact_hash: "a".repeat(64),
+            settings_digest: "b".repeat(64),
+            binding_hash: "4".repeat(64),
+            qualification_attestation_hash: "c".repeat(64),
+            product_witness_hash: "1".repeat(64),
+            account: "account".into(),
+            source: ryeos_external_execution_contract::LifecycleRuntimeProbeSource {
+                manifest_hash: "2".repeat(64),
+                owner_executable_sha256: "5".repeat(64),
+                controller_root_blob_sha256: lillux::sha256_hex(hex::encode(root_bytes).as_bytes()),
+                controller_public_root: public_root,
+            },
+            probe_evidence: serde_json::to_value(probe()).unwrap(),
+        };
+        let response = interpret_authenticated_request(&request, &settings).unwrap();
+        response.validate_for(&request).unwrap();
+        let mut changed = request.clone();
+        changed.source.owner_executable_sha256 = "d".repeat(64);
+        assert!(interpret_authenticated_request(&changed, &settings).is_err());
+        changed = request.clone();
+        changed.source.controller_root_blob_sha256 = "e".repeat(64);
+        assert!(interpret_authenticated_request(&changed, &settings).is_err());
+        let mut changed_settings = settings;
+        changed_settings.snapshot_id = "snp-other".into();
+        assert!(interpret_authenticated_request(&request, &changed_settings).is_err());
     }
 }

@@ -73,6 +73,7 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         _contract: &ExternalPlacementBackendContract,
         _proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
         _source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
+        _binding_hash: &str,
     ) -> Result<()> {
         bail!("external lifecycle adapter does not verify runtime qualification probes")
     }
@@ -863,6 +864,7 @@ impl ExternalPlacementBackendRegistry {
         contract: &ExternalPlacementBackendContract,
         proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
         source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
+        binding_hash: &str,
     ) -> Result<()> {
         let backend = self
             .backends
@@ -871,7 +873,7 @@ impl ExternalPlacementBackendRegistry {
                 contract.backend_artifact_hash.clone(),
             ))
             .context("exact signed external placement backend generation is not installed")?;
-        backend.verify_runtime_probe(contract, proof, source)
+        backend.verify_runtime_probe(contract, proof, source, binding_hash)
     }
 
     pub(crate) fn from_backends(backends: Vec<Arc<dyn ExternalPlacementBackend>>) -> Result<Self> {
@@ -1102,9 +1104,12 @@ fn require_retained_session_runtime_qualification(
         return Ok(());
     };
     let source = verify_retained_runtime_proof(state, retained)?;
-    state
-        .external_placement_backends
-        .verify_runtime_probe(&contract, &retained.proof, &source)
+    state.external_placement_backends.verify_runtime_probe(
+        &contract,
+        &retained.proof,
+        &source,
+        binding.digest(),
+    )
 }
 
 /// Recovery validates only the capsule's historical CAS-owned witness. First
@@ -1279,9 +1284,12 @@ pub fn preflight_external_candidate_program(
         .transpose()?;
     if let Some(proof) = runtime_proof.as_ref() {
         let source = verify_retained_runtime_proof(state, proof)?;
-        state
-            .external_placement_backends
-            .verify_runtime_probe(&contract, &proof.proof, &source)?;
+        state.external_placement_backends.verify_runtime_probe(
+            &contract,
+            &proof.proof,
+            &source,
+            binding.digest(),
+        )?;
     }
     preflight_external_candidate_dependencies(
         &state.node_config.external_execution,
@@ -6700,7 +6708,7 @@ mod tests {
             };
         assert!(
             ExternalPlacementBackendRegistry::default()
-                .verify_runtime_probe(&contract, proof, &source)
+                .verify_runtime_probe(&contract, proof, &source, binding.digest())
                 .is_err()
         );
         let registry =
@@ -6710,7 +6718,7 @@ mod tests {
             .unwrap();
         assert!(
             registry
-                .verify_runtime_probe(&contract, proof, &source)
+                .verify_runtime_probe(&contract, proof, &source, binding.digest())
                 .is_err()
         );
     }

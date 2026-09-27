@@ -19,6 +19,7 @@ const MAX_LIFECYCLE_ADAPTER_OPEN_FILES: u64 = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleAdapterInvocation {
     Inspect,
+    VerifyRuntimeProbe,
     Operate,
 }
 
@@ -34,6 +35,7 @@ impl LifecycleAdapterInvocation {
     fn argument(self) -> &'static str {
         match self {
             Self::Inspect => "inspect",
+            Self::VerifyRuntimeProbe => "verify-runtime-probe",
             Self::Operate => "operate",
         }
     }
