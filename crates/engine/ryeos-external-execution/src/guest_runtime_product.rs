@@ -202,6 +202,16 @@ mod tests {
             std::fs::read(parent.path().join("runtime/bin").join(OWNER_NAME)).unwrap(),
             bytes
         );
+        let installed_owner = parent.path().join("runtime/bin").join(OWNER_NAME);
+        std::fs::set_permissions(&installed_owner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&installed_owner, b"changed-guest-owner-fixture").unwrap();
+        std::fs::set_permissions(&installed_owner, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert_ne!(
+            product.manifest_hash(),
+            ObservedGuestRuntime::observe(product.root())
+                .unwrap()
+                .manifest_hash()
+        );
         assert!(
             produce_guest_owner_runtime(
                 &parent,
