@@ -1,0 +1,25 @@
+# ryeos:signed:2026-09-20T11:15:48Z:2516d1e02d90bebca8fad1b93a67de850874cd43fdf9c0e0a652f079e4a4e8cf:w8DQXj2K1rScK993BW/DrugLR831fEeGRukAUtyl053czUf0uZKwlijDMsVWT6pNLCiFNgs+hOxj/SDUhrGRCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: substrate-release-finalize
+version: "1.0.0"
+description: Verify and retain one exact qualified substrate-release descriptor without signing it.
+endpoint: bundle_release.substrate_release_finalize
+ui_read_only: false
+state_access: read_write
+record_thread: true
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/substrate-release-finalize"]
+schema:
+  catalog_namespace: string
+  bundle_publication_policy_section_digest: string
+  trust_epoch: integer
+  substrate_image_digest: string
+  substrate_protocol: integer
+  target: object
+  substrate_build_accepted_result_hash: string
+  substrate_build_receipt_hash: string
+  selected_substrate_product_identity: string
+  selected_substrate_product_witness: string
+  qualification_evidence_hashes: array
+  core_generation_hash: string
+  core_generation_attestation_hash: string

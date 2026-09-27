@@ -20,9 +20,13 @@ pub mod admission_submit;
 pub mod admission_token;
 pub mod authorize_client;
 pub mod authorize_key;
+pub mod bundle_catalog;
+pub mod bundle_catalog_publish;
 pub mod bundle_export;
 pub mod bundle_install;
 pub mod bundle_list;
+pub mod bundle_release;
+pub(crate) mod bundle_release_execution;
 pub mod bundle_remove;
 pub mod bundle_smoke;
 pub mod bundle_verify;
@@ -66,6 +70,7 @@ pub mod project_apply_snapshot;
 pub mod project_snapshot_status;
 pub mod project_status;
 pub mod push_head;
+pub(crate) mod qualification_project_context;
 pub mod rebuild;
 pub mod remote_admit;
 pub mod remote_authorize;
@@ -226,6 +231,36 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
+    bundle_catalog_publish::DESCRIPTOR,
+    bundle_catalog::UPLOAD,
+    bundle_catalog::STAGE_LOCAL,
+    bundle_catalog::INSPECT,
+    bundle_catalog::RESOLVE,
+    bundle_catalog::EXPORT_RECOVERY,
+    bundle_catalog::RESTORE_GENESIS,
+    bundle_release::INPUT_INSPECT,
+    bundle_release::AUTHORITY_CALIBRATE,
+    bundle_release::AUTHORITY_MEASURE,
+    bundle_release::CORE_SEED_BUILD,
+    bundle_release::CORE_SEED_INSPECT,
+    bundle_release::CORE_SEED_CAPTURE,
+    bundle_release::CORE_SEED_QUALIFY,
+    bundle_release::GENERATION_BUILD,
+    bundle_release::REQUEST_TREE_SIGNING,
+    bundle_release::GENERATION_CAPTURE,
+    bundle_release::GENERATION_QUALIFY,
+    bundle_release::GENERATION_FINALIZE,
+    bundle_release::SUBSTRATE_BUILD,
+    bundle_release::SUBSTRATE_QUALIFY,
+    bundle_release::SUBSTRATE_RELEASE_FINALIZE,
+    bundle_release::SUBSTRATE_RELEASE_AUTHORIZATION,
+    bundle_release::REQUEST_AUTHORIZATION,
+    bundle_release::SET_COMPOSE,
+    bundle_release::GENESIS_SET_COMPOSE,
+    bundle_release::CATALOG_REQUEST_PUBLICATION,
+    bundle_release::CATALOG_REMOTE_PUBLISH,
+    bundle_release::SUBMIT,
+    bundle_release::STATUS,
     bundle_smoke::DESCRIPTOR,
     bundle_verify::DESCRIPTOR,
     maintenance_gc::DESCRIPTOR,

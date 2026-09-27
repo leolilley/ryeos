@@ -81,7 +81,6 @@ def render(manifest: dict) -> str:
         "pub(super) static WEB_ASSETS: &[WebAssetEntry] = &[",
     ]
     for asset in manifest["assets"]:
-        imports = ", ".join(json.dumps(value) for value in asset["imports"])
         lines.extend(
             [
                 "    WebAssetEntry {",
@@ -90,7 +89,23 @@ def render(manifest: dict) -> str:
                 f'        content_type: {json.dumps(asset["mime"])},',
                 f'        cache_control: {json.dumps(asset["cache"])},',
                 f'        sha256: {json.dumps(asset["sha256"])},',
-                f'        imports: &[{imports}],',
+            ]
+        )
+        if asset["imports"]:
+            imports = ", ".join(json.dumps(value) for value in asset["imports"])
+            inline = f"        imports: &[{imports}],"
+            if len(inline) <= 100:
+                lines.append(inline)
+            else:
+                lines.append("        imports: &[")
+                lines.extend(
+                    f"            {json.dumps(value)}," for value in asset["imports"]
+                )
+                lines.append("        ],")
+        else:
+            lines.append("        imports: &[],")
+        lines.extend(
+            [
                 f'        bytes: include_bytes!("../../../clients/web/pkg/{asset["filename"]}"),',
                 "    },",
             ]

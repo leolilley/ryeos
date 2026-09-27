@@ -227,6 +227,7 @@ async fn run_core_initialization(
         source_dir: options.source_dir.clone(),
         trust_files: options.trust_files.clone(),
         node_profile: options.node_profile.clone(),
+        substrate_identity: options.substrate_identity.clone(),
         replace_node_policy_generation: options.replace_node_policy_generation,
         skip_preflight: options.skip_preflight,
     };

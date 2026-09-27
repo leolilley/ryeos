@@ -11,6 +11,7 @@ use ryeos_handler_protocol::{
     ValidateLaunchPreparerConfigSuccess,
 };
 use ryeos_state::external_content::products::ProductDeclarations;
+use ryeos_state::external_content::products::ProductRecipePurpose;
 use ryeos_state::external_content::products::admission::{
     AdmittedProductRecipeBinding, PRODUCT_RECIPE_BINDING_SCHEMA,
 };
@@ -124,6 +125,21 @@ fn prepare_inner(
                         LaunchPrepareErrorClass::Configuration,
                     )
                 })?;
+            let purpose = bound
+                .composed
+                .composed
+                .get("recipe_purpose")
+                .cloned()
+                .map(serde_json::from_value::<ProductRecipePurpose>)
+                .transpose()
+                .map_err(|error| {
+                    wire_error(
+                        "product_recipe_purpose_invalid",
+                        format!("invalid product recipe purpose: {error}"),
+                        LaunchPrepareErrorClass::Configuration,
+                    )
+                })?
+                .unwrap_or(ProductRecipePurpose::GeneralProductV1);
             let declarations =
                 ProductDeclarations::from_value(declarations_value).map_err(|error| {
                     wire_error(
@@ -183,6 +199,7 @@ fn prepare_inner(
                 binding_name: PRODUCT_RECIPE_BINDING.to_owned(),
                 recipe_ref: bound.canonical_ref.clone(),
                 recipe_raw_content_digest,
+                purpose,
                 declarations_hash: declarations.content_hash().map_err(|error| {
                     wire_error(
                         "product_declarations_invalid",
@@ -193,12 +210,20 @@ fn prepare_inner(
                 declarations,
                 relationships,
             };
-            let fact_value = serde_json::to_value(&fact).map_err(|error| {
-                wire_error(
-                    "product_recipe_admission_invalid",
-                    error.to_string(),
-                    LaunchPrepareErrorClass::Internal,
-                )
+            let fact_value = fact.runtime_fact_value().map_err(|error| {
+                if error.to_string().contains("runtime-fact budget") {
+                    wire_error(
+                        "product_recipe_admission_too_large",
+                        error.to_string(),
+                        LaunchPrepareErrorClass::Configuration,
+                    )
+                } else {
+                    wire_error(
+                        "product_recipe_admission_invalid",
+                        error.to_string(),
+                        LaunchPrepareErrorClass::Internal,
+                    )
+                }
             })?;
             let fact_bytes = serde_json::to_vec(&fact_value)
                 .map_err(|error| {
@@ -216,13 +241,6 @@ fn prepare_inner(
                     LaunchPrepareErrorClass::Configuration,
                 ));
             }
-            fact.validate().map_err(|error| {
-                wire_error(
-                    "product_recipe_admission_invalid",
-                    format!("invalid admitted product recipe: {error:#}"),
-                    LaunchPrepareErrorClass::Internal,
-                )
-            })?;
             runtime_facts.insert(PRODUCT_RECIPE_BINDING.to_owned(), fact_value);
         }
     }
@@ -461,8 +479,11 @@ mod tests {
     #[test]
     fn product_graph_retains_exact_config_identity_and_declaration_block() {
         let result = success(request(true));
-        let fact: AdmittedProductRecipeBinding =
-            serde_json::from_value(result.runtime_facts[PRODUCT_RECIPE_BINDING].clone()).unwrap();
+        let fact = ryeos_state::external_content::products::admission::
+            admitted_product_recipe_from_runtime_fact(
+                &result.runtime_facts[PRODUCT_RECIPE_BINDING],
+            )
+            .unwrap();
         assert_eq!(fact.recipe_ref, "config:test/two-products");
         assert_eq!(fact.recipe_raw_content_digest, "a".repeat(64));
         assert_eq!(fact.declarations.products[0].name, "runtime");
@@ -486,8 +507,11 @@ mod tests {
             .unwrap()
             .remove("product_relationships");
         let result = success(request);
-        let fact: AdmittedProductRecipeBinding =
-            serde_json::from_value(result.runtime_facts[PRODUCT_RECIPE_BINDING].clone()).unwrap();
+        let fact = ryeos_state::external_content::products::admission::
+            admitted_product_recipe_from_runtime_fact(
+                &result.runtime_facts[PRODUCT_RECIPE_BINDING],
+            )
+            .unwrap();
         assert!(fact.relationships.relationships.is_empty());
         assert!(fact.validate().is_ok());
     }
@@ -537,8 +561,11 @@ mod tests {
             .composed["build_products"]["products"][0]["source"] =
             json!({"kind": "workspace_output", "root": "runtime"});
         let result = success(request);
-        let fact: AdmittedProductRecipeBinding =
-            serde_json::from_value(result.runtime_facts[PRODUCT_RECIPE_BINDING].clone()).unwrap();
+        let fact = ryeos_state::external_content::products::admission::
+            admitted_product_recipe_from_runtime_fact(
+                &result.runtime_facts[PRODUCT_RECIPE_BINDING],
+            )
+            .unwrap();
         assert!(fact.declarations.requires_workspace_output_capture());
         assert_eq!(fact.declarations.output_roots[0].path, "products/runtime");
         assert!(fact.validate().is_ok());
@@ -596,7 +623,7 @@ mod tests {
             .map(|index| {
                 let segment = format!("product-{index}-{}", "x".repeat(90));
                 json!({
-                    "name": format!("product-{index}"),
+                    "name": if index == 0 { "runtime".to_owned() } else { format!("product-{index}") },
                     "source": {"kind": "retained_project"},
                     "path": format!("products/{segment}/{segment}/{segment}/{segment}/{segment}"),
                     "shape": "tree",
@@ -618,11 +645,15 @@ mod tests {
             .unwrap()
             .composed
             .composed["build_products"]["products"] = json!(products);
-        assert!(matches!(
-            prepare(oversized),
-            HandlerResponse::LaunchPrepare {
-                response: LaunchPrepareResponse::Error { error }
-            } if error.code == "product_recipe_admission_too_large"
-        ));
+        let HandlerResponse::LaunchPrepare {
+            response: LaunchPrepareResponse::Error { error },
+        } = prepare(oversized)
+        else {
+            panic!("oversized product recipe should be refused");
+        };
+        assert_eq!(
+            error.code, "product_recipe_admission_too_large",
+            "{error:?}"
+        );
     }
 }

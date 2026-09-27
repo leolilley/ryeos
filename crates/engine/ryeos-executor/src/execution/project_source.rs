@@ -401,6 +401,7 @@ impl PreparedExternalProductConsumer {
         state: &AppState,
         context: &ryeos_app::handler_context::HandlerContext,
         selectors: &[ryeos_state::external_content::products::composition::ProductSelection],
+        project_context_resolver: Option<Arc<dyn ryeos_app::operator_external_content::product_qualification::QualificationProjectContextResolver>>,
     ) -> anyhow::Result<()> {
         let subject = prepared_product_subject(self._project_context.as_ref())?;
         let engine = self
@@ -413,7 +414,7 @@ impl PreparedExternalProductConsumer {
                 .as_ref()
                 .map(|context| context.effective_path.clone()),
         );
-        ryeos_app::operator_external_content::product_composition::select_products(
+        ryeos_app::operator_external_content::product_composition::select_products_with_project_context_resolver(
             state,
             context,
             engine,
@@ -421,6 +422,7 @@ impl PreparedExternalProductConsumer {
             &subject,
             &mut self.resolution,
             selectors,
+            project_context_resolver.as_deref(),
         )?;
         Ok(())
     }
@@ -433,6 +435,7 @@ impl PreparedExternalProductConsumer {
         state: Arc<AppState>,
         context: ryeos_app::handler_context::HandlerContext,
         request: &ryeos_app::operator_external_content::product_composition::ComposeRetainedProductsRequest,
+        project_context_resolver: Option<Arc<dyn ryeos_app::operator_external_content::product_qualification::QualificationProjectContextResolver>>,
     ) -> anyhow::Result<
         ryeos_app::operator_external_content::product_composition::PreparedProductImports,
     > {
@@ -464,6 +467,7 @@ impl PreparedExternalProductConsumer {
             engine,
             &roots,
             &mut self.resolution,
+            project_context_resolver.as_deref(),
         )
     }
 }
@@ -941,6 +945,110 @@ pub fn resolve_read_only_snapshot_context(
         captured_generation: None,
         realization: PinnedContextRealization::ReadOnly,
     })
+}
+
+/// App-owned qualification context resolver implemented at the executor
+/// boundary, where pinned snapshot materialization and request Engine
+/// construction already live.
+pub fn qualification_project_context_resolver(
+    state: &AppState,
+) -> Arc<dyn ryeos_app::operator_external_content::product_qualification::QualificationProjectContextResolver>
+{
+    Arc::new(ExecutorQualificationProjectContextResolver {
+        state: Arc::new(state.clone()),
+    })
+}
+
+struct ExecutorQualificationProjectContextResolver {
+    state: Arc<AppState>,
+}
+
+impl
+    ryeos_app::operator_external_content::product_qualification::QualificationProjectContextResolver
+    for ExecutorQualificationProjectContextResolver
+{
+    fn resolve_read_only_snapshot(
+        &self,
+        snapshot_hash: &str,
+        display_path: &Path,
+        operation_id: &str,
+    ) -> anyhow::Result<
+        Box<dyn ryeos_app::operator_external_content::product_qualification::QualificationProjectContextLease>,
+    >{
+        let context = resolve_read_only_snapshot_context(
+            &self.state,
+            snapshot_hash,
+            display_path.to_path_buf(),
+            operation_id,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("resolve exact qualification verifier project snapshot: {error}")
+        })?;
+        let materialization = context.pinned_materialization.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("snapshot resolver omitted pinned materialization proof")
+        })?;
+        let lifeline = context.temp_dir.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("snapshot resolver omitted materialization lifetime guard")
+        })?;
+        if context.snapshot_hash.as_deref() != Some(snapshot_hash)
+            || !matches!(
+                &context.source,
+                ProjectSource::Snapshot { hash } if hash == snapshot_hash
+            )
+            || context.original_path != display_path
+            || materialization.snapshot_hash() != snapshot_hash
+            || materialization.path() != context.effective_path
+            || !materialization.owns_path(&context.effective_path)?
+            || !lifeline.owns_effective_path(&context.effective_path)
+        {
+            anyhow::bail!("executor snapshot context contradicts exact qualification authority");
+        }
+        materialization.ensure_path_binding()?;
+        Ok(Box::new(ExecutorQualificationProjectContextLease {
+            context,
+        }))
+    }
+}
+
+struct ExecutorQualificationProjectContextLease {
+    context: ResolvedProjectContext,
+}
+
+impl ryeos_app::operator_external_content::product_qualification::QualificationProjectContextLease
+    for ExecutorQualificationProjectContextLease
+{
+    fn snapshot_hash(&self) -> &str {
+        self.context
+            .snapshot_hash
+            .as_deref()
+            .expect("verified snapshot lease has a snapshot hash")
+    }
+
+    fn original_path(&self) -> &Path {
+        &self.context.original_path
+    }
+
+    fn effective_path(&self) -> &Path {
+        &self.context.effective_path
+    }
+
+    fn request_engine(&self) -> &Arc<Engine> {
+        &self.context.request_engine
+    }
+
+    fn pinned_materialization(&self) -> &ryeos_state::PinnedProjectMaterialization {
+        self.context
+            .pinned_materialization
+            .as_ref()
+            .expect("verified snapshot lease has materialization proof")
+    }
+
+    fn workspace_lifeline(&self) -> &Arc<TempDirGuard> {
+        self.context
+            .temp_dir
+            .as_ref()
+            .expect("verified snapshot lease has a workspace lifeline")
+    }
 }
 
 /// Sentinel value for `--no-project` mode: the caller has chosen to

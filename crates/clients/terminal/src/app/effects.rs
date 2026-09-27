@@ -61,7 +61,9 @@ async fn run_effect(client: &DaemonClient, effect: &RyeOsEffect) -> RyeOsEffectR
 fn effect_error(kind: &RyeOsEffectKind, error: ClientError) -> ryeos_client_base::ui::RyeOsUiError {
     let mutation = matches!(
         kind,
-        RyeOsEffectKind::InvokeBinding { .. } | RyeOsEffectKind::ReplaceSession { .. }
+        RyeOsEffectKind::InvokeBinding { .. }
+            | RyeOsEffectKind::ReplaceSession { .. }
+            | RyeOsEffectKind::ReleaseBindingAttachment { .. }
     );
     let contact_unknown = matches!(
         &error,
@@ -71,10 +73,12 @@ fn effect_error(kind: &RyeOsEffectKind, error: ClientError) -> ryeos_client_base
             | ClientError::Json(_)
     );
     if mutation && contact_unknown {
-        let code = if matches!(kind, RyeOsEffectKind::ReplaceSession { .. }) {
-            "session_replacement_outcome_unknown"
-        } else {
-            "invocation_outcome_unknown"
+        let code = match kind {
+            RyeOsEffectKind::ReplaceSession { .. } => "session_replacement_outcome_unknown",
+            RyeOsEffectKind::ReleaseBindingAttachment { .. } => {
+                "attachment_release_outcome_unknown"
+            }
+            _ => "invocation_outcome_unknown",
         };
         ryeos_client_base::ui::RyeOsUiError::outcome_unknown(code, error.to_string())
     } else {
@@ -138,6 +142,23 @@ async fn effect_data(
         } => Ok(serde_json::to_value(
             client.redeem_ui_session(session_id, launch_url).await?,
         )?),
+        RyeOsEffectKind::ReleaseBindingAttachment {
+            binding_attachment_id,
+            binding_generation,
+            binding_digest,
+        } => {
+            let envelope = client
+                .signed_post(
+                    "/ui/api/session/attachments/detach",
+                    &serde_json::json!({
+                        "binding_attachment_id": binding_attachment_id,
+                        "binding_generation": binding_generation,
+                        "binding_digest": binding_digest,
+                    }),
+                )
+                .await?;
+            Ok(envelope.get("result").cloned().unwrap_or(envelope))
+        }
     }
 }
 
@@ -148,6 +169,7 @@ fn result_kind_for(kind: &RyeOsEffectKind) -> RyeOsEffectResultKind {
         RyeOsEffectKind::SetLocationHash { .. }
         | RyeOsEffectKind::CopyToClipboard { .. }
         | RyeOsEffectKind::OpenUrl { .. }
-        | RyeOsEffectKind::ReplaceSession { .. } => RyeOsEffectResultKind::BrowserOnly,
+        | RyeOsEffectKind::ReplaceSession { .. }
+        | RyeOsEffectKind::ReleaseBindingAttachment { .. } => RyeOsEffectResultKind::BrowserOnly,
     }
 }

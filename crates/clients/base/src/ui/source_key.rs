@@ -125,12 +125,12 @@ fn hex(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::TileId;
+    use crate::ids::{TileId, ViewSetId};
 
     #[test]
     fn codec_round_trips_every_current_channel_without_collisions() {
-        let tile = RyeOsViewInstanceKey::workspace_tile(TileId::new(7));
-        let dock = RyeOsViewInstanceKey::surface_slot("left");
+        let tile = RyeOsViewInstanceKey::view_set_tile(TileId::new(7));
+        let dock = RyeOsViewInstanceKey::view_set_slot(ViewSetId::new(9), "left");
         let keys = [
             RyeOsSourceInstanceKey::named(tile.clone(), "default"),
             RyeOsSourceInstanceKey::named(tile.clone(), "project"),

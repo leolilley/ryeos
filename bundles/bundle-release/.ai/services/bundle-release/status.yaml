@@ -1,0 +1,15 @@
+# ryeos:signed:2026-09-19T03:51:21Z:b7fa3d37423349a0cb9fe336e3c53df7f4044f51b12f54c3395fa4fff806b607:ak0a8iCar/tTFtNM0v6edyedxzghqcJdA2pyHGEJMQ5/TDWxyrovJ8CA7r7h333fV4OjtPm1cZqodiOYb0pABQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: status
+version: "1.0.0"
+description: Read bounded status and immutable product coordinates for one native release operation.
+endpoint: bundle_release.status
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/status"]
+schema:
+  operation_id: string
+  include_events: boolean?
+  event_limit: integer?

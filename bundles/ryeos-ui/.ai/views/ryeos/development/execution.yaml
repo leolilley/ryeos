@@ -1,0 +1,95 @@
+# ryeos:signed:2026-09-19T05:26:03Z:3339faa0e70b0334e9a9814ee00b3372ac67ff01f74cb8de4e2c49bc84389374:I2waDGuFzxQ6It2xu0ahcycuWDTxOo1kLctXxbw9F3s24GpfroQBOuoLRHXSPs/YT2aGbF9Vtn9r8bMILdGxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: development-execution
+title: Execution
+version: "1.0.0"
+description: Bounded live execution field for the work selected as this view set's conversation route
+
+widget: field
+sources:
+  execution:
+    ref: service:ui/ryeos-ui/field/execution
+    params:
+      thread_id: "@facet:selection.work.thread"
+      max_depth: 16
+      max_nodes: 160
+      expansions: []
+projections:
+  schema_version: ryeos.ui.field.projection.v1
+  groups:
+    - { id: execution, label: Work in motion, layout: flow }
+    - { id: evidence, label: Evidence, layout: stack, aggregate: { mode: count } }
+  layers:
+    - { id: execution, label: Execution, default_visible: true }
+    - { id: evidence, label: Evidence, default_visible: true }
+  entity_rules:
+    - match: { source: execution, kind: thread }
+      set:
+        role: thread
+        group: execution
+        layer: execution
+        shape: diamond
+        emphasis: strong
+        tone:
+          field: status
+          map: { completed: good, running: accent, failed: danger, cancelled: warn, timed_out: danger }
+          default: neutral
+    - match: { source: execution, kind: graph_run }
+      set:
+        role: graph-run
+        group: execution
+        layer: execution
+        shape: hex
+        emphasis: strong
+        tone:
+          field: status
+          map: { completed: good, running: accent, failed: danger }
+          default: neutral
+    - match: { source: execution, kind: occurrence }
+      set:
+        role: occurrence
+        group: execution
+        layer: execution
+        shape: rect
+        tone:
+          field: status
+          map: { completed: good, running: accent, retry: warn, suspended: warn, failed: danger, cancelled: warn, timed_out: danger, skipped: neutral }
+          default: neutral
+    - match: { source: execution, kind: hook_observation }
+      set:
+        role: observation
+        group: evidence
+        layer: evidence
+        shape: capsule
+        fill: hollow
+        tone: neutral
+    - match: { source: execution, kind: hook_failure }
+      set:
+        role: failure
+        group: evidence
+        layer: evidence
+        shape: capsule
+        fill: hollow
+        tone: danger
+  relation_rules:
+    - match: { source: execution, kind: contains }
+      set: { layer: execution, stroke: solid, directed: true }
+    - match: { source: execution, kind: executes_node }
+      set: { layer: execution, stroke: solid, directed: true }
+    - match: { source: execution, kind: observes }
+      set: { layer: evidence, stroke: dotted, directed: true }
+selection:
+  change: select
+  activate: select
+affordances:
+  - id: select
+    label: Inspect
+    visible_when: { field: kind, equals: occurrence }
+    invoke:
+      plane: ui
+      facet: selection.execution
+      merge:
+        entity_id: "{record.id}"
+      open_view: view:ryeos/development/occurrence
+refresh:
+  on_facet: selection.work
+  on_hint: [thread, activity]

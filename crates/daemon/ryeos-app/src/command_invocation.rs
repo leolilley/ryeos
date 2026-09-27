@@ -68,6 +68,8 @@ pub struct CommandInvocationControls {
     pub async_launch: bool,
     pub pin_project_at_admission: bool,
     pub pin_current_head_at_admission: bool,
+    /// Exact published project snapshot to execute read-only.
+    pub project_snapshot: Option<String>,
     pub retain_child_results: bool,
     pub exclude_operator_vault: bool,
     pub stream: Option<bool>,
@@ -239,6 +241,24 @@ pub fn compile_command_invocation(
             "capture-live and current-HEAD project sources are mutually exclusive".into(),
         ));
     }
+    if controls.project_snapshot.is_some()
+        && (controls.pin_project_at_admission || controls.pin_current_head_at_admission)
+    {
+        return Err(Invalid(
+            "--project-snapshot cannot be combined with --pin-project or --current-head".into(),
+        ));
+    }
+    if controls.project_snapshot.is_some() && project_path.is_none() {
+        return Err(Invalid(
+            "--project-snapshot requires a project root; it cannot be combined with --no-project"
+                .into(),
+        ));
+    }
+    if controls.project_snapshot.is_some() && controls.state_root.is_some() {
+        return Err(Invalid(
+            "--project-snapshot cannot be combined with --state-root".into(),
+        ));
+    }
     if (controls.pin_project_at_admission || controls.pin_current_head_at_admission)
         && controls.state_root.is_some()
     {
@@ -284,7 +304,9 @@ pub fn command_execution_policy(
     } else {
         ExecutionResponse::Wait
     };
-    let mut policy = if controls.pin_current_head_at_admission {
+    let mut policy = if let Some(hash) = &controls.project_snapshot {
+        ExecutionPolicy::local_pinned_snapshot_read_only(response, hash.clone())
+    } else if controls.pin_current_head_at_admission {
         ExecutionPolicy::local_pinned_current_head(response)
     } else if controls.pin_project_at_admission {
         ExecutionPolicy::local_pinned_capture(response)
@@ -431,6 +453,12 @@ pub fn strip_declared_control_flags(
                     );
                 }
                 ControlFlagBinding::StateRoot => controls.state_root = Some(value),
+                ControlFlagBinding::ProjectSnapshot => {
+                    if controls.project_snapshot.is_some() {
+                        return Err(format!("duplicate --{name} flag"));
+                    }
+                    controls.project_snapshot = Some(value);
+                }
                 ControlFlagBinding::ProductSelections => {
                     if controls.product_selections.is_some() {
                         return Err(format!("duplicate --{name} flag"));

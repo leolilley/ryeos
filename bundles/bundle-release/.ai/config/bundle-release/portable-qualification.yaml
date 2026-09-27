@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-21T01:02:19Z:8c1ab06fed9b769ee3d90759cff1ee6f8ff17fd99818d8ad49a3b5c6306b7158:tIpUamZLvtaOOYZLoBpxaA3Yr77+vrsiSRtovY96TpXOjTQUt6Byk3FvhKGk/MBvANTtMHxlJ4CXPNHyROiSAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: bundle-release
+version: "1.0.0"
+description: Independent release qualification for an exact captured portable bundle tree.
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v1
+  verifier_ref: tool:ryeos/bundle-release/portable-qualify
+  subject_declaration_id: subject
+  allowed_claims: [portable_bundle_release_checks_v1]
+  verifier_parameters: {}

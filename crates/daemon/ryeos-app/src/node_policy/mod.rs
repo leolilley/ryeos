@@ -65,6 +65,7 @@ impl NodePolicyTable {
     pub fn new() -> Self {
         Self::from_sections(vec![
             Box::new(sections::accounting::NodeAccountingPolicySection),
+            Box::new(sections::bundle_publication::BundlePublicationPolicySection),
             Box::new(sections::command_registration::CommandRegistrationPolicySection),
             Box::new(sections::execution::NodeExecutionPolicySection),
             Box::new(sections::external_content::ExternalContentImportPolicySection),
@@ -75,6 +76,7 @@ impl NodePolicyTable {
             Box::new(sections::object_closure::NodeObjectClosurePolicySection),
             Box::new(sections::persistent_sessions::PersistentSessionPolicySection),
             Box::new(sections::thread_history::ThreadHistoryPolicySection),
+            Box::new(sections::ui_browser_sessions::UiBrowserSessionPolicySection),
         ])
         .expect("built-in node-policy table is valid")
     }

@@ -85,10 +85,7 @@ fn compiled_project_session(
             .expect("open session project")
             .expect("session project exists"),
     ));
-    let (session_id, token) = get_ui_state(state)
-        .expect("UI state")
-        .browser_sessions
-        .mint_token(launch);
+    let (session_id, token) = test_state::mint_launch(state, launch);
     assert_eq!(
         get_ui_state(state)
             .expect("UI state")
@@ -137,8 +134,12 @@ async fn mint_compiled_project_session(
         .browser_sessions
         .get_session(&session_id)
         .expect("active compiled project session");
+    let attachment = session
+        .attachments
+        .get(&session.surface_attachment_id)
+        .expect("surface attachment");
     assert!(
-        session
+        attachment
             .compiled_binding
             .binding
             .sources
@@ -156,9 +157,16 @@ async fn dispatch_project_threads(
     context: HandlerContext,
     attempted_project_override: &std::path::Path,
 ) -> serde_json::Value {
+    let coordinate = session
+        .attachments
+        .get(&session.surface_attachment_id)
+        .expect("surface attachment")
+        .coordinate();
     (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "binding_digest": session.compiled_binding.binding_digest,
+            "binding_attachment_id": coordinate.binding_attachment_id,
+            "binding_generation": coordinate.binding_generation,
+            "binding_digest": coordinate.binding_digest,
             "coordinate": {
                 "kind": "source",
                 "view_ref": "view:ryeos/threads/history",
@@ -197,7 +205,12 @@ async fn compiled_project_sources_query_only_the_canonical_session_project() {
         true,
     );
 
-    ryeos_ui::seat_auth::with_compiled_ui_session(session, async {
+    let attachment = session
+        .attachments
+        .get(&session.surface_attachment_id)
+        .expect("surface attachment")
+        .clone();
+    ryeos_ui::seat_auth::with_compiled_ui_attachment(attachment, async {
         let threads = (ryeos_ui::handlers::ui_threads::DESCRIPTOR.handler)(
             serde_json::json!({"project": "current", "limit": 10}),
             ctx.clone(),
@@ -272,11 +285,17 @@ async fn compiled_browser_dispatch_keeps_equivalent_paths_and_live_projects_isol
     let canonical_first = first.canonicalize().expect("canonical first project");
     let canonical_second = second.canonicalize().expect("canonical second project");
     assert_eq!(
-        first_session.project_root.as_deref(),
+        first_session
+            .attachments
+            .get(&first_session.surface_attachment_id)
+            .and_then(|attachment| attachment.project_query_identity.as_deref()),
         Some(canonical_first.to_string_lossy().as_ref())
     );
     assert_eq!(
-        second_session.project_root.as_deref(),
+        second_session
+            .attachments
+            .get(&second_session.surface_attachment_id)
+            .and_then(|attachment| attachment.project_query_identity.as_deref()),
         Some(canonical_second.to_string_lossy().as_ref())
     );
 

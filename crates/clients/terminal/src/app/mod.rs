@@ -41,9 +41,27 @@ enum SeatIoAck {
 const SEAT_RECONNECT_MIN_MS: u64 = 1_000;
 const SEAT_RECONNECT_MAX_MS: u64 = 30_000;
 
+fn surface_seat_binding(
+    session: &ryeos_client_base::ui::BrowserSession,
+) -> Result<seat::SeatBindingCoordinate, std::io::Error> {
+    let mut matches = session
+        .binding_attachments
+        .iter()
+        .filter(|attachment| attachment.binding_attachment_id == session.surface_attachment_id);
+    let attachment = matches.next().ok_or_else(|| {
+        std::io::Error::other("UI session omitted its authored surface attachment")
+    })?;
+    if matches.next().is_some() {
+        return Err(std::io::Error::other(
+            "UI session duplicated its authored surface attachment",
+        ));
+    }
+    Ok(seat::SeatBindingCoordinate::from(attachment))
+}
+
 pub async fn run(
-    project_path: &str,
-    loaded_surface: LoadedSurface,
+    _project_path: &str,
+    _loaded_surface: LoadedSurface,
     diagnostics: Vec<String>,
     client: Option<DaemonClient>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -53,11 +71,6 @@ pub async fn run(
         Some(client) => client,
         None => DaemonClient::try_connect().await?,
     };
-    let mut surface_ref = loaded_surface
-        .requested_ref()
-        .map(str::to_string)
-        .unwrap_or_else(|| loaded_surface.spec().name.clone());
-
     let mut term = TerminalGuard::init()?;
     let (width, height) = term.size();
     let mut stdout = std::io::stdout();
@@ -72,10 +85,8 @@ pub async fn run(
     let mut tail_chain: Option<String> = None;
     let mut tail_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    client
-        .mint_ui_session(&surface_ref, Some(project_path))
-        .await?;
     let current_session = client.current_ui_session().await?;
+    let mut seat_binding = surface_seat_binding(&current_session)?;
     let session = current_session;
     let start_effects = core.dispatch(RyeOsEvent::Start {
         session,
@@ -119,11 +130,10 @@ pub async fn run(
         tokio::sync::mpsc::unbounded_channel::<Result<seat::SeatBootstrap, String>>();
     {
         let client = client.clone();
-        let surface_ref = surface_ref.clone();
-        let project_path = project_path.to_string();
+        let seat_binding = seat_binding.clone();
         let seat_tx = seat_tx.clone();
         tokio::spawn(async move {
-            let _ = seat_tx.send(seat::bootstrap_seat(&client, &surface_ref, &project_path).await);
+            let _ = seat_tx.send(seat::bootstrap_seat(&client, &seat_binding).await);
         });
     }
     let mut seat_thread: Option<String> = None;
@@ -202,7 +212,7 @@ pub async fn run(
         // Reconcile the SSE tail with the route facet. The timeline source is
         // scoped by `input.route.chain_root`, so tail the same braid live; keep
         // the moving route head separately as the live-buffer owner.
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         let desired_chain = route.chain_root.clone().or_else(|| route.thread.clone());
         let desired_thread = route.thread.clone().or_else(|| desired_chain.clone());
         if desired_chain != tail_chain {
@@ -297,15 +307,11 @@ pub async fn run(
                     }
                 }
                 let current_session = core.data.session.as_ref().map(|session| {
-                    (
-                        session.session_id.clone(),
-                        session.surface_ref.clone(),
-                        session.project_path.clone().unwrap_or_default(),
-                    )
+                    (session.session_id.clone(), surface_seat_binding(session))
                 });
                 let current_session_id = current_session
                     .as_ref()
-                    .map(|(session_id, _, _)| session_id.clone());
+                    .map(|(session_id, _)| session_id.clone());
                 if current_session_id != previous_session_id {
                     // A project/surface authority change creates a new immutable
                     // UI session. Every transport keyed by the predecessor must
@@ -336,19 +342,15 @@ pub async fn run(
                     seat_reconnect_delay_ms = SEAT_RECONNECT_MIN_MS;
                     seeded_events = core.seat.events().len();
 
-                    if let Some((_, replacement_surface, replacement_project)) = current_session {
-                        surface_ref = replacement_surface;
+                    if let Some((_, replacement_binding)) = current_session {
+                        seat_binding = replacement_binding?;
                         let client = client.clone();
-                        let replacement_surface = surface_ref.clone();
+                        let replacement_binding = seat_binding.clone();
                         let seat_tx = seat_tx.clone();
                         seat_bootstrap_inflight = true;
                         tokio::spawn(async move {
                             let _ = seat_tx.send(
-                                seat::bootstrap_seat(
-                                    &client,
-                                    &replacement_surface,
-                                    &replacement_project,
-                                )
+                                seat::bootstrap_seat(&client, &replacement_binding)
                                 .await,
                             );
                         });
@@ -481,12 +483,11 @@ pub async fn run(
                     // fold stale facets over fresher ones — leave that braid
                     // alone and open a new seat for this session instead.
                     let client = client.clone();
-                    let surface_ref = surface_ref.clone();
-                    let project_path = project_path.to_string();
+                    let seat_binding = seat_binding.clone();
                     let seat_tx = seat_tx.clone();
                     seat_bootstrap_inflight = true;
                     tokio::spawn(async move {
-                        let result = seat::open_seat_thread(&client, &surface_ref, &project_path)
+                        let result = seat::open_seat_thread(&client, &seat_binding)
                             .await
                             .map(|thread_id| seat::SeatBootstrap {
                                 thread_id,
@@ -505,12 +506,11 @@ pub async fn run(
                     seat_bootstrap_inflight = true;
                     seat_bootstrap_retry_at_ms = None;
                     let client = client.clone();
-                    let surface_ref = surface_ref.clone();
-                    let project_path = project_path.to_string();
+                    let seat_binding = seat_binding.clone();
                     let seat_tx = seat_tx.clone();
                     tokio::spawn(async move {
                         let _ = seat_tx.send(
-                            seat::bootstrap_seat(&client, &surface_ref, &project_path).await,
+                            seat::bootstrap_seat(&client, &seat_binding).await,
                         );
                     });
                 }

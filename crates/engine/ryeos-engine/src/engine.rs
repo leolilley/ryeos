@@ -1103,6 +1103,96 @@ impl CheckedEngineGeneration<'_> {
     }
 }
 
+/// Select the source authority used to compile a Bundle item whose logical
+/// project root is retained only for templates. Project-pinned callers keep
+/// their admitted `item` and `ctx` unchanged; this returns a separate,
+/// projectless verification of the same current trusted Bundle item.
+fn logical_bundle_compile_subject(
+    generation: &CheckedEngineGeneration<'_>,
+    ctx: &PlanContext,
+    item: &VerifiedItem,
+    root_source: &str,
+) -> Result<(PlanContext, VerifiedItem), EngineError> {
+    ctx.subject_resolution_authority
+        .validate_for_project_context(&ctx.project_context)
+        .map_err(|error| EngineError::Internal(error.to_string()))?;
+
+    let caller_ref = &item.resolved.canonical_ref;
+    if caller_ref.suffix.is_some()
+        || item.resolved.source_space != crate::contracts::ItemSpace::Bundle
+        || !matches!(
+            &item.resolved.source_root,
+            crate::contracts::ItemSourceRoot::Bundle { .. }
+        )
+        || item.trust_class != crate::contracts::TrustClass::Trusted
+        || item.resolved.subject_resolution_authority != ctx.subject_resolution_authority
+        || item.resolved.raw_content_digest != crate::item_resolution::content_hash(root_source)
+    {
+        return Err(EngineError::Internal(
+            "logical project-root compilation requires the admitted exact trusted Bundle source"
+                .into(),
+        ));
+    }
+
+    match (
+        &ctx.project_context,
+        &ctx.subject_resolution_authority,
+    ) {
+        (
+            crate::contracts::ProjectContext::None,
+            crate::contracts::SubjectResolutionAuthority::Projectless,
+        ) => Ok((ctx.clone(), item.clone())),
+        (
+            crate::contracts::ProjectContext::LocalPath { .. }
+            | crate::contracts::ProjectContext::SnapshotHash { .. },
+            crate::contracts::SubjectResolutionAuthority::PinnedGeneration { .. },
+        ) => {
+            let mut compile_ctx = ctx.clone();
+            compile_ctx.project_context = crate::contracts::ProjectContext::None;
+            compile_ctx.subject_resolution_authority =
+                crate::contracts::SubjectResolutionAuthority::Projectless;
+
+            // The pinned admission remains the caller's authority for its
+            // snapshot and selected products. Plan compilation has a narrower
+            // source authority: independently resolve and verify the same
+            // canonical item from the current Bundle generation.
+            let resolved = generation.resolve(&compile_ctx, caller_ref)?;
+            let compile_item = generation.verify(&compile_ctx, resolved)?;
+            let admitted_root_name = match &item.resolved.source_root {
+                crate::contracts::ItemSourceRoot::Bundle { name } => name,
+                _ => unreachable!("Bundle source root checked above"),
+            };
+            let compile_root_name = match &compile_item.resolved.source_root {
+                crate::contracts::ItemSourceRoot::Bundle { name } => name,
+                _ => {
+                    return Err(EngineError::Internal(
+                        "projectless verifier resolved the item outside a registered Bundle".into(),
+                    ));
+                }
+            };
+            if compile_item.resolved.canonical_ref != item.resolved.canonical_ref
+                || compile_item.resolved.kind != item.resolved.kind
+                || compile_item.resolved.source_space != crate::contracts::ItemSpace::Bundle
+                || compile_root_name != admitted_root_name
+                || compile_item.resolved.content_hash != item.resolved.content_hash
+                || compile_item.resolved.raw_content_digest != item.resolved.raw_content_digest
+                || compile_item.signer != item.signer
+                || compile_item.trust_class != item.trust_class
+                || compile_item.resolved.raw_content_digest
+                    != crate::item_resolution::content_hash(root_source)
+            {
+                return Err(EngineError::Internal(
+                    "pinned qualification Bundle source differs from the current projectless Bundle identity".into(),
+                ));
+            }
+            Ok((compile_ctx, compile_item))
+        }
+        _ => Err(EngineError::Internal(
+            "logical project-root compilation requires projectless or read-only pinned project authority".into(),
+        )),
+    }
+}
+
 impl Engine {
     pub fn new(
         kinds: KindRegistry,
@@ -1162,6 +1252,33 @@ impl Engine {
             .iter()
             .find(|bundle| bundle.name == name)
             .map(|bundle| bundle.canonical_root.as_path())
+    }
+
+    /// Resolve one exact publisher-owned Config from a retained project
+    /// snapshot. This is deliberately separate from merged config resolution:
+    /// release input ownership must not be changed by an overlay or a live
+    /// checkout read. The registered source bundle anchors the signer.
+    pub fn load_strict_signed_project_bundle_config(
+        &self,
+        project_root: &Path,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+        bundle_name: &str,
+        config_path: &str,
+    ) -> Result<crate::config_loading::StrictSignedProjectBundleConfig, EngineError> {
+        let registered_root = self.registered_bundle_root(bundle_name).ok_or_else(|| {
+            EngineError::InvalidRuntimeConfig {
+                path: config_path.to_owned(),
+                reason: format!("source bundle `{bundle_name}` is not registered"),
+            }
+        })?;
+        crate::config_loading::load_strict_signed_project_bundle_config(
+            project_root,
+            project_content,
+            &self.node_trust_store,
+            registered_root,
+            bundle_name,
+            config_path,
+        )
     }
 
     /// Stable identity for this engine's complete admitted installed-bundle
@@ -1299,7 +1416,15 @@ impl Engine {
                     .unwrap_or(&self.trust_store);
                 Ok(base.with_project_keys(root)?)
             }
-            None => Ok(Cow::Borrowed(&self.trust_store)),
+            // A project-derived request Engine's `trust_store` is the merged
+            // project view. A projectless lookup must fall back to its pinned
+            // request base (node trust plus any caller-scoped overlay), never
+            // carry local project keys into Bundle authority.
+            None => Ok(Cow::Borrowed(
+                self.request_trust_base
+                    .as_ref()
+                    .unwrap_or(&self.trust_store),
+            )),
         }
     }
 
@@ -3517,8 +3642,11 @@ impl Engine {
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
         logical_project_root: Option<&Path>,
     ) -> Result<ExecutionPlan, EngineError> {
-        self.checked_bundle_generation(|| {
+        self.with_checked_bundle_generation(|generation| {
             crate::scope::check_execution_scope(&ctx.requested_by)?;
+            let (compile_ctx, compile_item) =
+                logical_bundle_compile_subject(generation, ctx, item, root_source)?;
+
             let roots = self.resolution_roots(None);
             let request_snapshot = self.effective_request_snapshot_current(
                 None,
@@ -3526,11 +3654,11 @@ impl Engine {
             )?;
             let plan = crate::plan_builder::build_bundle_plan_with_logical_project_root(
                 crate::plan_builder::BuildPlanInput {
-                    item,
+                    item: &compile_item,
                     root_source: Some(root_source),
                     parameters,
                     hints,
-                    ctx,
+                    ctx: &compile_ctx,
                     kinds: &self.kinds,
                     parsers: &request_snapshot.parser_dispatcher,
                     roots: &roots,
@@ -4101,6 +4229,99 @@ formats:
             scheduled_fire: None,
             validate_only: false,
         }
+    }
+
+    #[test]
+    fn logical_bundle_compile_subject_reverifies_pinned_source_projectlessly() {
+        let bundle_root = tempdir();
+        let kinds_dir = tempdir();
+        let trust_store = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
+        let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).unwrap();
+
+        let source = "# ryeos-tool:\n#   note: exact bundle source\nprint('verified')\n";
+        let signed_source = lillux::signature::sign_content(source, &test_signing_key(), "#", None);
+        let source_path = bundle_root.join(AI_DIR).join("tools/hello.py");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(&source_path, &signed_source).unwrap();
+
+        let engine = Engine::new(
+            kinds,
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
+            vec![],
+        )
+        .with_trust_store(trust_store)
+        .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
+            name: "core".to_owned(),
+            canonical_root: bundle_root,
+        }]);
+
+        let projectless_ctx = test_plan_context();
+        let canonical_ref = CanonicalRef::parse("tool:hello").unwrap();
+        let projectless_item = engine
+            .with_checked_bundle_generation(|generation| {
+                let resolved = generation.resolve(&projectless_ctx, &canonical_ref)?;
+                generation.verify(&projectless_ctx, resolved)
+            })
+            .unwrap();
+        assert_eq!(projectless_item.trust_class, TrustClass::Trusted);
+        assert_eq!(projectless_item.resolved.source_space, ItemSpace::Bundle);
+
+        // Model the already-admitted pinned caller item without changing its
+        // source identity. The projection must return a separate projectless
+        // compile item and leave this caller authority intact.
+        let mut pinned_ctx = test_plan_context();
+        pinned_ctx.project_context = ProjectContext::SnapshotHash {
+            hash: "a".repeat(64),
+        };
+        pinned_ctx.subject_resolution_authority = SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "a".repeat(64),
+        };
+        let mut pinned_item = projectless_item;
+        pinned_item.resolved.subject_resolution_authority =
+            pinned_ctx.subject_resolution_authority.clone();
+        let original_ctx = pinned_ctx.clone();
+        let original_item_authority = pinned_item.resolved.subject_resolution_authority.clone();
+
+        let (compile_ctx, compile_item) = engine
+            .with_checked_bundle_generation(|generation| {
+                logical_bundle_compile_subject(generation, &pinned_ctx, &pinned_item, source)
+            })
+            .unwrap();
+
+        assert_eq!(compile_ctx.project_context, ProjectContext::None);
+        assert_eq!(
+            compile_ctx.subject_resolution_authority,
+            SubjectResolutionAuthority::Projectless
+        );
+        assert_eq!(compile_item.resolved.source_space, ItemSpace::Bundle);
+        assert_eq!(compile_item.resolved.canonical_ref, canonical_ref);
+        assert_eq!(pinned_ctx.project_context, original_ctx.project_context);
+        assert_eq!(
+            pinned_ctx.subject_resolution_authority,
+            original_ctx.subject_resolution_authority
+        );
+        assert_eq!(
+            pinned_item.resolved.subject_resolution_authority,
+            original_item_authority
+        );
+
+        let mismatch = engine
+            .with_checked_bundle_generation(|generation| {
+                logical_bundle_compile_subject(
+                    generation,
+                    &pinned_ctx,
+                    &pinned_item,
+                    "different captured bytes",
+                )
+            })
+            .unwrap_err();
+        assert!(
+            mismatch
+                .to_string()
+                .contains("admitted exact trusted Bundle source"),
+            "unexpected captured-source mismatch: {mismatch}"
+        );
     }
 
     fn immutable_request_fixture() -> Arc<EffectiveRequestSnapshot> {
@@ -4965,12 +5186,92 @@ formats:
 
         let scoped = test_engine().for_project_root(&project_dir, None).unwrap();
         assert!(scoped.trust_store.is_trusted(&fingerprint));
+        assert!(
+            !scoped
+                .effective_trust_store(None)
+                .unwrap()
+                .is_trusted(&fingerprint),
+            "projectless lookup must use the request trust base, not project-local keys"
+        );
 
         fs::remove_file(key_path).unwrap();
         let current = scoped.effective_trust_store(Some(&project_dir)).unwrap();
         assert!(
             !current.is_trusted(&fingerprint),
             "project trust removals must be visible to the next request"
+        );
+    }
+
+    #[test]
+    fn logical_bundle_compile_subject_rejects_project_only_bundle_trust() {
+        let bundle_root = tempdir();
+        let project_root = tempdir();
+        let kinds_dir = tempdir();
+        let node_trust = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
+        let kinds = KindRegistry::load_base(&[kinds_dir], &node_trust).unwrap();
+
+        let project_signing_key = SigningKey::from_bytes(&[77u8; 32]);
+        let project_verifying_key = project_signing_key.verifying_key();
+        let project_fingerprint = crate::trust::compute_fingerprint(&project_verifying_key);
+        let trusted_dir = project_root.join(AI_DIR).join(crate::TRUST_KEYS_DIR);
+        fs::create_dir_all(&trusted_dir).unwrap();
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(project_verifying_key.as_bytes());
+        fs::write(trusted_dir.join("project.pub"), encoded).unwrap();
+
+        let source = "# ryeos-tool:\n#   note: project-only publisher\nprint('project trusted')\n";
+        let signed_source =
+            lillux::signature::sign_content(source, &project_signing_key, "#", None);
+        let source_path = bundle_root.join(AI_DIR).join("tools/hello.py");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(source_path, signed_source).unwrap();
+
+        let engine = Engine::new(
+            kinds,
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
+            vec![],
+        )
+        .with_trust_store(node_trust.clone())
+        .with_node_trust_store(node_trust)
+        .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
+            name: "core".to_owned(),
+            canonical_root: bundle_root,
+        }])
+        .for_project_root(&project_root, None)
+        .unwrap();
+        assert!(
+            !engine
+                .effective_trust_store(None)
+                .unwrap()
+                .is_trusted(&project_fingerprint),
+            "project-only signer must be absent from the compile trust base"
+        );
+
+        let mut pinned_ctx = test_plan_context();
+        pinned_ctx.project_context = ProjectContext::LocalPath { path: project_root };
+        pinned_ctx.subject_resolution_authority = SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "b".repeat(64),
+        };
+        let canonical_ref = CanonicalRef::parse("tool:hello").unwrap();
+        let pinned_item = engine
+            .with_checked_bundle_generation(|generation| {
+                let resolved = generation.resolve(&pinned_ctx, &canonical_ref)?;
+                generation.verify(&pinned_ctx, resolved)
+            })
+            .unwrap();
+        assert_eq!(pinned_item.trust_class, TrustClass::Trusted);
+
+        let error = engine
+            .with_checked_bundle_generation(|generation| {
+                logical_bundle_compile_subject(generation, &pinned_ctx, &pinned_item, source)
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("pinned qualification Bundle source differs"),
+            "project-local trust must not transfer to projectless Bundle compilation: {error}"
         );
     }
 

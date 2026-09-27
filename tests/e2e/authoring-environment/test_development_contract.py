@@ -144,12 +144,11 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertEqual(tool["workspace_access"], "immutable_current_generation")
         self.assertFalse(tool["config_schema"]["additionalProperties"])
         self.assertEqual(tool["config_schema"]["properties"], {})
-        declarations = {entry["id"]: entry for entry in tool["external_content"]}
-        self.assertEqual(set(declarations), {"platform"})
-        for declaration in declarations.values():
-            self.assertEqual(declaration["mode"], "pinned")
-            self.assertEqual(declaration["mount_root"], "execution_runtime")
-            self.assertRegex(declaration["digest"], r"^[0-9a-f]{64}$")
+        self.assertEqual(tool["external_content"], [{
+            "id": "platform", "kind": "tree", "mode": "pinned",
+            "digest": "b74b15f0877a2c4941e8bb5660b9f827091aeeb2b2a50b00311101c903895c00",
+            "mount_root": "execution_runtime", "mount": "platform",
+        }])
         producer = load(".ai/graphs/ryeos/development/cargo-vendor-production.yaml")
         self.assertEqual(producer["external_product_slots"], [{
             "id": "registry-inputs",
@@ -158,7 +157,31 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
             "kind": "tree",
             "mount_root": "execution_runtime",
             "mount": "registry-inputs",
+        }, {
+            "id": "platform",
+            "relationship_ref": "config:development/ryeos/platform-products",
+            "relationship": "platform_to_cargo_vendor_production",
+            "kind": "tree",
+            "mount_root": "execution_runtime",
+            "mount": "platform",
         }])
+        self.assertEqual(producer["config"]["nodes"]["produce"]["next"],
+                         {"type": "unconditional", "to": "retain_lock"})
+        self.assertEqual(
+            producer["config"]["nodes"]["retain_lock"]["action"]["item_id"],
+            "tool:ryeos/development/cargo-vendor-finalize/run",
+        )
+        finalizer = ROOT / ".ai/tools/ryeos/development/cargo-vendor-finalize/run.py"
+        finalizer_source = finalizer.read_text()
+        self.assertIn("#   category: ryeos/development/cargo-vendor-finalize", finalizer_source)
+        self.assertIn("#   executor_id: tool:ryeos/development/authoring-environment-production/runtime",
+                      finalizer_source)
+        self.assertIn("9e8e1a93918f8e229cdbb8a037aa1a4fbbccbe5efe1257519396bb8fc3103f09",
+                      finalizer_source)
+        self.assertIn('OUTPUT = Path("products/cargo-vendor/Cargo.lock")', finalizer_source)
+        execution = load(".ai/config/execution/execution.yaml")["items"]
+        self.assertEqual(execution["graph"]["ryeos/development/cargo-vendor-production"]["timeout"], 360)
+        self.assertEqual(execution["tool"]["ryeos/development/cargo-vendor-finalize/run"]["timeout"], 60)
         args = tool["config"]["args"]
         for required in ("--locked", "--frozen", "--offline", "--respect-source-config", "--versioned-dirs"):
             self.assertIn(required, args)
@@ -175,7 +198,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertEqual(
             {relationship["consumer"]["declaration_id"]
              for relationship in products["product_relationships"]["relationships"]},
-            {"vendor"},
+            {"subject", "vendor"},
         )
 
     def test_development_closure_policy_covers_observed_vendor_artifact(self):
@@ -202,8 +225,22 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         tool_text = (ROOT / ".ai/tools/ryeos/development/platform-production/assemble.py").read_text()
         self.assertIn("#   network_authority: isolated", tool_text)
         self.assertIn("#   filesystem_authority: captured_execution", tool_text)
-        self.assertIn("digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316",
+        self.assertIn("digest: b74b15f0877a2c4941e8bb5660b9f827091aeeb2b2a50b00311101c903895c00",
                       tool_text)
+        relationships = {
+            relationship["name"]: relationship
+            for relationship in products["product_relationships"]["relationships"]
+        }
+        self.assertEqual(
+            relationships["platform_to_cargo_vendor_production"]["consumer"],
+            {"canonical_ref": "graph:ryeos/development/cargo-vendor-production",
+             "declaration_id": "platform"},
+        )
+        self.assertEqual(
+            relationships["platform_to_authoring_utility_production"]["consumer"],
+            {"canonical_ref": "graph:ryeos/development/authoring-built-utilities-production",
+             "declaration_id": "platform"},
+        )
 
     def test_stage0_acquisition_is_retained_input_not_compiler_production(self):
         products = load(
@@ -415,9 +452,10 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
             self.assertIn("built-utilities is selected by that same Graph", source)
         utility = (owner / "build-utilities.py").read_text()
         self.assertNotIn("digest: f6bcd9d28b9bb3da", utility)
-        for retained_pin in ("id: producer-python", "id: platform", "id: source-inputs"):
+        for retained_pin in ("id: producer-python", "id: source-inputs"):
             self.assertIn(retained_pin, utility)
-        self.assertIn("authoring-build-support is selected by the enclosing producer Graph", utility)
+        self.assertNotIn("digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316", utility)
+        self.assertIn("authoring-build-support and the qualified platform product are selected", utility)
 
     def test_recorded_wrappers_forward_only_explicit_authenticated_root_selections(self):
         cases = {

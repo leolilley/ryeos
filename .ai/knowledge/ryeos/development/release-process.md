@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-18T23:05:06Z:cde0aa466b0f4c58f51058f24fe9e425b8e3193f20239b1c97f26e9c1a8d5d36:1jl+WKT+aryXWpxuuVxtrbW55hWp/k+jGR30zOTFjtRTOZLGgo0I/CfGCYA39wjKVbJMDpRuB5P84MQ3FVdFBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-22T02:52:14Z:3a5426dca7a8f6ce8e8b2df3db39cc15ecde52d5420b317c14c394b92984752d:XlO0zQ8g9pXaeuaUUk3PCjHsA6bGM5I4VNF/Ui0TKfm2ew3y4DfAVEqf/zZi01wBGPyEcoQodyX7RsfC7uiOAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.7.0"
+version: "1.9.0"
 ```
 
 # RyeOS Release Process
@@ -30,7 +30,7 @@ scaffolding, but AUR is not currently an active release channel.
 
 ## Future direction boundary
 
-This runbook describes the current release authority; it is not the permanent
+This runbook describes the image/tag release path; it is not the permanent
 software-factory architecture. The scheduled direction in
 [`native-bundle-publication-and-node-composition.md`](../future/native-bundle-publication-and-node-composition.md)
 separates infrequent substrate-image releases from independently published
@@ -38,10 +38,34 @@ bundle generations and makes a RyeOS development node the eventual release
 executor. GitHub Actions becomes a temporary adapter and optional mirror.
 
 Until that path passes its publication, restart, consumer-admission, activation,
-and rollback gates, do not substitute the future design for this runbook or
+and pre-commit recovery/post-execution rollback-refusal gates, do not substitute
+the future design for this runbook or
 claim that bundle-only releases are active. Conversely, new release behavior
 should be implemented behind RyeOS-owned commands, services, libraries, and
 Graphs so GitHub workflow YAML does not become a second permanent authority.
+
+As of the 2026-09-22 development checkpoint, native publication, calibration,
+catalog and bundle-set transaction source exists, but the current campaign has
+not yet demonstrated the complete cross-node release/activation path. Its
+verified Stage-0 compiler artifact is a development prerequisite, not that
+acceptance result. Continue from
+[`source-local-bundle-development.md`](source-local-bundle-development.md)
+and follow [`development-operation-ownership.md`](development-operation-ownership.md).
+Do not restart the image/tag workflow merely to continue this proof, or require
+the external compiler bootstrap for every future bundle change. The intended
+normal path reuses qualified environment products, publishes the changed bundle
+closure to the source node, and activates an admitted selection on consumers.
+
+The remaining native implementation sequence is section 0 of
+`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`:
+finish qualified build inputs, calibrate/apply publication authority, bootstrap
+the catalog, then demonstrate data-only and binary-bearing successor updates.
+Calibration is reused while its measured identities and policy remain valid;
+invalidating changes require recalibration. Portable production itself needs
+only its qualified Python runtime, while native compilation needs the selected
+platform and vendor products. Broader development-worker acceptance, Stage1
+reproduction and self-hosted CI cutover are separate campaigns. Do not report
+prerequisite qualification as completion of bundle publication or activation.
 
 ## Critical rules
 

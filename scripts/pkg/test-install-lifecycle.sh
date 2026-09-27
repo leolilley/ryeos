@@ -3,6 +3,8 @@
 set -euo pipefail
 
 test_root="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=scripts/pkg/bundle-sets.sh
+source "$test_root/scripts/pkg/bundle-sets.sh"
 source "$test_root/scripts/pkg/install-local-direct.sh"
 
 test_dir="$(mktemp -d)"
@@ -12,6 +14,7 @@ test_release="$test_dir/release"
 mkdir "$test_release"
 cp /bin/true "$test_release/ryeos"
 cp /bin/true "$test_release/ryeosd"
+cp /bin/true "$test_release/ryeos-bundle-publisher"
 
 # Stub only this external bootstrap boundary. Missing artifacts must be refused
 # before any authorization request; refused authorization must precede stop.
@@ -23,6 +26,11 @@ ryeos_term_fail() { :; }
 
 attempt_install() {
     preflight_host_install "$test_release" "$@" || return 1
+    stop_daemon_for_install
+}
+
+attempt_bundle_set_install() {
+    preflight_bundle_set_host_install "$test_release" "$test_bundle_set" ryeos ryeosd || return 1
     stop_daemon_for_install
 }
 
@@ -45,6 +53,30 @@ test_sudo_status=0
 attempt_install ryeos ryeosd
 [[ "$(<"$test_log")" == $'authorize\nstop' ]]
 
+: > "$test_log"
+attempt_install ryeos ryeosd ryeos-bundle-publisher
+[[ "$(<"$test_log")" == $'authorize\nstop' ]]
+
+# Release-authority owns the measurement copy and refuses its absence before
+# authorization or lifecycle shutdown. Ordinary sets do not require it.
+: > "$test_log"
+rm "$test_release/ryeos-bundle-publisher"
+test_bundle_set=release-authority
+if attempt_bundle_set_install; then
+    echo 'release-authority accepted a missing publisher measurement executable' >&2
+    exit 1
+fi
+[[ ! -s "$test_log" ]]
+cp /bin/true "$test_release/ryeos-bundle-publisher"
+attempt_bundle_set_install
+[[ "$(<"$test_log")" == $'authorize\nstop' ]]
+
+: > "$test_log"
+rm "$test_release/ryeos-bundle-publisher"
+test_bundle_set=standard
+attempt_bundle_set_install
+[[ "$(<"$test_log")" == $'authorize\nstop' ]]
+
 # Root already holds installation authority; do not require another prompt.
 : > "$test_log"
 id() { printf '%s\n' 0; }
@@ -52,7 +84,7 @@ attempt_install ryeos ryeosd
 [[ "$(<"$test_log")" == stop ]]
 
 # Guard the actual entrypoint ordering, not merely the mocked composition.
-preflight_line="$(sed -n '/^preflight_host_install "\$target_dir"/=' "$test_root/scripts/pkg/install-local-direct.sh")"
+preflight_line="$(sed -n '/^preflight_bundle_set_host_install "\$target_dir"/=' "$test_root/scripts/pkg/install-local-direct.sh")"
 stop_line="$(sed -n '/^    if stop_daemon_for_install; then/=' "$test_root/scripts/pkg/install-local-direct.sh")"
 [[ -n "$preflight_line" && -n "$stop_line" && "$preflight_line" -lt "$stop_line" ]]
 

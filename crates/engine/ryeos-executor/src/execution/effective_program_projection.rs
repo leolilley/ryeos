@@ -460,6 +460,8 @@ fn capture_and_finalize_fresh_effective_program_once(
     let subject_resolution_authority = materialization
         .map(|binding| binding.subject_authority())
         .unwrap_or(&projectless_authority);
+    let qualification_project_context_resolver =
+        super::project_source::qualification_project_context_resolver(state);
     ryeos_app::operator_external_content::product_composition::admit_root_product_selections(
         state,
         current_site_id,
@@ -470,6 +472,7 @@ fn capture_and_finalize_fresh_effective_program_once(
         selection_owner,
         selection_context,
         product_selections,
+        Some(qualification_project_context_resolver.as_ref()),
         false,
     )
     .map_err(DispatchError::Internal)?;

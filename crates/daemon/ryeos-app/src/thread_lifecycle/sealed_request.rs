@@ -1039,6 +1039,66 @@ impl SealedRootExecutionRequest {
         &self.project_context
     }
 
+    /// Reconstruct the immutable planning inputs needed to re-admit this
+    /// verifier. A pinned local path is rebound only to the newly verified
+    /// materialization of the same sealed snapshot; the project authority,
+    /// principal, site, hints, and schedule remain capsule-owned.
+    pub(crate) fn qualification_plan_context(
+        &self,
+        pinned_effective_path: Option<&Path>,
+    ) -> Result<PlanContext> {
+        if self.validate_only {
+            bail!("qualification verifier capsule was admitted in validation-only mode");
+        }
+        let requested_by = self.planning_principal.restore()?;
+        let project_context = match (&self.project_authority, &self.project_context) {
+            (
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. },
+                ProjectContext::None,
+            ) if pinned_effective_path.is_none() => ProjectContext::None,
+            (
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                    ..
+                },
+                ProjectContext::LocalPath { .. },
+            ) => ProjectContext::LocalPath {
+                path: pinned_effective_path
+                    .context("pinned verifier has no verified effective project path")?
+                    .to_path_buf(),
+            },
+            (
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    snapshot_hash,
+                    realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                    ..
+                },
+                ProjectContext::SnapshotHash { hash },
+            ) if hash == snapshot_hash && pinned_effective_path.is_some() => {
+                ProjectContext::SnapshotHash { hash: hash.clone() }
+            }
+            _ => {
+                bail!("qualification verifier project context is not a supported sealed authority")
+            }
+        };
+        let plan_context = PlanContext {
+            requested_by,
+            project_context,
+            subject_resolution_authority: self.project_binding_subject_authority.clone(),
+            current_site_id: self.current_site_id.clone(),
+            origin_site_id: self.origin_site_id.clone(),
+            execution_hints: ExecutionHints {
+                values: self.execution_hints.clone(),
+            },
+            scheduled_fire: self.scheduled_fire.clone(),
+            validate_only: false,
+        };
+        plan_context
+            .subject_resolution_authority
+            .validate_for_project_context(&plan_context.project_context)?;
+        Ok(plan_context)
+    }
+
     /// Execution-filesystem subject authority sealed at fresh admission.
     /// This remains distinct from [`Self::resolution_subject_authority`] for
     /// explicitly admitted evaluator/augmentation roots.
@@ -2311,6 +2371,98 @@ mod authority_tests {
                 .unwrap_err()
                 .to_string()
                 .contains("verifier definition")
+        );
+    }
+
+    #[test]
+    fn qualification_plan_context_rebinds_only_the_pinned_snapshot_path() {
+        use ryeos_state::objects::{EnvironmentAuthority, PinnedProjectRealization};
+
+        let original = PathBuf::from("/retained/snapshot/project");
+        let verified = PathBuf::from("/materialized/current/project");
+        let snapshot_hash = "a".repeat(64);
+        let authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:qualification".to_string(),
+            Some(original),
+            snapshot_hash.clone(),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let mut sealed = SealedRootExecutionRequest::storage_test_fixture_with_project_identity(
+            ProjectContext::LocalPath {
+                path: PathBuf::from("/stale/old/materialization"),
+            },
+            authority,
+        );
+        sealed.current_site_id = "site:qualification".to_string();
+        sealed.origin_site_id = "site:origin".to_string();
+        sealed
+            .execution_hints
+            .insert("lane".to_string(), json!("native"));
+
+        let context = sealed
+            .qualification_plan_context(Some(&verified))
+            .expect("the exact pinned snapshot can be rebound to its verified materialization");
+
+        assert_eq!(
+            context.requested_by,
+            sealed.planning_principal.restore().unwrap()
+        );
+        assert_eq!(context.current_site_id, sealed.current_site_id);
+        assert_eq!(context.origin_site_id, sealed.origin_site_id);
+        assert_eq!(context.execution_hints.values, sealed.execution_hints);
+        assert_eq!(context.scheduled_fire, sealed.scheduled_fire);
+        assert_eq!(
+            context.project_context,
+            ProjectContext::LocalPath { path: verified }
+        );
+        assert_eq!(
+            context.subject_resolution_authority,
+            ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration { snapshot_hash }
+        );
+        assert!(!context.validate_only);
+    }
+
+    #[test]
+    fn qualification_plan_context_fails_closed_for_unpinned_project_authority() {
+        use ryeos_state::objects::{
+            EnvironmentAuthority, PinnedProjectRealization, PinnedTerminalPublication,
+        };
+
+        let base = "b".repeat(64);
+        let cow = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:qualification".to_string(),
+            None,
+            base.clone(),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let sealed = SealedRootExecutionRequest::storage_test_fixture_with_project_identity(
+            ProjectContext::LocalPath {
+                path: PathBuf::from("/project"),
+            },
+            cow,
+        );
+
+        assert!(
+            sealed
+                .qualification_plan_context(Some(Path::new("/materialized")))
+                .unwrap_err()
+                .to_string()
+                .contains("not a supported sealed authority")
+        );
+        assert!(
+            sealed
+                .qualification_plan_context(None)
+                .unwrap_err()
+                .to_string()
+                .contains("not a supported sealed authority")
         );
     }
 

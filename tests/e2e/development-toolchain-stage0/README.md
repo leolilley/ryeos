@@ -29,6 +29,19 @@ publisher calls the Tool-adjacent offline producer. The other tests call the can
 bootstrap-artifact verifier in that same library. Tests live here; reusable
 verification behavior does not.
 
+`test-bootstrap.py` checks the Tool-owned bootstrap export handoff: bounded
+regular archive/checksum members, saved-source verification, destination
+preservation and failure cleanup. It uses mocked subprocesses, not Docker,
+Cargo or a live node:
+
+```sh
+python3 tests/e2e/development-toolchain-stage0/test-bootstrap.py
+```
+
+The bootstrap entry and usage belong to the Stage-0 tooling and the existing
+`.ai/knowledge/ryeos/development/source-local-bundle-development.md` reference,
+not a separate release-script workflow.
+
 `test-artifact.sh` requires two independently produced archive/checksum pairs.
 It does not download inputs, produce an archive, or treat a moved source file as
 new reproduction evidence. Historical archives retain the producer digest they

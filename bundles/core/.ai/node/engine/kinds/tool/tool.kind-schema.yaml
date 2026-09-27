@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-27T10:40:53Z:fd61cc2cfcd7a7902f88a00bd0b6683f6fc0fa803f3f1f5e2ff535b9aa124319:hlIvhDpWYJ6FepPw10DUtWV6LqGawRQ91doBGzgiISrmJkWp/dqHXkFSYXkt0Qdy2PDcd7V+wcQEKjBzb7ycCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-27T22:01:05Z:91cb6e0825fc849e544038faa83564004e8751f9cb092cab7a361cda2b078d90:QBGKxHU2FxdTA4sLE4SF+wkXPJsQwPg7gcexrYOI6RK2157E8f9Aazc2oVln1lXMVwevnhHXByT/E2ovz5waBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.3.0"
 location:
@@ -235,6 +235,10 @@ runtime:
     - supported_target
     - execution_endpoint
     - resource_authority
+    # Public invocation schemas are inventory metadata consumed before plan
+    # compilation. They are not executable runtime-handler blocks.
+    - input_schema
+    - parameters
     # `config_schema` is validated as a pre-pass against the user's
     # ROOT tool item (see plan_builder.rs::build_plan and
     # runtime/config_schema.rs). Wrapper / runtime YAMLs may declare

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-25T06:44:42Z:1db062ce23dfd0af8fe50dba0fe258eac65c89a68fc5e35c0009fb2ed3d47c4f:NiUGzklE5LH31+Mhj78ySIuUBJi+eMSkwMZSoU8eGAiOJQCsy+dH7OmMtFZJV6246LTDsDBW2TS+ozEi2SgKDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-27T22:01:04Z:64d4f686603a3590dd2774078c27061ce3d4f7cded80b81d132101809bf40dee:AUgZcnkYBbIAGJmi8DBGzWem66QXxdYWPbGQQBMmv50S3zje4K2PR2H7axXfXAJiPcohaJmyVChxepBRrqnpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -8,6 +8,11 @@ exact_bundles:
   - opencode
   - standard
 policies:
+  bundle_publication:
+    schema: 2
+    # Publication is disabled until the operator installs measured release authority.
+    catalogs: []
+
   accounting:
     schema: 2
     issue_acceptance_window_ms: 60000
@@ -280,3 +285,6 @@ policies:
       max_active_streams_per_subject: 1
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
+  ui_browser_sessions:
+    schema: 1
+    max_live_binding_attachments_per_session: 16

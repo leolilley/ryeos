@@ -4851,6 +4851,7 @@ async fn prepare_managed_launch_authority(
             params.resolved.requested_by.as_deref(),
             params.handler_context,
             &params.resolved.product_selections,
+            None,
             true,
         )
         .map_err(BuildAndLaunchError::Internal)?;
@@ -6234,6 +6235,7 @@ async fn run_claimed_thread_row_inner(
         &thread_id,
         resolution,
         project_path,
+        super::source_closure::SourceMountPlacement::Project,
     )
     .map_err(BuildAndLaunchError::Internal)?;
     let post_publication_timer = launch_timings

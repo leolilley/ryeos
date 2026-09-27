@@ -3802,11 +3802,14 @@ fn validate_process_inputs_outside_workspace_outputs(
     state: &AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     partition: &ryeos_state::objects::WorkspaceOutputPartition,
+    source_placement: super::source_closure::SourceMountPlacement,
 ) -> Result<()> {
     partition.validate()?;
     let mut mounts = super::external_content::admitted_realization_mounts(resolution)?;
-    if let Some(source) = super::source_closure::admitted_source_mount(state, resolution)? {
-        mounts.push(source);
+    if source_placement == super::source_closure::SourceMountPlacement::Project {
+        if let Some(source) = super::source_closure::admitted_source_mount(state, resolution)? {
+            mounts.push(source);
+        }
     }
     for mount in mounts {
         let mount = Path::new(&mount);
@@ -3868,6 +3871,7 @@ pub(crate) fn prepare_process_inputs(
     thread_id: &str,
     retained_resolution: &ryeos_engine::resolution::ResolutionOutput,
     base_path: &Path,
+    source_placement: super::source_closure::SourceMountPlacement,
 ) -> Result<PreparedProcessInputs> {
     // `retained_resolution` is the execution being spawned. For a borrowed
     // child this already materializes/mounts the child's finalized source and
@@ -3877,7 +3881,7 @@ pub(crate) fn prepare_process_inputs(
     super::source_closure::validate_external_mount_separation(
         state,
         retained_resolution,
-        super::source_closure::SourceMountPlacement::Project,
+        source_placement,
     )?;
     let has_bindings = retained_resolution_has_filesystem_bindings(retained_resolution)?;
     let project_class = process_project_class(provenance);
@@ -3887,6 +3891,7 @@ pub(crate) fn prepare_process_inputs(
             state,
             retained_resolution,
             &outputs.partition,
+            source_placement,
         )?;
     }
     let immutable_input_generation = provenance.immutable_workspace_input_generation();
@@ -4056,7 +4061,7 @@ pub(crate) fn prepare_process_inputs(
                 state,
                 retained_resolution,
                 &path,
-                super::source_closure::SourceMountPlacement::Project,
+                source_placement,
             )?,
         )
     };
@@ -4070,14 +4075,16 @@ pub(crate) fn prepare_process_inputs(
                 prepare_sparse_input_mount_target(root, relative, kind)?;
             }
         }
-        if let Some(relative) =
-            super::source_closure::admitted_source_mount(state, retained_resolution)?
-        {
-            prepare_sparse_input_mount_target(
-                root,
-                &relative,
-                ryeos_engine::external_content::ExternalContentKind::Tree,
-            )?;
+        if source_placement == super::source_closure::SourceMountPlacement::Project {
+            if let Some(relative) =
+                super::source_closure::admitted_source_mount(state, retained_resolution)?
+            {
+                prepare_sparse_input_mount_target(
+                    root,
+                    &relative,
+                    ryeos_engine::external_content::ExternalContentKind::Tree,
+                )?;
+            }
         }
     }
     if let Some(budget) = budget.as_ref() {
@@ -4432,6 +4439,8 @@ pub(crate) fn finalize_direct_effective_program(
         item_kind,
         &mut resolution,
     )?;
+    let qualification_project_context_resolver =
+        super::project_source::qualification_project_context_resolver(state);
     ryeos_app::operator_external_content::product_composition::admit_root_product_selections(
         state,
         &resolved.current_site_id,
@@ -4442,6 +4451,7 @@ pub(crate) fn finalize_direct_effective_program(
         resolved.requested_by.as_deref(),
         handler_context,
         &resolved.product_selections,
+        Some(qualification_project_context_resolver.as_ref()),
         false,
     )?;
     let captured_external =
@@ -5043,6 +5053,10 @@ pub async fn run_and_wait(
         &created.thread_id,
         &wait_external.retained_resolution,
         &effective_path,
+        super::source_closure::direct_source_placement(
+            &prepared_plan,
+            state.isolation.is_enforced(),
+        ),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     let wait_bound_external = wait_bound_external.map(Arc::new);
@@ -5076,6 +5090,11 @@ pub async fn run_and_wait(
                 path: effective_path.clone(),
             };
     }
+    super::source_closure::bind_prepared_source_members(
+        &mut prepared_plan,
+        wait_bound_source.as_deref(),
+    )
+    .map_err(|error| guard.fail_before_spawn(error))?;
     super::external_content::bind_prepared_realization_command(
         &mut prepared_plan,
         wait_bound_external.as_deref(),
@@ -6109,6 +6128,10 @@ pub async fn run_detached(
         &created.thread_id,
         &bg_fresh_external.retained_resolution,
         &effective_path,
+        super::source_closure::direct_source_placement(
+            &prepared_plan,
+            state.isolation.is_enforced(),
+        ),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     effective_path = process_path;
@@ -6138,6 +6161,11 @@ pub async fn run_detached(
                 path: effective_path.clone(),
             };
     }
+    super::source_closure::bind_prepared_source_members(
+        &mut prepared_plan,
+        bg_bound_source.as_ref(),
+    )
+    .map_err(|error| guard.fail_before_spawn(error))?;
     super::external_content::bind_prepared_realization_command(
         &mut prepared_plan,
         bg_bound_external.as_ref(),
@@ -8669,6 +8697,7 @@ async fn run_existing_recovered_thread(
         params.resolved.requested_by.as_deref(),
         params.handler_context.as_ref(),
         &params.resolved.product_selections,
+        None,
         true,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
@@ -8678,6 +8707,27 @@ async fn run_existing_recovered_thread(
         retained_resolution,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
+    let cas_root = state
+        .state_store
+        .cas_root()
+        .map_err(|error| guard.fail_before_spawn(error))?;
+    let cas_directory = lillux::PinnedDirectory::open(&cas_root)
+        .map_err(|error| guard.fail_before_spawn(error))?
+        .ok_or_else(|| guard.fail_before_spawn(anyhow::anyhow!("state CAS root is unavailable")))?;
+    let cas = lillux::CasStore::from_pinned_root(cas_directory);
+    let effective_project_root = match &params.resolved.plan_context.project_context {
+        ProjectContext::LocalPath { path } => Some(path.as_path()),
+        _ => None,
+    };
+    let mut prepared_plan = thread_lifecycle::PreparedItemPlan::recover_from_execution_closure(
+        &admitted_capsule,
+        &cas,
+        state.isolation.as_ref(),
+        effective_project_root,
+    )
+    .map_err(|error| {
+        guard.fail_before_spawn(error.context("admitted_execution_closure_invalid"))
+    })?;
     let PreparedProcessInputs {
         path: process_path,
         default_input_cwd,
@@ -8693,10 +8743,19 @@ async fn run_existing_recovered_thread(
         &thread_id,
         retained_resolution,
         &effective_path,
+        super::source_closure::direct_source_placement(
+            &prepared_plan,
+            state.isolation.is_enforced(),
+        ),
     )
     .map_err(|error| {
         guard.fail_before_spawn(error.context("recovery_input_materialization_failed"))
     })?;
+    if effective_project_root.is_some() {
+        prepared_plan
+            .relocate_project_for_spawn(effective_project_root, Some(&process_path))
+            .map_err(|error| guard.fail_before_spawn(error.into()))?;
+    }
     effective_path = process_path;
     if let Some(lifeline) = process_input_lifeline {
         guard.track_process_input_dir(lifeline);
@@ -8717,25 +8776,9 @@ async fn run_existing_recovered_thread(
         .state_root_override()
         .unwrap_or(params.provenance.effective_path())
         .to_path_buf();
-    let cas_root = state
-        .state_store
-        .cas_root()
-        .map_err(|error| guard.fail_before_spawn(error))?;
-    let cas_directory = lillux::PinnedDirectory::open(&cas_root)
-        .map_err(|error| guard.fail_before_spawn(error))?
-        .ok_or_else(|| guard.fail_before_spawn(anyhow::anyhow!("state CAS root is unavailable")))?;
-    let cas = lillux::CasStore::from_pinned_root(cas_directory);
-    let effective_project_root = match &params.resolved.plan_context.project_context {
-        ProjectContext::LocalPath { path } => Some(path.as_path()),
-        ProjectContext::None
-        | ProjectContext::SnapshotHash { .. }
-        | ProjectContext::ProjectRef { .. } => None,
-    };
-    let mut prepared_plan = thread_lifecycle::PreparedItemPlan::recover_from_execution_closure(
-        &admitted_capsule,
-        &cas,
-        state.isolation.as_ref(),
-        effective_project_root,
+    super::source_closure::bind_prepared_source_members(
+        &mut prepared_plan,
+        bg_source_closure.as_ref(),
     )
     .map_err(|error| {
         guard.fail_before_spawn(error.context("admitted_execution_closure_invalid"))

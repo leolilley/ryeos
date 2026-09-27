@@ -144,6 +144,36 @@ pub fn ryeos_restore_layout_preferences(encoded: &str) -> Result<JsValue, JsValu
     })
 }
 
+#[wasm_bindgen]
+pub fn ryeos_export_active_view_set_template(id: &str, name: &str) -> Result<String, JsValue> {
+    RYEOS_UI.with(|state| {
+        let template = state
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?
+            .export_active_view_set_template(id.to_owned(), name.to_owned())
+            .map_err(|error| JsValue::from_str(&error))?;
+        serde_json::to_string(&template)
+            .map_err(|error| JsValue::from_str(&format!("serialize view-set template: {error}")))
+    })
+}
+
+#[wasm_bindgen]
+pub fn ryeos_open_saved_view_set_template(encoded: &str) -> Result<JsValue, JsValue> {
+    let template = serde_json::from_str(encoded)
+        .map_err(|error| JsValue::from_str(&format!("invalid view-set template: {error}")))?;
+    RYEOS_UI.with(|state| {
+        let mut state = state.borrow_mut();
+        let core = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
+        let effects = core
+            .open_saved_view_set_template(&template)
+            .map_err(|error| JsValue::from_str(&error))?;
+        ryeos_envelope(core, effects)
+    })
+}
+
 /// Start RyeOS, returning the semantic view/scene models and initial effects.
 #[wasm_bindgen]
 pub fn ryeos_start(

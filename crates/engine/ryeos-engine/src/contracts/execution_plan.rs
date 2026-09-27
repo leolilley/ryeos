@@ -419,6 +419,7 @@ pub struct PlanSubprocessSpec {
 pub enum PlanArgument {
     Literal { value: String },
     AdmittedSourceEntry,
+    AdmittedSourceMember { relative_path: String },
 }
 
 impl PlanArgument {
@@ -431,7 +432,7 @@ impl PlanArgument {
     pub fn literal_value(&self) -> Option<&str> {
         match self {
             Self::Literal { value } => Some(value),
-            Self::AdmittedSourceEntry => None,
+            Self::AdmittedSourceEntry | Self::AdmittedSourceMember { .. } => None,
         }
     }
 }

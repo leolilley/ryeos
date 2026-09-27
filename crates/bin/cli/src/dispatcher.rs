@@ -268,11 +268,12 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         "parameters": resolved.parameters,
         "parameter_encoding": "command",
         "validate_only": resolved.validate_only,
-        "execution_policy": execution_policy_value(
+        "execution_policy": execution_policy_value_with_snapshot(
             resolved.project_path.is_some(),
             resolved.async_launch,
             resolved.pin_project_at_admission,
             resolved.pin_current_head_at_admission,
+            resolved.project_snapshot.clone(),
             resolved.retain_child_results,
             resolved.exclude_operator_vault,
         ),
@@ -505,6 +506,7 @@ fn accepted_launch_delivery_is_uncertain(error: &CliError) -> bool {
     )
 }
 
+#[cfg(test)]
 fn execution_policy_value(
     project_backed: bool,
     accepted: bool,
@@ -513,10 +515,31 @@ fn execution_policy_value(
     retain_child_results: bool,
     exclude_operator_vault: bool,
 ) -> Value {
+    execution_policy_value_with_snapshot(
+        project_backed,
+        accepted,
+        pin_project_at_admission,
+        pin_current_head_at_admission,
+        None,
+        retain_child_results,
+        exclude_operator_vault,
+    )
+}
+
+fn execution_policy_value_with_snapshot(
+    project_backed: bool,
+    accepted: bool,
+    pin_project_at_admission: bool,
+    pin_current_head_at_admission: bool,
+    project_snapshot: Option<String>,
+    retain_child_results: bool,
+    exclude_operator_vault: bool,
+) -> Value {
     let controls = ryeos_app::command_invocation::CommandInvocationControls {
         async_launch: accepted,
         pin_project_at_admission,
         pin_current_head_at_admission,
+        project_snapshot,
         retain_child_results,
         exclude_operator_vault,
         ..Default::default()
@@ -748,6 +771,8 @@ struct CliResolvedExecute {
     /// Resolve the caller's principal project HEAD at admission and execute
     /// from a retained daemon-owned COW generation.
     pin_current_head_at_admission: bool,
+    /// Exact published project snapshot selected for immutable read-only execution.
+    project_snapshot: Option<String>,
     /// Give project-backed child roots independent COW generations retained
     /// for explicit owner disposition.
     retain_child_results: bool,
@@ -833,6 +858,7 @@ fn resolve_command_for_daemon_with_commands(
         async_launch: control.async_launch,
         pin_project_at_admission: control.pin_project_at_admission,
         pin_current_head_at_admission: control.pin_current_head_at_admission,
+        project_snapshot: control.project_snapshot,
         retain_child_results: control.retain_child_results,
         exclude_operator_vault: control.exclude_operator_vault,
         validate_only: compiled.validate_only,
@@ -1740,6 +1766,13 @@ mod tests {
                 aliases: vec![],
             },
             F {
+                flag: "project-snapshot".into(),
+                help: "Execute an exact published snapshot read-only".into(),
+                binding: B::ProjectSnapshot,
+                ref_binding_name: None,
+                aliases: vec![],
+            },
+            F {
                 flag: "retain-child-results".into(),
                 help: "Retain independent private COW results for project-backed child roots"
                     .into(),
@@ -2321,6 +2354,104 @@ mod tests {
         assert_eq!(resolved.project_path.as_deref(), Some(tmp.path()));
         assert_eq!(resolved.parameters["profile"], "fast");
         assert!(resolved.parameters.get("current_head").is_none());
+    }
+
+    #[test]
+    fn direct_execute_exact_project_snapshot_is_pinned_read_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = vec![direct_execute_command()];
+        let hash = "2e17ce199aeeff755d46b78894a5fb4ab7436dbd5a7666c4be7d5a86a60f3c13";
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "--project-snapshot", hash, "graph:test/run"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(tmp.path()),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.project_snapshot.as_deref(), Some(hash));
+        assert_eq!(resolved.project_path.as_deref(), Some(tmp.path()));
+        assert!(resolved.parameters.get("project_snapshot").is_none());
+        let policy = execution_policy_value_with_snapshot(
+            true,
+            false,
+            false,
+            false,
+            resolved.project_snapshot,
+            false,
+            false,
+        );
+        assert_eq!(policy["project"]["kind"], "pinned");
+        assert_eq!(policy["project"]["source"]["kind"], "snapshot");
+        assert_eq!(policy["project"]["source"]["hash"], hash);
+        assert_eq!(policy["project"]["realization"]["kind"], "read_only");
+        assert_eq!(policy["project"]["child_policy"]["kind"], "inherit");
+    }
+
+    #[test]
+    fn direct_execute_snapshot_requires_project_and_excludes_other_pinning_modes() {
+        let commands = vec![direct_execute_command()];
+        let hash = "a".repeat(64);
+        let no_project = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "--project-snapshot",
+                &hash,
+                "--no-project",
+                "graph:test/run",
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        );
+        let no_project_error = match no_project {
+            Ok(_) => panic!("snapshot execution without a project root must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            no_project_error.to_string().contains("project"),
+            "projectless snapshot request should fail for project authority: {no_project_error}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        for args in [
+            vec![
+                "execute",
+                "--project-snapshot",
+                hash.as_str(),
+                "--pin-project",
+                "graph:test/run",
+            ],
+            vec![
+                "execute",
+                "--project-snapshot",
+                hash.as_str(),
+                "--current-head",
+                "graph:test/run",
+            ],
+            vec![
+                "execute",
+                "--project-snapshot",
+                hash.as_str(),
+                "--state-root",
+                ".state",
+                "graph:test/run",
+            ],
+        ] {
+            let error = resolve_command_for_daemon_with_commands(
+                &args
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect::<Vec<_>>(),
+                &commands,
+                &ryeos_runtime::CommandRegistrationPolicy::default(),
+                Some(tmp.path()),
+            );
+            assert!(
+                error.is_err(),
+                "conflicting snapshot controls must fail closed"
+            );
+        }
     }
 
     #[test]

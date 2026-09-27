@@ -5,6 +5,17 @@ use std::io::Read as _;
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 
+mod docker_runtime;
+
+// Release packaging compares this data with the requested release coordinate;
+// verification reads the ELF section without executing the host adapter.
+const BUILD_LEN: usize =
+    include_bytes!(concat!(env!("OUT_DIR"), "/ryeos-contained-oci-hook-build")).len();
+#[used]
+#[unsafe(link_section = ".ryeos_contained_oci_hook_build")]
+static BUILD_TESTIMONY: [u8; BUILD_LEN] =
+    *include_bytes!(concat!(env!("OUT_DIR"), "/ryeos-contained-oci-hook-build"));
+
 const APP_ROOT: &str = "/data/app";
 const BINDING_DIRECTORY: &str = "/run/ryeos";
 const BINDING_NAME: &str = "host-runtime.json";
@@ -129,11 +140,15 @@ impl LifecycleRecord {
 }
 
 fn main() -> Result<()> {
+    std::hint::black_box(&BUILD_TESTIMONY);
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     let operation = arguments.next().context("missing OCI hook operation")?;
     lillux::require_administrator()?;
     require_installed_executable()?;
+    if operation.to_str() == Some("docker-runtime") {
+        return docker_runtime::run(arguments.collect());
+    }
     if operation.to_str() == Some("install-host-state") {
         if arguments.next().is_some() {
             bail!("usage: ryeos-lillux-oci-hook install-host-state");

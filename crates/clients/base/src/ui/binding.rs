@@ -16,6 +16,44 @@ pub enum UiEffectivePosture {
     Interactive,
 }
 
+/// Public projection of one server-admitted binding. This is not a grant:
+/// every request is independently checked against the cookie-authenticated
+/// session's retained attachment. Display paths cannot admit a project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiBindingAttachment {
+    pub binding_attachment_id: String,
+    pub binding_generation: u64,
+    pub binding_digest: String,
+    pub surface_ref: String,
+    pub surface_generation: String,
+    pub effective_surface: Value,
+    pub project_path: Option<String>,
+    pub posture: UiEffectivePosture,
+    pub binding_request_bounds: UiBindingRequestBounds,
+}
+
+impl UiBindingAttachment {
+    /// Validate the public coordinate before retaining it. This establishes
+    /// shape only; the daemon remains the authority for admission.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.binding_attachment_id.is_empty()
+            || self.binding_generation == 0
+            || self.binding_digest.is_empty()
+            || self.surface_ref.is_empty()
+            || self.surface_generation.is_empty()
+        {
+            return Err("binding attachment has an incomplete coordinate");
+        }
+        if self.binding_request_bounds.max_request_bytes == 0
+            || self.binding_request_bounds.max_input_bytes == 0
+        {
+            return Err("binding attachment has invalid request bounds");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiBindingCoordinate {
@@ -50,6 +88,8 @@ pub fn input_completion_channel(input_id: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UiBindingRequest {
+    pub binding_attachment_id: String,
+    pub binding_generation: u64,
     pub binding_digest: String,
     pub coordinate: UiBindingCoordinate,
     pub payload: UiBindingPayload,
@@ -98,6 +138,12 @@ impl UiBindingRequest {
         &self,
         bounds: UiBindingRequestBounds,
     ) -> Result<(), UiBindingRequestError> {
+        if self.binding_attachment_id.is_empty()
+            || self.binding_generation == 0
+            || self.binding_digest.is_empty()
+        {
+            return Err(UiBindingRequestError::InvalidAttachment);
+        }
         if bounds.max_request_bytes == 0 || bounds.max_input_bytes == 0 {
             return Err(UiBindingRequestError::InvalidBounds);
         }
@@ -152,6 +198,8 @@ pub struct UiBindingRequestBounds {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UiBindingRequestError {
+    #[error("UI binding request requires an exact admitted attachment coordinate")]
+    InvalidAttachment,
     #[error("UI binding request bounds must be non-zero")]
     InvalidBounds,
     #[error("UI binding request is not canonical JSON")]
@@ -169,6 +217,105 @@ mod tests {
     use super::*;
 
     #[test]
+    fn attachment_descriptor_requires_complete_coordinate_and_bounds() {
+        let valid = serde_json::json!({
+            "binding_attachment_id": "attachment-one",
+            "binding_generation": 1,
+            "binding_digest": "digest-one",
+            "surface_ref": "surface:test",
+            "surface_generation": "generation-one",
+            "effective_surface": {"name": "test"},
+            "project_path": null,
+            "posture": "observation_only",
+            "binding_request_bounds": {"max_request_bytes": 4096, "max_input_bytes": 1024}
+        });
+        assert!(
+            serde_json::from_value::<UiBindingAttachment>(valid.clone())
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        for field in [
+            "binding_attachment_id",
+            "binding_digest",
+            "surface_ref",
+            "surface_generation",
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = Value::String(String::new());
+            assert!(
+                serde_json::from_value::<UiBindingAttachment>(invalid)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
+        for path in [
+            "/binding_generation",
+            "/binding_request_bounds/max_request_bytes",
+            "/binding_request_bounds/max_input_bytes",
+        ] {
+            let mut invalid = valid.clone();
+            *invalid.pointer_mut(path).unwrap() = Value::from(0);
+            assert!(
+                serde_json::from_value::<UiBindingAttachment>(invalid)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn request_requires_the_complete_attachment_coordinate() {
+        let request = UiBindingRequest {
+            binding_attachment_id: "attachment-one".into(),
+            binding_generation: 1,
+            binding_digest: "fixture-digest".into(),
+            coordinate: UiBindingCoordinate::Source {
+                view_ref: "view:test/read".into(),
+                channel: "default".into(),
+            },
+            payload: UiBindingPayload::SourceParameters {
+                params: serde_json::json!({}),
+            },
+        };
+        let bounds = UiBindingRequestBounds {
+            max_request_bytes: 4096,
+            max_input_bytes: 4096,
+        };
+        assert!(request.validate_bounds(bounds).is_ok());
+        for field in [
+            "binding_attachment_id",
+            "binding_generation",
+            "binding_digest",
+        ] {
+            let mut encoded = serde_json::to_value(&request).unwrap();
+            encoded.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<UiBindingRequest>(encoded).is_err());
+        }
+        for bad in [
+            UiBindingRequest {
+                binding_attachment_id: String::new(),
+                ..request.clone()
+            },
+            UiBindingRequest {
+                binding_generation: 0,
+                ..request.clone()
+            },
+            UiBindingRequest {
+                binding_digest: String::new(),
+                ..request
+            },
+        ] {
+            assert_eq!(
+                bad.validate_bounds(bounds),
+                Err(UiBindingRequestError::InvalidAttachment)
+            );
+        }
+    }
+
+    #[test]
     fn coordinate_cannot_smuggle_an_execution_target() {
         let encoded = serde_json::to_value(UiBindingCoordinate::Affordance {
             view_ref: "view:example/work".to_string(),
@@ -183,6 +330,8 @@ mod tests {
     #[test]
     fn request_bounds_and_coordinate_payload_pair_are_closed() {
         let mismatch = UiBindingRequest {
+            binding_attachment_id: "fixture-attachment".into(),
+            binding_generation: 1,
             binding_digest: "sha256:fixture".to_string(),
             coordinate: UiBindingCoordinate::Source {
                 view_ref: "view:example/work".to_string(),
@@ -202,6 +351,8 @@ mod tests {
         );
 
         let too_large = UiBindingRequest {
+            binding_attachment_id: "fixture-attachment".into(),
+            binding_generation: 1,
             binding_digest: "sha256:fixture".to_string(),
             coordinate: UiBindingCoordinate::Affordance {
                 view_ref: "view:example/work".to_string(),

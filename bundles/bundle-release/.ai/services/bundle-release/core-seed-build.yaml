@@ -1,0 +1,21 @@
+# ryeos:signed:2026-09-23T04:25:12Z:2d3f6cd9372e5910e27a0bf4791e7e854ab278d3cbbe7fccbcdfd3b7050114f1:dcBNthtjXZZAaCsmFokexzoOD5hLpS03mWnfA1Hf22ltEmwykI3mR8VwvYGtxEHTUvaFhVbcXEB/8mYq9z5TCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: core-seed-build
+version: "1.0.0"
+description: Build the exact Core generation that will be bound into the first substrate release.
+endpoint: bundle_release.core_seed_build
+ui_read_only: false
+state_access: read_write
+record_thread: true
+availability: daemon_only
+required_caps:
+  - ryeos.execute.config.bundle-release/core-seed-build-products
+  - ryeos.execute.config.bundle-release/execution-environment-products
+  - ryeos.execute.config.bundle-release/execution-tool-products
+  - ryeos.execute.service.bundle-release/core-seed-build
+  - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
+schema:
+  catalog_namespace: string
+  bundle_publication_policy_section_digest: string
+  trust_epoch: integer
+  release_input: object

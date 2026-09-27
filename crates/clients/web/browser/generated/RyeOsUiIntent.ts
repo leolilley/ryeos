@@ -3,6 +3,7 @@
 import type { FocusDirection } from "./FocusDirection";
 import type { RyeOsDockEdge } from "./RyeOsDockEdge";
 import type { RyeOsStackMoveDirection } from "./RyeOsStackMoveDirection";
+import type { RyeOsViewInstanceKey } from "./RyeOsViewInstanceKey";
 import type { SplitBranch } from "./SplitBranch";
 import type { ThreadControlCommand } from "./ThreadControlCommand";
 import type { ViewSpec } from "./ViewSpec";
@@ -15,7 +16,7 @@ export type RyeOsUiIntent =
    * affordance, substitutes row fields, and applies its plane (ui
    * facet write or rye token dispatch). No product verbs in code.
    */
-  | { type: "invoke_affordance"; view_ref: string; affordance_id: string; record: unknown }
+  | { type: "invoke_affordance"; instance_key: RyeOsViewInstanceKey; view_ref: string; affordance_id: string; record: unknown }
   | { type: "open_view"; view: ViewSpec }
   | { type: "open_new_view"; view: ViewSpec }
   | { type: "open_overlay"; overlay_id: string }
@@ -26,7 +27,13 @@ export type RyeOsUiIntent =
   | { type: "toggle_overlay_group"; group: string }
   | { type: "close_focused" }
   | { type: "close_tile"; tile_id: string }
+  | { type: "toggle_tile_maximized"; tile_id: string }
   | { type: "toggle_focused_master" }
+  /**
+   * Promote one exact mounted tile in an authored master-and-stack set.
+   * Pointer clients must not rely on focus changing before this arrives.
+   */
+  | { type: "promote_tile_to_master"; layout_guard: string; tile_id: string }
   | { type: "move_focused_tile"; direction: RyeOsStackMoveDirection }
   /**
    * Pure placement edit between already mounted instances. No view ref,
@@ -37,11 +44,17 @@ export type RyeOsUiIntent =
   | { type: "move_tile_to_group"; layout_guard: string; tile_id: string; target_tile_id: string; index: bigint }
   | { type: "cycle_view_tab"; direction: RyeOsStackMoveDirection }
   | { type: "switch_tab"; index: bigint }
-  | { type: "new_workspace" }
-  | { type: "select_workspace"; workspace_id: bigint }
-  | { type: "rename_workspace"; workspace_id: bigint; title: string }
-  | { type: "close_workspace"; workspace_id: bigint }
-  | { type: "move_tile_to_workspace"; layout_guard: string; tile_id: string; workspace_id: bigint }
+  | { type: "new_view_set" }
+  | { type: "select_view_set"; view_set_id: bigint }
+  | { type: "rename_view_set"; view_set_id: bigint; title: string }
+  | { type: "duplicate_view_set"; view_set_id: bigint }
+  | { type: "close_view_set"; view_set_id: bigint }
+  | { type: "move_tile_to_view_set"; layout_guard: string; tile_id: string; view_set_id: bigint }
+  | { type: "pin_view_selection"; instance_key: RyeOsViewInstanceKey }
+  | { type: "open_pinned_view_alongside"; instance_key: RyeOsViewInstanceKey }
+  | { type: "follow_view_set_selection"; instance_key: RyeOsViewInstanceKey; view_set_id: bigint }
+  | { type: "supply_required_subject"; instance_key: RyeOsViewInstanceKey; source_view_set_id: bigint }
+  | { type: "release_binding_attachment"; binding_attachment_id: string; binding_generation: bigint; binding_digest: string }
   | { type: "resize_split"; layout_guard: string; path: SplitBranch[]; ratio: number }
   | { type: "toggle_top_status_bar" }
   | { type: "toggle_bottom_status_bar" }

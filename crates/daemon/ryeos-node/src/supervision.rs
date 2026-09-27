@@ -123,14 +123,40 @@ fn launch_failure_status(
 }
 
 impl UpgradeIntent {
-    fn require_target(&self, binding_digest: &str, expected_daemon_sha256: &str) -> Result<()> {
+    fn require_association(&self, binding_digest: &str) -> Result<()> {
         if self.schema_version != 1
             || self.binding_digest != binding_digest
-            || self.expected_daemon_sha256 != expected_daemon_sha256
+            || !lillux::valid_hash(&self.expected_daemon_sha256)
+        {
+            bail!("host upgrade belongs to a different association or package generation");
+        }
+        Ok(())
+    }
+
+    fn require_target(&self, binding_digest: &str, expected_daemon_sha256: &str) -> Result<()> {
+        self.require_association(binding_digest)?;
+        if self.expected_daemon_sha256 != expected_daemon_sha256
             || !lillux::valid_hash(expected_daemon_sha256)
         {
             bail!("host upgrade belongs to a different association or package generation");
         }
+        Ok(())
+    }
+
+    fn retarget_restored_generation(
+        &mut self,
+        binding_digest: &str,
+        expected_daemon_sha256: &str,
+        installed_daemon_sha256: &str,
+    ) -> Result<()> {
+        self.require_association(binding_digest)?;
+        if self.phase != UpgradePhase::RestoreReady
+            || installed_daemon_sha256 != self.expected_daemon_sha256
+            || !lillux::valid_hash(expected_daemon_sha256)
+        {
+            bail!("unfinished host upgrade cannot be superseded safely");
+        }
+        self.expected_daemon_sha256 = expected_daemon_sha256.to_owned();
         Ok(())
     }
 }
@@ -805,9 +831,33 @@ impl InstalledService {
         self.check_binding()?;
         self.supervisor.check_available()?;
         if let Some(mut intent) = self.upgrade_intent()? {
-            intent.require_target(&self.binding_digest, expected_daemon_sha256)?;
-            // A same-package installer retry may have been interrupted after
-            // restore-ready. Re-establish inhibition BEFORE it requests down
+            intent.require_association(&self.binding_digest)?;
+            if intent.expected_daemon_sha256 != expected_daemon_sha256 {
+                // A generation that reached restore-ready but failed to launch
+                // cannot finish its journal and must not permanently deadlock
+                // package repair. Preserve the original boot disposition, and
+                // accept a new exact generation only after proving that the
+                // installed predecessor is still the journaled image and its
+                // entire delegated process tree is empty. Do not require the
+                // operator intent to remain `up`: the lifecycle deliberately
+                // changes it to `down` after a terminal startup failure. The
+                // root-owned journal retains the original disposition.
+                let daemon = self.installed_daemon()?;
+                let installed_daemon_sha256 = daemon.digest_stable_exact(&daemon.observation()?)?;
+                self.binding
+                    .runtime
+                    .process_scopes
+                    .require_controller_tree_empty(&self.binding.runtime.account)
+                    .map_err(anyhow::Error::msg)?;
+                intent.retarget_restored_generation(
+                    &self.binding_digest,
+                    expected_daemon_sha256,
+                    &installed_daemon_sha256,
+                )?;
+            } else {
+                intent.require_target(&self.binding_digest, expected_daemon_sha256)?;
+            }
+            // A safe retry re-establishes inhibition BEFORE it requests down
             // or replaces files, retaining the original boot disposition.
             if intent.phase == UpgradePhase::RestoreReady {
                 intent.phase = UpgradePhase::Installing;
@@ -1147,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_retry_cannot_substitute_package_or_association() {
+    fn upgrade_retry_requires_exact_target_until_restored_generation_is_proven_stopped() {
         let binding = "a".repeat(64);
         let image = "b".repeat(64);
         let intent = UpgradeIntent {
@@ -1165,6 +1215,27 @@ mod tests {
         assert!(restored.require_target(&"c".repeat(64), &image).is_err());
         assert!(restored.require_target(&binding, &"d".repeat(64)).is_err());
         assert!(restored.require_target(&binding, "").is_err());
+
+        let replacement = "d".repeat(64);
+        let mut installing = restored.clone();
+        assert!(
+            installing
+                .retarget_restored_generation(&binding, &replacement, &image)
+                .is_err()
+        );
+        let mut restored_ready = restored.clone();
+        restored_ready.phase = UpgradePhase::RestoreReady;
+        assert!(
+            restored_ready
+                .retarget_restored_generation(&binding, &replacement, &"e".repeat(64))
+                .is_err()
+        );
+        restored_ready
+            .retarget_restored_generation(&binding, &replacement, &image)
+            .unwrap();
+        assert_eq!(restored_ready.expected_daemon_sha256, replacement);
+        assert_eq!(restored_ready.desired, DesiredState::Up);
+        assert_eq!(restored_ready.native_state, intent.native_state);
         let mut missing = serde_json::to_value(&intent).unwrap();
         missing.as_object_mut().unwrap().remove("native_state");
         assert!(serde_json::from_value::<UpgradeIntent>(missing).is_err());

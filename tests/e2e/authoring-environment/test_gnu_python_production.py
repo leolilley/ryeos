@@ -25,6 +25,7 @@ PRODUCTS_PATH = ROOT / ".ai/config/development/ryeos/gnu-python-products.yaml"
 POLICY_PATH = ROOT / "bundles/standard/.ai/config/ryeos/environments/qualification/gnu-python.yaml"
 CONSUMER_PATH = ROOT / ".ai/config/development/ryeos/gnu-python-qualified-runtime.yaml"
 VERIFIER_PATH = ROOT / "bundles/standard/.ai/tools/ryeos/environments/qualification/gnu-python.yaml"
+VERIFIER_BOOTSTRAP_PATH = ROOT / "bundles/standard/.ai/config/development/ryeos/gnu-python-verifier-bootstrap-activation.yaml"
 
 
 def contract():
@@ -162,7 +163,14 @@ class GnuPythonProductionTests(unittest.TestCase):
         self.assertEqual(verifier["executor_id"], "@subprocess")
         self.assertEqual(verifier["execution_protocol"], "protocol:ryeos/core/opaque")
         self.assertEqual(verifier["network_authority"], "isolated")
-        self.assertEqual(verifier["external_content"], [])
+        self.assertEqual(verifier["external_content"], [{
+            "id": "producer-python",
+            "kind": "tree",
+            "mode": "pinned",
+            "digest": "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf",
+            "mount_root": "execution_runtime",
+            "mount": "producer-python",
+        }])
         self.assertEqual(verifier["external_product_slots"], [{
             "id": "subject",
             "relationship_ref": "config:development/ryeos/gnu-python-products",
@@ -173,12 +181,23 @@ class GnuPythonProductionTests(unittest.TestCase):
         }])
         self.assertEqual(verifier["env_config"]["interpreter"], {
             "type": "realization_member",
-            "realization_id": "subject",
-            "relative_path": "python/bin/python3.14",
+            "realization_id": "producer-python",
+            "relative_path": "lib/ld-musl-x86_64.so.1",
         })
         arguments = verifier["config"]["args"]
+        self.assertEqual(
+            arguments[0],
+            "/ryeos/realizations/producer-python/python/bin/python3.14",
+        )
+        verifier_program = arguments[-2]["literal"]
         program = arguments[-1]["literal"]
+        compile(verifier_program, str(VERIFIER_PATH), "exec")
         compile(program, str(VERIFIER_PATH), "exec")
+        self.assertIn('set(by_id) != {"producer-python", "subject"}', verifier_program)
+        self.assertIn('subject["manifest_hash"] == producer_manifest', verifier_program)
+        self.assertIn('root + "/lib/ld-linux-x86-64.so.2"', verifier_program)
+        self.assertIn('subprocess.run(', verifier_program)
+        self.assertIn('result.get("subject_manifest_hash") != subject_hash', verifier_program)
         self.assertIn("RYEOS_EXTERNAL_REALIZATIONS", program)
         self.assertIn('zlib.ZLIB_RUNTIME_VERSION != "1.3.2"', program)
         self.assertIn('zlib.__spec__.origin != "built-in"', program)
@@ -201,6 +220,49 @@ class GnuPythonProductionTests(unittest.TestCase):
         self.assertIn('"subject_manifest_hash": subject["manifest_hash"]', program)
         self.assertNotIn('"success": True', program)
         self.assertIn("print(json.dumps(result", program)
+
+    def test_independent_verifier_rejects_self_verification_before_subject_execution(self):
+        verifier = yaml.safe_load(VERIFIER_PATH.read_text())
+        program = verifier["config"]["args"][-2]["literal"]
+        manifest = verifier["external_content"][0]["digest"]
+        realization = lambda identity, mount: {
+            "id": identity,
+            "kind": "tree",
+            "mode": "pinned",
+            "manifest_hash": manifest,
+            "entry_count": 1,
+            "total_bytes": 1,
+            "mount_root": "execution_runtime",
+            "mount": mount,
+        }
+        environment = json.dumps([
+            realization("producer-python", "producer-python"),
+            realization("subject", "python-gnu"),
+        ])
+        with mock.patch.dict("os.environ", {"RYEOS_EXTERNAL_REALIZATIONS": environment}, clear=True), \
+                mock.patch.object(sys, "argv", ["-c", "unused subject probe"]):
+            with self.assertRaisesRegex(SystemExit, "may not qualify itself"):
+                exec(compile(program, str(VERIFIER_PATH), "exec"), {})
+
+    def test_independent_verifier_bootstrap_is_bound_to_the_verifier_consumer(self):
+        activation = yaml.safe_load(VERIFIER_BOOTSTRAP_PATH.read_text())
+        verifier = yaml.safe_load(VERIFIER_PATH.read_text())
+        self.assertEqual(
+            activation["consumer_ref"],
+            "tool:ryeos/environments/qualification/gnu-python",
+        )
+        declaration = verifier["external_content"][0]
+        component = activation["components"][0]
+        self.assertEqual(component["id"], declaration["id"])
+        self.assertEqual(component["storage"], "content")
+        self.assertEqual(
+            declaration["digest"],
+            "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf",
+        )
+        self.assertEqual(
+            activation["sources"][0]["sha256"],
+            "7d6239902fb584ef27aee8c97f5e9a0e66409750611f74d7e16235ddd4278eef",
+        )
 
     def test_startup_provider_helpers_reject_spoofed_maps_and_missing_versions(self):
         mapped_provider_paths, probe_versioned_symbols = self._qualification_helpers(

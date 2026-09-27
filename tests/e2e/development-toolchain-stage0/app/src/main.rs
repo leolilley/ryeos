@@ -8,6 +8,7 @@ unsafe extern "C" {
     ) -> i32;
 }
 fn main() {
+    assert_eq!(cfg!(target_feature = "crt-static"), EXPECTED_STATIC);
     assert_eq!(macro_probe::identity!(unsafe { native_answer() }), EXPECTED);
     // Linkage-only fixture: exercise the pinned nonshared archive, without
     // implementing an OS primitive or requiring an actual child process.

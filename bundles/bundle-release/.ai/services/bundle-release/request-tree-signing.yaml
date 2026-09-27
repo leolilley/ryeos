@@ -1,0 +1,13 @@
+# ryeos:signed:2026-09-19T03:51:21Z:f0f77bfedce14409bf0e5f4e5afa3854d793a103f3b56e0fe0002bef526dca47:vv6ypJlwGDGdvBbNHR91jVSi7D3xczjpBfS/BRUOqVw8FBtd7HuO4QezlLNJpvQrbT634PZpCsanKWa3pMeoCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: request-tree-signing
+version: "1.0.0"
+description: Ask the constrained publisher to perform only the ryeos_bundle_sign_v1 tree transformation.
+endpoint: bundle_release.request_tree_signing
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/request-tree-signing"]
+schema:
+  accepted_product_result_hash: string
+  selected_product_identity: string
+  selected_product_witness: string
+  input_content_manifest_hash: string

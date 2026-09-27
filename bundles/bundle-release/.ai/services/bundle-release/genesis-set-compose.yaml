@@ -1,0 +1,16 @@
+# ryeos:signed:2026-09-20T11:15:48Z:94008713b5f123971c2a32642d49e1977e34b7e317611979183feee1180c1c66:hpiWjZK4gKqC7Wx2XXHr1aV/Mg2GT2HFK3g68nRrY5Ar4KxYCxP9Ig61Wvj6cq6G6w2EZQIEOkXckR4Gdtc/BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: genesis-set-compose
+version: "1.0.0"
+description: Verify and retain the first complete substrate-bound bundle set without a predecessor.
+endpoint: bundle_release.genesis_set_compose
+ui_read_only: false
+state_access: read_write
+record_thread: true
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/genesis-set-compose"]
+schema:
+  bundle_set: object
+  catalog_namespace: string
+  bundle_publication_policy_section_digest: string
+  trust_epoch: integer

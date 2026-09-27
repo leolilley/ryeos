@@ -199,6 +199,8 @@ pub fn prepare_after_reservation(
             content: super::CurrentVerifierContent::Root(None),
             logical_project_root: None,
             binding_subject_authority: None,
+            sealed_request: None,
+            project_context_resolver: None,
         },
         None,
     )?;

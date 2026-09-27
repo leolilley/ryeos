@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-22T00:31:25Z:7496f8c85964b955aea2cce0145a13cade76f2683312c414c6635deae89fda1b:Ng67p1AcPv8u7fwcARTnU9rGCShgqQkHX6z1o8GPjyA/4HQBQ0JbYHj/Q4svtbWB4kNiQwRZLUyoFL937tCMCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-27T22:01:04Z:12db5676b51943e6ad69a58d9709901c270fdd7ae28cf057e02a41ef8f34682e:PqDJY4xkwjKEyhUSjs9DWZMabzbbFnwglr8yjLtjrGHdMWJaOQ6rL2/JNWO1AVaqEqOd1GZmH7Lib9cYW2b1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "README"
@@ -49,7 +49,7 @@ contributor guide rather than duplicating the product documentation.
 - `steering-graph-interrupt-and-cancel-path`: an implementation decision record.
 - `admitted-execution-recovery`: a contributor-facing map of the recovery code
   and the invariants changes to that code must preserve.
-- `ui-design-system`: the governing Gruvbox visual language, nested-workspace
+- `ui-design-system`: the governing Gruvbox visual language, nested-view-set
   direction, component anatomy, contextual-input rules, renderer/content
   ownership and visual review criteria. Read it before implementing or restyling
   web or terminal UI. It preserves the launcher, optional slots and authored

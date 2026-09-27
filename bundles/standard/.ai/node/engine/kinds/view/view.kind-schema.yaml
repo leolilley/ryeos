@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-18T04:20:55Z:b745977fb3f9750cc69f429a08dee15d693f95009dd45c2199d75116e7d3d88b:wi1quJ7OBadXQckUr+0VNVyNgkP02yx4sGq3qdPGjofJ9ZuBuKPwUzXS/LU41RT1qEnEaMGMDXaszAxW5Y1yDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T04:54:27Z:f829fc8d80a2be67c0ee720629b06be8162739ba5f459fb6bec965168336fda1:CRYjn4avzATh1xAIhgRpf+dIxb7r/maq/enIQuklBjMz2m1KMCWHJVoGRWNciouP9vqH5skDi6EbaGeFMk49BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
 version: "1.0.0"
 location:
@@ -179,6 +179,11 @@ composed_value_contract:
                     prim: sequence
                     elements: { type: single, prim: string }
                   facet: { type: single, prim: string }
+                  operation:
+                    type: single
+                    prim: string
+                    enum: [open_saved_view_set, save_active_view_set]
+                  persist_affordance: { type: single, prim: string }
                   value: { type: single, prim: any }
                   merge: { type: single, prim: mapping }
                   open_view: { type: single, prim: string }

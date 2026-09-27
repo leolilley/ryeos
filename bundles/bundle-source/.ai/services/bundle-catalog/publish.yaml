@@ -1,0 +1,11 @@
+# ryeos:signed:2026-09-19T03:43:17Z:e3bbdb4831034063c7a3aceb070f8f62774c22d2da173577ca2f5afa282e05b0:Xo9+805p3j5V9PLx0Lc0O5fyupjpTB+VmpFkKmOlpYHeHAgWubjDj56ViDTMsb1miNXQ2sMY58D/rJVAzCgbDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: bundle_catalog.publish
+required_caps: ["ryeos.execute.service.bundle-catalog/publish"]
+result_retention: digest_only
+schema:
+  catalog_namespace: string
+  candidate_publication_attestation_hash: string
+  expected_catalog_head: string?
+  upload_session_id: string
+description: "Verify and atomically publish one exact publisher-authorized catalog successor"

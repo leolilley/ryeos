@@ -45,9 +45,6 @@ pub async fn handle(input: Value, _ctx: HandlerContext, state: Arc<AppState>) ->
         .browser_sessions
         .activate_launch_token(&req.token)
         .ok_or_else(|| anyhow::anyhow!("invalid or expired launch token"))?;
-    if let Some(predecessor) = activation.predecessor_session_id.as_deref() {
-        super::ui_seat::retire_session_seats(&state, predecessor)?;
-    }
     let session_id = activation.session_id;
 
     // Return session info. The route layer handles Set-Cookie + redirect.

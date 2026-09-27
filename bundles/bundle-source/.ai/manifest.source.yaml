@@ -1,0 +1,7 @@
+name: bundle-source
+version: "0.1.0"
+description: "Bundle catalog publication, exact resolution, and immutable closure serving"
+requires_kinds:
+  - service
+uses_kinds:
+  - node

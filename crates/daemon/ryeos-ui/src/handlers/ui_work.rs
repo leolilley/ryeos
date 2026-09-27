@@ -23,6 +23,16 @@ const MAX_SOURCE_THREADS: usize = 2_000;
 const MAX_CANDIDATE_CHANGES: usize = 2_000;
 const MAX_CANDIDATE_CHANGE_BYTES: usize = 160 * 1024;
 
+fn unavailable_candidate(state: &'static str, reason: &'static str) -> Value {
+    serde_json::json!({
+        "schema_version":"ryeos.ui.work_candidate.v1",
+        "availability":[{"state":state,"reason":reason}],
+        "candidates":[],
+        "change_summary":[],
+        "changes":[],
+    })
+}
+
 #[derive(Debug, Serialize)]
 struct WorkCoordinate {
     chain_root_id: String,
@@ -396,19 +406,16 @@ pub async fn handle_candidate(
         _ => None,
     };
     let Some(session) = state.state_store.dedicated_session(placement_thread_id)? else {
-        return Ok(serde_json::json!({
-            "schema_version":"ryeos.ui.work_candidate.v1",
-            "candidates":[],
-        }));
+        return Ok(unavailable_candidate(
+            "unavailable",
+            "not_dedicated_session",
+        ));
     };
     if session.owner_principal != caller.principal_id() {
         return Err(ryeos_app::handler_error::HandlerError::NotFound.into());
     }
     let Some(candidate_snapshot_hash) = session.candidate_snapshot_hash.as_deref() else {
-        return Ok(serde_json::json!({
-            "schema_version":"ryeos.ui.work_candidate.v1",
-            "candidates":[],
-        }));
+        return Ok(unavailable_candidate("pending", "candidate_not_captured"));
     };
     let workspace = state
         .state_store
@@ -463,6 +470,7 @@ pub async fn handle_candidate(
     });
     Ok(serde_json::json!({
         "schema_version":"ryeos.ui.work_candidate.v1",
+        "availability":[{"state":"available","reason":"candidate_retained"}],
         "candidates":[candidate],
         "change_summary":change_summary,
         "changes":change_files,
@@ -549,6 +557,24 @@ fn candidate_tree_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absent_candidate_states_are_explicit_and_empty() {
+        let unavailable = unavailable_candidate("unavailable", "not_dedicated_session");
+        assert_eq!(unavailable["availability"][0]["state"], "unavailable");
+        assert_eq!(
+            unavailable["availability"][0]["reason"],
+            "not_dedicated_session"
+        );
+        assert_eq!(unavailable["candidates"], serde_json::json!([]));
+
+        let pending = unavailable_candidate("pending", "candidate_not_captured");
+        assert_eq!(pending["availability"][0]["state"], "pending");
+        assert_eq!(
+            pending["availability"][0]["reason"],
+            "candidate_not_captured"
+        );
+    }
 
     #[test]
     fn candidate_tree_changes_are_sorted_bounded_and_exact() {

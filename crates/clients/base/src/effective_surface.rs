@@ -105,7 +105,7 @@ impl EffectiveSurface {
             .cloned()
             .unwrap_or(serde_json::Value::Null);
 
-        crate::surface::workspaces::validate_effective_workspaces(&composed)
+        crate::surface::view_sets::validate_effective_view_sets(&composed)
             .map_err(EffectiveSurfaceError::BadSpec)?;
         let spec: SurfaceSpec = serde_json::from_value(composed)
             .map_err(|e| EffectiveSurfaceError::BadSpec(e.to_string()))?;

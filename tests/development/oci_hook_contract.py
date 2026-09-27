@@ -149,7 +149,12 @@ class OciHookContractTests(unittest.TestCase):
         self.assertIn("reconcile_records", hook)
         self.assertIn("SETUP_TRANSACTION_NAME", hook)
         self.assertIn("require_container_id", hook)
-        self.assertNotIn("docker", hook.lower())
+        # Docker's explicit runtime entry may attach hooks. Lifecycle authority
+        # still comes only from the generic host-observed OCI hook operations.
+        self.assertNotIn("docker", hook[hook.index("fn prestart("):].lower())
+        adapter = (HOOK.parent / "docker_runtime.rs").read_text()
+        self.assertNotIn("prepare_oci_hook", adapter)
+        self.assertNotIn("capture_oci_observed", adapter)
         self.assertIn("prepare_oci_controller_root", cgroup)
         self.assertIn("libc::setns", cgroup)
         self.assertIn("libc::SYS_open_tree", cgroup)

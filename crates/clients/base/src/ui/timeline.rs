@@ -639,7 +639,7 @@ pub(crate) fn append_live_delta(core: &RyeOsCore, entries: &mut Vec<RyeOsTimelin
 }
 
 pub(crate) fn live_delta_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
-    let head = core.seat.fold().input_route().thread?;
+    let head = core.focused_input_route().thread?;
     // Streaming output for the head thread → render it with a trailing cursor.
     if let Some(buf) = core.data.live_delta.as_ref()
         && !buf.text.is_empty()

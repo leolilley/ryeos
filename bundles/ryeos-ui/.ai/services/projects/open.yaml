@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:c71db24a5917bd776daea47ff24b0edfeaded0b20e80463c273b5afbf1a6f53b:m0HD7RW7fgRzjD75CWRaXm9IDWa4YDsgz7HnsThk57Qvbe+dxZHQshn0OMy72NFZNfLuqvUp8rAJXolflNPcCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T05:56:15Z:c1c9f8101fc94738eab313532dbbccb4efa73227364c91698542316d4fe1fe50:ZRPjUxOuJBO5eTzGCrJCFPVt4kiYCS8C4IGwVYqEljwyZ4VGkCPvaSmpHlI2S6Y+pSHA4Kmv23e0FUxMEup6BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: projects/open
 version: "1.0.0"
@@ -6,4 +6,4 @@ description: Open a registered project root and bind it to the current session.
 endpoint: projects.open
 availability: daemon_only
 ui_dispatch: session_local
-ui_result_effect: replace_session
+ui_result_effect: admit_binding_attachment

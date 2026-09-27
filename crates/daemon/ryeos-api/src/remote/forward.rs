@@ -1113,7 +1113,7 @@ mod tests {
 
         assert_eq!(
             policy.node_patterns,
-            vec!["/.ai/config/remotes/", ".env", "target/"]
+            vec![".env", "/.ai/config/remotes/", "target/"]
         );
         policy.validate().unwrap();
     }

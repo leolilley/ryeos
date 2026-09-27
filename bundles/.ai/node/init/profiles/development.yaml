@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-25T06:44:42Z:b4a2ca158caef8b5ec4f322563d9b1b0b447499d53b19ab4a2a5643fd83bff5e:ZXUoexfN4S5IUBsUOS5Sdrsvyo0eysmpwfhVdBtKGGmUskSC/ybKvrqbW0tmo21GUiYPLKtmv8MReyjjSn+xCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-27T22:01:04Z:4c83959e1df77b65094f369f8d5e66c05d010af066e112f0b50f603be7ece402:glL80flAlYNq2anOv3nAc3UeZlxsO66QuzVrpfvzQHlHm5FahkozSBy5FDgjWl0FKIfXnoRHOYcskie/myyMCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -12,6 +12,11 @@ exact_bundles:
   - standard
   - web
 policies:
+  bundle_publication:
+    schema: 2
+    # Publication is disabled until the operator installs measured release authority.
+    catalogs: []
+
   accounting:
     schema: 2
     issue_acceptance_window_ms: 60000
@@ -320,3 +325,6 @@ policies:
       max_active_streams_per_subject: 1
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
+  ui_browser_sessions:
+    schema: 1
+    max_live_binding_attachments_per_session: 16

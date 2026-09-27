@@ -551,6 +551,9 @@ fn compile_external_direct_program_parts(
                 .to_str()
                 .context("external direct source entry is not UTF-8")?
                 .to_owned()),
+            PlanArgument::AdmittedSourceMember { .. } => {
+                bail!("external direct source members require an admitted guest binding")
+            }
         })
         .collect::<Result<Vec<_>>>()?;
     let environment =

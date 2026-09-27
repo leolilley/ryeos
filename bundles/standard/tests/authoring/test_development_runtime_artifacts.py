@@ -171,7 +171,7 @@ class DevelopmentRuntimeArtifactTests(unittest.TestCase):
             "url": f"{RELEASE_BASE}/ryeos-authoring-source-inputs-v2.tar.gz",
             "sha256": "5d96c864bc93a40168976c3d814b1d6a6850c7edfa03071f482034610560df2d",
             "maximum_compressed_bytes": 242451026,
-            "maximum_expanded_bytes": 247900160,
+            "maximum_expanded_bytes": 247930880,
             "maximum_entries": 56,
             "archive_format": "tar_gzip",
         }])
@@ -179,6 +179,9 @@ class DevelopmentRuntimeArtifactTests(unittest.TestCase):
         self.assertEqual(component["id"], "authoring-source-inputs")
         self.assertEqual(component["storage"], "large_content")
         self.assertEqual(component["shape"]["prefix"], "ryeos-authoring-source-inputs-v2")
+        # The published tree includes e.g. elf/bin/patchelf below its prefix.
+        # Keep the signed depth bound equal to that real three-segment shape.
+        self.assertEqual(component["shape"]["bounds"]["maximum_depth"], 3)
         source = SOURCE_VERIFIER.read_text()
         self.assertIn("c66ac1c984e0793416106cd2fefa1a45d1b00c17b5865ff751e41594a3d39857", source)
         self.assertIn("external_large_content_manifest", source)

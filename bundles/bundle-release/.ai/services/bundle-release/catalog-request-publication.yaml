@@ -1,0 +1,18 @@
+# ryeos:signed:2026-09-20T11:15:48Z:3560b0b3c08b5748b626c660b14499e0d5da4c7cd32f036e5e3fbd36f9b2760d:XySZFrXpjyLJnlFbBqm2+RAy9D/0a/MIly3I90at5xkbnbivi/NgrYeArfLbgLxzVAyi4nZ84eZI92kDQmmvCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: catalog-request-publication
+version: "1.0.0"
+description: Authorize and compare-and-swap one exact catalog successor after verified closure upload.
+endpoint: bundle_release.catalog_request_publication
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/catalog-request-publication"]
+schema:
+  catalog_namespace: string
+  bundle_publication_policy_section_digest: string
+  trust_epoch: integer
+  channel: string
+  bundle_name: string
+  generation_attestation_hash: string
+  bundle_set_hash: string
+  predecessor_publication_attestation_hash: string?
+  expected_sequence: integer

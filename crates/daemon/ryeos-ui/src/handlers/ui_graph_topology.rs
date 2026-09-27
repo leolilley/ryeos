@@ -324,7 +324,9 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                 .map(String::from)
         });
     let root_surface = match &caller {
-        crate::seat_auth::SeatCaller::Session(session) => Some(session.surface_ref.clone()),
+        crate::seat_auth::SeatCaller::Attachment(attachment) => {
+            Some(attachment.surface_ref.clone())
+        }
         crate::seat_auth::SeatCaller::Operator { .. } => params
             .get("surface_ref")
             .and_then(|v| v.as_str())

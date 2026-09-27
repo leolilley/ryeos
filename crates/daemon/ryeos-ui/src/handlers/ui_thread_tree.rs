@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -51,6 +51,13 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             "root_thread_id": null,
             "threads": [],
             "truncated": false,
+            "coverage": [{
+                "state": "unselected",
+                "reason": "thread_not_selected",
+                "root_thread_id": null,
+                "retained": 0,
+                "truncated": false,
+            }],
         }));
     };
     crate::thread_authorization::authorize_exact_thread_subjects(
@@ -64,7 +71,29 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         request.max_depth.clamp(1, MAX_DEPTH),
         request.max_nodes.clamp(1, MAX_NODES),
     )?;
-    Ok(serde_json::to_value(tree)?)
+    let mut response = serde_json::to_value(tree)?;
+    let truncated = response
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let retained = response
+        .get("threads")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    response
+        .as_object_mut()
+        .context("execution tree response is not an object")?
+        .insert(
+            "coverage".into(),
+            serde_json::json!([{
+                "state": if truncated { "truncated" } else { "complete" },
+                "reason": if truncated { "bounded_tree_limit" } else { "full_bounded_closure" },
+                "root_thread_id": thread_id,
+                "retained": retained,
+                "truncated": truncated,
+            }]),
+        );
+    Ok(response)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

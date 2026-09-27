@@ -1,0 +1,113 @@
+# ryeos:signed:2026-09-27T22:01:21Z:be8b932ddde991691e871beab333a2b6e5133a27b2509fbc8e1217461fec32ef:bamG6Cuv/DZ86eaf/ScOW5ZSZT8zrb8HU9bcy5br35UY1goTQySgpb++xFJQUqa0EukamlgPlIzsahWBWFj7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: bundle-release
+version: "1.0.0"
+description: Exact publisher-authored ownership of native payloads by RyeOS bundle.
+payload_ownership:
+  schema: ryeos.bundle_payload_ownership.v1
+  kind: bundle_payload_ownership
+  bundles:
+    - bundle_name: browser
+      bundle_sets: [full, release-artifacts, release-authority]
+      payloads:
+        - binary: ryeos-browser-tools
+          cargo_package: ryeos-browser-tools
+          build_class: release
+    - bundle_name: codex
+      bundle_sets: [full, hosted-workflow, release-artifacts, release-authority]
+      payloads:
+        - binary: ryeos-codex-external-configuration
+          cargo_package: ryeos-codex-external-configuration
+          build_class: static
+        - binary: ryeos-codex-guest-runtime-producer
+          cargo_package: ryeos-codex-guest-runtime-producer
+          build_class: static
+        - binary: ryeos-external-candidate-connector
+          cargo_package: ryeos-external-candidate-connector
+          build_class: static
+        - binary: ryeos-external-guest-occurrence-owner
+          cargo_package: ryeos-external-guest-occurrence-owner
+          build_class: static
+        - binary: ryeos-external-guest-runtime-producer
+          cargo_package: ryeos-external-guest-runtime-producer
+          build_class: static
+    - bundle_name: core
+      bundle_sets: [bundle-source, central-host, full, hosted-node, hosted-workflow, local-inference, release-artifacts, release-authority, standard]
+      payloads:
+        - binary: rye-composer-identity
+          cargo_package: ryeos-handler-bins
+          build_class: release
+        - binary: rye-parser-regex-kv
+          cargo_package: ryeos-handler-bins
+          build_class: release
+        - binary: rye-parser-yaml-document
+          cargo_package: ryeos-handler-bins
+          build_class: release
+        - binary: rye-parser-yaml-header-document
+          cargo_package: ryeos-handler-bins
+          build_class: release
+        - binary: ryeos-core-tools
+          cargo_package: ryeos-core-tools
+          build_class: release
+        - binary: ryeos-direct-execution-evidence
+          cargo_package: ryeos-handler-bins
+          build_class: release
+        - binary: ryeos-lillux-isolation-adapter
+          cargo_package: ryeos-lillux-isolation-adapter
+          build_class: static
+        - binary: ryeos-scoped-qualification-execution-evidence
+          cargo_package: ryeos-handler-bins
+          build_class: release
+        - binary: ryeos-session-exec
+          cargo_package: ryeos-session-exec
+          build_class: static
+        - binary: ryeos-structured-session-bridge
+          cargo_package: ryeos-structured-session
+          build_class: static
+        - binary: ryeos-worker-execution-launch-preparer
+          cargo_package: ryeos-structured-session
+          build_class: static
+        - binary: ryeos-worker-execution-runtime
+          cargo_package: ryeos-structured-session
+          build_class: static
+    - bundle_name: ryeos-ui
+      bundle_sets: [full, release-artifacts, release-authority]
+      payloads:
+        - binary: ryeos-tui
+          cargo_package: ryeos-client-terminal
+          build_class: release
+        - binary: web
+          cargo_package: ryeos-client-web
+          build_class: release
+    - bundle_name: standard
+      bundle_sets: [central-host, full, hosted-workflow, local-inference, release-artifacts, release-authority, standard]
+      payloads:
+        - binary: rye-composer-extends-chain
+          cargo_package: ryeos-handler-bins
+          build_class: release
+        - binary: ryeos-directive-launch-preparer
+          cargo_package: ryeos-handler-bins
+          build_class: release
+        - binary: ryeos-directive-runtime
+          cargo_package: ryeos-directive-runtime
+          build_class: release
+        - binary: ryeos-graph-effective-validator
+          cargo_package: ryeos-handler-bins
+          build_class: release
+        - binary: ryeos-graph-execution-evidence
+          cargo_package: ryeos-handler-bins
+          build_class: release
+        - binary: ryeos-graph-launch-preparer
+          cargo_package: ryeos-handler-bins
+          build_class: release
+        - binary: ryeos-graph-runtime
+          cargo_package: ryeos-graph-runtime
+          build_class: release
+        - binary: ryeos-knowledge-runtime
+          cargo_package: ryeos-knowledge-runtime
+          build_class: release
+    - bundle_name: web
+      bundle_sets: [central-host, full, release-artifacts, release-authority]
+      payloads:
+        - binary: ryeos-web-tools
+          cargo_package: ryeos-web-tools
+          build_class: release

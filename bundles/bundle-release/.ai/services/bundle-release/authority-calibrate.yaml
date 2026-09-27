@@ -1,0 +1,38 @@
+# ryeos:signed:2026-09-23T12:16:49Z:fd2d3ae1565368168e5f43907f547b8836b1bff364918f150157535794ecfe77:2T3HadJJSiCGIFBgtsWkvfDe/lzksFuyrl6SsqTryVBcLGWoROXRaaH5x6jegkom1yq7G2YW8V/faYrJFw6QBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: authority-calibrate
+version: "1.0.0"
+description: Execute the fixed, operator-only portable, native, Core seed, and substrate calibration lanes and retain one node-authenticated calibration run; this service cannot finalize, authorize, compose, or publish a release.
+endpoint: bundle_release.authority_calibrate
+ui_read_only: false
+state_access: read_write
+record_thread: true
+availability: daemon_only
+required_caps:
+  - ryeos.execute.config.bundle-release/core-seed-build-products
+  - ryeos.execute.config.bundle-release/core-seed-capture-products
+  - ryeos.execute.config.bundle-release/execution-environment-products
+  - ryeos.execute.config.bundle-release/execution-tool-products
+  - ryeos.execute.config.bundle-release/native-build-products
+  - ryeos.execute.config.bundle-release/native-qualification
+  - ryeos.execute.config.bundle-release/portable-build-products
+  - ryeos.execute.config.bundle-release/portable-qualification
+  - ryeos.execute.config.bundle-release/portable-signed-capture-products
+  - ryeos.execute.config.bundle-release/signed-capture-products
+  - ryeos.execute.config.bundle-release/substrate-build-products
+  - ryeos.execute.service.bundle-release/authority-calibrate
+  - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
+  - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
+  - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify
+  - ryeos.execute.tool.ryeos/bundle-release/native-build
+  - ryeos.execute.tool.ryeos/bundle-release/native-qualify
+  - ryeos.execute.tool.ryeos/bundle-release/portable-build
+  - ryeos.execute.tool.ryeos/bundle-release/portable-qualify
+  - ryeos.execute.tool.ryeos/bundle-release/portable-signed-capture
+  - ryeos.execute.tool.ryeos/bundle-release/signed-capture
+  - ryeos.execute.tool.ryeos/bundle-release/substrate-build
+  - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
+schema:
+  project_path: string
+  source_snapshot_hash: string
+  execution_environment: object

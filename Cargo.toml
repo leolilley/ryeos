@@ -14,6 +14,7 @@ members = [
     "crates/kinds/directive-definition",
     "crates/runtimes/directive",
     "crates/engine/ryeos-accounting",
+    "crates/engine/ryeos-bundle-publication-contract",
     "crates/engine/ryeos-effect-contract",
     "crates/engine/ryeos-external-execution-contract",
     "crates/engine/ryeos-external-execution",
@@ -82,6 +83,7 @@ opt-level = 3
 # Internal crates
 lillux = { path = "crates/kernel/lillux" }
 ryeos-accounting = { path = "crates/engine/ryeos-accounting" }
+ryeos-bundle-publication-contract = { path = "crates/engine/ryeos-bundle-publication-contract" }
 ryeos-effect-contract = { path = "crates/engine/ryeos-effect-contract" }
 ryeos-external-execution-contract = { path = "crates/engine/ryeos-external-execution-contract" }
 ryeos-external-execution = { path = "crates/engine/ryeos-external-execution" }

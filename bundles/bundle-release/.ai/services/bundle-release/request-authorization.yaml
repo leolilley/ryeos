@@ -1,0 +1,15 @@
+# ryeos:signed:2026-09-19T03:51:20Z:3811be5472e703f25580a2b27b93f50bda34e2c7eb2bb745eba623208fa483ac:VjdO/Tz2DrEhYHOkCiWpA8c7O5S24u3qG++q0df/VBDF6p9I6hNg8ccmrLqLBdUv2CMq/BZq19P2wJ+wR3WkAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: request-authorization
+version: "1.0.0"
+description: Ask the constrained publisher to authorize one exact verified generation for one catalog namespace.
+endpoint: bundle_release.request_authorization
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/request-authorization"]
+schema:
+  bundle_publication_policy_section_digest: string
+  trust_epoch: integer
+  catalog_namespace: string
+  generation_hash: string
+  qualification_evidence_hashes: array
+  expected_publisher_fingerprint: string

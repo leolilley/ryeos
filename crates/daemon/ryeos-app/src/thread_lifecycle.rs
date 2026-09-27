@@ -1293,6 +1293,59 @@ impl AdmittedProjectBinding {
         Ok(binding)
     }
 
+    /// Rebuild a pinned verifier binding from the snapshot resolver's live
+    /// content proof and lifetime guard. Unlike capsule restoration, this is
+    /// for fresh current-identity checks and refuses a hash/path without the
+    /// descriptor-rooted materialization that proves its bytes.
+    pub(crate) fn from_qualification_snapshot(
+        engine: &Arc<Engine>,
+        plan_context: &PlanContext,
+        exact_authority: ryeos_state::objects::ExecutionProjectAuthority,
+        original_project_path: &Path,
+        effective_path: &Path,
+        verified_materialization: &ryeos_state::PinnedProjectMaterialization,
+        workspace_lifeline: Arc<crate::temp_dir_guard::TempDirGuard>,
+    ) -> Result<Self> {
+        let (display_path, snapshot_hash) = match &exact_authority {
+            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                display_path: Some(display_path),
+                snapshot_hash,
+                realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                ..
+            } => (display_path, snapshot_hash),
+            _ => bail!("qualification snapshot binding requires exact read-only pinned authority"),
+        };
+        if display_path != original_project_path
+            || verified_materialization.snapshot_hash() != snapshot_hash
+            || verified_materialization.path() != effective_path
+        {
+            bail!("qualification snapshot lease contradicts its sealed project authority");
+        }
+        verified_materialization.ensure_path_binding()?;
+        if !verified_materialization.owns_path(effective_path)?
+            || workspace_lifeline.path().is_none()
+            || !workspace_lifeline.owns_effective_path(effective_path)
+        {
+            bail!("qualification snapshot lease lacks its exact materialization lifetime proof");
+        }
+        let materialization = AdmittedProjectMaterialization::Pinned {
+            original_project_path: Some(original_project_path.to_path_buf()),
+            effective_path: Some(effective_path.to_path_buf()),
+            snapshot_hash: snapshot_hash.clone(),
+            workspace_lifeline: Some(workspace_lifeline),
+            verified_materialization: Some(verified_materialization.clone()),
+        };
+        let binding = Self {
+            request_engine: Arc::clone(engine),
+            exact_authority,
+            subject_resolution_authority: plan_context.subject_resolution_authority.clone(),
+            project_context: plan_context.project_context.clone(),
+            materialization,
+        };
+        binding.validate_for(engine, plan_context)?;
+        Ok(binding)
+    }
+
     fn restore(
         engine: &Arc<Engine>,
         plan_context: &PlanContext,

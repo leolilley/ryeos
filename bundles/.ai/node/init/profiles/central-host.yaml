@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-24T10:24:07Z:48de5edb58d714f159b0a6e2de8e52754a9cabf9c4de3f99e8693cb25e6ba16d:pFEr1QcwwUcMfTLznrfumpgd+a8hi8hqj/m30YS+9fgB3+Q00zGVBZOKBcQbQfOtMo6Z8ZgxIjF8lNobIIwfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-27T22:01:04Z:5ecc24cc31c01988d08da1673b1353163f9f368820fc73612754c6cae6e7a5fe:2Y7f1b36C2e60SfYkX4d1HjkF9MLvlfMj+wnkrYSO+zlk/XIFLWSwsPqbUBkkVHsrO24E0IML3YtpBk+tli+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -7,6 +7,11 @@ exact_bundles:
   - tv-tracker-authoring
   - web
 policies:
+  bundle_publication:
+    schema: 2
+    # Publication is disabled until the operator installs measured release authority.
+    catalogs: []
+
   accounting:
     schema: 2
     issue_acceptance_window_ms: 60000
@@ -229,3 +234,6 @@ policies:
     schema: 1
     enabled: false
     limits: null
+  ui_browser_sessions:
+    schema: 1
+    max_live_binding_attachments_per_session: 16

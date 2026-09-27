@@ -1,4 +1,5 @@
 pub mod accounting;
+pub mod bundle_publication;
 pub mod command_registration;
 pub mod execution;
 pub mod external_content;
@@ -9,3 +10,4 @@ pub mod maintenance;
 pub mod object_closure;
 pub mod persistent_sessions;
 pub mod thread_history;
+pub mod ui_browser_sessions;

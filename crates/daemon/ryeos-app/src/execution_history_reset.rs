@@ -176,7 +176,7 @@ fn run_execution_history_reset_inner(
     options: &ExecutionHistoryResetOptions,
     mut observer: Option<&mut dyn FnMut(&ExecutionHistoryResetProgress)>,
 ) -> Result<ExecutionHistoryResetReport> {
-    crate::provider_object_contracts::install()
+    crate::object_contracts::install()
         .context("install application object contracts for execution-history reset")?;
     publish_progress(
         &mut observer,
@@ -786,7 +786,7 @@ mod tests {
 
     #[test]
     fn execution_history_reset_closure_knows_provider_records_and_local_observations() {
-        crate::provider_object_contracts::install().unwrap();
+        crate::object_contracts::install().unwrap();
         let coordinate = local_coordinate();
         let terminal = local_terminal();
         let observation = LocalWorkerObservation {
