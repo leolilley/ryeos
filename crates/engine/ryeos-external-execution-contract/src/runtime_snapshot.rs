@@ -16,6 +16,8 @@ pub const RUNTIME_SNAPSHOT_RESULT_SCHEMA: u32 = 2;
 pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v2";
 pub const RUNTIME_SNAPSHOT_READINESS_PROTOCOL: &str = "ryeos.runtime-snapshot-readiness.v1";
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA: u32 = 1;
+pub const RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL: &str =
+    "ryeos.runtime-snapshot-qualification-adapter.v1";
 pub const MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES: usize = 24 * 1024;
 pub const MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES: u64 = 64 * 1024 * 1024 + 16 * 1024;
 
@@ -313,6 +315,69 @@ impl RuntimeSnapshotQualificationOccurrence {
             canonical_json(self)?.len() <= 1024,
             "snapshot qualification occurrence exceeds its bound"
         );
+        Ok(())
+    }
+}
+
+/// Sealed create-only handoff. The selected snapshot ID is a retained provider
+/// result, not a mutable setting or a value inferred from the adapter's own
+/// environment. This grants no verifier run or qualification claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotQualificationAdapterRequest {
+    pub protocol: String,
+    pub intent: RuntimeSnapshotQualificationIntent,
+    pub source_intent: RuntimeSnapshotIntent,
+    pub locator: RuntimeSnapshotLocator,
+    pub readiness: RuntimeSnapshotReadinessObservation,
+    pub provider_spec_digest: String,
+}
+
+impl RuntimeSnapshotQualificationAdapterRequest {
+    pub fn validate(&self) -> Result<()> {
+        self.intent
+            .validate_for(&self.source_intent, &self.locator)?;
+        let readiness_request = RuntimeSnapshotReadinessRequest {
+            protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
+            intent: self.source_intent.clone(),
+            locator: self.locator.clone(),
+            provider_spec_digest: self.source_intent.provider_spec_digest.clone(),
+        };
+        self.readiness.validate_for(&readiness_request)?;
+        ensure!(
+            self.protocol == RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL
+                && self.provider_spec_digest == self.intent.provider_spec_digest,
+            "snapshot qualification adapter handoff changed signed authority"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+            "snapshot qualification adapter handoff exceeds its bound"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeSnapshotQualificationAdapterResponse {
+    OccurrenceBound {
+        occurrence: RuntimeSnapshotQualificationOccurrence,
+    },
+    Uncertain {
+        operation_id: String,
+    },
+}
+
+impl RuntimeSnapshotQualificationAdapterResponse {
+    pub fn validate_for(&self, request: &RuntimeSnapshotQualificationAdapterRequest) -> Result<()> {
+        request.validate()?;
+        match self {
+            Self::OccurrenceBound { occurrence } => occurrence.validate_for(&request.intent)?,
+            Self::Uncertain { operation_id } => ensure!(
+                operation_id == &request.intent.operation_id,
+                "uncertain qualification result changed durable attempt"
+            ),
+        }
         Ok(())
     }
 }
@@ -661,8 +726,45 @@ mod tests {
         let mut switched = qualification.clone();
         switched.snapshot_id = "snp-other".into();
         assert!(switched.validate_for(&source, &locator).is_err());
-        let mut switched = qualification;
+        let mut switched = qualification.clone();
         switched.verifier_artifact_hash = "6".repeat(64);
         assert!(switched.validate_for(&source, &locator).is_err());
+
+        let readiness = RuntimeSnapshotReadinessObservation {
+            schema: 1,
+            operation_id: source.operation_id.clone(),
+            intent_digest: source.digest().unwrap(),
+            snapshot_id: locator.snapshot_id.clone(),
+            source_occurrence_id: source.source_occurrence_id.clone(),
+            provider_group_id: source.provider_group_id.clone(),
+            creation_response_sha256: locator.provider_response_sha256.clone(),
+            readiness_response_sha256: "b".repeat(64),
+            captured_at: "2026-09-28T00:01:00Z".into(),
+            size_bytes: 4096,
+        };
+        let request = RuntimeSnapshotQualificationAdapterRequest {
+            protocol: RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL.into(),
+            provider_spec_digest: qualification.provider_spec_digest.clone(),
+            intent: qualification,
+            source_intent: source,
+            locator,
+            readiness,
+        };
+        request.validate().unwrap();
+        let bound = RuntimeSnapshotQualificationAdapterResponse::OccurrenceBound {
+            occurrence: RuntimeSnapshotQualificationOccurrence {
+                schema: 1,
+                operation_id: request.intent.operation_id.clone(),
+                occurrence_id: "sbx-restored".into(),
+                provider_response_sha256: "c".repeat(64),
+            },
+        };
+        bound.validate_for(&request).unwrap();
+        let mut wrong = request.clone();
+        wrong.locator.snapshot_id = "snp-other".into();
+        assert!(wrong.validate().is_err());
+        wrong = request;
+        wrong.readiness.snapshot_id = "snp-other".into();
+        assert!(wrong.validate().is_err());
     }
 }
