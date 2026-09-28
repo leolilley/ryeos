@@ -43,7 +43,7 @@ use crate::runtime_db::runtime_snapshot_qualification::{
     SnapshotQualificationAttemptClaim, SnapshotQualificationPhase, SnapshotQualificationRecord,
 };
 use crate::runtime_db::runtime_snapshot_qualification_termination::{
-    QualificationTerminationClaim, QualificationTerminationRecord,
+    QualificationTerminationClaim, QualificationTerminationPhase, QualificationTerminationRecord,
 };
 use crate::state::AppState;
 
@@ -636,7 +636,7 @@ pub(crate) fn verify_probe_snapshot_locator(
         .runtime_snapshot_operation(&named.operation_id)?
         .context("runtime probe names no retained snapshot operation")?;
     validate_probe_snapshot_record(&record, &named, proof, source, provider_id, owner_principal)?;
-    verify_probe_restored_verifier_record(
+    let verifier = verify_probe_restored_verifier_record(
         state,
         &record,
         proof,
@@ -644,6 +644,7 @@ pub(crate) fn verify_probe_snapshot_locator(
         provider_id,
         owner_principal,
     )?;
+    verify_probe_provider_terminal_record(state, proof, &verifier, provider_id, owner_principal)?;
     Ok(Some(named))
 }
 
@@ -654,7 +655,7 @@ fn verify_probe_restored_verifier_record(
     source: &GuestOwnerRuntimeManifestIdentity,
     provider_id: &str,
     owner_principal: &str,
-) -> Result<()> {
+) -> Result<RestoredVerifierAttemptRecord> {
     let evidence = &proof.evidence.result.probe_evidence;
     let operation_id = evidence
         .get("restored_verifier_operation_id")
@@ -696,6 +697,62 @@ fn verify_probe_restored_verifier_record(
                 observation
             )?) == observation_hash,
         "runtime probe verifier differs from exact timely retained observation"
+    );
+    Ok(retained)
+}
+
+fn verify_probe_provider_terminal_record(
+    state: &AppState,
+    proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+    verifier: &RestoredVerifierAttemptRecord,
+    provider_id: &str,
+    owner_principal: &str,
+) -> Result<()> {
+    let evidence = &proof.evidence.result.probe_evidence;
+    let operation_id = evidence
+        .get("qualification_termination_operation_id")
+        .and_then(serde_json::Value::as_str)
+        .context("runtime probe lacks exact qualification termination operation")?;
+    let observation_hash = evidence
+        .get("provider_terminal_observation_hash")
+        .and_then(serde_json::Value::as_str)
+        .context("runtime probe lacks exact provider terminal observation")?;
+    ensure!(
+        lillux::valid_hash(operation_id) && lillux::valid_hash(observation_hash),
+        "runtime probe has invalid provider terminal evidence identity"
+    );
+    let retained = state.state_store.qualification_termination_operation(operation_id)?
+        .context("runtime probe names no retained qualification termination")?;
+    validate_provider_terminal_join(
+        &retained,
+        &verifier.intent.qualification_operation_id,
+        &verifier.intent.restored_occurrence_id,
+        provider_id,
+        owner_principal,
+        observation_hash,
+    )
+}
+
+fn validate_provider_terminal_join(
+    retained: &QualificationTerminationRecord,
+    qualification_operation_id: &str,
+    restored_occurrence_id: &str,
+    provider_id: &str,
+    owner_principal: &str,
+    observation_hash: &str,
+) -> Result<()> {
+    let observation = retained.observation.as_ref()
+        .context("runtime probe termination has no provider terminal observation")?;
+    ensure!(
+        retained.phase == QualificationTerminationPhase::Terminal
+            && !observation.contact_deadline_exceeded
+            && retained.intent.qualification_operation_id == qualification_operation_id
+            && retained.intent.occurrence_id == restored_occurrence_id
+            && retained.intent.provider_id == provider_id
+            && retained.intent.owner_principal == owner_principal
+            && lillux::sha256_hex(&ryeos_external_execution_contract::canonical_json(observation)?)
+                == observation_hash,
+        "runtime probe provider terminal status differs from exact retained occurrence"
     );
     Ok(())
 }
@@ -1010,5 +1067,53 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn provider_terminal_join_requires_same_qualification_occurrence_and_observation() {
+        let owner = format!("fp:{}", "1".repeat(64));
+        let mut intent = RuntimeSnapshotQualificationTerminationIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: "2".repeat(64),
+            occurrence_id: "sbx-restored".into(),
+            owner_principal: owner.clone(),
+            provider_id: "render-sandbox-early-access".into(),
+            provider_spec_digest: "3".repeat(64),
+            attempt_deadline_ms: 1,
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        let observation = ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminalObservation {
+            schema: 1,
+            operation_id: intent.operation_id.clone(),
+            occurrence_id: intent.occurrence_id.clone(),
+            provider_response_sha256: "4".repeat(64),
+            terminated_at: "2026-09-28T00:02:00Z".into(),
+            contact_deadline_exceeded: false,
+        };
+        let hash = lillux::sha256_hex(&ryeos_external_execution_contract::canonical_json(&observation).unwrap());
+        let mut retained = QualificationTerminationRecord {
+            intent,
+            phase: QualificationTerminationPhase::Terminal,
+            observation: Some(observation),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        let check = |retained: &QualificationTerminationRecord, qualification: &str,
+                     occurrence: &str, hash: &str| {
+            validate_provider_terminal_join(
+                retained, qualification, occurrence,
+                "render-sandbox-early-access", &owner, hash,
+            )
+        };
+        assert!(check(&retained, &"2".repeat(64), "sbx-restored", &hash).is_ok());
+        assert!(check(&retained, &"5".repeat(64), "sbx-restored", &hash).is_err());
+        assert!(check(&retained, &"2".repeat(64), "sbx-other", &hash).is_err());
+        assert!(check(&retained, &"2".repeat(64), "sbx-restored", &"6".repeat(64)).is_err());
+        retained.observation.as_mut().unwrap().contact_deadline_exceeded = true;
+        assert!(check(&retained, &"2".repeat(64), "sbx-restored", &hash).is_err());
+        retained.observation.as_mut().unwrap().contact_deadline_exceeded = false;
+        retained.phase = QualificationTerminationPhase::Quarantined;
+        assert!(check(&retained, &"2".repeat(64), "sbx-restored", &hash).is_err());
     }
 }

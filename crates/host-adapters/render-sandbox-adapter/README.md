@@ -421,22 +421,25 @@ startup capability.
 `src/snapshot_qualification.rs` now defines the bounded Render-specific probe
 shape and exact comparison against those expected coordinates. It rejects
 unknown fields, changed snapshot/root/manifest, weak or noncanonical controller
-keys, changed file modes, and missing terminal evidence identities. This is only the
-provider-edge interpretation of probe data: placement admission now calls it
-after rechecking the current product witness and independent verifier execution,
-but that execution has not yet run inside a restored Render Sandbox. The
-signed provider spec therefore still refuses activation. The next cut must
-bind the separately authenticated restored-Sandbox verifier run to that
-qualification, and retain cleanup even if later startup qualification is absent.
+keys, changed file modes, and missing provider-terminal evidence identities.
+Placement admission now rejoins both the independently admitted verifier's
+retained observation and the exact restored occurrence's daemon-retained
+provider-terminal observation to the same qualification operation. The old
+probe-provided terminal hash is no longer accepted as free-standing evidence.
+This remains only a provider-terminal join: the verifier and termination have
+not yet run as an installed Render qualification, and a provider `terminated`
+response does not prove guest-writer exclusion. The signed provider spec still
+refuses activation.
 
 The separate `ryeos-external-guest-restoration-verifier` now measures the
 restored owner tree under a fresh challenge. This adapter has an offline,
 bounded SSE interpreter for its run output: it requires canonical measurement
 bytes, no stderr or unknown event, a complete zero exit, and the exact joined
 content/readiness coordinates. This parser is not an authenticated Render run.
-A distinct, durable qualification occurrence must first be provisioned from
-the bound snapshot, deliver the admitted verifier, retain the token/run and
-whole-guest settlement evidence, and then submit those facts to the controller
+A distinct, durable qualification occurrence is now provisioned from the bound
+snapshot, with one-shot verifier and provider-termination journals. Installed
+qualification must still execute that path, retain the token/run and independent
+guest-writer settlement evidence, and submit those facts to the controller
 join. Worker allocation cannot be borrowed for that purpose because it itself
 requires prior runtime qualification. The existing durable
 `ExternalAllocationOwner` variants are only `DedicatedSession` and

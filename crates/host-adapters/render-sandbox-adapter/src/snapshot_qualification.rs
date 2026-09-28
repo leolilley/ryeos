@@ -692,6 +692,10 @@ pub(crate) struct RenderSnapshotProbe {
     /// The adapter checks shape; the daemon authenticates the exact row.
     pub restored_verifier_operation_id: String,
     pub restored_verifier_observation_hash: String,
+    /// Provider terminal status only. The daemon rejoins this exact record;
+    /// guest-writer exclusion remains a separate qualification claim.
+    pub qualification_termination_operation_id: String,
+    pub provider_terminal_observation_hash: String,
     pub snapshot_kind: String,
     pub plan: RenderPlan,
     pub region: String,
@@ -703,7 +707,6 @@ pub(crate) struct RenderSnapshotProbe {
     pub guest_package_mode: u32,
     pub lost_stream_survival_evidence_hash: String,
     pub authenticated_ready_evidence_hash: String,
-    pub whole_guest_termination_evidence_hash: String,
     pub writer_exclusion_evidence_hash: String,
 }
 
@@ -732,7 +735,7 @@ impl RenderSnapshotProbe {
         settings: &Settings,
         expected: &SnapshotExpectation<'_>,
     ) -> Result<()> {
-        ensure!(self.schema == 3, "unsupported Render snapshot probe schema");
+        ensure!(self.schema == 4, "unsupported Render snapshot probe schema");
         for hash in [
             &self.product_witness_hash,
             &self.guest_runtime_manifest_hash,
@@ -741,10 +744,11 @@ impl RenderSnapshotProbe {
             &self.installed_owner_hash,
             &self.lost_stream_survival_evidence_hash,
             &self.authenticated_ready_evidence_hash,
-            &self.whole_guest_termination_evidence_hash,
             &self.writer_exclusion_evidence_hash,
             &self.restored_verifier_operation_id,
             &self.restored_verifier_observation_hash,
+            &self.qualification_termination_operation_id,
+            &self.provider_terminal_observation_hash,
         ] {
             ensure!(
                 lillux::valid_hash(hash),
@@ -1063,7 +1067,7 @@ mod tests {
 
     fn probe() -> RenderSnapshotProbe {
         RenderSnapshotProbe {
-            schema: 3,
+            schema: 4,
             product_witness_hash: "1".repeat(64),
             guest_runtime_manifest_hash: "2".repeat(64),
             controller_public_root: public_root(),
@@ -1083,6 +1087,8 @@ mod tests {
             },
             restored_verifier_operation_id: "d".repeat(64),
             restored_verifier_observation_hash: "e".repeat(64),
+            qualification_termination_operation_id: "f".repeat(64),
+            provider_terminal_observation_hash: "8".repeat(64),
             snapshot_kind: "filesystem".into(),
             plan: RenderPlan::Starter,
             region: "oregon".into(),
@@ -1094,7 +1100,6 @@ mod tests {
             guest_package_mode: 0o600,
             lost_stream_survival_evidence_hash: "6".repeat(64),
             authenticated_ready_evidence_hash: "7".repeat(64),
-            whole_guest_termination_evidence_hash: "8".repeat(64),
             writer_exclusion_evidence_hash: "9".repeat(64),
         }
     }
@@ -1143,7 +1148,10 @@ mod tests {
         observed.guest_package_mode = 0o644;
         assert!(observed.validate_for(&settings, &expected).is_err());
         observed = probe();
-        observed.whole_guest_termination_evidence_hash.clear();
+        observed.qualification_termination_operation_id.clear();
+        assert!(observed.validate_for(&settings, &expected).is_err());
+        observed = probe();
+        observed.provider_terminal_observation_hash.clear();
         assert!(observed.validate_for(&settings, &expected).is_err());
         observed = probe();
         observed.restored_verifier_operation_id.clear();

@@ -56,13 +56,15 @@ fn invocation(with_credential: bool) -> anyhow::Result<(LifecycleRuntimeProbeReq
             controller_public_root: public_root.clone(),
         },
         probe_evidence: serde_json::json!({
-            "schema": 2,
+            "schema": 4,
             "product_witness_hash": "1".repeat(64),
             "guest_runtime_manifest_hash": "2".repeat(64),
             "controller_public_root": public_root,
             "owner_id": "owner",
             "account": "account",
             "snapshot_id": "snp-exact",
+            "restored_verifier_operation_id": "d".repeat(64),
+            "restored_verifier_observation_hash": "e".repeat(64),
             "runtime_snapshot_locator": {
                 "schema": ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_RESULT_SCHEMA,
                 "operation_id": "a".repeat(64),
@@ -88,7 +90,8 @@ fn invocation(with_credential: bool) -> anyhow::Result<(LifecycleRuntimeProbeReq
             "guest_package_mode": 0o600,
             "lost_stream_survival_evidence_hash": "6".repeat(64),
             "authenticated_ready_evidence_hash": "7".repeat(64),
-            "whole_guest_termination_evidence_hash": "8".repeat(64),
+            "qualification_termination_operation_id": "f".repeat(64),
+            "provider_terminal_observation_hash": "8".repeat(64),
             "writer_exclusion_evidence_hash": "9".repeat(64)
         }),
     };
