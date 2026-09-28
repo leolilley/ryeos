@@ -13,6 +13,7 @@ use serde_json::Value;
 pub mod external_execution;
 pub mod runtime_snapshot;
 pub mod runtime_snapshot_qualification;
+pub mod restored_verifier_attempt;
 pub mod scoped_child_attempt;
 
 use crate::launch_metadata::{LAUNCH_METADATA_SCHEMA_VERSION, RuntimeLaunchMetadata};
@@ -1864,13 +1865,14 @@ const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence 
 
 fn runtime_schema_sql() -> String {
     format!(
-        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}",
+        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}",
         external_execution::GUARD_SQL,
         ryeos_state::external_execution::journal::CHANNEL_SQL,
         external_execution::JOURNAL_SQL,
         scoped_child_attempt::JOURNAL_SQL,
         runtime_snapshot::JOURNAL_SQL,
         runtime_snapshot_qualification::JOURNAL_SQL,
+        restored_verifier_attempt::JOURNAL_SQL,
     )
 }
 
@@ -2624,7 +2626,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 75 retains the controller-observed contact deadline on each bound
 // restored-Sandbox occurrence. Older rows cannot distinguish a late create
 // from timely qualification evidence.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 75;
+// Epoch 76 retains one verifier upload/run contact independently of restored
+// Sandbox creation. A pending or uncertain attempt cannot remint contact.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 76;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2983,6 +2987,17 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec { name: "intent_json", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "occurrence_json", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "restored_verifier_attempt",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "operation_id", col_type: "TEXT", pk: true, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "qualification_operation_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "intent_json", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                 ],
@@ -5532,6 +5547,7 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
     external_execution::validate_current(&tx)?;
     runtime_snapshot::validate_current(&tx)?;
     runtime_snapshot_qualification::validate_current(&tx)?;
+    restored_verifier_attempt::validate_current(&tx)?;
     scoped_child_attempt::validate_current(&tx)?;
     read_scope_lifetime_fence(&tx)?;
     let rows = {

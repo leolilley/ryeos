@@ -78,7 +78,7 @@ fn canonical<T: Serialize>(value: &T) -> Result<String> {
     )?)
 }
 
-fn read(conn: &Connection, operation_id: &str) -> Result<Option<SnapshotQualificationRecord>> {
+pub(super) fn read(conn: &Connection, operation_id: &str) -> Result<Option<SnapshotQualificationRecord>> {
     let row: Option<(String, String, String, Option<String>, i64, i64)> = conn
         .query_row(
             "SELECT snapshot_operation_id,intent_json,phase,occurrence_json,created_at_ms,updated_at_ms
@@ -314,6 +314,10 @@ impl RuntimeDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_external_execution_contract::restored_runtime_measurement::{
+        RESTORED_OWNER_MEASUREMENT_PROTOCOL, RestoredOwnerChallenge,
+        RestoredVerifierAttemptIntent,
+    };
     use ryeos_external_execution_contract::runtime_snapshot::{
         RUNTIME_SNAPSHOT_INTENT_SCHEMA, RUNTIME_SNAPSHOT_RESULT_SCHEMA, RuntimeSnapshotIntent,
         RuntimeSnapshotLocator, RuntimeSnapshotReadinessObservation,
@@ -427,5 +431,47 @@ mod tests {
         let mut changed = occurrence;
         changed.occurrence_id = "sbx-other".into();
         assert!(db.bind_snapshot_qualification_occurrence(&changed).is_err());
+
+        let mut verifier = RestoredVerifierAttemptIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: intent.operation_id.clone(),
+            restored_occurrence_id: "sbx-restored".into(),
+            verifier_artifact_hash: intent.verifier_artifact_hash.clone(),
+            upload_sha256: "4".repeat(64),
+            upload_bytes: 1024,
+            challenge: RestoredOwnerChallenge {
+                schema: 1,
+                protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
+                operation_id: source.operation_id.clone(),
+                snapshot_id: locator.snapshot_id.clone(),
+                restored_occurrence_id: "sbx-restored".into(),
+                nonce_hex: "5".repeat(64),
+            },
+            attempt_deadline_ms: now + 60_000,
+        };
+        verifier.operation_id = verifier.derived_operation_id().unwrap();
+        db.reserve_restored_verifier_attempt(&verifier).unwrap();
+        assert!(matches!(
+            db.claim_restored_verifier_attempt(&verifier.operation_id)
+                .unwrap(),
+            super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::StartAttempt(_)
+        ));
+        assert!(matches!(
+            db.claim_restored_verifier_attempt(&verifier.operation_id)
+                .unwrap(),
+            super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::Reconcile(_)
+        ));
+        db.quarantine_restored_verifier_attempt(&verifier.operation_id)
+            .unwrap();
+        assert!(matches!(
+            db.claim_restored_verifier_attempt(&verifier.operation_id)
+                .unwrap(),
+            super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::Reconcile(_)
+        ));
+        let mut reminted = verifier.clone();
+        reminted.challenge.nonce_hex = "6".repeat(64);
+        assert_eq!(reminted.derived_operation_id().unwrap(), verifier.operation_id);
+        assert!(db.reserve_restored_verifier_attempt(&reminted).is_err());
     }
 }
