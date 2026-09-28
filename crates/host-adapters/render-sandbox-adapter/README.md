@@ -36,6 +36,20 @@ below therefore remain grounded in the pinned CLI source and are unqualified.
 This source and its fixture responses are not a claim of public/stable API
 support, signing, installation, or provider qualification.
 
+The current controller source also has a signed operator snapshot-production
+service and a durable one-attempt journal. A complete create response binds a
+locator, never runtime contents. The credential-free runtime probe now
+requires that locator in its schema-2 evidence; controller admission compares
+it with the retained bound attempt and product witness before this adapter
+compares its snapshot ID with the signed placement. This offline join is
+tested, but it is not a live restored-Sandbox verifier. The availability
+response parser exists without a provider-contacting readiness operation. The
+durable locator now retains the bounded, adapter-validated creation projection
+(`requestedAt` and `expiresAt`) under the same operation identity so a later
+readiness GET can preserve the parser's exact continuity check. No admitted
+verifier yet measures the exact restored owner tree.
+Therefore the Render activation gate remains closed.
+
 ## Implemented control-plane behavior
 
 - Creates a Sandbox through `POST /v1/sandboxes`, placing `ownerId` in the JSON

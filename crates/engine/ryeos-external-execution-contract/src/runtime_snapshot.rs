@@ -12,8 +12,8 @@ use sha2::{Digest as _, Sha256};
 use crate::canonical_json;
 
 pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 1;
-pub const RUNTIME_SNAPSHOT_RESULT_SCHEMA: u32 = 1;
-pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v1";
+pub const RUNTIME_SNAPSHOT_RESULT_SCHEMA: u32 = 2;
+pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v2";
 pub const MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES: usize = 24 * 1024;
 pub const MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES: u64 = 64 * 1024 * 1024 + 16 * 1024;
 
@@ -197,6 +197,9 @@ pub struct RuntimeSnapshotLocator {
     pub provider_group_id: String,
     pub snapshot_id: String,
     pub provider_response_sha256: String,
+    /// Bounded, adapter-validated creation projection retained for later
+    /// readiness interpretation. It is not a restored-content claim.
+    pub provider_creation_observation: serde_json::Value,
     pub adapter_observation_sha256: String,
 }
 
@@ -215,6 +218,14 @@ impl RuntimeSnapshotLocator {
         ] {
             require_hash(value, label)?;
         }
+        let observation = canonical_json(&self.provider_creation_observation)?;
+        ensure!(
+            self.provider_creation_observation.is_object()
+                && !observation.is_empty()
+                && observation.len() <= 4096
+                && hex::encode(Sha256::digest(&observation)) == self.adapter_observation_sha256,
+            "runtime snapshot creation observation changed its adapter identity"
+        );
         for (label, value) in [
             ("source occurrence", &self.source_occurrence_id),
             ("provider group", &self.provider_group_id),
@@ -350,9 +361,13 @@ mod tests {
             provider_group_id: intent.provider_group_id.clone(),
             snapshot_id: "snp-fixture-1".into(),
             provider_response_sha256: "a".repeat(64),
-            adapter_observation_sha256: "b".repeat(64),
+            provider_creation_observation: serde_json::json!({"schema": 1}),
+            adapter_observation_sha256: hex::encode(Sha256::digest(br#"{"schema":1}"#)),
         };
         locator.validate_for(&intent).unwrap();
+        let mut changed_observation = locator.clone();
+        changed_observation.provider_creation_observation["schema"] = serde_json::json!(2);
+        assert!(changed_observation.validate_for(&intent).is_err());
         locator.source_occurrence_id = "sbox-other".into();
         assert!(locator.validate_for(&intent).is_err());
     }

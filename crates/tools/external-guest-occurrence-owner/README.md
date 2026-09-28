@@ -20,12 +20,28 @@ are **not yet complete**, and the Render adapter must still return
 `SupervisorPending`. This owner has no Kaggle, project signing, provider, or
 controller credential.
 
-`ryeos-external-execution::guest_runtime_product` can now create a fresh,
+`ryeos-external-execution::guest_runtime_product` creates a fresh,
 credential-free runtime tree from an admitted owner-executable descriptor,
-the controller **public** key, and a validated profile. It returns the content
-manifest hash calculated from the exact tree the guest later measures. This
-is a source product only: the signed authoring tool, provider snapshot
-lineage, restored-tree measurement, and installed qualification remain open.
+the controller **public** key, and a validated profile. The ordinary retained
+product witness can now be staged under daemon-owned private authority and
+sent through the signed snapshot producer. That producer journals one attempt
+and retains only an unqualified Render locator. A separately qualified probe
+must carry that exact locator; the controller rejoins it to the bound journal,
+product witness, executable, public root, provider, and operator before the
+Render adapter checks the signed placement's snapshot ID.
+
+This is still not installed qualification. The adapter has strict parsers for
+creation and later availability, but no admitted operation yet observes
+readiness, restores this exact produced snapshot into a disposable Sandbox,
+measures its installed runtime tree there, or authors the independent product
+qualification. An arbitrary matching probe JSON is not a substitute for that
+execution. The durable locator now retains the adapter-validated creation
+projection required for an exact readiness observation, but no provider-
+contacting readiness operation or restored-guest verifier is admitted.
+Activation must remain fail-closed
+until the restored occurrence,
+measurement, lost-stream survival, whole-guest termination, and writer
+exclusion evidence are joined and admitted.
 
 Inbound import and package files must be current-owner pinned regular files
 beneath the owner-private `0700` activation directory. Their modes may be

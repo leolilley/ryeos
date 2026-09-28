@@ -276,20 +276,71 @@ fn first_snapshot_attempt(
         cancellation,
     )?)?;
     let creation = bind_snapshot_create_response(creation_intent, status, &response_body)?;
+    let locator = bind_snapshot_locator(request, &creation, settings)?;
+    Ok(RuntimeSnapshotAdapterResponse::Bound { locator })
+}
+
+fn bind_snapshot_locator(
+    request: &RuntimeSnapshotAdapterRequest,
+    creation: &BoundSnapshotCreation,
+    settings: &SnapshotProductionSettings,
+) -> Result<RuntimeSnapshotLocator> {
+    let provider_creation_observation = serde_json::to_value(&creation)?;
+    let adapter_observation_sha256 = lillux::sha256_hex(
+        &ryeos_external_execution_contract::canonical_json(&provider_creation_observation)?,
+    );
     let locator = RuntimeSnapshotLocator {
         schema: RUNTIME_SNAPSHOT_RESULT_SCHEMA,
         operation_id: request.intent.operation_id.clone(),
         intent_digest: request.intent.digest()?,
-        source_occurrence_id: source_id.clone(),
+        source_occurrence_id: request.intent.source_occurrence_id.clone(),
         provider_group_id: settings.sandbox_group_id.clone(),
         snapshot_id: creation.snapshot_id.clone(),
         provider_response_sha256: creation.response_sha256.clone(),
-        adapter_observation_sha256: lillux::sha256_hex(
-            &ryeos_external_execution_contract::canonical_json(&creation)?,
-        ),
+        provider_creation_observation,
+        adapter_observation_sha256,
     };
     locator.validate_for(&request.intent)?;
-    Ok(RuntimeSnapshotAdapterResponse::Bound { locator })
+    Ok(locator)
+}
+
+fn retained_snapshot_creation(
+    request: &RuntimeSnapshotAdapterRequest,
+    intent: &SnapshotCreationIntent,
+    locator: &RuntimeSnapshotLocator,
+) -> Result<BoundSnapshotCreation> {
+    locator.validate_for(&request.intent)?;
+    ensure!(
+        locator.schema == RUNTIME_SNAPSHOT_RESULT_SCHEMA
+            && locator.operation_id == intent.operation_id
+            && locator.source_occurrence_id == intent.source_sandbox_id
+            && locator.provider_group_id == intent.sandbox_group_id,
+        "retained snapshot locator differs from the creation intent"
+    );
+    let observation =
+        ryeos_external_execution_contract::canonical_json(&locator.provider_creation_observation)?;
+    ensure!(
+        observation.len() <= 4096
+            && lillux::sha256_hex(&observation) == locator.adapter_observation_sha256,
+        "retained snapshot creation observation changed"
+    );
+    let creation: BoundSnapshotCreation =
+        ryeos_external_execution_contract::from_json_slice_strict(&observation, 4096)?;
+    ensure!(
+        creation.schema == 1
+            && creation.operation_id == intent.operation_id
+            && creation.intent_digest == intent.digest()?
+            && creation.product_witness_hash == intent.product_witness_hash
+            && creation.guest_runtime_manifest_hash == intent.guest_runtime_manifest_hash
+            && creation.controller_public_root == intent.controller_public_root
+            && creation.owner_executable_sha256 == intent.owner_executable_sha256
+            && creation.source_sandbox_id == intent.source_sandbox_id
+            && creation.sandbox_group_id == intent.sandbox_group_id
+            && creation.snapshot_id == locator.snapshot_id
+            && creation.response_sha256 == locator.provider_response_sha256,
+        "retained snapshot creation is not bound to its exact locator"
+    );
+    Ok(creation)
 }
 
 fn creation_intent(
@@ -527,7 +578,7 @@ where
 }
 
 /// A provider locator, not an installed-runtime or product qualification.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BoundSnapshotCreation {
     pub schema: u32,
@@ -791,6 +842,27 @@ mod tests {
         .unwrap();
         assert_eq!(url.host_str(), Some("api.render.com"));
         assert_eq!(url.query_pairs().count(), 2);
+        let created = bind_snapshot_create_response(
+            &prepared,
+            202,
+            &serde_json::to_vec(&response()).unwrap(),
+        )
+        .unwrap();
+        let locator = bind_snapshot_locator(&request, &created, &settings).unwrap();
+        let retained: BoundSnapshotCreation =
+            serde_json::from_value(locator.provider_creation_observation.clone()).unwrap();
+        assert_eq!(retained.requested_at, created.requested_at);
+        assert_eq!(retained.expires_at, created.expires_at);
+        assert_eq!(retained.response_sha256, locator.provider_response_sha256);
+        assert_eq!(
+            retained_snapshot_creation(&request, &prepared, &locator)
+                .unwrap()
+                .snapshot_id,
+            created.snapshot_id
+        );
+        let mut substituted = locator.clone();
+        substituted.snapshot_id = "snp-other".into();
+        assert!(retained_snapshot_creation(&request, &prepared, &substituted).is_err());
         let mut wrong = settings;
         wrong.sandbox_group_id = "sbg-other".into();
         assert!(wrong.validate_for(&request).is_err());

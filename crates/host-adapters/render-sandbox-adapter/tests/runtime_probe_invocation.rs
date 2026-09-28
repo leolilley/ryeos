@@ -71,7 +71,8 @@ fn invocation(with_credential: bool) -> anyhow::Result<(LifecycleRuntimeProbeReq
                 "provider_group_id": "sbg-exact",
                 "snapshot_id": "snp-exact",
                 "provider_response_sha256": "c".repeat(64),
-                "adapter_observation_sha256": "d".repeat(64)
+                "provider_creation_observation": {"schema": 1},
+                "adapter_observation_sha256": lillux::sha256_hex(br#"{"schema":1}"#)
             },
             "snapshot_kind": "filesystem",
             "plan": "starter",

@@ -352,7 +352,8 @@ mod tests {
             provider_group_id: intent.provider_group_id.clone(),
             snapshot_id: "snp-exact".into(),
             provider_response_sha256: "b".repeat(64),
-            adapter_observation_sha256: "c".repeat(64),
+            provider_creation_observation: serde_json::json!({"schema": 1}),
+            adapter_observation_sha256: lillux::sha256_hex(br#"{"schema":1}"#),
         };
         let mut record = RuntimeSnapshotRecord {
             intent,
