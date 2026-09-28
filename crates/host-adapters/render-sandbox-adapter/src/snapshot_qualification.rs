@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
 use ryeos_external_execution_contract::restored_runtime_measurement::{
-    MAX_RESTORED_OWNER_RESULT_BYTES, RestoredOwnerChallenge, RestoredOwnerMeasurement,
+    MAX_RESTORED_OWNER_RESULT_BYTES, MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES,
+    RESTORATION_VERIFIER_REMOTE_DIRECTORY, RESTORED_VERIFIER_ADAPTER_PROTOCOL,
+    RestoredOwnerChallenge, RestoredOwnerMeasurement, RestoredVerifierAdapterRequest,
+    RestoredVerifierAdapterResponse,
 };
 use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator;
 use ryeos_external_execution_contract::runtime_snapshot::{
@@ -37,6 +40,42 @@ struct QualificationSettings {
     region: String,
     sandbox_group_id: String,
     tls_roots_der_base64: Vec<String>,
+}
+
+fn selected_qualification_settings(
+    bytes: &[u8],
+    digest: &str,
+    group_id: &str,
+    snapshot_id: &str,
+) -> Result<Settings> {
+    ensure!(
+        lillux::sha256_hex(bytes) == digest,
+        "qualification settings changed their signed identity"
+    );
+    let settings: QualificationSettings =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            bytes,
+            crate::MAX_SETTINGS_BYTES,
+        )?;
+    ensure!(
+        ryeos_external_execution_contract::canonical_json(&serde_json::from_slice::<
+            serde_json::Value,
+        >(bytes)?)?
+            == bytes
+            && settings.schema == 1
+            && settings.sandbox_group_id == group_id,
+        "qualification settings are noncanonical or differ from retained group"
+    );
+    let selected = Settings {
+        schema: 2,
+        owner_id: settings.owner_id,
+        plan: settings.plan,
+        region: settings.region,
+        snapshot_id: snapshot_id.into(),
+        tls_roots_der_base64: settings.tls_roots_der_base64,
+    };
+    crate::validate_settings(&selected)?;
+    Ok(selected)
 }
 
 /// The only create contact for the retained qualification attempt. The
@@ -91,35 +130,12 @@ pub(crate) fn create_restored_sandbox(
     )?;
     let settings_bytes =
         crate::read_sealed_env(crate::LIFECYCLE_SETTINGS_FD_ENV, crate::MAX_SETTINGS_BYTES)?;
-    ensure!(
-        lillux::sha256_hex(&settings_bytes) == request.intent.settings_digest,
-        "qualification create settings changed their signed identity"
-    );
-    let settings: QualificationSettings =
-        ryeos_external_execution_contract::from_json_slice_strict(
-            &settings_bytes,
-            crate::MAX_SETTINGS_BYTES,
-        )?;
-    ensure!(
-        ryeos_external_execution_contract::canonical_json(&serde_json::from_slice::<
-            serde_json::Value,
-        >(&settings_bytes)?)?
-            == settings_bytes,
-        "qualification settings are noncanonical"
-    );
-    ensure!(
-        settings.schema == 1 && settings.sandbox_group_id == request.intent.provider_group_id,
-        "qualification settings differ from retained provider group"
-    );
-    let selected = Settings {
-        schema: 2,
-        owner_id: settings.owner_id,
-        plan: settings.plan,
-        region: settings.region,
-        snapshot_id: request.locator.snapshot_id.clone(),
-        tls_roots_der_base64: settings.tls_roots_der_base64,
-    };
-    crate::validate_settings(&selected)?;
+    let selected = selected_qualification_settings(
+        &settings_bytes,
+        &request.intent.settings_digest,
+        &request.intent.provider_group_id,
+        &request.locator.snapshot_id,
+    )?;
     let plan = match selected.plan {
         RenderPlan::Starter => PlanValue::Starter,
         RenderPlan::Standard => PlanValue::Standard,
@@ -193,6 +209,146 @@ pub(crate) fn create_restored_sandbox(
     };
     result.validate_for(&request)?;
     crate::write_response(&result)
+}
+
+/// Invoked only after the daemon's durable verifier-attempt claim. The entire
+/// sealed source, upload and route preflight precedes credential access. Any
+/// ambiguous upload, token mint, run or stream is returned as uncertainty;
+/// reconciliation must never invoke this entry again.
+pub(crate) fn run_restored_verifier(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
+    let enclosing = crate::operation_deadline()?;
+    ensure!(
+        [
+            crate::LIFECYCLE_BOOTSTRAP_FD_ENV,
+            crate::LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            crate::LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+        ]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none()),
+        "restored verifier received worker activation authority"
+    );
+    let bytes = crate::read_sealed_env(
+        crate::LIFECYCLE_REQUEST_FD_ENV,
+        MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES,
+    )?;
+    let request: RestoredVerifierAdapterRequest =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &bytes,
+            MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES,
+        )?;
+    request.validate()?;
+    ensure!(
+        request.protocol == RESTORED_VERIFIER_ADAPTER_PROTOCOL
+            && ryeos_external_execution_contract::canonical_json(&request)? == bytes
+            && request.source_intent.provider_id == ADAPTER_ID,
+        "restored verifier request is noncanonical or selects another provider"
+    );
+    crate::verify_artifact(
+        adapter,
+        &request.qualification_intent.adapter_artifact_hash,
+        None,
+    )?;
+    let deadline = crate::request_deadline(request.intent.attempt_deadline_ms, enclosing)?;
+    let spec_bytes = crate::read_sealed_env(
+        crate::LIFECYCLE_PROVIDER_SPEC_FD_ENV,
+        usize::try_from(ryeos_external_execution_contract::MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?,
+    )?;
+    let captured_spec_digest = std::env::var(crate::LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
+        .context("restored verifier lacks captured provider spec digest")?;
+    ensure!(
+        captured_spec_digest == request.provider_spec_digest
+            && lillux::sha256_hex(&spec_bytes) == request.provider_spec_digest,
+        "restored verifier provider spec changed its signed handoff"
+    );
+    let spec = ProviderSpec::parse(
+        &spec_bytes,
+        &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
+    )?;
+    let settings_bytes =
+        crate::read_sealed_env(crate::LIFECYCLE_SETTINGS_FD_ENV, crate::MAX_SETTINGS_BYTES)?;
+    let settings = selected_qualification_settings(
+        &settings_bytes,
+        &request.qualification_intent.settings_digest,
+        &request.qualification_intent.provider_group_id,
+        &request.locator.snapshot_id,
+    )?;
+    // SAFETY: the trusted runner transferred this exact sealed descriptor
+    // once into this single-threaded, first-claim adapter invocation.
+    let upload = unsafe { lillux::take_inherited_descriptor_authority(request.upload_descriptor) }
+        .map_err(anyhow::Error::msg)?;
+    preflight_verifier_upload_and_routes(&request, &upload, &spec, &settings)?;
+    let network = crate::network_context_from_captured_inputs()?;
+    let cancellation = lillux::network::NetworkCancellation::default();
+    let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
+    let result = crate::restored_verifier_contact::first_contact(
+        &network,
+        &spec,
+        &settings,
+        &request,
+        &upload,
+        deadline,
+        &cancellation,
+    )
+    .unwrap_or_else(|_| RestoredVerifierAdapterResponse::Uncertain {
+        operation_id: request.intent.operation_id.clone(),
+    });
+    result.validate_for(&request)?;
+    crate::write_response(&result)
+}
+
+fn preflight_verifier_upload_and_routes(
+    request: &RestoredVerifierAdapterRequest,
+    upload: &lillux::InheritedDescriptorAuthority,
+    spec: &ProviderSpec,
+    settings: &Settings,
+) -> Result<()> {
+    request.validate()?;
+    upload.require_owned_regular()?;
+    let observation = upload.regular_file_observation()?;
+    ensure!(
+        observation.full_permission_mode()? == 0o600
+            && observation.size() == request.upload_bytes
+            && upload.digest_regular_file_stable_exact(&observation)? == request.upload_sha256,
+        "sealed restored verifier upload differs from retained attempt"
+    );
+    let (upload_route, run_route) = spec.qualification_verifier_routes();
+    for (route, operation, path) in [
+        (
+            upload_route,
+            crate::proxy_route::ProxyOperation::UploadFile {
+                remote_path: RESTORATION_VERIFIER_REMOTE_DIRECTORY,
+            },
+            Some(RESTORATION_VERIFIER_REMOTE_DIRECTORY),
+        ),
+        (
+            run_route,
+            crate::proxy_route::ProxyOperation::RunStream,
+            None,
+        ),
+    ] {
+        let (url, target) = crate::api_url(
+            spec,
+            route,
+            Some(&request.occurrence.occurrence_id),
+            settings,
+            path,
+        )?;
+        crate::validate_api_url(
+            &url,
+            &target.path_segments,
+            target.owner_id_query.as_deref(),
+            target.upload_path_query.as_deref(),
+        )?;
+        ensure!(
+            url == crate::proxy_route::connect_token_url(
+                &request.occurrence.occurrence_id,
+                &settings.owner_id,
+                operation,
+            )?,
+            "signed verifier route differs from exact Render token operation"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -620,6 +776,8 @@ mod tests {
         };
 
         let (challenge, source_intent, locator, readiness, stream) = restored_stream_fixture();
+        let upload = lillux::sealed_memfd(c"verifier-upload-test", b"tar-fixture").unwrap();
+        let upload_sha256 = lillux::sha256_hex(b"tar-fixture");
         let mut qualification_intent = RuntimeSnapshotQualificationIntent {
             schema: 1,
             operation_id: String::new(),
@@ -651,8 +809,8 @@ mod tests {
             qualification_operation_id: qualification_intent.operation_id.clone(),
             restored_occurrence_id: occurrence.occurrence_id.clone(),
             verifier_artifact_hash: qualification_intent.verifier_artifact_hash.clone(),
-            upload_sha256: "4".repeat(64),
-            upload_bytes: 1024,
+            upload_sha256: upload_sha256.clone(),
+            upload_bytes: 11,
             challenge,
             attempt_deadline_ms: 42,
         };
@@ -667,10 +825,24 @@ mod tests {
             qualification_intent,
             occurrence,
             upload_descriptor: 4,
-            upload_bytes: 1024,
-            upload_sha256: "4".repeat(64),
+            upload_bytes: 11,
+            upload_sha256,
         };
         request.validate().unwrap();
+        let spec = ProviderSpec::parse(
+            include_bytes!("../fixtures/provider-spec.json"),
+            &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
+        )
+        .unwrap();
+        let settings = Settings {
+            schema: 2,
+            owner_id: "owner-1".into(),
+            plan: RenderPlan::Starter,
+            region: "oregon".into(),
+            snapshot_id: request.locator.snapshot_id.clone(),
+            tls_roots_der_base64: vec![],
+        };
+        preflight_verifier_upload_and_routes(&request, &upload, &spec, &settings).unwrap();
         let parsed = parse_restored_verifier_stream(
             &stream,
             &request.intent.challenge,
@@ -698,6 +870,7 @@ mod tests {
         let mut changed = request;
         changed.upload_sha256 = "6".repeat(64);
         assert!(response.validate_for(&changed).is_err());
+        assert!(preflight_verifier_upload_and_routes(&changed, &upload, &spec, &settings).is_err());
     }
 
     fn public_root() -> String {

@@ -16,6 +16,9 @@ use crate::runtime_snapshot::{
 };
 
 pub const RESTORED_OWNER_MEASUREMENT_PROTOCOL: &str = "ryeos.restored-owner-measurement.v1";
+pub const RESTORATION_VERIFIER_REMOTE_DIRECTORY: &str = "/ryeos/qualification";
+pub const RESTORATION_VERIFIER_REMOTE_NAME: &str = "ryeos-external-guest-restoration-verifier";
+pub const MAX_RESTORATION_VERIFIER_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_RESTORED_OWNER_CHALLENGE_BYTES: usize = 4096;
 pub const MAX_RESTORED_OWNER_RESULT_BYTES: usize = 4096;
 pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v1";
@@ -186,7 +189,7 @@ impl RestoredVerifierAttemptIntent {
                 && self.verifier_artifact_hash == qualification.verifier_artifact_hash
                 && !occurrence.contact_deadline_exceeded
                 && self.upload_bytes > 0
-                && self.upload_bytes <= 32 * 1024 * 1024 + 16 * 1024
+                && self.upload_bytes <= MAX_RESTORATION_VERIFIER_BYTES + 16 * 1024
                 && self.attempt_deadline_ms > 0,
             "restored verifier attempt differs from timely qualified occurrence"
         );

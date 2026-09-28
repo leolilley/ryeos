@@ -5,6 +5,7 @@
 mod activation_contact;
 mod provider_spec;
 mod proxy_route;
+mod restored_verifier_contact;
 mod snapshot_production;
 mod snapshot_provider_spec;
 mod snapshot_qualification;
@@ -264,6 +265,9 @@ fn run() -> Result<()> {
         Some("observe-snapshot-readiness") => snapshot_production::observe_readiness(&adapter),
         Some("qualify-snapshot-create") => {
             snapshot_qualification::create_restored_sandbox(&adapter)
+        }
+        Some("qualify-snapshot-verify") => {
+            snapshot_qualification::run_restored_verifier(&adapter)
         }
         _ => anyhow::bail!("unsupported lifecycle invocation"),
     }

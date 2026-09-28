@@ -85,16 +85,14 @@ pub(crate) fn first_activation_contact(
     cancellation: &NetworkCancellation,
 ) -> Result<()> {
     preflight_delivery_before_credential(delivery, signed_import, package)?;
-    let credential = read_credential()?;
-    let mut contact = RenderContact {
+    let mut contact = RenderContact::new(
         network,
         provider_spec,
         settings,
         occurrence_id,
-        credential,
         deadline,
         cancellation,
-    };
+    )?;
     contact_once(&mut contact, delivery, signed_import, package)
 }
 
@@ -134,7 +132,7 @@ pub(crate) fn verify_package_before_contact(
     Ok(())
 }
 
-struct RenderContact<'a> {
+pub(crate) struct RenderContact<'a> {
     network: &'a NetworkContext,
     provider_spec: &'a ProviderSpec,
     settings: &'a Settings,
@@ -145,7 +143,26 @@ struct RenderContact<'a> {
 }
 
 impl RenderContact<'_> {
-    fn mint(
+    pub(crate) fn new<'a>(
+        network: &'a NetworkContext,
+        provider_spec: &'a ProviderSpec,
+        settings: &'a Settings,
+        occurrence_id: &'a str,
+        deadline: MonotonicDeadline,
+        cancellation: &'a NetworkCancellation,
+    ) -> Result<RenderContact<'a>> {
+        Ok(RenderContact {
+            network,
+            provider_spec,
+            settings,
+            occurrence_id,
+            credential: read_credential()?,
+            deadline,
+            cancellation,
+        })
+    }
+
+    pub(crate) fn mint(
         &self,
         operation: ProxyOperation<'_>,
         command: Option<&str>,
@@ -212,7 +229,7 @@ impl RenderContact<'_> {
         )
     }
 
-    fn send_proxy(
+    pub(crate) fn send_proxy(
         &self,
         token: BoundConnectToken,
         operation: ProxyOperation<'_>,
@@ -564,7 +581,9 @@ mod tests {
         let path = parent.path().join("package");
         std::fs::write(&path, b"exact-package").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
-        let root = lillux::PinnedDirectory::open(parent.path()).unwrap().unwrap();
+        let root = lillux::PinnedDirectory::open(parent.path())
+            .unwrap()
+            .unwrap();
         let package = root
             .open_pinned_regular(std::ffi::OsStr::new("package"), false)
             .unwrap()
@@ -586,8 +605,7 @@ mod tests {
         let mut changed_digest = plan;
         changed_digest.guest_package_sha256 = "a".repeat(64);
         assert!(
-            preflight_delivery_before_credential(&changed_digest, signed_import, &package)
-                .is_err()
+            preflight_delivery_before_credential(&changed_digest, signed_import, &package).is_err()
         );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(

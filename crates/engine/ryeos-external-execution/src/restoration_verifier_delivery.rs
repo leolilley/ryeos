@@ -4,9 +4,10 @@
 
 use anyhow::{Result, ensure};
 
-pub const RESTORATION_VERIFIER_REMOTE_DIRECTORY: &str = "/ryeos/qualification";
-pub const RESTORATION_VERIFIER_REMOTE_NAME: &str = "ryeos-external-guest-restoration-verifier";
-pub const MAX_RESTORATION_VERIFIER_BYTES: u64 = 32 * 1024 * 1024;
+pub use ryeos_external_execution_contract::restored_runtime_measurement::{
+    MAX_RESTORATION_VERIFIER_BYTES, RESTORATION_VERIFIER_REMOTE_DIRECTORY,
+    RESTORATION_VERIFIER_REMOTE_NAME,
+};
 
 pub struct SealedRestorationVerifierUpload {
     descriptor: lillux::InheritedDescriptorAuthority,
