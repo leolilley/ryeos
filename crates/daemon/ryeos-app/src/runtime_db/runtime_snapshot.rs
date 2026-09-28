@@ -1,4 +1,4 @@
-//! One-contact journal for operator-owned external runtime snapshot production.
+//! One-attempt journal for operator-owned external runtime snapshot production.
 //!
 //! This is separate from a worker allocation. A complete provider response
 //! may bind a locator, but only independent restored-guest qualification can
@@ -15,7 +15,7 @@ CREATE TABLE runtime_snapshot_operation (
     operation_id TEXT PRIMARY KEY,
     intent_json TEXT NOT NULL,
     intent_digest TEXT NOT NULL,
-    phase TEXT NOT NULL CHECK (phase IN ('reserved','contact_pending','quarantined','bound')),
+    phase TEXT NOT NULL CHECK (phase IN ('reserved','attempt_pending','quarantined','bound')),
     locator_json TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
@@ -35,7 +35,7 @@ BEGIN SELECT RAISE(ABORT, 'runtime snapshot operation is retained'); END;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSnapshotPhase {
     Reserved,
-    ContactPending,
+    AttemptPending,
     Quarantined,
     Bound,
 }
@@ -44,7 +44,7 @@ impl RuntimeSnapshotPhase {
     fn parse(value: &str) -> Result<Self> {
         Ok(match value {
             "reserved" => Self::Reserved,
-            "contact_pending" => Self::ContactPending,
+            "attempt_pending" => Self::AttemptPending,
             "quarantined" => Self::Quarantined,
             "bound" => Self::Bound,
             _ => anyhow::bail!("runtime snapshot has an invalid phase"),
@@ -62,8 +62,8 @@ pub struct RuntimeSnapshotRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeSnapshotContactClaim {
-    Contact(RuntimeSnapshotRecord),
+pub enum RuntimeSnapshotAttemptClaim {
+    StartAttempt(RuntimeSnapshotRecord),
     Reconcile(RuntimeSnapshotRecord),
     Bound(RuntimeSnapshotRecord),
 }
@@ -174,9 +174,9 @@ impl RuntimeDb {
         }
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         ensure!(
-            intent.contact_deadline_ms > now
-                && intent.contact_deadline_ms.saturating_sub(now) <= 300_000,
-            "runtime snapshot contact deadline is outside its admission window"
+            intent.attempt_deadline_ms > now
+                && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
+            "runtime snapshot attempt deadline is outside its admission window"
         );
         tx.execute(
             "INSERT INTO runtime_snapshot_operation VALUES(?1,?2,?3,'reserved',NULL,?4,?4)",
@@ -193,48 +193,49 @@ impl RuntimeDb {
         Ok(record)
     }
 
-    /// Only Contact may invoke a provider mutation. Pending and quarantined
-    /// rows never grant another contact claim after restart or lost output.
-    pub fn claim_runtime_snapshot_contact(
+    /// Only StartAttempt may run the bounded provider sequence. The sequence
+    /// can include several requests; pending and quarantined rows never grant
+    /// a second attempt after restart or lost output.
+    pub fn claim_runtime_snapshot_attempt(
         &self,
         operation_id: &str,
         intent_digest: &str,
-    ) -> Result<RuntimeSnapshotContactClaim> {
+    ) -> Result<RuntimeSnapshotAttemptClaim> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read(&tx, operation_id)?.context("runtime snapshot was not reserved")?;
         ensure!(
             record.intent.digest()? == intent_digest,
-            "runtime snapshot contact changed intent"
+            "runtime snapshot attempt changed intent"
         );
         match record.phase {
             RuntimeSnapshotPhase::Bound => {
                 tx.commit()?;
-                return Ok(RuntimeSnapshotContactClaim::Bound(record));
+                return Ok(RuntimeSnapshotAttemptClaim::Bound(record));
             }
-            RuntimeSnapshotPhase::ContactPending | RuntimeSnapshotPhase::Quarantined => {
+            RuntimeSnapshotPhase::AttemptPending | RuntimeSnapshotPhase::Quarantined => {
                 tx.commit()?;
-                return Ok(RuntimeSnapshotContactClaim::Reconcile(record));
+                return Ok(RuntimeSnapshotAttemptClaim::Reconcile(record));
             }
             RuntimeSnapshotPhase::Reserved => {}
         }
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         ensure!(
-            now < record.intent.contact_deadline_ms,
-            "runtime snapshot contact deadline expired"
+            now < record.intent.attempt_deadline_ms,
+            "runtime snapshot attempt deadline expired"
         );
         let changed = tx.execute(
-            "UPDATE runtime_snapshot_operation SET phase='contact_pending',updated_at_ms=?2
+            "UPDATE runtime_snapshot_operation SET phase='attempt_pending',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='reserved'",
             params![operation_id, now],
         )?;
         ensure!(
             changed == 1,
-            "runtime snapshot contact claim lost its durable CAS"
+            "runtime snapshot attempt claim lost its durable CAS"
         );
         let current =
-            read(&tx, operation_id)?.context("runtime snapshot contact claim vanished")?;
+            read(&tx, operation_id)?.context("runtime snapshot attempt claim vanished")?;
         tx.commit()?;
-        Ok(RuntimeSnapshotContactClaim::Contact(current))
+        Ok(RuntimeSnapshotAttemptClaim::StartAttempt(current))
     }
 
     /// A complete adapter observation may bind one opaque snapshot locator.
@@ -245,7 +246,7 @@ impl RuntimeDb {
     ) -> Result<RuntimeSnapshotRecord> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record =
-            read(&tx, &locator.operation_id)?.context("runtime snapshot has no contact claim")?;
+            read(&tx, &locator.operation_id)?.context("runtime snapshot has no attempt claim")?;
         locator.validate_for(&record.intent)?;
         if record.phase == RuntimeSnapshotPhase::Bound {
             ensure!(
@@ -258,14 +259,14 @@ impl RuntimeDb {
         ensure!(
             matches!(
                 record.phase,
-                RuntimeSnapshotPhase::ContactPending | RuntimeSnapshotPhase::Quarantined
+                RuntimeSnapshotPhase::AttemptPending | RuntimeSnapshotPhase::Quarantined
             ),
-            "runtime snapshot locator did not follow its one contact claim"
+            "runtime snapshot locator did not follow its one attempt claim"
         );
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         let changed = tx.execute(
             "UPDATE runtime_snapshot_operation SET phase='bound',locator_json=?2,updated_at_ms=?3
-             WHERE operation_id=?1 AND phase IN ('contact_pending','quarantined')",
+             WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
             params![locator.operation_id, canonical(locator)?, now],
         )?;
         ensure!(
@@ -278,13 +279,13 @@ impl RuntimeDb {
         Ok(current)
     }
 
-    pub fn quarantine_runtime_snapshot_contact(
+    pub fn quarantine_runtime_snapshot_attempt(
         &self,
         operation_id: &str,
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotRecord> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("runtime snapshot contact is absent")?;
+        let record = read(&tx, operation_id)?.context("runtime snapshot attempt is absent")?;
         ensure!(
             record.intent.digest()? == intent_digest,
             "runtime snapshot quarantine changed intent"
@@ -294,13 +295,13 @@ impl RuntimeDb {
             return Ok(record);
         }
         ensure!(
-            record.phase == RuntimeSnapshotPhase::ContactPending,
-            "runtime snapshot quarantine requires pending contact"
+            record.phase == RuntimeSnapshotPhase::AttemptPending,
+            "runtime snapshot quarantine requires pending attempt"
         );
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         tx.execute(
             "UPDATE runtime_snapshot_operation SET phase='quarantined',updated_at_ms=?2
-             WHERE operation_id=?1 AND phase='contact_pending'",
+             WHERE operation_id=?1 AND phase='attempt_pending'",
             params![operation_id, now],
         )?;
         let current = read(&tx, operation_id)?.context("runtime snapshot quarantine vanished")?;
@@ -325,7 +326,7 @@ mod tests {
             provider_id: "render-sandbox-early-access".into(),
             source_occurrence_id: "sbx-source".into(),
             provider_group_id: "sbg-group".into(),
-            binding_hash: "3".repeat(64),
+            production_profile_digest: "3".repeat(64),
             adapter_artifact_hash: "4".repeat(64),
             settings_digest: "5".repeat(64),
             product_witness_hash: "6".repeat(64),
@@ -334,7 +335,7 @@ mod tests {
             controller_public_root: format!("ed25519:{}", "A".repeat(44)),
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
-            contact_deadline_ms: now + 60_000,
+            attempt_deadline_ms: now + 60_000,
         };
         intent.operation_id = intent.derived_operation_id().unwrap();
         intent
@@ -354,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_reservation_claim_and_result_never_recontact() {
+    fn exact_reservation_claim_and_result_never_restart_attempt() {
         let db = RuntimeDb::new_in_memory().unwrap();
         let intent = intent();
         assert_eq!(
@@ -367,18 +368,18 @@ mod tests {
         assert!(db.reserve_runtime_snapshot(&changed).is_err());
         let digest = intent.digest().unwrap();
         assert!(
-            db.claim_runtime_snapshot_contact(&intent.operation_id, &"f".repeat(64))
+            db.claim_runtime_snapshot_attempt(&intent.operation_id, &"f".repeat(64))
                 .is_err()
         );
         assert!(matches!(
-            db.claim_runtime_snapshot_contact(&intent.operation_id, &digest)
+            db.claim_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .unwrap(),
-            RuntimeSnapshotContactClaim::Contact(_)
+            RuntimeSnapshotAttemptClaim::StartAttempt(_)
         ));
         assert!(matches!(
-            db.claim_runtime_snapshot_contact(&intent.operation_id, &digest)
+            db.claim_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .unwrap(),
-            RuntimeSnapshotContactClaim::Reconcile(_)
+            RuntimeSnapshotAttemptClaim::Reconcile(_)
         ));
         let locator = locator(&intent);
         assert_eq!(
@@ -386,9 +387,9 @@ mod tests {
             RuntimeSnapshotPhase::Bound
         );
         assert!(matches!(
-            db.claim_runtime_snapshot_contact(&intent.operation_id, &digest)
+            db.claim_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .unwrap(),
-            RuntimeSnapshotContactClaim::Bound(_)
+            RuntimeSnapshotAttemptClaim::Bound(_)
         ));
         assert_eq!(
             db.bind_runtime_snapshot_locator(&locator).unwrap().locator,
@@ -401,30 +402,30 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_contact_stays_non_replayable() {
+    fn uncertain_attempt_stays_non_replayable() {
         let db = RuntimeDb::new_in_memory().unwrap();
         let intent = intent();
         db.reserve_runtime_snapshot(&intent).unwrap();
         let digest = intent.digest().unwrap();
-        db.claim_runtime_snapshot_contact(&intent.operation_id, &digest)
+        db.claim_runtime_snapshot_attempt(&intent.operation_id, &digest)
             .unwrap();
         assert_eq!(
-            db.quarantine_runtime_snapshot_contact(&intent.operation_id, &digest)
+            db.quarantine_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .unwrap()
                 .phase,
             RuntimeSnapshotPhase::Quarantined
         );
         assert!(matches!(
-            db.claim_runtime_snapshot_contact(&intent.operation_id, &digest)
+            db.claim_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .unwrap(),
-            RuntimeSnapshotContactClaim::Reconcile(_)
+            RuntimeSnapshotAttemptClaim::Reconcile(_)
         ));
         let late = db.bind_runtime_snapshot_locator(&locator(&intent)).unwrap();
         assert_eq!(late.phase, RuntimeSnapshotPhase::Bound);
         assert!(matches!(
-            db.claim_runtime_snapshot_contact(&intent.operation_id, &digest)
+            db.claim_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .unwrap(),
-            RuntimeSnapshotContactClaim::Bound(_)
+            RuntimeSnapshotAttemptClaim::Bound(_)
         ));
     }
 }

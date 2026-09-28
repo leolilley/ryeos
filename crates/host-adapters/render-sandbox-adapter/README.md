@@ -357,9 +357,12 @@ original product witness/root in a locator observation. A separate bounded
 readiness parser accepts only a complete `200` response that reports the same
 filesystem snapshot, source, group, plan and request timing as `available`;
 this remains provider readiness, not a restored-content proof. RyeOS also
-retains a provider-neutral snapshot intent and one-contact journal: an exact
-reservation may claim provider contact once; an uncertain contact must reconcile, never
-blindly repeat the mutation. The parser and journal are not yet joined by an
+retains a provider-neutral snapshot intent and one-attempt journal. The intent
+binds a signed production profile, not the later placement binding whose
+snapshot ID does not exist yet. An exact
+reservation may start the bounded provider sequence once; an uncertain
+attempt must reconcile, never blindly repeat the sequence. The parser and
+journal are not yet joined by an
 admitted operator action. Neither is evidence of the bytes restored from the
 snapshot.
 This does not export a CAS path, contact Render, publish a snapshot, or attest

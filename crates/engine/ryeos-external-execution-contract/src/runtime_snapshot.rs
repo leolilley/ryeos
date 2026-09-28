@@ -1,7 +1,7 @@
 //! Durable, provider-neutral identity of one external runtime snapshot effect.
 //!
-//! The intent owns one provider-contact opportunity. A provider locator is
-//! only a contact result; restored bytes and runtime behavior require an
+//! The intent owns one provider-sequence attempt. A provider locator is
+//! only an attempt result; restored bytes and runtime behavior require an
 //! independent qualification rooted in the retained product witness.
 
 use anyhow::{Result, ensure};
@@ -23,7 +23,9 @@ pub struct RuntimeSnapshotIntent {
     pub provider_id: String,
     pub source_occurrence_id: String,
     pub provider_group_id: String,
-    pub binding_hash: String,
+    /// Signed producer authority, distinct from the later placement binding
+    /// that will name the resulting snapshot ID.
+    pub production_profile_digest: String,
     pub adapter_artifact_hash: String,
     pub settings_digest: String,
     pub product_witness_hash: String,
@@ -32,7 +34,7 @@ pub struct RuntimeSnapshotIntent {
     pub controller_public_root: String,
     pub upload_sha256: String,
     pub upload_bytes: u64,
-    pub contact_deadline_ms: i64,
+    pub attempt_deadline_ms: i64,
 }
 
 impl RuntimeSnapshotIntent {
@@ -43,7 +45,7 @@ impl RuntimeSnapshotIntent {
         );
         for (label, value) in [
             ("operation", &self.operation_id),
-            ("binding", &self.binding_hash),
+            ("production profile", &self.production_profile_digest),
             ("adapter", &self.adapter_artifact_hash),
             ("settings", &self.settings_digest),
             ("product witness", &self.product_witness_hash),
@@ -69,7 +71,7 @@ impl RuntimeSnapshotIntent {
         );
         ensure!(
             (1..=MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES).contains(&self.upload_bytes)
-                && self.contact_deadline_ms > 0,
+                && self.attempt_deadline_ms > 0,
             "runtime snapshot upload or deadline exceeds its bound"
         );
         ensure!(
@@ -81,7 +83,7 @@ impl RuntimeSnapshotIntent {
 
     /// Stable across a retry with a later deadline, but unique to the exact
     /// admitted source and delivery bytes. A caller cannot mint a second
-    /// contact opportunity by choosing another operation ID.
+    /// attempt opportunity by choosing another operation ID.
     pub fn derived_operation_id(&self) -> Result<String> {
         let coordinates = (
             "ryeos.runtime-snapshot-operation.v1",
@@ -89,7 +91,7 @@ impl RuntimeSnapshotIntent {
             &self.provider_id,
             &self.source_occurrence_id,
             &self.provider_group_id,
-            &self.binding_hash,
+            &self.production_profile_digest,
             &self.adapter_artifact_hash,
             &self.settings_digest,
             &self.product_witness_hash,
@@ -188,7 +190,7 @@ mod tests {
             provider_id: "render-sandbox-early-access".into(),
             source_occurrence_id: "sbox-fixture-1".into(),
             provider_group_id: "sbg-fixture-1".into(),
-            binding_hash: "3".repeat(64),
+            production_profile_digest: "3".repeat(64),
             adapter_artifact_hash: "4".repeat(64),
             settings_digest: "5".repeat(64),
             product_witness_hash: "6".repeat(64),
@@ -197,7 +199,7 @@ mod tests {
             controller_public_root: format!("ed25519:{}", "A".repeat(44)),
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
-            contact_deadline_ms: 42,
+            attempt_deadline_ms: 42,
         };
         intent.operation_id = intent.derived_operation_id().unwrap();
         intent
@@ -214,6 +216,7 @@ mod tests {
             "upload_sha256",
             "adapter_artifact_hash",
             "settings_digest",
+            "production_profile_digest",
             "source_occurrence_id",
             "provider_group_id",
         ] {
@@ -238,10 +241,10 @@ mod tests {
     }
 
     #[test]
-    fn deadline_change_cannot_mint_another_contact_opportunity() {
+    fn deadline_change_cannot_mint_another_attempt_opportunity() {
         let baseline = intent();
         let mut retried = baseline.clone();
-        retried.contact_deadline_ms += 100;
+        retried.attempt_deadline_ms += 100;
         assert_eq!(
             retried.derived_operation_id().unwrap(),
             baseline.operation_id
@@ -252,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn locator_cannot_switch_source_after_contact() {
+    fn locator_cannot_switch_source_after_attempt() {
         let intent = intent();
         let mut locator = RuntimeSnapshotLocator {
             schema: RUNTIME_SNAPSHOT_RESULT_SCHEMA,
