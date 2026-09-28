@@ -43,7 +43,7 @@
       ],
       "query": {
         "ownerId": { "source": "settings.owner_id" },
-        "path": { "source": "activation.upload_path" }
+        "path": { "source": "operation.upload_path" }
       }
     },
     "sandbox_run_stream_token_by_id": {
@@ -92,6 +92,12 @@
       },
       "bind_proof_profile": "render_sandbox_create_201_v1",
       "no_occurrence_proof_profile": "render_no_request_sent_v1"
+    },
+    "qualification_verify": {
+      "kind": "upload_then_run_once",
+      "precondition_profile": "render_bound_qualification_occurrence_v1",
+      "mutation_route": "sandbox_file_upload_token_by_id",
+      "observation_route": "sandbox_run_stream_token_by_id"
     },
     "reconcile_allocation": { "kind": "unsupported_pending" },
     "activate_supervisor": { "kind": "unsupported_pending" },

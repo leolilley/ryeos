@@ -115,8 +115,8 @@ struct RouteQuery {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 enum UploadPathFieldSource {
-    #[serde(rename = "activation.upload_path")]
-    ActivationUploadPath,
+    #[serde(rename = "operation.upload_path")]
+    OperationUploadPath,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -209,6 +209,7 @@ enum PreconditionProfile {
     RenderConfiguredRuntimeSnapshotV1,
     RenderQualifiedGuestRuntimeV1,
     RenderBoundRuntimeSnapshotV1,
+    RenderBoundQualificationOccurrenceV1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -234,6 +235,7 @@ enum TerminalProofProfile {
 enum OperationKind {
     CreateOnce,
     UploadThenRunOncePending,
+    UploadThenRunOnce,
     UnsupportedPending,
     TerminateOnceThenObserveExact,
     ObserveExactOccurrence,
@@ -268,6 +270,7 @@ pub(crate) struct OperationSpec {
 pub(crate) struct Operations {
     pub(crate) allocate: OperationSpec,
     qualification_create: OperationSpec,
+    qualification_verify: OperationSpec,
     reconcile_allocation: OperationSpec,
     activate_supervisor: OperationSpec,
     reconcile_supervisor_activation: OperationSpec,
@@ -423,6 +426,20 @@ impl ProviderSpec {
                 && qualification.terminal_proof_profile.is_none(),
             "provider spec qualification create operation is unsupported"
         );
+        let verifier = &self.operations.qualification_verify;
+        ensure!(
+            verifier.kind == OperationKind::UploadThenRunOnce
+                && verifier.precondition_profile
+                    == Some(PreconditionProfile::RenderBoundQualificationOccurrenceV1)
+                && verifier.route.is_none()
+                && verifier.body.is_none()
+                && verifier.bind_proof_profile.is_none()
+                && verifier.no_occurrence_proof_profile.is_none()
+                && verifier.mutation_route == Some(RouteName::SandboxFileUploadTokenById)
+                && verifier.observation_route == Some(RouteName::SandboxRunStreamTokenById)
+                && verifier.terminal_proof_profile.is_none(),
+            "provider spec restored verifier operation is unsupported"
+        );
         ensure!(
             self.operations.reconcile_allocation.is_empty_pending()
                 && (self.operations.activate_supervisor.is_empty_pending()
@@ -518,6 +535,17 @@ impl ProviderSpec {
         self.operations.qualification_create.route
     }
 
+    pub(crate) fn qualification_verifier_routes(&self) -> (RouteName, RouteName) {
+        // `validate_operations` has already checked both finite route names.
+        (
+            self.operations.qualification_verify.mutation_route.unwrap(),
+            self.operations
+                .qualification_verify
+                .observation_route
+                .unwrap(),
+        )
+    }
+
     pub(crate) fn allocation_requires_configured_runtime_snapshot(&self) -> bool {
         self.operations.allocate.precondition_profile
             == Some(PreconditionProfile::RenderConfiguredRuntimeSnapshotV1)
@@ -599,7 +627,7 @@ impl ProviderSpec {
         let upload_path_query = match (&route.query, upload_path) {
             (Some(query), Some(path))
                 if query.path.as_ref().is_some_and(|source| {
-                    source.source == UploadPathFieldSource::ActivationUploadPath
+                    source.source == UploadPathFieldSource::OperationUploadPath
                 }) =>
             {
                 ensure!(
@@ -614,13 +642,13 @@ impl ProviderSpec {
                                         || matches!(byte, b'-' | b'_' | b'.')
                                 })
                         }),
-                    "activation upload path is invalid"
+                    "operation upload path is invalid"
                 );
                 Some(path.to_owned())
             }
             (Some(query), None) if query.path.is_none() => None,
             (None, None) => None,
-            _ => anyhow::bail!("activation upload path does not match the signed route"),
+            _ => anyhow::bail!("operation upload path does not match the signed route"),
         };
         Ok(RouteTarget {
             path_segments,
@@ -782,7 +810,7 @@ fn route_matches(
             (Some(query), ExpectedRouteQuery::OwnerAndUploadPath) => {
                 query.owner_id.source == StringFieldSource::SettingsOwnerId
                     && query.path.as_ref().is_some_and(|source| {
-                        source.source == UploadPathFieldSource::ActivationUploadPath
+                        source.source == UploadPathFieldSource::OperationUploadPath
                     })
             }
             _ => false,
@@ -1002,7 +1030,7 @@ mod tests {
             ProviderSpec::parse(arbitrary_token_route.as_bytes(), SETTINGS_SCHEMA_DIGEST).is_err()
         );
         let arbitrary_upload_source =
-            fixture.replace("activation.upload_path", "settings.snapshot_id");
+            fixture.replace("operation.upload_path", "settings.snapshot_id");
         assert!(
             ProviderSpec::parse(arbitrary_upload_source.as_bytes(), SETTINGS_SCHEMA_DIGEST)
                 .is_err()
@@ -1077,6 +1105,48 @@ mod tests {
         changed["operations"]["qualification_create"]["body"]["snapshotId"]["source"] =
             serde_json::json!("qualification.locator.snapshot_id");
         changed["qualification_settings_schema_digest"] = serde_json::json!("0".repeat(64));
+        assert!(
+            ProviderSpec::parse(
+                &serde_json::to_vec(&changed).unwrap(),
+                SETTINGS_SCHEMA_DIGEST
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn restored_verifier_routes_are_finite_and_separate_from_activation() {
+        let spec = ProviderSpec::parse(&fixture(), SETTINGS_SCHEMA_DIGEST).unwrap();
+        assert_eq!(
+            spec.qualification_verifier_routes(),
+            (
+                RouteName::SandboxFileUploadTokenById,
+                RouteName::SandboxRunStreamTokenById,
+            )
+        );
+        assert!(
+            spec.route_target(
+                RouteName::SandboxFileUploadTokenById,
+                Some("sbx-restored"),
+                "owner-1",
+                Some("/ryeos/qualification"),
+            )
+            .is_ok()
+        );
+        let mut changed: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        changed["operations"]["qualification_verify"]["observation_route"] =
+            serde_json::json!("sandbox_by_id");
+        assert!(
+            ProviderSpec::parse(
+                &serde_json::to_vec(&changed).unwrap(),
+                SETTINGS_SCHEMA_DIGEST
+            )
+            .is_err()
+        );
+        changed["operations"]["qualification_verify"]["observation_route"] =
+            serde_json::json!("sandbox_run_stream_token_by_id");
+        changed["operations"]["qualification_verify"]["precondition_profile"] =
+            serde_json::json!("render_qualified_guest_runtime_v1");
         assert!(
             ProviderSpec::parse(
                 &serde_json::to_vec(&changed).unwrap(),

@@ -7,6 +7,7 @@
     "schema",
     "provider_profile",
     "settings_schema_digest",
+    "qualification_settings_schema_digest",
     "origin_profile",
     "routes",
     "operations"
@@ -15,6 +16,10 @@
     "schema": { "const": 2 },
     "provider_profile": { "const": "render_sandbox_v1" },
     "settings_schema_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "qualification_settings_schema_digest": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
@@ -42,6 +47,8 @@
       "additionalProperties": false,
       "required": [
         "allocate",
+        "qualification_create",
+        "qualification_verify",
         "reconcile_allocation",
         "activate_supervisor",
         "reconcile_supervisor_activation",
@@ -50,6 +57,8 @@
       ],
       "properties": {
         "allocate": { "$ref": "#/$defs/allocate_operation" },
+        "qualification_create": { "$ref": "#/$defs/qualification_create_operation" },
+        "qualification_verify": { "$ref": "#/$defs/qualification_verify_operation" },
         "reconcile_allocation": { "$ref": "#/$defs/pending_operation" },
         "activate_supervisor": { "$ref": "#/$defs/pending_operation" },
         "reconcile_supervisor_activation": {
@@ -118,7 +127,7 @@
         }
       }
     },
-    "owner_and_activation_path_query": {
+    "owner_and_operation_path_query": {
       "type": "object", "additionalProperties": false,
       "required": ["ownerId", "path"],
       "properties": {
@@ -126,7 +135,7 @@
         "path": {
           "type": "object", "additionalProperties": false,
           "required": ["source"],
-          "properties": { "source": { "const": "activation.upload_path" } }
+          "properties": { "source": { "const": "operation.upload_path" } }
         }
       }
     },
@@ -202,7 +211,7 @@
           ],
           "minItems": 6, "maxItems": 6, "items": false
         },
-        "query": { "$ref": "#/$defs/owner_and_activation_path_query" }
+        "query": { "$ref": "#/$defs/owner_and_operation_path_query" }
       }
     },
     "run_stream_token_route": {
@@ -256,6 +265,14 @@
         "source": { "const": "reservation.maximum_lifetime_seconds" }
       }
     },
+    "qualification_lifetime_source": {
+      "type": "object", "additionalProperties": false, "required": ["source"],
+      "properties": { "source": { "const": "qualification.maximum_lifetime_seconds" } }
+    },
+    "qualification_snapshot_source": {
+      "type": "object", "additionalProperties": false, "required": ["source"],
+      "properties": { "source": { "const": "qualification.locator.snapshot_id" } }
+    },
     "create_body": {
       "type": "object",
       "additionalProperties": false,
@@ -293,6 +310,39 @@
       "additionalProperties": false,
       "required": ["kind"],
       "properties": { "kind": { "const": "unsupported_pending" } }
+    },
+    "qualification_create_operation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "route", "precondition_profile", "body", "bind_proof_profile", "no_occurrence_proof_profile"],
+      "properties": {
+        "kind": { "const": "create_once" },
+        "route": { "const": "sandbox_collection" },
+        "precondition_profile": { "const": "render_bound_runtime_snapshot_v1" },
+        "body": {
+          "type": "object", "additionalProperties": false,
+          "required": ["ownerId", "plan", "region", "timeoutSeconds", "networkPolicy", "snapshotId"],
+          "properties": {
+            "ownerId": { "$ref": "#/$defs/settings_owner_source" },
+            "plan": { "$ref": "#/$defs/settings_plan_source" },
+            "region": { "$ref": "#/$defs/settings_region_source" },
+            "timeoutSeconds": { "$ref": "#/$defs/qualification_lifetime_source" },
+            "networkPolicy": { "type": "object", "additionalProperties": false, "required": ["literal"], "properties": { "literal": { "type": "object", "additionalProperties": false, "required": ["default"], "properties": { "default": { "const": "deny-all" } } } } },
+            "snapshotId": { "$ref": "#/$defs/qualification_snapshot_source" }
+          }
+        },
+        "bind_proof_profile": { "const": "render_sandbox_create_201_v1" },
+        "no_occurrence_proof_profile": { "const": "render_no_request_sent_v1" }
+      }
+    },
+    "qualification_verify_operation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "precondition_profile", "mutation_route", "observation_route"],
+      "properties": {
+        "kind": { "const": "upload_then_run_once" },
+        "precondition_profile": { "const": "render_bound_qualification_occurrence_v1" },
+        "mutation_route": { "const": "sandbox_file_upload_token_by_id" },
+        "observation_route": { "const": "sandbox_run_stream_token_by_id" }
+      }
     },
     "allocate_operation": {
       "type": "object",
