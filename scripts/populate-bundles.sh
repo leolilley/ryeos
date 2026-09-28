@@ -661,6 +661,7 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDL
   ryeos_term_update "publishing Render Sandbox adapter bundle" "signed lifecycle profile"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$RENDER_SANDBOX" \
     --registry-root "$CORE" \
+    --registry-root "$STD" \
     --owner "$OWNER" >/dev/null
 fi
 

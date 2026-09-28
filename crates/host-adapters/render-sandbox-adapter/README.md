@@ -403,7 +403,17 @@ also ran a bounded fail-closed argument probe in a disposable Render Sandbox.
 These are source-production and native-execution observations, not an installed
 Render snapshot or runtime qualification. The product witness must be carried
 through an admitted product-to-provider staging path; the artifact-blob export
-command does not export external-content manifests.
+command does not export external-content manifests. The existing
+`service:external-content/receive-product` is that same-operator, pinned-remote
+CAS receipt path. It authenticates the origin admission and witness, then
+publishes a distinct local acceptance without copying consumer or qualification
+authority. The signed `graph:render-sandbox/owner-snapshot-production` joins
+that returned `acceptance_hash` to a single
+`service:external-content/produce-runtime-snapshot` call with
+`source: {kind: received}`. Its successful output is only an unqualified
+provider snapshot locator. A failed or uncertain provider sequence remains
+with the service's original durable operation; restarting the graph is not a
+license to repeat contact.
 `ryeos-executor::execution::external_guest_runtime_product` supplies the
 controller-side source half of that path: it authenticates the current witness
 and import bounds, loads the exact ordinary manifest under CAS authority,

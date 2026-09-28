@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-28T10:43:25Z:a5fea3b61543d10ba72360a677099f16ef11a23e44a1912f476fac926f938905:7aw4UR9PdLD6NqM/aRuNCGhxrq0O0rJtf4ksHTm1p83Kvn4RKqk1h4PDom/YxvYRpX04xpPvRzrceWxtTOwbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T11:57:31Z:09c09405094c8ec72b0246b020d78449e7e8955800f404e573f43ed3ef7656cd:ak35s1aXB0eq7s0bK+eF+UaIIzfEMsb86u25I9Uya+ifroO5vjVL6a30EvboFfo1qLwnSV21egV4HSMKt+fYCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: render-sandbox
 version: 0.1.0
 description: Early-access Render Sandbox lifecycle adapter; activation remains disabled by its signed provider profile
 provides_kinds: []
-requires_kinds: []
+requires_kinds:
+- graph
 uses_kinds: []
 external_lifecycle_adapters:
 - id: render-sandbox-early-access

@@ -1,0 +1,71 @@
+# ryeos:signed:2026-09-28T11:57:31Z:6862460e975e476bbac248f7a73493ea023035221370bc53057299d0d446a3a9:LmkiGModRXEtY9TTtUfLB09mCHfuh7GdAUVNrAYx6WquJ2Pb7GhDe+Z6MhEVRtWCgjylQmdd2WRtOGEQ0a63Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: render-sandbox
+version: "1.0.0"
+description: Receive one origin-admitted owner product and produce an unqualified Render snapshot locator
+effects: live
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.service.external-content/receive-product
+      - ryeos.execute.service.external-content/produce-runtime-snapshot
+config:
+  start: receive
+  max_steps: 3
+  on_error: fail
+  config_schema:
+    type: object
+    properties:
+      remote: {type: string}
+      witness_hash: {type: string}
+      origin_admission_hash: {type: string}
+      maximum_bytes: {type: integer, minimum: 1}
+      binding_id: {type: string}
+      source_occurrence_id: {type: string}
+    required:
+      - remote
+      - witness_hash
+      - origin_admission_hash
+      - maximum_bytes
+      - binding_id
+      - source_occurrence_id
+    additionalProperties: false
+  nodes:
+    receive:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: service:external-content/receive-product
+        ref_bindings: {}
+        params:
+          remote: "${config.remote}"
+          witness_hash: "${config.witness_hash}"
+          origin_admission_hash: "${config.origin_admission_hash}"
+          maximum_bytes: "${config.maximum_bytes}"
+        thread: inline
+      assign:
+        receipt: "${result}"
+      next: {type: unconditional, to: produce}
+    produce:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: service:external-content/produce-runtime-snapshot
+        ref_bindings: {}
+        params:
+          binding_id: "${config.binding_id}"
+          witness_hash: "${config.witness_hash}"
+          source:
+            kind: received
+            acceptance_hash: "${state.receipt.acceptance_hash}"
+          source_occurrence_id: "${config.source_occurrence_id}"
+        thread: inline
+      assign:
+        snapshot: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output:
+        receipt: "${state.receipt}"
+        snapshot: "${state.snapshot}"

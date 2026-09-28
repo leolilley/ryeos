@@ -1,7 +1,8 @@
 name: render-sandbox
 version: "0.1.0"
 description: "Early-access Render Sandbox lifecycle adapter; activation remains disabled by its signed provider profile"
-requires_kinds: []
+requires_kinds:
+  - graph
 uses_kinds: []
 external_lifecycle_adapters:
   - id: render-sandbox-early-access
