@@ -515,6 +515,10 @@ pub(crate) struct RenderSnapshotProbe {
     /// The daemon independently rejoins this exact value to its bound
     /// one-attempt journal before invoking the credential-free adapter.
     pub runtime_snapshot_locator: RuntimeSnapshotLocator,
+    /// CAS-authored pointer to the daemon's complete, timely verifier run.
+    /// The adapter checks shape; the daemon authenticates the exact row.
+    pub restored_verifier_operation_id: String,
+    pub restored_verifier_observation_hash: String,
     pub snapshot_kind: String,
     pub plan: RenderPlan,
     pub region: String,
@@ -555,7 +559,7 @@ impl RenderSnapshotProbe {
         settings: &Settings,
         expected: &SnapshotExpectation<'_>,
     ) -> Result<()> {
-        ensure!(self.schema == 2, "unsupported Render snapshot probe schema");
+        ensure!(self.schema == 3, "unsupported Render snapshot probe schema");
         for hash in [
             &self.product_witness_hash,
             &self.guest_runtime_manifest_hash,
@@ -566,6 +570,8 @@ impl RenderSnapshotProbe {
             &self.authenticated_ready_evidence_hash,
             &self.whole_guest_termination_evidence_hash,
             &self.writer_exclusion_evidence_hash,
+            &self.restored_verifier_operation_id,
+            &self.restored_verifier_observation_hash,
         ] {
             ensure!(
                 lillux::valid_hash(hash),
@@ -884,7 +890,7 @@ mod tests {
 
     fn probe() -> RenderSnapshotProbe {
         RenderSnapshotProbe {
-            schema: 2,
+            schema: 3,
             product_witness_hash: "1".repeat(64),
             guest_runtime_manifest_hash: "2".repeat(64),
             controller_public_root: public_root(),
@@ -902,6 +908,8 @@ mod tests {
                 provider_creation_observation: serde_json::json!({"schema": 1}),
                 adapter_observation_sha256: lillux::sha256_hex(br#"{"schema":1}"#),
             },
+            restored_verifier_operation_id: "d".repeat(64),
+            restored_verifier_observation_hash: "e".repeat(64),
             snapshot_kind: "filesystem".into(),
             plan: RenderPlan::Starter,
             region: "oregon".into(),
@@ -964,12 +972,24 @@ mod tests {
         observed = probe();
         observed.whole_guest_termination_evidence_hash.clear();
         assert!(observed.validate_for(&settings, &expected).is_err());
+        observed = probe();
+        observed.restored_verifier_operation_id.clear();
+        assert!(observed.validate_for(&settings, &expected).is_err());
+        observed = probe();
+        observed.restored_verifier_observation_hash.clear();
+        assert!(observed.validate_for(&settings, &expected).is_err());
 
         let mut untrusted = serde_json::to_value(probe()).unwrap();
         untrusted
             .as_object_mut()
             .unwrap()
             .remove("runtime_snapshot_locator");
+        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
+        untrusted = serde_json::to_value(probe()).unwrap();
+        untrusted
+            .as_object_mut()
+            .unwrap()
+            .remove("restored_verifier_operation_id");
         assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
         untrusted = serde_json::to_value(probe()).unwrap();
         untrusted["qualified"] = serde_json::Value::Bool(true);

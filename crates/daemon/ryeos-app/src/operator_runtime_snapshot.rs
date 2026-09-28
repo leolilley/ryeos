@@ -30,7 +30,7 @@ use ryeos_state::object_closure::load_exact_cas_object_with_cas;
 use crate::handler_context::HandlerContext;
 use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::runtime_db::restored_verifier_attempt::{
-    RestoredVerifierAttemptClaim, RestoredVerifierAttemptRecord,
+    RestoredVerifierAttemptClaim, RestoredVerifierAttemptPhase, RestoredVerifierAttemptRecord,
 };
 use crate::runtime_db::runtime_snapshot::{
     RuntimeSnapshotAttemptClaim, RuntimeSnapshotPhase, RuntimeSnapshotRecord,
@@ -493,7 +493,68 @@ pub(crate) fn verify_probe_snapshot_locator(
         .runtime_snapshot_operation(&named.operation_id)?
         .context("runtime probe names no retained snapshot operation")?;
     validate_probe_snapshot_record(&record, &named, proof, source, provider_id, owner_principal)?;
+    verify_probe_restored_verifier_record(
+        state,
+        &record,
+        proof,
+        source,
+        provider_id,
+        owner_principal,
+    )?;
     Ok(Some(named))
+}
+
+fn verify_probe_restored_verifier_record(
+    state: &AppState,
+    snapshot: &RuntimeSnapshotRecord,
+    proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+    source: &GuestOwnerRuntimeManifestIdentity,
+    provider_id: &str,
+    owner_principal: &str,
+) -> Result<()> {
+    let evidence = &proof.evidence.result.probe_evidence;
+    let operation_id = evidence
+        .get("restored_verifier_operation_id")
+        .and_then(serde_json::Value::as_str)
+        .context("runtime probe lacks exact restored verifier operation")?;
+    let observation_hash = evidence
+        .get("restored_verifier_observation_hash")
+        .and_then(serde_json::Value::as_str)
+        .context("runtime probe lacks exact restored verifier observation")?;
+    ensure!(
+        lillux::valid_hash(operation_id) && lillux::valid_hash(observation_hash),
+        "runtime probe has invalid verifier evidence identity"
+    );
+    let retained = state
+        .state_store
+        .restored_verifier_attempt(operation_id)?
+        .context("runtime probe names no retained verifier attempt")?;
+    let observation = retained
+        .observation
+        .as_ref()
+        .context("runtime probe verifier has no complete observation")?;
+    ensure!(
+        retained.phase == RestoredVerifierAttemptPhase::Observed
+            && !observation.contact_deadline_exceeded
+            && retained.intent.challenge.operation_id == snapshot.intent.operation_id
+            && retained.intent.challenge.snapshot_id
+                == snapshot
+                    .locator
+                    .as_ref()
+                    .context("probe snapshot lost locator")?
+                    .snapshot_id
+            && retained.intent.restored_occurrence_id == observation.occurrence_id
+            && snapshot.intent.provider_id == provider_id
+            && snapshot.intent.owner_principal == owner_principal
+            && observation.measurement.manifest_hash == source.manifest_hash
+            && observation.measurement.owner_executable_sha256 == source.owner_executable_sha256
+            && observation.measurement.controller_public_root == source.controller_public_root
+            && lillux::sha256_hex(&ryeos_external_execution_contract::canonical_json(
+                observation
+            )?) == observation_hash,
+        "runtime probe verifier differs from exact timely retained observation"
+    );
+    Ok(())
 }
 
 fn validate_probe_snapshot_record(
