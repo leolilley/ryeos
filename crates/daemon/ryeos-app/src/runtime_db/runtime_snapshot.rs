@@ -83,7 +83,7 @@ fn canonical<T: Serialize>(value: &T) -> Result<String> {
     )?)
 }
 
-fn read(conn: &Connection, operation_id: &str) -> Result<Option<RuntimeSnapshotRecord>> {
+pub(super) fn read(conn: &Connection, operation_id: &str) -> Result<Option<RuntimeSnapshotRecord>> {
     let raw: Option<(String, String, String, Option<String>, Option<String>, i64, i64)> = conn
         .query_row(
             "SELECT intent_json,intent_digest,phase,locator_json,readiness_json,created_at_ms,updated_at_ms

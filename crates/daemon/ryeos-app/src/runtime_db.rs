@@ -12,6 +12,7 @@ use serde_json::Value;
 
 pub mod external_execution;
 pub mod runtime_snapshot;
+pub mod runtime_snapshot_qualification;
 pub mod scoped_child_attempt;
 
 use crate::launch_metadata::{LAUNCH_METADATA_SCHEMA_VERSION, RuntimeLaunchMetadata};
@@ -1863,12 +1864,13 @@ const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence 
 
 fn runtime_schema_sql() -> String {
     format!(
-        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}",
+        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}",
         external_execution::GUARD_SQL,
         ryeos_state::external_execution::journal::CHANNEL_SQL,
         external_execution::JOURNAL_SQL,
         scoped_child_attempt::JOURNAL_SQL,
         runtime_snapshot::JOURNAL_SQL,
+        runtime_snapshot_qualification::JOURNAL_SQL,
     )
 }
 
@@ -2619,10 +2621,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // immutable supervisor activation row and one-shot contact claim.
 // Scoped mount evidence now retains exact prepared-directory source identities.
 // An epoch-70 row cannot be decoded under the new no-backcompat contract.
-// Epoch 72 retains a separate, one-contact operator effect for external
-// runtime-snapshot production. An older runtime DB cannot represent an
-// uncertain snapshot mutation and must not be decoded as the current owner.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 73;
+// Epoch 74 adds the distinct one-contact restored-Sandbox qualification
+// journal. An older runtime DB cannot represent its uncertain provider create
+// and must not be decoded as the current owner.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 74;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2969,6 +2971,18 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "locator_json", col_type: "TEXT", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "readiness_json", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "runtime_snapshot_qualification",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "operation_id", col_type: "TEXT", pk: true, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "snapshot_operation_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "intent_json", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "occurrence_json", col_type: "TEXT", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                 ],
@@ -5517,6 +5531,7 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
     assert_current_runtime_schema(&tx, path)?;
     external_execution::validate_current(&tx)?;
     runtime_snapshot::validate_current(&tx)?;
+    runtime_snapshot_qualification::validate_current(&tx)?;
     scoped_child_attempt::validate_current(&tx)?;
     read_scope_lifetime_fence(&tx)?;
     let rows = {

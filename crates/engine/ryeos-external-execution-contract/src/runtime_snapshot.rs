@@ -289,6 +289,34 @@ impl RuntimeSnapshotQualificationIntent {
     }
 }
 
+/// A complete, bounded provider creation observation. The occurrence is only
+/// a locator for the verifier run; it does not prove restored content or make
+/// the runtime eligible for Worker allocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotQualificationOccurrence {
+    pub schema: u32,
+    pub operation_id: String,
+    pub occurrence_id: String,
+    pub provider_response_sha256: String,
+}
+
+impl RuntimeSnapshotQualificationOccurrence {
+    pub fn validate_for(&self, intent: &RuntimeSnapshotQualificationIntent) -> Result<()> {
+        ensure!(
+            self.schema == 1 && self.operation_id == intent.operation_id,
+            "snapshot qualification occurrence changed attempt identity"
+        );
+        require_bounded_text(&self.occurrence_id, 256, "qualification occurrence")?;
+        require_hash(&self.provider_response_sha256, "qualification response")?;
+        ensure!(
+            canonical_json(self)?.len() <= 1024,
+            "snapshot qualification occurrence exceeds its bound"
+        );
+        Ok(())
+    }
+}
+
 /// A read-only observation of a previously bound locator. This grants no
 /// create/retry authority and no claim about restored snapshot contents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
