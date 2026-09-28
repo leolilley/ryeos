@@ -438,7 +438,13 @@ A distinct, durable qualification occurrence must first be provisioned from
 the bound snapshot, deliver the admitted verifier, retain the token/run and
 whole-guest settlement evidence, and then submit those facts to the controller
 join. Worker allocation cannot be borrowed for that purpose because it itself
-requires prior runtime qualification.
+requires prior runtime qualification. The existing durable
+`ExternalAllocationOwner` variants are only `DedicatedSession` and
+`DirectThread`; neither denotes a product-qualification occurrence. A
+qualification allocation therefore needs its own bounded intent and journal,
+while reusing the signed lifecycle profile and transport primitives. Adding a
+fake Worker owner or bypassing current runtime qualification to use that journal
+would create an authority cycle.
 
 Binding schema 14 now carries a required-nullable `runtime_qualification`
 object with the exact attestation hash, product-owner principal, policy ref,
