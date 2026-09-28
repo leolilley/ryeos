@@ -137,6 +137,7 @@ pub(crate) fn first_contact(
             upload_response_sha256: lillux::sha256_hex(&upload_body),
             run_stream_sha256: parsed.response_sha256,
             measurement: parsed.measurement,
+            contact_deadline_exceeded: false,
         },
     };
     result.validate_for(request)?;

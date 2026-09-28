@@ -2626,9 +2626,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 75 retains the controller-observed contact deadline on each bound
 // restored-Sandbox occurrence. Older rows cannot distinguish a late create
 // from timely qualification evidence.
-// Epoch 76 retains one verifier upload/run contact independently of restored
-// Sandbox creation. A pending or uncertain attempt cannot remint contact.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 76;
+// Epoch 77 retains a complete verifier stream observation separately from its
+// one-shot contact claim. A late observation remains visible but cannot
+// silently qualify a runtime.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 77;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2998,6 +2999,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec { name: "qualification_operation_id", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "intent_json", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "observation_json", col_type: "TEXT", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                 ],

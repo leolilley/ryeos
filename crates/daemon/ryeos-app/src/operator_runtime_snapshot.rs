@@ -10,13 +10,18 @@ use ryeos_external_execution::guest_runtime_product::{
     GuestOwnerRuntimeManifestIdentity, derive_guest_owner_runtime_manifest_identity,
     seal_guest_owner_snapshot_upload,
 };
+use ryeos_external_execution_contract::restored_runtime_measurement::{
+    RESTORED_OWNER_MEASUREMENT_PROTOCOL, RESTORED_VERIFIER_ADAPTER_PROTOCOL,
+    RestoredOwnerChallenge, RestoredVerifierAdapterRequest, RestoredVerifierAdapterResponse,
+    RestoredVerifierAttemptIntent,
+};
 use ryeos_external_execution_contract::runtime_snapshot::{
     RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL, RUNTIME_SNAPSHOT_INTENT_SCHEMA,
-    RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotAdapterRequest,
-    RuntimeSnapshotAdapterResponse, RuntimeSnapshotIntent, RuntimeSnapshotReadinessRequest,
     RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL, RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
+    RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotAdapterRequest,
+    RuntimeSnapshotAdapterResponse, RuntimeSnapshotIntent,
     RuntimeSnapshotQualificationAdapterRequest, RuntimeSnapshotQualificationAdapterResponse,
-    RuntimeSnapshotQualificationIntent,
+    RuntimeSnapshotQualificationIntent, RuntimeSnapshotReadinessRequest,
 };
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use ryeos_state::external_content::products::{ProductShape, ProductStorage};
@@ -24,11 +29,14 @@ use ryeos_state::object_closure::load_exact_cas_object_with_cas;
 
 use crate::handler_context::HandlerContext;
 use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
+use crate::runtime_db::restored_verifier_attempt::{
+    RestoredVerifierAttemptClaim, RestoredVerifierAttemptRecord,
+};
 use crate::runtime_db::runtime_snapshot::{
     RuntimeSnapshotAttemptClaim, RuntimeSnapshotPhase, RuntimeSnapshotRecord,
 };
 use crate::runtime_db::runtime_snapshot_qualification::{
-    SnapshotQualificationAttemptClaim, SnapshotQualificationRecord,
+    SnapshotQualificationAttemptClaim, SnapshotQualificationPhase, SnapshotQualificationRecord,
 };
 use crate::state::AppState;
 
@@ -103,14 +111,28 @@ pub fn create_qualification_occurrence(
         source.phase == RuntimeSnapshotPhase::Bound && source.readiness.is_some(),
         "qualification source snapshot is not ready"
     );
-    let locator = source.locator.clone().context("ready source has no locator")?;
-    let readiness = source.readiness.clone().context("ready source has no readiness")?;
-    let qualification = state.node_config.runtime_snapshot_qualification.iter()
+    let locator = source
+        .locator
+        .clone()
+        .context("ready source has no locator")?;
+    let readiness = source
+        .readiness
+        .clone()
+        .context("ready source has no readiness")?;
+    let qualification = state
+        .node_config
+        .runtime_snapshot_qualification
+        .iter()
         .find(|binding| binding.id() == qualification_binding_id)
         .context("current signed snapshot qualification binding is absent")?;
-    let producer = state.node_config.runtime_snapshot_production.iter()
-        .find(|binding| binding.id() == qualification.production_binding_id()
-            && binding.digest() == qualification.production_binding_digest())
+    let producer = state
+        .node_config
+        .runtime_snapshot_production
+        .iter()
+        .find(|binding| {
+            binding.id() == qualification.production_binding_id()
+                && binding.digest() == qualification.production_binding_digest()
+        })
         .context("qualification lost its exact signed producer binding")?;
     ensure!(
         source.intent.production_profile_digest == producer.digest()
@@ -121,9 +143,9 @@ pub fn create_qualification_occurrence(
     );
     let access = producer.credential_access()?;
     let credential = access.decode(state.vault.placement_credential(&access)?)?;
-    state.external_placement_backends.preflight_snapshot_qualification_create(
-        producer, qualification, &credential,
-    )?;
+    state
+        .external_placement_backends
+        .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
     let now = lillux::time::timestamp_millis();
     let mut intent = RuntimeSnapshotQualificationIntent {
         schema: RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
@@ -140,11 +162,15 @@ pub fn create_qualification_occurrence(
         settings_digest: qualification.settings_digest().to_owned(),
         verifier_artifact_hash: qualification.verifier_artifact_hash().to_owned(),
         maximum_lifetime_seconds: qualification.maximum_lifetime_seconds(),
-        attempt_deadline_ms: now.checked_add(i64::from(qualification.contact_timeout_seconds()) * 1_000)
+        attempt_deadline_ms: now
+            .checked_add(i64::from(qualification.contact_timeout_seconds()) * 1_000)
             .context("qualification create deadline overflow")?,
     };
     intent.operation_id = intent.derived_operation_id()?;
-    if let Some(existing) = state.state_store.snapshot_qualification_operation(&intent.operation_id)? {
+    if let Some(existing) = state
+        .state_store
+        .snapshot_qualification_operation(&intent.operation_id)?
+    {
         intent.attempt_deadline_ms = existing.intent.attempt_deadline_ms;
         ensure!(
             intent == existing.intent,
@@ -153,7 +179,9 @@ pub fn create_qualification_occurrence(
     }
     intent.validate_for(&source.intent, &locator)?;
     let reserved = state.state_store.reserve_snapshot_qualification(&intent)?;
-    let claim = state.state_store.claim_snapshot_qualification_attempt(&intent.operation_id)?;
+    let claim = state
+        .state_store
+        .claim_snapshot_qualification_attempt(&intent.operation_id)?;
     let SnapshotQualificationAttemptClaim::StartAttempt(_) = claim else {
         return Ok(match claim {
             SnapshotQualificationAttemptClaim::Reconcile(record)
@@ -161,7 +189,10 @@ pub fn create_qualification_occurrence(
             SnapshotQualificationAttemptClaim::StartAttempt(_) => unreachable!(),
         });
     };
-    ensure!(reserved.intent == intent, "qualification reservation changed before contact claim");
+    ensure!(
+        reserved.intent == intent,
+        "qualification reservation changed before contact claim"
+    );
     let request = RuntimeSnapshotQualificationAdapterRequest {
         protocol: RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL.into(),
         provider_spec_digest: qualification.provider_spec_digest().to_owned(),
@@ -174,21 +205,202 @@ pub fn create_qualification_occurrence(
     let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
         u64::from(qualification.contact_timeout_seconds()),
     ));
-    let attempted = state.external_placement_backends.create_snapshot_qualification_occurrence(
-        producer, qualification, &credential, &request, deadline,
-    );
+    let attempted = state
+        .external_placement_backends
+        .create_snapshot_qualification_occurrence(
+            producer,
+            qualification,
+            &credential,
+            &request,
+            deadline,
+        );
     match attempted {
         Ok(observation) => match observation.value {
             RuntimeSnapshotQualificationAdapterResponse::OccurrenceBound { mut occurrence } => {
                 occurrence.contact_deadline_exceeded = observation.deadline_exceeded;
-                state.state_store.bind_snapshot_qualification_occurrence(&occurrence)
+                state
+                    .state_store
+                    .bind_snapshot_qualification_occurrence(&occurrence)
             }
-            RuntimeSnapshotQualificationAdapterResponse::Uncertain { .. } => {
-                state.state_store.quarantine_snapshot_qualification_attempt(&request.intent.operation_id)
-            }
+            RuntimeSnapshotQualificationAdapterResponse::Uncertain { .. } => state
+                .state_store
+                .quarantine_snapshot_qualification_attempt(&request.intent.operation_id),
         },
         Err(error) => {
-            state.state_store.quarantine_snapshot_qualification_attempt(&request.intent.operation_id)?;
+            state
+                .state_store
+                .quarantine_snapshot_qualification_attempt(&request.intent.operation_id)?;
+            Err(error)
+        }
+    }
+}
+
+/// Execute one independently admitted verifier inside the exact restored
+/// Sandbox. This returns a retained content observation, not a runtime
+/// qualification or activation grant.
+pub fn verify_qualification_occurrence(
+    state: &AppState,
+    context: &HandlerContext,
+    qualification_operation_id: &str,
+) -> Result<RestoredVerifierAttemptRecord> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    let qualified = state
+        .state_store
+        .snapshot_qualification_operation(qualification_operation_id)?
+        .context("snapshot qualification operation is absent")?;
+    ensure!(
+        qualified.intent.owner_principal == context.fingerprint
+            && qualified.phase == SnapshotQualificationPhase::OccurrenceBound,
+        "restored verifier has no operator-owned bound occurrence"
+    );
+    let occurrence = qualified
+        .occurrence
+        .clone()
+        .context("restored occurrence is absent")?;
+    ensure!(
+        !occurrence.contact_deadline_exceeded,
+        "restored occurrence was created late"
+    );
+    let source = get_operation(state, context, &qualified.intent.snapshot_operation_id)?;
+    ensure!(
+        source.phase == RuntimeSnapshotPhase::Bound,
+        "restored verifier source is not bound"
+    );
+    let locator = source
+        .locator
+        .clone()
+        .context("restored verifier source has no locator")?;
+    let readiness = source
+        .readiness
+        .clone()
+        .context("restored verifier source is not ready")?;
+    let qualification = state
+        .node_config
+        .runtime_snapshot_qualification
+        .iter()
+        .find(|binding| binding.digest() == qualified.intent.qualification_profile_digest)
+        .context("current signed snapshot qualification binding is absent")?;
+    let producer = state
+        .node_config
+        .runtime_snapshot_production
+        .iter()
+        .find(|binding| {
+            binding.id() == qualification.production_binding_id()
+                && binding.digest() == qualification.production_binding_digest()
+        })
+        .context("restored verifier lost its exact signed producer binding")?;
+    ensure!(
+        qualified.intent.adapter_artifact_hash == producer.adapter_artifact_hash()
+            && qualified.intent.provider_spec_digest == qualification.provider_spec_digest()
+            && qualified.intent.settings_digest == qualification.settings_digest()
+            && qualified.intent.verifier_artifact_hash == qualification.verifier_artifact_hash(),
+        "restored verifier differs from exact signed qualification authority"
+    );
+    let upload = state
+        .external_placement_backends
+        .seal_restoration_verifier_upload(producer, qualification)?;
+    let access = producer.credential_access()?;
+    let credential = access.decode(state.vault.placement_credential(&access)?)?;
+    state
+        .external_placement_backends
+        .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
+    let now = lillux::time::timestamp_millis();
+    let mut intent = RestoredVerifierAttemptIntent {
+        schema: 1,
+        operation_id: String::new(),
+        qualification_operation_id: qualified.intent.operation_id.clone(),
+        restored_occurrence_id: occurrence.occurrence_id.clone(),
+        verifier_artifact_hash: qualification.verifier_artifact_hash().into(),
+        upload_sha256: upload.sha256().into(),
+        upload_bytes: upload.bytes(),
+        challenge: RestoredOwnerChallenge {
+            schema: 1,
+            protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
+            operation_id: source.intent.operation_id.clone(),
+            snapshot_id: locator.snapshot_id.clone(),
+            restored_occurrence_id: occurrence.occurrence_id.clone(),
+            nonce_hex: hex::encode(lillux::crypto::generate_random_bytes::<32>()),
+        },
+        attempt_deadline_ms: now
+            .checked_add(i64::from(qualification.contact_timeout_seconds()) * 1_000)
+            .context("restored verifier deadline overflow")?,
+    };
+    intent.operation_id = intent.derived_operation_id()?;
+    if let Some(existing) = state
+        .state_store
+        .restored_verifier_attempt(&intent.operation_id)?
+    {
+        intent.challenge = existing.intent.challenge.clone();
+        intent.attempt_deadline_ms = existing.intent.attempt_deadline_ms;
+        ensure!(
+            intent == existing.intent,
+            "retained verifier attempt contradicts current signed coordinates"
+        );
+    }
+    intent.validate_for(&source.intent, &locator, &qualified.intent, &occurrence)?;
+    let reserved = state
+        .state_store
+        .reserve_restored_verifier_attempt(&intent)?;
+    let claim = state
+        .state_store
+        .claim_restored_verifier_attempt(&intent.operation_id)?;
+    let RestoredVerifierAttemptClaim::StartAttempt(_) = claim else {
+        return Ok(match claim {
+            RestoredVerifierAttemptClaim::Reconcile(record)
+            | RestoredVerifierAttemptClaim::Observed(record) => record,
+            RestoredVerifierAttemptClaim::StartAttempt(_) => unreachable!(),
+        });
+    };
+    ensure!(
+        reserved.intent == intent,
+        "verifier reservation changed before contact claim"
+    );
+    let request = RestoredVerifierAdapterRequest {
+        protocol: RESTORED_VERIFIER_ADAPTER_PROTOCOL.into(),
+        provider_spec_digest: qualification.provider_spec_digest().into(),
+        intent,
+        source_intent: source.intent,
+        locator,
+        readiness,
+        qualification_intent: qualified.intent,
+        occurrence,
+        upload_descriptor: upload
+            .descriptor()
+            .inherited_descriptor()
+            .map_err(anyhow::Error::msg)?,
+        upload_bytes: upload.bytes(),
+        upload_sha256: upload.sha256().into(),
+    };
+    request.validate()?;
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
+        u64::from(qualification.contact_timeout_seconds()),
+    ));
+    let attempted = state
+        .external_placement_backends
+        .verify_restored_snapshot_once(
+            producer,
+            qualification,
+            &credential,
+            &request,
+            upload.descriptor(),
+            deadline,
+        );
+    match attempted {
+        Ok(output) => match output.value {
+            RestoredVerifierAdapterResponse::Observed { mut observation } => {
+                observation.contact_deadline_exceeded = output.deadline_exceeded;
+                state
+                    .state_store
+                    .bind_restored_verifier_observation(&observation)
+            }
+            RestoredVerifierAdapterResponse::Uncertain { .. } => state
+                .state_store
+                .quarantine_restored_verifier_attempt(&request.intent.operation_id),
+        },
+        Err(error) => {
+            state
+                .state_store
+                .quarantine_restored_verifier_attempt(&request.intent.operation_id)?;
             Err(error)
         }
     }

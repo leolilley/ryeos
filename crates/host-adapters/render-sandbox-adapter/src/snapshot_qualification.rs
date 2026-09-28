@@ -861,6 +861,7 @@ mod tests {
                 upload_response_sha256: "5".repeat(64),
                 run_stream_sha256: parsed.response_sha256,
                 measurement: parsed.measurement,
+                contact_deadline_exceeded: false,
             },
         };
         response.validate_for(&request).unwrap();

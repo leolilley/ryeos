@@ -3,16 +3,20 @@
 
 use super::*;
 use anyhow::{Context as _, ensure};
-use ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent;
+use ryeos_external_execution_contract::restored_runtime_measurement::{
+    RestoredVerifierAdapterObservation, RestoredVerifierAttemptIntent,
+};
 
 pub(super) const JOURNAL_SQL: &str = r#"
 CREATE TABLE restored_verifier_attempt (
     operation_id TEXT PRIMARY KEY,
     qualification_operation_id TEXT NOT NULL REFERENCES runtime_snapshot_qualification(operation_id),
     intent_json TEXT NOT NULL,
-    phase TEXT NOT NULL CHECK (phase IN ('reserved','attempt_pending','quarantined')),
+    phase TEXT NOT NULL CHECK (phase IN ('reserved','attempt_pending','quarantined','observed')),
+    observation_json TEXT,
     created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL
+    updated_at_ms INTEGER NOT NULL,
+    CHECK ((phase='observed') = (observation_json IS NOT NULL))
 );
 CREATE TRIGGER restored_verifier_attempt_immutable
 BEFORE UPDATE ON restored_verifier_attempt
@@ -24,6 +28,10 @@ BEGIN SELECT RAISE(ABORT, 'restored verifier attempt is immutable'); END;
 CREATE TRIGGER restored_verifier_attempt_no_delete
 BEFORE DELETE ON restored_verifier_attempt
 BEGIN SELECT RAISE(ABORT, 'restored verifier attempt is retained'); END;
+CREATE TRIGGER restored_verifier_attempt_immutable_observation
+BEFORE UPDATE ON restored_verifier_attempt
+WHEN OLD.observation_json IS NOT NULL AND NEW.observation_json IS NOT OLD.observation_json
+BEGIN SELECT RAISE(ABORT, 'restored verifier observation is immutable'); END;
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -32,6 +40,7 @@ pub enum RestoredVerifierAttemptPhase {
     Reserved,
     AttemptPending,
     Quarantined,
+    Observed,
 }
 
 impl RestoredVerifierAttemptPhase {
@@ -40,6 +49,7 @@ impl RestoredVerifierAttemptPhase {
             "reserved" => Self::Reserved,
             "attempt_pending" => Self::AttemptPending,
             "quarantined" => Self::Quarantined,
+            "observed" => Self::Observed,
             _ => anyhow::bail!("restored verifier has an invalid attempt phase"),
         })
     }
@@ -49,6 +59,7 @@ impl RestoredVerifierAttemptPhase {
 pub struct RestoredVerifierAttemptRecord {
     pub intent: RestoredVerifierAttemptIntent,
     pub phase: RestoredVerifierAttemptPhase,
+    pub observation: Option<RestoredVerifierAdapterObservation>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -57,6 +68,7 @@ pub struct RestoredVerifierAttemptRecord {
 pub enum RestoredVerifierAttemptClaim {
     StartAttempt(RestoredVerifierAttemptRecord),
     Reconcile(RestoredVerifierAttemptRecord),
+    Observed(RestoredVerifierAttemptRecord),
 }
 
 fn canonical<T: Serialize>(value: &T) -> Result<String> {
@@ -66,9 +78,9 @@ fn canonical<T: Serialize>(value: &T) -> Result<String> {
 }
 
 fn read(conn: &Connection, operation_id: &str) -> Result<Option<RestoredVerifierAttemptRecord>> {
-    let row: Option<(String, String, String, i64, i64)> = conn
+    let row: Option<(String, String, String, Option<String>, i64, i64)> = conn
         .query_row(
-            "SELECT qualification_operation_id,intent_json,phase,created_at_ms,updated_at_ms
+            "SELECT qualification_operation_id,intent_json,phase,observation_json,created_at_ms,updated_at_ms
              FROM restored_verifier_attempt WHERE operation_id=?1",
             [operation_id],
             |row| {
@@ -78,11 +90,20 @@ fn read(conn: &Connection, operation_id: &str) -> Result<Option<RestoredVerifier
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((qualification_id, intent_json, phase, created_at_ms, updated_at_ms)) = row else {
+    let Some((
+        qualification_id,
+        intent_json,
+        phase,
+        observation_json,
+        created_at_ms,
+        updated_at_ms,
+    )) = row
+    else {
         return Ok(None);
     };
     ensure!(
@@ -102,10 +123,10 @@ fn read(conn: &Connection, operation_id: &str) -> Result<Option<RestoredVerifier
         .locator
         .as_ref()
         .context("restored verifier snapshot has no locator")?;
-    ensure!(
-        source.readiness.is_some(),
-        "restored verifier snapshot is not ready"
-    );
+    let readiness = source
+        .readiness
+        .as_ref()
+        .context("restored verifier snapshot is not ready")?;
     intent.validate_for(&source.intent, locator, &qualification.intent, occurrence)?;
     ensure!(
         intent.operation_id == operation_id
@@ -115,9 +136,37 @@ fn read(conn: &Connection, operation_id: &str) -> Result<Option<RestoredVerifier
             && updated_at_ms >= created_at_ms,
         "restored verifier retained attempt changed identity"
     );
+    let phase = RestoredVerifierAttemptPhase::parse(&phase)?;
+    let observation = observation_json
+        .map(|raw| -> Result<_> {
+            ensure!(
+                raw.len() <= 8192,
+                "restored verifier observation exceeds bound"
+            );
+            let value: RestoredVerifierAdapterObservation = serde_json::from_str(&raw)?;
+            value.validate_for_retained(
+                &intent,
+                &source.intent,
+                locator,
+                readiness,
+                &qualification.intent,
+                occurrence,
+            )?;
+            ensure!(
+                canonical(&value)? == raw,
+                "restored verifier observation is noncanonical"
+            );
+            Ok(value)
+        })
+        .transpose()?;
+    ensure!(
+        (phase == RestoredVerifierAttemptPhase::Observed) == observation.is_some(),
+        "restored verifier phase contradicts retained observation"
+    );
     Ok(Some(RestoredVerifierAttemptRecord {
         intent,
-        phase: RestoredVerifierAttemptPhase::parse(&phase)?,
+        phase,
+        observation,
         created_at_ms,
         updated_at_ms,
     }))
@@ -183,8 +232,8 @@ impl RuntimeDb {
         );
         tx.execute(
             "INSERT INTO restored_verifier_attempt
-             (operation_id,qualification_operation_id,intent_json,phase,created_at_ms,updated_at_ms)
-             VALUES(?1,?2,?3,'reserved',?4,?4)",
+             (operation_id,qualification_operation_id,intent_json,phase,observation_json,created_at_ms,updated_at_ms)
+             VALUES(?1,?2,?3,'reserved',NULL,?4,?4)",
             params![
                 intent.operation_id,
                 intent.qualification_operation_id,
@@ -204,6 +253,10 @@ impl RuntimeDb {
     ) -> Result<RestoredVerifierAttemptClaim> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read(&tx, operation_id)?.context("restored verifier was not reserved")?;
+        if record.phase == RestoredVerifierAttemptPhase::Observed {
+            tx.commit()?;
+            return Ok(RestoredVerifierAttemptClaim::Observed(record));
+        }
         if record.phase != RestoredVerifierAttemptPhase::Reserved {
             tx.commit()?;
             return Ok(RestoredVerifierAttemptClaim::Reconcile(record));
@@ -245,6 +298,71 @@ impl RuntimeDb {
             params![operation_id, now],
         )?;
         let current = read(&tx, operation_id)?.context("restored verifier quarantine vanished")?;
+        tx.commit()?;
+        Ok(current)
+    }
+
+    pub fn bind_restored_verifier_observation(
+        &self,
+        observation: &RestoredVerifierAdapterObservation,
+    ) -> Result<RestoredVerifierAttemptRecord> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read(&tx, &observation.operation_id)?
+            .context("restored verifier observation has no claimed attempt")?;
+        if record.phase == RestoredVerifierAttemptPhase::Observed {
+            ensure!(
+                record.observation.as_ref() == Some(observation),
+                "restored verifier observation replay changed"
+            );
+            tx.commit()?;
+            return Ok(record);
+        }
+        ensure!(
+            matches!(
+                record.phase,
+                RestoredVerifierAttemptPhase::AttemptPending
+                    | RestoredVerifierAttemptPhase::Quarantined
+            ),
+            "restored verifier observation did not follow a contact claim"
+        );
+        let qualification = super::runtime_snapshot_qualification::read(
+            &tx,
+            &record.intent.qualification_operation_id,
+        )?
+        .context("restored verifier qualification disappeared")?;
+        let occurrence = qualification
+            .occurrence
+            .as_ref()
+            .context("restored occurrence disappeared")?;
+        let source =
+            super::runtime_snapshot::read(&tx, &qualification.intent.snapshot_operation_id)?
+                .context("restored verifier source disappeared")?;
+        observation.validate_for_retained(
+            &record.intent,
+            &source.intent,
+            source
+                .locator
+                .as_ref()
+                .context("restored verifier locator disappeared")?,
+            source
+                .readiness
+                .as_ref()
+                .context("restored verifier readiness disappeared")?,
+            &qualification.intent,
+            occurrence,
+        )?;
+        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        let changed = tx.execute(
+            "UPDATE restored_verifier_attempt SET phase='observed',observation_json=?2,updated_at_ms=?3
+             WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
+            params![observation.operation_id, canonical(observation)?, now],
+        )?;
+        ensure!(
+            changed == 1,
+            "restored verifier observation bind lost durable CAS"
+        );
+        let current = read(&tx, &observation.operation_id)?
+            .context("restored verifier observation vanished")?;
         tx.commit()?;
         Ok(current)
     }

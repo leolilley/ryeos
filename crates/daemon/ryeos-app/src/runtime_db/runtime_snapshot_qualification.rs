@@ -316,7 +316,7 @@ mod tests {
     use super::*;
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         RESTORED_OWNER_MEASUREMENT_PROTOCOL, RestoredOwnerChallenge,
-        RestoredVerifierAttemptIntent,
+        RestoredOwnerMeasurement, RestoredVerifierAdapterObservation, RestoredVerifierAttemptIntent,
     };
     use ryeos_external_execution_contract::runtime_snapshot::{
         RUNTIME_SNAPSHOT_INTENT_SCHEMA, RUNTIME_SNAPSHOT_RESULT_SCHEMA, RuntimeSnapshotIntent,
@@ -473,5 +473,37 @@ mod tests {
         reminted.challenge.nonce_hex = "6".repeat(64);
         assert_eq!(reminted.derived_operation_id().unwrap(), verifier.operation_id);
         assert!(db.reserve_restored_verifier_attempt(&reminted).is_err());
+        let observation = RestoredVerifierAdapterObservation {
+            schema: 1,
+            operation_id: verifier.operation_id.clone(),
+            occurrence_id: verifier.restored_occurrence_id.clone(),
+            upload_token_execution_id: "exe-upload".into(),
+            run_token_execution_id: "exe-run".into(),
+            upload_response_sha256: "7".repeat(64),
+            run_stream_sha256: "8".repeat(64),
+            measurement: RestoredOwnerMeasurement {
+                schema: 1,
+                protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
+                challenge_digest: verifier.challenge.digest().unwrap(),
+                manifest_hash: source.guest_runtime_manifest_hash.clone(),
+                owner_executable_sha256: source.owner_executable_sha256.clone(),
+                controller_public_root: source.controller_public_root.clone(),
+            },
+            contact_deadline_exceeded: false,
+        };
+        db.bind_restored_verifier_observation(&observation).unwrap();
+        assert!(matches!(
+            db.claim_restored_verifier_attempt(&verifier.operation_id).unwrap(),
+            super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::Observed(_)
+        ));
+        let mut changed_observation = observation;
+        changed_observation.run_stream_sha256 = "9".repeat(64);
+        assert!(db.bind_restored_verifier_observation(&changed_observation).is_err());
+        assert!(
+            db.conn.execute(
+                "UPDATE restored_verifier_attempt SET phase='attempt_pending',observation_json=NULL WHERE operation_id=?1",
+                [&verifier.operation_id],
+            ).is_err()
+        );
     }
 }

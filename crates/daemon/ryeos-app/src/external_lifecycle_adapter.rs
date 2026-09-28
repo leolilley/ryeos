@@ -6,11 +6,15 @@ use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution::lifecycle_adapter::{
     LifecycleAdapterInvocation, run_lifecycle_adapter,
 };
+use ryeos_external_execution_contract::restored_runtime_measurement::{
+    MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES, RestoredVerifierAdapterRequest,
+    RestoredVerifierAdapterResponse,
+};
 use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotAdapterRequest,
-    RuntimeSnapshotAdapterResponse, RuntimeSnapshotReadinessObservation,
-    RuntimeSnapshotReadinessRequest, RuntimeSnapshotQualificationAdapterRequest,
-    RuntimeSnapshotQualificationAdapterResponse,
+    RuntimeSnapshotAdapterResponse, RuntimeSnapshotQualificationAdapterRequest,
+    RuntimeSnapshotQualificationAdapterResponse, RuntimeSnapshotReadinessObservation,
+    RuntimeSnapshotReadinessRequest,
 };
 use ryeos_external_execution_contract::staging_package::GuestStagingExpected;
 use ryeos_external_execution_contract::{
@@ -124,31 +128,52 @@ impl ExecutableExternalPlacementBackend {
         let adapter_bytes = artifact_bytes(&artifacts.adapter)?;
         let supervisor_bytes = artifact_bytes(&artifacts.supervisor)?;
         let launcher_bytes = artifact_bytes(&artifacts.launcher)?;
-        let restoration_verifier_bytes = artifacts.restoration_verifier.as_ref()
-            .map(artifact_bytes).transpose()?;
+        let restoration_verifier_bytes = artifacts
+            .restoration_verifier
+            .as_ref()
+            .map(artifact_bytes)
+            .transpose()?;
         ensure!(
             artifacts.provider_spec.sha256 == artifacts.declaration.provider_spec.sha256,
             "captured lifecycle provider spec identity differs from its signed declaration"
         );
         let mut inspected_artifacts = BTreeMap::from([
-            (LifecycleArtifactRole::Supervisor, LifecycleArtifactInspection {
-                descriptor: artifacts.supervisor.handle.inherited_descriptor().map_err(anyhow::Error::msg)?,
-                digest: artifacts.supervisor.identity.content_hash.clone(),
-                bytes: supervisor_bytes,
-            }),
-            (LifecycleArtifactRole::Launcher, LifecycleArtifactInspection {
-                descriptor: artifacts.launcher.handle.inherited_descriptor().map_err(anyhow::Error::msg)?,
-                digest: artifacts.launcher.identity.content_hash.clone(),
-                bytes: launcher_bytes,
-            }),
+            (
+                LifecycleArtifactRole::Supervisor,
+                LifecycleArtifactInspection {
+                    descriptor: artifacts
+                        .supervisor
+                        .handle
+                        .inherited_descriptor()
+                        .map_err(anyhow::Error::msg)?,
+                    digest: artifacts.supervisor.identity.content_hash.clone(),
+                    bytes: supervisor_bytes,
+                },
+            ),
+            (
+                LifecycleArtifactRole::Launcher,
+                LifecycleArtifactInspection {
+                    descriptor: artifacts
+                        .launcher
+                        .handle
+                        .inherited_descriptor()
+                        .map_err(anyhow::Error::msg)?,
+                    digest: artifacts.launcher.identity.content_hash.clone(),
+                    bytes: launcher_bytes,
+                },
+            ),
         ]);
         if let Some(verifier) = &artifacts.restoration_verifier {
             inspected_artifacts.insert(
                 LifecycleArtifactRole::RestorationVerifier,
                 LifecycleArtifactInspection {
-                    descriptor: verifier.handle.inherited_descriptor().map_err(anyhow::Error::msg)?,
+                    descriptor: verifier
+                        .handle
+                        .inherited_descriptor()
+                        .map_err(anyhow::Error::msg)?,
                     digest: verifier.identity.content_hash.clone(),
-                    bytes: restoration_verifier_bytes.context("restoration verifier has no size")?,
+                    bytes: restoration_verifier_bytes
+                        .context("restoration verifier has no size")?,
                 },
             );
         }
@@ -197,7 +222,10 @@ impl ExecutableExternalPlacementBackend {
             [
                 Some(artifacts.supervisor.handle.clone()),
                 Some(artifacts.launcher.handle.clone()),
-                artifacts.restoration_verifier.as_ref().map(|item| item.handle.clone()),
+                artifacts
+                    .restoration_verifier
+                    .as_ref()
+                    .map(|item| item.handle.clone()),
                 Some(artifacts.provider_spec.authority.clone()),
                 artifacts
                     .snapshot_production_spec
@@ -227,7 +255,9 @@ impl ExecutableExternalPlacementBackend {
             launcher_hash: artifacts.launcher.identity.content_hash,
             launcher_bytes,
             launcher: artifacts.launcher.handle,
-            restoration_verifier_hash: artifacts.restoration_verifier.as_ref()
+            restoration_verifier_hash: artifacts
+                .restoration_verifier
+                .as_ref()
                 .map(|item| item.identity.content_hash.clone()),
             restoration_verifier: artifacts.restoration_verifier.map(|item| item.handle),
             provider_spec: artifacts.provider_spec,
@@ -470,11 +500,20 @@ impl ExecutableExternalPlacementBackend {
         upload: Option<&lillux::InheritedDescriptorAuthority>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ryeos_external_execution::lifecycle_adapter::LifecycleAdapterOutput> {
-        let spec = self.snapshot_production_spec.as_ref()
+        let spec = self
+            .snapshot_production_spec
+            .as_ref()
             .context("installed lifecycle adapter has no signed snapshot production profile")?;
         self.invoke_sealed_snapshot_operation(
-            binding.network_inputs(), spec, binding.settings(), binding.settings_digest(),
-            credential, request_bytes, invocation, upload, deadline,
+            binding.network_inputs(),
+            spec,
+            binding.settings(),
+            binding.settings_digest(),
+            credential,
+            request_bytes,
+            invocation,
+            upload,
+            deadline,
         )
     }
 
@@ -493,7 +532,12 @@ impl ExecutableExternalPlacementBackend {
     ) -> Result<ryeos_external_execution::lifecycle_adapter::LifecycleAdapterOutput> {
         ensure!(!deadline.has_elapsed(), "snapshot adapter deadline expired");
         ensure!(
-            request_bytes.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+            request_bytes.len()
+                <= if invocation == LifecycleAdapterInvocation::QualifySnapshotVerify {
+                    MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES
+                } else {
+                    MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES
+                },
             "snapshot adapter request exceeds its bound"
         );
         let descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)?;
@@ -671,38 +715,162 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
                 && request.intent.provider_spec_digest == self.provider_spec.sha256
                 && request.intent.settings_digest == qualification.settings_digest()
                 && request.intent.verifier_artifact_hash == qualification.verifier_artifact_hash()
-                && request.intent.maximum_lifetime_seconds == qualification.maximum_lifetime_seconds()
+                && request.intent.maximum_lifetime_seconds
+                    == qualification.maximum_lifetime_seconds()
                 && request.source_intent.production_profile_digest == producer.digest(),
             "qualification create differs from inspected signed authority"
         );
-        let remaining_ms = request.intent.attempt_deadline_ms
+        let remaining_ms = request
+            .intent
+            .attempt_deadline_ms
             .saturating_sub(lillux::time::timestamp_millis());
-        ensure!(remaining_ms > 0, "qualification create expired before adapter contact");
+        ensure!(
+            remaining_ms > 0,
+            "qualification create expired before adapter contact"
+        );
         let deadline = deadline
             .min(lillux::time::MonotonicDeadline::after(
-                lillux::time::Duration::from_secs(u64::from(qualification.contact_timeout_seconds())),
+                lillux::time::Duration::from_secs(u64::from(
+                    qualification.contact_timeout_seconds(),
+                )),
             ))
             .min(lillux::time::MonotonicDeadline::after(
                 lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
             ));
         let bytes = ryeos_external_execution_contract::canonical_json(request)?;
         let output = self.invoke_sealed_snapshot_operation(
-            producer.network_inputs(), &self.provider_spec, qualification.settings(),
-            qualification.settings_digest(), credential, &bytes,
-            LifecycleAdapterInvocation::QualifySnapshotCreate, None, deadline,
+            producer.network_inputs(),
+            &self.provider_spec,
+            qualification.settings(),
+            qualification.settings_digest(),
+            credential,
+            &bytes,
+            LifecycleAdapterInvocation::QualifySnapshotCreate,
+            None,
+            deadline,
         )?;
         let value: RuntimeSnapshotQualificationAdapterResponse =
             from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
                 .map_err(|_| anyhow::anyhow!("invalid qualification create adapter response"))?;
-        value.validate_for(request)
+        value
+            .validate_for(request)
             .map_err(|_| anyhow::anyhow!("invalid qualification create adapter response"))?;
-        if let RuntimeSnapshotQualificationAdapterResponse::OccurrenceBound { occurrence } = &value {
+        if let RuntimeSnapshotQualificationAdapterResponse::OccurrenceBound { occurrence } = &value
+        {
             ensure!(
                 !occurrence.contact_deadline_exceeded,
                 "qualification adapter claimed daemon-only deadline evidence"
             );
         }
-        Ok(ExternalLifecycleObservation { value, deadline_exceeded: output.deadline_exceeded })
+        Ok(ExternalLifecycleObservation {
+            value,
+            deadline_exceeded: output.deadline_exceeded,
+        })
+    }
+
+    fn seal_restoration_verifier_upload(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+    ) -> Result<
+        ryeos_external_execution::restoration_verifier_delivery::SealedRestorationVerifierUpload,
+    > {
+        ensure!(
+            producer.backend() == self.declaration.id
+                && producer.adapter_artifact_hash() == self.adapter_hash
+                && qualification.production_binding_id() == producer.id()
+                && qualification.production_binding_digest() == producer.digest()
+                && qualification.provider_spec_digest() == self.provider_spec.sha256
+                && self.restoration_verifier_hash.as_deref()
+                    == Some(qualification.verifier_artifact_hash())
+                && self.inspection.observed_provider_spec_sha256 == self.provider_spec.sha256,
+            "restoration verifier differs from exact signed product authority"
+        );
+        let verifier = self
+            .restoration_verifier
+            .as_ref()
+            .context("exact admitted restoration verifier executable is absent")?;
+        ryeos_external_execution::restoration_verifier_delivery::seal_restoration_verifier_upload(
+            verifier,
+            qualification.verifier_artifact_hash(),
+        )
+    }
+
+    fn verify_restored_snapshot_once(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &PlacementCredential,
+        request: &RestoredVerifierAdapterRequest,
+        upload: &lillux::InheritedDescriptorAuthority,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<RestoredVerifierAdapterResponse>> {
+        self.preflight_snapshot_qualification_create(producer, qualification, credential)?;
+        request.validate()?;
+        ensure!(
+            request.qualification_intent.qualification_profile_digest == qualification.digest()
+                && request.qualification_intent.adapter_artifact_hash == self.adapter_hash
+                && request.qualification_intent.provider_spec_digest == self.provider_spec.sha256
+                && request.qualification_intent.settings_digest == qualification.settings_digest()
+                && request.intent.verifier_artifact_hash == qualification.verifier_artifact_hash()
+                && request.source_intent.production_profile_digest == producer.digest()
+                && request.upload_descriptor
+                    == upload.inherited_descriptor().map_err(anyhow::Error::msg)?,
+            "restored verifier contact differs from inspected signed authority"
+        );
+        upload.require_owned_regular()?;
+        let observation = upload.regular_file_observation()?;
+        ensure!(
+            observation.full_permission_mode()? == 0o600
+                && observation.size() == request.upload_bytes
+                && upload.digest_regular_file_stable_exact(&observation)? == request.upload_sha256,
+            "restored verifier upload changed before adapter invocation"
+        );
+        let remaining_ms = request
+            .intent
+            .attempt_deadline_ms
+            .saturating_sub(lillux::time::timestamp_millis());
+        ensure!(
+            remaining_ms > 0,
+            "restored verifier expired before adapter contact"
+        );
+        let deadline = deadline
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(u64::from(
+                    qualification.contact_timeout_seconds(),
+                )),
+            ))
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+            ));
+        let bytes = ryeos_external_execution_contract::canonical_json(request)?;
+        let output = self.invoke_sealed_snapshot_operation(
+            producer.network_inputs(),
+            &self.provider_spec,
+            qualification.settings(),
+            qualification.settings_digest(),
+            credential,
+            &bytes,
+            LifecycleAdapterInvocation::QualifySnapshotVerify,
+            Some(upload),
+            deadline,
+        )?;
+        let value: RestoredVerifierAdapterResponse =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+                .map_err(|_| anyhow::anyhow!("invalid restored verifier adapter response"))?;
+        value
+            .validate_for(request)
+            .map_err(|_| anyhow::anyhow!("invalid restored verifier adapter response"))?;
+        if let RestoredVerifierAdapterResponse::Observed { observation } = &value {
+            ensure!(
+                !observation.contact_deadline_exceeded,
+                "restored verifier adapter claimed daemon-only deadline evidence"
+            );
+        }
+        Ok(ExternalLifecycleObservation {
+            value,
+            deadline_exceeded: output.deadline_exceeded,
+        })
     }
 
     fn produce_runtime_snapshot(

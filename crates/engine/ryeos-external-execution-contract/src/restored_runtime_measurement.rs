@@ -88,15 +88,47 @@ pub struct RestoredVerifierAdapterObservation {
     pub upload_response_sha256: String,
     pub run_stream_sha256: String,
     pub measurement: RestoredOwnerMeasurement,
+    /// Replaced by daemon-observed timing before durable retention. The
+    /// adapter must emit false and cannot author host deadline testimony.
+    pub contact_deadline_exceeded: bool,
 }
 
 impl RestoredVerifierAdapterObservation {
     pub fn validate_for(&self, request: &RestoredVerifierAdapterRequest) -> Result<()> {
         request.validate()?;
+        self.validate_for_retained(
+            &request.intent,
+            &request.source_intent,
+            &request.locator,
+            &request.readiness,
+            &request.qualification_intent,
+            &request.occurrence,
+        )
+    }
+
+    /// Validate replayed content against retained authorities without
+    /// inventing a process-local descriptor from the old adapter invocation.
+    pub fn validate_for_retained(
+        &self,
+        intent: &RestoredVerifierAttemptIntent,
+        source: &RuntimeSnapshotIntent,
+        locator: &RuntimeSnapshotLocator,
+        readiness: &RuntimeSnapshotReadinessObservation,
+        qualification: &RuntimeSnapshotQualificationIntent,
+        occurrence: &RuntimeSnapshotQualificationOccurrence,
+    ) -> Result<()> {
+        intent.validate_for(source, locator, qualification, occurrence)?;
+        let readiness_request = RuntimeSnapshotReadinessRequest {
+            protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
+            intent: source.clone(),
+            locator: locator.clone(),
+            provider_spec_digest: source.provider_spec_digest.clone(),
+        };
+        readiness.validate_for(&readiness_request)?;
         ensure!(
             self.schema == 1
-                && self.operation_id == request.intent.operation_id
-                && self.occurrence_id == request.occurrence.occurrence_id,
+                && self.operation_id == intent.operation_id
+                && self.occurrence_id == occurrence.occurrence_id,
             "restored verifier observation changed its attempt or occurrence"
         );
         for execution_id in [
@@ -115,10 +147,10 @@ impl RestoredVerifierAdapterObservation {
         require_hash(&self.upload_response_sha256, "upload response")?;
         require_hash(&self.run_stream_sha256, "run stream")?;
         self.measurement.validate_content_for_bound_snapshot(
-            &request.intent.challenge,
-            &request.source_intent,
-            &request.locator,
-            &request.readiness,
+            &intent.challenge,
+            source,
+            locator,
+            readiness,
         )?;
         Ok(())
     }
