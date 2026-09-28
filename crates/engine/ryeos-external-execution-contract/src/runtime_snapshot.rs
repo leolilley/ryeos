@@ -21,6 +21,8 @@ pub struct RuntimeSnapshotIntent {
     pub operation_id: String,
     pub owner_principal: String,
     pub provider_id: String,
+    pub source_occurrence_id: String,
+    pub provider_group_id: String,
     pub binding_hash: String,
     pub adapter_artifact_hash: String,
     pub settings_digest: String,
@@ -57,6 +59,8 @@ impl RuntimeSnapshotIntent {
             .ok_or_else(|| anyhow::anyhow!("runtime snapshot owner principal is invalid"))?;
         require_hash(owner, "owner")?;
         require_bounded_text(&self.provider_id, 128, "provider")?;
+        require_bounded_text(&self.source_occurrence_id, 256, "source occurrence")?;
+        require_bounded_text(&self.provider_group_id, 256, "provider group")?;
         require_bounded_text(&self.controller_public_root, 128, "controller root")?;
         ensure!(
             self.controller_public_root.starts_with("ed25519:")
@@ -68,7 +72,34 @@ impl RuntimeSnapshotIntent {
                 && self.contact_deadline_ms > 0,
             "runtime snapshot upload or deadline exceeds its bound"
         );
+        ensure!(
+            self.operation_id == self.derived_operation_id()?,
+            "runtime snapshot operation does not match exact transfer coordinates"
+        );
         Ok(())
+    }
+
+    /// Stable across a retry with a later deadline, but unique to the exact
+    /// admitted source and delivery bytes. A caller cannot mint a second
+    /// contact opportunity by choosing another operation ID.
+    pub fn derived_operation_id(&self) -> Result<String> {
+        let coordinates = (
+            "ryeos.runtime-snapshot-operation.v1",
+            &self.owner_principal,
+            &self.provider_id,
+            &self.source_occurrence_id,
+            &self.provider_group_id,
+            &self.binding_hash,
+            &self.adapter_artifact_hash,
+            &self.settings_digest,
+            &self.product_witness_hash,
+            &self.guest_runtime_manifest_hash,
+            &self.owner_executable_sha256,
+            &self.controller_public_root,
+            &self.upload_sha256,
+            self.upload_bytes,
+        );
+        Ok(hex::encode(Sha256::digest(canonical_json(&coordinates)?)))
     }
 
     pub fn digest(&self) -> Result<String> {
@@ -112,6 +143,11 @@ impl RuntimeSnapshotLocator {
         ] {
             require_bounded_text(value, 256, label)?;
         }
+        ensure!(
+            self.source_occurrence_id == intent.source_occurrence_id
+                && self.provider_group_id == intent.provider_group_id,
+            "runtime snapshot locator changed its source occurrence"
+        );
         Ok(())
     }
 }
@@ -145,11 +181,13 @@ mod tests {
     use super::*;
 
     fn intent() -> RuntimeSnapshotIntent {
-        RuntimeSnapshotIntent {
+        let mut intent = RuntimeSnapshotIntent {
             schema: 1,
-            operation_id: "1".repeat(64),
+            operation_id: String::new(),
             owner_principal: format!("fp:{}", "2".repeat(64)),
             provider_id: "render-sandbox-early-access".into(),
+            source_occurrence_id: "sbox-fixture-1".into(),
+            provider_group_id: "sbg-fixture-1".into(),
             binding_hash: "3".repeat(64),
             adapter_artifact_hash: "4".repeat(64),
             settings_digest: "5".repeat(64),
@@ -160,7 +198,9 @@ mod tests {
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
             contact_deadline_ms: 42,
-        }
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        intent
     }
 
     #[test]
@@ -174,18 +214,58 @@ mod tests {
             "upload_sha256",
             "adapter_artifact_hash",
             "settings_digest",
+            "source_occurrence_id",
+            "provider_group_id",
         ] {
             let mut changed = serde_json::to_value(&baseline).unwrap();
             changed[field] = serde_json::json!(if field == "controller_public_root" {
                 format!("ed25519:{}", "B".repeat(44))
+            } else if field == "source_occurrence_id" {
+                "sbox-fixture-2".to_owned()
+            } else if field == "provider_group_id" {
+                "sbg-fixture-2".to_owned()
             } else {
                 "a".repeat(64)
             });
-            let changed: RuntimeSnapshotIntent = serde_json::from_value(changed).unwrap();
+            let mut changed: RuntimeSnapshotIntent = serde_json::from_value(changed).unwrap();
+            assert!(changed.validate().is_err(), "{field} reused operation ID");
+            changed.operation_id = changed.derived_operation_id().unwrap();
             assert_ne!(changed.digest().unwrap(), digest, "{field}");
         }
         let mut unknown = serde_json::to_value(&baseline).unwrap();
         unknown["credential"] = serde_json::json!("ambient");
         assert!(serde_json::from_value::<RuntimeSnapshotIntent>(unknown).is_err());
+    }
+
+    #[test]
+    fn deadline_change_cannot_mint_another_contact_opportunity() {
+        let baseline = intent();
+        let mut retried = baseline.clone();
+        retried.contact_deadline_ms += 100;
+        assert_eq!(
+            retried.derived_operation_id().unwrap(),
+            baseline.operation_id
+        );
+        assert_ne!(retried.digest().unwrap(), baseline.digest().unwrap());
+        retried.operation_id = "f".repeat(64);
+        assert!(retried.validate().is_err());
+    }
+
+    #[test]
+    fn locator_cannot_switch_source_after_contact() {
+        let intent = intent();
+        let mut locator = RuntimeSnapshotLocator {
+            schema: RUNTIME_SNAPSHOT_RESULT_SCHEMA,
+            operation_id: intent.operation_id.clone(),
+            intent_digest: intent.digest().unwrap(),
+            source_occurrence_id: intent.source_occurrence_id.clone(),
+            provider_group_id: intent.provider_group_id.clone(),
+            snapshot_id: "snp-fixture-1".into(),
+            provider_response_sha256: "a".repeat(64),
+            adapter_observation_sha256: "b".repeat(64),
+        };
+        locator.validate_for(&intent).unwrap();
+        locator.source_occurrence_id = "sbox-other".into();
+        assert!(locator.validate_for(&intent).is_err());
     }
 }

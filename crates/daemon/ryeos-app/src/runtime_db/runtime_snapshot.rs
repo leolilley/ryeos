@@ -318,11 +318,13 @@ mod tests {
 
     fn intent() -> RuntimeSnapshotIntent {
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
-        RuntimeSnapshotIntent {
+        let mut intent = RuntimeSnapshotIntent {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
-            operation_id: "1".repeat(64),
+            operation_id: String::new(),
             owner_principal: format!("fp:{}", "2".repeat(64)),
             provider_id: "render-sandbox-early-access".into(),
+            source_occurrence_id: "sbx-source".into(),
+            provider_group_id: "sbg-group".into(),
             binding_hash: "3".repeat(64),
             adapter_artifact_hash: "4".repeat(64),
             settings_digest: "5".repeat(64),
@@ -333,7 +335,9 @@ mod tests {
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
             contact_deadline_ms: now + 60_000,
-        }
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        intent
     }
 
     fn locator(intent: &RuntimeSnapshotIntent) -> RuntimeSnapshotLocator {
@@ -341,8 +345,8 @@ mod tests {
             schema: RUNTIME_SNAPSHOT_RESULT_SCHEMA,
             operation_id: intent.operation_id.clone(),
             intent_digest: intent.digest().unwrap(),
-            source_occurrence_id: "sbx-source".into(),
-            provider_group_id: "sbg-group".into(),
+            source_occurrence_id: intent.source_occurrence_id.clone(),
+            provider_group_id: intent.provider_group_id.clone(),
             snapshot_id: "snp-snapshot".into(),
             provider_response_sha256: "a".repeat(64),
             adapter_observation_sha256: "b".repeat(64),
