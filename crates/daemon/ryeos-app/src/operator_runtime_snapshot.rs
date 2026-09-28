@@ -32,6 +32,54 @@ pub struct SnapshotProductionRequest {
     pub staged_root: lillux::PinnedDirectory,
 }
 
+/// Resolve a bounded staging ceiling exclusively from the current signed
+/// producer binding. The API must not accept an upload budget from its caller.
+pub fn staging_source_ceiling(
+    state: &AppState,
+    context: &HandlerContext,
+    binding_id: &str,
+) -> Result<u64> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    let binding = state
+        .node_config
+        .runtime_snapshot_production
+        .iter()
+        .find(|binding| binding.id() == binding_id)
+        .context("current signed snapshot producer binding is absent")?;
+    binding
+        .maximum_upload_bytes()
+        .checked_sub(16 * 1024)
+        .filter(|ceiling| *ceiling > 0)
+        .context("signed snapshot producer upload ceiling is too small")
+}
+
+/// Exact, read-only recovery lookup. A lost response to a non-idempotent
+/// provider attempt must be reconciled through its retained operation, never
+/// by issuing another create request.
+pub fn get_operation(
+    state: &AppState,
+    context: &HandlerContext,
+    operation_id: &str,
+) -> Result<RuntimeSnapshotRecord> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    ensure!(
+        operation_id.len() == 64
+            && operation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "runtime snapshot operation ID is not a canonical SHA-256 digest"
+    );
+    let operation = state
+        .state_store
+        .runtime_snapshot_operation(operation_id)?
+        .context("runtime snapshot operation is absent")?;
+    ensure!(
+        operation.intent.owner_principal == context.fingerprint,
+        "runtime snapshot operation belongs to another operator"
+    );
+    Ok(operation)
+}
+
 pub fn produce(
     state: &AppState,
     context: &HandlerContext,
@@ -44,7 +92,7 @@ pub fn produce(
         .iter()
         .find(|binding| binding.id() == request.binding_id)
         .context("current signed snapshot producer binding is absent")?;
-    let source_ceiling = binding.maximum_upload_bytes() - 16 * 1024;
+    let source_ceiling = staging_source_ceiling(state, context, &request.binding_id)?;
 
     let limits = state
         .node_policy

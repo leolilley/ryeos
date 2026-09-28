@@ -184,6 +184,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     external_content_import::DESCRIPTOR,
     external_content_product_receive::DESCRIPTOR,
     external_content_products::CAPTURE_DESCRIPTOR,
+    external_content_products::PRODUCE_RUNTIME_SNAPSHOT_DESCRIPTOR,
+    external_content_products::GET_RUNTIME_SNAPSHOT_DESCRIPTOR,
     external_content_products::GET_DESCRIPTOR,
     external_content_products::COMPOSE_DESCRIPTOR,
     external_content_products::QUALIFY_DESCRIPTOR,

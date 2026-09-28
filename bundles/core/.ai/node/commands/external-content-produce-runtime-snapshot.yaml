@@ -1,0 +1,13 @@
+# ryeos:signed:2026-09-28T06:27:40Z:8e07a62d00d312bb57558c5fd129451f2f5938254216f6c329029c21dcb4672a:JD1eRrjgkEsU/D/eZr9mrJRcgdhdEKYlaxbYS+PTGY/2X9L3h1VpRHQ2+Gm7UcCVKf1hQ7lH0He6iSSYf5KrCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, produce-runtime-snapshot]
+description: Produce one unqualified runtime snapshot locator from an exact retained product
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content produce-runtime-snapshot '{\"binding_id\":\"<signed-binding>\",\"witness_hash\":\"<exact-witness>\",\"source\":{\"kind\":\"local_capture\"},\"source_occurrence_id\":\"<exact-provider-sandbox>\"}'"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/produce-runtime-snapshot

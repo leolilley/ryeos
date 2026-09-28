@@ -32,7 +32,8 @@ BEFORE DELETE ON runtime_snapshot_operation
 BEGIN SELECT RAISE(ABORT, 'runtime snapshot operation is retained'); END;
 "#;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeSnapshotPhase {
     Reserved,
     AttemptPending,
@@ -52,7 +53,7 @@ impl RuntimeSnapshotPhase {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RuntimeSnapshotRecord {
     pub intent: RuntimeSnapshotIntent,
     pub phase: RuntimeSnapshotPhase,

@@ -5,10 +5,82 @@ use crate::registry::ServiceDescriptor;
 use anyhow::Result;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::external_content::products::transfer::ProductWitnessSource;
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 
 pub type Request = ryeos_app::operator_external_content::products::ProductRequest;
+
+/// The caller selects retained authority, never bytes, a path, or a contact
+/// budget. The installed producer binding supplies all provider authority.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProduceRuntimeSnapshotRequest {
+    binding_id: String,
+    witness_hash: String,
+    source: ProductWitnessSource,
+    source_occurrence_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetRuntimeSnapshotRequest {
+    operation_id: String,
+}
+
+pub async fn get_runtime_snapshot(
+    req: GetRuntimeSnapshotRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    Ok(serde_json::to_value(
+        ryeos_app::operator_runtime_snapshot::get_operation(&state, &ctx, &req.operation_id)?,
+    )?)
+}
+
+pub async fn produce_runtime_snapshot(
+    req: ProduceRuntimeSnapshotRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)?;
+    let result = tokio::task::spawn_blocking(move || {
+        let ceiling = ryeos_app::operator_runtime_snapshot::staging_source_ceiling(
+            &state,
+            &ctx,
+            &req.binding_id,
+        )?;
+        let stage = state.state_store.begin_runtime_snapshot_stage()?;
+        let staged =
+            ryeos_executor::execution::external_guest_runtime_product::stage_current_guest_owner_runtime_product(
+                &state,
+                &ctx,
+                &req.witness_hash,
+                &req.source,
+                ceiling,
+                stage.root(),
+                stage.product_name(),
+            )?;
+        staged.ensure_current()?;
+        let result = ryeos_app::operator_runtime_snapshot::produce(
+            &state,
+            &ctx,
+            ryeos_app::operator_runtime_snapshot::SnapshotProductionRequest {
+                binding_id: req.binding_id,
+                witness_hash: req.witness_hash,
+                source: req.source,
+                source_occurrence_id: req.source_occurrence_id,
+                staged_identity: staged.identity().clone(),
+                staged_root: staged.root().try_clone()?,
+            },
+        )?;
+        anyhow::Ok(result)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("runtime snapshot production join failed: {error}"))??;
+    Ok(serde_json::to_value(result)?)
+}
 
 pub async fn capture(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     Ok(serde_json::to_value(
@@ -94,6 +166,30 @@ pub const CAPTURE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     },
 };
 
+pub const PRODUCE_RUNTIME_SNAPSHOT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/produce-runtime-snapshot",
+    endpoint: "external-content.produce-runtime-snapshot",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/produce-runtime-snapshot"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            produce_runtime_snapshot(crate::handler_error::parse_request(params)?, ctx, state).await
+        })
+    },
+};
+
+pub const GET_RUNTIME_SNAPSHOT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/runtime-snapshot",
+    endpoint: "external-content.runtime-snapshot",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/runtime-snapshot"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            get_runtime_snapshot(crate::handler_error::parse_request(params)?, ctx, state).await
+        })
+    },
+};
+
 pub const GET_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:external-content/product",
     endpoint: "external-content.product",
@@ -121,6 +217,34 @@ mod tests {
     use ryeos_app::operator_external_content::product_composition::ComposeRetainedProductsRequest;
     use ryeos_engine::contracts::SubjectResolutionAuthority;
     use serde_json::json;
+
+    #[test]
+    fn runtime_snapshot_request_cannot_supply_upload_or_filesystem_authority() {
+        let required = json!({
+            "binding_id": "signed-render-producer",
+            "witness_hash": "a".repeat(64),
+            "source": {"kind": "local_capture"},
+            "source_occurrence_id": "sbx-exact"
+        });
+        assert!(
+            serde_json::from_value::<super::ProduceRuntimeSnapshotRequest>(required.clone())
+                .is_ok()
+        );
+        for (key, value) in [
+            ("upload_path", json!("/tmp/ambient")),
+            ("upload_bytes", json!(123)),
+            ("contact_timeout_seconds", json!(600)),
+            ("credential", json!("secret")),
+            ("provider_group_id", json!("another-group")),
+        ] {
+            let mut changed = required.clone();
+            changed[key] = value;
+            assert!(
+                serde_json::from_value::<super::ProduceRuntimeSnapshotRequest>(changed).is_err(),
+                "unadmitted field {key} was accepted"
+            );
+        }
+    }
 
     #[test]
     fn signed_compose_contract_preserves_required_nullable_project_authority() {

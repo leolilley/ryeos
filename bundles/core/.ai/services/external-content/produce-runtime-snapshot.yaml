@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-28T06:27:48Z:e1c97f4d246c20390e3237674a2515672f13fbd690394b65af43035140696a0a:drfnfzxediHnJ974I6BxbITG0zqLedraBsD6h4DYx8EJSSuOf+fuI9oA1wESnfltisys7DO7rTe+mgDdvqoFCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.produce-runtime-snapshot
+required_caps: ["ryeos.execute.service.external-content/produce-runtime-snapshot"]
+schema:
+  binding_id: string
+  witness_hash: string
+  source: object
+  source_occurrence_id: string
+description: Produce one unqualified provider snapshot locator from an exact retained guest-owner product under the current signed producer binding; admitted operator only
