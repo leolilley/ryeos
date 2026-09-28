@@ -741,6 +741,7 @@ pub enum LifecycleCapability {
 pub enum LifecycleArtifactRole {
     Supervisor,
     Launcher,
+    RestorationVerifier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -779,8 +780,9 @@ pub enum ExternalProviderConnectorProcessGroup {
 }
 
 /// Signed bundle declaration for one external occurrence lifecycle adapter.
-/// The adapter, provider behavior specification, and two guest bootstrap
-/// executables are captured from the same signed bundle generation.
+/// The adapter, provider behavior specification, guest bootstrap executables,
+/// and optional independent restoration verifier are captured from the same
+/// signed bundle generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalLifecycleAdapterDeclaration {
@@ -790,6 +792,8 @@ pub struct ExternalLifecycleAdapterDeclaration {
     pub adapter: String,
     pub supervisor: String,
     pub launcher: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restoration_verifier: Option<String>,
     pub provider_spec: LifecycleProviderSpecIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_production_spec: Option<LifecycleProviderSpecIdentity>,
@@ -839,6 +843,15 @@ impl ExternalLifecycleAdapterDeclaration {
         validate_executable_name(&self.adapter, "external lifecycle adapter")?;
         validate_executable_name(&self.supervisor, "external candidate supervisor")?;
         validate_executable_name(&self.launcher, "external candidate launcher")?;
+        if let Some(verifier) = &self.restoration_verifier {
+            validate_executable_name(verifier, "external restoration verifier")?;
+            ensure!(
+                verifier != &self.adapter
+                    && verifier != &self.supervisor
+                    && verifier != &self.launcher,
+                "external restoration verifier must be a distinct executable"
+            );
+        }
         validate_bundle_relative_file_path(&self.provider_spec.path, "lifecycle provider spec")?;
         digest(&self.provider_spec.sha256, "lifecycle provider spec")?;
         if let Some(spec) = &self.snapshot_production_spec {
@@ -1209,14 +1222,14 @@ impl LifecycleAdapterInspectionRequest {
         }
         validate_artifact_inspections(&self.artifacts)?;
         ensure!(
-            self.artifacts.len() == 2
+            (2..=3).contains(&self.artifacts.len())
                 && self
                     .artifacts
                     .contains_key(&LifecycleArtifactRole::Supervisor)
                 && self
                     .artifacts
                     .contains_key(&LifecycleArtifactRole::Launcher),
-            "lifecycle adapter inspection requires exact supervisor and launcher artifacts"
+            "lifecycle adapter inspection requires exact bootstrap artifacts"
         );
         Ok(())
     }
@@ -2508,6 +2521,7 @@ mod tests {
             adapter: "ryeos-external-lifecycle-synthetic".into(),
             supervisor: "ryeos-external-candidate-supervisor".into(),
             launcher: "ryeos-external-candidate-launcher".into(),
+            restoration_verifier: None,
             provider_spec: LifecycleProviderSpecIdentity {
                 path: "lifecycle/provider.json".into(),
                 sha256: "f".repeat(64),
@@ -2523,6 +2537,12 @@ mod tests {
             ]),
         };
         lifecycle.validate().unwrap();
+        let mut with_verifier = lifecycle.clone();
+        with_verifier.restoration_verifier =
+            Some("ryeos-external-guest-restoration-verifier".into());
+        with_verifier.validate().unwrap();
+        with_verifier.restoration_verifier = Some(with_verifier.adapter.clone());
+        assert!(with_verifier.validate().is_err());
         let mut overlapping = lifecycle.clone();
         overlapping.snapshot_production_spec.as_mut().unwrap().path =
             overlapping.provider_spec.path.clone();

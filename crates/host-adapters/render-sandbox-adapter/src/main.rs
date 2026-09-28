@@ -408,10 +408,10 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
         );
     }
     ensure!(
-        artifacts.len() == 2
+        (2..=3).contains(&artifacts.len())
             && artifacts.contains_key(&LifecycleArtifactRole::Supervisor)
             && artifacts.contains_key(&LifecycleArtifactRole::Launcher),
-        "inspection requires exact supervisor and launcher artifacts"
+        "inspection requires exact bootstrap artifacts"
     );
     let response = LifecycleAdapterInspectionResponse {
         schema: 1,

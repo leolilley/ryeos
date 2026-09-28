@@ -112,6 +112,8 @@ pub(crate) struct ExecutableExternalPlacementBackend {
     launcher_hash: String,
     launcher_bytes: u64,
     launcher: lillux::InheritedDescriptorAuthority,
+    restoration_verifier: Option<lillux::InheritedDescriptorAuthority>,
+    restoration_verifier_hash: Option<String>,
     provider_spec: CapturedLifecycleProviderSpec,
     snapshot_production_spec: Option<CapturedLifecycleProviderSpec>,
     inspection: LifecycleAdapterInspectionResponse,
@@ -122,10 +124,34 @@ impl ExecutableExternalPlacementBackend {
         let adapter_bytes = artifact_bytes(&artifacts.adapter)?;
         let supervisor_bytes = artifact_bytes(&artifacts.supervisor)?;
         let launcher_bytes = artifact_bytes(&artifacts.launcher)?;
+        let restoration_verifier_bytes = artifacts.restoration_verifier.as_ref()
+            .map(artifact_bytes).transpose()?;
         ensure!(
             artifacts.provider_spec.sha256 == artifacts.declaration.provider_spec.sha256,
             "captured lifecycle provider spec identity differs from its signed declaration"
         );
+        let mut inspected_artifacts = BTreeMap::from([
+            (LifecycleArtifactRole::Supervisor, LifecycleArtifactInspection {
+                descriptor: artifacts.supervisor.handle.inherited_descriptor().map_err(anyhow::Error::msg)?,
+                digest: artifacts.supervisor.identity.content_hash.clone(),
+                bytes: supervisor_bytes,
+            }),
+            (LifecycleArtifactRole::Launcher, LifecycleArtifactInspection {
+                descriptor: artifacts.launcher.handle.inherited_descriptor().map_err(anyhow::Error::msg)?,
+                digest: artifacts.launcher.identity.content_hash.clone(),
+                bytes: launcher_bytes,
+            }),
+        ]);
+        if let Some(verifier) = &artifacts.restoration_verifier {
+            inspected_artifacts.insert(
+                LifecycleArtifactRole::RestorationVerifier,
+                LifecycleArtifactInspection {
+                    descriptor: verifier.handle.inherited_descriptor().map_err(anyhow::Error::msg)?,
+                    digest: verifier.identity.content_hash.clone(),
+                    bytes: restoration_verifier_bytes.context("restoration verifier has no size")?,
+                },
+            );
+        }
         let request = LifecycleAdapterInspectionRequest {
             schema: 1,
             protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
@@ -157,32 +183,7 @@ impl ExecutableExternalPlacementBackend {
                     })
                 })
                 .transpose()?,
-            artifacts: BTreeMap::from([
-                (
-                    LifecycleArtifactRole::Supervisor,
-                    LifecycleArtifactInspection {
-                        descriptor: artifacts
-                            .supervisor
-                            .handle
-                            .inherited_descriptor()
-                            .map_err(anyhow::Error::msg)?,
-                        digest: artifacts.supervisor.identity.content_hash.clone(),
-                        bytes: supervisor_bytes,
-                    },
-                ),
-                (
-                    LifecycleArtifactRole::Launcher,
-                    LifecycleArtifactInspection {
-                        descriptor: artifacts
-                            .launcher
-                            .handle
-                            .inherited_descriptor()
-                            .map_err(anyhow::Error::msg)?,
-                        digest: artifacts.launcher.identity.content_hash.clone(),
-                        bytes: launcher_bytes,
-                    },
-                ),
-            ]),
+            artifacts: inspected_artifacts,
         };
         request.validate()?;
         let request_bytes = lifecycle_inspection_bytes(&request)?;
@@ -196,6 +197,7 @@ impl ExecutableExternalPlacementBackend {
             [
                 Some(artifacts.supervisor.handle.clone()),
                 Some(artifacts.launcher.handle.clone()),
+                artifacts.restoration_verifier.as_ref().map(|item| item.handle.clone()),
                 Some(artifacts.provider_spec.authority.clone()),
                 artifacts
                     .snapshot_production_spec
@@ -225,6 +227,9 @@ impl ExecutableExternalPlacementBackend {
             launcher_hash: artifacts.launcher.identity.content_hash,
             launcher_bytes,
             launcher: artifacts.launcher.handle,
+            restoration_verifier_hash: artifacts.restoration_verifier.as_ref()
+                .map(|item| item.identity.content_hash.clone()),
+            restoration_verifier: artifacts.restoration_verifier.map(|item| item.handle),
             provider_spec: artifacts.provider_spec,
             snapshot_production_spec: artifacts.snapshot_production_spec,
             inspection,
@@ -635,6 +640,9 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
                 && qualification.production_binding_id() == producer.id()
                 && qualification.production_binding_digest() == producer.digest()
                 && qualification.provider_spec_digest() == self.provider_spec.sha256
+                && self.restoration_verifier_hash.as_deref()
+                    == Some(qualification.verifier_artifact_hash())
+                && self.restoration_verifier.is_some()
                 && self.inspection.observed_provider_spec_sha256 == self.provider_spec.sha256
                 && credential.backend() == producer.backend()
                 && credential.account() == producer.account()
@@ -688,6 +696,12 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
                 .map_err(|_| anyhow::anyhow!("invalid qualification create adapter response"))?;
         value.validate_for(request)
             .map_err(|_| anyhow::anyhow!("invalid qualification create adapter response"))?;
+        if let RuntimeSnapshotQualificationAdapterResponse::OccurrenceBound { occurrence } = &value {
+            ensure!(
+                !occurrence.contact_deadline_exceeded,
+                "qualification adapter claimed daemon-only deadline evidence"
+            );
+        }
         Ok(ExternalLifecycleObservation { value, deadline_exceeded: output.deadline_exceeded })
     }
 

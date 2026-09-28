@@ -14689,6 +14689,45 @@ impl StateStore {
             .runtime_snapshot_operation(operation_id)
     }
 
+    pub(crate) fn snapshot_qualification_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<runtime_db::runtime_snapshot_qualification::SnapshotQualificationRecord>> {
+        self.lock()?.runtime_db.snapshot_qualification_operation(operation_id)
+    }
+
+    pub(crate) fn reserve_snapshot_qualification(
+        &self,
+        intent: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationIntent,
+    ) -> Result<runtime_db::runtime_snapshot_qualification::SnapshotQualificationRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.reserve_snapshot_qualification(intent)
+    }
+
+    pub(crate) fn claim_snapshot_qualification_attempt(
+        &self,
+        operation_id: &str,
+    ) -> Result<runtime_db::runtime_snapshot_qualification::SnapshotQualificationAttemptClaim> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.claim_snapshot_qualification_attempt(operation_id)
+    }
+
+    pub(crate) fn bind_snapshot_qualification_occurrence(
+        &self,
+        occurrence: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationOccurrence,
+    ) -> Result<runtime_db::runtime_snapshot_qualification::SnapshotQualificationRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.bind_snapshot_qualification_occurrence(occurrence)
+    }
+
+    pub(crate) fn quarantine_snapshot_qualification_attempt(
+        &self,
+        operation_id: &str,
+    ) -> Result<runtime_db::runtime_snapshot_qualification::SnapshotQualificationRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.quarantine_snapshot_qualification_attempt(operation_id)
+    }
+
     pub(crate) fn cancel_uncontacted_external_allocation(&self, placement: &str) -> Result<()> {
         self.lock()?
             .runtime_db

@@ -2621,10 +2621,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // immutable supervisor activation row and one-shot contact claim.
 // Scoped mount evidence now retains exact prepared-directory source identities.
 // An epoch-70 row cannot be decoded under the new no-backcompat contract.
-// Epoch 74 adds the distinct one-contact restored-Sandbox qualification
-// journal. An older runtime DB cannot represent its uncertain provider create
-// and must not be decoded as the current owner.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 74;
+// Epoch 75 retains the controller-observed contact deadline on each bound
+// restored-Sandbox occurrence. Older rows cannot distinguish a late create
+// from timely qualification evidence.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 75;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

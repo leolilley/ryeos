@@ -301,6 +301,10 @@ pub struct RuntimeSnapshotQualificationOccurrence {
     pub operation_id: String,
     pub occurrence_id: String,
     pub provider_response_sha256: String,
+    /// Daemon-authored host observation. An adapter response must supply
+    /// false; the controller replaces it with its own observed deadline bit
+    /// before retaining the occurrence for settlement and cleanup.
+    pub contact_deadline_exceeded: bool,
 }
 
 impl RuntimeSnapshotQualificationOccurrence {
@@ -757,6 +761,7 @@ mod tests {
                 operation_id: request.intent.operation_id.clone(),
                 occurrence_id: "sbx-restored".into(),
                 provider_response_sha256: "c".repeat(64),
+                contact_deadline_exceeded: false,
             },
         };
         bound.validate_for(&request).unwrap();

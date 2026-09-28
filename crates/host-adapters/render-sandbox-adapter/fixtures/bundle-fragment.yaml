@@ -7,6 +7,7 @@ external_lifecycle_adapters:
     adapter: ryeos-render-sandbox-lifecycle-adapter
     supervisor: ryeos-external-candidate-supervisor
     launcher: ryeos-external-candidate-launcher
+    restoration_verifier: ryeos-external-guest-restoration-verifier
     provider_spec:
       path: fixtures/provider-spec.json
       sha256: "47ac8b751716e0bebfd58bf7e9331e0ad4f56890ad81ba4f7b02c03c9b48712e"

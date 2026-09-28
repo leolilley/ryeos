@@ -176,6 +176,7 @@ pub(crate) fn create_restored_sandbox(
                         operation_id: request.intent.operation_id.clone(),
                         occurrence_id: sandbox.id,
                         provider_response_sha256: lillux::sha256_hex(&body),
+                        contact_deadline_exceeded: false,
                     },
                 },
                 None => RuntimeSnapshotQualificationAdapterResponse::Uncertain {

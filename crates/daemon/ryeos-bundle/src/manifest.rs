@@ -790,6 +790,7 @@ mod tests {
             adapter: "lifecycle-adapter".to_string(),
             supervisor: "candidate-supervisor".to_string(),
             launcher: "candidate-launcher".to_string(),
+            restoration_verifier: None,
             provider_spec: ryeos_external_execution_contract::LifecycleProviderSpecIdentity {
                 path: "lifecycle/provider.json".to_string(),
                 sha256: "f".repeat(64),

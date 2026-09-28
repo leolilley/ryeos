@@ -415,6 +415,7 @@ mod tests {
             operation_id: intent.operation_id.clone(),
             occurrence_id: "sbx-restored".into(),
             provider_response_sha256: "3".repeat(64),
+            contact_deadline_exceeded: false,
         };
         db.bind_snapshot_qualification_occurrence(&occurrence)
             .unwrap();

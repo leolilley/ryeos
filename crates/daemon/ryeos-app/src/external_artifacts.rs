@@ -29,6 +29,7 @@ pub struct ResolvedExternalLifecycleArtifacts {
     pub adapter: CapturedExecutable,
     pub supervisor: CapturedExecutable,
     pub launcher: CapturedExecutable,
+    pub restoration_verifier: Option<CapturedExecutable>,
     pub provider_spec: CapturedLifecycleProviderSpec,
     pub snapshot_production_spec: Option<CapturedLifecycleProviderSpec>,
 }
@@ -151,6 +152,19 @@ pub fn resolve_external_execution_artifacts(
                     &declaration.launcher,
                     "external candidate launcher",
                 )?,
+                restoration_verifier: declaration
+                    .restoration_verifier
+                    .as_ref()
+                    .map(|name| {
+                        capture_declared_executable(
+                            root,
+                            node_trust_store,
+                            &verified.signer_fingerprint,
+                            name,
+                            "external restoration verifier",
+                        )
+                    })
+                    .transpose()?,
                 provider_spec: capture_declared_provider_spec(
                     root,
                     &declaration.provider_spec,

@@ -14,6 +14,9 @@ use ryeos_external_execution_contract::runtime_snapshot::{
     RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL, RUNTIME_SNAPSHOT_INTENT_SCHEMA,
     RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotAdapterRequest,
     RuntimeSnapshotAdapterResponse, RuntimeSnapshotIntent, RuntimeSnapshotReadinessRequest,
+    RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL, RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
+    RuntimeSnapshotQualificationAdapterRequest, RuntimeSnapshotQualificationAdapterResponse,
+    RuntimeSnapshotQualificationIntent,
 };
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use ryeos_state::external_content::products::{ProductShape, ProductStorage};
@@ -23,6 +26,9 @@ use crate::handler_context::HandlerContext;
 use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::runtime_db::runtime_snapshot::{
     RuntimeSnapshotAttemptClaim, RuntimeSnapshotPhase, RuntimeSnapshotRecord,
+};
+use crate::runtime_db::runtime_snapshot_qualification::{
+    SnapshotQualificationAttemptClaim, SnapshotQualificationRecord,
 };
 use crate::state::AppState;
 
@@ -81,6 +87,111 @@ pub fn get_operation(
         "runtime snapshot operation belongs to another operator"
     );
     Ok(operation)
+}
+
+/// Create at most one restored Sandbox for the exact retained snapshot.
+/// This operation stops at an occurrence locator; verifier execution,
+/// whole-guest settlement, and qualification remain separate authorities.
+pub fn create_qualification_occurrence(
+    state: &AppState,
+    context: &HandlerContext,
+    qualification_binding_id: &str,
+    snapshot_operation_id: &str,
+) -> Result<SnapshotQualificationRecord> {
+    let source = get_operation(state, context, snapshot_operation_id)?;
+    ensure!(
+        source.phase == RuntimeSnapshotPhase::Bound && source.readiness.is_some(),
+        "qualification source snapshot is not ready"
+    );
+    let locator = source.locator.clone().context("ready source has no locator")?;
+    let readiness = source.readiness.clone().context("ready source has no readiness")?;
+    let qualification = state.node_config.runtime_snapshot_qualification.iter()
+        .find(|binding| binding.id() == qualification_binding_id)
+        .context("current signed snapshot qualification binding is absent")?;
+    let producer = state.node_config.runtime_snapshot_production.iter()
+        .find(|binding| binding.id() == qualification.production_binding_id()
+            && binding.digest() == qualification.production_binding_digest())
+        .context("qualification lost its exact signed producer binding")?;
+    ensure!(
+        source.intent.production_profile_digest == producer.digest()
+            && source.intent.provider_id == producer.backend()
+            && source.intent.adapter_artifact_hash == producer.adapter_artifact_hash()
+            && source.intent.provider_group_id == producer.provider_group_id(),
+        "qualification source differs from its signed producer"
+    );
+    let access = producer.credential_access()?;
+    let credential = access.decode(state.vault.placement_credential(&access)?)?;
+    state.external_placement_backends.preflight_snapshot_qualification_create(
+        producer, qualification, &credential,
+    )?;
+    let now = lillux::time::timestamp_millis();
+    let mut intent = RuntimeSnapshotQualificationIntent {
+        schema: RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
+        operation_id: String::new(),
+        owner_principal: context.fingerprint.clone(),
+        snapshot_operation_id: source.intent.operation_id.clone(),
+        snapshot_intent_digest: source.intent.digest()?,
+        snapshot_id: locator.snapshot_id.clone(),
+        provider_id: producer.backend().to_owned(),
+        provider_group_id: producer.provider_group_id().to_owned(),
+        qualification_profile_digest: qualification.digest().to_owned(),
+        adapter_artifact_hash: producer.adapter_artifact_hash().to_owned(),
+        provider_spec_digest: qualification.provider_spec_digest().to_owned(),
+        settings_digest: qualification.settings_digest().to_owned(),
+        verifier_artifact_hash: qualification.verifier_artifact_hash().to_owned(),
+        maximum_lifetime_seconds: qualification.maximum_lifetime_seconds(),
+        attempt_deadline_ms: now.checked_add(i64::from(qualification.contact_timeout_seconds()) * 1_000)
+            .context("qualification create deadline overflow")?,
+    };
+    intent.operation_id = intent.derived_operation_id()?;
+    if let Some(existing) = state.state_store.snapshot_qualification_operation(&intent.operation_id)? {
+        intent.attempt_deadline_ms = existing.intent.attempt_deadline_ms;
+        ensure!(
+            intent == existing.intent,
+            "retained qualification attempt contradicts current signed coordinates"
+        );
+    }
+    intent.validate_for(&source.intent, &locator)?;
+    let reserved = state.state_store.reserve_snapshot_qualification(&intent)?;
+    let claim = state.state_store.claim_snapshot_qualification_attempt(&intent.operation_id)?;
+    let SnapshotQualificationAttemptClaim::StartAttempt(_) = claim else {
+        return Ok(match claim {
+            SnapshotQualificationAttemptClaim::Reconcile(record)
+            | SnapshotQualificationAttemptClaim::OccurrenceBound(record) => record,
+            SnapshotQualificationAttemptClaim::StartAttempt(_) => unreachable!(),
+        });
+    };
+    ensure!(reserved.intent == intent, "qualification reservation changed before contact claim");
+    let request = RuntimeSnapshotQualificationAdapterRequest {
+        protocol: RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL.into(),
+        provider_spec_digest: qualification.provider_spec_digest().to_owned(),
+        intent,
+        source_intent: source.intent,
+        locator,
+        readiness,
+    };
+    request.validate()?;
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
+        u64::from(qualification.contact_timeout_seconds()),
+    ));
+    let attempted = state.external_placement_backends.create_snapshot_qualification_occurrence(
+        producer, qualification, &credential, &request, deadline,
+    );
+    match attempted {
+        Ok(observation) => match observation.value {
+            RuntimeSnapshotQualificationAdapterResponse::OccurrenceBound { mut occurrence } => {
+                occurrence.contact_deadline_exceeded = observation.deadline_exceeded;
+                state.state_store.bind_snapshot_qualification_occurrence(&occurrence)
+            }
+            RuntimeSnapshotQualificationAdapterResponse::Uncertain { .. } => {
+                state.state_store.quarantine_snapshot_qualification_attempt(&request.intent.operation_id)
+            }
+        },
+        Err(error) => {
+            state.state_store.quarantine_snapshot_qualification_attempt(&request.intent.operation_id)?;
+            Err(error)
+        }
+    }
 }
 
 /// Observe availability of the exact already-bound provider locator. This is
