@@ -7674,6 +7674,7 @@ async fn start_candidate_operation(
             usage_subject: None,
             usage_subject_asserted_by: None,
             launch_timings: None,
+            pinned_project_snapshot: None,
         },
     )
     .await

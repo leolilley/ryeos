@@ -128,7 +128,7 @@ pub fn derive_consumer_authority_for_test(
 /// committed by the effective definition and must retain generation scope.
 /// A source closure is owned by the resolution root itself; its mere presence
 /// therefore cannot turn a bundle root into project authority.
-fn bundle_consumer_depends_on_project(
+pub(crate) fn bundle_consumer_depends_on_project(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
 ) -> bool {
     let project_source = |ancestor: &ryeos_engine::resolution::ResolvedAncestor| {
@@ -144,6 +144,34 @@ fn bundle_consumer_depends_on_project(
             .composed
             .derived
             .contains_key(ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY)
+}
+
+/// A pinned-project binding may name either an executable rooted in the
+/// project snapshot, or a trusted bundle executable whose admitted effective
+/// definition actually incorporates that exact project generation. The
+/// latter is required for bundle-owned Tools whose product selections are
+/// resolved from project-owned relationship Configs.
+pub(crate) fn is_pinned_project_consumer_resolution(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> bool {
+    use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace};
+    use ryeos_engine::resolution::TrustClass;
+
+    match (resolution.root.source_space, &resolution.root.source_root) {
+        (ItemSpace::Project, ItemSourceRoot::Project) => matches!(
+            resolution.effective_trust_class,
+            TrustClass::TrustedProject | TrustClass::UntrustedProject
+        ),
+        (ItemSpace::Bundle, ItemSourceRoot::Bundle { .. }) => {
+            resolution.root.trust_class == TrustClass::TrustedBundle
+                && matches!(
+                    resolution.effective_trust_class,
+                    TrustClass::TrustedBundle | TrustClass::TrustedProject
+                )
+                && bundle_consumer_depends_on_project(resolution)
+        }
+        _ => false,
+    }
 }
 
 fn pinned_project_consumer_authority(
@@ -1575,6 +1603,7 @@ mod consumer_authority_tests {
             snapshot_hash: "d".repeat(64),
         };
         let declarative = consumer_authority(&resolution, &generation).unwrap();
+        assert!(is_pinned_project_consumer_resolution(&resolution));
         assert!(declarative.source_closure().is_none());
         assert!(consumer_authority(&resolution, &SubjectResolutionAuthority::LiveFs).is_err());
         let source = ryeos_state::objects::EffectiveSourceClosureProjection {
@@ -1598,6 +1627,7 @@ mod consumer_authority_tests {
             name: "standard".into(),
         };
         resolution.root.trust_class = TrustClass::TrustedBundle;
+        assert!(!is_pinned_project_consumer_resolution(&resolution));
         // The outer execution generation can be pinned while this declaration-
         // bearing consumer remains bundle-owned. Project relationship/product
         // evidence is retained by the separate selection/binding contract; it
@@ -1628,6 +1658,7 @@ mod consumer_authority_tests {
         project_contributor.trust_class = TrustClass::TrustedProject;
         project_contributor.resolved_ref = "config:project/relationship".into();
         resolution.ancestors.push(project_contributor);
+        assert!(is_pinned_project_consumer_resolution(&resolution));
         let project_composed_bundle = consumer_authority(&resolution, &generation).unwrap();
         assert!(matches!(
             project_composed_bundle,
@@ -1711,6 +1742,8 @@ mod consumer_authority_tests {
             ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY.to_owned(),
             selections,
         );
+        resolution.ancestors.clear();
+        assert!(is_pinned_project_consumer_resolution(&resolution));
         assert!(matches!(
             consumer_authority(&resolution, &generation).unwrap(),
             ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject { .. }

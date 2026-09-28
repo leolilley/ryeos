@@ -599,6 +599,7 @@ fn prove_participant(
             binding_subject_authority: Some(sealed.resolution_subject_authority()),
             sealed_request: Some(&sealed),
             project_context_resolver,
+            pinned_admission: None,
         },
         Some(resolution),
     )?;
@@ -815,6 +816,7 @@ pub(in crate::operator_external_content) fn verify_current(
                 binding_subject_authority: Some(child_sealed.resolution_subject_authority()),
                 sealed_request: Some(&child_sealed),
                 project_context_resolver,
+                pinned_admission: None,
             },
             None,
         )?;

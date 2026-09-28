@@ -1845,18 +1845,10 @@ fn resolve_project_external_content_consumer(
     if canonical.to_string() != requested_ref || resolution.root.resolved_ref != requested_ref {
         bail!("resolved project consumer does not match the canonical requested ref");
     }
-    if resolution.root.source_space != ryeos_engine::contracts::ItemSpace::Project
-        || !matches!(
-            &resolution.root.source_root,
-            ryeos_engine::contracts::ItemSourceRoot::Project
-        )
-        || !matches!(
-            resolution.effective_trust_class,
-            ryeos_engine::resolution::TrustClass::TrustedProject
-                | ryeos_engine::resolution::TrustClass::UntrustedProject
-        )
-    {
-        bail!("project external-content consumer must resolve from the pinned project");
+    if !crate::external_content_admission::is_pinned_project_consumer_resolution(resolution) {
+        bail!(
+            "pinned-project external-content consumer must be project-rooted or a trusted bundle consumer whose effective definition depends on the pinned project"
+        );
     }
     let consumer = crate::external_content_admission::consumer_authority(
         resolution,

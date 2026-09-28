@@ -107,6 +107,176 @@ struct CurrentVerifierContext<'a> {
     /// Exact sealed launch request owning project and engine authority.
     sealed_request: Option<&'a crate::thread_lifecycle::SealedRootExecutionRequest>,
     project_context_resolver: Option<&'a dyn QualificationProjectContextResolver>,
+    /// Fresh selected-slot launch has already passed normal dispatch
+    /// preflight. Re-resolve current D1/D2 against that exact retained pinned
+    /// admission rather than inventing a projectless context.
+    pinned_admission: Option<&'a QualificationPinnedAdmissionContext<'a>>,
+}
+
+pub struct QualificationPinnedAdmissionContext<'a> {
+    pub plan_context: &'a ryeos_engine::contracts::PlanContext,
+    pub request_engine: &'a Arc<ryeos_engine::engine::Engine>,
+    pub project_binding: &'a crate::thread_lifecycle::AdmittedProjectBinding,
+    pub project_root: &'a Path,
+    pub project_authority: &'a ryeos_state::objects::ExecutionProjectAuthority,
+}
+
+/// Finalize the verifier identities only after normal root dispatch preflight
+/// has admitted the daemon-derived selected Root product under an exact pinned
+/// read-only snapshot. D1 comes from root admission; D2 is rebuilt through the
+/// same current-verifier finalization path used by qualification proof.
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_pinned_qualification_launch(
+    state: &AppState,
+    context: &HandlerContext,
+    prepared: &mut launch::PreparedProductQualificationLaunch,
+    admission: &crate::thread_lifecycle::RootExecutionAdmission,
+    request_engine: &Arc<ryeos_engine::engine::Engine>,
+    plan_context: &PlanContext,
+    project_binding: &crate::thread_lifecycle::AdmittedProjectBinding,
+    project_root: &Path,
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> anyhow::Result<()> {
+    use ryeos_state::objects::{ExecutionProjectAuthority, PinnedProjectRealization};
+
+    if !Arc::ptr_eq(admission.request_engine(), request_engine) {
+        bail!("qualification finalization Engine differs from the admitted request Engine");
+    }
+    let snapshot_hash = prepared
+        .pinned_snapshot_hash
+        .as_deref()
+        .context("pinned qualification launch has no selected snapshot")?;
+    let ExecutionProjectAuthority::PinnedGeneration {
+        snapshot_hash: authority_hash,
+        realization: PinnedProjectRealization::ReadOnly,
+        workspace_outputs: None,
+        ..
+    } = project_authority
+    else {
+        bail!("qualification verifier launch requires read-only pinned authority");
+    };
+    let admitted_plan = admission.plan_context();
+    if authority_hash != snapshot_hash
+        || !matches!(
+            &plan_context.project_context,
+            ProjectContext::SnapshotHash { hash } if hash == snapshot_hash
+        )
+        || plan_context.subject_resolution_authority
+            != (SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: snapshot_hash.to_owned(),
+            })
+        || admission.project_authority() != project_authority
+        || admitted_plan.requested_by != plan_context.requested_by
+        || admitted_plan.project_context != plan_context.project_context
+        || admitted_plan.subject_resolution_authority != plan_context.subject_resolution_authority
+        || admitted_plan.current_site_id != plan_context.current_site_id
+        || admitted_plan.origin_site_id != plan_context.origin_site_id
+        || admitted_plan.execution_hints != plan_context.execution_hints
+        || admitted_plan.scheduled_fire != plan_context.scheduled_fire
+        || admitted_plan.validate_only != plan_context.validate_only
+        || admission.product_selections() != &prepared.product_selections
+        || project_binding.exact_authority() != project_authority
+        || project_binding.subject_resolution_authority()
+            != &plan_context.subject_resolution_authority
+    {
+        bail!("qualification root admission differs from its exact read-only snapshot request");
+    }
+    if prepared.product_selections.len() != 1 {
+        bail!("pinned qualification requires exactly one daemon-derived Root product selection");
+    }
+    let selected_input = &prepared.product_selections[0];
+    if !matches!(selected_input.target, ProductSelectionTarget::Root {})
+        || selected_input.selection.declaration_id
+            != prepared.policy_source.policy.subject_declaration_id
+        || selected_input.selection.witness_hash != prepared.product_witness_hash
+        || selected_input.selection.witness_source != prepared.witness_source
+        || selected_input.selection.qualification_hash.is_some()
+    {
+        bail!("pinned qualification Root selector differs from signed policy subject and witness");
+    }
+
+    // RootExecutionAdmission retains caller-independent selectors, while its
+    // ResolutionOutput remains the pre-selection D0 composition. Resolve the
+    // selector through the ordinary product-composition authority here: that
+    // rechecks the signed relationship, exact pinned-project binding, witness,
+    // and consumer slot instead of assuming dispatch preflight projected a
+    // resolved selection into the root ResolutionOutput.
+    let subject_authority = &plan_context.subject_resolution_authority;
+    let roots = request_engine.resolution_roots(Some(project_root.to_path_buf()));
+    let selectors = prepared
+        .product_selections
+        .iter()
+        .map(|input| match &input.target {
+            ProductSelectionTarget::Root {} => Ok(input.selection.clone()),
+            _ => bail!("pinned qualification admission contains a non-Root product selector"),
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut selected_resolution = admission.resolution_output().clone();
+    let retained = crate::operator_external_content::product_composition::
+        select_products_with_project_context_resolver(
+            state,
+            context,
+            request_engine,
+            &roots,
+            subject_authority,
+            &mut selected_resolution,
+            &selectors,
+            None,
+        )?;
+    if retained.len() != 1 {
+        bail!("pinned qualification admission resolved an unexpected Root selection count");
+    }
+    let selected = retained
+        .get(&prepared.policy_source.policy.subject_declaration_id)
+        .context("pinned qualification admission lost its signed inner subject slot")?;
+    if selected.witness_hash != prepared.product_witness_hash
+        || selected.witness_source != prepared.witness_source
+        || selected.manifest_hash != prepared.subject_manifest_hash
+        || selected.qualification.is_some()
+        || selected.relationship.qualification.policy_ref.is_some()
+    {
+        bail!(
+            "pinned qualification resolved subject differs from the authenticated unqualified witness"
+        );
+    }
+
+    let admitted_definition_digest = admission
+        .resolution_output()
+        .effective_definition_digest()?
+        .as_str()
+        .to_owned();
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let current = resolve_current_bundle_verifier_identity_against_admitted(
+        state,
+        &authority,
+        &guard,
+        context,
+        &prepared.policy_source.policy.verifier_ref,
+        &prepared.policy_source.policy.verifier_parameters,
+        CurrentVerifierContext {
+            content: CurrentVerifierContent::Root(Some(&retained)),
+            logical_project_root: Some(project_root),
+            binding_subject_authority: Some(&plan_context.subject_resolution_authority),
+            sealed_request: None,
+            project_context_resolver: None,
+            pinned_admission: Some(&QualificationPinnedAdmissionContext {
+                plan_context,
+                request_engine,
+                project_binding,
+                project_root,
+                project_authority,
+            }),
+        },
+        Some(admission.resolution_output()),
+    )?;
+    if current.admitted_definition_digest != admitted_definition_digest {
+        bail!("pinned qualification verifier current D1 differs from root admission");
+    }
+    prepared.verifier_admitted_definition_digest = Some(admitted_definition_digest);
+    prepared.verifier_realized_definition_digest = Some(current.effective_definition_digest);
+    authority.ensure_guard(&guard)?;
+    Ok(())
 }
 
 pub(super) mod execution_evidence;
@@ -431,6 +601,7 @@ fn prove_with_guard(
             binding_subject_authority: Some(sealed.resolution_subject_authority()),
             sealed_request: Some(&sealed),
             project_context_resolver,
+            pinned_admission: None,
         },
         Some(&admitted_resolution),
     )?;
@@ -1870,6 +2041,7 @@ pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
             binding_subject_authority: Some(sealed.resolution_subject_authority()),
             sealed_request: Some(&sealed),
             project_context_resolver,
+            pinned_admission: None,
         },
         Some(&admitted_resolution),
     )
@@ -2059,6 +2231,51 @@ fn resolve_current_bundle_verifier_identity_in_generation(
                 "qualification verifier project authority is not projectless or read-only pinned"
             ),
         }
+    } else if let Some(pinned) = verifier_context.pinned_admission {
+        use ryeos_state::objects::{ExecutionProjectAuthority, PinnedProjectRealization};
+        let ExecutionProjectAuthority::PinnedGeneration {
+            snapshot_hash,
+            realization: PinnedProjectRealization::ReadOnly,
+            workspace_outputs: None,
+            ..
+        } = pinned.project_authority
+        else {
+            bail!("qualification selected-slot admission is not read-only pinned authority");
+        };
+        if !matches!(
+            &pinned.plan_context.project_context,
+            ProjectContext::SnapshotHash { hash } if hash == snapshot_hash
+        ) || pinned.plan_context.subject_resolution_authority
+            != (SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: snapshot_hash.clone(),
+            })
+        {
+            bail!("qualification selected-slot admission snapshot authority differs");
+        }
+        if pinned.project_binding.exact_authority() != pinned.project_authority
+            || pinned.project_binding.subject_resolution_authority()
+                != &pinned.plan_context.subject_resolution_authority
+        {
+            bail!("qualification pinned project binding differs from its exact plan context");
+        }
+        let EffectivePrincipal::Local(principal) = &pinned.plan_context.requested_by else {
+            bail!("independent product qualification rejects delegated verifier principals");
+        };
+        context.validate_execution_authority(
+            &principal.fingerprint,
+            &principal.scopes,
+            &pinned.plan_context.current_site_id,
+            &pinned.plan_context.origin_site_id,
+        )?;
+        if pinned.plan_context.current_site_id != state.threads.site_id() {
+            bail!("pinned verifier current site differs from the serving node");
+        }
+        (
+            Arc::clone(pinned.request_engine),
+            pinned.plan_context.clone(),
+            pinned.project_binding.clone(),
+            Some(pinned.project_root.to_path_buf()),
+        )
     } else {
         // Legacy in-memory callers are retained for projectless unit
         // fixtures only. Production evidence paths always carry a sealed
@@ -2084,9 +2301,13 @@ fn resolve_current_bundle_verifier_identity_in_generation(
         (engine, plan_context, binding, None)
     };
     let projectless_binding_authority = SubjectResolutionAuthority::Projectless;
+    let admitted_binding_authority = verifier_context
+        .pinned_admission
+        .map(|pinned| &pinned.plan_context.subject_resolution_authority)
+        .unwrap_or(&projectless_binding_authority);
     let binding_subject_authority = current_verifier_binding_subject_authority(
         verifier_context.binding_subject_authority,
-        &projectless_binding_authority,
+        admitted_binding_authority,
     );
     if let Some(sealed) = verifier_context.sealed_request
         && verifier_context.binding_subject_authority != Some(sealed.resolution_subject_authority())

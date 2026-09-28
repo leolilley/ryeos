@@ -12,7 +12,7 @@ use ryeos_state::external_content::products::composition::{
 use ryeos_state::external_content::products::qualification::ProductQualificationConsumerContentIdentity;
 use ryeos_state::external_content::products::qualification::ProductQualificationPolicySource;
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
@@ -30,6 +30,25 @@ pub struct ProductQualificationLaunchRequest {
     pub witness_hash: String,
     pub witness_source: ProductWitnessSource,
     pub relationship_name: String,
+    /// Required-nullable so omission cannot silently select the legacy
+    /// projectless lane. A present snapshot selects the pinned read-only
+    /// verifier lane; no path or authority is caller-authored.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub project_context: Option<ProductQualificationProjectContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationProjectContext {
+    pub snapshot_hash: String,
+}
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 impl ProductQualificationLaunchRequest {
@@ -39,7 +58,17 @@ impl ProductQualificationLaunchRequest {
         }
         require_canonical_hash("product witness", &self.witness_hash)?;
         self.witness_source.validate()?;
-        require_bounded_name("product relationship", &self.relationship_name)
+        require_bounded_name("product relationship", &self.relationship_name)?;
+        if let Some(project) = &self.project_context
+            && (!lillux::valid_hash(&project.snapshot_hash)
+                || project
+                    .snapshot_hash
+                    .bytes()
+                    .any(|byte| byte.is_ascii_uppercase()))
+        {
+            bail!("qualification project context requires an exact canonical snapshot");
+        }
+        Ok(())
     }
 }
 
@@ -57,10 +86,13 @@ pub struct PreparedProductQualificationLaunch {
     pub verifier_ref: String,
     /// Pre-realization D1 from the first current-Bundle admission. The later
     /// dispatch preflight must match it before any verifier executes.
-    pub verifier_admitted_definition_digest: String,
+    pub verifier_admitted_definition_digest: Option<String>,
     /// Finalized, realized verifier definition (D2). The accepted root's
     /// pre-realization D1 is computed independently from dispatch preflight.
-    pub verifier_realized_definition_digest: String,
+    pub verifier_realized_definition_digest: Option<String>,
+    /// Pinned selected-slot admission resolves both verifier identities only
+    /// after normal root preflight has authenticated the exact slot binding.
+    pub pinned_snapshot_hash: Option<String>,
     pub verifier_parameters: Value,
     pub product_selections: ProductSelectionInputs,
     consumer_content: Option<super::PreparedBundleConsumerContentInputs>,
@@ -85,6 +117,25 @@ impl PreparedProductQualificationLaunch {
             .take()
             .map(super::PreparedBundleConsumerContentInputs::into_publication)
             .transpose()
+    }
+}
+
+fn selected_root_product_selection(
+    declaration_id: &str,
+    witness_hash: &str,
+    witness_source: &ProductWitnessSource,
+) -> ryeos_state::external_content::products::composition::ProductSelectionInput {
+    use ryeos_state::external_content::products::composition::{
+        ProductSelection, ProductSelectionInput, ProductSelectionTarget,
+    };
+    ProductSelectionInput {
+        target: ProductSelectionTarget::Root {},
+        selection: ProductSelection {
+            declaration_id: declaration_id.to_owned(),
+            witness_hash: witness_hash.to_owned(),
+            witness_source: witness_source.clone(),
+            qualification_hash: None,
+        },
     }
 }
 
@@ -184,34 +235,58 @@ pub fn prepare_after_reservation(
             bail!("product relationship requires a claim outside its signed policy");
         }
     }
-    // This profile uses a signed fixed-pin verifier, not an operator-selected
-    // product slot. Re-admit the exact current Bundle Tool and independently
-    // compare its pinned subject realization with the authenticated witness
-    // before any root or nested producer can execute.
-    let current_verifier = super::resolve_current_bundle_verifier_identity_against_admitted(
-        state,
-        &authority,
-        &guard,
-        context,
-        &policy_source.policy.verifier_ref,
-        &policy_source.policy.verifier_parameters,
-        super::CurrentVerifierContext {
-            content: super::CurrentVerifierContent::Root(None),
-            logical_project_root: None,
-            binding_subject_authority: None,
-            sealed_request: None,
-            project_context_resolver: None,
-        },
-        None,
-    )?;
-    super::require_exact_pinned_subject(
-        &current_verifier.realizations,
-        &policy_source.policy.subject_declaration_id,
-        &product.evidence.manifest_hash,
-        product.evidence.declaration.shape,
-        product.evidence.entry_count,
-        product.evidence.total_bytes,
-    )?;
+    // Projectless qualification retains the signed fixed-pin lane. The pinned
+    // read-only lane instead selects the policy's inner subject slot and lets
+    // normal request-engine preflight authenticate its current binding.
+    let (
+        verifier_admitted_definition_digest,
+        verifier_realized_definition_digest,
+        product_selections,
+    ) = if request.project_context.is_some() {
+        // The pinned lane selects an outer-relationship-authorized product
+        // slot. The ordinary request Engine preflight authenticates the
+        // selected inner slot and current pinned binding before D1/D2 are
+        // finalized below; do not resolve it projectlessly here.
+        // The signed policy selects the verifier's inner subject slot; it is
+        // distinct from the outer relationship's qualified-product consumer.
+        let selection = selected_root_product_selection(
+            &policy_source.policy.subject_declaration_id,
+            &product.attestation_hash,
+            &request.witness_source,
+        );
+        (None, None, vec![selection])
+    } else {
+        let current_verifier = super::resolve_current_bundle_verifier_identity_against_admitted(
+            state,
+            &authority,
+            &guard,
+            context,
+            &policy_source.policy.verifier_ref,
+            &policy_source.policy.verifier_parameters,
+            super::CurrentVerifierContext {
+                content: super::CurrentVerifierContent::Root(None),
+                logical_project_root: None,
+                binding_subject_authority: None,
+                sealed_request: None,
+                project_context_resolver: None,
+                pinned_admission: None,
+            },
+            None,
+        )?;
+        super::require_exact_pinned_subject(
+            &current_verifier.realizations,
+            &policy_source.policy.subject_declaration_id,
+            &product.evidence.manifest_hash,
+            product.evidence.declaration.shape,
+            product.evidence.entry_count,
+            product.evidence.total_bytes,
+        )?;
+        (
+            Some(current_verifier.admitted_definition_digest),
+            Some(current_verifier.effective_definition_digest),
+            Vec::new(),
+        )
+    };
     Ok(PreparedProductQualificationLaunch {
         launch_id: request.launch_id.clone(),
         owner_fingerprint: context.fingerprint.clone(),
@@ -221,16 +296,19 @@ pub fn prepare_after_reservation(
         policy_source: policy_source.clone(),
         subject_manifest_hash: product.evidence.manifest_hash,
         verifier_ref: policy_source.policy.verifier_ref.clone(),
-        verifier_admitted_definition_digest: current_verifier.admitted_definition_digest,
-        verifier_realized_definition_digest: current_verifier.effective_definition_digest,
+        verifier_admitted_definition_digest,
+        verifier_realized_definition_digest,
         verifier_parameters: policy_source.policy.verifier_parameters.clone(),
-        // The current signed verifier declares exact fixed pins. A Root
-        // ProductSelection would invent a different execution definition and
-        // is invalid when no signed product slot exists. Dispatch preflight
-        // must verify the fixed subject declaration and exact witness bytes.
-        // A selected-slot verifier needs a separate signed-contract branch;
-        // it must never be inferred from the policy subject id alone.
-        product_selections: Vec::new(),
+        // In the projectless lane, the signed verifier declares an exact fixed
+        // pin, so adding a Root selector would invent a different definition.
+        // In the pinned lane, derive the Root selector from the signed policy
+        // subject and authenticated witness; dispatch preflight resolves its
+        // inner signed slot.
+        product_selections,
+        pinned_snapshot_hash: request
+            .project_context
+            .as_ref()
+            .map(|project| project.snapshot_hash.clone()),
         consumer_content,
     })
 }
@@ -238,6 +316,7 @@ pub fn prepare_after_reservation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_state::external_content::products::composition::ProductSelectionTarget;
     use serde_json::json;
 
     #[test]
@@ -246,11 +325,20 @@ mod tests {
             "launch_id":"L-0123456789abcdef0123456789abcdef",
             "witness_hash":"a".repeat(64),
             "witness_source":{"kind":"local_capture"},
-            "relationship_name":"runtime_to_verifier"
+            "relationship_name":"runtime_to_verifier",
+            "project_context":null
         });
         let request: ProductQualificationLaunchRequest =
             serde_json::from_value(valid.clone()).unwrap();
         request.validate().unwrap();
+        let mut omitted_nullable = valid.clone();
+        omitted_nullable
+            .as_object_mut()
+            .unwrap()
+            .remove("project_context");
+        assert!(
+            serde_json::from_value::<ProductQualificationLaunchRequest>(omitted_nullable).is_err()
+        );
         for field in [
             "verifier_ref",
             "policy_ref",
@@ -262,5 +350,79 @@ mod tests {
             forged[field] = json!("caller-controlled");
             assert!(serde_json::from_value::<ProductQualificationLaunchRequest>(forged).is_err());
         }
+    }
+
+    #[test]
+    fn pinned_selector_uses_policy_inner_slot_not_outer_consumer_slot() {
+        use std::fs;
+
+        let outer_relationship_name = "runtime_to_qualified_runtime";
+        let outer_consumer_declaration = "runtime";
+        let workspace = ryeos_engine::test_support::workspace_root();
+        let standard = ryeos_engine::test_support::standard_bundle_root();
+        let policy: serde_yaml::Value = serde_yaml::from_slice(
+            &fs::read(standard.join(".ai/config/ryeos/environments/qualification/gnu-python.yaml"))
+                .unwrap(),
+        )
+        .unwrap();
+        let policy_inner_subject_declaration =
+            policy["product_qualification_policy"]["subject_declaration_id"]
+                .as_str()
+                .unwrap();
+        let relationships: serde_yaml::Value = serde_yaml::from_slice(
+            &fs::read(workspace.join(".ai/config/development/ryeos/gnu-python-products.yaml"))
+                .unwrap(),
+        )
+        .unwrap();
+        let relationships = relationships["product_relationships"]["relationships"]
+            .as_sequence()
+            .unwrap();
+        let outer = relationships
+            .iter()
+            .find(|relationship| relationship["name"].as_str() == Some(outer_relationship_name))
+            .unwrap();
+        let inner = relationships
+            .iter()
+            .find(|relationship| {
+                relationship["name"].as_str() == Some("runtime_to_qualification_verifier")
+            })
+            .unwrap();
+        assert_eq!(
+            outer["consumer"]["declaration_id"].as_str(),
+            Some(outer_consumer_declaration)
+        );
+        assert_eq!(
+            inner["consumer"]["declaration_id"].as_str(),
+            Some(policy_inner_subject_declaration)
+        );
+        assert!(inner["qualification"]["policy_ref"].is_null());
+
+        let verifier: serde_yaml::Value = serde_yaml::from_slice(
+            &fs::read(standard.join(".ai/tools/ryeos/environments/qualification/gnu-python.yaml"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            verifier["external_product_slots"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .any(|slot| {
+                    slot["id"].as_str() == Some(policy_inner_subject_declaration)
+                        && slot["relationship"].as_str()
+                            == Some("runtime_to_qualification_verifier")
+                })
+        );
+
+        let source = ProductWitnessSource::LocalCapture {};
+        let selection = selected_root_product_selection(
+            policy_inner_subject_declaration,
+            &"a".repeat(64),
+            &source,
+        );
+        assert!(matches!(selection.target, ProductSelectionTarget::Root {}));
+        assert_eq!(selection.selection.declaration_id, "subject");
+        assert_eq!(selection.selection.witness_source, source);
+        assert!(selection.selection.qualification_hash.is_none());
     }
 }

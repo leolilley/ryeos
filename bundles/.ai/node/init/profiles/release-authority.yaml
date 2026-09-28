@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-28T11:34:21Z:2bac6379dbdb6737a855e37f51d3020e65454a975460e5fc49c212da379adaeb:ZwxQi4G61aCqSftIFmFDE+jtl0mqKncONBAAR9oaDs9Eg5ATov9jiaIS7jrlCO6lFrpLlJQg+57mKB2cP776BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T23:08:50Z:5d4840d74962a941a132c7ff5e72684d9833734465685c8f8cd507332dfc19b4:5IPanT5y4NuvACwGA4VxTo9s/s49PqRbv2a4lqcUbe0IjSGvM++S01KUwTPxl1dCfJsbSDf7pOIbOdg6clwdCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -167,8 +167,10 @@ policies:
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
-    # Release-authority runs only signed, purpose-scoped bundle-release
-    # producers. Recipe bounds may narrow this explicit node ceiling.
+    # Release-authority runs signed, purpose-scoped bundle-release producers.
+    # This is the explicit initial node-wide ceiling already used by
+    # full/development; producer admission remains disabled in catalog-only
+    # nodes. It is bounded below structural maxima and is not recipe-calibrated.
     producer_resource_ceiling:
       maximum_wall_time_ms: 600000
       maximum_stdout_bytes: 6291456
