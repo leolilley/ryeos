@@ -451,12 +451,8 @@ mod tests {
             &profile,
         )
         .unwrap();
-        assert_eq!(
-            product.manifest_hash(),
-            ObservedGuestRuntime::observe(product.root())
-                .unwrap()
-                .manifest_hash()
-        );
+        let observed_product = ObservedGuestRuntime::observe(product.root()).unwrap();
+        assert_eq!(product.manifest_hash(), observed_product.manifest_hash());
         let ignore =
             ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
                 patterns: vec![],
@@ -489,6 +485,10 @@ mod tests {
         let manifest = ryeos_state::observe_external_content_tree_exact(product.root()).unwrap();
         let manifest_value = serde_json::to_value(&manifest).unwrap();
         let identity = derive_guest_owner_runtime_manifest_identity(&manifest_value, &key).unwrap();
+        assert_eq!(
+            observed_product.measure_exact_owner_product().unwrap(),
+            identity
+        );
         assert_eq!(identity.manifest_hash, product.manifest_hash());
         assert_eq!(identity.owner_executable_sha256, digest);
         assert!(identity.controller_public_root.starts_with("ed25519:"));

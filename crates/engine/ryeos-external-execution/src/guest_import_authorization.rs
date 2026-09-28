@@ -14,6 +14,10 @@ use ryeos_external_execution_contract::guest_import_authorization::{
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 
+use crate::guest_runtime_product::{
+    GuestOwnerRuntimeManifestIdentity, derive_guest_owner_runtime_manifest_identity,
+};
+
 const CONTROLLER_ROOT_FILE: &str = "controller-root.hex";
 const OWNER_PROFILE_FILE: &str = "guest-owner-profile.json";
 const MAX_OWNER_PROFILE_BYTES: u64 = 4 * 1024;
@@ -127,6 +131,30 @@ impl ObservedGuestRuntime {
 
     pub fn manifest_hash(&self) -> &str {
         &self.manifest_hash
+    }
+
+    /// Strict four-entry owner-product measurement for a restored snapshot.
+    /// This is intentionally separate from generic installed-runtime
+    /// observation and grants no provider or snapshot identity by itself.
+    pub fn measure_exact_owner_product(&self) -> Result<GuestOwnerRuntimeManifestIdentity> {
+        ensure!(
+            self.root.identity()? == self.root_identity,
+            "installed runtime root changed before owner-product measurement"
+        );
+        let manifest = ryeos_state::observe_external_content_tree_exact(&self.root)?;
+        ensure!(
+            ryeos_state::external_content_manifest_digest(&manifest)? == self.manifest_hash,
+            "installed runtime changed before owner-product measurement"
+        );
+        let identity = derive_guest_owner_runtime_manifest_identity(
+            &serde_json::to_value(&manifest)?,
+            &self.controller_root,
+        )?;
+        ensure!(
+            identity.manifest_hash == self.manifest_hash,
+            "owner-product measurement changed manifest identity"
+        );
+        Ok(identity)
     }
 
     pub fn profile(&self) -> &GuestOwnerRuntimeProfile {
@@ -463,6 +491,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let observed = ObservedGuestRuntime::observe(&runtime).unwrap();
+        assert!(observed.measure_exact_owner_product().is_err());
         let separate = tempfile::tempdir().unwrap();
         let separate = lillux::PinnedDirectory::open(separate.path())
             .unwrap()
