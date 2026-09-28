@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-28T01:25:00Z:3f8655dd791f363199b928f42535b59fa57fb86b49942ffc0ef4d4c81b15c3b0:90yBSSPGljGTVvSB8D/ptTCihf9qM5EUlWnB89N0X54qH9KjgCDDNRvul94WjZ35XUgtiSRbbHSN7JUkBXFsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T01:32:07Z:5d63f9beba3a6127e15c5a2919066a91062f6ed0e7848c57f447e493f4cd0bda:RqB+ynA5sRyhHynT5xsgxBsj358ESSuy97Qur0iiT95ktmwvXZuX8h+PporxUpAvZkf03X2fy1pKIuO20RfNDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -165,7 +165,14 @@ policies:
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
-    producer_resource_ceiling: null
+    # Release-authority runs only signed, purpose-scoped bundle-release
+    # producers. Recipe bounds may narrow this explicit node ceiling.
+    producer_resource_ceiling:
+      maximum_wall_time_ms: 600000
+      maximum_stdout_bytes: 6291456
+      maximum_stderr_bytes: 2097152
+      maximum_memory_bytes: 2147483648
+      maximum_processes: 64
     resource_authority:
       cleanup_allowance_ms: 30000
       admission:

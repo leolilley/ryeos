@@ -456,7 +456,14 @@ mod tests {
                 serde_json::from_value(document["policies"]["execution"].clone()).unwrap();
             policy.validate().unwrap();
             assert_eq!(policy.schema, 4, "{}", path.display());
-            if ["development", "full", "contained-workflow"].contains(&profile) {
+            if [
+                "development",
+                "full",
+                "contained-workflow",
+                "release-authority",
+            ]
+            .contains(&profile)
+            {
                 assert!(policy.producer_resource_ceiling.is_some(), "{profile}");
             } else {
                 assert!(policy.producer_resource_ceiling.is_none(), "{profile}");
