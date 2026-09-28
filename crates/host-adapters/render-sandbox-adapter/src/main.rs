@@ -5,6 +5,7 @@
 mod activation_contact;
 mod provider_spec;
 mod proxy_route;
+mod snapshot_production;
 mod snapshot_qualification;
 
 use std::collections::BTreeMap;

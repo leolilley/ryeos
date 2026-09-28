@@ -349,6 +349,13 @@ command does not export external-content manifests.
 controller-side source half of that path: it authenticates the current witness
 and import bounds, loads the exact ordinary manifest under CAS authority,
 privately stages it, and re-observes the tree against the node public root.
+The staged authority can emit one bounded, deterministic, sealed tar/gzip
+directory-upload body from pinned descriptors; it rechecks the tree after
+packaging. The Render adapter now parses a complete `202` filesystem snapshot
+response against the exact source Sandbox, group and plan, retaining the
+original product witness/root in a locator observation. This parser is not yet
+connected to a durable snapshot-production operation and is not evidence of
+the bytes restored from that snapshot.
 This does not export a CAS path, contact Render, publish a snapshot, or attest
 restored guest bytes. Durable provider transfer and independent restore
 observation must consume that exact staged authority before qualification.
