@@ -22,6 +22,10 @@ use ryeos_external_execution_contract::runtime_snapshot::{
     RuntimeSnapshotAdapterResponse, RuntimeSnapshotIntent,
     RuntimeSnapshotQualificationAdapterRequest, RuntimeSnapshotQualificationAdapterResponse,
     RuntimeSnapshotQualificationIntent, RuntimeSnapshotReadinessRequest,
+    RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL,
+    RuntimeSnapshotQualificationTerminationAdapterRequest,
+    RuntimeSnapshotQualificationTerminationAdapterResponse,
+    RuntimeSnapshotQualificationTerminationIntent,
 };
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use ryeos_state::external_content::products::{ProductShape, ProductStorage};
@@ -37,6 +41,9 @@ use crate::runtime_db::runtime_snapshot::{
 };
 use crate::runtime_db::runtime_snapshot_qualification::{
     SnapshotQualificationAttemptClaim, SnapshotQualificationPhase, SnapshotQualificationRecord,
+};
+use crate::runtime_db::runtime_snapshot_qualification_termination::{
+    QualificationTerminationClaim, QualificationTerminationRecord,
 };
 use crate::state::AppState;
 
@@ -401,6 +408,112 @@ pub fn verify_qualification_occurrence(
             state
                 .state_store
                 .quarantine_restored_verifier_attempt(&request.intent.operation_id)?;
+            Err(error)
+        }
+    }
+}
+
+/// Terminate one exact restored qualification Sandbox. A replayed or
+/// uncertain first contact can only observe the retained occurrence; it
+/// cannot repeat the POST. Provider terminal status is not writer exclusion.
+pub fn terminate_qualification_occurrence(
+    state: &AppState,
+    context: &HandlerContext,
+    qualification_operation_id: &str,
+) -> Result<QualificationTerminationRecord> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    let qualified = state.state_store
+        .snapshot_qualification_operation(qualification_operation_id)?
+        .context("snapshot qualification operation is absent")?;
+    ensure!(
+        qualified.intent.owner_principal == context.fingerprint
+            && qualified.phase == SnapshotQualificationPhase::OccurrenceBound,
+        "qualification termination has no operator-owned restored occurrence"
+    );
+    let occurrence = qualified.occurrence.clone()
+        .context("qualification termination occurrence is absent")?;
+    let qualification = state.node_config.runtime_snapshot_qualification.iter()
+        .find(|binding| binding.digest() == qualified.intent.qualification_profile_digest)
+        .context("current signed snapshot qualification binding is absent")?;
+    let producer = state.node_config.runtime_snapshot_production.iter()
+        .find(|binding| {
+            binding.id() == qualification.production_binding_id()
+                && binding.digest() == qualification.production_binding_digest()
+        })
+        .context("qualification termination lost exact producer binding")?;
+    ensure!(
+        qualified.intent.adapter_artifact_hash == producer.adapter_artifact_hash()
+            && qualified.intent.provider_spec_digest == qualification.provider_spec_digest()
+            && qualified.intent.settings_digest == qualification.settings_digest()
+            && qualified.intent.provider_id == producer.backend(),
+        "qualification termination differs from signed provider authority"
+    );
+    let access = producer.credential_access()?;
+    let credential = access.decode(state.vault.placement_credential(&access)?)?;
+    state.external_placement_backends
+        .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
+    let now = lillux::time::timestamp_millis();
+    let mut intent = RuntimeSnapshotQualificationTerminationIntent {
+        schema: 1,
+        operation_id: String::new(),
+        qualification_operation_id: qualified.intent.operation_id.clone(),
+        occurrence_id: occurrence.occurrence_id.clone(),
+        owner_principal: context.fingerprint.clone(),
+        provider_id: producer.backend().to_owned(),
+        provider_spec_digest: qualification.provider_spec_digest().to_owned(),
+        attempt_deadline_ms: now.checked_add(i64::from(qualification.contact_timeout_seconds()) * 1_000)
+            .context("qualification termination deadline overflow")?,
+    };
+    intent.operation_id = intent.derived_operation_id()?;
+    if let Some(existing) = state.state_store
+        .qualification_termination_operation(&intent.operation_id)? {
+        intent.attempt_deadline_ms = existing.intent.attempt_deadline_ms;
+        ensure!(intent == existing.intent,
+            "retained qualification termination changed signed coordinates");
+    }
+    intent.validate_for(&qualified.intent, &occurrence)?;
+    state.state_store.reserve_qualification_termination(&intent)?;
+    let claim = state.state_store
+        .claim_qualification_termination_attempt(&intent.operation_id)?;
+    let first_contact = match claim {
+        QualificationTerminationClaim::StartAttempt(_) => true,
+        QualificationTerminationClaim::Reconcile(_) => false,
+        QualificationTerminationClaim::Terminal(record) => return Ok(record),
+    };
+    let request = RuntimeSnapshotQualificationTerminationAdapterRequest {
+        protocol: RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL.into(),
+        provider_spec_digest: qualification.provider_spec_digest().to_owned(),
+        intent,
+        qualification_intent: qualified.intent,
+        occurrence,
+    };
+    request.validate()?;
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
+        u64::from(qualification.contact_timeout_seconds()),
+    ));
+    let attempted = state.external_placement_backends
+        .terminate_snapshot_qualification_occurrence(
+            producer, qualification, &credential, &request, first_contact, deadline,
+        );
+    match attempted {
+        Ok(output) => match output.value {
+            RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal { mut observation } => {
+                observation.contact_deadline_exceeded = output.deadline_exceeded;
+                state.state_store.bind_qualification_terminal_observation(&observation)
+            }
+            RuntimeSnapshotQualificationTerminationAdapterResponse::Pending { .. } => {
+                if first_contact {
+                    state.state_store.quarantine_qualification_termination_attempt(&request.intent.operation_id)
+                } else {
+                    state.state_store.qualification_termination_operation(&request.intent.operation_id)?
+                        .context("qualification termination disappeared during reconciliation")
+                }
+            }
+        },
+        Err(error) => {
+            if first_contact {
+                state.state_store.quarantine_qualification_termination_attempt(&request.intent.operation_id)?;
+            }
             Err(error)
         }
     }

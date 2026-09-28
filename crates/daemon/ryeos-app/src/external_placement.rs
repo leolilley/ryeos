@@ -110,6 +110,19 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterResponse>> {
         bail!("external placement backend cannot create a qualification occurrence")
     }
+    /// The caller owns the one-shot journal claim. `first_contact=false` is
+    /// strictly observation-only and may not repeat a termination mutation.
+    fn terminate_snapshot_qualification_occurrence(
+        &self,
+        _producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        _credential: &PlacementCredential,
+        _request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterRequest,
+        _first_contact: bool,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>> {
+        bail!("external placement backend cannot terminate a qualification occurrence")
+    }
     fn seal_restoration_verifier_upload(
         &self,
         _producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
@@ -978,6 +991,22 @@ impl ExternalPlacementBackendRegistry {
         let backend = self.backends.get(&(producer.backend().to_owned(), producer.adapter_artifact_hash().to_owned()))
             .context("exact signed qualification adapter generation is not installed")?;
         backend.create_snapshot_qualification_occurrence(producer, qualification, credential, request, deadline)
+    }
+
+    pub(crate) fn terminate_snapshot_qualification_occurrence(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &PlacementCredential,
+        request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterRequest,
+        first_contact: bool,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>> {
+        let backend = self.backends.get(&(producer.backend().to_owned(), producer.adapter_artifact_hash().to_owned()))
+            .context("exact signed qualification termination adapter generation is not installed")?;
+        backend.terminate_snapshot_qualification_occurrence(
+            producer, qualification, credential, request, first_contact, deadline,
+        )
     }
 
     pub(crate) fn preflight_runtime_snapshot(

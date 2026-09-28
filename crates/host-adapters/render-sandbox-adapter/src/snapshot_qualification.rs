@@ -20,6 +20,9 @@ use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotIntent,
     RuntimeSnapshotQualificationAdapterRequest, RuntimeSnapshotQualificationAdapterResponse,
     RuntimeSnapshotQualificationOccurrence, RuntimeSnapshotReadinessObservation,
+    RuntimeSnapshotQualificationTerminationAdapterRequest,
+    RuntimeSnapshotQualificationTerminationAdapterResponse,
+    RuntimeSnapshotQualificationTerminalObservation,
 };
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_PROTOCOL, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
@@ -292,6 +295,176 @@ pub(crate) fn run_restored_verifier(adapter: &lillux::InheritedDescriptorAuthori
     .unwrap_or_else(|_| RestoredVerifierAdapterResponse::Uncertain {
         operation_id: request.intent.operation_id.clone(),
     });
+    result.validate_for(&request)?;
+    crate::write_response(&result)
+}
+
+/// The mutation entry is called only after a durable first-contact claim.
+/// The observation entry must never issue a second POST.
+pub(crate) fn terminate_restored_sandbox(
+    adapter: &lillux::InheritedDescriptorAuthority,
+    first_contact: bool,
+) -> Result<()> {
+    let enclosing = crate::operation_deadline()?;
+    ensure!(
+        [
+            crate::LIFECYCLE_BOOTSTRAP_FD_ENV,
+            crate::LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            crate::LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+        ]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none()),
+        "qualification termination received worker activation authority"
+    );
+    let bytes = crate::read_sealed_env(
+        crate::LIFECYCLE_REQUEST_FD_ENV,
+        MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+    )?;
+    let request: RuntimeSnapshotQualificationTerminationAdapterRequest =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &bytes,
+            MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+        )?;
+    request.validate()?;
+    ensure!(
+        ryeos_external_execution_contract::canonical_json(&request)? == bytes
+            && request.intent.provider_id == ADAPTER_ID,
+        "qualification termination request is noncanonical or selects another provider"
+    );
+    crate::verify_artifact(
+        adapter,
+        &request.qualification_intent.adapter_artifact_hash,
+        None,
+    )?;
+    // A recovery GET may run after the original POST deadline. It retains
+    // the exact intent but has its own bounded invocation deadline.
+    let deadline = if first_contact {
+        crate::request_deadline(request.intent.attempt_deadline_ms, enclosing)?
+    } else {
+        enclosing
+    };
+    let spec_bytes = crate::read_sealed_env(
+        crate::LIFECYCLE_PROVIDER_SPEC_FD_ENV,
+        usize::try_from(ryeos_external_execution_contract::MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?,
+    )?;
+    let captured_spec_digest = std::env::var(crate::LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
+        .context("qualification termination lacks captured provider spec digest")?;
+    ensure!(
+        captured_spec_digest == request.provider_spec_digest
+            && lillux::sha256_hex(&spec_bytes) == request.provider_spec_digest,
+        "qualification termination provider spec changed its signed handoff"
+    );
+    let spec = ProviderSpec::parse(
+        &spec_bytes,
+        &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
+    )?;
+    let settings_bytes =
+        crate::read_sealed_env(crate::LIFECYCLE_SETTINGS_FD_ENV, crate::MAX_SETTINGS_BYTES)?;
+    let settings = selected_qualification_settings(
+        &settings_bytes,
+        &request.qualification_intent.settings_digest,
+        &request.qualification_intent.provider_group_id,
+        &request.qualification_intent.snapshot_id,
+    )?;
+    ensure!(
+        spec.termination_terminal_proof_enabled() && spec.reconciliation_terminal_proof_enabled(),
+        "signed provider spec has no exact terminal observation profile"
+    );
+    let mutation = spec.termination_mutation_route()
+        .context("signed provider spec has no qualification termination route")?;
+    let observation = if first_contact {
+        spec.termination_observation_route()
+    } else {
+        spec.reconciliation_route()
+    }
+    .context("signed provider spec has no qualification terminal observation route")?;
+    for route in [mutation, observation] {
+        let (url, target) = crate::api_url(
+            &spec,
+            route,
+            Some(&request.intent.occurrence_id),
+            &settings,
+            None,
+        )?;
+        crate::validate_api_url(
+            &url,
+            &target.path_segments,
+            target.owner_id_query.as_deref(),
+            target.upload_path_query.as_deref(),
+        )?;
+    }
+    let network = crate::network_context_from_captured_inputs()?;
+    let cancellation = lillux::network::NetworkCancellation::default();
+    let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
+    let credential = crate::read_credential()?;
+    if first_contact {
+        let (url, _) = crate::api_url(
+            &spec,
+            mutation,
+            Some(&request.intent.occurrence_id),
+            &settings,
+            None,
+        )?;
+        // The acknowledgement is never terminal. A lost response remains
+        // under this already-claimed attempt; recovery is GET-only.
+        let _ = crate::send_api_request(
+            &network,
+            &url,
+            "POST",
+            None,
+            &credential,
+            deadline,
+            &settings,
+            &cancellation,
+        );
+    }
+    let pending = || RuntimeSnapshotQualificationTerminationAdapterResponse::Pending {
+        operation_id: request.intent.operation_id.clone(),
+    };
+    let (url, _) = crate::api_url(
+        &spec,
+        observation,
+        Some(&request.intent.occurrence_id),
+        &settings,
+        None,
+    )?;
+    let result = crate::send_api_request(
+        &network,
+        &url,
+        "GET",
+        None,
+        &credential,
+        deadline,
+        &settings,
+        &cancellation,
+    )
+    .ok()
+    .and_then(|response| crate::read_response(response).ok())
+    .and_then(|(status, body)| {
+        if status != 200 {
+            return None;
+        }
+        let sandbox: crate::RenderSandbox = ryeos_external_execution_contract::from_json_slice_strict(
+            &body,
+            usize::try_from(crate::MAX_API_RESPONSE_BYTES).ok()?,
+        ).ok()?;
+        let terminated_at = crate::exact_terminal_timestamp(
+            &sandbox,
+            &request.intent.occurrence_id,
+            &settings,
+        )?;
+        Some(RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
+            observation: RuntimeSnapshotQualificationTerminalObservation {
+                schema: 1,
+                operation_id: request.intent.operation_id.clone(),
+                occurrence_id: request.intent.occurrence_id.clone(),
+                provider_response_sha256: lillux::sha256_hex(&body),
+                terminated_at: terminated_at.into(),
+                contact_deadline_exceeded: false,
+            },
+        })
+    })
+    .unwrap_or_else(pending);
     result.validate_for(&request)?;
     crate::write_response(&result)
 }

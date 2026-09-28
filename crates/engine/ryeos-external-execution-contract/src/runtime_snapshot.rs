@@ -412,6 +412,55 @@ impl RuntimeSnapshotQualificationTerminalObservation {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotQualificationTerminationAdapterRequest {
+    pub protocol: String,
+    pub intent: RuntimeSnapshotQualificationTerminationIntent,
+    pub qualification_intent: RuntimeSnapshotQualificationIntent,
+    pub occurrence: RuntimeSnapshotQualificationOccurrence,
+    pub provider_spec_digest: String,
+}
+
+impl RuntimeSnapshotQualificationTerminationAdapterRequest {
+    pub fn validate(&self) -> Result<()> {
+        self.intent.validate_for(&self.qualification_intent, &self.occurrence)?;
+        ensure!(
+            self.protocol == RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL
+                && self.provider_spec_digest == self.intent.provider_spec_digest
+                && canonical_json(self)?.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+            "qualification termination handoff changed signed authority"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeSnapshotQualificationTerminationAdapterResponse {
+    Terminal {
+        observation: RuntimeSnapshotQualificationTerminalObservation,
+    },
+    Pending { operation_id: String },
+}
+
+impl RuntimeSnapshotQualificationTerminationAdapterResponse {
+    pub fn validate_for(
+        &self,
+        request: &RuntimeSnapshotQualificationTerminationAdapterRequest,
+    ) -> Result<()> {
+        request.validate()?;
+        match self {
+            Self::Terminal { observation } => observation.validate_for(&request.intent)?,
+            Self::Pending { operation_id } => ensure!(
+                operation_id == &request.intent.operation_id,
+                "pending qualification termination changed attempt identity"
+            ),
+        }
+        Ok(())
+    }
+}
+
 /// Sealed create-only handoff. The selected snapshot ID is a retained provider
 /// result, not a mutable setting or a value inferred from the adapter's own
 /// environment. This grants no verifier run or qualification claim.
@@ -888,6 +937,22 @@ mod tests {
             contact_deadline_exceeded: false,
         };
         terminal.validate_for(&termination).unwrap();
+        let termination_request = RuntimeSnapshotQualificationTerminationAdapterRequest {
+            protocol: RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL.into(),
+            intent: termination.clone(),
+            qualification_intent: request.intent.clone(),
+            occurrence: occurrence.clone(),
+            provider_spec_digest: termination.provider_spec_digest.clone(),
+        };
+        termination_request.validate().unwrap();
+        RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
+            observation: terminal.clone(),
+        }
+        .validate_for(&termination_request)
+        .unwrap();
+        let mut wrong_request = termination_request.clone();
+        wrong_request.occurrence.occurrence_id = "sbx-other".into();
+        assert!(wrong_request.validate().is_err());
         let mut switched_terminal = terminal;
         switched_terminal.occurrence_id = "sbx-other".into();
         assert!(switched_terminal.validate_for(&termination).is_err());

@@ -269,6 +269,12 @@ fn run() -> Result<()> {
         Some("qualify-snapshot-verify") => {
             snapshot_qualification::run_restored_verifier(&adapter)
         }
+        Some("qualify-snapshot-terminate") => {
+            snapshot_qualification::terminate_restored_sandbox(&adapter, true)
+        }
+        Some("observe-snapshot-termination") => {
+            snapshot_qualification::terminate_restored_sandbox(&adapter, false)
+        }
         _ => anyhow::bail!("unsupported lifecycle invocation"),
     }
 }
