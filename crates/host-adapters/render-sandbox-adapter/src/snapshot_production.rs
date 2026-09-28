@@ -4,7 +4,7 @@
 //! original one-shot intent. It is never evidence that the snapshot contains
 //! the retained product; an independent restored-guest verifier owns that join.
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 
@@ -154,7 +154,26 @@ pub(crate) struct BoundSnapshotCreation {
     pub source_sandbox_id: String,
     pub sandbox_group_id: String,
     pub snapshot_id: String,
+    pub requested_at: String,
+    pub expires_at: String,
     pub response_sha256: String,
+}
+
+/// Provider readiness for the same opaque locator. It is not evidence of the
+/// filesystem restored from this snapshot.
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AvailableSnapshotObservation {
+    pub schema: u32,
+    pub operation_id: String,
+    pub intent_digest: String,
+    pub snapshot_id: String,
+    pub source_sandbox_id: String,
+    pub sandbox_group_id: String,
+    pub captured_at: String,
+    pub size_bytes: i64,
+    pub creation_response_sha256: String,
+    pub availability_response_sha256: String,
 }
 
 pub(crate) fn bind_snapshot_create_response(
@@ -215,7 +234,77 @@ pub(crate) fn bind_snapshot_create_response(
         source_sandbox_id: intent.source_sandbox_id.clone(),
         sandbox_group_id: intent.sandbox_group_id.clone(),
         snapshot_id: snapshot.id,
+        requested_at: snapshot.requested_at,
+        expires_at: snapshot.expires_at,
         response_sha256: lillux::sha256_hex(body),
+    })
+}
+
+pub(crate) fn observe_snapshot_available(
+    intent: &SnapshotCreationIntent,
+    creation: &BoundSnapshotCreation,
+    status: u16,
+    body: &[u8],
+) -> Result<AvailableSnapshotObservation> {
+    intent.validate()?;
+    ensure!(
+        creation.schema == 1
+            && creation.operation_id == intent.operation_id
+            && creation.intent_digest == intent.digest()?
+            && creation.product_witness_hash == intent.product_witness_hash
+            && creation.guest_runtime_manifest_hash == intent.guest_runtime_manifest_hash
+            && creation.controller_public_root == intent.controller_public_root
+            && creation.owner_executable_sha256 == intent.owner_executable_sha256
+            && creation.source_sandbox_id == intent.source_sandbox_id
+            && creation.sandbox_group_id == intent.sandbox_group_id
+            && valid_snapshot_id(&creation.snapshot_id)
+            && lillux::valid_hash(&creation.response_sha256),
+        "snapshot readiness is not bound to its exact creation"
+    );
+    ensure!(
+        status == 200 && !body.is_empty() && body.len() <= MAX_SNAPSHOT_RESPONSE_BYTES,
+        "snapshot readiness has no complete provider response"
+    );
+    let mut decoder = serde_json::Deserializer::from_slice(body);
+    let snapshot = RenderSnapshotCreateResponse::deserialize(&mut decoder)?;
+    decoder.end()?;
+    ensure!(
+        snapshot.id == creation.snapshot_id
+            && snapshot.kind == SnapshotKind::Filesystem
+            && snapshot.status == SnapshotStatus::Available
+            && snapshot.source_sandbox_id == intent.source_sandbox_id
+            && snapshot.sandbox_group_id == intent.sandbox_group_id
+            && snapshot.plan == intent.plan
+            && snapshot.name.is_none()
+            && snapshot.error.is_none()
+            && snapshot.requested_at == creation.requested_at
+            && snapshot.expires_at == creation.expires_at,
+        "available snapshot differs from its exact creation"
+    );
+    let requested = DateTime::parse_from_rfc3339(&snapshot.requested_at)?;
+    let expires = DateTime::parse_from_rfc3339(&snapshot.expires_at)?;
+    let captured_at = snapshot
+        .captured_at
+        .context("available snapshot has no capture timestamp")?;
+    let captured = DateTime::parse_from_rfc3339(&captured_at)?;
+    let size_bytes = snapshot
+        .size_bytes
+        .context("available snapshot has no byte count")?;
+    ensure!(
+        requested <= captured && captured < expires && size_bytes > 0,
+        "available snapshot has invalid capture metadata"
+    );
+    Ok(AvailableSnapshotObservation {
+        schema: 1,
+        operation_id: intent.operation_id.clone(),
+        intent_digest: creation.intent_digest.clone(),
+        snapshot_id: creation.snapshot_id.clone(),
+        source_sandbox_id: creation.source_sandbox_id.clone(),
+        sandbox_group_id: creation.sandbox_group_id.clone(),
+        captured_at,
+        size_bytes,
+        creation_response_sha256: creation.response_sha256.clone(),
+        availability_response_sha256: lillux::sha256_hex(body),
     })
 }
 
@@ -286,6 +375,55 @@ mod tests {
         assert!(
             bind_snapshot_create_response(&intent, 202, &serde_json::to_vec(&missing).unwrap())
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn availability_is_an_exact_readiness_observation_not_content_proof() {
+        let intent = intent();
+        let creation =
+            bind_snapshot_create_response(&intent, 202, &serde_json::to_vec(&response()).unwrap())
+                .unwrap();
+        let mut available = response();
+        available["status"] = serde_json::json!("available");
+        available["capturedAt"] = serde_json::json!("2026-09-28T00:01:00Z");
+        available["sizeBytes"] = serde_json::json!(4096);
+        let body = serde_json::to_vec(&available).unwrap();
+        let observed = observe_snapshot_available(&intent, &creation, 200, &body).unwrap();
+        assert_eq!(observed.snapshot_id, creation.snapshot_id);
+        assert_eq!(observed.creation_response_sha256, creation.response_sha256);
+        assert_eq!(
+            observed.availability_response_sha256,
+            lillux::sha256_hex(&body)
+        );
+        assert!(observe_snapshot_available(&intent, &creation, 202, &body).is_err());
+        for (field, replacement) in [
+            ("status", serde_json::json!("creating")),
+            ("kind", serde_json::json!("runtime")),
+            ("sourceSandboxId", serde_json::json!("sbx-other")),
+            ("id", serde_json::json!("snp-other")),
+            ("requestedAt", serde_json::json!("2026-09-27T00:00:00Z")),
+            ("sizeBytes", serde_json::json!(0)),
+        ] {
+            let mut changed = available.clone();
+            changed[field] = replacement;
+            assert!(
+                observe_snapshot_available(
+                    &intent,
+                    &creation,
+                    200,
+                    &serde_json::to_vec(&changed).unwrap()
+                )
+                .is_err(),
+                "{field}"
+            );
+        }
+        let duplicated = String::from_utf8(body).unwrap().replace(
+            "\"id\":\"snp-exact\"",
+            "\"id\":\"snp-exact\",\"id\":\"snp-other\"",
+        );
+        assert!(
+            observe_snapshot_available(&intent, &creation, 200, duplicated.as_bytes()).is_err()
         );
     }
 }
