@@ -18,6 +18,7 @@ pub(crate) struct ProviderSpec {
     schema: u32,
     provider_profile: ProviderProfile,
     settings_schema_digest: String,
+    qualification_settings_schema_digest: String,
     origin_profile: OriginProfile,
     routes: Routes,
     operations: Operations,
@@ -133,6 +134,8 @@ enum StringFieldSource {
     SettingsRegion,
     #[serde(rename = "settings.snapshot_id")]
     SettingsSnapshotId,
+    #[serde(rename = "qualification.locator.snapshot_id")]
+    QualificationLocatorSnapshotId,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -157,6 +160,8 @@ struct PlanSource {
 enum LifetimeFieldSource {
     #[serde(rename = "reservation.maximum_lifetime_seconds")]
     ReservationMaximumLifetimeSeconds,
+    #[serde(rename = "qualification.maximum_lifetime_seconds")]
+    QualificationMaximumLifetimeSeconds,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -203,6 +208,7 @@ struct CreateBodyMapping {
 enum PreconditionProfile {
     RenderConfiguredRuntimeSnapshotV1,
     RenderQualifiedGuestRuntimeV1,
+    RenderBoundRuntimeSnapshotV1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -261,6 +267,7 @@ pub(crate) struct OperationSpec {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Operations {
     pub(crate) allocate: OperationSpec,
+    qualification_create: OperationSpec,
     reconcile_allocation: OperationSpec,
     activate_supervisor: OperationSpec,
     reconcile_supervisor_activation: OperationSpec,
@@ -323,7 +330,11 @@ impl ProviderSpec {
             self.schema == 2
                 && self.provider_profile == ProviderProfile::RenderSandboxV1
                 && self.origin_profile == OriginProfile::RenderApiV1
-                && self.settings_schema_digest == settings_schema_digest,
+                && self.settings_schema_digest == settings_schema_digest
+                && self.qualification_settings_schema_digest
+                    == lillux::sha256_hex(include_bytes!(
+                        "../fixtures/qualification-settings.schema.json"
+                    )),
             "provider spec identity or profile is unsupported"
         );
         ensure!(
@@ -394,6 +405,23 @@ impl ProviderSpec {
                 && allocate.observation_route.is_none()
                 && allocate.terminal_proof_profile.is_none(),
             "provider spec allocation operation is unsupported"
+        );
+        let qualification = &self.operations.qualification_create;
+        ensure!(
+            qualification.kind == OperationKind::CreateOnce
+                && qualification.route == Some(RouteName::SandboxCollection)
+                && qualification.precondition_profile
+                    == Some(PreconditionProfile::RenderBoundRuntimeSnapshotV1)
+                && qualification.body.as_ref()
+                    == Some(&expected_qualification_create_body_mapping())
+                && qualification.bind_proof_profile
+                    == Some(BindProofProfile::RenderSandboxCreate201V1)
+                && qualification.no_occurrence_proof_profile
+                    == Some(NoOccurrenceProofProfile::RenderNoRequestSentV1)
+                && qualification.mutation_route.is_none()
+                && qualification.observation_route.is_none()
+                && qualification.terminal_proof_profile.is_none(),
+            "provider spec qualification create operation is unsupported"
         );
         ensure!(
             self.operations.reconcile_allocation.is_empty_pending()
@@ -484,6 +512,10 @@ impl ProviderSpec {
 
     pub(crate) fn allocation_route(&self) -> Option<RouteName> {
         self.operations.allocate.route
+    }
+
+    pub(crate) fn qualification_create_route(&self) -> Option<RouteName> {
+        self.operations.qualification_create.route
     }
 
     pub(crate) fn allocation_requires_configured_runtime_snapshot(&self) -> bool {
@@ -628,6 +660,9 @@ impl ProviderSpec {
         };
         let timeout_seconds = match mapping.timeout_seconds.source {
             LifetimeFieldSource::ReservationMaximumLifetimeSeconds => reservation_lifetime_seconds,
+            LifetimeFieldSource::QualificationMaximumLifetimeSeconds => {
+                anyhow::bail!("worker allocation cannot select qualification lifetime")
+            }
         };
         Ok(CreateProjection {
             owner_id: owner_id.to_owned(),
@@ -636,6 +671,49 @@ impl ProviderSpec {
             timeout_seconds,
             network_policy_default: mapping.network_policy.literal.default,
             snapshot_id: snapshot_id.to_owned(),
+        })
+    }
+
+    pub(crate) fn qualification_create_projection(
+        &self,
+        settings_owner_id: &str,
+        settings_plan: PlanValue,
+        settings_region: &str,
+        bound_snapshot_id: &str,
+        maximum_lifetime_seconds: u32,
+    ) -> Result<CreateProjection> {
+        let mapping = self
+            .operations
+            .qualification_create
+            .body
+            .as_ref()
+            .context("provider spec has no qualification create mapping")?;
+        ensure!(
+            mapping.owner_id.source == StringFieldSource::SettingsOwnerId
+                && mapping.region.source == StringFieldSource::SettingsRegion
+                && mapping.plan.source == PlanFieldSource::SettingsPlan
+                && mapping.snapshot_id.source == StringFieldSource::QualificationLocatorSnapshotId
+                && mapping.timeout_seconds.source
+                    == LifetimeFieldSource::QualificationMaximumLifetimeSeconds
+                && mapping.network_policy.literal.default == NetworkPolicyDefault::DenyAll,
+            "qualification create mapping differs from its reviewed field sources"
+        );
+        ensure!(
+            bound_snapshot_id.starts_with("snp-")
+                && bound_snapshot_id.len() <= 256
+                && bound_snapshot_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && (1..=3600).contains(&maximum_lifetime_seconds),
+            "qualification create snapshot or lifetime is invalid"
+        );
+        Ok(CreateProjection {
+            owner_id: settings_owner_id.to_owned(),
+            plan: settings_plan,
+            region: settings_region.to_owned(),
+            timeout_seconds: maximum_lifetime_seconds,
+            network_policy_default: NetworkPolicyDefault::DenyAll,
+            snapshot_id: bound_snapshot_id.to_owned(),
         })
     }
 }
@@ -732,6 +810,31 @@ fn expected_create_body_mapping() -> CreateBodyMapping {
         },
         snapshot_id: StringSource {
             source: StringFieldSource::SettingsSnapshotId,
+        },
+    }
+}
+
+fn expected_qualification_create_body_mapping() -> CreateBodyMapping {
+    CreateBodyMapping {
+        owner_id: StringSource {
+            source: StringFieldSource::SettingsOwnerId,
+        },
+        plan: PlanSource {
+            source: PlanFieldSource::SettingsPlan,
+        },
+        region: StringSource {
+            source: StringFieldSource::SettingsRegion,
+        },
+        timeout_seconds: LifetimeSource {
+            source: LifetimeFieldSource::QualificationMaximumLifetimeSeconds,
+        },
+        network_policy: NetworkPolicyLiteral {
+            literal: NetworkPolicyValue {
+                default: NetworkPolicyDefault::DenyAll,
+            },
+        },
+        snapshot_id: StringSource {
+            source: StringFieldSource::QualificationLocatorSnapshotId,
         },
     }
 }
@@ -927,6 +1030,60 @@ mod tests {
             NetworkPolicyDefault::DenyAll
         );
         assert_eq!(projection.snapshot_id, "snp-fixture-1");
+    }
+
+    #[test]
+    fn qualification_create_selects_only_retained_locator_snapshot() {
+        let spec = ProviderSpec::parse(&fixture(), SETTINGS_SCHEMA_DIGEST).unwrap();
+        assert_eq!(
+            spec.qualification_create_route(),
+            Some(RouteName::SandboxCollection)
+        );
+        let projection = spec
+            .qualification_create_projection(
+                "owner-1",
+                PlanValue::Starter,
+                "oregon",
+                "snp-bound-1",
+                900,
+            )
+            .unwrap();
+        assert_eq!(projection.snapshot_id, "snp-bound-1");
+        assert_eq!(projection.timeout_seconds, 900);
+        assert_eq!(
+            projection.network_policy_default,
+            NetworkPolicyDefault::DenyAll
+        );
+        assert!(
+            spec.qualification_create_projection(
+                "owner-1",
+                PlanValue::Starter,
+                "oregon",
+                "../ambient",
+                900,
+            )
+            .is_err()
+        );
+        let mut changed: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        changed["operations"]["qualification_create"]["body"]["snapshotId"]["source"] =
+            serde_json::json!("settings.snapshot_id");
+        assert!(
+            ProviderSpec::parse(
+                &serde_json::to_vec(&changed).unwrap(),
+                SETTINGS_SCHEMA_DIGEST
+            )
+            .is_err()
+        );
+        changed["operations"]["qualification_create"]["body"]["snapshotId"]["source"] =
+            serde_json::json!("qualification.locator.snapshot_id");
+        changed["qualification_settings_schema_digest"] = serde_json::json!("0".repeat(64));
+        assert!(
+            ProviderSpec::parse(
+                &serde_json::to_vec(&changed).unwrap(),
+                SETTINGS_SCHEMA_DIGEST
+            )
+            .is_err()
+        );
     }
 
     #[test]

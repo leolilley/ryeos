@@ -14,16 +14,185 @@ use ryeos_external_execution_contract::restored_runtime_measurement::{
 };
 use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator;
 use ryeos_external_execution_contract::runtime_snapshot::{
-    RuntimeSnapshotIntent, RuntimeSnapshotReadinessObservation,
+    MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotIntent,
+    RuntimeSnapshotQualificationAdapterRequest, RuntimeSnapshotQualificationAdapterResponse,
+    RuntimeSnapshotQualificationOccurrence, RuntimeSnapshotReadinessObservation,
 };
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_PROTOCOL, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
 };
 use ryeos_http_transport::{SseLimits, SseReader};
 
+use crate::provider_spec::{PlanValue, ProviderSpec};
 use crate::{ADAPTER_ID, RenderPlan, Settings};
 
 const MAX_RESTORED_RUN_STREAM_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QualificationSettings {
+    schema: u32,
+    owner_id: String,
+    plan: RenderPlan,
+    region: String,
+    sandbox_group_id: String,
+    tls_roots_der_base64: Vec<String>,
+}
+
+/// The only create contact for the retained qualification attempt. The
+/// caller must durably claim that attempt before invoking this executable.
+/// A lost or ambiguous response remains uncertain; this path is never a
+/// recovery operation and cannot be called to retry after journal replay.
+pub(crate) fn create_restored_sandbox(
+    adapter: &lillux::InheritedDescriptorAuthority,
+) -> Result<()> {
+    let deadline = crate::operation_deadline()?;
+    ensure!(
+        [
+            crate::LIFECYCLE_BOOTSTRAP_FD_ENV,
+            crate::LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            crate::LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+        ]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none()),
+        "snapshot qualification create received worker activation authority"
+    );
+    let bytes = crate::read_sealed_env(
+        crate::LIFECYCLE_REQUEST_FD_ENV,
+        MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+    )?;
+    let request: RuntimeSnapshotQualificationAdapterRequest =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &bytes,
+            MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+        )?;
+    request.validate()?;
+    ensure!(
+        ryeos_external_execution_contract::canonical_json(&request)? == bytes
+            && request.intent.provider_id == ADAPTER_ID,
+        "snapshot qualification request is noncanonical or selects another provider"
+    );
+    crate::verify_artifact(adapter, &request.intent.adapter_artifact_hash, None)?;
+    let deadline = crate::request_deadline(request.intent.attempt_deadline_ms, deadline)?;
+    let spec_bytes = crate::read_sealed_env(
+        crate::LIFECYCLE_PROVIDER_SPEC_FD_ENV,
+        usize::try_from(ryeos_external_execution_contract::MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?,
+    )?;
+    let spec_digest = std::env::var(crate::LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
+        .context("qualification create lacks captured provider spec digest")?;
+    ensure!(
+        spec_digest == request.provider_spec_digest
+            && lillux::sha256_hex(&spec_bytes) == request.provider_spec_digest,
+        "qualification create provider spec changed its signed handoff"
+    );
+    let spec = ProviderSpec::parse(
+        &spec_bytes,
+        &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
+    )?;
+    let settings_bytes =
+        crate::read_sealed_env(crate::LIFECYCLE_SETTINGS_FD_ENV, crate::MAX_SETTINGS_BYTES)?;
+    ensure!(
+        lillux::sha256_hex(&settings_bytes) == request.intent.settings_digest,
+        "qualification create settings changed their signed identity"
+    );
+    let settings: QualificationSettings =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &settings_bytes,
+            crate::MAX_SETTINGS_BYTES,
+        )?;
+    ensure!(
+        ryeos_external_execution_contract::canonical_json(&serde_json::from_slice::<
+            serde_json::Value,
+        >(&settings_bytes)?)?
+            == settings_bytes,
+        "qualification settings are noncanonical"
+    );
+    ensure!(
+        settings.schema == 1 && settings.sandbox_group_id == request.intent.provider_group_id,
+        "qualification settings differ from retained provider group"
+    );
+    let selected = Settings {
+        schema: 2,
+        owner_id: settings.owner_id,
+        plan: settings.plan,
+        region: settings.region,
+        snapshot_id: request.locator.snapshot_id.clone(),
+        tls_roots_der_base64: settings.tls_roots_der_base64,
+    };
+    crate::validate_settings(&selected)?;
+    let plan = match selected.plan {
+        RenderPlan::Starter => PlanValue::Starter,
+        RenderPlan::Standard => PlanValue::Standard,
+        RenderPlan::Pro => PlanValue::Pro,
+    };
+    let projection = spec.qualification_create_projection(
+        &selected.owner_id,
+        plan,
+        &selected.region,
+        &request.locator.snapshot_id,
+        request.intent.maximum_lifetime_seconds,
+    )?;
+    let route = spec
+        .qualification_create_route()
+        .context("signed provider spec has no qualification create route")?;
+    let (url, target) = crate::api_url(&spec, route, None, &selected, None)?;
+    crate::validate_api_url(
+        &url,
+        &target.path_segments,
+        target.owner_id_query.as_deref(),
+        None,
+    )?;
+    let body = crate::CreateSandboxBody {
+        owner_id: projection.owner_id.clone(),
+        plan: selected.plan,
+        region: projection.region.clone(),
+        timeout_seconds: projection.timeout_seconds,
+        network_policy: crate::NetworkPolicy {
+            default: crate::RenderNetworkPolicyDefault::DenyAll,
+        },
+        snapshot_id: projection.snapshot_id.clone(),
+    };
+    let body = ryeos_external_execution_contract::canonical_json(&body)?;
+    let network = crate::network_context_from_captured_inputs()?;
+    let cancellation = lillux::network::NetworkCancellation::default();
+    let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
+    let credential = crate::read_credential()?;
+    let result = match crate::send_api_request(
+        &network,
+        &url,
+        "POST",
+        Some(body),
+        &credential,
+        deadline,
+        &selected,
+        &cancellation,
+    ) {
+        Ok(response) => match crate::read_response(response) {
+            Ok((status, body)) => match crate::accepted_create_response(status, &body, &projection)
+            {
+                Some(sandbox) => RuntimeSnapshotQualificationAdapterResponse::OccurrenceBound {
+                    occurrence: RuntimeSnapshotQualificationOccurrence {
+                        schema: 1,
+                        operation_id: request.intent.operation_id.clone(),
+                        occurrence_id: sandbox.id,
+                        provider_response_sha256: lillux::sha256_hex(&body),
+                    },
+                },
+                None => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
+                    operation_id: request.intent.operation_id.clone(),
+                },
+            },
+            Err(()) => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
+                operation_id: request.intent.operation_id.clone(),
+            },
+        },
+        Err(_) => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
+            operation_id: request.intent.operation_id.clone(),
+        },
+    };
+    result.validate_for(&request)?;
+    crate::write_response(&result)
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

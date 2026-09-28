@@ -262,6 +262,9 @@ fn run() -> Result<()> {
         Some("operate") => operate(),
         Some("produce-snapshot") => snapshot_production::operate(&adapter),
         Some("observe-snapshot-readiness") => snapshot_production::observe_readiness(&adapter),
+        Some("qualify-snapshot-create") => {
+            snapshot_qualification::create_restored_sandbox(&adapter)
+        }
         _ => anyhow::bail!("unsupported lifecycle invocation"),
     }
 }
