@@ -106,6 +106,18 @@ impl SnapshotProductionSpec {
         &self.operations.upload_content_type
     }
 
+    pub(crate) fn create_kind(&self) -> &str {
+        &self.operations.create_kind
+    }
+
+    pub(crate) fn create_status(&self) -> u16 {
+        self.operations.create_status
+    }
+
+    pub(crate) fn get_status(&self) -> u16 {
+        self.operations.get_status
+    }
+
     pub(crate) fn source_upload_token_path(&self, source_sandbox_id: &str) -> Result<String> {
         ensure!(
             crate::valid_sandbox_id(source_sandbox_id),

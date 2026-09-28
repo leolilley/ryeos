@@ -138,7 +138,8 @@ pub(crate) fn observe_readiness(adapter: &lillux::InheritedDescriptorAuthority) 
         deadline,
         &cancellation,
     )?)?;
-    let observed = observe_snapshot_available_from_locator(&request, &creation, status, &body)?;
+    let observed =
+        observe_snapshot_available_from_locator(&spec, &request, &creation, status, &body)?;
     write_response(&observed)
 }
 
@@ -248,7 +249,10 @@ fn first_snapshot_attempt(
         deadline,
         cancellation,
     )?)?;
-    ensure!(status == 200, "snapshot source did not return exact status");
+    ensure!(
+        status == spec.get_status(),
+        "snapshot source did not return exact status"
+    );
     let source: crate::RenderSandbox = ryeos_external_execution_contract::from_json_slice_strict(
         &source_body,
         MAX_SNAPSHOT_RESPONSE_BYTES,
@@ -341,7 +345,7 @@ fn first_snapshot_attempt(
     let create_path = spec.create_path(source_id)?;
     let create_url = control_url(&create_path, &settings.owner_id, None)?;
     let body = ryeos_external_execution_contract::canonical_json(
-        &serde_json::json!({"kind":"filesystem"}),
+        &serde_json::json!({"kind": spec.create_kind()}),
     )?;
     let (status, response_body) = read_control_json(send_control(
         network,
@@ -353,7 +357,7 @@ fn first_snapshot_attempt(
         deadline,
         cancellation,
     )?)?;
-    let creation = bind_snapshot_create_response(creation_intent, status, &response_body)?;
+    let creation = bind_snapshot_create_response(spec, creation_intent, status, &response_body)?;
     let locator = bind_snapshot_locator(request, &creation, settings)?;
     Ok(RuntimeSnapshotAdapterResponse::Bound { locator })
 }
@@ -422,6 +426,7 @@ fn retained_snapshot_creation(
 }
 
 pub(crate) fn observe_snapshot_available_from_locator(
+    spec: &SnapshotProductionSpec,
     request: &RuntimeSnapshotReadinessRequest,
     intent: &SnapshotCreationIntent,
     status: u16,
@@ -429,7 +434,7 @@ pub(crate) fn observe_snapshot_available_from_locator(
 ) -> Result<RuntimeSnapshotReadinessObservation> {
     request.validate()?;
     let creation = retained_snapshot_creation(&request.intent, intent, &request.locator)?;
-    let observed = observe_snapshot_available(intent, &creation, status, body)?;
+    let observed = observe_snapshot_available(spec, intent, &creation, status, body)?;
     let result = RuntimeSnapshotReadinessObservation {
         schema: observed.schema,
         operation_id: observed.operation_id,
@@ -741,13 +746,16 @@ pub(crate) struct AvailableSnapshotObservation {
 }
 
 pub(crate) fn bind_snapshot_create_response(
+    spec: &SnapshotProductionSpec,
     intent: &SnapshotCreationIntent,
     status: u16,
     body: &[u8],
 ) -> Result<BoundSnapshotCreation> {
     intent.validate()?;
     ensure!(
-        status == 202 && !body.is_empty() && body.len() <= MAX_SNAPSHOT_RESPONSE_BYTES,
+        status == spec.create_status()
+            && !body.is_empty()
+            && body.len() <= MAX_SNAPSHOT_RESPONSE_BYTES,
         "snapshot creation has no complete accepted provider response"
     );
     // Deserialize directly: a generic Value can silently collapse duplicate
@@ -805,6 +813,7 @@ pub(crate) fn bind_snapshot_create_response(
 }
 
 pub(crate) fn observe_snapshot_available(
+    spec: &SnapshotProductionSpec,
     intent: &SnapshotCreationIntent,
     creation: &BoundSnapshotCreation,
     status: u16,
@@ -826,7 +835,9 @@ pub(crate) fn observe_snapshot_available(
         "snapshot readiness is not bound to its exact creation"
     );
     ensure!(
-        status == 200 && !body.is_empty() && body.len() <= MAX_SNAPSHOT_RESPONSE_BYTES,
+        status == spec.get_status()
+            && !body.is_empty()
+            && body.len() <= MAX_SNAPSHOT_RESPONSE_BYTES,
         "snapshot readiness has no complete provider response"
     );
     let mut decoder = serde_json::Deserializer::from_slice(body);
@@ -876,6 +887,11 @@ pub(crate) fn observe_snapshot_available(
 mod tests {
     use super::*;
     use base64::Engine as _;
+
+    fn profile() -> SnapshotProductionSpec {
+        SnapshotProductionSpec::parse(include_bytes!("../fixtures/snapshot-production-spec.json"))
+            .unwrap()
+    }
 
     fn intent() -> SnapshotCreationIntent {
         let key = lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key();
@@ -970,6 +986,7 @@ mod tests {
         assert_eq!(url.host_str(), Some("api.render.com"));
         assert_eq!(url.query_pairs().count(), 2);
         let created = bind_snapshot_create_response(
+            &profile,
             &prepared,
             202,
             &serde_json::to_vec(&response()).unwrap(),
@@ -1007,9 +1024,14 @@ mod tests {
             locator: locator.clone(),
             provider_spec_digest: request.provider_spec_digest.clone(),
         };
-        let observed =
-            observe_snapshot_available_from_locator(&readiness, &prepared, 200, &availability_body)
-                .unwrap();
+        let observed = observe_snapshot_available_from_locator(
+            &profile,
+            &readiness,
+            &prepared,
+            200,
+            &availability_body,
+        )
+        .unwrap();
         assert_eq!(observed.snapshot_id, locator.snapshot_id);
         let mut mismatched_creation = locator.clone();
         mismatched_creation.provider_creation_observation["requested_at"] =
@@ -1022,6 +1044,7 @@ mod tests {
         );
         assert!(
             observe_snapshot_available_from_locator(
+                &profile,
                 &RuntimeSnapshotReadinessRequest {
                     locator: mismatched_creation,
                     ..readiness
@@ -1040,13 +1063,14 @@ mod tests {
 
     #[test]
     fn accepted_create_only_binds_a_locator_for_the_exact_source() {
+        let profile = profile();
         let intent = intent();
         let body = serde_json::to_vec(&response()).unwrap();
-        let bound = bind_snapshot_create_response(&intent, 202, &body).unwrap();
+        let bound = bind_snapshot_create_response(&profile, &intent, 202, &body).unwrap();
         assert_eq!(bound.snapshot_id, "snp-exact");
         assert_eq!(bound.product_witness_hash, intent.product_witness_hash);
         assert_eq!(bound.intent_digest, intent.digest().unwrap());
-        assert!(bind_snapshot_create_response(&intent, 201, &body).is_err());
+        assert!(bind_snapshot_create_response(&profile, &intent, 201, &body).is_err());
         for (field, value) in [
             ("kind", "runtime"),
             ("sourceSandboxId", "sbx-other"),
@@ -1056,42 +1080,60 @@ mod tests {
             let mut changed = response();
             changed[field] = serde_json::json!(value);
             assert!(
-                bind_snapshot_create_response(&intent, 202, &serde_json::to_vec(&changed).unwrap())
-                    .is_err()
+                bind_snapshot_create_response(
+                    &profile,
+                    &intent,
+                    202,
+                    &serde_json::to_vec(&changed).unwrap()
+                )
+                .is_err()
             );
         }
         let duplicated = String::from_utf8(body).unwrap().replace(
             "\"id\":\"snp-exact\"",
             "\"id\":\"snp-exact\",\"id\":\"snp-other\"",
         );
-        assert!(bind_snapshot_create_response(&intent, 202, duplicated.as_bytes()).is_err());
+        assert!(
+            bind_snapshot_create_response(&profile, &intent, 202, duplicated.as_bytes()).is_err()
+        );
         let mut missing = response();
         missing.as_object_mut().unwrap().remove("sizeBytes");
         assert!(
-            bind_snapshot_create_response(&intent, 202, &serde_json::to_vec(&missing).unwrap())
-                .is_err()
+            bind_snapshot_create_response(
+                &profile,
+                &intent,
+                202,
+                &serde_json::to_vec(&missing).unwrap()
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn availability_is_an_exact_readiness_observation_not_content_proof() {
+        let profile = profile();
         let intent = intent();
-        let creation =
-            bind_snapshot_create_response(&intent, 202, &serde_json::to_vec(&response()).unwrap())
-                .unwrap();
+        let creation = bind_snapshot_create_response(
+            &profile,
+            &intent,
+            202,
+            &serde_json::to_vec(&response()).unwrap(),
+        )
+        .unwrap();
         let mut available = response();
         available["status"] = serde_json::json!("available");
         available["capturedAt"] = serde_json::json!("2026-09-28T00:01:00Z");
         available["sizeBytes"] = serde_json::json!(4096);
         let body = serde_json::to_vec(&available).unwrap();
-        let observed = observe_snapshot_available(&intent, &creation, 200, &body).unwrap();
+        let observed =
+            observe_snapshot_available(&profile, &intent, &creation, 200, &body).unwrap();
         assert_eq!(observed.snapshot_id, creation.snapshot_id);
         assert_eq!(observed.creation_response_sha256, creation.response_sha256);
         assert_eq!(
             observed.availability_response_sha256,
             lillux::sha256_hex(&body)
         );
-        assert!(observe_snapshot_available(&intent, &creation, 202, &body).is_err());
+        assert!(observe_snapshot_available(&profile, &intent, &creation, 202, &body).is_err());
         for (field, replacement) in [
             ("status", serde_json::json!("creating")),
             ("kind", serde_json::json!("runtime")),
@@ -1104,6 +1146,7 @@ mod tests {
             changed[field] = replacement;
             assert!(
                 observe_snapshot_available(
+                    &profile,
                     &intent,
                     &creation,
                     200,
@@ -1118,7 +1161,8 @@ mod tests {
             "\"id\":\"snp-exact\",\"id\":\"snp-other\"",
         );
         assert!(
-            observe_snapshot_available(&intent, &creation, 200, duplicated.as_bytes()).is_err()
+            observe_snapshot_available(&profile, &intent, &creation, 200, duplicated.as_bytes())
+                .is_err()
         );
     }
 }
