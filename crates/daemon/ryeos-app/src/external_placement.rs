@@ -1169,6 +1169,13 @@ fn admit_current_runtime_qualification(
     };
     retained.validate()?;
     let source = verify_retained_runtime_proof(state, &retained)?;
+    crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
+        state,
+        &retained.proof,
+        &source,
+        &contract.backend,
+        &retained.owner_principal,
+    )?;
     state.external_placement_backends.verify_runtime_probe(
         contract,
         &retained.proof,
@@ -1196,6 +1203,13 @@ fn require_retained_session_runtime_qualification(
         return Ok(());
     };
     let source = verify_retained_runtime_proof(state, retained)?;
+    crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
+        state,
+        &retained.proof,
+        &source,
+        &contract.backend,
+        &retained.owner_principal,
+    )?;
     state.external_placement_backends.verify_runtime_probe(
         &contract,
         &retained.proof,

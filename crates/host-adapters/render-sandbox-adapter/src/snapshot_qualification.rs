@@ -8,6 +8,7 @@ use anyhow::{Result, ensure};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator;
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_PROTOCOL, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
 };
@@ -74,6 +75,9 @@ pub(crate) struct RenderSnapshotProbe {
     pub owner_id: String,
     pub account: String,
     pub snapshot_id: String,
+    /// The daemon independently rejoins this exact value to its bound
+    /// one-attempt journal before invoking the credential-free adapter.
+    pub runtime_snapshot_locator: RuntimeSnapshotLocator,
     pub snapshot_kind: String,
     pub plan: RenderPlan,
     pub region: String,
@@ -114,7 +118,7 @@ impl RenderSnapshotProbe {
         settings: &Settings,
         expected: &SnapshotExpectation<'_>,
     ) -> Result<()> {
-        ensure!(self.schema == 1, "unsupported Render snapshot probe schema");
+        ensure!(self.schema == 2, "unsupported Render snapshot probe schema");
         for hash in [
             &self.product_witness_hash,
             &self.guest_runtime_manifest_hash,
@@ -154,6 +158,14 @@ impl RenderSnapshotProbe {
                 && self.owner_id == settings.owner_id
                 && self.account == expected.account
                 && self.snapshot_id == settings.snapshot_id
+                && self.runtime_snapshot_locator.schema
+                    == ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_RESULT_SCHEMA
+                && self.runtime_snapshot_locator.snapshot_id == self.snapshot_id
+                && self.runtime_snapshot_locator.operation_id.len() == 64
+                && lillux::valid_hash(&self.runtime_snapshot_locator.operation_id)
+                && lillux::valid_hash(&self.runtime_snapshot_locator.intent_digest)
+                && lillux::valid_hash(&self.runtime_snapshot_locator.provider_response_sha256)
+                && lillux::valid_hash(&self.runtime_snapshot_locator.adapter_observation_sha256)
                 && self.snapshot_kind == "filesystem"
                 && self.plan == settings.plan
                 && self.region == settings.region
@@ -186,13 +198,23 @@ mod tests {
 
     fn probe() -> RenderSnapshotProbe {
         RenderSnapshotProbe {
-            schema: 1,
+            schema: 2,
             product_witness_hash: "1".repeat(64),
             guest_runtime_manifest_hash: "2".repeat(64),
             controller_public_root: public_root(),
             owner_id: "owner".into(),
             account: "account".into(),
             snapshot_id: "snp-exact".into(),
+            runtime_snapshot_locator: RuntimeSnapshotLocator {
+                schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_RESULT_SCHEMA,
+                operation_id: "a".repeat(64),
+                intent_digest: "b".repeat(64),
+                source_occurrence_id: "sbx-source".into(),
+                provider_group_id: "sbg-exact".into(),
+                snapshot_id: "snp-exact".into(),
+                provider_response_sha256: "c".repeat(64),
+                adapter_observation_sha256: "d".repeat(64),
+            },
             snapshot_kind: "filesystem".into(),
             plan: RenderPlan::Starter,
             region: "oregon".into(),
@@ -230,6 +252,12 @@ mod tests {
         let mut observed = probe();
         observed.validate_for(&settings, &expected).unwrap();
         observed.snapshot_id = "snp-other".into();
+        assert!(observed.validate_for(&settings, &expected).is_err());
+        observed = probe();
+        observed.runtime_snapshot_locator.snapshot_id = "snp-other".into();
+        assert!(observed.validate_for(&settings, &expected).is_err());
+        observed = probe();
+        observed.runtime_snapshot_locator.provider_response_sha256 = "invalid".into();
         assert!(observed.validate_for(&settings, &expected).is_err());
         observed = probe();
         observed.snapshot_kind = "runtime".into();

@@ -20,7 +20,9 @@ use ryeos_state::object_closure::load_exact_cas_object_with_cas;
 
 use crate::handler_context::HandlerContext;
 use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
-use crate::runtime_db::runtime_snapshot::{RuntimeSnapshotAttemptClaim, RuntimeSnapshotRecord};
+use crate::runtime_db::runtime_snapshot::{
+    RuntimeSnapshotAttemptClaim, RuntimeSnapshotPhase, RuntimeSnapshotRecord,
+};
 use crate::state::AppState;
 
 pub struct SnapshotProductionRequest {
@@ -78,6 +80,59 @@ pub fn get_operation(
         "runtime snapshot operation belongs to another operator"
     );
     Ok(operation)
+}
+
+/// Rejoin an independently qualified runtime probe to the daemon's one-shot
+/// provider journal. The probe can name a locator, but cannot manufacture a
+/// bound attempt or replace the source product, controller, or operator.
+pub(crate) fn verify_probe_snapshot_locator(
+    state: &AppState,
+    proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+    source: &GuestOwnerRuntimeManifestIdentity,
+    provider_id: &str,
+    owner_principal: &str,
+) -> Result<Option<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator>> {
+    let Some(value) = proof
+        .evidence
+        .result
+        .probe_evidence
+        .get("runtime_snapshot_locator")
+    else {
+        return Ok(None);
+    };
+    let named: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator =
+        serde_json::from_value(value.clone())
+            .context("runtime probe has an invalid snapshot locator")?;
+    let record = state
+        .state_store
+        .runtime_snapshot_operation(&named.operation_id)?
+        .context("runtime probe names no retained snapshot operation")?;
+    validate_probe_snapshot_record(&record, &named, proof, source, provider_id, owner_principal)?;
+    Ok(Some(named))
+}
+
+fn validate_probe_snapshot_record(
+    record: &RuntimeSnapshotRecord,
+    named: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator,
+    proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+    source: &GuestOwnerRuntimeManifestIdentity,
+    provider_id: &str,
+    owner_principal: &str,
+) -> Result<()> {
+    ensure!(
+        record.phase == RuntimeSnapshotPhase::Bound
+            && record.locator.as_ref() == Some(&named)
+            && record.intent.owner_principal == owner_principal
+            && record.intent.owner_principal == proof.evidence.product_coordinate.owner_principal
+            && record.intent.provider_id == provider_id
+            && record.intent.product_witness_hash == proof.evidence.product_witness_hash
+            && record.intent.guest_runtime_manifest_hash == source.manifest_hash
+            && record.intent.owner_executable_sha256 == source.owner_executable_sha256
+            && record.intent.controller_public_root == source.controller_public_root,
+        "runtime probe locator differs from its exact bound product and provider attempt"
+    );
+    named.validate_for(&record.intent)?;
+    Ok(())
 }
 
 pub fn produce(
@@ -238,5 +293,131 @@ pub fn produce(
             )?;
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+    use ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_RESULT_SCHEMA;
+
+    #[test]
+    fn runtime_probe_requires_exact_bound_snapshot_product_and_owner() {
+        let manifest_hash = "7".repeat(64);
+        let selections = ryeos_state::external_content::products::qualification::test_support::qualified_runtime_selections(&manifest_hash).unwrap();
+        let proof = selections
+            .get("auxiliary")
+            .unwrap()
+            .qualification
+            .as_ref()
+            .unwrap();
+        let owner = proof.evidence.product_coordinate.owner_principal.clone();
+        let root_key = lillux::crypto::SigningKey::from_bytes(&[3u8; 32]).verifying_key();
+        let source = GuestOwnerRuntimeManifestIdentity {
+            manifest_hash: manifest_hash.clone(),
+            owner_executable_sha256: "8".repeat(64),
+            controller_root_blob_sha256: "9".repeat(64),
+            controller_public_root: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(root_key.to_bytes())
+            ),
+        };
+        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let mut intent = RuntimeSnapshotIntent {
+            schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
+            operation_id: String::new(),
+            owner_principal: owner.clone(),
+            provider_id: "render-sandbox-early-access".into(),
+            source_occurrence_id: "sbx-source".into(),
+            provider_group_id: "sbg-group".into(),
+            production_profile_digest: "3".repeat(64),
+            adapter_artifact_hash: "4".repeat(64),
+            provider_spec_digest: "d".repeat(64),
+            settings_digest: "5".repeat(64),
+            product_witness_hash: proof.evidence.product_witness_hash.clone(),
+            guest_runtime_manifest_hash: manifest_hash,
+            owner_executable_sha256: source.owner_executable_sha256.clone(),
+            controller_public_root: source.controller_public_root.clone(),
+            upload_sha256: "a".repeat(64),
+            upload_bytes: 1024,
+            attempt_deadline_ms: now + 60_000,
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        let named = ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator {
+            schema: RUNTIME_SNAPSHOT_RESULT_SCHEMA,
+            operation_id: intent.operation_id.clone(),
+            intent_digest: intent.digest().unwrap(),
+            source_occurrence_id: intent.source_occurrence_id.clone(),
+            provider_group_id: intent.provider_group_id.clone(),
+            snapshot_id: "snp-exact".into(),
+            provider_response_sha256: "b".repeat(64),
+            adapter_observation_sha256: "c".repeat(64),
+        };
+        let mut record = RuntimeSnapshotRecord {
+            intent,
+            phase: RuntimeSnapshotPhase::Bound,
+            locator: Some(named.clone()),
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        validate_probe_snapshot_record(
+            &record,
+            &named,
+            proof,
+            &source,
+            "render-sandbox-early-access",
+            &owner,
+        )
+        .unwrap();
+        record.phase = RuntimeSnapshotPhase::Quarantined;
+        assert!(
+            validate_probe_snapshot_record(
+                &record,
+                &named,
+                proof,
+                &source,
+                "render-sandbox-early-access",
+                &owner
+            )
+            .is_err()
+        );
+        record.phase = RuntimeSnapshotPhase::Bound;
+        record.intent.product_witness_hash = "f".repeat(64);
+        assert!(
+            validate_probe_snapshot_record(
+                &record,
+                &named,
+                proof,
+                &source,
+                "render-sandbox-early-access",
+                &owner
+            )
+            .is_err()
+        );
+        record.intent.product_witness_hash = proof.evidence.product_witness_hash.clone();
+        assert!(
+            validate_probe_snapshot_record(
+                &record,
+                &named,
+                proof,
+                &source,
+                "another-provider",
+                &owner
+            )
+            .is_err()
+        );
+        record.locator.as_mut().unwrap().snapshot_id = "snp-other".into();
+        assert!(
+            validate_probe_snapshot_record(
+                &record,
+                &named,
+                proof,
+                &source,
+                "render-sandbox-early-access",
+                &owner
+            )
+            .is_err()
+        );
     }
 }
