@@ -446,6 +446,8 @@ mod tests {
             "contained-workflow",
             "full",
             "development",
+            "bundle-source",
+            "release-authority",
         ] {
             let path = repository.join(format!("bundles/.ai/node/init/profiles/{profile}.yaml"));
             let source = std::fs::read_to_string(&path).unwrap();

@@ -119,6 +119,13 @@ for profile_name in "${node_init_profiles[@]}"; do
   node_init_profile="$node_init_profile_dir/$profile_name.yaml"
   ryeos_validate_node_init_profile "$profile_name" "$node_init_profile"
   verify_dev_signed_profile "$node_init_profile"
+  execution_section="$(
+    awk '/^  execution:$/ { in_execution = 1; next }
+         in_execution && /^  [a-z_]+:$/ { exit }
+         in_execution { print }' "$node_init_profile"
+  )"
+  grep -Fxq '    schema: 4' <<<"$execution_section"
+  grep -Eq '^    producer_resource_ceiling:($| null$)' <<<"$execution_section"
   if [[ "$profile_name" == hosted-workflow ]]; then
     grep -Eq '^      trusted_process_group_sessions: true$' "$node_init_profile"
   else
