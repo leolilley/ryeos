@@ -404,6 +404,17 @@ These are source-production and native-execution observations, not an installed
 Render snapshot or runtime qualification. The product witness must be carried
 through an admitted product-to-provider staging path; the artifact-blob export
 command does not export external-content manifests. The existing
+producer app root remains at `/tmp/ryeos-owner-node.7nCdlW/app-root`, but this
+particular witness is rooted in that node's public key
+`ed25519:jVDJyGjQ2xYH57FLBUHFzYXZYkxnZQ1lh6966CHWLO8=` and operator
+`7403704f740160c26b43df3cf9264b6d63ccc3b775fed84ce5effce39510aee1`.
+The disposable receiver has a different public key and operator. The retained
+product therefore cannot be accepted as that receiver's exact owner runtime:
+the receipt requires the same configured operator, and the runtime manifest
+must name the eventual controller's own public root. A new target-root product
+must be produced by an enforced-isolation node under the correct operator;
+copying the old witness or weakening receipt checks is not a substitute. The
+existing
 `service:external-content/receive-product` is that same-operator, pinned-remote
 CAS receipt path. It authenticates the origin admission and witness, then
 publishes a distinct local acceptance without copying consumer or qualification
