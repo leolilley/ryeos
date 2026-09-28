@@ -353,9 +353,12 @@ The staged authority can emit one bounded, deterministic, sealed tar/gzip
 directory-upload body from pinned descriptors; it rechecks the tree after
 packaging. The Render adapter now parses a complete `202` filesystem snapshot
 response against the exact source Sandbox, group and plan, retaining the
-original product witness/root in a locator observation. This parser is not yet
-connected to a durable snapshot-production operation and is not evidence of
-the bytes restored from that snapshot.
+original product witness/root in a locator observation. RyeOS also retains a
+provider-neutral snapshot intent and one-contact journal: an exact reservation
+may claim provider contact once; an uncertain contact must reconcile, never
+blindly repeat the mutation. The parser and journal are not yet joined by an
+admitted operator action. Neither is evidence of the bytes restored from the
+snapshot.
 This does not export a CAS path, contact Render, publish a snapshot, or attest
 restored guest bytes. Durable provider transfer and independent restore
 observation must consume that exact staged authority before qualification.
