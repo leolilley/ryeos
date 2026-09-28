@@ -14,13 +14,13 @@
 #
 # Bundle sets:
 #   full            core + central-auth + standard + web + browser + ryeos-ui +
-#                   hosted-node + codex + opencode + local-inference (default)
+#                   hosted-node + codex + render-sandbox + opencode + local-inference (default)
 #   central-host    core + central-auth + standard + web + tv-tracker-authoring —
 #                   standard node plus the rye/web/search tool and app authoring
 #   standard        core + central-auth + standard — scheduler/graph/directive node
 #   local-inference core + central-auth + standard + local-inference — provider-neutral inference node
 #   hosted-node     core + central-auth + hosted-node — lean remote-admission plane
-#   hosted-workflow core + central-auth + standard + hosted-node + codex + opencode — hosted
+#   hosted-workflow core + central-auth + standard + hosted-node + codex + render-sandbox + opencode — hosted
 #                   node that also runs scheduler/graph/directive and hosted workloads
 #   bundle-source   core + central-auth + bundle-source — catalog authority only
 #   release-authority full + bundle-release — isolated release authoring node
@@ -237,6 +237,7 @@ BROWSER="$ROOT/bundles/browser"
 RYEOS_UI="$ROOT/bundles/ryeos-ui"
 HOSTED_NODE="$ROOT/bundles/hosted-node"
 CODEX="$ROOT/bundles/codex"
+RENDER_SANDBOX="$ROOT/bundles/render-sandbox"
 OPENCODE="$ROOT/bundles/opencode"
 LOCAL_INFERENCE="$ROOT/bundles/local-inference"
 TVTA="$ROOT/bundles/tv-tracker-authoring"
@@ -379,9 +380,10 @@ case "$BUNDLE_SET" in
           ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter \
           ryeos-external-candidate-connector ryeos-codex-external-configuration \
           ryeos-external-guest-occurrence-owner \
-          ryeos-external-guest-restoration-verifier \
           ryeos-external-guest-runtime-producer \
-          ryeos-codex-guest-runtime-producer)
+          ryeos-codex-guest-runtime-producer \
+          ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
+          ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter)
     ;;
   central-host)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
@@ -398,9 +400,10 @@ case "$BUNDLE_SET" in
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter ryeos-external-candidate-connector \
           ryeos-external-guest-occurrence-owner ryeos-codex-external-configuration \
-          ryeos-external-guest-restoration-verifier \
           ryeos-external-guest-runtime-producer \
-          ryeos-codex-guest-runtime-producer)
+          ryeos-codex-guest-runtime-producer \
+          ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
+          ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter)
     ;;
   hosted-node)
     pkgs=(lillux ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
@@ -445,8 +448,11 @@ build_static_structured_session=0
 build_static_lillux_isolation_adapter=0
 build_static_external_candidate_connector=0
 build_static_external_guest_occurrence_owner=0
+build_static_external_candidate_launcher=0
+build_static_external_candidate_supervisor=0
 build_static_external_guest_restoration_verifier=0
 build_static_external_guest_runtime_producer=0
+build_static_render_sandbox_lifecycle_adapter=0
 build_static_codex_external_configuration=0
 build_static_codex_guest_runtime_producer=0
 for p in "${pkgs[@]}"; do
@@ -456,8 +462,11 @@ for p in "${pkgs[@]}"; do
     ryeos-lillux-isolation-adapter) build_static_lillux_isolation_adapter=1 ;;
     ryeos-external-candidate-connector) build_static_external_candidate_connector=1 ;;
     ryeos-external-guest-occurrence-owner) build_static_external_guest_occurrence_owner=1 ;;
+    ryeos-external-candidate-launcher) build_static_external_candidate_launcher=1 ;;
+    ryeos-external-candidate-supervisor) build_static_external_candidate_supervisor=1 ;;
     ryeos-external-guest-restoration-verifier) build_static_external_guest_restoration_verifier=1 ;;
     ryeos-external-guest-runtime-producer) build_static_external_guest_runtime_producer=1 ;;
+    ryeos-render-sandbox-lifecycle-adapter) build_static_render_sandbox_lifecycle_adapter=1 ;;
     ryeos-codex-external-configuration) build_static_codex_external_configuration=1 ;;
     ryeos-codex-guest-runtime-producer) build_static_codex_guest_runtime_producer=1 ;;
     *) host_pkgs+=("$p") ;;
@@ -509,8 +518,11 @@ static_build_labels=()
 (( build_static_lillux_isolation_adapter == 1 )) && static_build_labels+=(ryeos-lillux-isolation-adapter)
 (( build_static_external_candidate_connector == 1 )) && static_build_labels+=(ryeos-external-candidate-connector)
 (( build_static_external_guest_occurrence_owner == 1 )) && static_build_labels+=(ryeos-external-guest-occurrence-owner)
+(( build_static_external_candidate_launcher == 1 )) && static_build_labels+=(ryeos-external-candidate-launcher)
+(( build_static_external_candidate_supervisor == 1 )) && static_build_labels+=(ryeos-external-candidate-supervisor)
 (( build_static_external_guest_restoration_verifier == 1 )) && static_build_labels+=(ryeos-external-guest-restoration-verifier)
 (( build_static_external_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-external-guest-runtime-producer)
+(( build_static_render_sandbox_lifecycle_adapter == 1 )) && static_build_labels+=(ryeos-render-sandbox-lifecycle-adapter)
 (( build_static_codex_external_configuration == 1 )) && static_build_labels+=(ryeos-codex-external-configuration)
 (( build_static_codex_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-codex-guest-runtime-producer)
 if (( ${#static_build_labels[@]} > 0 )); then
@@ -543,10 +555,13 @@ require_static_payload "$PAYLOAD_STAGE/core/ryeos-lillux-isolation-adapter"
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-candidate-connector"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-guest-occurrence-owner"
-  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-guest-restoration-verifier"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-guest-runtime-producer"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-external-configuration"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-guest-runtime-producer"
+  require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-candidate-launcher"
+  require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-candidate-supervisor"
+  require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-guest-restoration-verifier"
+  require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-render-sandbox-lifecycle-adapter"
 fi
 prepare_bundle_trees
 
@@ -641,6 +656,11 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDL
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$CODEX" \
     --registry-root "$CORE" \
     --registry-root "$STD" \
+    --owner "$OWNER" >/dev/null
+
+  ryeos_term_update "publishing Render Sandbox adapter bundle" "signed lifecycle profile"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$RENDER_SANDBOX" \
+    --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 fi
 

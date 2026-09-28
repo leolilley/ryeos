@@ -1,3 +1,8 @@
+name: render-sandbox
+version: "0.1.0"
+description: "Early-access Render Sandbox lifecycle adapter; activation remains disabled by its signed provider profile"
+requires_kinds: []
+uses_kinds: []
 external_lifecycle_adapters:
   - id: render-sandbox-early-access
     protocol: ryeos.external-execution.lifecycle-adapter.v2
@@ -9,10 +14,10 @@ external_lifecycle_adapters:
     launcher: ryeos-external-candidate-launcher
     restoration_verifier: ryeos-external-guest-restoration-verifier
     provider_spec:
-      path: fixtures/provider-spec.json
+      path: specs/provider-spec.json
       sha256: "96c7f56970d6187fc444c93a9d06e3c921961e6427347f721776594f1f52011e"
     snapshot_production_spec:
-      path: fixtures/snapshot-production-spec.json
+      path: specs/snapshot-production-spec.json
       sha256: "5cec9da4b46523ffc79aaf581d84b9302bafc511b91a4f54aed1ec3d93af12d8"
     settings_schema_digest: "f5b4994d71a6896ddad77bf2a08716fdc3527ea4f91579f084112ca69dad7172"
     capabilities:

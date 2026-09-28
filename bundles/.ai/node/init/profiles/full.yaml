@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-27T22:01:04Z:802d54658ff1d2440ac26f3c7e4c9b0b347e1b75d0854f49829de04bb8e52eb7:BPiTzcbGstVLbyk4rjw9JPueyBuRLoLIozmMwmkHaDDYtBX61vefkOklZ6B2ovOqbG4cgo1XTYFrPPbhwMPCDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T10:44:06Z:44ba321c417394d57da67aad9ea5f07bb461e2112fa3d926c9e3f5c6276b0238:cE54hthjeyiC7JlH9i9nFnLLGXtU7M20qGXtpcZDZwypigKCcbZ1vOSssWDzcHy1Yl8R7M4c41OVG1PRo/ulCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -8,6 +8,7 @@ exact_bundles:
   - hosted-node
   - local-inference
   - opencode
+  - render-sandbox
   - ryeos-ui
   - standard
   - web

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-28T10:21:32Z:163629248b5c830891fe56303849037fccca27e77961330845345ae614b59c84:pBD7jNMfXjt/hM+DlSFeChWW4i6fJPO5UZ2D+/w4XNXwyq0coKtkZfUhgU3m2d/HXVaHDysrDzmvwsro8HTQAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T10:36:03Z:51dd38b196c19ba5645fe752d8fff6ba637b35adfb5217eab5bd801fa93fe760:G/Z/LNew4InIeAiEmyGxmfWxVa8qVpvhgT4OSTB0lBlRPJ+knDGLI47zLd44DL04A4lFWJi8Mp2qI/BMupofDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Exact publisher-authored ownership of native payloads by RyeOS bundle.
@@ -26,9 +26,6 @@ payload_ownership:
           build_class: static
         - binary: ryeos-external-guest-occurrence-owner
           cargo_package: ryeos-external-guest-occurrence-owner
-          build_class: static
-        - binary: ryeos-external-guest-restoration-verifier
-          cargo_package: ryeos-external-guest-restoration-verifier
           build_class: static
         - binary: ryeos-external-guest-runtime-producer
           cargo_package: ryeos-external-guest-runtime-producer
@@ -71,6 +68,21 @@ payload_ownership:
           build_class: static
         - binary: ryeos-worker-execution-runtime
           cargo_package: ryeos-structured-session
+          build_class: static
+    - bundle_name: render-sandbox
+      bundle_sets: [full, hosted-workflow, release-artifacts, release-authority]
+      payloads:
+        - binary: ryeos-external-candidate-launcher
+          cargo_package: ryeos-external-candidate-launcher
+          build_class: static
+        - binary: ryeos-external-candidate-supervisor
+          cargo_package: ryeos-external-candidate-supervisor
+          build_class: static
+        - binary: ryeos-external-guest-restoration-verifier
+          cargo_package: ryeos-external-guest-restoration-verifier
+          build_class: static
+        - binary: ryeos-render-sandbox-lifecycle-adapter
+          cargo_package: ryeos-render-sandbox-lifecycle-adapter
           build_class: static
     - bundle_name: ryeos-ui
       bundle_sets: [full, release-artifacts, release-authority]

@@ -66,16 +66,23 @@ for set_name in "${bundle_set_ids[@]}"; do
   contains central-auth "${members[@]}"
 done
 
-[[ "${hosted_workflow[*]}" == "core central-auth standard hosted-node codex opencode" ]]
+[[ "${hosted_workflow[*]}" == "core central-auth standard hosted-node codex render-sandbox opencode" ]]
 [[ "${local_inference[*]}" == "core central-auth standard local-inference" ]]
-for forbidden in hosted-node codex opencode web browser ryeos-ui; do
+for forbidden in hosted-node codex render-sandbox opencode web browser ryeos-ui; do
   ! contains "$forbidden" "${local_inference[@]}"
 done
-[[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference tv-tracker-authoring bundle-source bundle-release" ]]
-[[ "${release_authority[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference bundle-release" ]]
+[[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference tv-tracker-authoring bundle-source bundle-release" ]]
+[[ "${release_authority[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference bundle-release" ]]
 [[ "${release_authority_host_support[*]}" == "ryeos-bundle-publisher" ]]
 contains bundle-release "${release_authority[@]}"
 ! contains bundle-source "${release_authority[@]}"
+render_specs="$ROOT/bundles/render-sandbox/specs"
+render_fixture="$ROOT/crates/host-adapters/render-sandbox-adapter/fixtures"
+for profile in provider-spec.json snapshot-production-spec.json settings.schema.json; do
+  cmp -s "$render_specs/$profile" "$render_fixture/$profile"
+  profile_hash="$(sha256sum "$render_specs/$profile" | cut -d' ' -f1)"
+  grep -Fq -- "$profile_hash" "$ROOT/bundles/render-sandbox/.ai/manifest.source.yaml"
+done
 for ordinary_set in full central-host standard local-inference hosted-node hosted-workflow bundle-source; do
   mapfile -t ordinary_members < <(ryeos_bundle_set_names "$ordinary_set")
   ! contains bundle-release "${ordinary_members[@]}"
@@ -219,6 +226,9 @@ static_package_cases=(
   'ryeos-external-candidate-connector|ryeos-external-candidate-connector'
   'ryeos-external-guest-occurrence-owner|ryeos-external-guest-occurrence-owner'
   'ryeos-external-guest-restoration-verifier|ryeos-external-guest-restoration-verifier'
+  'ryeos-external-candidate-launcher|ryeos-external-candidate-launcher'
+  'ryeos-external-candidate-supervisor|ryeos-external-candidate-supervisor'
+  'ryeos-render-sandbox-lifecycle-adapter|ryeos-render-sandbox-lifecycle-adapter'
   'ryeos-external-guest-runtime-producer|ryeos-external-guest-runtime-producer'
   'ryeos-codex-external-configuration|ryeos-codex-external-configuration'
   'ryeos-codex-guest-runtime-producer|ryeos-codex-guest-runtime-producer'

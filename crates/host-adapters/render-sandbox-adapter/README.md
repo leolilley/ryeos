@@ -450,11 +450,12 @@ restored owner tree under a fresh challenge. This adapter has an offline,
 bounded SSE interpreter for its run output: it requires canonical measurement
 bytes, no stderr or unknown event, a complete zero exit, and the exact joined
 content/readiness coordinates. This parser is not an authenticated Render run.
-The verifier is now an exact static Codex bundle payload, with source-publisher
-signed item identity and a required hosted-workflow payload inventory entry.
-That closes source packaging only; the controller must still admit the matching
-artifact through its signed lifecycle declaration and run it in the restored
-qualification occurrence.
+The verifier is now an exact static payload in a dedicated `render-sandbox`
+bundle alongside the adapter, supervisor, and launcher. Its source-publisher
+signed manifest captures the finite provider specs and all four executables
+from one generation; the hosted-workflow payload inventory requires them.
+That closes source packaging only. The controller must still admit this bundle
+and run the matching verifier in the restored qualification occurrence.
 A distinct, durable qualification occurrence is now provisioned from the bound
 snapshot, with one-shot verifier and provider-termination journals. Installed
 qualification must still execute that path, retain the token/run and independent

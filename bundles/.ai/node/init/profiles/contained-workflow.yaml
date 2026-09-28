@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-27T22:01:04Z:64d4f686603a3590dd2774078c27061ce3d4f7cded80b81d132101809bf40dee:AUgZcnkYBbIAGJmi8DBGzWem66QXxdYWPbGQQBMmv50S3zje4K2PR2H7axXfXAJiPcohaJmyVChxepBRrqnpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T10:44:06Z:94f16e33915e0461c7bca4d4ba2bfa0991547e0a6cf232917b4b87ae14f1b5b3:1oDc3sMepk/GP0TqD+iYzxoR4HTQHrab8c+Aog7+GTqOqJv2vx4DQ0UV0bGXlI95872ON//M3iEfQXBsHs82Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -6,6 +6,7 @@ exact_bundles:
   - core
   - hosted-node
   - opencode
+  - render-sandbox
   - standard
 policies:
   bundle_publication:
