@@ -3094,6 +3094,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-external-guest-restoration-verifier"
+version = "0.5.99"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "lillux",
+ "ryeos-external-execution",
+ "ryeos-external-execution-contract",
+ "serde_json",
+]
+
+[[package]]
 name = "ryeos-external-guest-runtime-producer"
 version = "0.5.99"
 dependencies = [

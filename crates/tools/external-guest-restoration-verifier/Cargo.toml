@@ -1,0 +1,15 @@
+[package]
+name = "ryeos-external-guest-restoration-verifier"
+version = "0.5.99"
+edition = "2024"
+description = "Independent exact owner-product measurement inside a restored guest"
+license.workspace = true
+repository = "https://github.com/leolilley/ryeos"
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+lillux = { workspace = true }
+ryeos-external-execution = { workspace = true }
+ryeos-external-execution-contract = { workspace = true }
+serde_json = { workspace = true }

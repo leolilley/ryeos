@@ -43,6 +43,7 @@ members = [
     "crates/tools/external-candidate-supervisor",
     "crates/tools/external-guest-occurrence-owner",
     "crates/tools/external-guest-runtime-producer",
+    "crates/tools/external-guest-restoration-verifier",
     "crates/tools/codex-external-configuration",
     "crates/tools/codex-guest-runtime-producer",
     "crates/tools/independent-runtime-verifier",
