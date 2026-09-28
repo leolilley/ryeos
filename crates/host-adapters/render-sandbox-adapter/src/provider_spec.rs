@@ -501,14 +501,10 @@ impl ProviderSpec {
         {
             capabilities.insert(LifecycleCapability::ExactTerminalObservation);
         }
-        if self
-            .operations
-            .activate_supervisor
-            .is_one_shot_pending_activation()
-        {
-            capabilities.insert(LifecycleCapability::SupervisorActivation);
-            capabilities.insert(LifecycleCapability::IndependentGuestRuntimeAdmission);
-        }
+        // A configured one-shot delivery still returns SupervisorPending.
+        // Profile data cannot turn delivery into authenticated Ready or an
+        // independently admitted runtime. In particular, do not authorize a
+        // paid allocation merely because the delivery operation is selected.
         capabilities
     }
 
@@ -907,13 +903,13 @@ mod tests {
         let encoded = serde_json::to_vec(&value).unwrap();
         let spec = ProviderSpec::parse(&encoded, SETTINGS_SCHEMA_DIGEST).unwrap();
         assert!(spec.one_shot_activation_enabled());
-        assert!(
-            spec.effective_capabilities()
-                .contains(&LifecycleCapability::SupervisorActivation)
-        );
-        assert!(
-            spec.effective_capabilities()
-                .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission)
+        assert_eq!(
+            spec.effective_capabilities(),
+            BTreeSet::from([
+                LifecycleCapability::AuthoritativeNoOccurrence,
+                LifecycleCapability::ExactTerminalObservation,
+            ]),
+            "one-shot delivery cannot claim Ready or runtime admission"
         );
         value["operations"]["reconcile_supervisor_activation"] = serde_json::json!({
             "kind": "upload_then_run_once_pending",

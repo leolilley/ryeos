@@ -127,8 +127,11 @@ Therefore the Render activation gate remains closed.
   at offline placement admission, before Sandbox allocation or other provider
   contact; this incomplete adapter cannot strand a paid occurrence merely to
   discover that startup is unavailable. The capability must be derived from
-  a genuinely implemented signed activation operation, not added to the
-  declaration as a claim.
+  a genuinely implemented signed activation operation with authenticated
+  readiness and settlement, not added to the declaration as a claim. Selecting
+  the dormant one-shot delivery profile is insufficient: it still returns
+  `supervisor_pending`, so it advertises neither `supervisor_activation` nor
+  `independent_guest_runtime_admission` and cannot pass allocation preflight.
   The pinned CLI source exposes a connect-token POST for a run, returning an
   execution ID, expiry, method, proxy URI, and short-lived bearer token. The CLI
   then sends a command to that URI using the returned method and parses
