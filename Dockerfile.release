@@ -237,6 +237,7 @@ COPY --from=contained-publication /build/bundles/central-auth /opt/ryeos/central
 COPY --from=contained-publication /build/bundles/standard     /opt/ryeos/standard
 COPY --from=contained-publication /build/bundles/hosted-node  /opt/ryeos/hosted-node
 COPY --from=contained-publication /build/bundles/codex        /opt/ryeos/codex
+COPY --from=contained-publication /build/bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY --from=contained-publication /build/bundles/opencode     /opt/ryeos/opencode
 COPY images/contained-workflow/entrypoint.sh /usr/local/bin/contained-workflow-entrypoint
 RUN chmod 0555 /usr/local/bin/contained-workflow-entrypoint && \
@@ -316,6 +317,7 @@ COPY --from=published /build/bundles/central-auth /opt/ryeos/central-auth
 COPY --from=published /build/bundles/standard     /opt/ryeos/standard
 COPY --from=published /build/bundles/hosted-node  /opt/ryeos/hosted-node
 COPY --from=published /build/bundles/codex        /opt/ryeos/codex
+COPY --from=published /build/bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY --from=published /build/bundles/opencode     /opt/ryeos/opencode
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

@@ -1,0 +1,141 @@
+name: Build contained-workflow qualification image
+
+# This produces an exact, signed candidate for installed host qualification.
+# It does not promote the image to an official release or enable any worker.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing immutable release version without v prefix"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ryeos-contained-workflow-qualification
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve exact release tag
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="$(scripts/release/resolve-version.sh workflow_dispatch '' "$REQUESTED_VERSION")"
+          TAG="v${VERSION}"
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          SOURCE_SHA="$(git rev-parse --verify "${TAG}^{commit}")"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$SOURCE_SHA")"
+          BUILD_DATE="$(date --utc --date="@${SOURCE_DATE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "version=$VERSION"
+            echo "sha=$SOURCE_SHA"
+            echo "epoch=$SOURCE_DATE_EPOCH"
+            echo "build_date=$BUILD_DATE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out immutable release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ steps.release.outputs.sha }}
+
+      - name: Verify source and released bundle
+        env:
+          SOURCE_SHA: ${{ steps.release.outputs.sha }}
+          VERSION: ${{ steps.release.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          gh release view "v${VERSION}" >/dev/null
+          test -f images/contained-workflow/entrypoint.sh
+          test -f bundles/.ai/node/init/profiles/contained-workflow.yaml
+
+      - name: Assert official publisher key
+        env:
+          PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
+        run: |
+          test -n "$PUBLISHER_KEY"
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s\n' "$PUBLISHER_KEY" > "$KEY_FILE"
+          EXPECTED="$(scripts/release/official-publisher-fingerprint.sh)"
+          ACTUAL="$(openssl pkey -in "$KEY_FILE" -pubout -outform DER 2>/dev/null \
+            | tail -c 32 | sha256sum | cut -d' ' -f1)"
+          [[ "$ACTUAL" == "$EXPECTED" ]]
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify released hosted image
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          docker buildx imagetools inspect "ghcr.io/leolilley/ryeos-hosted-workflow:${VERSION}" >/dev/null
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Build one qualification candidate
+        id: candidate
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        env:
+          RYEOS_PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
+        with:
+          source: .
+          files: ./docker-bake.release.hcl
+          targets: contained-workflow-qualification
+          vars: |
+            VERSION=${{ steps.release.outputs.version }}
+            SOURCE_DATE_EPOCH=${{ steps.release.outputs.epoch }}
+            VCS_REF=${{ steps.release.outputs.sha }}
+            BUILD_DATE=${{ steps.release.outputs.build_date }}
+            CONTAINED_WORKFLOW_TAG=ghcr.io/leolilley/ryeos-contained-workflow:qualification-${{ steps.release.outputs.version }}-${{ steps.release.outputs.sha }}
+
+      - name: Verify and sign exact candidate digest
+        env:
+          BAKE_METADATA: ${{ steps.candidate.outputs.metadata }}
+          SOURCE_SHA: ${{ steps.release.outputs.sha }}
+          VERSION: ${{ steps.release.outputs.version }}
+          WORKFLOW_IDENTITY: https://github.com/${{ github.workflow_ref }}
+        run: |
+          DIGEST="$(jq -r '.["contained-workflow-qualification"]["containerimage.digest"] // empty' <<<"$BAKE_METADATA")"
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          IMAGE="ghcr.io/leolilley/ryeos-contained-workflow@${DIGEST}"
+          docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' > "$RUNNER_TEMP/contained-provenance.json"
+          jq -e 'type == "object" and length > 0' "$RUNNER_TEMP/contained-provenance.json"
+          jq -e --arg sha "$SOURCE_SHA" '.. | strings | select(. == $sha)' "$RUNNER_TEMP/contained-provenance.json"
+          docker buildx imagetools inspect "$IMAGE" --format '{{ json .SBOM }}' > "$RUNNER_TEMP/contained-sbom.json"
+          jq -e 'type == "object" and length > 0' "$RUNNER_TEMP/contained-sbom.json"
+          cosign sign --yes "$IMAGE"
+          cosign verify --certificate-identity "$WORKFLOW_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE" >/dev/null
+          {
+            echo "Qualification candidate: $IMAGE"
+            echo "Release source: v${VERSION} ($SOURCE_SHA)"
+            echo "This digest is not an installed qualification or an official promoted image."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -232,6 +232,7 @@ assert_runtime_bundle_inventory Dockerfile.release standard ryeos-standard
 assert_runtime_bundle_inventory Dockerfile.release central-host ryeos-central-host
 assert_runtime_bundle_inventory Dockerfile.release local-inference ryeos-local-inference
 assert_runtime_bundle_inventory Dockerfile.release hosted-workflow ryeos-hosted-workflow
+assert_runtime_bundle_inventory Dockerfile.release hosted-workflow ryeos-contained-workflow
 
 assert_runtime_init_profile() {
     local image="$1" bundle_set="$2" stage="${3:-}" instructions final_stage expected_selector actual_selector
@@ -428,6 +429,14 @@ for target in bundle-artifact standard central-host local-inference hosted-workf
         exit 1
     }
 done
+grep -Fq 'target "contained-workflow-qualification"' "$release_bake" || {
+    echo "release Bake contract is missing the contained qualification candidate" >&2
+    exit 1
+}
+if grep -Fq 'contained-workflow-qualification' "$release_workflow"; then
+    echo "contained qualification candidate must not enter official release promotion" >&2
+    exit 1
+fi
 [[ "$(grep -Fc 'cache-to' "$release_bake")" -eq 1 ]] || {
     echo "release Bake contract must export its shared build cache exactly once" >&2
     exit 1

@@ -136,3 +136,17 @@ target "contained-workflow" {
   tags     = [CONTAINED_WORKFLOW_TAG]
   output   = ["type=docker"]
 }
+
+# Manual installed-qualification build. This is never part of the official
+# release promotion set and never advances a mutable `latest` tag. The exact
+# pushed digest, not the candidate tag, is the administrator's image input.
+target "contained-workflow-qualification" {
+  inherits = ["_release"]
+  target   = "ryeos-contained-workflow"
+  tags     = [CONTAINED_WORKFLOW_TAG]
+  output   = ["type=registry"]
+  attest = [
+    "type=provenance,mode=max",
+    "type=sbom",
+  ]
+}
