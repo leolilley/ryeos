@@ -4,6 +4,7 @@ This cannot prove provider contact, snapshot availability, or restored bytes.
 """
 
 from pathlib import Path
+import re
 import unittest
 
 import yaml
@@ -28,6 +29,12 @@ class RenderSnapshotProductionSourceTests(unittest.TestCase):
             "maximum_bytes", "binding_id", "source_occurrence_id",
         ])
         self.assertFalse(graph["config"]["config_schema"]["additionalProperties"])
+        expressions = yaml.safe_dump(graph["config"]["nodes"])
+        self.assertNotIn("${config.", expressions)
+        self.assertEqual(
+            set(re.findall(r"\$\{inputs\.([A-Za-z_][A-Za-z_0-9]*)", expressions)),
+            set(graph["config"]["config_schema"]["properties"]),
+        )
 
         receive = graph["config"]["nodes"]["receive"]
         produce = graph["config"]["nodes"]["produce"]
@@ -41,7 +48,7 @@ class RenderSnapshotProductionSourceTests(unittest.TestCase):
             "acceptance_hash": "${state.receipt.acceptance_hash}",
         })
         self.assertEqual(produce["action"]["params"]["witness_hash"],
-                         "${config.witness_hash}")
+                         "${inputs.witness_hash}")
         self.assertEqual(graph["config"]["nodes"]["done"]["output"], {
             "receipt": "${state.receipt}",
             "snapshot": "${state.snapshot}",

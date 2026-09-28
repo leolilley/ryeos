@@ -4,6 +4,7 @@ This does not qualify a producer host, captured product, or Render snapshot.
 """
 
 from pathlib import Path
+import re
 import unittest
 
 import yaml
@@ -35,8 +36,14 @@ class GuestOwnerProductionSourceTests(unittest.TestCase):
         self.assertEqual(nodes["produce"]["action"]["item_id"],
                          "tool:codex/guest-runtime/produce-owner")
         self.assertEqual(nodes["produce"]["action"]["params"], {
-            "controller_public_key": "${config.controller_public_key}"
+            "controller_public_key": "${inputs.controller_public_key}"
         })
+        expressions = yaml.safe_dump(nodes)
+        self.assertNotIn("${config.", expressions)
+        self.assertEqual(
+            set(re.findall(r"\$\{inputs\.([A-Za-z_][A-Za-z_0-9]*)", expressions)),
+            set(schema["properties"]),
+        )
         self.assertNotIn("identity", nodes)
         self.assertEqual(tool["filesystem_authority"], "captured_execution")
         self.assertEqual(tool["network_authority"], "isolated")

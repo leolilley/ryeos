@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-28T11:50:27Z:d5d5fdf2db5357faaf79dd50a5c2d54642f30856229a25ab379c6bd72d299c54:SIyjKJW2XRsEqy+YciytT4bMVVGW8jVJTDY4P7DcKNbKfjvdCSlJzNenuTO5vEn8+4jDFK2FMhnEqhIGKrdQBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T12:03:48Z:d7aae4e96cdf74de1f0b5a16a9bb0703500430e8296274af8afa7832decfd992:FvzDzPafbN8b0CogHI1hmLGRl3Zmyf79WV90Aacb8klUYcyPGJnv0ymnv8U8sy6wgptDv+UJ0wZ9Z1nG4OEYCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 description: Produce a credential-free guest owner for an explicitly selected controller public root on an enforced-isolation authoring node
@@ -28,7 +28,7 @@ config:
         item_id: tool:codex/guest-runtime/produce-owner
         ref_bindings: {}
         params:
-          controller_public_key: "${config.controller_public_key}"
+          controller_public_key: "${inputs.controller_public_key}"
         thread: inline
       assign:
         production: "${result}"

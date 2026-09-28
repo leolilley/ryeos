@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-28T11:57:31Z:6862460e975e476bbac248f7a73493ea023035221370bc53057299d0d446a3a9:LmkiGModRXEtY9TTtUfLB09mCHfuh7GdAUVNrAYx6WquJ2Pb7GhDe+Z6MhEVRtWCgjylQmdd2WRtOGEQ0a63Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T12:03:52Z:d85eea2901a5a037ee88d53629fbcccd5474d10a2d2db6d9024454c4ce3d8348:wagcHtKGxpF0j63KeGKP3+Rz13c+9RGSfR7ZYMinJRwh7O/zf24EP5GyfkiCKZeFZcX9mrqKva5cIQRUZ6SbAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: render-sandbox
 version: "1.0.0"
 description: Receive one origin-admitted owner product and produce an unqualified Render snapshot locator
@@ -38,10 +38,10 @@ config:
         item_id: service:external-content/receive-product
         ref_bindings: {}
         params:
-          remote: "${config.remote}"
-          witness_hash: "${config.witness_hash}"
-          origin_admission_hash: "${config.origin_admission_hash}"
-          maximum_bytes: "${config.maximum_bytes}"
+          remote: "${inputs.remote}"
+          witness_hash: "${inputs.witness_hash}"
+          origin_admission_hash: "${inputs.origin_admission_hash}"
+          maximum_bytes: "${inputs.maximum_bytes}"
         thread: inline
       assign:
         receipt: "${result}"
@@ -54,12 +54,12 @@ config:
         item_id: service:external-content/produce-runtime-snapshot
         ref_bindings: {}
         params:
-          binding_id: "${config.binding_id}"
-          witness_hash: "${config.witness_hash}"
+          binding_id: "${inputs.binding_id}"
+          witness_hash: "${inputs.witness_hash}"
           source:
             kind: received
             acceptance_hash: "${state.receipt.acceptance_hash}"
-          source_occurrence_id: "${config.source_occurrence_id}"
+          source_occurrence_id: "${inputs.source_occurrence_id}"
         thread: inline
       assign:
         snapshot: "${result}"
