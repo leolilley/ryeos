@@ -423,15 +423,20 @@ directory-upload body from pinned descriptors; it rechecks the tree after
 packaging. A separate closed snapshot-production profile fixture describes the
 reviewed Render upload-token, create and exact-status routes, filesystem kind,
 plain-tar content type and response states. Its parser rejects unsupported
-substitutions; the fixture is not yet a signed or admitted provider authority.
+substitutions. The exact profile bytes are digest-bound in the signed
+`render-sandbox` bundle and delivered through a sealed descriptor. That
+establishes profile provenance, not provider qualification.
 The adapter now also has a separate `produce-snapshot` invocation. It consumes
 an exact sealed attempt, digest-bound profile bytes, settings, credential, network
 inputs and owner-product tar descriptor; it checks the running denied-network
 source, mints one scoped upload token, uploads the exact plain-tar body, then
 requests a filesystem snapshot. A complete create response yields only an
 operation-bound locator. The daemon has an operator-owned one-shot production
-service and journal, but the profile/definitions have not completed installed
-admission. Lost output must be quarantined under the original attempt without a
+service and journal. The signed production graph passed threadless admission
+on a disposable hosted-workflow node; the source producer was correctly
+refused there because captured execution requires enforced isolation. No
+exact product has yet traversed the installed controller-to-Render path. Lost
+output must be quarantined under the original attempt without a
 second upload or snapshot-create sequence. The Render adapter parses a
 complete `202` filesystem snapshot response against the exact source Sandbox,
 group and plan, retaining the
@@ -637,6 +642,12 @@ boundary before another provider is added. The integrated v2 seam carries the
 signed, digest-checked provider spec over a sealed descriptor. The Render
 profile cannot introduce
 an origin, credential placement, HTTP method, retry rule, or proof behavior.
+The snapshot-production profile is narrower still: its parser currently
+compares route and operation values against one reviewed Render protocol.
+The request and response path consumes the signed profile, but changing that
+protocol still requires Rust review and a rebuild. It is not the shared
+data-driven interpreter proposed in
+`.ai/knowledge/ryeos/future/data-driven-provider-lifecycle.md`.
 The Sandbox proxy stays disabled until its observed URL shape, token handling,
 bounded transfer, and RyeOS bootstrap mapping are qualified.
 
