@@ -73,16 +73,15 @@ impl RestoredVerifierAttemptIntent {
         Ok(())
     }
 
-    /// The fresh challenge and wall-clock deadline are retained attempt data,
-    /// not coordinates with which a caller may request another contact.
+    /// The challenge, wall-clock deadline and upload representation are
+    /// retained attempt data, not coordinates that mint another contact.
+    /// Reservation replay compares the entire intent, including those fields.
     pub fn derived_operation_id(&self) -> Result<String> {
         let coordinates = (
             "ryeos.restored-verifier-attempt.v1",
             &self.qualification_operation_id,
             &self.restored_occurrence_id,
             &self.verifier_artifact_hash,
-            &self.upload_sha256,
-            self.upload_bytes,
         );
         Ok(hex::encode(Sha256::digest(canonical_json(&coordinates)?)))
     }
@@ -253,7 +252,7 @@ mod tests {
         assert_ne!(attempt.derived_operation_id().unwrap(), identity);
         attempt.restored_occurrence_id = "sbx-exact".into();
         attempt.upload_sha256 = "7".repeat(64);
-        assert_ne!(attempt.derived_operation_id().unwrap(), identity);
+        assert_eq!(attempt.derived_operation_id().unwrap(), identity);
     }
 
     #[test]
