@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-independent-runtime-verifier"
-version = "0.5.99"
+version = "0.5.100"
 edition = "2024"
 description = "Bounded independent runtime qualification probe"
 license.workspace = true

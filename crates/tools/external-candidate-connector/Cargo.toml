@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-external-candidate-connector"
-version = "0.5.99"
+version = "0.5.100"
 edition = "2024"
 description = "Authenticated controller-side connector for RyeOS external candidates"
 license.workspace = true

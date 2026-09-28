@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-22T02:52:14Z:3a5426dca7a8f6ce8e8b2df3db39cc15ecde52d5420b317c14c394b92984752d:XlO0zQ8g9pXaeuaUUk3PCjHsA6bGM5I4VNF/Ui0TKfm2ew3y4DfAVEqf/zZi01wBGPyEcoQodyX7RsfC7uiOAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-28T23:35:24Z:7189124e584d13edd4770f869cc50f4b556cfab78a1eaf2c0ded8e20796d4978:6nd/O5QfwDidFido6hJNNdLBo17e0iARn5e6S9QFzdXEp1tfQTe88zoEYzuXkyPFGGaqVwzh4/HdF/BJ/g8BDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -182,6 +182,15 @@ crates/kernel/lillux/pyproject.toml
 crates/engine/ryeos-runtime/Cargo.toml
 crates/tools/core-tools/Cargo.toml
 crates/tools/session-exec/Cargo.toml
+crates/tools/codex-external-configuration/Cargo.toml
+crates/tools/codex-guest-runtime-producer/Cargo.toml
+crates/tools/external-candidate-connector/Cargo.toml
+crates/tools/external-candidate-launcher/Cargo.toml
+crates/tools/external-candidate-supervisor/Cargo.toml
+crates/tools/external-guest-occurrence-owner/Cargo.toml
+crates/tools/external-guest-restoration-verifier/Cargo.toml
+crates/tools/external-guest-runtime-producer/Cargo.toml
+crates/tools/independent-runtime-verifier/Cargo.toml
 crates/bin/cli/Cargo.toml
 crates/bin/daemon/Cargo.toml
 Cargo.lock
@@ -201,6 +210,15 @@ files=(
   crates/engine/ryeos-runtime/Cargo.toml
   crates/tools/core-tools/Cargo.toml
   crates/tools/session-exec/Cargo.toml
+  crates/tools/codex-external-configuration/Cargo.toml
+  crates/tools/codex-guest-runtime-producer/Cargo.toml
+  crates/tools/external-candidate-connector/Cargo.toml
+  crates/tools/external-candidate-launcher/Cargo.toml
+  crates/tools/external-candidate-supervisor/Cargo.toml
+  crates/tools/external-guest-occurrence-owner/Cargo.toml
+  crates/tools/external-guest-restoration-verifier/Cargo.toml
+  crates/tools/external-guest-runtime-producer/Cargo.toml
+  crates/tools/independent-runtime-verifier/Cargo.toml
   crates/bin/cli/Cargo.toml
   crates/bin/daemon/Cargo.toml
 )
@@ -218,15 +236,7 @@ Then confirm no old release package version remains in the release-version
 files or lockfile:
 
 ```bash
-rg "$old" \
-  crates/kernel/lillux/Cargo.toml \
-  crates/kernel/lillux/pyproject.toml \
-  crates/engine/ryeos-runtime/Cargo.toml \
-  crates/tools/core-tools/Cargo.toml \
-  crates/tools/session-exec/Cargo.toml \
-  crates/bin/cli/Cargo.toml \
-  crates/bin/daemon/Cargo.toml \
-  Cargo.lock
+rg "$old" "${files[@]}" Cargo.lock
 ```
 
 Expected: no matches, unless the old version is intentionally mentioned in
@@ -283,15 +293,7 @@ Stage only relevant files. Do not stage unrelated untracked docs or local state.
 Example:
 
 ```bash
-git add \
-  crates/kernel/lillux/Cargo.toml \
-  crates/kernel/lillux/pyproject.toml \
-  crates/engine/ryeos-runtime/Cargo.toml \
-  crates/tools/core-tools/Cargo.toml \
-  crates/bin/cli/Cargo.toml \
-  crates/bin/daemon/Cargo.toml \
-  Cargo.lock \
-  <actual-fix-files>
+git add "${files[@]}" Cargo.lock <actual-fix-files>
 
 git commit -m "Fix <release issue> for v$new"
 ```
@@ -673,6 +675,7 @@ Before tagging:
   - [ ] `crates/engine/ryeos-runtime/Cargo.toml`
   - [ ] `crates/tools/core-tools/Cargo.toml`
   - [ ] `crates/tools/session-exec/Cargo.toml`
+  - [ ] All `crates/tools/{codex-*,external-*,independent-runtime-verifier}/Cargo.toml` release-version manifests
   - [ ] `crates/bin/cli/Cargo.toml`
   - [ ] `crates/bin/daemon/Cargo.toml`
   - [ ] `Cargo.lock`

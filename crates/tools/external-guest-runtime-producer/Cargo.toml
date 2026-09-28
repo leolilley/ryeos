@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-external-guest-runtime-producer"
-version = "0.5.99"
+version = "0.5.100"
 edition = "2024"
 description = "Exact external guest-owner runtime product producer"
 license.workspace = true
