@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-27T22:01:21Z:be8b932ddde991691e871beab333a2b6e5133a27b2509fbc8e1217461fec32ef:bamG6Cuv/DZ86eaf/ScOW5ZSZT8zrb8HU9bcy5br35UY1goTQySgpb++xFJQUqa0EukamlgPlIzsahWBWFj7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T10:21:32Z:163629248b5c830891fe56303849037fccca27e77961330845345ae614b59c84:pBD7jNMfXjt/hM+DlSFeChWW4i6fJPO5UZ2D+/w4XNXwyq0coKtkZfUhgU3m2d/HXVaHDysrDzmvwsro8HTQAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Exact publisher-authored ownership of native payloads by RyeOS bundle.
@@ -26,6 +26,9 @@ payload_ownership:
           build_class: static
         - binary: ryeos-external-guest-occurrence-owner
           cargo_package: ryeos-external-guest-occurrence-owner
+          build_class: static
+        - binary: ryeos-external-guest-restoration-verifier
+          cargo_package: ryeos-external-guest-restoration-verifier
           build_class: static
         - binary: ryeos-external-guest-runtime-producer
           cargo_package: ryeos-external-guest-runtime-producer

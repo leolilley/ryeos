@@ -379,6 +379,7 @@ case "$BUNDLE_SET" in
           ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter \
           ryeos-external-candidate-connector ryeos-codex-external-configuration \
           ryeos-external-guest-occurrence-owner \
+          ryeos-external-guest-restoration-verifier \
           ryeos-external-guest-runtime-producer \
           ryeos-codex-guest-runtime-producer)
     ;;
@@ -397,6 +398,7 @@ case "$BUNDLE_SET" in
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter ryeos-external-candidate-connector \
           ryeos-external-guest-occurrence-owner ryeos-codex-external-configuration \
+          ryeos-external-guest-restoration-verifier \
           ryeos-external-guest-runtime-producer \
           ryeos-codex-guest-runtime-producer)
     ;;
@@ -443,6 +445,7 @@ build_static_structured_session=0
 build_static_lillux_isolation_adapter=0
 build_static_external_candidate_connector=0
 build_static_external_guest_occurrence_owner=0
+build_static_external_guest_restoration_verifier=0
 build_static_external_guest_runtime_producer=0
 build_static_codex_external_configuration=0
 build_static_codex_guest_runtime_producer=0
@@ -453,6 +456,7 @@ for p in "${pkgs[@]}"; do
     ryeos-lillux-isolation-adapter) build_static_lillux_isolation_adapter=1 ;;
     ryeos-external-candidate-connector) build_static_external_candidate_connector=1 ;;
     ryeos-external-guest-occurrence-owner) build_static_external_guest_occurrence_owner=1 ;;
+    ryeos-external-guest-restoration-verifier) build_static_external_guest_restoration_verifier=1 ;;
     ryeos-external-guest-runtime-producer) build_static_external_guest_runtime_producer=1 ;;
     ryeos-codex-external-configuration) build_static_codex_external_configuration=1 ;;
     ryeos-codex-guest-runtime-producer) build_static_codex_guest_runtime_producer=1 ;;
@@ -505,6 +509,7 @@ static_build_labels=()
 (( build_static_lillux_isolation_adapter == 1 )) && static_build_labels+=(ryeos-lillux-isolation-adapter)
 (( build_static_external_candidate_connector == 1 )) && static_build_labels+=(ryeos-external-candidate-connector)
 (( build_static_external_guest_occurrence_owner == 1 )) && static_build_labels+=(ryeos-external-guest-occurrence-owner)
+(( build_static_external_guest_restoration_verifier == 1 )) && static_build_labels+=(ryeos-external-guest-restoration-verifier)
 (( build_static_external_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-external-guest-runtime-producer)
 (( build_static_codex_external_configuration == 1 )) && static_build_labels+=(ryeos-codex-external-configuration)
 (( build_static_codex_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-codex-guest-runtime-producer)
@@ -538,6 +543,7 @@ require_static_payload "$PAYLOAD_STAGE/core/ryeos-lillux-isolation-adapter"
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-candidate-connector"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-guest-occurrence-owner"
+  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-guest-restoration-verifier"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-guest-runtime-producer"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-external-configuration"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-guest-runtime-producer"

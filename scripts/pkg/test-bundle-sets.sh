@@ -218,6 +218,7 @@ static_package_cases=(
   'ryeos-structured-session|ryeos-worker-execution-launch-preparer ryeos-worker-execution-runtime ryeos-structured-session-bridge'
   'ryeos-external-candidate-connector|ryeos-external-candidate-connector'
   'ryeos-external-guest-occurrence-owner|ryeos-external-guest-occurrence-owner'
+  'ryeos-external-guest-restoration-verifier|ryeos-external-guest-restoration-verifier'
   'ryeos-external-guest-runtime-producer|ryeos-external-guest-runtime-producer'
   'ryeos-codex-external-configuration|ryeos-codex-external-configuration'
   'ryeos-codex-guest-runtime-producer|ryeos-codex-guest-runtime-producer'
