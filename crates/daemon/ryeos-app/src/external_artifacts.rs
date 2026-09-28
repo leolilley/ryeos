@@ -30,6 +30,7 @@ pub struct ResolvedExternalLifecycleArtifacts {
     pub supervisor: CapturedExecutable,
     pub launcher: CapturedExecutable,
     pub provider_spec: CapturedLifecycleProviderSpec,
+    pub snapshot_production_spec: Option<CapturedLifecycleProviderSpec>,
 }
 
 #[derive(Debug)]
@@ -154,6 +155,11 @@ pub fn resolve_external_execution_artifacts(
                     root,
                     &declaration.provider_spec,
                 )?,
+                snapshot_production_spec: declaration
+                    .snapshot_production_spec
+                    .as_ref()
+                    .map(|identity| capture_declared_provider_spec(root, identity))
+                    .transpose()?,
             });
         }
     }

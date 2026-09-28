@@ -10,6 +10,9 @@ external_lifecycle_adapters:
     provider_spec:
       path: fixtures/provider-spec.json
       sha256: "867227b37e7090a0497cefb41980964d5e9651e7be8f711db8f7fc3abaf644ae"
+    snapshot_production_spec:
+      path: fixtures/snapshot-production-spec.json
+      sha256: "5cec9da4b46523ffc79aaf581d84b9302bafc511b91a4f54aed1ec3d93af12d8"
     settings_schema_digest: "f5b4994d71a6896ddad77bf2a08716fdc3527ea4f91579f084112ca69dad7172"
     capabilities:
       - authoritative_no_occurrence

@@ -790,6 +790,8 @@ pub struct ExternalLifecycleAdapterDeclaration {
     pub supervisor: String,
     pub launcher: String,
     pub provider_spec: LifecycleProviderSpecIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_production_spec: Option<LifecycleProviderSpecIdentity>,
     pub settings_schema_digest: String,
     pub capabilities: BTreeSet<LifecycleCapability>,
 }
@@ -838,6 +840,14 @@ impl ExternalLifecycleAdapterDeclaration {
         validate_executable_name(&self.launcher, "external candidate launcher")?;
         validate_bundle_relative_file_path(&self.provider_spec.path, "lifecycle provider spec")?;
         digest(&self.provider_spec.sha256, "lifecycle provider spec")?;
+        if let Some(spec) = &self.snapshot_production_spec {
+            validate_bundle_relative_file_path(&spec.path, "snapshot production spec")?;
+            digest(&spec.sha256, "snapshot production spec")?;
+            ensure!(
+                spec.path != self.provider_spec.path,
+                "snapshot production spec must have a separate signed source"
+            );
+        }
         digest(
             &self.settings_schema_digest,
             "external lifecycle settings schema",
@@ -2485,6 +2495,10 @@ mod tests {
                 path: "lifecycle/provider.json".into(),
                 sha256: "f".repeat(64),
             },
+            snapshot_production_spec: Some(LifecycleProviderSpecIdentity {
+                path: "lifecycle/snapshot-production.json".into(),
+                sha256: "e".repeat(64),
+            }),
             settings_schema_digest: "a".repeat(64),
             capabilities: BTreeSet::from([
                 LifecycleCapability::ExactAllocationReconciliation,
@@ -2492,6 +2506,10 @@ mod tests {
             ]),
         };
         lifecycle.validate().unwrap();
+        let mut overlapping = lifecycle.clone();
+        overlapping.snapshot_production_spec.as_mut().unwrap().path =
+            overlapping.provider_spec.path.clone();
+        assert!(overlapping.validate().is_err());
 
         let mut invalid = provider;
         invalid.connector = "../ambient".into();

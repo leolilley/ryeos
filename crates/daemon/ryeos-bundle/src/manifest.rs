@@ -794,6 +794,7 @@ mod tests {
                 path: "lifecycle/provider.json".to_string(),
                 sha256: "f".repeat(64),
             },
+            snapshot_production_spec: None,
             settings_schema_digest: "a".repeat(64),
             capabilities: [LifecycleCapability::ExactAllocationReconciliation]
                 .into_iter()

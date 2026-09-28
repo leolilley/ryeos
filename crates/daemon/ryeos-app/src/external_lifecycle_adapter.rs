@@ -107,6 +107,7 @@ pub(crate) struct ExecutableExternalPlacementBackend {
     launcher_bytes: u64,
     launcher: lillux::InheritedDescriptorAuthority,
     provider_spec: CapturedLifecycleProviderSpec,
+    snapshot_production_spec: Option<CapturedLifecycleProviderSpec>,
     inspection: LifecycleAdapterInspectionResponse,
 }
 
@@ -198,6 +199,7 @@ impl ExecutableExternalPlacementBackend {
             launcher_bytes,
             launcher: artifacts.launcher.handle,
             provider_spec: artifacts.provider_spec,
+            snapshot_production_spec: artifacts.snapshot_production_spec,
             inspection,
         })
     }
