@@ -71,6 +71,12 @@ service and command definitions are signed; their presence does not prove
 admission on the installed controller generation. Installed admission and the
 restored-content qualification still need verification before this path can
 authorize worker activation.
+The schema-5 snapshot probe carries only the retained snapshot locator,
+restored-verifier observation, provider terminal observation, and exact
+product/placement coordinates. It rejects the older unjoined hashes for
+lost-stream survival, authenticated Ready, and writer exclusion. Those are
+separate execution/settlement claims, not properties established by a
+point-in-time restored-content measurement or a provider terminal status.
 Therefore the Render activation gate remains closed.
 
 ## Implemented control-plane behavior

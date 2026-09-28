@@ -3,6 +3,9 @@
 //! Parsing and matching this shape grants no lifecycle capability. The daemon
 //! must first authenticate a current, published product qualification and its
 //! admitted verifier execution, then join these fields to the signed binding.
+//! Schema 5 contains only snapshot-content and retained-operation coordinates:
+//! supervisor Ready, lost-stream survival, and writer exclusion require their
+//! own witnessed operations and cannot be asserted as probe hashes.
 
 use anyhow::{Context as _, Result, ensure};
 use base64::Engine as _;
@@ -705,9 +708,6 @@ pub(crate) struct RenderSnapshotProbe {
     pub installed_controller_public_root: String,
     pub signed_import_mode: u32,
     pub guest_package_mode: u32,
-    pub lost_stream_survival_evidence_hash: String,
-    pub authenticated_ready_evidence_hash: String,
-    pub writer_exclusion_evidence_hash: String,
 }
 
 pub(crate) struct SnapshotExpectation<'a> {
@@ -735,16 +735,13 @@ impl RenderSnapshotProbe {
         settings: &Settings,
         expected: &SnapshotExpectation<'_>,
     ) -> Result<()> {
-        ensure!(self.schema == 4, "unsupported Render snapshot probe schema");
+        ensure!(self.schema == 5, "unsupported Render snapshot probe schema");
         for hash in [
             &self.product_witness_hash,
             &self.guest_runtime_manifest_hash,
             &self.binding_hash,
             &self.restored_tree_manifest_hash,
             &self.installed_owner_hash,
-            &self.lost_stream_survival_evidence_hash,
-            &self.authenticated_ready_evidence_hash,
-            &self.writer_exclusion_evidence_hash,
             &self.restored_verifier_operation_id,
             &self.restored_verifier_observation_hash,
             &self.qualification_termination_operation_id,
@@ -1067,7 +1064,7 @@ mod tests {
 
     fn probe() -> RenderSnapshotProbe {
         RenderSnapshotProbe {
-            schema: 4,
+            schema: 5,
             product_witness_hash: "1".repeat(64),
             guest_runtime_manifest_hash: "2".repeat(64),
             controller_public_root: public_root(),
@@ -1098,9 +1095,6 @@ mod tests {
             installed_controller_public_root: public_root(),
             signed_import_mode: 0o600,
             guest_package_mode: 0o600,
-            lost_stream_survival_evidence_hash: "6".repeat(64),
-            authenticated_ready_evidence_hash: "7".repeat(64),
-            writer_exclusion_evidence_hash: "9".repeat(64),
         }
     }
 
@@ -1172,6 +1166,24 @@ mod tests {
             .unwrap()
             .remove("restored_verifier_operation_id");
         assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
+        untrusted = serde_json::to_value(probe()).unwrap();
+        untrusted["authenticated_ready_evidence_hash"] =
+            serde_json::Value::String("7".repeat(64));
+        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
+        untrusted = serde_json::to_value(probe()).unwrap();
+        untrusted["writer_exclusion_evidence_hash"] =
+            serde_json::Value::String("9".repeat(64));
+        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
+        untrusted = serde_json::to_value(probe()).unwrap();
+        untrusted["lost_stream_survival_evidence_hash"] =
+            serde_json::Value::String("6".repeat(64));
+        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
+        untrusted = serde_json::to_value(probe()).unwrap();
+        untrusted["schema"] = serde_json::Value::from(4);
+        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted)
+            .unwrap()
+            .validate_for(&settings, &expected)
+            .is_err());
         untrusted = serde_json::to_value(probe()).unwrap();
         untrusted["qualified"] = serde_json::Value::Bool(true);
         assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
