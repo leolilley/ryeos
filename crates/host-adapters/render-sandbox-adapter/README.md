@@ -1,6 +1,6 @@
 # Render Sandbox early-access lifecycle adapter
 
-## Bounded provider feasibility observation (2026-09-27)
+## Bounded provider feasibility observations (2026-09-27–28)
 
 With explicit operator approval, two `starter` Sandboxes in the default Oregon
 group ran for a total of about 124 seconds. Both used `deny-all` network policy
@@ -21,6 +21,18 @@ Render behaviors. They do not qualify an owner executable, signed runtime
 product, authenticated supervisor `Ready`, whole-guest writer exclusion, or
 RyeOS recovery. No model or Kaggle contact occurred. Exact charges were not
 observed.
+
+On 2026-09-28, a further approved `starter`, `deny-all` Sandbox
+`sbx-18p4gdat3m2h7lnhs73bhbo30` accepted a user/mount/PID namespace with
+`unshare --user --map-root-user --mount --pid --fork`. A descendant scheduled
+to write a marker after namespace PID 1 exited did not write it. The Sandbox
+was explicitly stopped and then independently observed `terminated` at
+2026-09-28T10:04:59Z. This establishes that the relevant Linux namespace
+primitive is available in this disposable Render guest. It does **not** attest
+that the admitted Lillux owner launched the exact verifier in such a namespace,
+that its process tree settled, or that restored/product bytes were frozen and
+joined to the retained qualification occurrence. Those remain installed
+qualification requirements; the signed activation operation stays closed.
 
 This crate is an authored, unqualified adapter for the early-access Sandbox
 surface described by the pinned Render CLI source at
@@ -54,9 +66,11 @@ The adapter now has a separate sealed `observe-snapshot-readiness` entry that
 can make this one bounded read-only GET. RyeOS has a typed observation, an
 operator-owned service and a durable one-time readiness record. This only
 establishes the provider's `available` report; the restored tree still lacks
-independent measurement and activation remains closed. The newly authored
-service and command definitions still need signing and bundle admission before
-the service can be invoked on an installed node.
+independent measurement and activation remains closed. The source-local
+service and command definitions are signed; their presence does not prove
+admission on the installed controller generation. Installed admission and the
+restored-content qualification still need verification before this path can
+authorize worker activation.
 Therefore the Render activation gate remains closed.
 
 ## Implemented control-plane behavior
