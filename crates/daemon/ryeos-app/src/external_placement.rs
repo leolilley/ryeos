@@ -79,6 +79,19 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     > {
         bail!("external placement backend does not produce runtime snapshots")
     }
+    fn observe_runtime_snapshot_readiness(
+        &self,
+        _binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _credential: &PlacementCredential,
+        _request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotReadinessRequest,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ExternalLifecycleObservation<
+            ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotReadinessObservation,
+        >,
+    >{
+        bail!("external placement backend cannot observe runtime snapshot readiness")
+    }
     /// Effective capabilities from the exact installed adapter inspection.
     /// A declaration alone is not permission to invent stronger observations.
     fn lifecycle_capabilities(&self) -> BTreeSet<LifecycleCapability>;
@@ -921,6 +934,27 @@ impl ExternalPlacementBackendRegistry {
             ))
             .context("exact signed snapshot producer adapter generation is not installed")?;
         backend.produce_runtime_snapshot(binding, credential, request, upload, deadline)
+    }
+
+    pub(crate) fn observe_runtime_snapshot_readiness(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+        request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotReadinessRequest,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ExternalLifecycleObservation<
+            ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotReadinessObservation,
+        >,
+    >{
+        let backend = self
+            .backends
+            .get(&(
+                binding.backend().to_owned(),
+                binding.adapter_artifact_hash().to_owned(),
+            ))
+            .context("exact signed snapshot producer adapter generation is not installed")?;
+        backend.observe_runtime_snapshot_readiness(binding, credential, request, deadline)
     }
 
     fn verify_runtime_probe(

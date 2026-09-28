@@ -12,7 +12,8 @@ use ryeos_external_execution::guest_runtime_product::{
 };
 use ryeos_external_execution_contract::runtime_snapshot::{
     RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL, RUNTIME_SNAPSHOT_INTENT_SCHEMA,
-    RuntimeSnapshotAdapterRequest, RuntimeSnapshotAdapterResponse, RuntimeSnapshotIntent,
+    RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotAdapterRequest,
+    RuntimeSnapshotAdapterResponse, RuntimeSnapshotIntent, RuntimeSnapshotReadinessRequest,
 };
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use ryeos_state::external_content::products::{ProductShape, ProductStorage};
@@ -80,6 +81,67 @@ pub fn get_operation(
         "runtime snapshot operation belongs to another operator"
     );
     Ok(operation)
+}
+
+/// Observe availability of the exact already-bound provider locator. This is
+/// a read-only provider request and retains only provider readiness; restored
+/// bytes still require independent qualification before activation.
+pub fn observe_readiness(
+    state: &AppState,
+    context: &HandlerContext,
+    operation_id: &str,
+) -> Result<RuntimeSnapshotRecord> {
+    let record = get_operation(state, context, operation_id)?;
+    ensure!(
+        record.phase == RuntimeSnapshotPhase::Bound,
+        "snapshot has no bound locator"
+    );
+    if record.readiness.is_some() {
+        return Ok(record);
+    }
+    let binding = state
+        .node_config
+        .runtime_snapshot_production
+        .iter()
+        .find(|binding| binding.digest() == record.intent.production_profile_digest)
+        .context("current signed snapshot producer binding is absent")?;
+    ensure!(
+        binding.backend() == record.intent.provider_id
+            && binding.adapter_artifact_hash() == record.intent.adapter_artifact_hash
+            && binding.snapshot_spec_sha256() == record.intent.provider_spec_digest
+            && binding.settings_digest() == record.intent.settings_digest
+            && binding.provider_group_id() == record.intent.provider_group_id,
+        "snapshot readiness differs from its exact signed producer"
+    );
+    let locator = record
+        .locator
+        .clone()
+        .context("bound snapshot has no locator")?;
+    let request = RuntimeSnapshotReadinessRequest {
+        protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
+        intent: record.intent.clone(),
+        locator,
+        provider_spec_digest: record.intent.provider_spec_digest.clone(),
+    };
+    request.validate()?;
+    let access = binding.credential_access()?;
+    let credential = access.decode(state.vault.placement_credential(&access)?)?;
+    state
+        .external_placement_backends
+        .preflight_runtime_snapshot(binding, &credential)?;
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
+        u64::from(binding.contact_timeout_seconds()),
+    ));
+    let observed = state
+        .external_placement_backends
+        .observe_runtime_snapshot_readiness(binding, &credential, &request, deadline)?;
+    ensure!(
+        !observed.deadline_exceeded,
+        "snapshot readiness exceeded its contact deadline"
+    );
+    state
+        .state_store
+        .bind_runtime_snapshot_readiness(&observed.value)
 }
 
 /// Rejoin an independently qualified runtime probe to the daemon's one-shot

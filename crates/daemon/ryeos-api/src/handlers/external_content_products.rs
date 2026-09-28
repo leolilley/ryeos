@@ -39,6 +39,19 @@ pub async fn get_runtime_snapshot(
     )?)
 }
 
+pub async fn observe_runtime_snapshot_readiness(
+    req: GetRuntimeSnapshotRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let observed = tokio::task::spawn_blocking(move || {
+        ryeos_app::operator_runtime_snapshot::observe_readiness(&state, &ctx, &req.operation_id)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("runtime snapshot readiness join failed: {error}"))??;
+    Ok(serde_json::to_value(observed)?)
+}
+
 pub async fn produce_runtime_snapshot(
     req: ProduceRuntimeSnapshotRequest,
     ctx: HandlerContext,
@@ -186,6 +199,23 @@ pub const GET_RUNTIME_SNAPSHOT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor
     handler: |params, ctx, state| {
         Box::pin(async move {
             get_runtime_snapshot(crate::handler_error::parse_request(params)?, ctx, state).await
+        })
+    },
+};
+
+pub const OBSERVE_RUNTIME_SNAPSHOT_READINESS_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/observe-runtime-snapshot-readiness",
+    endpoint: "external-content.observe-runtime-snapshot-readiness",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/observe-runtime-snapshot-readiness"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            observe_runtime_snapshot_readiness(
+                crate::handler_error::parse_request(params)?,
+                ctx,
+                state,
+            )
+            .await
         })
     },
 };

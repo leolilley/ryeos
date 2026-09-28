@@ -1,0 +1,6 @@
+kind: service
+endpoint: external-content.observe-runtime-snapshot-readiness
+required_caps: ["ryeos.execute.service.external-content/observe-runtime-snapshot-readiness"]
+schema:
+  operation_id: string
+description: Observe provider readiness for one exact bound runtime snapshot; does not qualify restored content

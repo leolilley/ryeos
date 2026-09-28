@@ -1,0 +1,10 @@
+tokens: [external-content, observe-runtime-snapshot-readiness]
+description: Observe provider readiness for one bound runtime snapshot without qualifying restored content
+forms:
+  - slots:
+      - field: operation_id
+help:
+  usage: ryeos external-content observe-runtime-snapshot-readiness <operation-id>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/observe-runtime-snapshot-readiness
