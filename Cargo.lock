@@ -2972,7 +2972,6 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
- "flate2",
  "libc",
  "lillux",
  "rand 0.8.6",

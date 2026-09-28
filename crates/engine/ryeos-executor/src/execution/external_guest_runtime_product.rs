@@ -5,7 +5,6 @@
 //! while producing a fresh private tree for a later descriptor-bound transfer.
 
 use std::ffi::OsStr;
-use std::io::Write as _;
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime;
@@ -79,8 +78,8 @@ impl StagedGuestOwnerRuntimeProduct {
         Ok(())
     }
 
-    /// Package exactly the admitted four-entry tree for Render's directory
-    /// upload protocol. Content is read through pinned Lillux descriptors,
+    /// Package exactly the admitted four-entry tree as an application/x-tar
+    /// directory upload. Content is read through pinned Lillux descriptors,
     /// never through a reconstructed CAS or ambient project path.
     pub fn sealed_snapshot_upload(&self) -> Result<GuestOwnerSnapshotUpload> {
         self.ensure_current()?;
@@ -114,19 +113,10 @@ impl StagedGuestOwnerRuntimeProduct {
             0o644,
             4 * 1024,
         )?;
-        let uncompressed = archive.into_inner()?;
-        ensure!(
-            uncompressed.len() as u64 <= self.maximum_bytes.saturating_add(16 * 1024),
-            "guest runtime archive exceeds its source bound"
-        );
-        let mut gzip = flate2::GzBuilder::new()
-            .mtime(0)
-            .write(Vec::new(), flate2::Compression::default());
-        gzip.write_all(&uncompressed)?;
-        let bytes = gzip.finish()?;
+        let bytes = archive.into_inner()?;
         ensure!(
             bytes.len() as u64 <= self.maximum_bytes.saturating_add(16 * 1024),
-            "guest runtime compressed upload exceeds its source bound"
+            "guest runtime archive exceeds its source bound"
         );
         self.ensure_current()?;
         let descriptor = lillux::sealed_memfd(c"ryeos-guest-runtime-upload", &bytes)
@@ -322,7 +312,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lillux::sha256_hex(&uploaded), package.sha256());
-        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(uploaded.as_slice()));
+        let mut tar = tar::Archive::new(uploaded.as_slice());
         let entries = tar
             .entries()
             .unwrap()
