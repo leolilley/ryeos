@@ -321,6 +321,8 @@ mod tests {
     use ryeos_external_execution_contract::runtime_snapshot::{
         RUNTIME_SNAPSHOT_INTENT_SCHEMA, RUNTIME_SNAPSHOT_RESULT_SCHEMA, RuntimeSnapshotIntent,
         RuntimeSnapshotLocator, RuntimeSnapshotReadinessObservation,
+        RuntimeSnapshotQualificationTerminalObservation,
+        RuntimeSnapshotQualificationTerminationIntent,
     };
 
     #[test]
@@ -428,6 +430,51 @@ mod tests {
                 .unwrap(),
             SnapshotQualificationAttemptClaim::OccurrenceBound(_)
         ));
+        let mut termination = RuntimeSnapshotQualificationTerminationIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: intent.operation_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            owner_principal: intent.owner_principal.clone(),
+            provider_id: intent.provider_id.clone(),
+            provider_spec_digest: intent.provider_spec_digest.clone(),
+            attempt_deadline_ms: now + 60_000,
+        };
+        termination.operation_id = termination.derived_operation_id().unwrap();
+        db.reserve_qualification_termination(&termination).unwrap();
+        assert!(matches!(
+            db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
+            super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::StartAttempt(_)
+        ));
+        assert!(matches!(
+            db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
+            super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::Reconcile(_)
+        ));
+        db.quarantine_qualification_termination_attempt(&termination.operation_id).unwrap();
+        let mut changed_deadline = termination.clone();
+        changed_deadline.attempt_deadline_ms += 1;
+        assert_eq!(changed_deadline.derived_operation_id().unwrap(), termination.operation_id);
+        assert!(db.reserve_qualification_termination(&changed_deadline).is_err());
+        let terminal = RuntimeSnapshotQualificationTerminalObservation {
+            schema: 1,
+            operation_id: termination.operation_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            provider_response_sha256: "a".repeat(64),
+            terminated_at: "2026-09-28T00:02:00Z".into(),
+            contact_deadline_exceeded: false,
+        };
+        db.bind_qualification_terminal_observation(&terminal).unwrap();
+        assert!(matches!(
+            db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
+            super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::Terminal(_)
+        ));
+        let mut changed_terminal = terminal;
+        changed_terminal.provider_response_sha256 = "b".repeat(64);
+        assert!(db.bind_qualification_terminal_observation(&changed_terminal).is_err());
+        assert!(db.conn.execute(
+            "UPDATE runtime_snapshot_qualification_termination SET phase='attempt_pending',observation_json=NULL WHERE operation_id=?1",
+            [&termination.operation_id],
+        ).is_err());
         let mut changed = occurrence;
         changed.occurrence_id = "sbx-other".into();
         assert!(db.bind_snapshot_qualification_occurrence(&changed).is_err());
