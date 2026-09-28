@@ -355,8 +355,17 @@ packaging. A separate closed snapshot-production profile fixture describes the
 reviewed Render upload-token, create and exact-status routes, filesystem kind,
 plain-tar content type and response states. Its parser rejects unsupported
 substitutions; the fixture is not yet a signed or admitted provider authority.
-The Render adapter now parses a complete `202` filesystem snapshot
-response against the exact source Sandbox, group and plan, retaining the
+The adapter now also has a separate `produce-snapshot` invocation. It consumes
+an exact sealed attempt, digest-bound profile bytes, settings, credential, network
+inputs and owner-product tar descriptor; it checks the running denied-network
+source, mints one scoped upload token, uploads the exact plain-tar body, then
+requests a filesystem snapshot. A complete create response yields only an
+operation-bound locator. The daemon has no admitted caller for this invocation
+yet: the profile fixture is not signed into a production authority, and lost
+output must be quarantined under the original journal attempt without a
+second upload or snapshot-create sequence. The Render adapter parses a
+complete `202` filesystem snapshot response against the exact source Sandbox,
+group and plan, retaining the
 original product witness/root in a locator observation. A separate bounded
 readiness parser accepts only a complete `200` response that reports the same
 filesystem snapshot, source, group, plan and request timing as `available`;

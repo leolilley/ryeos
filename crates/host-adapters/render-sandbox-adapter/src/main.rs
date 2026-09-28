@@ -260,6 +260,7 @@ fn run() -> Result<()> {
         Some("inspect") => inspect(&adapter),
         Some("verify-runtime-probe") => verify_runtime_probe(&adapter),
         Some("operate") => operate(),
+        Some("produce-snapshot") => snapshot_production::operate(&adapter),
         _ => anyhow::bail!("unsupported lifecycle invocation"),
     }
 }
@@ -1256,14 +1257,17 @@ fn validate_settings(settings: &Settings) -> Result<()> {
         valid_snapshot_id(&settings.snapshot_id),
         "invalid immutable Render snapshot id"
     );
+    validate_tls_roots(&settings.tls_roots_der_base64)
+}
+
+fn validate_tls_roots(roots: &[String]) -> Result<()> {
     ensure!(
-        !settings.tls_roots_der_base64.is_empty()
-            && settings.tls_roots_der_base64.len() <= MAX_ROOTS,
+        !roots.is_empty() && roots.len() <= MAX_ROOTS,
         "explicit Render API TLS roots are missing or excessive"
     );
     let mut total = 0usize;
     let mut previous: Option<&str> = None;
-    for root in &settings.tls_roots_der_base64 {
+    for root in roots {
         ensure!(
             previous.is_none_or(|value| value < root.as_str()),
             "TLS roots are not uniquely ordered"
@@ -1294,8 +1298,11 @@ fn validate_settings(settings: &Settings) -> Result<()> {
 }
 
 fn tls_roots(settings: &Settings) -> Result<Vec<Vec<u8>>> {
-    settings
-        .tls_roots_der_base64
+    tls_roots_from_base64(&settings.tls_roots_der_base64)
+}
+
+fn tls_roots_from_base64(roots: &[String]) -> Result<Vec<Vec<u8>>> {
+    roots
         .iter()
         .map(|root| {
             base64::engine::general_purpose::STANDARD

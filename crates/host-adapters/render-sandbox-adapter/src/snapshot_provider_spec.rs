@@ -7,7 +7,7 @@
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 
-const MAX_SPEC_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_SPEC_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +22,7 @@ pub(crate) struct SnapshotProductionSpec {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SnapshotRoutes {
+    source_status: Vec<String>,
     upload_token: Vec<String>,
     create_snapshot: Vec<String>,
     get_snapshot: Vec<String>,
@@ -74,6 +75,7 @@ impl SnapshotProductionSpec {
                         "snapshots",
                         "{snapshot_id}",
                     ]
+                && self.routes.source_status == ["v1", "sandboxes", "{source_sandbox_id}"]
                 && self.operations.upload_content_type == "application/x-tar"
                 && self.operations.upload_path == "/ryeos/guest-runtime"
                 && self.operations.create_kind == "filesystem"
@@ -87,6 +89,17 @@ impl SnapshotProductionSpec {
 
     pub(crate) fn upload_path(&self) -> &str {
         &self.operations.upload_path
+    }
+
+    pub(crate) fn source_status_path(&self, source_sandbox_id: &str) -> Result<String> {
+        ensure!(
+            crate::valid_sandbox_id(source_sandbox_id),
+            "snapshot source sandbox ID is invalid"
+        );
+        Ok(render_route(
+            &self.routes.source_status,
+            &[("{source_sandbox_id}", source_sandbox_id)],
+        ))
     }
 
     pub(crate) fn upload_content_type(&self) -> &str {

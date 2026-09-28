@@ -21,6 +21,7 @@ pub enum LifecycleAdapterInvocation {
     Inspect,
     VerifyRuntimeProbe,
     Operate,
+    ProduceSnapshot,
 }
 
 /// Complete bounded protocol observation, not permission to continue startup.
@@ -37,6 +38,7 @@ impl LifecycleAdapterInvocation {
             Self::Inspect => "inspect",
             Self::VerifyRuntimeProbe => "verify-runtime-probe",
             Self::Operate => "operate",
+            Self::ProduceSnapshot => "produce-snapshot",
         }
     }
 }
@@ -139,7 +141,12 @@ fn lifecycle_adapter_output(
     ensure!(
         complete
             && ((result.success && !result.timed_out)
-                || (result.timed_out && invocation == LifecycleAdapterInvocation::Operate)),
+                || (result.timed_out
+                    && matches!(
+                        invocation,
+                        LifecycleAdapterInvocation::Operate
+                            | LifecycleAdapterInvocation::ProduceSnapshot
+                    ))),
         "external lifecycle adapter failed: {failure} (exit_code={})",
         result.exit_code
     );
@@ -176,6 +183,11 @@ mod tests {
             lifecycle_adapter_output(LifecycleAdapterInvocation::Operate, late_result()).unwrap();
         assert!(observation.deadline_exceeded);
         assert_eq!(observation.bytes, b"{\"observation\":true}");
+        let snapshot =
+            lifecycle_adapter_output(LifecycleAdapterInvocation::ProduceSnapshot, late_result())
+                .unwrap();
+        assert!(snapshot.deadline_exceeded);
+        assert_eq!(snapshot.bytes, observation.bytes);
         for success in [false, true] {
             let mut result = late_result();
             result.success = success;

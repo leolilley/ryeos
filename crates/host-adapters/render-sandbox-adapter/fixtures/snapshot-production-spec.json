@@ -3,6 +3,7 @@
   "provider_profile": "render_sandbox_v1",
   "origin_profile": "render_api_v1",
   "routes": {
+    "source_status": ["v1", "sandboxes", "{source_sandbox_id}"],
     "upload_token": ["v1", "sandboxes", "{source_sandbox_id}", "files", "upload", "token"],
     "create_snapshot": ["v1", "sandboxes", "{source_sandbox_id}", "snapshots"],
     "get_snapshot": ["v1", "sandbox-groups", "{sandbox_group_id}", "snapshots", "{snapshot_id}"]

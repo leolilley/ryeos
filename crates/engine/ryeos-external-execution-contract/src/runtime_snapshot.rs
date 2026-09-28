@@ -5,6 +5,7 @@
 //! independent qualification rooted in the retained product witness.
 
 use anyhow::{Result, ensure};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -12,7 +13,74 @@ use crate::canonical_json;
 
 pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 1;
 pub const RUNTIME_SNAPSHOT_RESULT_SCHEMA: u32 = 1;
+pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v1";
+pub const MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES: usize = 24 * 1024;
 pub const MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES: u64 = 64 * 1024 * 1024 + 16 * 1024;
+
+/// One sealed invocation of the exact admitted snapshot producer. The upload
+/// descriptor is a process-local transport coordinate, not durable identity;
+/// its bytes and digest are owned by the retained intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotAdapterRequest {
+    pub protocol: String,
+    pub intent: RuntimeSnapshotIntent,
+    pub provider_spec_digest: String,
+    pub upload_descriptor: u32,
+    pub upload_bytes: u64,
+    pub upload_sha256: String,
+}
+
+impl RuntimeSnapshotAdapterRequest {
+    pub fn validate(&self) -> Result<()> {
+        self.intent.validate()?;
+        ensure!(
+            self.protocol == RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL
+                && self.upload_descriptor > 2
+                && self.provider_spec_digest == self.intent.provider_spec_digest
+                && self.upload_bytes == self.intent.upload_bytes
+                && self.upload_sha256 == self.intent.upload_sha256,
+            "runtime snapshot adapter handoff differs from the retained intent"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+            "runtime snapshot adapter request exceeds its bound"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeSnapshotAdapterResponse {
+    Bound {
+        locator: RuntimeSnapshotLocator,
+    },
+    Uncertain {
+        operation_id: String,
+        intent_digest: String,
+    },
+}
+
+impl RuntimeSnapshotAdapterResponse {
+    pub fn validate_for(&self, request: &RuntimeSnapshotAdapterRequest) -> Result<()> {
+        request.validate()?;
+        match self {
+            Self::Bound { locator } => locator.validate_for(&request.intent)?,
+            Self::Uncertain {
+                operation_id,
+                intent_digest,
+            } => {
+                ensure!(
+                    operation_id == &request.intent.operation_id
+                        && intent_digest == &request.intent.digest()?,
+                    "uncertain snapshot result changed its durable attempt"
+                );
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +95,7 @@ pub struct RuntimeSnapshotIntent {
     /// that will name the resulting snapshot ID.
     pub production_profile_digest: String,
     pub adapter_artifact_hash: String,
+    pub provider_spec_digest: String,
     pub settings_digest: String,
     pub product_witness_hash: String,
     pub guest_runtime_manifest_hash: String,
@@ -47,6 +116,7 @@ impl RuntimeSnapshotIntent {
             ("operation", &self.operation_id),
             ("production profile", &self.production_profile_digest),
             ("adapter", &self.adapter_artifact_hash),
+            ("provider spec", &self.provider_spec_digest),
             ("settings", &self.settings_digest),
             ("product witness", &self.product_witness_hash),
             ("guest runtime manifest", &self.guest_runtime_manifest_hash),
@@ -63,11 +133,17 @@ impl RuntimeSnapshotIntent {
         require_bounded_text(&self.provider_id, 128, "provider")?;
         require_bounded_text(&self.source_occurrence_id, 256, "source occurrence")?;
         require_bounded_text(&self.provider_group_id, 256, "provider group")?;
-        require_bounded_text(&self.controller_public_root, 128, "controller root")?;
+        let encoded = self
+            .controller_public_root
+            .strip_prefix("ed25519:")
+            .ok_or_else(|| {
+                anyhow::anyhow!("runtime snapshot controller root has no Ed25519 envelope")
+            })?;
+        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded)?;
         ensure!(
-            self.controller_public_root.starts_with("ed25519:")
-                && self.controller_public_root.len() == "ed25519:".len() + 44,
-            "runtime snapshot controller root has no canonical envelope"
+            decoded.len() == 32
+                && base64::engine::general_purpose::STANDARD.encode(&decoded) == encoded,
+            "runtime snapshot controller root is not canonical 32-byte base64"
         );
         ensure!(
             (1..=MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES).contains(&self.upload_bytes)
@@ -93,6 +169,7 @@ impl RuntimeSnapshotIntent {
             &self.provider_group_id,
             &self.production_profile_digest,
             &self.adapter_artifact_hash,
+            &self.provider_spec_digest,
             &self.settings_digest,
             &self.product_witness_hash,
             &self.guest_runtime_manifest_hash,
@@ -192,11 +269,15 @@ mod tests {
             provider_group_id: "sbg-fixture-1".into(),
             production_profile_digest: "3".repeat(64),
             adapter_artifact_hash: "4".repeat(64),
+            provider_spec_digest: "d".repeat(64),
             settings_digest: "5".repeat(64),
             product_witness_hash: "6".repeat(64),
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
-            controller_public_root: format!("ed25519:{}", "A".repeat(44)),
+            controller_public_root: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode([3u8; 32])
+            ),
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: 42,
@@ -215,6 +296,7 @@ mod tests {
             "controller_public_root",
             "upload_sha256",
             "adapter_artifact_hash",
+            "provider_spec_digest",
             "settings_digest",
             "production_profile_digest",
             "source_occurrence_id",
@@ -222,7 +304,10 @@ mod tests {
         ] {
             let mut changed = serde_json::to_value(&baseline).unwrap();
             changed[field] = serde_json::json!(if field == "controller_public_root" {
-                format!("ed25519:{}", "B".repeat(44))
+                format!(
+                    "ed25519:{}",
+                    base64::engine::general_purpose::STANDARD.encode([4u8; 32])
+                )
             } else if field == "source_occurrence_id" {
                 "sbox-fixture-2".to_owned()
             } else if field == "provider_group_id" {
@@ -270,5 +355,32 @@ mod tests {
         locator.validate_for(&intent).unwrap();
         locator.source_occurrence_id = "sbox-other".into();
         assert!(locator.validate_for(&intent).is_err());
+    }
+
+    #[test]
+    fn adapter_handoff_and_result_preserve_the_retained_attempt() {
+        let intent = intent();
+        let request = RuntimeSnapshotAdapterRequest {
+            protocol: RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL.into(),
+            provider_spec_digest: intent.provider_spec_digest.clone(),
+            upload_descriptor: 11,
+            upload_bytes: intent.upload_bytes,
+            upload_sha256: intent.upload_sha256.clone(),
+            intent,
+        };
+        request.validate().unwrap();
+        let uncertain = RuntimeSnapshotAdapterResponse::Uncertain {
+            operation_id: request.intent.operation_id.clone(),
+            intent_digest: request.intent.digest().unwrap(),
+        };
+        uncertain.validate_for(&request).unwrap();
+        let mut wrong = request.clone();
+        wrong.upload_sha256 = "b".repeat(64);
+        assert!(wrong.validate().is_err());
+        let mut wrong = uncertain;
+        if let RuntimeSnapshotAdapterResponse::Uncertain { intent_digest, .. } = &mut wrong {
+            *intent_digest = "f".repeat(64);
+        }
+        assert!(wrong.validate_for(&request).is_err());
     }
 }

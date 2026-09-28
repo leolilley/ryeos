@@ -328,11 +328,15 @@ mod tests {
             provider_group_id: "sbg-group".into(),
             production_profile_digest: "3".repeat(64),
             adapter_artifact_hash: "4".repeat(64),
+            provider_spec_digest: "d".repeat(64),
             settings_digest: "5".repeat(64),
             product_witness_hash: "6".repeat(64),
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
-            controller_public_root: format!("ed25519:{}", "A".repeat(44)),
+            controller_public_root: format!(
+                "ed25519:{}",
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [3u8; 32])
+            ),
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: now + 60_000,
