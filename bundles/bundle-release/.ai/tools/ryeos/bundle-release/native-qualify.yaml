@@ -1,0 +1,25 @@
+# ryeos:signed:2026-09-24T08:05:55Z:1d9f67a42d1c0ebc04789b93a0e6e73cfb21489906cf6c69ae8047c0a0d657f1:RnE7Y37776kjj+txrY552B0WiDXOvXxT7l3pZaodSZQsSUc74w/Ikd+65eKia0rPrqdaTnqudNB3YUYwxW0oDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/bundle-release
+name: native-qualify
+version: "1.0.0"
+description: Verify the exact captured native bundle tree and its executable payloads without mutating it.
+executor_id: tool:ryeos/bundle-release/runtime
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_native_qualify, kind: tree, mount_root: execution_runtime, mount: python-gnu}
+  - id: subject
+    relationship_ref: config:bundle-release/signed-capture-products
+    relationship: signed_native_bundle_to_qualifier_input
+    kind: tree
+    mount_root: execution_runtime
+    mount: native-bundle
+env_config:
+  interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
+config:
+  command: "${interpreter}"
+  args: ["-I", "-B", {source_member: "lib/native-qualify.py"}]
+  input_data: "${params_json}"
+  timeout_secs: 300

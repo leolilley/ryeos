@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-08T10:36:32Z:00e3e2e765f99d92c11ea20c4a88f7a0ff781669bdb065d6e7797622b07d1d5b:dlT26zEIfh9Xjhvq37rl9XnzLzVYSCjrQFH5DnB9NL2I7vTFV9GP4w+kRCQtg5j8GyhOYgMrljgIySi+bdkrCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-version: "1.0.0"
+# ryeos:signed:2026-09-22T00:24:35Z:318d6da6e8b650b6c7739e71fd0773860f7d535e3565b5d9d5fb0f95ee02bde1:OeGuBMkk/Dpr/zhyZyhDXg16NZkkJDokkO2aFWjdkaxREkNg5jEyEg3IbG4lpMeoRH6y4BPpu8dKaaetOZNRCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.1.0"
 category: ryeos/development
 description: Build the finite authoring utilities as retained named products
 effects: recorded
@@ -11,10 +11,17 @@ external_product_slots:
     kind: tree
     mount_root: execution_runtime
     mount: authoring-build-support
+  - id: platform
+    relationship_ref: config:development/ryeos/platform-products
+    relationship: platform_to_authoring_utility_production
+    kind: tree
+    mount_root: execution_runtime
+    mount: platform
 requires:
   capabilities:
     declared:
       - ryeos.execute.config.development/ryeos/authoring-built-utilities-products
+      - ryeos.execute.config.development/ryeos/platform-products
       - ryeos.execute.tool.ryeos/development/authoring-environment-production/build-utilities
 config:
   start: build

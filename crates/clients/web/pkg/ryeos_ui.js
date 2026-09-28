@@ -476,7 +476,7 @@ function errorMessage(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/shared/utils.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/shared/utils.js
 var is_array = Array.isArray;
 var index_of = Array.prototype.indexOf;
 var includes = Array.prototype.includes;
@@ -554,7 +554,7 @@ var STALE_REACTION = new class StaleReactionError extends Error {
 }();
 var IS_XHTML = !!globalThis.document?.contentType && /* @__PURE__ */ globalThis.document.contentType.includes("xml");
 //#endregion
-//#region node_modules/svelte/src/constants.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/constants.js
 var HYDRATION_ERROR = {};
 var UNINITIALIZED = Symbol("uninitialized");
 var NAMESPACE_HTML = "http://www.w3.org/1999/xhtml";
@@ -578,7 +578,7 @@ function svelte_boundary_reset_noop() {
 	console.warn(`https://svelte.dev/e/svelte_boundary_reset_noop`);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/hydration.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/hydration.js
 /** @import { TemplateNode } from '#client' */
 /**
 * Use this variable to guard everything related to hydration code so it can be treeshaken out
@@ -657,7 +657,7 @@ function read_hydration_instruction(node) {
 	return node.data;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/equality.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/equality.js
 /** @import { Equals } from '#client' */
 /** @type {Equals} */
 function equals(value) {
@@ -684,7 +684,7 @@ function lifecycle_outside_component(name) {
 	throw new Error(`https://svelte.dev/e/lifecycle_outside_component`);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/errors.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/errors.js
 /**
 * Cannot create a `$derived(...)` with an `await` expression outside of an effect tree
 * @returns {never}
@@ -768,13 +768,13 @@ function svelte_boundary_reset_onerror() {
 	throw new Error(`https://svelte.dev/e/svelte_boundary_reset_onerror`);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/flags/index.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/flags/index.js
 /** True if experimental.async=true */
 var async_mode_flag = false;
 /** True if we're not certain that we only have Svelte 5 code in the compilation */
 var legacy_mode_flag = false;
 //#endregion
-//#region node_modules/svelte/src/internal/shared/context.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/shared/context.js
 /**
 * @typedef {{ p: Context | null, c: Map<unknown, unknown> | null }} Context
 */
@@ -797,7 +797,7 @@ function get_or_init_context_map(context, name) {
 	return context.c ??= new Map(get_parent_context(context) || void 0);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/context.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/context.js
 /** @import { ComponentContext, DevStackEntry, Effect } from '#client' */
 /** @type {ComponentContext | null} */
 var component_context = null;
@@ -895,7 +895,7 @@ function is_runes() {
 	return !legacy_mode_flag || component_context !== null && component_context.l === null;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/task.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/task.js
 /** @type {Array<() => void>} */
 var micro_tasks = [];
 function run_micro_tasks() {
@@ -916,7 +916,7 @@ function queue_micro_task(fn) {
 	micro_tasks.push(fn);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/status.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/status.js
 /** @import { Derived, Signal } from '#client' */
 var STATUS_MASK = ~(DIRTY | MAYBE_DIRTY | CLEAN);
 /**
@@ -935,7 +935,7 @@ function update_derived_status(derived) {
 	else set_signal_status(derived, MAYBE_DIRTY);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/utils.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/utils.js
 /** @import { Derived, Effect, Value } from '#client' */
 /**
 * @param {Value[] | null} deps
@@ -963,14 +963,14 @@ function defer_effect(effect, dirty_effects, maybe_dirty_effects) {
 	set_signal_status(effect, CLEAN);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/store.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/store.js
 /**
 * We set this to `true` when updating a store so that we correctly
 * schedule effects if the update takes place inside a `$:` effect
 */
 var legacy_is_updating_store = false;
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/misc.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/misc.js
 /**
 * The child of a textarea actually corresponds to the defaultValue property, so we need
 * to remove it upon hydration to avoid a bug when someone resets the form value.
@@ -993,7 +993,7 @@ function add_form_reset_listener() {
 	}
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/bindings/shared.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/bindings/shared.js
 /**
 * @template T
 * @param {() => T} fn
@@ -1011,7 +1011,7 @@ function without_reactive_context(fn) {
 	}
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/async.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/async.js
 /** @import { Blocker, Effect, Source, Value } from '#client' */
 /**
 * @param {Blocker[]} blockers
@@ -1300,7 +1300,7 @@ function unfreeze_derived_effects(derived) {
 	for (const e of derived.effects) if (e.teardown && e.fn !== null) update_effect(e);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/batch.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/batch.js
 /** @import { Fork } from 'svelte' */
 /** @import { Derived, Effect, Reaction, Source, Value } from '#client' */
 /** @type {Batch | null} */
@@ -2015,7 +2015,7 @@ function reset_all(effect) {
 	}
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/sources.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/sources.js
 /** @import { Derived, Effect, Source, Value } from '#client' */
 /** @type {Set<Effect>} */
 var eager_effects = /* @__PURE__ */ new Set();
@@ -2314,7 +2314,7 @@ function proxy(value) {
 	});
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/operations.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/operations.js
 /** @import { Effect, TemplateNode } from '#client' */
 /** @type {Window} */
 var $window;
@@ -2539,7 +2539,7 @@ function invoke_error_boundary(error, effect) {
 	throw error;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/effects.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/effects.js
 /** @import { Blocker, ComponentContext, ComponentContextLegacy, Derived, Effect, TemplateNode, TransitionManager } from '#client' */
 /**
 * @param {'$effect' | '$effect.pre' | '$inspect'} rune
@@ -2919,14 +2919,14 @@ function move_effect(effect, fragment) {
 	}
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/legacy.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/legacy.js
 /**
 * @type {Set<Value> | null}
 * @deprecated
 */
 var captured_signals = null;
 //#endregion
-//#region node_modules/svelte/src/internal/client/runtime.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/runtime.js
 /** @import { Derived, Effect, Reaction, Source, Value } from '#client' */
 /**
 * True if updating in an effect context that is reactive (i.e. not branch/root effects)
@@ -3301,7 +3301,7 @@ function is_passive_event(name) {
 	return PASSIVE_EVENTS.includes(name);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/events.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/events.js
 /**
 * Used on elements, as a map of event type -> event handler,
 * and on events themselves to track which element handled an event
@@ -3449,7 +3449,7 @@ function handle_event_propagation(event) {
 	}
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/reconciler.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/reconciler.js
 var policy = globalThis?.window?.trustedTypes && /* @__PURE__ */ globalThis.window.trustedTypes.createPolicy("svelte-trusted-html", {
 /** @param {string} html */
 createHTML: (html) => {
@@ -3468,7 +3468,7 @@ function create_fragment_from_html(html) {
 	return elem.content;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/template.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/template.js
 /** @import { Effect, EffectNodes, TemplateNode } from '#client' */
 /** @import { TemplateStructure } from './types' */
 /**
@@ -3614,7 +3614,7 @@ function append(anchor, dom) {
 	anchor.before(dom);
 }
 //#endregion
-//#region node_modules/svelte/src/reactivity/create-subscriber.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/reactivity/create-subscriber.js
 /**
 * Returns a `subscribe` function that integrates external event-based systems with Svelte's reactivity.
 * It's particularly useful for integrating with web APIs like `MediaQuery`, `IntersectionObserver`, or `WebSocket`.
@@ -3687,7 +3687,7 @@ function createSubscriber(start) {
 	};
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/blocks/boundary.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/boundary.js
 /** @import { Effect, Source, TemplateNode, } from '#client' */
 /**
 * @typedef {{
@@ -4190,7 +4190,7 @@ function unmount(component, options) {
 	return Promise.resolve();
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/blocks/branches.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/branches.js
 /** @import { Effect, TemplateNode } from '#client' */
 /**
 * @typedef {{ effect: Effect, fragment: DocumentFragment }} Branch
@@ -4338,7 +4338,7 @@ var BranchManager = class {
 	}
 };
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/blocks/if.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/if.js
 /** @import { TemplateNode } from '#client' */
 /**
 * @param {TemplateNode} node
@@ -4384,7 +4384,7 @@ function if_block(node, fn, elseif = false) {
 	}, flags);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/blocks/each.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/each.js
 /** @import { EachItem, EachOutroGroup, EachState, Effect, EffectNodes, MaybeSource, Source, TemplateNode, TransitionManager, Value } from '#client' */
 /** @import { Batch } from '../../reactivity/batch.js'; */
 /**
@@ -4801,7 +4801,7 @@ function link(state, prev, next) {
 	else next.prev = prev;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/shared/attributes.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/shared/attributes.js
 var whitespace = [..." 	\n\r\f\xA0\v﻿"];
 /**
 * @param {any} value
@@ -4911,7 +4911,7 @@ function to_style(value, styles) {
 	return value == null ? null : String(value);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/class.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/class.js
 /**
 * @param {Element} dom
 * @param {boolean | number} is_html
@@ -4938,7 +4938,7 @@ function set_class(dom, is_html, value, hash, prev_classes, next_classes) {
 	return next_classes;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/style.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/style.js
 /**
 * @param {Element & ElementCSSInlineStyle} dom
 * @param {Record<string, any>} prev
@@ -4978,7 +4978,7 @@ function set_style(dom, value, prev_styles, next_styles) {
 	return next_styles;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/attributes.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/attributes.js
 /** @import { Blocker, Effect } from '#client' */
 var IS_CUSTOM_ELEMENT = Symbol("is custom element");
 var IS_HTML = Symbol("is html");
@@ -5070,7 +5070,7 @@ function get_setters(element) {
 	return setters;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/bindings/this.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/bindings/this.js
 /** @import { ComponentContext, Effect } from '#client' */
 /**
 * @param {any} bound_value
@@ -5157,7 +5157,7 @@ function init_update_callbacks(context) {
 	};
 }
 //#endregion
-//#region node_modules/svelte/src/internal/disclose-version.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/disclose-version.js
 if (typeof window !== "undefined") ((window.__svelte ??= {}).v ??= /* @__PURE__ */ new Set()).add("5");
 //#endregion
 //#region browser/runtime/context.ts
@@ -5171,11 +5171,11 @@ function dispatchUi() {
 //#endregion
 //#region browser/app/Navigation.svelte
 var root$17 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
-var root_1$9 = /* @__PURE__ */ from_html(`<aside class="navigation" aria-label="RyeOS navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`);
+var root_1$10 = /* @__PURE__ */ from_html(`<aside class="navigation" aria-label="RyeOS navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`);
 function Navigation($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
-	var aside = root_1$9();
+	var aside = root_1$10();
 	var div = child(aside);
 	var text = only_child(sibling(child(div)), true);
 	reset(div);
@@ -5207,14 +5207,14 @@ delegate(["click"]);
 //#endregion
 //#region browser/app/Notices.svelte
 var root$16 = /* @__PURE__ */ from_html(`<div class="notice"><span> </span> <button aria-label="Dismiss notice">×</button></div>`);
-var root_1$8 = /* @__PURE__ */ from_html(`<aside class="notice-stack" aria-label="RyeOS notices" aria-live="polite" aria-atomic="false"></aside>`);
+var root_1$9 = /* @__PURE__ */ from_html(`<aside class="notice-stack" aria-label="RyeOS notices" aria-live="polite" aria-atomic="false"></aside>`);
 function Notices($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var aside = root_1$8();
+		var aside = root_1$9();
 		each(aside, 21, () => $$props.notices, (notice) => notice.id, ($$anchor, notice) => {
 			var div = root$16();
 			var span = child(div);
@@ -5246,8 +5246,8 @@ delegate(["click"]);
 //#endregion
 //#region browser/app/OverlayLayer.svelte
 var root$15 = /* @__PURE__ */ from_html(`<span> </span>`);
-var root_1$7 = /* @__PURE__ */ from_html(`<div class="overlay-columns"></div>`);
-var root_2$4 = /* @__PURE__ */ from_html(`<span class="overlay-secondary"> </span>`);
+var root_1$8 = /* @__PURE__ */ from_html(`<div class="overlay-columns"></div>`);
+var root_2$6 = /* @__PURE__ */ from_html(`<span class="overlay-secondary"> </span>`);
 var root_3$4 = /* @__PURE__ */ from_html(`<span class="overlay-secondary overlay-disabled-reason"> </span>`);
 var root_4$4 = /* @__PURE__ */ from_html(`<small> </small>`);
 var root_5$4 = /* @__PURE__ */ from_html(`<button class="overlay-secondary-action">↗</button>`);
@@ -5316,7 +5316,7 @@ function OverlayLayer($$anchor, $$props) {
 	bind_this(input, ($$value) => queryInput = $$value, () => queryInput);
 	var node = sibling(input, 2);
 	var consequent = ($$anchor) => {
-		var div_3 = root_1$7();
+		var div_3 = root_1$8();
 		each(div_3, 21, () => $$props.model.columns, index, ($$anchor, column) => {
 			var span = root$15();
 			var text_2 = only_child(span, true);
@@ -5349,7 +5349,7 @@ function OverlayLayer($$anchor, $$props) {
 		reset(span_1);
 		var node_2 = sibling(span_1, 2);
 		var consequent_2 = ($$anchor) => {
-			var span_2 = root_2$4();
+			var span_2 = root_2$6();
 			var text_5 = only_child(span_2, true);
 			template_effect(() => set_text(text_5, get(item).secondary));
 			append($$anchor, span_2);
@@ -7129,13 +7129,13 @@ function AmbientLayer($$anchor, $$props) {
 //#endregion
 //#region browser/app/StatusBar.svelte
 var root$13 = /* @__PURE__ */ from_html(`<span> </span>`);
-var root_1$6 = /* @__PURE__ */ from_html(`<footer class="status-bar"><!> <span class="key-hint"> </span></footer>`);
+var root_1$7 = /* @__PURE__ */ from_html(`<footer class="status-bar"><!> <span class="key-hint"> </span></footer>`);
 function StatusBar($$anchor, $$props) {
 	push($$props, true);
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var footer = root_1$6();
+		var footer = root_1$7();
 		var node_1 = child(footer);
 		each(node_1, 17, () => $$props.model.segments, index, ($$anchor, segment) => {
 			var span = root$13();
@@ -7194,49 +7194,82 @@ function SystemBar($$anchor, $$props) {
 	pop();
 }
 //#endregion
-//#region browser/app/WorkspaceStrip.svelte
-var root$11 = /* @__PURE__ */ from_html(`<button><span class="ordinal"> </span> <span> </span></button>`);
-var root_1$5 = /* @__PURE__ */ from_html(`<nav class="workspace-strip" aria-label="Workspaces"><!> <button class="new-workspace" aria-label="New workspace">＋</button></nav>`);
-function WorkspaceStrip($$anchor, $$props) {
+//#region browser/app/ViewSetStrip.svelte
+var root$11 = /* @__PURE__ */ from_html(`<span class="view-set-actions" role="group"><button title="Duplicate view set">⧉</button> <button title="Close view set">×</button></span>`);
+var root_1$6 = /* @__PURE__ */ from_html(`<div><button class="view-set-select"><span class="ordinal"> </span> <span> </span></button> <!></div>`);
+var root_2$5 = /* @__PURE__ */ from_html(`<nav class="view-set-strip" aria-label="View sets"><!> <button class="new-view-set" aria-label="New view set">＋</button></nav>`);
+function ViewSetStrip($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
 	var fragment = comment();
 	var node = first_child(fragment);
-	var consequent = ($$anchor) => {
-		var nav = root_1$5();
+	var consequent_1 = ($$anchor) => {
+		var nav = root_2$5();
 		var node_1 = child(nav);
-		each(node_1, 17, () => $$props.model.tabs, (tab) => tab.workspace_id, ($$anchor, tab) => {
-			var button = root$11();
+		each(node_1, 17, () => $$props.model.tabs, (tab) => tab.view_set_id, ($$anchor, tab) => {
+			var div = root_1$6();
 			let classes;
+			var button = child(div);
 			var span = child(button);
 			var text = only_child(span, true);
 			var text_1 = only_child(sibling(span, 2), true);
 			reset(button);
+			var node_2 = sibling(button, 2);
+			var consequent = ($$anchor) => {
+				var span_2 = root$11();
+				var button_1 = child(span_2);
+				var button_2 = sibling(button_1, 2);
+				reset(span_2);
+				template_effect(() => {
+					set_attribute(span_2, "aria-label", `${get(tab).title} view-set actions`);
+					set_attribute(button_1, "aria-label", `Duplicate ${get(tab).title}`);
+					set_attribute(button_2, "aria-label", `Close ${get(tab).title}`);
+				});
+				delegated("click", button_1, () => dispatch({
+					type: "activate",
+					intent: {
+						type: "duplicate_view_set",
+						view_set_id: get(tab).view_set_id
+					}
+				}));
+				delegated("click", button_2, () => dispatch({
+					type: "activate",
+					intent: {
+						type: "close_view_set",
+						view_set_id: get(tab).view_set_id
+					}
+				}));
+				append($$anchor, span_2);
+			};
+			if_block(node_2, ($$render) => {
+				if (get(tab).active) $$render(consequent);
+			});
+			reset(div);
 			template_effect(($0) => {
+				classes = set_class(div, 1, "view-set-tab", null, classes, { active: get(tab).active });
 				set_attribute(button, "aria-current", get(tab).active ? "page" : void 0);
-				classes = set_class(button, 1, "", null, classes, { active: get(tab).active });
 				set_text(text, $0);
 				set_text(text_1, get(tab).title);
 			}, [() => String(get(tab).number).padStart(2, "0")]);
 			delegated("click", button, () => dispatch({
 				type: "activate",
 				intent: {
-					type: "select_workspace",
-					workspace_id: get(tab).workspace_id
+					type: "select_view_set",
+					view_set_id: get(tab).view_set_id
 				}
 			}));
-			append($$anchor, button);
+			append($$anchor, div);
 		});
-		var button_1 = sibling(node_1, 2);
+		var button_3 = sibling(node_1, 2);
 		reset(nav);
-		delegated("click", button_1, () => dispatch({
+		delegated("click", button_3, () => dispatch({
 			type: "activate",
-			intent: { type: "new_workspace" }
+			intent: { type: "new_view_set" }
 		}));
 		append($$anchor, nav);
 	};
 	if_block(node, ($$render) => {
-		if ($$props.model.visible) $$render(consequent);
+		if ($$props.model.visible) $$render(consequent_1);
 	});
 	append($$anchor, fragment);
 	pop();
@@ -7244,7 +7277,9 @@ function WorkspaceStrip($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/components/InputComposer.svelte
-var root$10 = /* @__PURE__ */ from_html(`<section class="composer"><div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div> <textarea></textarea> <div class="composer-actions"><span> </span><button>↑</button></div></section>`);
+var root$10 = /* @__PURE__ */ from_html(`<div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div>`);
+var root_1$5 = /* @__PURE__ */ from_html(`<button>↑</button>`);
+var root_2$4 = /* @__PURE__ */ from_html(`<section><!> <textarea></textarea> <div class="composer-actions"><span> </span><!></div></section>`);
 function InputComposer($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -7264,28 +7299,52 @@ function InputComposer($$anchor, $$props) {
 			}
 		});
 	}
-	var section = root$10();
-	var div = child(section);
-	var text_1 = only_child(sibling(child(div)), true);
-	next();
-	reset(div);
-	var textarea = sibling(div, 2);
+	var section = root_2$4();
+	let classes;
+	var node = child(section);
+	var consequent = ($$anchor) => {
+		var div = root$10();
+		var text_1 = only_child(sibling(child(div)), true);
+		next();
+		reset(div);
+		template_effect(() => set_text(text_1, $$props.model.route_label));
+		append($$anchor, div);
+	};
+	if_block(node, ($$render) => {
+		if (!$$props.model.live_filter) $$render(consequent);
+	});
+	var textarea = sibling(node, 2);
 	remove_textarea_child(textarea);
 	var div_1 = sibling(textarea, 2);
 	var span_1 = child(div_1);
 	var text_2 = only_child(span_1, true);
-	var button = sibling(span_1);
+	var node_1 = sibling(span_1);
+	var consequent_1 = ($$anchor) => {
+		var button = root_1$5();
+		template_effect(() => button.disabled = !$$props.model.submit_enabled);
+		delegated("click", button, () => dispatch({
+			type: "input_at",
+			address: $$props.model.address,
+			action: {
+				type: "submit",
+				interrupt: false
+			}
+		}));
+		append($$anchor, button);
+	};
+	if_block(node_1, ($$render) => {
+		if (!$$props.model.live_filter) $$render(consequent_1);
+	});
 	reset(div_1);
 	reset(section);
 	template_effect(() => {
+		classes = set_class(section, 1, "composer", null, classes, { "live-filter": $$props.model.live_filter });
 		set_attribute(section, "aria-label", $$props.model.route_label);
-		set_text(text_1, $$props.model.route_label);
 		set_attribute(textarea, "data-focus-key", `input:${$$props.model.address.buffer.view_instance_key}:${$$props.model.address.buffer.input_id}`);
 		set_value(textarea, $$props.model.text);
 		set_attribute(textarea, "placeholder", $$props.model.placeholder);
 		set_attribute(textarea, "aria-label", $$props.model.route_label);
 		set_text(text_2, $$props.model.hint);
-		button.disabled = !$$props.model.submit_enabled;
 	});
 	event("focus", textarea, () => dispatch({
 		type: "input_at",
@@ -7299,7 +7358,10 @@ function InputComposer($$anchor, $$props) {
 	});
 	delegated("input", textarea, (event) => emitInput(event.currentTarget));
 	delegated("keydown", textarea, (event) => {
-		if (event.key === "Enter" && !event.shiftKey && !composing && $$props.model.submit_enabled) {
+		if (event.key === "Enter" && $$props.model.live_filter && !composing) {
+			event.preventDefault();
+			dispatch({ type: "activate_focused" });
+		} else if (event.key === "Enter" && !event.shiftKey && !composing && $$props.model.submit_enabled) {
 			event.preventDefault();
 			dispatch({
 				type: "input_at",
@@ -7311,14 +7373,6 @@ function InputComposer($$anchor, $$props) {
 			});
 		}
 	});
-	delegated("click", button, () => dispatch({
-		type: "input_at",
-		address: $$props.model.address,
-		action: {
-			type: "submit",
-			interrupt: false
-		}
-	}));
 	append($$anchor, section);
 	pop();
 }
@@ -8780,24 +8834,26 @@ delegate(["click", "keydown"]);
 //#region browser/views/ViewRenderer.svelte
 var root$5 = /* @__PURE__ */ from_html(`<div> </div>`);
 var root_1$2 = /* @__PURE__ */ from_html(`<div class="text-view"></div>`);
-var root_2$1 = /* @__PURE__ */ from_html(`<small> </small>`);
-var root_3$1 = /* @__PURE__ */ from_html(`<span class="row-meta"> </span>`);
-var root_4$1 = /* @__PURE__ */ from_html(`<button><span class="row-glyph"> </span> <span class="row-copy"><strong> </strong><!></span> <!></button>`);
-var root_5$1 = /* @__PURE__ */ from_html(`<div class="rows-view" role="list"></div>`);
-var root_6$1 = /* @__PURE__ */ from_html(`<span role="columnheader"> </span>`);
-var root_7 = /* @__PURE__ */ from_html(`<span role="cell"> </span>`);
-var root_8 = /* @__PURE__ */ from_html(`<button role="row"></button>`);
-var root_9 = /* @__PURE__ */ from_html(`<div class="table-view" role="table"><div class="table-head" role="row"></div> <!></div>`);
-var root_10 = /* @__PURE__ */ from_html(`<p> </p>`);
-var root_11 = /* @__PURE__ */ from_html(`<strong> </strong><!>`, 1);
-var root_12 = /* @__PURE__ */ from_html(`<span> </span><!>`, 1);
-var root_13 = /* @__PURE__ */ from_html(`<span class="timeline-separator"> </span>`);
-var root_14 = /* @__PURE__ */ from_html(`<button><!></button>`);
-var root_15 = /* @__PURE__ */ from_html(`<div class="timeline-view"></div>`);
-var root_16 = /* @__PURE__ */ from_html(`<button><span> </span><small> </small></button>`);
-var root_17 = /* @__PURE__ */ from_html(`<section><button><span> </span><span> </span></button> <!></section>`);
-var root_18 = /* @__PURE__ */ from_html(`<div class="sections-view"></div>`);
-var root_19 = /* @__PURE__ */ from_html(`<div class="view"><!></div>`);
+var root_2$1 = /* @__PURE__ */ from_html(`<small>bounded preview</small>`);
+var root_3$1 = /* @__PURE__ */ from_html(`<article class="document-view"><header><span> </span><!></header> <pre> </pre></article>`);
+var root_4$1 = /* @__PURE__ */ from_html(`<small> </small>`);
+var root_5$1 = /* @__PURE__ */ from_html(`<span class="row-meta"> </span>`);
+var root_6$1 = /* @__PURE__ */ from_html(`<button><span class="row-glyph"> </span> <span class="row-copy"><strong> </strong><!></span> <!></button>`);
+var root_7 = /* @__PURE__ */ from_html(`<div class="rows-view" role="list"></div>`);
+var root_8 = /* @__PURE__ */ from_html(`<span role="columnheader"> </span>`);
+var root_9 = /* @__PURE__ */ from_html(`<span role="cell"> </span>`);
+var root_10 = /* @__PURE__ */ from_html(`<button role="row"></button>`);
+var root_11 = /* @__PURE__ */ from_html(`<div class="table-view" role="table"><div class="table-head" role="row"></div> <!></div>`);
+var root_12 = /* @__PURE__ */ from_html(`<p> </p>`);
+var root_13 = /* @__PURE__ */ from_html(`<strong> </strong><!>`, 1);
+var root_14 = /* @__PURE__ */ from_html(`<span> </span><!>`, 1);
+var root_15 = /* @__PURE__ */ from_html(`<span class="timeline-separator"> </span>`);
+var root_16 = /* @__PURE__ */ from_html(`<button><!></button>`);
+var root_17 = /* @__PURE__ */ from_html(`<div class="timeline-view"></div>`);
+var root_18 = /* @__PURE__ */ from_html(`<button><span> </span><small> </small></button>`);
+var root_19 = /* @__PURE__ */ from_html(`<section><button><span> </span><span> </span></button> <!></section>`);
+var root_20 = /* @__PURE__ */ from_html(`<div class="sections-view"></div>`);
+var root_21 = /* @__PURE__ */ from_html(`<div class="view"><!></div>`);
 function ViewRenderer($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -8810,7 +8866,7 @@ function ViewRenderer($$anchor, $$props) {
 			activate: true
 		});
 	};
-	var div = root_19();
+	var div = root_21();
 	var node = child(div);
 	var consequent = ($$anchor) => {
 		var div_1 = root_1$2();
@@ -8827,44 +8883,66 @@ function ViewRenderer($$anchor, $$props) {
 		template_effect(() => set_attribute(div_1, "aria-label", $$props.model.title));
 		append($$anchor, div_1);
 	};
-	var consequent_3 = ($$anchor) => {
-		var div_3 = root_5$1();
+	var consequent_2 = ($$anchor) => {
+		var article = root_3$1();
+		var header = child(article);
+		var span = child(header);
+		var text_1 = only_child(span, true);
+		var node_1 = sibling(span);
+		var consequent_1 = ($$anchor) => {
+			append($$anchor, root_2$1());
+		};
+		if_block(node_1, ($$render) => {
+			if ($$props.model.truncated) $$render(consequent_1);
+		});
+		reset(header);
+		var text_2 = only_child(sibling(header, 2), true);
+		reset(article);
+		template_effect(() => {
+			set_attribute(article, "aria-label", $$props.model.title);
+			set_text(text_1, $$props.model.path);
+			set_text(text_2, $$props.model.content);
+		});
+		append($$anchor, article);
+	};
+	var consequent_5 = ($$anchor) => {
+		var div_3 = root_7();
 		each(div_3, 23, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
-			var button = root_4$1();
+			var button = root_6$1();
 			let classes;
-			var span = child(button);
-			var text_1 = only_child(span, true);
-			var span_1 = sibling(span, 2);
-			var strong = child(span_1);
-			var text_2 = only_child(strong, true);
-			var node_1 = sibling(strong);
-			var consequent_1 = ($$anchor) => {
-				var small = root_2$1();
-				var text_3 = only_child(small, true);
-				template_effect(() => set_text(text_3, get(row).secondary));
-				append($$anchor, small);
-			};
-			if_block(node_1, ($$render) => {
-				if (get(row).secondary) $$render(consequent_1);
-			});
-			reset(span_1);
-			var node_2 = sibling(span_1, 2);
-			var consequent_2 = ($$anchor) => {
-				var span_2 = root_3$1();
-				var text_4 = only_child(span_2, true);
-				template_effect(() => set_text(text_4, get(row).meta));
-				append($$anchor, span_2);
+			var span_1 = child(button);
+			var text_3 = only_child(span_1, true);
+			var span_2 = sibling(span_1, 2);
+			var strong = child(span_2);
+			var text_4 = only_child(strong, true);
+			var node_2 = sibling(strong);
+			var consequent_3 = ($$anchor) => {
+				var small_1 = root_4$1();
+				var text_5 = only_child(small_1, true);
+				template_effect(() => set_text(text_5, get(row).secondary));
+				append($$anchor, small_1);
 			};
 			if_block(node_2, ($$render) => {
-				if (get(row).meta) $$render(consequent_2);
+				if (get(row).secondary) $$render(consequent_3);
+			});
+			reset(span_2);
+			var node_3 = sibling(span_2, 2);
+			var consequent_4 = ($$anchor) => {
+				var span_3 = root_5$1();
+				var text_6 = only_child(span_3, true);
+				template_effect(() => set_text(text_6, get(row).meta));
+				append($$anchor, span_3);
+			};
+			if_block(node_3, ($$render) => {
+				if (get(row).meta) $$render(consequent_4);
 			});
 			reset(button);
 			template_effect(() => {
 				set_attribute(button, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
 				set_attribute(button, "data-tone", get(row).tone);
 				classes = set_class(button, 1, "", null, classes, { selected: get(row).selected });
-				set_text(text_1, get(row).glyph ?? "◇");
-				set_text(text_2, get(row).primary);
+				set_text(text_3, get(row).glyph ?? "◇");
+				set_text(text_4, get(row).primary);
 			});
 			delegated("click", button, () => select(get(row).id));
 			append($$anchor, button);
@@ -8873,27 +8951,27 @@ function ViewRenderer($$anchor, $$props) {
 		template_effect(() => set_attribute(div_3, "aria-label", $$props.model.title));
 		append($$anchor, div_3);
 	};
-	var consequent_4 = ($$anchor) => {
-		var div_4 = root_9();
+	var consequent_6 = ($$anchor) => {
+		var div_4 = root_11();
 		var div_5 = child(div_4);
 		each(div_5, 21, () => $$props.model.columns, index, ($$anchor, column) => {
-			var span_3 = root_6$1();
-			var text_5 = only_child(span_3, true);
-			template_effect(() => set_text(text_5, get(column)));
-			append($$anchor, span_3);
+			var span_4 = root_8();
+			var text_7 = only_child(span_4, true);
+			template_effect(() => set_text(text_7, get(column)));
+			append($$anchor, span_4);
 		});
 		reset(div_5);
 		each(sibling(div_5, 2), 19, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
-			var button_1 = root_8();
+			var button_1 = root_10();
 			let classes_1;
 			each(button_1, 21, () => get(row).cells, index, ($$anchor, cell, index, $$array) => {
-				var span_4 = root_7();
-				var text_6 = only_child(span_4, true);
+				var span_5 = root_9();
+				var text_8 = only_child(span_5, true);
 				template_effect(() => {
-					set_attribute(span_4, "data-tone", get(row).cell_tones?.[index] ?? void 0);
-					set_text(text_6, get(cell));
+					set_attribute(span_5, "data-tone", get(row).cell_tones?.[index] ?? void 0);
+					set_text(text_8, get(cell));
 				});
-				append($$anchor, span_4);
+				append($$anchor, span_5);
 			});
 			reset(button_1);
 			template_effect(() => {
@@ -8911,45 +8989,28 @@ function ViewRenderer($$anchor, $$props) {
 		});
 		append($$anchor, div_4);
 	};
-	var consequent_10 = ($$anchor) => {
-		var div_6 = root_15();
+	var consequent_12 = ($$anchor) => {
+		var div_6 = root_17();
 		each(div_6, 21, () => $$props.model.entries, index, ($$anchor, entry, index) => {
-			var button_2 = root_14();
+			var button_2 = root_16();
 			let classes_2;
-			var node_4 = child(button_2);
-			var consequent_5 = ($$anchor) => {
-				var p = root_10();
-				var text_7 = only_child(p, true);
+			var node_5 = child(button_2);
+			var consequent_7 = ($$anchor) => {
+				var p = root_12();
+				var text_9 = only_child(p, true);
 				template_effect(() => {
 					set_attribute(p, "data-tone", get(entry).tone);
-					set_text(text_7, get(entry).text);
+					set_text(text_9, get(entry).text);
 				});
 				append($$anchor, p);
 			};
-			var consequent_7 = ($$anchor) => {
-				var fragment = root_11();
-				var strong_1 = first_child(fragment);
-				var text_8 = only_child(strong_1, true);
-				var node_5 = sibling(strong_1);
-				var consequent_6 = ($$anchor) => {
-					var small_1 = root_2$1();
-					var text_9 = only_child(small_1, true);
-					template_effect(() => set_text(text_9, get(entry).meta));
-					append($$anchor, small_1);
-				};
-				if_block(node_5, ($$render) => {
-					if (get(entry).meta) $$render(consequent_6);
-				});
-				template_effect(() => set_text(text_8, get(entry).primary));
-				append($$anchor, fragment);
-			};
 			var consequent_9 = ($$anchor) => {
-				var fragment_1 = root_12();
-				var span_5 = first_child(fragment_1);
-				var text_10 = only_child(span_5, true);
-				var node_6 = sibling(span_5);
+				var fragment = root_13();
+				var strong_1 = first_child(fragment);
+				var text_10 = only_child(strong_1, true);
+				var node_6 = sibling(strong_1);
 				var consequent_8 = ($$anchor) => {
-					var small_2 = root_2$1();
+					var small_2 = root_4$1();
 					var text_11 = only_child(small_2, true);
 					template_effect(() => set_text(text_11, get(entry).meta));
 					append($$anchor, small_2);
@@ -8957,19 +9018,36 @@ function ViewRenderer($$anchor, $$props) {
 				if_block(node_6, ($$render) => {
 					if (get(entry).meta) $$render(consequent_8);
 				});
-				template_effect(() => set_text(text_10, get(entry).summary));
+				template_effect(() => set_text(text_10, get(entry).primary));
+				append($$anchor, fragment);
+			};
+			var consequent_11 = ($$anchor) => {
+				var fragment_1 = root_14();
+				var span_6 = first_child(fragment_1);
+				var text_12 = only_child(span_6, true);
+				var node_7 = sibling(span_6);
+				var consequent_10 = ($$anchor) => {
+					var small_3 = root_4$1();
+					var text_13 = only_child(small_3, true);
+					template_effect(() => set_text(text_13, get(entry).meta));
+					append($$anchor, small_3);
+				};
+				if_block(node_7, ($$render) => {
+					if (get(entry).meta) $$render(consequent_10);
+				});
+				template_effect(() => set_text(text_12, get(entry).summary));
 				append($$anchor, fragment_1);
 			};
 			var alternate = ($$anchor) => {
-				var span_6 = root_13();
-				var text_12 = only_child(span_6, true);
-				template_effect(() => set_text(text_12, get(entry).label));
-				append($$anchor, span_6);
+				var span_7 = root_15();
+				var text_14 = only_child(span_7, true);
+				template_effect(() => set_text(text_14, get(entry).label));
+				append($$anchor, span_7);
 			};
-			if_block(node_4, ($$render) => {
-				if (get(entry).type === "block") $$render(consequent_5);
-				else if (get(entry).type === "line") $$render(consequent_7, 1);
-				else if (get(entry).type === "pair") $$render(consequent_9, 2);
+			if_block(node_5, ($$render) => {
+				if (get(entry).type === "block") $$render(consequent_7);
+				else if (get(entry).type === "line") $$render(consequent_9, 1);
+				else if (get(entry).type === "pair") $$render(consequent_11, 2);
 				else $$render(alternate, -1);
 			});
 			reset(button_2);
@@ -8986,48 +9064,48 @@ function ViewRenderer($$anchor, $$props) {
 		template_effect(() => set_attribute(div_6, "aria-label", $$props.model.title));
 		append($$anchor, div_6);
 	};
-	var consequent_12 = ($$anchor) => {
-		var div_7 = root_18();
+	var consequent_14 = ($$anchor) => {
+		var div_7 = root_20();
 		each(div_7, 21, () => $$props.model.sections, index, ($$anchor, section) => {
-			var section_1 = root_17();
+			var section_1 = root_19();
 			let classes_3;
 			var button_3 = child(section_1);
 			let classes_4;
-			var span_7 = child(button_3);
-			var text_13 = only_child(span_7);
-			var text_14 = only_child(sibling(span_7), true);
+			var span_8 = child(button_3);
+			var text_15 = only_child(span_8);
+			var text_16 = only_child(sibling(span_8), true);
 			reset(button_3);
-			var node_7 = sibling(button_3, 2);
-			var consequent_11 = ($$anchor) => {
+			var node_8 = sibling(button_3, 2);
+			var consequent_13 = ($$anchor) => {
 				var fragment_2 = comment();
 				each(first_child(fragment_2), 17, () => get(section).rows, (row) => row.id, ($$anchor, row) => {
-					var button_4 = root_16();
+					var button_4 = root_18();
 					let classes_5;
-					var span_9 = child(button_4);
-					var text_15 = only_child(span_9, true);
-					var text_16 = only_child(sibling(span_9), true);
+					var span_10 = child(button_4);
+					var text_17 = only_child(span_10, true);
+					var text_18 = only_child(sibling(span_10), true);
 					reset(button_4);
 					template_effect(() => {
 						set_attribute(button_4, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
 						classes_5 = set_class(button_4, 1, "section-row", null, classes_5, { selected: get(row).selected });
-						set_text(text_15, get(row).primary);
-						set_text(text_16, get(row).meta ?? get(row).secondary ?? "");
+						set_text(text_17, get(row).primary);
+						set_text(text_18, get(row).meta ?? get(row).secondary ?? "");
 					});
 					delegated("click", button_4, () => select(get(row).id));
 					append($$anchor, button_4);
 				});
 				append($$anchor, fragment_2);
 			};
-			if_block(node_7, ($$render) => {
-				if (!get(section).collapsed) $$render(consequent_11);
+			if_block(node_8, ($$render) => {
+				if (!get(section).collapsed) $$render(consequent_13);
 			});
 			reset(section_1);
 			template_effect(($0) => {
 				classes_3 = set_class(section_1, 1, "", null, classes_3, { collapsed: get(section).collapsed });
 				set_attribute(button_3, "data-focus-key", `view:${$$props.instanceKey}:section:${get(section).id}`);
 				classes_4 = set_class(button_3, 1, "", null, classes_4, { selected: get(section).header_selected });
-				set_text(text_13, `${get(section).collapsed ? "▸" : "▾"} ${get(section).title ?? ""}`);
-				set_text(text_14, $0);
+				set_text(text_15, `${get(section).collapsed ? "▸" : "▾"} ${get(section).title ?? ""}`);
+				set_text(text_16, $0);
 			}, [() => String(get(section).count).padStart(2, "0")]);
 			delegated("click", button_3, () => dispatch({
 				type: "toggle_view_section",
@@ -9040,7 +9118,7 @@ function ViewRenderer($$anchor, $$props) {
 		template_effect(() => set_attribute(div_7, "aria-label", $$props.model.title));
 		append($$anchor, div_7);
 	};
-	var consequent_13 = ($$anchor) => {
+	var consequent_15 = ($$anchor) => {
 		EmptyState($$anchor, {
 			get title() {
 				return $$props.model.title;
@@ -9050,12 +9128,12 @@ function ViewRenderer($$anchor, $$props) {
 			}
 		});
 	};
-	var consequent_14 = ($$anchor) => {
+	var consequent_16 = ($$anchor) => {
 		SceneView($$anchor, { get scene() {
 			return $$props.model.scene;
 		} });
 	};
-	var consequent_15 = ($$anchor) => {
+	var consequent_17 = ($$anchor) => {
 		FieldView($$anchor, {
 			get field() {
 				return $$props.model.field;
@@ -9067,13 +9145,14 @@ function ViewRenderer($$anchor, $$props) {
 	};
 	if_block(node, ($$render) => {
 		if ($$props.model.type === "text") $$render(consequent);
-		else if ($$props.model.type === "rows") $$render(consequent_3, 1);
-		else if ($$props.model.type === "table") $$render(consequent_4, 2);
-		else if ($$props.model.type === "timeline") $$render(consequent_10, 3);
-		else if ($$props.model.type === "sections") $$render(consequent_12, 4);
-		else if ($$props.model.type === "placeholder") $$render(consequent_13, 5);
-		else if ($$props.model.type === "map" || $$props.model.type === "atlas") $$render(consequent_14, 6);
-		else if ($$props.model.type === "field") $$render(consequent_15, 7);
+		else if ($$props.model.type === "document") $$render(consequent_2, 1);
+		else if ($$props.model.type === "rows") $$render(consequent_5, 2);
+		else if ($$props.model.type === "table") $$render(consequent_6, 3);
+		else if ($$props.model.type === "timeline") $$render(consequent_12, 4);
+		else if ($$props.model.type === "sections") $$render(consequent_14, 5);
+		else if ($$props.model.type === "placeholder") $$render(consequent_15, 6);
+		else if ($$props.model.type === "map" || $$props.model.type === "atlas") $$render(consequent_16, 7);
+		else if ($$props.model.type === "field") $$render(consequent_17, 8);
 	});
 	reset(div);
 	template_effect(() => set_attribute(div, "data-view", $$props.model.type));
@@ -9083,7 +9162,7 @@ function ViewRenderer($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/layout/DockSlot.svelte
-var root$4 = /* @__PURE__ */ from_html(`<aside><header><span> </span><span> </span></header> <!> <!></aside>`);
+var root$4 = /* @__PURE__ */ from_html(`<aside><header><span> </span><span> </span></header> <!> <!> <!></aside>`);
 function DockSlot($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -9095,9 +9174,18 @@ function DockSlot($$anchor, $$props) {
 	var text_1 = only_child(sibling(span), true);
 	reset(header);
 	var node = sibling(header, 2);
+	var consequent = ($$anchor) => {
+		InputComposer($$anchor, { get model() {
+			return $$props.model.input;
+		} });
+	};
+	if_block(node, ($$render) => {
+		if ($$props.model.input?.live_filter) $$render(consequent);
+	});
+	var node_1 = sibling(node, 2);
 	{
 		let $0 = /* @__PURE__ */ user_derived(() => String($$props.model.instance_key));
-		ViewRenderer(node, {
+		ViewRenderer(node_1, {
 			get model() {
 				return $$props.model.view;
 			},
@@ -9109,14 +9197,14 @@ function DockSlot($$anchor, $$props) {
 			}
 		});
 	}
-	var node_1 = sibling(node, 2);
-	var consequent = ($$anchor) => {
+	var node_2 = sibling(node_1, 2);
+	var consequent_1 = ($$anchor) => {
 		InputComposer($$anchor, { get model() {
 			return $$props.model.input;
 		} });
 	};
-	if_block(node_1, ($$render) => {
-		if ($$props.model.input) $$render(consequent);
+	if_block(node_2, ($$render) => {
+		if ($$props.model.input && !$$props.model.input.live_filter) $$render(consequent_1);
 	});
 	reset(aside);
 	template_effect(() => {
@@ -9146,11 +9234,11 @@ delegate(["pointerdown", "focusin"]);
 //#region browser/layout/TileFrame.svelte
 var root$3 = /* @__PURE__ */ from_html(`<button role="tab"> </button>`);
 var root_1$1 = /* @__PURE__ */ from_html(`<div class="view-tabs" role="tablist"></div>`);
-var root_2 = /* @__PURE__ */ from_html(`<header class="tile-header"><div class="tile-identity"><span class="tile-signal"></span><strong> </strong></div> <!> <div class="tile-tools">↗ <span aria-hidden="true">⋮</span></div></header>`);
+var root_2 = /* @__PURE__ */ from_html(`<header><div class="tile-title-row"><div class="tile-identity"><span class="tile-signal"></span><strong> </strong></div> <div class="tile-tools"><button class="tile-tool"> </button></div></div> <!></header>`);
 var root_3 = /* @__PURE__ */ from_html(`<p> </p>`);
 var root_4 = /* @__PURE__ */ from_html(`<div class="heading-meta"> </div>`);
 var root_5 = /* @__PURE__ */ from_html(`<div class="content-heading"><small> </small><h1> </h1><!><!></div>`);
-var root_6 = /* @__PURE__ */ from_html(`<article><!> <!> <!> <!></article>`);
+var root_6 = /* @__PURE__ */ from_html(`<article><!> <!> <!> <!> <!></article>`);
 function TileFrame($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -9159,36 +9247,55 @@ function TileFrame($$anchor, $$props) {
 	var node = child(article);
 	var consequent_1 = ($$anchor) => {
 		var header = root_2();
+		let classes_1;
 		var div = child(header);
-		var text = only_child(sibling(child(div)), true);
+		var div_1 = child(div);
+		var text = only_child(sibling(child(div_1)), true);
+		reset(div_1);
+		var div_2 = sibling(div_1, 2);
+		var button = child(div_2);
+		var text_1 = only_child(button, true);
+		reset(div_2);
 		reset(div);
 		var node_1 = sibling(div, 2);
 		var consequent = ($$anchor) => {
-			var div_1 = root_1$1();
-			each(div_1, 21, () => $$props.model.tabs, (tab) => tab.tile_id, ($$anchor, tab) => {
-				var button = root$3();
-				let classes_1;
-				var text_1 = only_child(button, true);
+			var div_3 = root_1$1();
+			each(div_3, 21, () => $$props.model.tabs, (tab) => tab.tile_id, ($$anchor, tab) => {
+				var button_1 = root$3();
+				let classes_2;
+				var text_2 = only_child(button_1, true);
 				template_effect(() => {
-					set_attribute(button, "aria-selected", get(tab).active);
-					classes_1 = set_class(button, 1, "", null, classes_1, { active: get(tab).active });
-					set_text(text_1, get(tab).title);
+					set_attribute(button_1, "aria-selected", get(tab).active);
+					classes_2 = set_class(button_1, 1, "", null, classes_2, { active: get(tab).active });
+					set_text(text_2, get(tab).title);
 				});
-				delegated("click", button, () => dispatch({
+				delegated("click", button_1, () => dispatch({
 					type: "focus_changed",
 					target: get(tab).tile_id
 				}));
-				append($$anchor, button);
+				append($$anchor, button_1);
 			});
-			reset(div_1);
-			append($$anchor, div_1);
+			reset(div_3);
+			append($$anchor, div_3);
 		};
 		if_block(node_1, ($$render) => {
 			if ($$props.model.tabs.length > 1) $$render(consequent);
 		});
-		next(2);
 		reset(header);
-		template_effect(() => set_text(text, $$props.model.title));
+		template_effect(() => {
+			classes_1 = set_class(header, 1, "tile-header", null, classes_1, { grouped: $$props.model.group_label });
+			set_text(text, $$props.model.group_label ?? $$props.model.title);
+			set_attribute(button, "aria-label", $$props.model.maximized ? "Restore view" : "Maximize view");
+			set_attribute(button, "title", $$props.model.maximized ? "Restore view" : "Maximize view");
+			set_text(text_1, $$props.model.maximized ? "↙" : "↗");
+		});
+		delegated("click", button, () => dispatch({
+			type: "activate",
+			intent: {
+				type: "toggle_tile_maximized",
+				tile_id: $$props.model.tile_id
+			}
+		}));
 		append($$anchor, header);
 	};
 	if_block(node, ($$render) => {
@@ -9196,16 +9303,16 @@ function TileFrame($$anchor, $$props) {
 	});
 	var node_2 = sibling(node, 2);
 	var consequent_4 = ($$anchor) => {
-		var div_2 = root_5();
-		var small = child(div_2);
-		var text_2 = only_child(small, true);
+		var div_4 = root_5();
+		var small = child(div_4);
+		var text_3 = only_child(small, true);
 		var h1 = sibling(small);
-		var text_3 = only_child(h1, true);
+		var text_4 = only_child(h1, true);
 		var node_3 = sibling(h1);
 		var consequent_2 = ($$anchor) => {
 			var p = root_3();
-			var text_4 = only_child(p, true);
-			template_effect(() => set_text(text_4, $$props.model.heading.summary));
+			var text_5 = only_child(p, true);
+			template_effect(() => set_text(text_5, $$props.model.heading.summary));
 			append($$anchor, p);
 		};
 		if_block(node_3, ($$render) => {
@@ -9213,26 +9320,35 @@ function TileFrame($$anchor, $$props) {
 		});
 		var node_4 = sibling(node_3);
 		var consequent_3 = ($$anchor) => {
-			var div_3 = root_4();
-			var text_5 = only_child(div_3, true);
-			template_effect(($0) => set_text(text_5, $0), [() => $$props.model.heading.metadata.join("  /  ")]);
-			append($$anchor, div_3);
+			var div_5 = root_4();
+			var text_6 = only_child(div_5, true);
+			template_effect(($0) => set_text(text_6, $0), [() => $$props.model.heading.metadata.join("  /  ")]);
+			append($$anchor, div_5);
 		};
 		if_block(node_4, ($$render) => {
 			if ($$props.model.heading.metadata.length) $$render(consequent_3);
 		});
-		reset(div_2);
+		reset(div_4);
 		template_effect(() => {
-			set_text(text_2, $$props.model.heading.eyebrow);
-			set_text(text_3, $$props.model.heading.title);
+			set_text(text_3, $$props.model.heading.eyebrow);
+			set_text(text_4, $$props.model.heading.title);
 		});
-		append($$anchor, div_2);
+		append($$anchor, div_4);
 	};
 	if_block(node_2, ($$render) => {
 		if ($$props.model.heading) $$render(consequent_4);
 	});
 	var node_5 = sibling(node_2, 2);
-	ViewRenderer(node_5, {
+	var consequent_5 = ($$anchor) => {
+		InputComposer($$anchor, { get model() {
+			return $$props.model.input;
+		} });
+	};
+	if_block(node_5, ($$render) => {
+		if ($$props.model.input?.live_filter) $$render(consequent_5);
+	});
+	var node_6 = sibling(node_5, 2);
+	ViewRenderer(node_6, {
 		get model() {
 			return $$props.model.view;
 		},
@@ -9243,14 +9359,14 @@ function TileFrame($$anchor, $$props) {
 			return $$props.model.instance_key;
 		}
 	});
-	var node_6 = sibling(node_5, 2);
-	var consequent_5 = ($$anchor) => {
+	var node_7 = sibling(node_6, 2);
+	var consequent_6 = ($$anchor) => {
 		InputComposer($$anchor, { get model() {
 			return $$props.model.input;
 		} });
 	};
-	if_block(node_6, ($$render) => {
-		if ($$props.model.input) $$render(consequent_5);
+	if_block(node_7, ($$render) => {
+		if ($$props.model.input && !$$props.model.input.live_filter) $$render(consequent_6);
 	});
 	reset(article);
 	template_effect(() => {
@@ -9319,11 +9435,12 @@ function LayoutNode_1($$anchor, $$props) {
 	pop();
 }
 //#endregion
-//#region browser/layout/Workspace.svelte
-var root$1 = /* @__PURE__ */ from_html(`<div class="workspace-backdrop" aria-label="Empty workspace"></div>`);
-var root_1 = /* @__PURE__ */ from_html(`<main><!> <div class="workspace-middle"><!> <section class="workspace-center"><!></section> <!></div> <!></main>`);
-function Workspace($$anchor, $$props) {
+//#region browser/layout/ViewSet.svelte
+var root$1 = /* @__PURE__ */ from_html(`<div class="view-set-backdrop" aria-label="Empty view set"></div>`);
+var root_1 = /* @__PURE__ */ from_html(`<main><!> <div class="view-set-middle"><!> <section class="view-set-center"><!></section> <!></div> <!></main>`);
+function ViewSet($$anchor, $$props) {
 	push($$props, true);
+	const maximized = /* @__PURE__ */ user_derived(() => $$props.model.root?.type === "tile" && $$props.model.root.maximized);
 	var main = root_1();
 	let classes;
 	var node = child(main);
@@ -9333,7 +9450,7 @@ function Workspace($$anchor, $$props) {
 		} });
 	};
 	if_block(node, ($$render) => {
-		if ($$props.model.docks.top) $$render(consequent);
+		if (!get(maximized) && $$props.model.docks.top) $$render(consequent);
 	});
 	var div = sibling(node, 2);
 	var node_1 = child(div);
@@ -9343,7 +9460,7 @@ function Workspace($$anchor, $$props) {
 		} });
 	};
 	if_block(node_1, ($$render) => {
-		if ($$props.model.docks.left) $$render(consequent_1);
+		if (!get(maximized) && $$props.model.docks.left) $$render(consequent_1);
 	});
 	var section = sibling(node_1, 2);
 	var node_2 = child(section);
@@ -9352,35 +9469,44 @@ function Workspace($$anchor, $$props) {
 			return $$props.model.root;
 		} });
 	};
+	var consequent_3 = ($$anchor) => {
+		SceneView($$anchor, { get scene() {
+			return $$props.model.backdrop;
+		} });
+	};
 	var alternate = ($$anchor) => {
 		append($$anchor, root$1());
 	};
 	if_block(node_2, ($$render) => {
 		if ($$props.model.root) $$render(consequent_2);
+		else if ($$props.model.backdrop) $$render(consequent_3, 1);
 		else $$render(alternate, -1);
 	});
 	reset(section);
 	var node_3 = sibling(section, 2);
-	var consequent_3 = ($$anchor) => {
+	var consequent_4 = ($$anchor) => {
 		DockSlot($$anchor, { get model() {
 			return $$props.model.docks.right;
 		} });
 	};
 	if_block(node_3, ($$render) => {
-		if ($$props.model.docks.right) $$render(consequent_3);
+		if (!get(maximized) && $$props.model.docks.right) $$render(consequent_4);
 	});
 	reset(div);
 	var node_4 = sibling(div, 2);
-	var consequent_4 = ($$anchor) => {
+	var consequent_5 = ($$anchor) => {
 		DockSlot($$anchor, { get model() {
 			return $$props.model.docks.bottom;
 		} });
 	};
 	if_block(node_4, ($$render) => {
-		if ($$props.model.docks.bottom) $$render(consequent_4);
+		if (!get(maximized) && $$props.model.docks.bottom) $$render(consequent_5);
 	});
 	reset(main);
-	template_effect(() => classes = set_class(main, 1, "workspace", null, classes, { empty: $$props.model.center_is_empty }));
+	template_effect(() => classes = set_class(main, 1, "view-set", null, classes, {
+		empty: $$props.model.center_is_empty,
+		maximized: get(maximized)
+	}));
 	append($$anchor, main);
 	pop();
 }
@@ -9425,7 +9551,7 @@ function RyeOs($$anchor, $$props) {
 		}
 	});
 	var node_2 = sibling(node_1, 2);
-	WorkspaceStrip(node_2, { get model() {
+	ViewSetStrip(node_2, { get model() {
 		return get(envelope).view_model.presentation.chrome.top_bar;
 	} });
 	var div_1 = sibling(node_2, 2);
@@ -9439,8 +9565,8 @@ function RyeOs($$anchor, $$props) {
 	if_block(node_3, ($$render) => {
 		if (get(envelope).view_model.navigation.items.length > 0) $$render(consequent_1);
 	});
-	Workspace(sibling(node_3, 2), { get model() {
-		return get(envelope).view_model.workspace;
+	ViewSet(sibling(node_3, 2), { get model() {
+		return get(envelope).view_model.view_set;
 	} });
 	reset(div_1);
 	var node_5 = sibling(div_1, 2);
@@ -10248,7 +10374,9 @@ function isWasmApi(value) {
 		"ryeos_replay_seat_events",
 		"ryeos_layout_preference_key",
 		"ryeos_export_layout_preferences",
-		"ryeos_restore_layout_preferences"
+		"ryeos_restore_layout_preferences",
+		"ryeos_export_active_view_set_template",
+		"ryeos_open_saved_view_set_template"
 	].every((name) => typeof exports[name] === "function");
 }
 //#endregion

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-09-28T06:27:40Z:b8b53b10adb8921b708632317f9e4fc6031b91fbace33ac11d1e5b5b91e206e7:uPXljULJyAmvVmoYsvd6SbrRW07xB7BGFV2HXGdwNpgbPpysGP6lNYTX6LP8QPcD+xO2Eazz5z746WdlxyyuDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, runtime-snapshot]
+description: Read one exact retained runtime snapshot operation without provider contact
+forms:
+  - slots:
+      - field: operation_id
+help:
+  usage: ryeos external-content runtime-snapshot <operation-id>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/runtime-snapshot

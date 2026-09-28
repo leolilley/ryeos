@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-11T10:53:16Z:b08637da668f76088b404158f9f96c7678b470b9c142e37e1b19009096134b15:htrMisJVB68cOC32fP7mnNolzZbhNyBlZ/Akz3AqPS/N89glu4D1AWOYRzs68jy2HbFMw2Vlza4vkkljxz/hAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-version: "1.0.0"
+# ryeos:signed:2026-09-22T06:28:31Z:e16390cac0ddb623f4d214cabba689d0e5168e8558271d1a156fa9ee4a948e6f:UU9m+pnduXk565D2uwLBj6ukKoyJMlaSiiovIHIJwdIAjixEU1IgnlTIR4VCBD9wDl7FPKi/JgQN093ch+/hAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.1.0"
 category: ryeos/development
 description: Produce the exact locked Cargo vendor closure as one retained named product
 effects: recorded
@@ -11,15 +11,23 @@ external_product_slots:
     kind: tree
     mount_root: execution_runtime
     mount: registry-inputs
+  - id: platform
+    relationship_ref: config:development/ryeos/platform-products
+    relationship: platform_to_cargo_vendor_production
+    kind: tree
+    mount_root: execution_runtime
+    mount: platform
 requires:
   capabilities:
     declared:
       - ryeos.execute.config.development/ryeos/cargo-vendor-products
       - ryeos.execute.config.development/ryeos/registry-products
+      - ryeos.execute.config.development/ryeos/platform-products
       - ryeos.execute.tool.ryeos/development/cargo-vendor
+      - ryeos.execute.tool.ryeos/development/cargo-vendor-finalize/run
 config:
   start: produce
-  max_steps: 2
+  max_steps: 3
   on_error: fail
   config_schema:
     type: object
@@ -37,6 +45,18 @@ config:
         thread: inline
       assign:
         production: "${result}"
+      next: {type: unconditional, to: retain_lock}
+    retain_lock:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:ryeos/development/cargo-vendor-finalize/run
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      assign:
+        lock_retention: "${result}"
       next: {type: unconditional, to: done}
     done:
       node_type: return

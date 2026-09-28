@@ -243,14 +243,21 @@ fn source_directory_digest(files: &BTreeMap<String, Vec<u8>>) -> Result<String> 
 
 fn portable_worker_source() -> Result<BTreeMap<String, Vec<u8>>> {
     let profile = serde_json::to_vec(&serde_json::json!({
-        "schema_version":1,
+        "schema_version":10,
+        "transport":"stdio_jsonrpc",
+        "http_sse":null,
         "configuration_authority":"immutable_argv",
         "workload_realization_id":"handoff-fixture",
         "workload_executable":"fixture-worker",
         "workload_args":[],
         "workload_home_env":"RYEOS_WORKLOAD_HOME",
+        "required_process_environment":[],
+        "workload_client":null,
         "baseline_config":"baseline.conf",
         "baseline_destination":"fixture.conf",
+        "auxiliary_configs":[],
+        "runtime_configs":[],
+        "external_candidate":null,
         "portable_state":{
             "schema":1,
             "restore_contract":"ryeos.worker_session.restore.v1",
@@ -393,7 +400,7 @@ def read_exact(size):
 def receive():
     return json.loads(read_exact(struct.unpack('>I', read_exact(4))[0]))
 def send(kind, request_id, body):
-    value = {'protocol':'ryeos.structured-session','version':1,'kind':kind,'request_id':request_id,'body':body}
+    value = {'protocol':'ryeos.structured-session','version':2,'kind':kind,'request_id':request_id,'body':body}
     raw = json.dumps(value, separators=(',', ':'), allow_nan=False).encode()
     framed = struct.pack('>I', len(raw)) + raw
     offset = 0
@@ -424,12 +431,45 @@ fn plant_portable_worker_for_owner(
     fixture: &common::fast_fixture::FastFixture,
     owner_principal: &str,
 ) -> Result<()> {
+    plant_portable_worker_with_script(state_path, fixture, owner_principal, PORTABLE_WORKER_SCRIPT)
+}
+
+fn plant_portable_worker_with_script(
+    state_path: &Path,
+    fixture: &common::fast_fixture::FastFixture,
+    owner_principal: &str,
+    worker_script: &[u8],
+) -> Result<()> {
+    plant_portable_worker_with_protocol(
+        state_path,
+        fixture,
+        owner_principal,
+        worker_script,
+        "protocol:ryeos/core/structured_session",
+    )
+}
+
+fn plant_portable_worker_with_protocol(
+    state_path: &Path,
+    fixture: &common::fast_fixture::FastFixture,
+    owner_principal: &str,
+    worker_script: &[u8],
+    execution_protocol: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        matches!(
+            execution_protocol,
+            "protocol:ryeos/core/structured_session"
+                | "protocol:ryeos/core/trusted_structured_session"
+        ),
+        "portable fixture selected an unknown session protocol"
+    );
     common::fast_fixture::register_standard_bundle(state_path, fixture)?;
     let bundle_root = state_path.join(".ai/bundles/handoff-portable-fixture");
     common::fast_fixture::install_signed_bundle_binary(
         &bundle_root,
         "handoff-portable-worker",
-        PORTABLE_WORKER_SCRIPT,
+        worker_script,
         &fixture.publisher,
     )?;
     let source = portable_worker_source()?;
@@ -444,7 +484,8 @@ fn plant_portable_worker_for_owner(
 version: "1.0.0"
 executor_id: "@subprocess"
 description: "Portable handoff qualification worker."
-execution_protocol: protocol:ryeos/core/structured_session
+execution_protocol: {execution_protocol}
+external_product_slots: []
 supported_target:
   os: linux
   arch: x86_64
@@ -492,6 +533,10 @@ config:
   required_terminal_publication: retain_result
   max_lifetime_seconds: 3600
   recover_upstream_session: true
+  mode:
+    kind: session
+  candidate_disposition: owner_decision
+  workload_client_delegation_caps: []
 limits:
   duration_seconds: 3660
   spend_usd: "1"
@@ -554,6 +599,112 @@ requires:
         &serde_json::json!({"email":"fixture@example.test","type":"fixture"}),
     )?;
     store.release_credential_profile(PORTABLE_CREDENTIAL_PROFILE_ID, lock_id)?;
+    Ok(())
+}
+
+#[cfg(feature = "crash-qualification-test-support")]
+fn portable_worker_script_with_contact_marker() -> Result<Vec<u8>> {
+    let original = std::str::from_utf8(PORTABLE_WORKER_SCRIPT)?;
+    let needle = "    if frame['kind'] == 'request':\n";
+    anyhow::ensure!(
+        original.matches(needle).count() == 1,
+        "portable fixture request boundary changed"
+    );
+    let instrumented = original.replacen(
+        needle,
+        concat!(
+            "    if frame['kind'] == 'request':\n",
+            "        if isinstance(frame['body'], dict) and frame['body'].get('route_id') == 'session.start':\n",
+            "            marker = os.path.join(os.environ['RYEOS_WORKSPACE'], '.lost_ack_contact_marker')\n",
+            "            with open(marker, 'ab') as contacts:\n",
+            "                contacts.write(b'1\\n')\n",
+            "                contacts.flush()\n",
+            "                os.fsync(contacts.fileno())\n",
+        ),
+        1,
+    );
+    Ok(instrumented.into_bytes())
+}
+
+/// One disposable lost-ACK fixture explicitly opts into the weaker trusted
+/// process-group lane. This is neither a protected-scope qualification nor a
+/// mutation of the node policy used by the other portable handoff tests.
+#[cfg(feature = "crash-qualification-test-support")]
+fn opt_in_trusted_portable_session(state_path: &Path, node: &SigningKey) -> Result<()> {
+    let policy_path = state_path.join(".ai/node/policies/isolation.yaml");
+    let signed = std::fs::read_to_string(&policy_path)?;
+    let header = signed
+        .lines()
+        .next()
+        .and_then(|line| lillux::signature::parse_signature_line(line, "#", None))
+        .context("fixture isolation policy has no node signature")?;
+    let body = lillux::signature::strip_signature_lines(&signed);
+    let fingerprint = lillux::signature::compute_fingerprint(&node.verifying_key());
+    anyhow::ensure!(
+        lillux::signature::is_valid_signature_for(
+            &header.content_hash,
+            &header.signature_b64,
+            &header.signer_fingerprint,
+            &body,
+            &node.verifying_key(),
+            &fingerprint,
+        ),
+        "fixture isolation policy is not signed by its exact node"
+    );
+    let mut policy: serde_json::Value = serde_yaml::from_str(&body)?;
+    anyhow::ensure!(
+        policy.pointer("/policy/mode") == Some(&serde_json::json!("disabled"))
+            && policy.pointer("/policy/trusted_process_group_sessions")
+                == Some(&serde_json::json!(false)),
+        "trusted lost-ACK fixture requires an unmodified disabled-isolation seed"
+    );
+    policy["policy"]["trusted_process_group_sessions"] = serde_json::json!(true);
+    std::fs::write(
+        &policy_path,
+        lillux::signature::sign_content_at(
+            &serde_yaml::to_string(&policy)?,
+            node,
+            "#",
+            None,
+            common::fast_fixture::FAST_FIXTURE_TIME,
+        ),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn portable_worker_source_compiles_current_structured_session_profile() -> Result<()> {
+    let source = portable_worker_source()?;
+    let profile = source
+        .get("profile.json")
+        .context("portable fixture has no signed source profile")?;
+    let admitted = ryeos_engine::structured_session_profile::compile(profile, &source)?;
+    admitted.validate()?;
+    anyhow::ensure!(
+        admitted.contract["schema_version"].as_u64()
+            == Some(u64::from(
+                ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
+            ))
+            && admitted.contract["transport"].as_str() == Some("stdio_jsonrpc")
+            && admitted.contract["recovery"]["resume_route"].as_str() == Some("session.resume")
+            && admitted.contract["recovery"]["inspect_route"].as_str() == Some("session.inspect"),
+        "portable fixture profile changed its current transport or recovery contract"
+    );
+    let schema_names = admitted
+        .schema_hashes
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        schema_names
+            == BTreeSet::from([
+                "schema/init.json",
+                "schema/request.json",
+                "schema/response.json",
+                "schema/session-request.json",
+            ]),
+        "portable fixture did not compile its complete exact route schema set"
+    );
     Ok(())
 }
 
@@ -6764,5 +6915,252 @@ async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session() -> R
         daemon_identity(&daemon.state_path)?.fingerprint() == fixture.node_fp(),
         "portable worker daemon changed node identity"
     );
+    Ok(())
+}
+
+/// The parent observes the live daemon after a real worker response has been
+/// rooted and settled, then SIGKILLs that daemon before HTTP acknowledgement.
+/// The exact public retry after restart must read the original result without
+/// reserving another command or contacting a replacement worker.
+#[cfg(feature = "crash-qualification-test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settled_portable_command_lost_ack_replays_after_real_daemon_restart() -> Result<()> {
+    use common::dedicated_command_cut::DedicatedCommandCutGate;
+
+    const LAUNCH_ID: &str = "L-22222222222222222222222222222222";
+    const COMMAND_KEY: &str = "portable-lost-ack-session-start";
+
+    let project = tempfile::tempdir()?;
+    std::fs::create_dir_all(project.path().join(".ai"))?;
+    std::fs::write(project.path().join("fixture.txt"), b"lost-ack fixture\n")?;
+    let (mut cut_gate, mut cut_child) = DedicatedCommandCutGate::pair(COMMAND_KEY)?;
+    let contact_marked_worker = portable_worker_script_with_contact_marker()?;
+    let (mut daemon, _fixture) = DaemonHarness::start_fast_with(
+        move |state_path, _user_space, fixture| {
+            opt_in_trusted_portable_session(state_path, &fixture.node)?;
+            plant_portable_worker_with_protocol(
+                state_path,
+                fixture,
+                &format!("fp:{}", fixture.user_fp()),
+                &contact_marked_worker,
+                "protocol:ryeos/core/trusted_structured_session",
+            )
+        },
+        move |command| {
+            cut_child
+                .configure_command(command, COMMAND_KEY)
+                .expect("bind exact settled-command cut to disposable daemon");
+        },
+    )
+    .await?;
+    daemon.retain_evidence_on_drop(true);
+    eprintln!(
+        "lost-ACK disposable daemon state: {}",
+        daemon.state_path.display()
+    );
+    let (status, launch) = daemon
+        .post_json(
+            "/execute/launch",
+            serde_json::json!({
+                "launch_id":LAUNCH_ID,
+                "item_ref":PORTABLE_EXECUTION_REF,
+                "ref_bindings":{},
+                "project_path":project.path(),
+                "parameters":{"credential_profile_id":PORTABLE_CREDENTIAL_PROFILE_ID},
+                "execution_policy":ryeos_app::execution_policy::ExecutionPolicy::local_pinned_capture(
+                    ryeos_app::execution_policy::ExecutionResponse::Accepted,
+                ),
+            }),
+        )
+        .await?;
+    anyhow::ensure!(
+        matches!(
+            status,
+            reqwest::StatusCode::OK | reqwest::StatusCode::ACCEPTED
+        ),
+        "portable lost-ACK launch returned {status}: {launch}"
+    );
+    let chain_root_id = launch
+        .get("thread_id")
+        .or_else(|| launch.get("chain_root_id"))
+        .or_else(|| launch.pointer("/result/thread_id"))
+        .or_else(|| launch.pointer("/result/chain_root_id"))
+        .or_else(|| launch.pointer("/thread/chain_root_id"))
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("portable lost-ACK launch has no chain root: {launch}"))?
+        .to_owned();
+    let request = serde_json::json!({
+        "chain_root_id":chain_root_id.clone(),
+        "idempotency_key":COMMAND_KEY,
+        "route_id":"session.start",
+        "payload":{},
+    });
+    let cut = {
+        let wait_for_cut = cut_gate.wait_reached();
+        tokio::pin!(wait_for_cut);
+        let mut tries = 0;
+        let mut first_refusal = None;
+        let mut last_refusal = None;
+        loop {
+            tries += 1;
+            anyhow::ensure!(
+                tries <= 120,
+                "worker did not reach lost-ACK command cut; first refusal: {first_refusal:?}; last refusal: {last_refusal:?}"
+            );
+            tokio::select! {
+                evidence = &mut wait_for_cut => break evidence?,
+                response = daemon.post_execute(
+                    "service:worker-executions/command", ".", request.clone(),
+                ) => {
+                    let (status, body) = response?;
+                    anyhow::ensure!(
+                        !status.is_success(),
+                        "selected command returned an acknowledgement before the crash cut: {body}"
+                    );
+                    let refusal = (status, body);
+                    if first_refusal.is_none() {
+                        first_refusal = Some(refusal.clone());
+                    }
+                    last_refusal = Some(refusal);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+    };
+    anyhow::ensure!(
+        cut.idempotency_key == COMMAND_KEY && cut.command_sequence == 1,
+        "lost-ACK gate did not capture the first exact command"
+    );
+    daemon.kill_daemon().await?;
+    let store = open_daemon_state(&daemon.state_path)?;
+    let settled = store
+        .dedicated_session_command_by_key(&cut.placement_thread_id, COMMAND_KEY)?
+        .context("lost-ACK cut has no retained command")?;
+    anyhow::ensure!(
+        settled.state == "completed"
+            && settled.command_sequence == cut.command_sequence
+            && settled.request_digest == cut.request_digest
+            && settled.result.as_ref().is_some_and(|result| {
+                ryeos_state::objects::canonical_value_digest(result)
+                    .is_ok_and(|digest| digest == cut.response_digest)
+            }),
+        "lost-ACK cut was not an exact durable successful settlement"
+    );
+    anyhow::ensure!(
+        store
+            .dedicated_session_commands(&cut.placement_thread_id)?
+            .len()
+            == 1,
+        "lost-ACK cut reserved more than its selected command"
+    );
+    let session = store
+        .dedicated_session(&cut.placement_thread_id)?
+        .context("lost-ACK cut has no retained dedicated session")?;
+    let workspace = store
+        .execution_workspace(&session.workspace_id)?
+        .context("lost-ACK cut has no retained candidate workspace")?;
+    anyhow::ensure!(
+        workspace.thread_id.as_deref() == Some(cut.placement_thread_id.as_str()),
+        "worker contact marker belongs to another placement workspace"
+    );
+    let contact_marker = PathBuf::from(&workspace.root_path)
+        .join("project")
+        .join(".lost_ack_contact_marker");
+    let contacts_at_cut = std::fs::read(&contact_marker).with_context(|| {
+        format!(
+            "read exact worker contact marker {}",
+            contact_marker.display()
+        )
+    })?;
+    anyhow::ensure!(
+        contacts_at_cut == b"1\n",
+        "worker recorded an unexpected number of session.start contacts before crash"
+    );
+    drop(store);
+
+    daemon.respawn_with(|_| {}).await?;
+    let (restarted_status, restarted_session) = daemon
+        .post_execute(
+            "service:worker-executions/status",
+            ".",
+            serde_json::json!({"chain_root_id":chain_root_id.clone()}),
+        )
+        .await?;
+    anyhow::ensure!(
+        restarted_status == reqwest::StatusCode::OK
+            && restarted_session
+                .pointer("/result/state")
+                .and_then(serde_json::Value::as_str)
+                == Some("recovering"),
+        "restart did not expose the recovering session boundary: status={restarted_status} body={restarted_session}"
+    );
+    let mut fresh = request.clone();
+    fresh["idempotency_key"] = serde_json::json!("portable-new-command-after-restart");
+    let (fresh_status, fresh_result) = daemon
+        .post_execute("service:worker-executions/command", ".", fresh)
+        .await?;
+    anyhow::ensure!(
+        !fresh_status.is_success(),
+        "recovering session admitted a new public command: {fresh_result}"
+    );
+    let (status, replay) = daemon
+        .post_execute("service:worker-executions/command", ".", request.clone())
+        .await?;
+    anyhow::ensure!(
+        status == reqwest::StatusCode::OK
+            && replay
+                .pointer("/result/state")
+                .and_then(serde_json::Value::as_str)
+                == Some("completed")
+            && replay
+                .pointer("/result/command_sequence")
+                .and_then(serde_json::Value::as_u64)
+                == Some(cut.command_sequence)
+            && replay.pointer("/result/result") == settled.result.as_ref(),
+        "restart did not replay the exact settled response: status={status} body={replay}"
+    );
+    let mut changed = request.clone();
+    changed["payload"] = serde_json::json!({"changed":true});
+    let (changed_status, changed_result) = daemon
+        .post_execute("service:worker-executions/command", ".", changed)
+        .await?;
+    anyhow::ensure!(
+        !changed_status.is_success(),
+        "reused idempotency key admitted changed authority: {changed_result}"
+    );
+    let (status, observed) = daemon
+        .post_execute(
+            "service:worker-executions/command-observation",
+            ".",
+            serde_json::json!({
+                "chain_root_id":chain_root_id.clone(),
+                "placement_thread_id":cut.placement_thread_id.clone(),
+                "command_sequence":cut.command_sequence,
+            }),
+        )
+        .await?;
+    anyhow::ensure!(
+        status == reqwest::StatusCode::OK
+            && observed
+                .pointer("/result/request_digest")
+                .and_then(serde_json::Value::as_str)
+                == Some(cut.request_digest.as_str())
+            && observed
+                .pointer("/result/command_state")
+                .and_then(serde_json::Value::as_str)
+                == Some("completed"),
+        "restart lost authoritative command observation: status={status} body={observed}"
+    );
+    daemon.kill_daemon().await?;
+    let store = open_daemon_state(&daemon.state_path)?;
+    anyhow::ensure!(
+        store.dedicated_session_commands(&cut.placement_thread_id)? == vec![settled],
+        "exact replay created another worker command or altered the settled record"
+    );
+    anyhow::ensure!(
+        std::fs::read(&contact_marker)? == contacts_at_cut,
+        "exact replay contacted the worker a second time"
+    );
+    daemon.retain_evidence_on_drop(false);
     Ok(())
 }

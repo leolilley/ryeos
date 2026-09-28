@@ -2062,6 +2062,18 @@ impl PinnedStateAuthority {
         })
     }
 
+    /// Reconstitute the exact descriptor-pinned state authority used by a
+    /// dedicated external-candidate launcher. This boundary deliberately has
+    /// an empty trust store and cannot validate signed heads or manufacture
+    /// project admission. It may access only the already-present CAS, refs and
+    /// recovery roots required to materialize and durably capture the exact
+    /// admitted snapshot named by the launcher binding.
+    pub fn from_external_candidate_runtime(
+        runtime_directory: lillux::PinnedDirectory,
+    ) -> anyhow::Result<Self> {
+        Self::from_pinned_runtime(runtime_directory, Arc::new(TrustStore::new()), false)
+    }
+
     pub fn runtime_directory(&self) -> &lillux::PinnedDirectory {
         &self.runtime_directory
     }

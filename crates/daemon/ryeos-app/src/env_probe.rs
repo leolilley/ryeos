@@ -176,7 +176,9 @@ pub fn import_dry_run(
         .into_iter()
         .map(|argument| match argument {
             PlanArgument::Literal { value } => Ok(value),
-            PlanArgument::AdmittedSourceEntry => Err(()),
+            PlanArgument::AdmittedSourceEntry | PlanArgument::AdmittedSourceMember { .. } => {
+                Err(())
+            }
         })
         .collect::<Result<Vec<_>, _>>()
     {
@@ -395,6 +397,7 @@ mod tests {
                 verified_command: None,
                 external_read_only_mounts: &[],
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: &[],
                 item_ref: "tool:test",
                 thread_id: "env-probe-test",

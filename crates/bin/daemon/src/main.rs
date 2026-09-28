@@ -28,6 +28,48 @@ mod maintenance_schedule;
 mod startup;
 
 const STARTUP_FAILURE_REPORTING_GRACE: Duration = Duration::from_secs(30);
+const BUNDLE_PUBLISHER_URL_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_URL";
+const BUNDLE_PUBLISHER_BEARER_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_BEARER";
+
+fn configured_bundle_publisher(
+    policy: &ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+) -> Result<Option<Arc<dyn ryeos_app::bundle_publication::producer::BundlePublisherAuthority>>> {
+    let endpoint = std::env::var_os(BUNDLE_PUBLISHER_URL_ENV);
+    let bearer = std::env::var_os(BUNDLE_PUBLISHER_BEARER_ENV);
+    let (endpoint, bearer) = match (endpoint, bearer) {
+        (None, None) => return Ok(None),
+        (Some(endpoint), Some(bearer)) => (endpoint, bearer),
+        _ => anyhow::bail!(
+            "{BUNDLE_PUBLISHER_URL_ENV} and {BUNDLE_PUBLISHER_BEARER_ENV} must be configured together"
+        ),
+    };
+    let endpoint = endpoint
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{BUNDLE_PUBLISHER_URL_ENV} is not valid UTF-8"))?
+        .parse::<url::Url>()
+        .context("parse explicit bundle publisher endpoint")?;
+    let bearer = bearer
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{BUNDLE_PUBLISHER_BEARER_ENV} is not valid UTF-8"))?;
+    let expected = policy
+        .catalogs
+        .first()
+        .context("bundle publisher configuration requires an authorized catalog")?
+        .publisher_fingerprint
+        .clone();
+    anyhow::ensure!(
+        policy
+            .catalogs
+            .iter()
+            .all(|catalog| catalog.publisher_fingerprint == expected),
+        "one configured bundle publisher cannot serve catalog policies with different publishers"
+    );
+    Ok(Some(Arc::new(
+        ryeos_app::bundle_publication::producer::AuthenticatedPublisherClient::new(
+            endpoint, bearer, expected,
+        )?,
+    )))
+}
 
 struct LifecycleExitGuard {
     state_dir: std::path::PathBuf,
@@ -211,6 +253,18 @@ fn build_route_table(
     let mut extensions = ryeos_api::routes::RouteExtensionRegistry {
         auth: ryeos_api::routes::invokers::AuthInvokerRegistry::with_api_builtins(),
     };
+    extensions.auth.register(
+        "external_occurrence",
+        Arc::new(
+            ryeos_api::routes::invokers::external_occurrence_invocation::ExternalOccurrenceAuthFactory,
+        ),
+    );
+    extensions.auth.register(
+        "external_channel",
+        Arc::new(
+            ryeos_api::routes::invokers::external_occurrence_invocation::ExternalChannelAuthFactory,
+        ),
+    );
 
     ryeos_ui::register_extensions(&mut extensions, &mut mode_registry, ui);
 
@@ -387,8 +441,10 @@ fn main() -> Result<()> {
     let external_host_runtime =
         ryeos_node::host_runtime::ExternalHostRuntime::take_from_environment()
             .context("consume inherited external host-runtime authority")?;
-    ryeos_app::provider_object_contracts::install()
-        .context("install application object contracts")?;
+    #[cfg(feature = "crash-qualification-test-support")]
+    ryeos_app::dedicated_session_service::test_support::initialize_from_env()
+        .context("initialize exact command-settlement crash gate")?;
+    ryeos_app::object_contracts::install().context("install application object contracts")?;
     // Recovery and launch reconstruction deserialize the complete retained
     // authority envelope on a runtime worker. Unoptimized builds can exceed
     // Tokio's 2 MiB default while doing that work (the real-process test
@@ -408,8 +464,10 @@ fn main() -> Result<()> {
     // abandoned request work keep a lifecycle-complete daemon alive holding
     // projection/CAS descriptors indefinitely.
     runtime.shutdown_timeout(Duration::from_secs(5));
-    // Keep replacement daemons and standalone tools out until every bounded
-    // worker teardown opportunity has finished.
+    // Release the composition root's owner only after bounded runtime drain.
+    // Any admitted blocking placement mutator retains a lease on this exact
+    // lock and continues excluding replacement controllers until it actually
+    // stops; shutdown_timeout is not treated as proof of cancellation.
     drop(process_state_lock);
     result
 }
@@ -445,6 +503,29 @@ fn build_handoff_phase_gate(
     ))))
 }
 
+#[cfg(feature = "handoff-test-support")]
+fn build_scoped_reserved_attempt_gate(
+    cli: &Cli,
+) -> Result<Option<Arc<ryeos_app::scoped_producer_start::test_support::ReservedAttemptGate>>> {
+    use ryeos_app::scoped_producer_start::test_support::{
+        RESERVED_ATTEMPT_GATE_FD_ENV, ReservedAttemptGate,
+    };
+
+    let descriptor_configured = std::env::var_os(RESERVED_ATTEMPT_GATE_FD_ENV).is_some();
+    match (cli.scoped_reserved_attempt_gate, descriptor_configured) {
+        (false, false) => return Ok(None),
+        (true, true) => {}
+        _ => anyhow::bail!("scoped reserved-attempt gate and channel must be supplied together"),
+    }
+    // SAFETY: the test parent minted and bound this connected channel through
+    // Lillux; the daemon consumes its child authority exactly once.
+    let channel =
+        unsafe { lillux::take_inherited_duplex_channel_from_env(RESERVED_ATTEMPT_GATE_FD_ENV) }
+            .map_err(anyhow::Error::msg)
+            .context("adopt inherited scoped reserved-attempt gate channel")?;
+    Ok(Some(Arc::new(ReservedAttemptGate::new(channel))))
+}
+
 async fn run(
     cli: Cli,
     process_state_lock: &mut Option<state_lock::StateLock>,
@@ -457,6 +538,8 @@ async fn run(
 
     #[cfg(feature = "handoff-test-support")]
     let handoff_phase_gate = build_handoff_phase_gate(&cli)?;
+    #[cfg(feature = "handoff-test-support")]
+    let scoped_reserved_attempt_gate = build_scoped_reserved_attempt_gate(&cli)?;
 
     if let Some(config::DaemonCommand::BuildInfo {
         revision,
@@ -586,10 +669,33 @@ async fn run(
         .context("daemon state lock is absent")?
         .ensure_protects_app_root(&config.app_root)?;
 
-    // Recheck the signed whole-init fence after acquiring the same lock as
-    // initialization. The pre-lock check provides early guidance; this check
-    // prevents a daemon from crossing an in-flight or failed bundle/policy cut.
+    // Bundle-set recovery must observe the old/new completion fence before
+    // ordinary completion verification. The present v1 journal can safely
+    // discard pre-activation work and finalize an already signed exact-new
+    // completion; activated old-state restoration remains fail-closed until
+    // the journal owns exact backup coordinates.
+    let bundle_set_recovery = {
+        let registry_lock =
+            ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&config.app_root)?;
+        ryeos_app::bundle_set_transaction::recover_for_bootstrap(
+            &config.app_root,
+            &registry_lock,
+            &ryeos_app::bundle_set_transaction::BootstrapBundleSetRecoveryExecutor::new(
+                &config.app_root,
+            ),
+        )?
+    };
+
+    // Recheck the signed whole-init fence after recovery while holding the
+    // same node state lock as initialization.
     bootstrap::verify_initialized(&config)?;
+    if bundle_set_recovery
+        == Some(ryeos_app::bundle_set_transaction::RecoveryDecision::CompleteExactNew)
+    {
+        // Preserve the journal until pinned-key verification has authenticated
+        // the exact-new whole-init completion and its registrations/policy.
+        ryeos_app::bundle_set_transaction::consume_journal(&config.app_root)?;
+    }
 
     // Initialize tracing with file sink only after init-state passes so direct
     // `ryeosd` startup on a fresh system cannot create runtime state.
@@ -760,6 +866,12 @@ async fn run(
                 });
             let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
                 bootstrap::load_node_config_two_phase_with_host_runtime(&config, host_runtime)?;
+            let external_artifacts = engine.with_checked_bundle_generation(|_| {
+                ryeos_app::external_artifacts::resolve_external_execution_artifacts(
+                    &engine.bundle_roots,
+                    &engine.node_trust_store,
+                )
+            })?;
 
             // Build the service registry early — self-check needs it.
             let services = Arc::new(build_service_registry()?);
@@ -1149,12 +1261,18 @@ async fn run(
                     .matcher
                     .clone(),
             );
+            let operator_state_lease = Arc::new(
+                process_state_lock
+                    .as_ref()
+                    .context("daemon state lock is absent")?
+                    .retain(),
+            );
 
             let mut app_state = AppState {
                 config: Arc::new(config.clone()),
                 daemon_build: build.clone(),
                 isolation,
-                state_store,
+                state_store: Arc::clone(&state_store),
                 engine: engine.clone(),
                 resolution_cache: std::sync::Arc::new(
                     ryeos_app::resolution_cache::ResolutionCache::new(128),
@@ -1170,14 +1288,44 @@ async fn run(
                 commands,
                 callback_tokens,
                 thread_auth,
+                controller_lifetime: Arc::clone(&operator_state_lease),
                 extensions: {
                     let mut ext = ryeos_app::extension_state::ExtensionState::new();
                     ext.insert(ui_state);
                     ext.insert(route_diagnostics);
                     ext.insert(prospective_node_config_validator);
                     ext.insert(node_execution_identity);
+                    let publication_policy = node_policy_snapshot
+                        .require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
+                        .clone();
+                    let publisher = configured_bundle_publisher(&publication_policy)?;
+                    let publication_authorities =
+                        ryeos_app::bundle_publication::producer::BundleReleaseAuthorityRouter {
+                            publisher,
+                            cas_composition: Some(Arc::new(
+                                ryeos_app::bundle_publication::producer::VerifiedLocalCasCompositionAuthority::new(
+                                    Arc::clone(&state_store),
+                                ),
+                            )),
+                            ..Default::default()
+                        };
+                    let publication_adapter = Arc::new(
+                        ryeos_app::bundle_publication::producer::PersistentBundleReleaseAdapter::new(
+                            config.app_root.clone(), publication_policy,
+                            publication_authorities,
+                        ),
+                    );
+                    ext.insert(Arc::new(
+                        ryeos_app::bundle_publication::producer::BundleReleaseAuthorities::new(
+                            publication_adapter,
+                        ),
+                    ));
                     #[cfg(feature = "handoff-test-support")]
                     if let Some(gate) = handoff_phase_gate.clone() {
+                        ext.insert(gate);
+                    }
+                    #[cfg(feature = "handoff-test-support")]
+                    if let Some(gate) = scoped_reserved_attempt_gate.clone() {
                         ext.insert(gate);
                     }
                     Arc::new(ext)
@@ -1189,6 +1337,16 @@ async fn run(
                 services,
                 service_descriptors: service_descriptors(),
                 node_config: node_config_snapshot,
+                external_placement_backends: Arc::new(external_artifacts.placement_backends),
+                // External connector generations must be supplied by signed
+                // bundle composition. No ambient sibling-binary discovery is
+                // permitted; absent composition keeps external admission
+                // fail-closed.
+                external_candidate_connectors: Arc::new(external_artifacts.connectors),
+                external_provider_configurations: Arc::new(
+                    external_artifacts.provider_configurations,
+                ),
+                external_candidate_imports: Arc::new(Default::default()),
                 node_policy: node_policy_snapshot,
                 vault,
                 command_registry,
@@ -1213,6 +1371,8 @@ async fn run(
                 accounting,
                 persistent_sessions: Arc::new(persistent_sessions),
                 execution_resources: Arc::new(execution_resources),
+                scoped_producer_authorities: Arc::new(Default::default()),
+                scoped_producer_processes: Arc::new(Default::default()),
             };
             // This is a generation cut, not a periodic repair. Settle every
             // attempt owned by the dead predecessor before any startup
@@ -1319,6 +1479,13 @@ async fn run(
             // node-signed execution policy before startup recovery. Per-launch
             // project execution configuration remains a separate item-resolution
             // contract and cannot alter this node-wide ceiling.
+            startup.phase(
+                ryeos_node::StartupPhase::ReconcilingThreads,
+                "recovering predecessor external candidate executions",
+            )?;
+            recover_external_candidates_before_ready(&app_state)
+                .await
+                .context("recover predecessor external candidate executions")?;
             startup.phase(
                 ryeos_node::StartupPhase::ReconcilingThreads,
                 "reconciling active thread execution state",
@@ -2306,6 +2473,49 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
     }
 }
 
+/// Settle the predecessor controller generation before Ready can release new
+/// external execution. Import runs first so a sealed result that was already
+/// delivered remains authoritative; fencing then makes every surviving
+/// occurrence cleanup-only. Cleanup failures remain durably quarantined and
+/// are retried by the periodic pass, but discovery/fencing failures abort
+/// startup rather than admitting work beside an unfenced predecessor.
+async fn recover_external_candidates_before_ready(state: &AppState) -> Result<()> {
+    let recovered = state
+        .external_candidate_imports
+        .wake_recoverable(Arc::clone(&state.state_store), None)
+        .context("discover recoverable external candidate imports")?;
+    if recovered != 0 {
+        tracing::info!(
+            recovered,
+            "woke recoverable external candidate imports before readiness"
+        );
+    }
+    wait_for_external_candidate_imports_async(
+        Arc::clone(&state.external_candidate_imports),
+        lillux::time::Duration::from_secs(30),
+    )
+    .await
+    .context("drain external candidate imports before restart fencing")?;
+
+    let fenced =
+        ryeos_app::external_placement::fence_external_candidates_after_controller_restart(state)
+            .context("fence predecessor-generation external candidates")?;
+    if fenced != 0 {
+        tracing::warn!(
+            fenced,
+            "fenced predecessor-generation external candidates before readiness"
+        );
+    }
+
+    log_external_candidate_cleanup_recovery(
+        recover_external_candidate_cleanups_async(state.clone())
+            .await
+            .context("advance startup external candidate cleanup")?,
+        "startup",
+    );
+    Ok(())
+}
+
 async fn run_cache_metric_flush_loop() -> Result<()> {
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -2325,6 +2535,22 @@ async fn run_cache_metric_flush_loop() -> Result<()> {
 }
 
 async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
+    let recovered_external_imports = state
+        .external_candidate_imports
+        .wake_recoverable(Arc::clone(&state.state_store), None)
+        .context("periodic external candidate import recovery")?;
+    if recovered_external_imports != 0 {
+        tracing::info!(
+            recovered_external_imports,
+            "periodic recovery woke external candidate imports"
+        );
+    }
+    log_external_candidate_cleanup_recovery(
+        recover_external_candidate_cleanups_async(state.clone())
+            .await
+            .context("periodic external candidate cleanup recovery")?,
+        "periodic",
+    );
     let recovered_activations =
         ryeos_api::handlers::external_content_activate::recover_durable_activations(state)
             .await
@@ -2430,6 +2656,60 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
     ensure_recovery_targets_classified(state, &targets)
         .context("periodic recovery ownership boundary")?;
     Ok(())
+}
+
+async fn recover_external_candidate_cleanups_async(
+    state: AppState,
+) -> Result<ryeos_app::external_placement::ExternalCandidateCleanupRecovery> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let task = lillux::task::spawn_host_task("external-cleanup-recovery", move || {
+        let _ =
+            sender.send(ryeos_app::external_placement::recover_external_candidate_cleanups(&state));
+    })
+    .context("start Lillux external cleanup recovery owner")?;
+    task.detach();
+    receiver
+        .await
+        .context("external cleanup recovery owner stopped without a result")?
+}
+
+async fn wait_for_external_candidate_imports_async(
+    imports: Arc<ryeos_app::external_candidate_import::ExternalCandidateImportPool>,
+    timeout: lillux::time::Duration,
+) -> Result<()> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let task = lillux::task::spawn_host_task("external-import-startup-fence", move || {
+        let _ = sender.send(imports.wait_for_idle(timeout));
+    })
+    .context("start Lillux external import startup fence")?;
+    task.detach();
+    receiver
+        .await
+        .context("external import startup fence stopped without a result")?
+}
+
+fn log_external_candidate_cleanup_recovery(
+    report: ryeos_app::external_placement::ExternalCandidateCleanupRecovery,
+    pass: &'static str,
+) {
+    if report.discovered != 0 {
+        tracing::info!(
+            pass,
+            discovered = report.discovered,
+            proved = report.proved,
+            pending = report.pending,
+            failures = report.failures.len(),
+            "advanced retained external candidate cleanup obligations"
+        );
+    }
+    for (placement, error) in report.failures {
+        tracing::error!(
+            pass,
+            placement = %placement,
+            error = %error,
+            "external candidate cleanup remains retained after reconciliation failure"
+        );
+    }
 }
 
 async fn run_ui_hint_loop(hub: Arc<ThreadEventHub>, ui: Arc<ryeos_ui::UiState>) -> Result<()> {
@@ -2665,6 +2945,7 @@ async fn drain_running_threads(state: &AppState) -> bool {
     // have no durable per-process row, so the pool itself is their only exact
     // shutdown owner. Exclusive workers are reaped through the same boundary,
     // then their durable identities are fenced below.
+    let external_candidate_imports_drained = drain_external_candidate_imports(state).await;
     let persistent_session_pool_drained = drain_persistent_session_pool(state).await;
 
     // Exclusive persistent-session workers are independent process groups,
@@ -2866,12 +3147,48 @@ async fn drain_running_threads(state: &AppState) -> bool {
             }
         }
     };
-    persistent_session_pool_drained
+    external_candidate_imports_drained
+        && persistent_session_pool_drained
         && persistent_session_workers_drained
         && attached_snapshot_clean
         && attached_drained
         && in_process_drained
         && in_process_authoritative_clean
+}
+
+async fn drain_external_candidate_imports(state: &AppState) -> bool {
+    let pool = Arc::clone(&state.external_candidate_imports);
+    match tokio::task::spawn_blocking(move || {
+        pool.shutdown_and_wait(Duration::from_secs(
+            process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
+        ))
+    })
+    .await
+    {
+        Ok(Ok(drained)) => {
+            if drained != 0 {
+                tracing::info!(
+                    drained,
+                    "drained external candidate imports before daemon exit"
+                );
+            }
+            true
+        }
+        Ok(Err(error)) => {
+            tracing::error!(
+                error = %error,
+                "external candidate import shutdown remains unproved"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "external candidate import shutdown task panicked"
+            );
+            false
+        }
+    }
 }
 
 async fn drain_persistent_session_pool(state: &AppState) -> bool {
@@ -3302,6 +3619,12 @@ async fn run_service_standalone(
     // standalone mode does not bind the configured UDS listener.
     let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
         bootstrap::load_node_config_two_phase_standalone(config)?;
+    let external_artifacts = engine.with_checked_bundle_generation(|_| {
+        ryeos_app::external_artifacts::resolve_external_execution_artifacts(
+            &engine.bundle_roots,
+            &engine.node_trust_store,
+        )
+    })?;
 
     let params: serde_json::Value = match params_json {
         Some(json_str) => {
@@ -3463,7 +3786,7 @@ async fn run_service_standalone(
         config: Arc::new(config.clone()),
         daemon_build: ryeos_app::build_info::get_for_version(env!("CARGO_PKG_VERSION")),
         isolation,
-        state_store,
+        state_store: Arc::clone(&state_store),
         engine: engine.clone(),
         resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(
             128,
@@ -3479,6 +3802,7 @@ async fn run_service_standalone(
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
+        controller_lifetime: Arc::new(standalone_state_lock.retain()),
         extensions: {
             let mut extensions = ryeos_app::extension_state::ExtensionState::new();
             // This is the stopped-node invocation's actual exclusion guard,
@@ -3487,6 +3811,29 @@ async fn run_service_standalone(
             extensions.insert(Arc::clone(&standalone_state_lock));
             extensions.insert(standalone_ui_state);
             extensions.insert(standalone_node_config_validator);
+            let publication_policy = node_policy_snapshot
+                .require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
+                .clone();
+            let publisher = configured_bundle_publisher(&publication_policy)?;
+            let publication_authorities =
+                ryeos_app::bundle_publication::producer::BundleReleaseAuthorityRouter {
+                    publisher,
+                    cas_composition: Some(Arc::new(
+                        ryeos_app::bundle_publication::producer::VerifiedLocalCasCompositionAuthority::new(
+                            Arc::clone(&state_store),
+                        ),
+                    )),
+                    ..Default::default()
+                };
+            let publication_adapter = Arc::new(
+                ryeos_app::bundle_publication::producer::PersistentBundleReleaseAdapter::new(
+                    config.app_root.clone(), publication_policy,
+                    publication_authorities,
+                ),
+            );
+            extensions.insert(Arc::new(
+                ryeos_app::bundle_publication::producer::BundleReleaseAuthorities::new(publication_adapter),
+            ));
             Arc::new(extensions)
         },
         write_barrier: Arc::new(write_barrier),
@@ -3499,6 +3846,12 @@ async fn run_service_standalone(
         services,
         service_descriptors: service_descriptors(),
         node_config: node_config_snapshot.clone(),
+        external_placement_backends: Arc::new(external_artifacts.placement_backends),
+        // External connector generations must be supplied by signed bundle
+        // composition; an empty registry refuses external profiles.
+        external_candidate_connectors: Arc::new(external_artifacts.connectors),
+        external_provider_configurations: Arc::new(external_artifacts.provider_configurations),
+        external_candidate_imports: Arc::new(Default::default()),
         node_policy: node_policy_snapshot.clone(),
         vault: Arc::new(
             ryeos_app::vault::SealedEnvelopeVault::load(&config.app_root)
@@ -3525,6 +3878,8 @@ async fn run_service_standalone(
         execution_resources: Arc::new(
             ryeos_app::execution_resources::ExecutionResourcePool::deny_all(),
         ),
+        scoped_producer_authorities: Arc::new(Default::default()),
+        scoped_producer_processes: Arc::new(Default::default()),
     };
 
     let ctx = ExecutionContext {

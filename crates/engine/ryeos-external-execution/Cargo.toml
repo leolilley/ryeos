@@ -1,0 +1,28 @@
+[package]
+name = "ryeos-external-execution"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Protected guest runtime for RyeOS external candidate execution"
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+lillux = { workspace = true }
+ryeos-project-capture = { workspace = true }
+ryeos-external-execution-contract = { workspace = true }
+ryeos-state = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tar = { workspace = true }
+
+[dev-dependencies]
+libc = { workspace = true }
+ryeos-state = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
+
+[[test]]
+name = "guest_occurrence_owner_native"
+path = "tests/guest_occurrence_owner_native.rs"
+harness = false

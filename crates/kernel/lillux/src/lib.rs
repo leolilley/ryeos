@@ -5,14 +5,20 @@ pub mod crypto;
 pub mod exec;
 pub mod host_service;
 pub mod identity;
+pub mod inherited_pipes;
+pub mod invocation;
 pub mod json;
 pub mod local_ipc;
 pub mod locks;
+pub mod loopback;
+pub mod network;
 pub mod platform;
 pub mod process_control;
 pub mod sandbox;
 pub mod secure_fs;
 pub mod signature;
+pub mod subordinate_process;
+pub mod task;
 pub mod time;
 pub mod vault;
 
@@ -24,21 +30,27 @@ pub use exec::InheritedReadonlyDocument;
 pub use exec::take_inherited_duplex_channel_from_env;
 pub use exec::{
     AbortedProcess, AttachmentAbortError, AttachmentReleaseError, CooperativeChildTermination,
-    DEFAULT_MAX_CAPTURE_BYTES, DeadlineDuplexStream, ForkSensitiveDescriptorLease,
+    DEFAULT_MAX_CAPTURE_BYTES, DeadlineDuplexStream, DuplexReadiness, ForkSensitiveDescriptorLease,
     InheritedDescriptorAuthority, InheritedDescriptorMapping, InheritedDuplexChannel,
     InheritedDuplexChannelChildAuthority, OutputLimitExceeded, PendingCooperativeChildTermination,
     ProcessAwaitingAttachment, ProcessObservationError, ProcessStdoutReader, RunningProcess,
     SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult,
     SupervisedLauncherAttachmentStatusPipe, SupervisedLauncherStatusPipe, SupervisedProcessStatus,
-    configure_command_argv0, configure_command_piped_stdio,
-    configure_inherited_descriptor_authorities, configure_inherited_fds,
+    configure_command_argv0, configure_inherited_descriptor_authorities, configure_inherited_fds,
     configure_owner_private_creation_mask, configure_subprocess_limits, disable_process_core_dumps,
     inherited_descriptor_coordinate, inherited_descriptor_path_for, inherited_duplex_channel_pair,
     protect_descriptor_from_exec, replace_current_process, sealed_executable_memfd, sealed_memfd,
     supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
     validate_subprocess_limits,
 };
+pub use exec::{
+    inherited_executable_path, take_inherited_descriptor_authority,
+    take_inherited_descriptor_authority_from_env,
+};
 pub use exec::{retain_fork_sensitive_descriptors, retain_fork_sensitive_descriptors_until};
+pub use sandbox::{
+    HeldLinuxSandboxProcess, LinuxSandboxPipes, prepare_linux_sandbox, prepare_linux_sandbox_piped,
+};
 
 pub use atomic_fs::{
     AtomicMutationError, AtomicMutationResult, atomic_exchange_paths, atomic_write,
@@ -56,7 +68,8 @@ pub use host_service::{
 };
 pub use json::deserialize_json_str_stack_safe;
 pub use local_ipc::{
-    LocalDuplexStream, OwnerPrivateLocalDuplexListener, authenticated_unix_peer_from_stream,
+    LocalConnectInterrupt, LocalDuplexStream, OwnerPrivateLocalDuplexListener,
+    authenticated_unix_peer_from_stream,
 };
 pub use locks::{
     ExactExclusiveFileLock, ExclusiveFileLock, SharedFileLock, with_exclusive_file_lock,
@@ -65,13 +78,21 @@ pub use process_control::{
     ControllerAccount, OciHookState, OciLifecycleGeneration, OciLifecycleIntent,
     ProcessHostLifetime, ProcessScope, ProcessScopeAllocation, ProcessScopeCapability,
     ProcessScopeConfiguration, ProcessScopeLaunchError, ProcessScopeProvider, ProcessScopeRecovery,
-    QuiescedProcessScope, require_administrator,
+    ProcessScopeResourceLimits, QuiescedProcessScope, ResourceLimitedProcessScope,
+    require_administrator,
 };
 pub use process_control::{
     ExactProcessIdentity, ExactProcessRoot, QuiescedProcessGroup, QuiescedProcesses,
-    capture_exact_process_identity, diagnostic_process_is_live,
+    capture_current_process_identity, capture_exact_process_identity, diagnostic_process_is_live,
     diagnostic_process_matches_executable_name, prepare_process_group_controller,
     quiesce_exact_process_group,
+};
+pub use secure_fs::{EmptyMountTargetReservation, EphemeralDescriptorFileLink};
+pub use subordinate_process::{
+    PinnedSubordinateProcessRequest, SubordinateDiagnosticDrain, SubordinateDiagnosticDrainEnd,
+    SubordinateProcess, SubordinateProcessDiagnostics, SubordinateProcessError,
+    SubordinateProcessExit, SubordinateProcessInput, SubordinateProcessOutput,
+    SubordinateProcessRequest,
 };
 
 #[cfg(target_os = "linux")]
@@ -82,16 +103,19 @@ pub use exec::{
     take_inherited_descriptor_transfer_sender,
 };
 pub use secure_fs::{
-    DirectoryTraversalBudget, FilesystemCapacity, NoFollowDirectoryTree, OpenFileIdentity,
-    OpenMountEntryKind, OpenRegularFileObservation, PinnedDirectory, PinnedDirectoryEntry,
-    PinnedDirectoryEntryMetadata, PinnedDirectoryIdentity, PinnedDirectoryLock, PinnedEntryType,
-    PinnedRegularFile, ProcessScopedFlatDirectoryGeneration, canonicalize_existing_path,
+    CapturedRegularFile, DirectoryTraversalBudget, FilesystemCapacity, NoFollowDirectoryTree,
+    OpenFileIdentity, OpenMountEntryKind, OpenRegularFileObservation, PinnedDirectory,
+    PinnedDirectoryEntry, PinnedDirectoryEntryMetadata, PinnedDirectoryIdentity,
+    PinnedDirectoryLock, PinnedEntryType, PinnedRegularFile, PinnedRegularFileIdentity,
+    ProcessScopedFlatDirectoryGeneration, StablePinnedRegularReader, canonicalize_existing_path,
     collect_directory_tree_no_follow, collect_pinned_regular_files_no_follow_bounded,
-    collect_regular_files_no_follow, current_user_home, digest_open_regular_file_stable_exact,
+    collect_regular_files_no_follow, current_user_home,
+    digest_open_regular_file_stable_chunked_exact, digest_open_regular_file_stable_exact,
     ensure_open_regular_file_unchanged, inspect_optional_entry_no_follow,
-    matches_regular_file_identity, normalized_portable_regular_mode, observe_open_file_identity,
-    observe_open_regular_file, open_mount_entry_kind, open_pinned_regular_file_no_follow,
-    pin_canonical_mount_source, protected_system_write_roots, read_open_regular_file_bounded,
+    matches_pinned_regular_file_identity, matches_regular_file_identity,
+    normalized_portable_regular_mode, observe_open_file_identity, observe_open_regular_file,
+    open_mount_entry_kind, open_pinned_regular_file_no_follow, pin_canonical_mount_source,
+    pinned_regular_file_identity, protected_system_write_roots, read_open_regular_file_bounded,
     read_open_regular_file_exact_bounded, read_open_regular_file_stable_bounded,
     read_optional_regular_file_bounded_no_follow, read_optional_regular_file_no_follow,
     read_regular_file_bounded_no_follow, read_regular_file_no_follow,
@@ -103,27 +127,52 @@ pub use secure_fs::{
 pub use sandbox::{
     LinuxOverlayMutation, LinuxOverlayMutationKind, LinuxOverlayTemplate,
     LinuxOverlayWorkspaceObservation, LinuxOverlayWorkspaceOperation, LinuxSandboxAggregateLimits,
-    LinuxSandboxCharacterDevice, LinuxSandboxExit, LinuxSandboxFixedParentView,
-    LinuxSandboxInspection, LinuxSandboxLifecycle, LinuxSandboxMount, LinuxSandboxMountAccess,
-    LinuxSandboxNetwork, LinuxSandboxOverlay, LinuxSandboxOverlayDescendantMount,
-    LinuxSandboxProcFilesystem, LinuxSandboxProcess, LinuxSandboxRequest,
-    create_linux_overlay_template, exit_with_linux_sandbox_status, inspect_linux_sandbox,
-    launch_linux_sandbox, operate_linux_overlay_workspace, read_sealed_inherited_descriptor,
-    validate_connected_unix_stream_descriptor, validate_current_executable_descriptor,
-    write_inherited_descriptor,
+    LinuxSandboxAppliedLaunchCommitments, LinuxSandboxAppliedLaunchReceipt,
+    LinuxSandboxAppliedLaunchTarget, LinuxSandboxCharacterDevice, LinuxSandboxExit,
+    LinuxSandboxFixedParentView, LinuxSandboxInspection, LinuxSandboxLifecycle, LinuxSandboxMount,
+    LinuxSandboxMountAccess, LinuxSandboxMountPreparationCommitments,
+    LinuxSandboxMountPreparationReceipt, LinuxSandboxNetwork, LinuxSandboxOverlay,
+    LinuxSandboxOverlayDescendantMount, LinuxSandboxProcFilesystem, LinuxSandboxProcess,
+    LinuxSandboxRequest, LinuxSandboxTermination, create_linux_overlay_template,
+    exit_with_linux_sandbox_status, inspect_linux_sandbox, launch_linux_sandbox,
+    launch_linux_sandbox_with_loopback_ingress, linux_sandbox_mount_overlaps_managed_namespace,
+    operate_linux_overlay_workspace, read_sealed_inherited_descriptor,
+    read_sealed_inherited_descriptor_from_env, validate_connected_unix_stream_descriptor,
+    validate_current_executable_descriptor, write_inherited_descriptor,
 };
 
 pub use identity::envelope::{
     AadFields, Envelope, InspectResult, OpenResult, ValidateResult, inspect_envelope,
     open_envelope, seal_envelope, validate_envelope_env,
 };
-
 pub fn run(request: SubprocessRequest) -> SubprocessResult {
     exec::lib_run(request)
 }
 
 pub fn spawn(request: SubprocessRequest) -> Result<RunningProcess, SubprocessResult> {
     exec::lib_spawn(request)
+}
+
+#[cfg(target_os = "linux")]
+pub fn spawn_exact_inheritance(
+    request: SubprocessRequest,
+) -> Result<RunningProcess, SubprocessResult> {
+    exec::lib_spawn_exact_inheritance(request)
+}
+
+pub fn spawn_until(
+    request: SubprocessRequest,
+    deadline: time::MonotonicDeadline,
+) -> Result<RunningProcess, SubprocessResult> {
+    exec::lib_spawn_until(request, deadline)
+}
+
+#[cfg(target_os = "linux")]
+pub fn spawn_exact_inheritance_until(
+    request: SubprocessRequest,
+    deadline: time::MonotonicDeadline,
+) -> Result<RunningProcess, SubprocessResult> {
+    exec::lib_spawn_exact_inheritance_until(request, deadline)
 }
 
 pub fn spawn_awaiting_attachment(
@@ -143,6 +192,15 @@ pub fn spawn_detached(
     envs: &[(String, String)],
 ) -> Result<SpawnResult, String> {
     exec::lib_spawn_detached(cmd, args, log, envs)
+}
+
+pub fn spawn_detached_from_executable(
+    executable: &InheritedDescriptorAuthority,
+    args: &[String],
+    log: Option<&str>,
+    envs: &[(String, String)],
+) -> Result<SpawnResult, String> {
+    exec::lib_spawn_detached_from_executable(executable, args, log, envs)
 }
 
 pub fn kill(pid: u32, grace: f64) -> Result<String, String> {

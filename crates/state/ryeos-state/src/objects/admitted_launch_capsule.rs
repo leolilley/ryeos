@@ -33,7 +33,13 @@ use super::{
 // v24 is already allocated to the coordinating fixed-parent confinement cut.
 // v27 admits the complete typed root/dependency product-selection list.
 // v28 retains exact product receipt proofs separately from semantic program identity.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 28;
+// v29 requires explicit ordinary endpoint intent and exact selected external
+// binding identity in direct plans. Missing predecessor fields are not local
+// execution authority and must never be filled from current node preferences.
+// v30 classifies product-qualification purpose as executable-program authority.
+// A verifier's selected policy, witness and purpose cannot enter or leave the
+// sealed invocation without moving the exact program identity.
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 30;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";
 
@@ -58,6 +64,7 @@ const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
     "project_binding_subject_authority",
     "project_context",
     "product_selections",
+    "product_qualification",
     "ref_bindings",
     "resolved_ref_bindings",
     "requested_by",
@@ -1116,6 +1123,13 @@ impl AdmittedLaunchCapsule {
     pub fn source_binding_hash_in_program(
         exact_program: &serde_json::Value,
     ) -> anyhow::Result<Option<String>> {
+        Ok(Self::source_projection_in_program(exact_program)?
+            .map(|projection| projection.binding_hash))
+    }
+
+    pub fn source_projection_in_program(
+        exact_program: &serde_json::Value,
+    ) -> anyhow::Result<Option<super::EffectiveSourceClosureProjection>> {
         let Some(value) = exact_program
             .get("resolution_output")
             .and_then(|resolution| resolution.get("composed"))
@@ -1124,9 +1138,9 @@ impl AdmittedLaunchCapsule {
         else {
             return Ok(None);
         };
-        Ok(Some(
-            super::EffectiveSourceClosureProjection::from_value(value)?.binding_hash,
-        ))
+        Ok(Some(super::EffectiveSourceClosureProjection::from_value(
+            value,
+        )?))
     }
 
     /// Verify the complete realization/substrate evidence named by this
@@ -2071,6 +2085,7 @@ mod tests {
             "resolved_result_policy": {"retention":"full"},
             "captured_history_policy": {"retention":"durable"},
             "candidate_evaluation": null,
+            "product_qualification": null,
         });
         sealed_invocation
             .as_object_mut()
@@ -2283,6 +2298,23 @@ mod tests {
     }
 
     #[test]
+    fn qualification_purpose_moves_exact_program_identity() {
+        let (mut invocation, ordinary, _) =
+            sealed_invocation_fixture("tool:test/run", "runtime:direct", "tool:test/executor");
+        invocation["product_qualification"] = serde_json::json!({"selected_policy":"first"});
+        let first = project_sealed_root_exact_program(&invocation).unwrap();
+        assert_ne!(first, ordinary);
+        invocation["product_qualification"] = serde_json::json!({"selected_policy":"second"});
+        let second = project_sealed_root_exact_program(&invocation).unwrap();
+        assert_ne!(second, first);
+        invocation
+            .as_object_mut()
+            .unwrap()
+            .remove("product_qualification");
+        assert!(project_sealed_root_exact_program(&invocation).is_err());
+    }
+
+    #[test]
     fn product_receipt_changes_sealed_authority_without_changing_exact_program() {
         use crate::external_content::products::composition::*;
         use crate::external_content::products::transfer::ProductWitnessSource;
@@ -2437,6 +2469,191 @@ mod tests {
         });
         let decoded = AdmittedLaunchCapsule::from_current_value(expected.to_value()).unwrap();
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn compact_product_recipe_survives_managed_capsule_wire_round_trip() {
+        use crate::external_content::products::{
+            PRODUCT_DECLARATIONS_SCHEMA, ProductBounds, ProductDeclaration, ProductDeclarations,
+            ProductRecipePurpose, ProductShape, ProductSource, ProductStorage,
+            admission::{
+                AdmittedProductRecipeBinding, MAX_ADMITTED_PRODUCT_RECIPE_BYTES,
+                PRODUCT_RECIPE_BINDING_SCHEMA, admitted_product_recipe_from_prepared,
+            },
+            composition::{PRODUCT_RELATIONSHIPS_SCHEMA, ProductRelationships},
+        };
+
+        let declarations = ProductDeclarations {
+            schema: PRODUCT_DECLARATIONS_SCHEMA.to_owned(),
+            output_roots: Vec::new(),
+            products: vec![ProductDeclaration {
+                name: "runtime".to_owned(),
+                source: ProductSource::RetainedProject {},
+                path: "products/runtime".to_owned(),
+                shape: ProductShape::Tree,
+                storage: ProductStorage::Content,
+                required: true,
+                bounds: ProductBounds {
+                    maximum_entries: 8,
+                    maximum_depth: 4,
+                    maximum_file_bytes: 1_024,
+                    maximum_total_bytes: 4_096,
+                },
+                expected_manifest_hash: None,
+            }],
+        };
+        let declarations_hash = declarations.content_hash().unwrap();
+        let mut selected = None;
+        for bytes in (4_000..10_000).step_by(100) {
+            let parameters = serde_json::json!({"signed_manifest": "x".repeat(bytes)});
+            let relationships: ProductRelationships = serde_json::from_value(serde_json::json!({
+                "schema": PRODUCT_RELATIONSHIPS_SCHEMA,
+                "relationships": [
+                    {
+                        "name": "to_graph",
+                        "producer": {
+                            "canonical_ref": "graph:test/producer",
+                            "recipe_binding": "product_recipe",
+                            "product_name": "runtime",
+                            "parameters": parameters.clone()
+                        },
+                        "consumer": {"canonical_ref": "graph:test/consumer", "declaration_id": "subject"},
+                        "required_product": {
+                            "shape": "tree", "storage": "content",
+                            "bounds": {"maximum_entries":8,"maximum_depth":4,"maximum_file_bytes":1024,"maximum_total_bytes":4096}
+                        },
+                        "qualification": {"policy_ref": null, "required_claims": []}
+                    },
+                    {
+                        "name": "to_tool",
+                        "producer": {
+                            "canonical_ref": "graph:test/producer",
+                            "recipe_binding": "product_recipe",
+                            "product_name": "runtime",
+                            "parameters": parameters
+                        },
+                        "consumer": {"canonical_ref": "tool:test/consumer", "declaration_id": "subject"},
+                        "required_product": {
+                            "shape": "tree", "storage": "content",
+                            "bounds": {"maximum_entries":8,"maximum_depth":4,"maximum_file_bytes":1024,"maximum_total_bytes":4096}
+                        },
+                        "qualification": {"policy_ref": null, "required_claims": []}
+                    }
+                ]
+            }))
+            .unwrap();
+            let candidate = AdmittedProductRecipeBinding {
+                schema: PRODUCT_RECIPE_BINDING_SCHEMA.to_owned(),
+                binding_name: "product_recipe".to_owned(),
+                recipe_ref: "config:test/two-consumers".to_owned(),
+                recipe_raw_content_digest: "a".repeat(64),
+                purpose: ProductRecipePurpose::GeneralProductV1,
+                declarations: declarations.clone(),
+                declarations_hash: declarations_hash.clone(),
+                relationships,
+            };
+            let expanded_bytes = lillux::canonical_json(&serde_json::to_value(&candidate).unwrap())
+                .unwrap()
+                .len();
+            if candidate.validate().is_ok() && expanded_bytes > MAX_ADMITTED_PRODUCT_RECIPE_BYTES {
+                selected = Some((candidate, parameters));
+                break;
+            }
+        }
+        let (expected, parameters) =
+            selected.expect("fixture must cross only the expanded fact limit");
+        let compact_fact = expected.runtime_fact_value().unwrap();
+        assert!(
+            lillux::canonical_json(&serde_json::to_value(&expected).unwrap())
+                .unwrap()
+                .len()
+                > MAX_ADMITTED_PRODUCT_RECIPE_BYTES
+        );
+        assert!(
+            lillux::canonical_json(&compact_fact).unwrap().len()
+                <= MAX_ADMITTED_PRODUCT_RECIPE_BYTES
+        );
+        assert_eq!(
+            compact_fact
+                .pointer("/relationships/parameter_values/0/value")
+                .unwrap(),
+            &parameters
+        );
+        assert_eq!(
+            compact_fact
+                .pointer("/relationships/relationships")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let binding_record = serde_json::json!({
+            "product_recipe": {
+                "canonical_ref": expected.recipe_ref,
+                "source_space": "project",
+                "effective_trust_class": "trusted_project",
+                "resolution": {
+                    "root": {
+                        "requested_id": expected.recipe_ref,
+                        "resolved_ref": expected.recipe_ref,
+                        "source_space": "project",
+                        "source_root": {"kind": "project"},
+                        "trust_class": "trusted_project",
+                        "signer_fingerprint": "b".repeat(64),
+                        "raw_content_digest": expected.recipe_raw_content_digest
+                    },
+                    "ancestors": [],
+                    "referenced_items": [],
+                    "effective_trust_class": "trusted_project",
+                    "policy_facts": {}
+                }
+            }
+        });
+        let prepared_runtime_launch = serde_json::json!({
+            "runtime_facts": {"product_recipe": compact_fact},
+            "binding_records": binding_record
+        });
+        let mut capsule = managed_capsule(prepared_runtime_launch);
+        capsule.sealed_invocation["resolved_ref_bindings"] = binding_record;
+        capsule.exact_program =
+            project_sealed_root_exact_program(&capsule.sealed_invocation).unwrap();
+        capsule.exact_program_hash = lillux::sha256_hex(
+            lillux::canonical_json(&capsule.exact_program)
+                .unwrap()
+                .as_bytes(),
+        );
+        capsule.validate().unwrap();
+
+        let persisted_wire = serde_json::to_vec(&capsule).unwrap();
+        let recovered = AdmittedLaunchCapsule::from_current_value(
+            serde_json::from_slice(&persisted_wire).unwrap(),
+        )
+        .unwrap();
+        let AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch,
+            ..
+        } = &recovered.execution_closure
+        else {
+            panic!("recovered capsule must retain its managed runtime closure");
+        };
+        let recovered_recipe =
+            admitted_product_recipe_from_prepared(prepared_runtime_launch, "product_recipe")
+                .unwrap();
+        assert_eq!(recovered_recipe, expected);
+        assert_eq!(
+            recovered_recipe.relationships.relationships[0]
+                .consumer
+                .canonical_ref,
+            "graph:test/consumer"
+        );
+        assert_eq!(
+            recovered_recipe.relationships.relationships[1]
+                .consumer
+                .canonical_ref,
+            "tool:test/consumer"
+        );
     }
 
     #[test]

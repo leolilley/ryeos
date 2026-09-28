@@ -24,6 +24,36 @@ pub enum BundlePhase {
     Activated,
 }
 
+/// Build the exact node-owned registration bytes used by init and ordinary
+/// bundle transactions, without publishing them. The caller supplies the
+/// explicit node key whose public half is already pinned by current node
+/// trust; no operator or daemon-global key is discovered here.
+pub fn prepare_signed_bundle_registration(
+    installed_target: &Path,
+    node_signing_key: &Path,
+) -> Result<Vec<u8>> {
+    let target = installed_target
+        .to_str()
+        .context("bundle registration target is not UTF-8")?;
+    if !installed_target.is_absolute() || target.contains('\n') || target.contains('\r') {
+        anyhow::bail!("bundle registration target must be an absolute single-line path");
+    }
+    let metadata = std::fs::symlink_metadata(node_signing_key)
+        .context("inspect explicit node registration key")?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("node registration key must be a regular non-symlink file");
+    }
+    use lillux::crypto::DecodePrivateKey as _;
+    let pem = lillux::read_regular_file_bounded_no_follow(node_signing_key, 64 * 1024)?;
+    let pem = std::str::from_utf8(&pem).context("node registration key is not UTF-8 PEM")?;
+    let key = SigningKey::from_pkcs8_pem(pem).context("decode explicit node registration key")?;
+    let yaml = serde_yaml::to_string(&serde_json::json!({
+        "kind": "node",
+        "path": target,
+    }))?;
+    Ok(lillux::signature::sign_content(&yaml, &key, "#", None).into_bytes())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
@@ -102,6 +132,13 @@ impl BundleRegistryMutationLock {
             app_root: app_root.to_path_buf(),
             _lock: lock,
         })
+    }
+
+    pub fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
+        if self.app_root != app_root {
+            anyhow::bail!("bundle registry lock belongs to a different app root");
+        }
+        Ok(())
     }
 
     /// Acquire a bundle's per-name transaction lock after the node-wide lock.
@@ -470,7 +507,9 @@ fn registration_digest(value: &serde_json::Value) -> Result<String> {
     Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
-fn tree_digest(root: &Path) -> Result<String> {
+/// Compute the exact descriptor-safe bundle tree identity used by both
+/// single-bundle and stopped whole-set transactions.
+pub fn tree_digest(root: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     hash_tree_entry(root, Path::new(""), &mut hasher)?;
     Ok(format!("{:x}", hasher.finalize()))

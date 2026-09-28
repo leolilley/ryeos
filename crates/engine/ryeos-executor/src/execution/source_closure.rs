@@ -15,11 +15,127 @@ pub(crate) struct BoundSourceClosure {
     mounts: Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     sealed_identity_env: String,
     execution_entry_path: PathBuf,
+    execution_root: PathBuf,
+    members: std::collections::BTreeSet<String>,
     source_directory: lillux::PinnedDirectory,
+    records: ryeos_state::source_verification::VerifiedAdmittedSourceRecords,
     _leases: Vec<std::fs::File>,
 }
 
+/// Descriptor-bound delivery of the existing B-owned source closure. The
+/// source materialization lease must outlive execution or an acknowledged exact
+/// private copy into the guest. Merely adopting its directory descriptor does
+/// not stop cache retirement from unlinking children. This does not create a
+/// new source product or execution grant.
+pub(crate) struct ExternalSourceDelivery {
+    pub records: ryeos_state::source_verification::VerifiedAdmittedSourceRecords,
+    pub input: ryeos_external_execution_contract::GuestMountInput,
+    pub directory: lillux::InheritedDescriptorAuthority,
+    pub content_records: [lillux::InheritedDescriptorAuthority; 2],
+    pub lifeline: BoundSourceClosure,
+}
+
+pub(crate) fn bind_external_source(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+) -> anyhow::Result<Option<ExternalSourceDelivery>> {
+    use ryeos_external_execution_contract::{
+        GuestMountAccess, GuestMountContentAuthority, GuestMountInput, GuestMountKind,
+        GuestMountRole,
+    };
+    capsule.validate()?;
+    let expected = ryeos_state::objects::AdmittedLaunchCapsule::source_projection_in_program(
+        &capsule.exact_program,
+    )?;
+    let actual = resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+        .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
+        .transpose()?;
+    anyhow::ensure!(
+        actual == expected,
+        "external source resolution differs from the retained launch capsule"
+    );
+    validate_external_mount_separation(state, resolution, SourceMountPlacement::ExecutionRuntime)?;
+    let Some(bound) = bind_source(
+        state,
+        resolution,
+        Path::new("/workspace"),
+        SourceMountPlacement::ExecutionRuntime,
+    )?
+    else {
+        anyhow::ensure!(expected.is_none(), "retained external source was not bound");
+        return Ok(None);
+    };
+    let records = bound.records.clone();
+    records.validate_projection(
+        expected
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("external source lacks capsule authority"))?,
+    )?;
+    let binding_bytes = lillux::canonical_json(&records.binding().to_value()?)?;
+    let manifest_bytes = lillux::canonical_json(&records.manifest().to_value()?)?;
+    let binding = lillux::sealed_memfd(c"external-source-binding", binding_bytes.as_bytes())
+        .map_err(anyhow::Error::msg)?;
+    let manifest = lillux::sealed_memfd(c"external-source-manifest", manifest_bytes.as_bytes())
+        .map_err(anyhow::Error::msg)?;
+    let directory = bound.source_directory.inherited_descriptor_authority()?;
+    let input = GuestMountInput {
+        role: GuestMountRole::Source,
+        authority_id: records.binding_hash().to_owned(),
+        descriptor: directory
+            .inherited_descriptor()
+            .map_err(anyhow::Error::msg)?,
+        destination: records
+            .runtime_destination()
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("external source destination is not UTF-8"))?
+            .to_owned(),
+        kind: GuestMountKind::Directory,
+        access: GuestMountAccess::ReadOnly,
+        normalized_mode: None,
+        bytes: records.manifest().totals.total_bytes,
+        content_authority: GuestMountContentAuthority::SourceClosure {
+            binding_hash: records.binding_hash().to_owned(),
+            binding_descriptor: binding.inherited_descriptor().map_err(anyhow::Error::msg)?,
+            binding_bytes: binding_bytes.len() as u64,
+            manifest_hash: records.content_manifest_hash().to_owned(),
+            manifest_descriptor: manifest
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?,
+            manifest_bytes: manifest_bytes.len() as u64,
+        },
+    };
+    Ok(Some(ExternalSourceDelivery {
+        records,
+        input,
+        directory,
+        content_records: [binding, manifest],
+        lifeline: bound,
+    }))
+}
+
 impl BoundSourceClosure {
+    fn member_path(&self, relative: &str) -> anyhow::Result<String> {
+        ryeos_engine::runtime::validate_source_member_path(relative)?;
+        anyhow::ensure!(
+            self.members.contains(relative),
+            "source member is absent from the admitted file manifest: {relative}"
+        );
+        anyhow::ensure!(
+            self.source_directory
+                .open_pinned_regular_descendant(Path::new(relative), false)?
+                .is_some(),
+            "admitted source member is not a retained regular file: {relative}"
+        );
+        self.execution_root
+            .join(relative)
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("source member execution coordinate is not UTF-8"))
+    }
     pub(crate) fn mounts(&self) -> &[ryeos_engine::isolation::IsolationReadOnlyMountAuthority] {
         &self.mounts
     }
@@ -40,6 +156,62 @@ impl BoundSourceClosure {
     pub(crate) fn source_directory(&self) -> &lillux::PinnedDirectory {
         &self.source_directory
     }
+}
+
+pub(crate) fn bind_prepared_source_members(
+    plan: &mut ryeos_app::thread_lifecycle::PreparedItemPlan,
+    source: Option<&BoundSourceClosure>,
+) -> anyhow::Result<()> {
+    plan.bind_source_members(|relative| {
+        source
+            .ok_or_else(|| {
+                anyhow::anyhow!("source member argument has no admitted source closure")
+            })?
+            .member_path(relative)
+    })
+}
+
+pub(crate) fn direct_source_placement(
+    plan: &ryeos_app::thread_lifecycle::PreparedItemPlan,
+    enforced: bool,
+) -> SourceMountPlacement {
+    source_member_placement(plan.consumes_source_members(), enforced)
+}
+
+fn source_member_placement(consumes_members: bool, enforced: bool) -> SourceMountPlacement {
+    if enforced && consumes_members {
+        SourceMountPlacement::ExecutionRuntime
+    } else {
+        SourceMountPlacement::Project
+    }
+}
+
+/// Fold-back must exclude only content actually shadowing the project. Replay
+/// uses the symbolic admitted plan, never the already-lowered spawn arguments.
+pub(crate) fn capsule_source_placement(
+    closure: &ryeos_state::objects::AdmittedExecutionClosure,
+    enforced: bool,
+) -> anyhow::Result<SourceMountPlacement> {
+    let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
+        execution_plan, ..
+    } = closure
+    else {
+        return Ok(SourceMountPlacement::Project);
+    };
+    let plan: ryeos_engine::contracts::ExecutionPlan =
+        serde_json::from_value(execution_plan.clone())?;
+    let consumes_members = plan.nodes.iter().any(|node| match node {
+        ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } => {
+            spec.args.iter().any(|arg| {
+                matches!(
+                    arg,
+                    ryeos_engine::contracts::PlanArgument::AdmittedSourceMember { .. }
+                )
+            })
+        }
+        _ => false,
+    });
+    Ok(source_member_placement(consumes_members, enforced))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +352,13 @@ fn bind_source_with(
     let Some((binding, manifest, projection)) = retained_source_records(&cas, resolution)? else {
         return Ok(None);
     };
+    let records =
+        ryeos_state::source_verification::VerifiedAdmittedSourceRecords::from_canonical_bytes(
+            &projection.binding_hash,
+            &projection.content_manifest_hash,
+            lillux::canonical_json(&binding.to_value()?)?.as_bytes(),
+            lillux::canonical_json(&manifest.to_value()?)?.as_bytes(),
+        )?;
     let placement = match mode {
         BindingMode::IsolationMount(placement) => placement,
         BindingMode::PrivateWorkspace => SourceMountPlacement::Project,
@@ -292,7 +471,14 @@ fn bind_source_with(
         mounts,
         sealed_identity_env,
         execution_entry_path: destination.join(entry),
+        execution_root: destination,
+        members: manifest
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect(),
         source_directory: source,
+        records,
         _leases: vec![lease],
     }))
 }
@@ -318,66 +504,30 @@ fn retained_source_records(
     let binding_value = cas
         .get_object(&projection.binding_hash)?
         .ok_or_else(|| anyhow::anyhow!("admitted source binding is missing"))?;
-    let binding = ryeos_state::objects::EffectiveSourceBinding::from_value(&binding_value)?;
     let manifest_value = cas
         .get_object(&projection.content_manifest_hash)?
         .ok_or_else(|| anyhow::anyhow!("admitted source manifest is missing"))?;
-    let manifest = ryeos_state::objects::SourceClosureManifest::from_value(&manifest_value)?;
-    if binding.digest()? != projection.binding_hash
-        || binding.content_manifest_hash != projection.content_manifest_hash
-        || manifest.digest()? != projection.content_manifest_hash
-        || binding.owner_key()? != projection.owner_key
-    {
-        anyhow::bail!("admitted source records contradict their effective projection");
-    }
-    binding.validate_content_manifest(&manifest)?;
-    Ok(Some((binding, manifest, projection)))
+    let records =
+        ryeos_state::source_verification::VerifiedAdmittedSourceRecords::from_canonical_bytes(
+            &projection.binding_hash,
+            &projection.content_manifest_hash,
+            lillux::canonical_json(&binding_value)?.as_bytes(),
+            lillux::canonical_json(&manifest_value)?.as_bytes(),
+        )?;
+    records.validate_projection(&projection)?;
+    Ok(Some((
+        records.binding().clone(),
+        records.manifest().clone(),
+        projection,
+    )))
 }
 
 fn logical_mount(binding: &ryeos_state::objects::EffectiveSourceBinding) -> anyhow::Result<String> {
-    let directory = binding
-        .kind_ceiling
-        .schema_document
-        .get("location")
-        .and_then(|location| location.get("directory"))
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("retained source kind has no logical directory"))?;
-    ryeos_state::objects::validate_canonical_project_relative_path(directory)?;
-    let mut path = PathBuf::from(".ai").join(directory);
-    match &binding.logical_binding {
-        ryeos_state::objects::SourceLogicalBinding::Tool { .. } => {
-            if let Some((namespace, _)) = binding.owner.logical_item_key.split_once('/') {
-                path.push(namespace);
-            }
-        }
-        ryeos_state::objects::SourceLogicalBinding::ToolDirectory { root, .. } => {
-            path.push(root);
-        }
-        ryeos_state::objects::SourceLogicalBinding::Worker { root, .. } => {
-            let namespace = binding
-                .owner
-                .logical_item_key
-                .split('/')
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("worker source owner has no namespace"))?;
-            path.push(namespace);
-            path.push(root);
-        }
-    }
-    let value = path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("admitted source mount is not UTF-8"))?
-        .to_owned();
-    ryeos_state::objects::validate_canonical_project_relative_path(&value)?;
-    Ok(value)
+    ryeos_state::source_verification::logical_project_mount(binding)
 }
 
 fn logical_entry(binding: &ryeos_state::objects::EffectiveSourceBinding) -> anyhow::Result<&str> {
-    Ok(match &binding.logical_binding {
-        ryeos_state::objects::SourceLogicalBinding::Tool { root_entry, .. } => root_entry,
-        ryeos_state::objects::SourceLogicalBinding::ToolDirectory { root_entry, .. } => root_entry,
-        ryeos_state::objects::SourceLogicalBinding::Worker { entry, .. } => entry,
-    })
+    Ok(ryeos_state::source_verification::logical_entry(binding))
 }
 
 fn publish_private_source(
@@ -434,87 +584,7 @@ fn publish_private_source(
             .with_context(|| format!("materialize admitted source file {}", entry.path))?;
     }
     target.sync_tree()?;
-    verify_private_source(&target, manifest)?;
-    Ok(())
-}
-
-fn verify_private_source(
-    root: &lillux::PinnedDirectory,
-    manifest: &ryeos_state::objects::SourceClosureManifest,
-) -> anyhow::Result<()> {
-    let expected = manifest
-        .entries
-        .iter()
-        .map(|entry| (entry.path.as_str(), entry))
-        .collect::<BTreeMap<_, _>>();
-    let mut observed = Vec::with_capacity(expected.len());
-    verify_private_source_directory(root, "", &expected, &mut observed)?;
-    observed.sort();
-    if observed.iter().map(String::as_str).collect::<Vec<_>>()
-        != expected.keys().copied().collect::<Vec<_>>()
-    {
-        anyhow::bail!("private admitted source has missing or extra files");
-    }
-    Ok(())
-}
-
-fn verify_private_source_directory(
-    directory: &lillux::PinnedDirectory,
-    prefix: &str,
-    expected: &BTreeMap<&str, &ryeos_state::objects::SourceClosureFile>,
-    observed: &mut Vec<String>,
-) -> anyhow::Result<()> {
-    for actual in directory.entries_no_follow_bounded(expected.len().saturating_add(1))? {
-        let name = actual
-            .name
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("private admitted source has a non-UTF-8 entry"))?;
-        let path = if prefix.is_empty() {
-            name.to_owned()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        match actual.entry_type {
-            lillux::PinnedEntryType::Directory => {
-                let descendant_prefix = format!("{path}/");
-                if !expected
-                    .keys()
-                    .any(|candidate| candidate.starts_with(&descendant_prefix))
-                {
-                    anyhow::bail!("private admitted source has unexpected directory {path}");
-                }
-                let child = directory
-                    .open_child_directory(&actual.name)?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("private admitted source directory {path} disappeared")
-                    })?;
-                verify_private_source_directory(&child, &path, expected, observed)?;
-            }
-            lillux::PinnedEntryType::Regular => {
-                let entry = expected.get(path.as_str()).ok_or_else(|| {
-                    anyhow::anyhow!("private admitted source has unexpected file {path}")
-                })?;
-                let mut file = directory
-                    .open_regular(&actual.name, false)?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("private admitted source file {path} disappeared")
-                    })?;
-                let (digest, metadata) =
-                    lillux::digest_open_regular_file_stable_exact(&mut file, entry.size)?;
-                let expected_mode = match entry.mode {
-                    ryeos_state::objects::SourceFileMode::ReadOnly => 0o644,
-                    ryeos_state::objects::SourceFileMode::Executable => 0o755,
-                };
-                if digest != entry.blob_hash
-                    || lillux::normalized_portable_regular_mode(&metadata)? != expected_mode
-                {
-                    anyhow::bail!("private admitted source file {path} failed verification");
-                }
-                observed.push(path);
-            }
-            _ => anyhow::bail!("private admitted source contains unsupported entry {path}"),
-        }
-    }
+    ryeos_state::source_verification::verify_admitted_source_tree(&target, manifest)?;
     Ok(())
 }
 
@@ -536,8 +606,10 @@ fn open_source_parent(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) mod external_delivery;
 
     fn directory_binding() -> ryeos_state::objects::EffectiveSourceBinding {
         ryeos_state::objects::EffectiveSourceBinding {
@@ -657,20 +729,101 @@ mod tests {
     }
 
     #[test]
+    fn source_member_retained_closure_has_no_project_shadow() {
+        use ryeos_state::objects::{AdmittedDirectCommandClosure, AdmittedExecutionClosure};
+        let mut closure = AdmittedExecutionClosure::DirectItemExecutor {
+            execution_plan: serde_json::json!({
+                "plan_id":"test", "root_executor_id":"@subprocess", "root_ref":"tool:test/run", "item_kind":"tool",
+                "nodes":[{"node_type":"dispatch_subprocess", "id":"spawn", "spec":{
+                    "cmd":"/python", "args":[{"kind":"admitted_source_member", "relative_path":"lib/run.py"}]
+                }, "executor_chain":[]}],
+                "entrypoint":"spawn", "capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
+                "materialization_requirements":[], "network_authority_ceiling":"node_policy", "filesystem_authority_ceiling":"node_policy",
+                "target_requirement":null, "resource_authority_ceiling":"node_policy", "cache_key":"test", "executor_authorities":[]
+            }),
+            protocol_descriptor_document: String::new(),
+            command: AdmittedDirectCommandClosure::NodePolicy,
+            admitted_project_root: Some("/project".into()),
+        };
+        let retained: AdmittedExecutionClosure =
+            serde_json::from_value(serde_json::to_value(&closure).unwrap()).unwrap();
+        assert_eq!(
+            capsule_source_placement(&retained, true).unwrap(),
+            SourceMountPlacement::ExecutionRuntime
+        );
+        assert_eq!(
+            capsule_source_placement(&retained, false).unwrap(),
+            SourceMountPlacement::Project
+        );
+        if let AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. } = &mut closure {
+            execution_plan["nodes"][0]["spec"]["args"] =
+                serde_json::json!([{"kind":"literal","value":".ai/tools/test/run.py"}]);
+        }
+        assert_eq!(
+            capsule_source_placement(&closure, true).unwrap(),
+            SourceMountPlacement::Project
+        );
+    }
+
+    #[test]
+    fn source_member_placement_matches_actual_delivery() {
+        assert_eq!(
+            source_member_placement(true, true),
+            SourceMountPlacement::ExecutionRuntime
+        );
+        assert_eq!(
+            source_member_placement(true, false),
+            SourceMountPlacement::Project
+        );
+        assert_eq!(
+            source_member_placement(false, true),
+            SourceMountPlacement::Project
+        );
+        assert_eq!(
+            source_member_placement(false, false),
+            SourceMountPlacement::Project
+        );
+    }
+
+    #[test]
     fn bound_source_keeps_daemon_authority_separate_from_execution_coordinate() {
         let cache = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(cache.path().join("baseline.toml"), b"captured = true\n").unwrap();
+        let (records, _) = external_delivery::source_records();
+        std::fs::write(cache.path().join("unlisted.py"), b"not admitted").unwrap();
+        std::fs::create_dir(cache.path().join("directory")).unwrap();
+        std::os::unix::fs::symlink("baseline.toml", cache.path().join("alias")).unwrap();
         let bound = BoundSourceClosure {
             mounts: Vec::new(),
             sealed_identity_env: "{}".to_owned(),
             execution_entry_path: workspace.path().join("not-mounted/profile.json"),
+            execution_root: workspace.path().join("not-mounted"),
+            members: ["baseline.toml", "directory", "alias"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
             source_directory: lillux::PinnedDirectory::open(cache.path())
                 .unwrap()
                 .unwrap(),
+            records,
             _leases: Vec::new(),
         };
         assert!(!bound.execution_entry_path().parent().unwrap().exists());
+        assert_eq!(
+            bound.member_path("baseline.toml").unwrap(),
+            workspace
+                .path()
+                .join("not-mounted/baseline.toml")
+                .to_str()
+                .unwrap()
+        );
+        assert!(bound.member_path("missing.py").is_err());
+        assert!(bound.member_path("unlisted.py").is_err());
+        assert!(bound.member_path("directory").is_err());
+        assert!(bound.member_path("alias").is_err());
+        assert!(bound.member_path("../baseline.toml").is_err());
+        assert!(!workspace.path().join("not-mounted").exists());
         let file = bound
             .source_directory()
             .open_pinned_regular_descendant(Path::new("baseline.toml"), false)

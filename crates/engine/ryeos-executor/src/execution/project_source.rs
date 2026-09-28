@@ -401,6 +401,7 @@ impl PreparedExternalProductConsumer {
         state: &AppState,
         context: &ryeos_app::handler_context::HandlerContext,
         selectors: &[ryeos_state::external_content::products::composition::ProductSelection],
+        project_context_resolver: Option<Arc<dyn ryeos_app::operator_external_content::product_qualification::QualificationProjectContextResolver>>,
     ) -> anyhow::Result<()> {
         let subject = prepared_product_subject(self._project_context.as_ref())?;
         let engine = self
@@ -413,7 +414,7 @@ impl PreparedExternalProductConsumer {
                 .as_ref()
                 .map(|context| context.effective_path.clone()),
         );
-        ryeos_app::operator_external_content::product_composition::select_products(
+        ryeos_app::operator_external_content::product_composition::select_products_with_project_context_resolver(
             state,
             context,
             engine,
@@ -421,6 +422,7 @@ impl PreparedExternalProductConsumer {
             &subject,
             &mut self.resolution,
             selectors,
+            project_context_resolver.as_deref(),
         )?;
         Ok(())
     }
@@ -433,6 +435,7 @@ impl PreparedExternalProductConsumer {
         state: Arc<AppState>,
         context: ryeos_app::handler_context::HandlerContext,
         request: &ryeos_app::operator_external_content::product_composition::ComposeRetainedProductsRequest,
+        project_context_resolver: Option<Arc<dyn ryeos_app::operator_external_content::product_qualification::QualificationProjectContextResolver>>,
     ) -> anyhow::Result<
         ryeos_app::operator_external_content::product_composition::PreparedProductImports,
     > {
@@ -464,6 +467,7 @@ impl PreparedExternalProductConsumer {
             engine,
             &roots,
             &mut self.resolution,
+            project_context_resolver.as_deref(),
         )
     }
 }
@@ -775,15 +779,9 @@ fn resolve_pinned_snapshot_context_admitted(
     let (target_path, project_guard) = match realization {
         PinnedContextRealization::ReadOnly => (None, None),
         PinnedContextRealization::Cow => {
-            let execution_root = runtime_cache.join("executions");
-            std::fs::create_dir_all(&execution_root)
+            ryeos_engine::execution_workspace::validate_workspace_id(checkout_id)
                 .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&execution_root, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-            }
+            let execution_root = runtime_cache.join("executions");
             let workspace_root = execution_root.join(checkout_id);
             state
                 .state_store
@@ -797,9 +795,6 @@ fn resolve_pinned_snapshot_context_admitted(
                     })?,
                 )
                 .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-            let workspace =
-                crate::execution::workspace::WorkspaceLayout::create(&execution_root, checkout_id)
-                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
             let reserved = state
                 .state_store
                 .execution_workspace(checkout_id)
@@ -809,30 +804,29 @@ fn resolve_pinned_snapshot_context_admitted(
                         "workspace reservation disappeared".to_string(),
                     )
                 })?;
-            if reserved.state == WorkspaceState::Reserved {
-                state
-                    .state_store
-                    .transition_execution_workspace(
-                        checkout_id,
-                        &[WorkspaceState::Reserved],
-                        WorkspaceState::Constructing,
-                        None,
-                    )
-                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-            } else if reserved.state != WorkspaceState::Constructing {
+            if reserved.state != WorkspaceState::Reserved {
                 return Err(ProjectSourceError::CheckoutFailed(format!(
-                    "workspace {checkout_id} cannot be adopted from state {}",
+                    "workspace {checkout_id} cannot be freshly created from state {}",
                     reserved.state
                 )));
             }
-            let project = workspace.project;
-            (
-                Some(project.clone()),
-                Some(Arc::new(
-                    TempDirGuard::new_workspace(workspace.root, project)
-                        .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?,
-                )),
-            )
+            // Fresh construction retains its original descriptor authority.
+            // An existing path or interrupted Constructing row is not an
+            // adoption proof; retained recovery has its own journal-backed path.
+            let (project, guard) =
+                ryeos_app::temp_dir_guard::create_runtime_workspace(&runtime_cache, checkout_id)
+                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            guard.preserve_for_explicit_cleanup();
+            state
+                .state_store
+                .transition_execution_workspace(
+                    checkout_id,
+                    &[WorkspaceState::Reserved],
+                    WorkspaceState::Constructing,
+                    None,
+                )
+                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            (Some(project), Some(guard))
         }
     };
     let project_materialization = match target_path.as_deref() {
@@ -951,6 +945,110 @@ pub fn resolve_read_only_snapshot_context(
         captured_generation: None,
         realization: PinnedContextRealization::ReadOnly,
     })
+}
+
+/// App-owned qualification context resolver implemented at the executor
+/// boundary, where pinned snapshot materialization and request Engine
+/// construction already live.
+pub fn qualification_project_context_resolver(
+    state: &AppState,
+) -> Arc<dyn ryeos_app::operator_external_content::product_qualification::QualificationProjectContextResolver>
+{
+    Arc::new(ExecutorQualificationProjectContextResolver {
+        state: Arc::new(state.clone()),
+    })
+}
+
+struct ExecutorQualificationProjectContextResolver {
+    state: Arc<AppState>,
+}
+
+impl
+    ryeos_app::operator_external_content::product_qualification::QualificationProjectContextResolver
+    for ExecutorQualificationProjectContextResolver
+{
+    fn resolve_read_only_snapshot(
+        &self,
+        snapshot_hash: &str,
+        display_path: &Path,
+        operation_id: &str,
+    ) -> anyhow::Result<
+        Box<dyn ryeos_app::operator_external_content::product_qualification::QualificationProjectContextLease>,
+    >{
+        let context = resolve_read_only_snapshot_context(
+            &self.state,
+            snapshot_hash,
+            display_path.to_path_buf(),
+            operation_id,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("resolve exact qualification verifier project snapshot: {error}")
+        })?;
+        let materialization = context.pinned_materialization.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("snapshot resolver omitted pinned materialization proof")
+        })?;
+        let lifeline = context.temp_dir.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("snapshot resolver omitted materialization lifetime guard")
+        })?;
+        if context.snapshot_hash.as_deref() != Some(snapshot_hash)
+            || !matches!(
+                &context.source,
+                ProjectSource::Snapshot { hash } if hash == snapshot_hash
+            )
+            || context.original_path != display_path
+            || materialization.snapshot_hash() != snapshot_hash
+            || materialization.path() != context.effective_path
+            || !materialization.owns_path(&context.effective_path)?
+            || !lifeline.owns_effective_path(&context.effective_path)
+        {
+            anyhow::bail!("executor snapshot context contradicts exact qualification authority");
+        }
+        materialization.ensure_path_binding()?;
+        Ok(Box::new(ExecutorQualificationProjectContextLease {
+            context,
+        }))
+    }
+}
+
+struct ExecutorQualificationProjectContextLease {
+    context: ResolvedProjectContext,
+}
+
+impl ryeos_app::operator_external_content::product_qualification::QualificationProjectContextLease
+    for ExecutorQualificationProjectContextLease
+{
+    fn snapshot_hash(&self) -> &str {
+        self.context
+            .snapshot_hash
+            .as_deref()
+            .expect("verified snapshot lease has a snapshot hash")
+    }
+
+    fn original_path(&self) -> &Path {
+        &self.context.original_path
+    }
+
+    fn effective_path(&self) -> &Path {
+        &self.context.effective_path
+    }
+
+    fn request_engine(&self) -> &Arc<Engine> {
+        &self.context.request_engine
+    }
+
+    fn pinned_materialization(&self) -> &ryeos_state::PinnedProjectMaterialization {
+        self.context
+            .pinned_materialization
+            .as_ref()
+            .expect("verified snapshot lease has materialization proof")
+    }
+
+    fn workspace_lifeline(&self) -> &Arc<TempDirGuard> {
+        self.context
+            .temp_dir
+            .as_ref()
+            .expect("verified snapshot lease has a workspace lifeline")
+    }
 }
 
 /// Sentinel value for `--no-project` mode: the caller has chosen to

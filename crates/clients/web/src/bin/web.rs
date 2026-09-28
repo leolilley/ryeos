@@ -63,6 +63,13 @@ struct MintResponse {
     session_id: String,
     #[allow(dead_code)]
     token: String,
+    /// Exact public coordinate of the surface binding admitted for this
+    /// launch. The browser obtains the same attachment through session open;
+    /// retaining it in this strict response type keeps the launcher and daemon
+    /// on one current mint contract without treating the coordinate as a
+    /// client-side grant.
+    #[allow(dead_code)]
+    attachment: ryeos_client_base::ui::UiBindingAttachment,
 }
 
 /// The daemon route the launcher mints against. Used for BOTH the signed
@@ -158,6 +165,10 @@ async fn main() -> Result<()> {
             ryeos_client_base::UI_BINDING_CONTRACT_REVISION
         );
     }
+    mint_resp
+        .attachment
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid mint binding attachment: {error}"))?;
 
     if cli.print_url || cli.no_open {
         println!("{}", mint_resp.launch_url);
@@ -419,7 +430,21 @@ mod tests {
             "ui_binding_contract_revision": ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
             "token": "abc-123",
             "launch_url": "http://localhost:8080/custom/launch/abc-123",
-            "session_id": "sess-456"
+            "session_id": "sess-456",
+            "attachment": {
+                "binding_attachment_id": "attachment-789",
+                "binding_generation": 1,
+                "binding_digest": "digest-789",
+                "surface_ref": "surface:ryeos/ui/assistant-observe",
+                "surface_generation": "surface-generation-789",
+                "effective_surface": {"name": "assistant-observe"},
+                "project_path": null,
+                "posture": "observation_only",
+                "binding_request_bounds": {
+                    "max_request_bytes": 4096,
+                    "max_input_bytes": 1024
+                }
+            }
         });
         let resp: MintResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(
@@ -427,6 +452,8 @@ mod tests {
             "http://localhost:8080/custom/launch/abc-123"
         );
         assert_eq!(resp.session_id, "sess-456");
+        assert_eq!(resp.attachment.binding_attachment_id, "attachment-789");
+        assert!(resp.attachment.validate().is_ok());
     }
 
     #[test]

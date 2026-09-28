@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-17T00:05:36Z:69362417812ba226cb0822b18b04264714f2f8379f09cd698b8b6ce5a204801b:O5s7fBCj6W7j7GcGWwaafNDkqD0C7k1vQ+Kh0074mHJTk7fBXPe+Kub1Fx9+x+hUnjvmaDkxqgj6/dHRqHV6BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-27T22:01:04Z:12db5676b51943e6ad69a58d9709901c270fdd7ae28cf057e02a41ef8f34682e:PqDJY4xkwjKEyhUSjs9DWZMabzbbFnwglr8yjLtjrGHdMWJaOQ6rL2/JNWO1AVaqEqOd1GZmH7Lib9cYW2b1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "README"
 title: "RyeOS Repository Development Knowledge"
 description: "Scope and index for contributor-facing knowledge used to change, test, review, and release the RyeOS repository"
 entry_type: reference
-version: "1.0.2"
+version: "1.0.3"
 ```
 
 # RyeOS Repository Development Knowledge
@@ -36,6 +36,8 @@ contributor guide rather than duplicating the product documentation.
 
 - `architecture` and `dependency-constitution`: repository layout, ownership,
   and dependency direction.
+- `host-capability-boundary`: required ownership and review gates for complete
+  host operations, interactive process migration, fixtures and diagnostics.
 - `dev-workflow`, `build-and-test`, `remote-development-and-qualification`,
   `ui-development`, `mcp-setup`, and `source-local-bundle-development`:
   contributor workflows.
@@ -47,7 +49,7 @@ contributor guide rather than duplicating the product documentation.
 - `steering-graph-interrupt-and-cancel-path`: an implementation decision record.
 - `admitted-execution-recovery`: a contributor-facing map of the recovery code
   and the invariants changes to that code must preserve.
-- `ui-design-system`: the governing Gruvbox visual language, nested-workspace
+- `ui-design-system`: the governing Gruvbox visual language, nested-view-set
   direction, component anatomy, contextual-input rules, renderer/content
   ownership and visual review criteria. Read it before implementing or restyling
   web or terminal UI. It preserves the launcher, optional slots and authored

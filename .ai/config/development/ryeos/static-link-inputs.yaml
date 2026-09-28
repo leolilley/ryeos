@@ -1,0 +1,23 @@
+# ryeos:signed:2026-09-22T03:41:07Z:83e22140d7e6e7cf696816d8a150c5f4b2714d8c7898a5c54653d78f23f5d681:szRCfJT0wYfc7MZgoUwzEa9iA2NnXjwjahGTrNq3KjESti4JX9Nzfvgn069AhmVWkzQ2EEwWziMsp5Oc4IqCDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+{
+  "category": "development/ryeos",
+  "name": "static-link-inputs",
+  "version": "1.0.0",
+  "description": "Exact supplementary GNU static-link inputs; leaves retained Stage-0 unchanged",
+  "schema": "ryeos.development.static_link_inputs.v1",
+  "publisher_image": "docker.io/library/rust@sha256:443dd9a3260cf23c22fc05051dd5661dd7b4028d3d25dbaffab6563b63c3539c",
+  "target": "x86_64-unknown-linux-gnu",
+  "inputs": {
+    "usr/lib/x86_64-linux-gnu/libc.a": {"source":"/usr/lib/x86_64-linux-gnu/libc.a","bytes":5669090,"mode":420,"sha256":"421b7c3395b35301a4626593b35842849ae1ba43582320383ffbc9790d918515"},
+    "usr/lib/x86_64-linux-gnu/libm.a": {"source":"/usr/lib/x86_64-linux-gnu/libm.a","bytes":132,"mode":420,"sha256":"aef85c72b98fbeb021f6bdd3abb137e62643d7970bd59f84dc1a7c43fa6b9f14"},
+    "usr/lib/x86_64-linux-gnu/libm-2.41.a": {"source":"/usr/lib/x86_64-linux-gnu/libm-2.41.a","bytes":2502842,"mode":420,"sha256":"0d748002785b531c0aa84679682deee556828ab21f9912569edd6bfae484ed0e"},
+    "usr/lib/x86_64-linux-gnu/libmvec.a": {"source":"/usr/lib/x86_64-linux-gnu/libmvec.a","bytes":1762900,"mode":420,"sha256":"60f1a89b047a78bbd64843d1e388b8b7ee6f4d6b9faf425f0f21f1617a8dbd4f"},
+    "usr/lib/x86_64-linux-gnu/libpthread.a": {"source":"/usr/lib/x86_64-linux-gnu/libpthread.a","bytes":8,"mode":420,"sha256":"f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5"},
+    "usr/lib/x86_64-linux-gnu/libdl.a": {"source":"/usr/lib/x86_64-linux-gnu/libdl.a","bytes":8,"mode":420,"sha256":"f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5"},
+    "usr/lib/x86_64-linux-gnu/librt.a": {"source":"/usr/lib/x86_64-linux-gnu/librt.a","bytes":8,"mode":420,"sha256":"f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5"},
+    "usr/lib/x86_64-linux-gnu/libutil.a": {"source":"/usr/lib/x86_64-linux-gnu/libutil.a","bytes":8,"mode":420,"sha256":"f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5"},
+    "usr/lib/x86_64-linux-gnu/rcrt1.o": {"source":"/usr/lib/x86_64-linux-gnu/rcrt1.o","bytes":1640,"mode":420,"sha256":"4ca31259aee8415b60fe566c00cecfa5858f1103296b8043f175ccf2489f00ec"},
+    "usr/lib/x86_64-linux-gnu/crt1.o": {"source":"/usr/lib/x86_64-linux-gnu/crt1.o","bytes":1776,"mode":420,"sha256":"8cd1a50edd44a4ded5856bf2254dc106401b37c285dcc55a594475438cd6ec1a"},
+    "usr/share/doc/libc6/copyright": {"source":"/usr/share/doc/libc6/copyright","bytes":51200,"mode":420,"sha256":"f5788886720a2605a946e81d571e6c8162b09f58d2e2ceb8d36e5768fccd850d"}
+  }
+}

@@ -1,0 +1,15 @@
+# ryeos:signed:2026-09-19T03:51:20Z:ef5a5571569d7a9748716cbaf47225d90e82b5d1b56c9d2ce258df75ac5f2e07:QIWINQcemiNKrqtNe3qzMVuI+NV+mn+F64V+UVvbuMYNBt9WwPQsMRtZnRsBP6LmA3MqO8SFx9BbO+qS33M7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: set-compose
+version: "1.0.0"
+description: Replace one entry in an exact predecessor set and verify the complete prospective composition.
+endpoint: bundle_release.set_compose
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/set-compose"]
+schema:
+  catalog_namespace: string
+  bundle_publication_policy_section_digest: string
+  trust_epoch: integer
+  predecessor_set_hash: string
+  replacement: object
+  substrate_protocol: integer

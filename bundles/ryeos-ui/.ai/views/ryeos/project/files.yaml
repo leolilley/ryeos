@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:f5ad69fa0f3739c6c87add86ae28c06dd52e8f0d3f3f07575b4f5df7d0f8394c:ul0joxNP6Vtzev+HAHIRyZQC2xvb+2bQ5xOxP0zDYL5n5m5xvUMHRqAvTVHQmsTXqMUFl1d49rBxr1UAdxACDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-18T23:48:29Z:01d98e4b9e4bedcd966599d1bba122c299aff98220c246e3eff5650b8d74b3e9:JBN6XFCxfm1GiBf+tVNn7/JNqkyO5G3M+yKRoUn4gcYKxCKzOQiCbiTiHrmWeywDrOlo/93O+UL4mE2nDLhDBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-files
 title: Files
 version: "1.0.0"
@@ -7,24 +7,32 @@ description: Active project file tree
 widget: rows
 sources:
   default:
-    ref: service:ui/ryeos-ui/files/list
+    ref: service:ui/ryeos-ui/files/tree
     role: files
     params:
       root: project
       project_path: "@session:project_root"
       path: ""
+      max_depth: 8
+      max_entries: 3000
     collection: entries
     requires_project: true
-  read:
-    ref: service:ui/ryeos-ui/files/read
-    role: file_read
-    params:
-      root: project
-      project_path: "@session:project_root"
-      path: ""
-    dynamic_parameters: [root, path]
-    activation: on_demand
-    requires_project: true
 projections:
-  primary: name
-  meta: kind
+  primary: path
+  secondary: name
+  meta: size
+selection:
+  activate: open-document
+affordances:
+  - id: open-document
+    label: Open document
+    producer: selection
+    visible_when: { field: is_dir, equals: false }
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        file:
+          root: project
+          path: "{record.path}"
+      open_view: view:ryeos/project/document

@@ -41,6 +41,7 @@ mod dedicated_sessions;
 mod routing;
 #[cfg(feature = "crash-qualification-test-support")]
 mod runtime_phase_cut;
+mod scoped_child;
 mod transport;
 mod workload_client;
 
@@ -298,6 +299,15 @@ pub(crate) async fn dispatch_runtime_method(
             | "runtime.provider_attempt_local_stream_start"
             | "runtime.provider_attempt_local_stream_next"
             | "runtime.provider_attempt_local_stream_control"
+            | "runtime.scoped_child_expected_source"
+            | "runtime.scoped_child_expected_isolation_class"
+            | "runtime.scoped_child_start"
+            | "runtime.scoped_child_resume"
+            | "runtime.scoped_child_observe"
+            | "runtime.scoped_child_abort"
+            | "runtime.scoped_child_write"
+            | "runtime.scoped_child_read"
+            | "runtime.scoped_child_close_input"
     ) {
         // runtime.poll_input drains staged operator inputs and persists them as
         // durable `cognition_in` for the running thread. Require BOTH proofs the
@@ -374,6 +384,26 @@ pub(crate) async fn dispatch_runtime_method(
 
     if let Some(cap) = callback_cap.as_ref() {
         cap.runtime_method_surface.authorize(method)?;
+        // The ordinary managed-runtime method surface is deliberately broad.
+        // It must never itself confer authority to start or observe a
+        // qualification producer: only the root's protected launch grant can.
+        if matches!(
+            method,
+            "runtime.scoped_child_expected_source"
+                | "runtime.scoped_child_expected_isolation_class"
+                | "runtime.scoped_child_start"
+                | "runtime.scoped_child_resume"
+                | "runtime.scoped_child_observe"
+                | "runtime.scoped_child_abort"
+                | "runtime.scoped_child_write"
+                | "runtime.scoped_child_read"
+                | "runtime.scoped_child_close_input"
+        ) && cap.scoped_producer_grant.is_none()
+        {
+            return Err(anyhow!(
+                "scoped child method requires an admitted producer grant"
+            ));
+        }
     }
     enforce_aggregate_work_deadline(method, state, callback_cap.as_ref())?;
 
@@ -597,6 +627,20 @@ pub(crate) async fn dispatch_runtime_method(
             })?;
             accounting::handle_provider_attempt_local_stream_control(&clean_params, state, cap)
         }
+        "runtime.scoped_child_expected_source"
+        | "runtime.scoped_child_expected_isolation_class"
+        | "runtime.scoped_child_start"
+        | "runtime.scoped_child_resume"
+        | "runtime.scoped_child_observe"
+        | "runtime.scoped_child_abort"
+        | "runtime.scoped_child_write"
+        | "runtime.scoped_child_read"
+        | "runtime.scoped_child_close_input" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("scoped child operation requires callback authority"))?;
+            scoped_child::handle(method, &clean_params, state, cap).await
+        }
         #[cfg(feature = "crash-qualification-test-support")]
         "runtime.test_phase_cut" => runtime_phase_cut::reach(&clean_params).await,
         other => anyhow::bail!("unknown runtime method: {other}"),
@@ -643,6 +687,11 @@ fn enforce_aggregate_work_deadline_at_ms(
             | "runtime.provider_attempt_mark_issued"
             | "runtime.provider_attempt_local_stream_start"
             | "runtime.provider_attempt_local_stream_next"
+            | "runtime.scoped_child_expected_source"
+            | "runtime.scoped_child_expected_isolation_class"
+            | "runtime.scoped_child_start"
+            | "runtime.scoped_child_write"
+            | "runtime.scoped_child_close_input"
     ) {
         return Ok(());
     }
@@ -738,6 +787,9 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.provider_attempt_prepare"
             | "runtime.provider_attempt_mark_issued"
             | "runtime.provider_attempt_local_stream_start"
+            | "runtime.scoped_child_start"
+            | "runtime.scoped_child_write"
+            | "runtime.scoped_child_close_input"
     )
 }
 
@@ -750,6 +802,9 @@ fn is_stop_completion_method(method: &str) -> bool {
             | "runtime.provider_attempt_settle"
             | "runtime.provider_attempt_release_unissued"
             | "runtime.provider_attempt_local_stream_control"
+            | "runtime.scoped_child_resume"
+            | "runtime.scoped_child_observe"
+            | "runtime.scoped_child_abort"
     )
 }
 
@@ -773,6 +828,9 @@ fn is_sensitive_runtime_read_method(method: &str) -> bool {
             | "runtime.dedicated_session_status"
             | "runtime.wait_dedicated_session"
             | "runtime.dedicated_session_command_observation"
+            | "runtime.scoped_child_expected_source"
+            | "runtime.scoped_child_expected_isolation_class"
+            | "runtime.scoped_child_read"
     )
 }
 
@@ -902,7 +960,7 @@ async fn handle_attach_process(
         let stop_thread_id = attached.thread_id.clone();
         let report = tokio::task::spawn_blocking(move || {
             ryeos_app::cascade::signal_thread(
-                &stop_state.state_store,
+                &stop_state,
                 &stop_thread_id,
                 ryeos_app::cascade::CascadeMode::Graceful,
             )
@@ -1768,6 +1826,46 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn scoped_child_start_and_observe_have_distinct_admission_classes() {
+        assert!(is_sensitive_runtime_read_method(
+            "runtime.scoped_child_expected_source"
+        ));
+        assert!(!is_unrestricted_runtime_read_method(
+            "runtime.scoped_child_expected_source"
+        ));
+        assert!(!is_stop_completion_method(
+            "runtime.scoped_child_expected_source"
+        ));
+        assert!(is_sensitive_runtime_read_method(
+            "runtime.scoped_child_expected_isolation_class"
+        ));
+        assert!(!is_unrestricted_runtime_read_method(
+            "runtime.scoped_child_expected_isolation_class"
+        ));
+        assert!(!is_stop_completion_method(
+            "runtime.scoped_child_expected_isolation_class"
+        ));
+        assert!(is_running_runtime_mutation("runtime.scoped_child_start"));
+        assert!(!is_stop_completion_method("runtime.scoped_child_start"));
+        assert!(!is_running_runtime_mutation("runtime.scoped_child_resume"));
+        assert!(is_stop_completion_method("runtime.scoped_child_resume"));
+        assert!(!is_unrestricted_runtime_read_method(
+            "runtime.scoped_child_resume"
+        ));
+        assert!(!is_running_runtime_mutation("runtime.scoped_child_observe"));
+        assert!(is_stop_completion_method("runtime.scoped_child_observe"));
+        assert!(!is_chain_read_method("runtime.scoped_child_observe"));
+        assert!(!is_unrestricted_runtime_read_method(
+            "runtime.scoped_child_observe"
+        ));
+        assert!(!is_running_runtime_mutation("runtime.scoped_child_abort"));
+        assert!(is_stop_completion_method("runtime.scoped_child_abort"));
+        assert!(!is_unrestricted_runtime_read_method(
+            "runtime.scoped_child_abort"
+        ));
+    }
+
+    #[test]
     fn runtime_attach_has_no_caller_selected_process_identity() {
         let request: RuntimeAttachProcessParams =
             serde_json::from_value(json!({"thread_id":"T-runtime"})).unwrap();
@@ -2011,6 +2109,8 @@ mod tests {
         );
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
+        let controller_lifetime =
+            ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
         let state = AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
@@ -2033,6 +2133,7 @@ mod tests {
             commands,
             callback_tokens: Arc::new(CallbackCapabilityStore::new()),
             thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
+            controller_lifetime,
             extensions: Arc::new(ryeos_app::extension_state::ExtensionState::new()),
             write_barrier: Arc::new(WriteBarrier::new()),
             started_at: Instant::now(),
@@ -2044,10 +2145,16 @@ mod tests {
             services: Arc::new(ryeos_api::build_service_registry()),
             service_descriptors: ryeos_api::handlers::ALL,
             node_config: Arc::new(ryeos_app::node_config::NodeConfigSnapshot {
+                external_execution: Vec::new(),
+                runtime_snapshot_production: Vec::new(),
                 bundles: vec![],
                 routes: vec![],
                 commands: vec![],
             }),
+            external_placement_backends: Arc::new(Default::default()),
+            external_candidate_connectors: Arc::new(Default::default()),
+            external_provider_configurations: Arc::new(Default::default()),
+            external_candidate_imports: Arc::new(Default::default()),
             node_policy: Arc::new(
                 ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
@@ -2076,6 +2183,8 @@ mod tests {
             execution_resources: Arc::new(
                 ryeos_app::execution_resources::ExecutionResourcePool::deny_all(),
             ),
+            scoped_producer_authorities: Arc::new(Default::default()),
+            scoped_producer_processes: Arc::new(Default::default()),
         };
 
         (tmpdir, state)

@@ -1,0 +1,18 @@
+[package]
+name = "ryeos-codex-external-configuration"
+version = "0.5.100"
+edition = "2024"
+description = "Signed Codex provider configuration adapter for RyeOS external candidates"
+license.workspace = true
+repository = "https://github.com/leolilley/ryeos"
+
+[[bin]]
+name = "ryeos-codex-external-configuration"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+lillux = { workspace = true }
+ryeos-external-execution-contract = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }

@@ -621,7 +621,7 @@ impl CasStore {
         source: fs::File,
         display_path: &Path,
     ) -> Result<StreamedBlobOutcome> {
-        self.put_blob_from_open_regular_inner(source, display_path, None)
+        self.put_blob_from_open_regular_inner(source, display_path, None, None)
     }
 
     /// Bounded form of [`Self::put_blob_from_open_regular`]. The bound is
@@ -633,7 +633,20 @@ impl CasStore {
         display_path: &Path,
         max_bytes: u64,
     ) -> Result<StreamedBlobOutcome> {
-        self.put_blob_from_open_regular_inner(source, display_path, Some(max_bytes))
+        self.put_blob_from_open_regular_inner(source, display_path, Some(max_bytes), None)
+    }
+
+    /// Cooperatively bounded ingestion: check the monotonic deadline between
+    /// reads, writes, verification and publication. This cannot interrupt a
+    /// kernel filesystem stall; the caller still needs an outer lifetime bound.
+    pub fn put_blob_from_open_regular_with_deadline(
+        &self,
+        source: fs::File,
+        display_path: &Path,
+        max_bytes: u64,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<StreamedBlobOutcome> {
+        self.put_blob_from_open_regular_inner(source, display_path, Some(max_bytes), Some(deadline))
     }
 
     fn put_blob_from_open_regular_inner(
@@ -641,7 +654,9 @@ impl CasStore {
         mut source: fs::File,
         display_path: &Path,
         max_bytes: Option<u64>,
+        deadline: Option<crate::time::MonotonicDeadline>,
     ) -> Result<StreamedBlobOutcome> {
+        check_capture_deadline(deadline)?;
         #[cfg(not(unix))]
         {
             let _ = (&mut source, display_path, max_bytes);
@@ -691,6 +706,7 @@ impl CasStore {
                 let mut size = 0_u64;
                 let mut buffer = vec![0_u8; 1024 * 1024];
                 loop {
+                    check_capture_deadline(deadline)?;
                     let read = source.read(&mut buffer).with_context(|| {
                         format!("stream project file {} into CAS", display_path.display())
                     })?;
@@ -709,10 +725,13 @@ impl CasStore {
                         );
                     }
                     digest.update(&buffer[..read]);
+                    check_capture_deadline(deadline)?;
                     staged.write_all(&buffer[..read])?;
                     size = next_size;
                 }
+                check_capture_deadline(deadline)?;
                 staged.sync_all()?;
+                check_capture_deadline(deadline)?;
 
                 let after = source.metadata()?;
                 let unchanged = before.dev() == after.dev()
@@ -741,7 +760,7 @@ impl CasStore {
                 )?;
                 let existing = target_parent.open_regular(&target_name, false)?;
                 let created = if let Some(existing) = existing {
-                    verify_existing_streamed_entry(existing, &hash, size, &target_path)?;
+                    verify_existing_streamed_entry(existing, &hash, size, &target_path, deadline)?;
                     false
                 } else if target_parent.publish_regular_link_from(
                     &target_name,
@@ -759,12 +778,13 @@ impl CasStore {
                                 target_path.display()
                             )
                         })?;
-                    verify_existing_streamed_entry(existing, &hash, size, &target_path)?;
+                    verify_existing_streamed_entry(existing, &hash, size, &target_path, deadline)?;
                     false
                 };
                 if !created {
                     let _ = staging.remove_if_same(&staging_name, &staged);
                 }
+                check_capture_deadline(deadline)?;
                 Ok(StreamedBlobOutcome {
                     hash,
                     size,
@@ -899,7 +919,9 @@ fn verify_existing_streamed_entry(
     expected_hash: &str,
     expected_size: u64,
     path: &Path,
+    deadline: Option<crate::time::MonotonicDeadline>,
 ) -> Result<()> {
+    check_capture_deadline(deadline)?;
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() || metadata.len() != expected_size {
         anyhow::bail!(
@@ -910,6 +932,7 @@ fn verify_existing_streamed_entry(
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
+        check_capture_deadline(deadline)?;
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
@@ -924,6 +947,13 @@ fn verify_existing_streamed_entry(
             actual,
             expected_hash
         );
+    }
+    Ok(())
+}
+
+fn check_capture_deadline(deadline: Option<crate::time::MonotonicDeadline>) -> Result<()> {
+    if deadline.is_some_and(|deadline| deadline.has_elapsed()) {
+        anyhow::bail!("regular-file capture deadline expired");
     }
     Ok(())
 }

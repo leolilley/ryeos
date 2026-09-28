@@ -2,6 +2,14 @@
 
 use anyhow::Context;
 use rand::RngCore as _;
+pub mod agreement;
+
+/// Fallible entropy acquisition for protocol-library integrations.
+pub fn fill_random_bytes(bytes: &mut [u8]) -> anyhow::Result<()> {
+    rand::rngs::OsRng
+        .try_fill_bytes(bytes)
+        .map_err(|_| anyhow::anyhow!("host entropy acquisition failed"))
+}
 
 pub use ed25519_dalek::pkcs8::{
     DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey,

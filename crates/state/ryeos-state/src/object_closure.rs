@@ -2072,7 +2072,8 @@ mod tests {
             "kind":"persistent_session_capsule", "execution_realization_hash":h("99"),
             "execution_closure":{"command":{"authority":"runtime_path"}},
             "exact_program":{"resolution_output":semantic},
-            "retained_product_selections":resolution["composed"]["derived"]["effective_external_product_selections"]
+            "retained_product_selections":resolution["composed"]["derived"]["effective_external_product_selections"],
+            "retained_external_runtime_qualification":null
         });
         for capsule in [&outer, &dependency, &persistent] {
             let edges = typed_object_edges(capsule).unwrap();
@@ -2089,6 +2090,16 @@ mod tests {
                 assert!(!edges.iter().any(|edge| edge.hash == historical));
             }
         }
+        let mut qualified = persistent.clone();
+        qualified["retained_external_runtime_qualification"] = json!({
+            "proof": {"attestation_hash": h("aa")}
+        });
+        let edges = typed_object_edges(&qualified).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("aa") && edge.expected == ExpectedObject::Kind("attestation")
+        }));
+        qualified["retained_external_runtime_qualification"] = json!({"proof": {}});
+        assert!(typed_object_edges(&qualified).is_err());
     }
 
     #[test]

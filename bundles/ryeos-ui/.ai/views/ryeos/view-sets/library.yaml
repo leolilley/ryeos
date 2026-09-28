@@ -1,0 +1,94 @@
+# ryeos:signed:2026-09-19T07:22:30Z:a1c21494b1bc96373608cb2dbac4db19c1a3f72877665260ed0a1711c9eb16f0:0Nlte0zthDKT7IvLkGaj/EjvFhla8X5vYzeZ1B/DC0QrfgJCTk8l9EuvBnBrF+5sBq4YW74jDmGqtrKkzYHKBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: view-set-library
+title: Saved view sets
+version: "1.0.0"
+description: Save a named composition or open a fresh copy under current admission; no work or credentials are restored
+widget: sections
+sources:
+  library:
+    ref: service:ui/ryeos-ui/config/get
+affordances:
+  - id: open
+    label: Open saved composition
+    invoke:
+      plane: ui
+      operation: open_saved_view_set
+      value:
+        id: "{record.id}"
+        name: "{record.name}"
+        composition: "{record.composition}"
+  - id: save
+    label: Save current view set
+    invoke:
+      plane: ui
+      operation: save_active_view_set
+      persist_affordance: persist
+      value: "{record.context}"
+  - id: persist
+    label: Persist captured composition
+    producer: selection
+    visible_when: { field: captured, equals: true }
+    invoke:
+      plane: rye
+      ref: service:ui/ryeos-ui/config/update
+      args:
+        view_set_library:
+          expected_revision: "{record.expected_revision}"
+          saved_view_sets: "{record.saved_view_sets}"
+      notice: Saved view set.
+  - id: resume-particular
+    label: Resume particular view set
+    producer: selection
+    invoke:
+      plane: rye
+      ref: service:ui/ryeos-ui/view-sets/resume
+      args:
+        id: "{record.id}"
+  - id: save-particular
+    label: Retain this particular view set
+    invoke:
+      plane: ui
+      operation: save_particular_view_set
+      persist_affordance: persist-particular
+      value: "{record.context}"
+  - id: persist-particular
+    label: Persist particular view set
+    producer: selection
+    visible_when: { field: captured, equals: true }
+    invoke:
+      plane: rye
+      ref: service:ui/ryeos-ui/config/update
+      args:
+        particular_view_set_library:
+          expected_revision: "{record.expected_revision}"
+          particular_view_sets: "{record.particular_view_sets}"
+      notice: Particular view set retained.
+sections:
+  - title: Save composition
+    source_channel: library
+    collection: view_set_save_context
+    projection:
+      primary: label
+      secondary: description
+    activate: save
+  - title: Retain current subject
+    source_channel: library
+    collection: particular_view_set_save_context
+    projection:
+      primary: label
+      secondary: description
+    activate: save-particular
+  - title: Saved compositions
+    source_channel: library
+    collection: saved_view_sets
+    projection:
+      primary: name
+    activate: open
+  - title: Particular view sets
+    source_channel: library
+    collection: particular_view_sets
+    projection:
+      primary: name
+    activate: resume-particular
+refresh:
+  after_invoke: true

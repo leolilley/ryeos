@@ -67,6 +67,8 @@ pub enum SplitBranch {
 pub enum LayoutTree {
     Group {
         group_id: ViewGroupId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         tabs: Vec<TileId>,
         active: TileId,
     },
@@ -111,6 +113,7 @@ impl LayoutTree {
     pub fn single(tile: TileId) -> Self {
         Self::Group {
             group_id: ViewGroupId::new(tile.0),
+            label: None,
             tabs: vec![tile],
             active: tile,
         }
@@ -131,6 +134,7 @@ impl LayoutTree {
                     group_id,
                     tabs,
                     active,
+                    ..
                 } => {
                     if tabs.is_empty() || !tabs.contains(active) {
                         return Err("layout group selection is invalid");
@@ -242,6 +246,7 @@ impl LayoutTree {
         };
         let incoming = Self::Group {
             group_id,
+            label: None,
             tabs: vec![incoming],
             active: incoming,
         };
@@ -292,6 +297,7 @@ impl LayoutTree {
         match self {
             Self::Group {
                 group_id,
+                label,
                 mut tabs,
                 mut active,
             } => {
@@ -306,6 +312,7 @@ impl LayoutTree {
                 }
                 Some(Self::Group {
                     group_id,
+                    label,
                     tabs,
                     active,
                 })

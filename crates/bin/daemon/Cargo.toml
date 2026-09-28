@@ -1,6 +1,6 @@
 [package]
 name = "ryeosd"
-version = "0.5.99"
+version = "0.5.100"
 edition = "2024"
 description = "ryeosd daemon - Rust control plane for Rye OS"
 license.workspace = true
@@ -13,6 +13,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "ryeosd"
 path = "src/main.rs"
+
+[[bin]]
+name = "ryeos-bundle-publisher"
+path = "src/bin/ryeos-bundle-publisher.rs"
 
 [features]
 default = []
@@ -81,9 +85,14 @@ ryeos-core-tools = { workspace = true, features = ["test-support"] }
 ryeos-runtime = { workspace = true }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }
 http-body-util = { workspace = true }
-hyper = { workspace = true, features = ["server", "http1"] }
+hyper = { workspace = true, features = ["client", "server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio", "server", "http1"] }
 bytes = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+ryeos-external-candidate-supervisor = { path = "../../tools/external-candidate-supervisor", features = ["test-support"] }
+ryeos-external-execution-contract = { workspace = true }
+ryeos-independent-runtime-verifier = { path = "../../tools/independent-runtime-verifier" }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

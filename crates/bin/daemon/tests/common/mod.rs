@@ -9,6 +9,8 @@
 
 #![allow(dead_code)]
 
+#[cfg(all(unix, feature = "crash-qualification-test-support"))]
+pub mod dedicated_command_cut;
 pub mod fast_fixture;
 pub mod mock_provider;
 #[cfg(all(unix, feature = "crash-qualification-test-support"))]
@@ -31,6 +33,72 @@ use tokio::process::{Child, Command};
 
 const DEFAULT_DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const DAEMON_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Parent-controlled, one-shot pause after the scoped attempt is durable but
+/// before the START request can register a live child. Unlike a crash gate,
+/// this permits a concurrent exact-owner RESUME to exercise the wait race.
+#[cfg(all(unix, feature = "handoff-test-support"))]
+pub struct ScopedReservedAttemptGate {
+    channel: lillux::InheritedDuplexChannel,
+}
+
+#[cfg(all(unix, feature = "handoff-test-support"))]
+impl ScopedReservedAttemptGate {
+    pub fn pair() -> anyhow::Result<(Self, lillux::InheritedDuplexChannelChildAuthority)> {
+        let (channel, child) = lillux::inherited_duplex_channel_pair()
+            .map_err(anyhow::Error::msg)
+            .context("create scoped reserved-attempt gate channel")?;
+        Ok((Self { channel }, child))
+    }
+
+    pub fn attach(
+        command: &mut Command,
+        child: lillux::InheritedDuplexChannelChildAuthority,
+    ) -> anyhow::Result<()> {
+        command.arg("--scoped-reserved-attempt-gate");
+        child
+            .bind_to_command(
+                command.as_std_mut(),
+                ryeos_app::scoped_producer_start::test_support::RESERVED_ATTEMPT_GATE_FD_ENV,
+            )
+            .map_err(anyhow::Error::msg)
+            .context("bind scoped reserved-attempt gate to daemon")
+    }
+
+    pub async fn wait_reached(&mut self) -> anyhow::Result<serde_json::Value> {
+        let mut channel = self.channel.try_clone()?;
+        let record = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+            let deadline = lillux::time::MonotonicDeadline::after(Duration::from_secs(180));
+            let mut bounded = channel.with_deadline(deadline);
+            let mut record = Vec::with_capacity(256);
+            for _ in 0..=512 {
+                let mut byte = [0u8; 1];
+                bounded.read_exact(&mut byte)?;
+                if byte[0] == b'\n' {
+                    return Ok(record);
+                }
+                record.push(byte[0]);
+            }
+            anyhow::bail!("scoped reserved-attempt gate evidence exceeds 512 bytes")
+        })
+        .await
+        .context("join scoped reserved-attempt gate reader")??;
+        let evidence: serde_json::Value = serde_json::from_slice(&record)?;
+        anyhow::ensure!(
+            evidence["schema"] == "ryeos.scoped_reserved_attempt_gate.v1",
+            "scoped reserved-attempt gate returned wrong schema"
+        );
+        Ok(evidence)
+    }
+
+    pub fn release(&mut self) -> anyhow::Result<()> {
+        use std::io::Write as _;
+
+        let deadline = lillux::time::MonotonicDeadline::after(Duration::from_secs(5));
+        self.channel.with_deadline(deadline).write_all(b"R")?;
+        Ok(())
+    }
+}
 
 /// Parent end of the feature-only handoff crash gate.
 ///
@@ -583,6 +651,16 @@ pub struct DaemonHarness {
 }
 
 impl DaemonHarness {
+    /// Retain the disposable node and its exact bundle/user inputs for diagnosis
+    /// if an accepted operation fails or observation times out. The daemon is
+    /// still killed on drop; this grants no permission to relaunch that work.
+    /// A successful test may restore cleanup after waiting for daemon exit.
+    pub fn retain_evidence_on_drop(&mut self, retain: bool) {
+        self._state_dir_outer.disable_cleanup(retain);
+        self._core_bundle_tmp.disable_cleanup(retain);
+        self.user_space.disable_cleanup(retain);
+    }
+
     /// Spawn a fresh daemon. Blocks until `daemon.json` appears (or times out).
     pub async fn start() -> anyhow::Result<Self> {
         Self::start_with(|_cmd| {}).await
@@ -638,6 +716,7 @@ impl DaemonHarness {
         let harness_id = next_harness_id();
         // UDS socket in a temp dir (avoids writing socket into workspace tree)
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
+        fast_fixture::write_harness_bootstrap_config(&app_root, bind, &uds_path)?;
         let stderr_log_path = daemon_stderr_log_path(state_dir_outer.path(), harness_id);
 
         let mut cmd = ryeosd_command();
@@ -837,6 +916,7 @@ impl DaemonHarness {
         let harness_id = next_harness_id();
         // UDS socket in a temp dir (avoids writing socket into workspace tree)
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
+        fast_fixture::write_harness_bootstrap_config(&state_path, bind, &uds_path)?;
         let stderr_log_path = daemon_stderr_log_path(state_dir_outer.path(), harness_id);
 
         let mut cmd = ryeosd_command();
@@ -913,6 +993,24 @@ impl DaemonHarness {
         let (harness, fixture) = Self::start_fast_with(plant, move |command| {
             HandoffCrashGate::attach_writer(command, writer, boundary)
                 .expect("bind handoff crash gate to daemon");
+        })
+        .await?;
+        Ok((harness, fixture, gate))
+    }
+
+    /// Spawn a signed fast-fixture daemon with a releaseable gate at the
+    /// committed scoped-child reservation, for same-daemon START/RESUME races.
+    #[cfg(all(unix, feature = "handoff-test-support"))]
+    pub async fn start_fast_with_scoped_reserved_attempt_gate<S>(
+        plant: S,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture, ScopedReservedAttemptGate)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+    {
+        let (gate, child) = ScopedReservedAttemptGate::pair()?;
+        let (harness, fixture) = Self::start_fast_with(plant, move |command| {
+            ScopedReservedAttemptGate::attach(command, child)
+                .expect("bind scoped reserved-attempt gate to daemon");
         })
         .await?;
         Ok((harness, fixture, gate))
@@ -1039,7 +1137,9 @@ impl DaemonHarness {
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
-                Err(_) => break,
+                Err(error) => {
+                    return Err(error).context("observe exact daemon child exit after SIGKILL");
+                }
             }
         }
 

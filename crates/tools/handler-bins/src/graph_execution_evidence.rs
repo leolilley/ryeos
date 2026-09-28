@@ -116,7 +116,11 @@ pub fn describe(request: ExecutionEvidenceDescribeRequest) -> HandlerResponse {
 
 pub fn project(request: ExecutionEvidenceProjectRequest) -> HandlerResponse {
     let response = match project_inner(request) {
-        Ok((result, calls)) => ExecutionEvidenceProjectResponse::Projected { result, calls },
+        Ok((result, calls)) => ExecutionEvidenceProjectResponse::Projected {
+            result,
+            calls,
+            scoped_attempt: None,
+        },
         Err(error) => ExecutionEvidenceProjectResponse::Refused {
             message: format!("{error:#}"),
         },
@@ -844,7 +848,12 @@ mod tests {
         let request = successful_project_request();
         let expected_result = request.terminal.result["result"].clone();
         let HandlerResponse::ExecutionEvidenceProject {
-            response: ExecutionEvidenceProjectResponse::Projected { result, calls },
+            response:
+                ExecutionEvidenceProjectResponse::Projected {
+                    result,
+                    calls,
+                    scoped_attempt: None,
+                },
         } = project(request)
         else {
             panic!("exact committed unary history was refused")

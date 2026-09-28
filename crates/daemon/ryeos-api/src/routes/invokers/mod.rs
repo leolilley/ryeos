@@ -8,6 +8,7 @@
 
 pub mod chain_tail_invocation;
 pub mod dispatch_invocation;
+pub mod external_occurrence_invocation;
 pub mod gateway_stream_invocation;
 pub mod hmac_invocation;
 pub mod launch_invocation;
@@ -324,6 +325,46 @@ mod tests {
             contract.output,
             crate::routes::invocation::RouteInvocationOutput::Principal
         ));
+    }
+
+    #[test]
+    fn external_occurrence_verifier_requires_explicit_composition() {
+        assert!(matches!(
+            compile_auth_invoker("external_occurrence", None, "r1"),
+            Err(RouteConfigError::UnknownVerifier { .. })
+        ));
+        let mut registry = AuthInvokerRegistry::with_api_builtins();
+        registry.register(
+            "external_occurrence",
+            Arc::new(external_occurrence_invocation::ExternalOccurrenceAuthFactory),
+        );
+        registry.register(
+            "external_channel",
+            Arc::new(external_occurrence_invocation::ExternalChannelAuthFactory),
+        );
+        let invoker =
+            compile_auth_invoker_with_registry("external_occurrence", None, "r1", &registry)
+                .unwrap();
+        assert!(matches!(
+            invoker.contract().output,
+            crate::routes::invocation::RouteInvocationOutput::Principal
+        ));
+        assert!(matches!(
+            compile_auth_invoker_with_registry(
+                "external_occurrence",
+                Some(&serde_json::json!({})),
+                "r1",
+                &registry,
+            ),
+            Err(RouteConfigError::InvalidSourceConfig { .. })
+        ));
+        assert!(matches!(
+            compile_auth_invoker("external_channel", None, "r1"),
+            Err(RouteConfigError::UnknownVerifier { .. })
+        ));
+        assert!(
+            compile_auth_invoker_with_registry("external_channel", None, "r1", &registry).is_ok()
+        );
     }
 
     #[test]

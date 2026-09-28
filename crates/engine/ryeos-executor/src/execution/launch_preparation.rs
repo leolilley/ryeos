@@ -453,6 +453,12 @@ fn validate_launch_environment_binding(
 pub struct PreparedExecutionDependency {
     pub canonical_ref: String,
     pub resolution: ryeos_engine::resolution::ResolutionOutput,
+    /// Invocation-selected testimony for product slots authored by this exact
+    /// executable dependency. Admission remains with the dependency owner;
+    /// the launch preparer only binds the caller's selectors to its signed
+    /// dependency name and slot inventory.
+    pub product_selections:
+        Vec<ryeos_state::external_content::products::composition::ProductSelection>,
     /// Engine-verified root facts required to compile the already-captured
     /// definition into a direct mechanical plan. The root bytes themselves
     /// come from `resolution.root.raw_content`; this projection never grants
@@ -509,6 +515,9 @@ impl PreparedExecutionDependency {
         {
             anyhow::bail!("prepared execution dependency root bytes changed");
         }
+        ryeos_state::external_content::products::composition::validate_product_selections(
+            &self.product_selections,
+        )?;
         Ok(())
     }
 
@@ -2240,6 +2249,8 @@ fn resolve_execution_dependencies(
         ));
     }
     let mut resolved = BTreeMap::new();
+    let mut unused_product_selections =
+        execution_dependency_product_selections(&inputs.product_selections);
     let mut aggregate_bytes = 0usize;
     for (name, request) in requests {
         if name.is_empty()
@@ -2387,9 +2398,49 @@ fn resolve_execution_dependencies(
             signer: verified_subject.signer.clone(),
             trust_class: verified_subject.trust_class,
         };
+        let product_selections = unused_product_selections.remove(&name).unwrap_or_default();
+        let declarer =
+            ryeos_engine::external_content::declaring_authority(&resolution).map_err(|error| {
+                preparation_error(
+                    "execution_dependency_authority_invalid",
+                    format!(
+                        "execution dependency `{name}` has invalid declaring authority: {error}"
+                    ),
+                    LaunchPrepareErrorClass::Configuration,
+                )
+            })?;
+        let authored_slots = ryeos_engine::external_content::authored_external_content_shape(
+            &resolution.composed.composed,
+            engine
+                .kinds
+                .get(&canonical.kind)
+                .and_then(|kind| kind.external_content_contract()),
+            declarer,
+        )
+        .map_err(|error| {
+            preparation_error(
+                "execution_dependency_declaration_invalid",
+                format!("execution dependency `{name}` authored content shape is invalid: {error}"),
+                LaunchPrepareErrorClass::Configuration,
+            )
+        })?
+        .map(|shape| shape.product_slots)
+        .unwrap_or_default();
+        // Absence remains admissible through structural launch preparation:
+        // executable dependency admission owns the authoritative required-slot
+        // refusal. Once the caller targets this dependency, however, it must
+        // cover the signed slot inventory exactly.
+        if !product_selections.is_empty() {
+            match_product_selections_to_authored_slots(
+                &name,
+                &authored_slots,
+                &product_selections,
+            )?;
+        }
         let dependency = PreparedExecutionDependency {
             canonical_ref: resolution.root.resolved_ref.clone(),
             resolution,
+            product_selections,
             subject,
         };
         dependency.validate().map_err(|error| {
@@ -2425,6 +2476,16 @@ fn resolve_execution_dependencies(
             ));
         }
         resolved.insert(name, dependency);
+    }
+    if let Some((binding, _)) = unused_product_selections.into_iter().next() {
+        return Err(preparation_error_with_binding(
+            "product_selection_unused",
+            format!(
+                "product selector for execution dependency `{binding}` was not requested by the launch preparer"
+            ),
+            LaunchPrepareErrorClass::Caller,
+            Some(binding),
+        ));
     }
     Ok(resolved)
 }
@@ -2725,6 +2786,23 @@ fn content_dependency_product_selections(
     let mut grouped = BTreeMap::<String, Vec<_>>::new();
     for input in inputs {
         if let ProductSelectionTarget::ContentDependency { binding } = &input.target {
+            grouped
+                .entry(binding.clone())
+                .or_default()
+                .push(input.selection.clone());
+        }
+    }
+    grouped
+}
+
+fn execution_dependency_product_selections(
+    inputs: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+) -> BTreeMap<String, Vec<ryeos_state::external_content::products::composition::ProductSelection>> {
+    use ryeos_state::external_content::products::composition::ProductSelectionTarget;
+
+    let mut grouped = BTreeMap::<String, Vec<_>>::new();
+    for input in inputs {
+        if let ProductSelectionTarget::ExecutionDependency { binding } = &input.target {
             grouped
                 .entry(binding.clone())
                 .or_default()

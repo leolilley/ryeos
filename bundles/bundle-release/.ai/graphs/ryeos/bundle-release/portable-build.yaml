@@ -1,0 +1,39 @@
+# ryeos:signed:2026-09-23T04:20:49Z:8f1c2790204f8a31a79868d496d3e7d66c714ef200e2f61f0fcf86308cd32b3e:9TUiRLWFQpxPuB8j7iBmwCkVC+xzofnUfbSVSiczpv2JscJWSPabo056zEobQjGQpNZXXK64U1RSWPm6gzcFDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/bundle-release
+description: Materialize exactly one portable data-only bundle without compiler or Cargo authority.
+effects: live
+external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_portable_build, kind: tree, mount_root: execution_runtime, mount: python-gnu}
+product_recipe: config:bundle-release/portable-build-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.bundle-release/execution-environment-products
+      - ryeos.execute.config.bundle-release/execution-tool-products
+      - ryeos.execute.tool.ryeos/bundle-release/portable-build
+config:
+  start: build
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    additionalProperties: false
+    required: [release_input, child_product_selections]
+    properties:
+      release_input: {type: object}
+      child_product_selections: {type: array, minItems: 1, maxItems: 8}
+  state: {}
+  nodes:
+    build:
+      action:
+        item_id: tool:ryeos/bundle-release/portable-build
+        ref_bindings: {}
+        product_selections: "${inputs.child_product_selections}"
+        params:
+          release_input: "${inputs.release_input}"
+      assign: {build: "${result}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.build}"

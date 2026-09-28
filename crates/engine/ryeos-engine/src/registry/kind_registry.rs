@@ -921,7 +921,9 @@ pub struct ExecutionHooksDecl {
 pub struct KindExternalContentDecl {
     /// Reserved derived slot populated only by launch-time realization.
     pub realization_derived: String,
-    /// Named-root classes this kind permits its items to declare.
+    /// Signed source classes this kind permits its items to declare. Most
+    /// select named file roots; `bundle_binary:own` selects only a binary in
+    /// the declaring Bundle's verified executor manifest.
     pub allowed_roots: Vec<String>,
     /// Target namespaces admitted by this signed kind. Unlike named source
     /// roots, these control where verified content appears in the sandbox.
@@ -1062,6 +1064,39 @@ pub struct ExecutionTargetDecl {
     pub limits: crate::contracts::ExecutionTargetLimits,
 }
 
+/// Kind-owned location of signed process placement. The only omission default
+/// is explicitly local; selecting an external binding always requires authored
+/// intent, independently of daemon routing and platform/resource suitability.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionEndpointDecl {
+    pub path: Vec<String>,
+    pub default: crate::contracts::ExecutionEndpointRequirement,
+}
+
+impl ExecutionEndpointDecl {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.path.is_empty()
+                && self.path.len() <= 16
+                && self.path.iter().all(|segment| !segment.is_empty()
+                    && segment.len() <= 128
+                    && segment.trim() == segment
+                    && !segment.contains('.')
+                    && !segment.chars().any(char::is_control)),
+            "execution.endpoint.path must contain bounded canonical non-empty segments"
+        );
+        anyhow::ensure!(
+            matches!(
+                self.default,
+                crate::contracts::ExecutionEndpointRequirement::Local {}
+            ),
+            "execution.endpoint default must explicitly select local execution"
+        );
+        Ok(())
+    }
+}
+
 /// Signed resource-authority narrowing. This is separate from the process's
 /// target requirement: a CPU controller may request no resource while
 /// retaining bounded node-policy delegation for a child.
@@ -1198,6 +1233,10 @@ pub struct ExecutionSchema {
     /// Shared signed platform/resource requirement for this process.
     #[serde(default)]
     pub target: Option<ExecutionTargetDecl>,
+    /// Absence means this kind has no external placement authoring capability:
+    /// it remains local, not a node-policy/hint-selected external fallback.
+    #[serde(default)]
+    pub endpoint: Option<ExecutionEndpointDecl>,
     #[serde(default)]
     pub resource_authority_ceiling: Option<ResourceAuthorityCeilingDecl>,
     /// Kind-level method dispatch: the route shared by all methods plus
@@ -1223,6 +1262,38 @@ pub struct ExecutionSchema {
 }
 
 impl ExecutionSchema {
+    pub fn project_endpoint_requirement(
+        &self,
+        composed: &Value,
+    ) -> Result<crate::contracts::ExecutionEndpointRequirement, EngineError> {
+        let Some(declaration) = &self.endpoint else {
+            // Kinds without the signed projection cannot request external
+            // placement. This does not consult untyped execution hints.
+            return Ok(crate::contracts::ExecutionEndpointRequirement::Local {});
+        };
+        let invalid = |reason: String| EngineError::SchemaLoaderError { reason };
+        declaration
+            .validate()
+            .map_err(|error| invalid(error.to_string()))?;
+        let mut value = composed;
+        for segment in &declaration.path {
+            let object = value.as_object().ok_or_else(|| {
+                invalid("signed execution endpoint projection crosses a non-mapping".into())
+            })?;
+            let Some(next) = object.get(segment) else {
+                return Ok(declaration.default.clone());
+            };
+            value = next;
+        }
+        let endpoint: crate::contracts::ExecutionEndpointRequirement =
+            serde_json::from_value(value.clone())
+                .map_err(|error| invalid(format!("invalid signed execution endpoint: {error}")))?;
+        endpoint
+            .validate()
+            .map_err(|error| invalid(error.to_string()))?;
+        Ok(endpoint)
+    }
+
     pub fn project_resource_authority_ceiling(
         &self,
         composed: &Value,
@@ -2720,6 +2791,7 @@ fn parse_execution_schema(
         "network_authority_ceiling",
         "filesystem_authority_ceiling",
         "target",
+        "endpoint",
         "resource_authority_ceiling",
         "method_dispatch",
         "methods",
@@ -3076,6 +3148,22 @@ fn parse_execution_schema(
         None => None,
     };
 
+    let endpoint = match execution_value.get("endpoint") {
+        Some(value) => {
+            let declaration: ExecutionEndpointDecl = serde_yaml::from_value(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid execution.endpoint declaration: {error}"),
+                })?;
+            declaration
+                .validate()
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!("{display}: {error}"),
+                })?;
+            Some(declaration)
+        }
+        None => None,
+    };
+
     let resource_authority_ceiling = match execution_value.get("resource_authority_ceiling") {
         Some(value) => {
             let declaration = serde_yaml::from_value::<ResourceAuthorityCeilingDecl>(
@@ -3318,6 +3406,7 @@ fn parse_execution_schema(
         network_authority_ceiling,
         filesystem_authority_ceiling,
         target,
+        endpoint,
         resource_authority_ceiling,
         method_dispatch,
         methods,
@@ -3418,7 +3507,10 @@ fn validate_execution_external_content_decl(
     }
     let mut seen = std::collections::BTreeSet::new();
     for root in &declaration.allowed_roots {
-        if !matches!(root.as_str(), "project_files" | "node_files" | "bundle:own") {
+        if !matches!(
+            root.as_str(),
+            "project_files" | "node_files" | "bundle:own" | "bundle_binary:own"
+        ) {
             return Err(EngineError::SchemaLoaderError {
                 reason: format!(
                     "{display}: {field}.allowed_roots contains unsupported root class `{root}`"
@@ -4738,6 +4830,71 @@ execution:
     fn parse_exec(yaml: &str) -> Result<Option<ExecutionSchema>, EngineError> {
         let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         parse_execution_schema(&v, "test.yaml")
+    }
+
+    #[test]
+    fn endpoint_projection_is_kind_owned_closed_and_explicitly_local_by_default() {
+        use crate::contracts::ExecutionEndpointRequirement;
+        let yaml = "execution:\n  endpoint:\n    path: [execution_endpoint]\n    default: {kind: local}\n  delegate: {via: runtime_registry}\n";
+        let execution = parse_exec(yaml).unwrap().unwrap();
+        assert_eq!(
+            execution
+                .project_endpoint_requirement(&serde_json::json!({}))
+                .unwrap(),
+            ExecutionEndpointRequirement::Local {}
+        );
+        let external = serde_json::json!({"execution_endpoint":{"kind":"external",
+            "binding_id":"farm-direct","stdout_max_bytes":1024,"stderr_max_bytes":2048}});
+        assert_eq!(
+            execution.project_endpoint_requirement(&external).unwrap(),
+            ExecutionEndpointRequirement::External {
+                binding_id: "farm-direct".into(),
+                stdout_max_bytes: 1024,
+                stderr_max_bytes: 2048
+            }
+        );
+        for invalid in [
+            serde_json::json!({"execution_endpoint":null}),
+            serde_json::json!({"execution_endpoint":"external"}),
+            serde_json::json!({"execution_endpoint":{"kind":"local","binding_id":"farm-direct"}}),
+            serde_json::json!({"execution_endpoint":{"kind":"external","binding_id":"farm-direct",
+                "stdout_max_bytes":0,"stderr_max_bytes":1}}),
+        ] {
+            assert!(execution.project_endpoint_requirement(&invalid).is_err());
+        }
+        let unprojected = parse_exec("execution:\n  delegate: {via: runtime_registry}\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            unprojected.project_endpoint_requirement(&external).unwrap(),
+            ExecutionEndpointRequirement::Local {}
+        );
+        // Untyped hints never select placement, even on the projecting kind.
+        assert_eq!(
+            execution
+                .project_endpoint_requirement(&serde_json::json!({
+                    "execution_hints":{"execution_endpoint":external["execution_endpoint"]}
+                }))
+                .unwrap(),
+            ExecutionEndpointRequirement::Local {}
+        );
+        for invalid in [
+            yaml.replace("    default: {kind: local}\n", ""),
+            yaml.replace("[execution_endpoint]", "[]"),
+            yaml.replace("[execution_endpoint]", "[nested.endpoint]"),
+            yaml.replace("default: {kind: local}", "default: {kind: external, binding_id: farm-direct, stdout_max_bytes: 1, stderr_max_bytes: 1}"),
+            yaml.replace("    path:", "    typo: true\n    path:"),
+        ] {
+            assert!(parse_exec(&invalid).is_err());
+        }
+        let nested = parse_exec(&yaml.replace("[execution_endpoint]", "[placement, endpoint]"))
+            .unwrap()
+            .unwrap();
+        assert!(
+            nested
+                .project_endpoint_requirement(&serde_json::json!({"placement":null}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -6253,7 +6410,7 @@ metadata:
         let registry = load_external_content_schema(&[
             "realization_derived: effective_external_realizations",
             "allowed_mount_roots: [project]",
-            "allowed_roots: [\"project_files\", \"bundle:own\"]",
+            "allowed_roots: [\"project_files\", \"bundle:own\", \"bundle_binary:own\"]",
             "max_declarations: 4",
         ])
         .unwrap();
@@ -6265,7 +6422,10 @@ metadata:
             contract.realization_derived,
             "effective_external_realizations"
         );
-        assert_eq!(contract.allowed_roots, ["project_files", "bundle:own"]);
+        assert_eq!(
+            contract.allowed_roots,
+            ["project_files", "bundle:own", "bundle_binary:own"]
+        );
         assert_eq!(contract.max_declarations, 4);
     }
 

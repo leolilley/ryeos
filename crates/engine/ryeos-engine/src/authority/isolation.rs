@@ -17,8 +17,8 @@ use ryeos_isolation_protocol::{
     AdapterLaunchLifecycle, AdapterLaunchRequest, AdapterWorkspaceRequest,
     AdapterWorkspaceResponse, IsolationAdapterProtocolVersion, IsolationAuthority,
     IsolationAuthorityId, IsolationAuthorityPurpose, IsolationCapability, IsolationDeviceSurface,
-    IsolationEnvironment, IsolationFixedParentView, IsolationMount, IsolationMountAccess,
-    IsolationNetwork, IsolationPath, IsolationPidNamespace, IsolationPlan,
+    IsolationEnvironment, IsolationFixedParentView, IsolationLoopbackIngress, IsolationMount,
+    IsolationMountAccess, IsolationNetwork, IsolationPath, IsolationPidNamespace, IsolationPlan,
     IsolationProjectWorkspace, IsolationTarget, IsolationTargetChannel,
     IsolationWorkspaceDescendantMount, MAX_AUTHORITIES, WorkspaceLifecycleOperation,
 };
@@ -36,9 +36,10 @@ pub use authority::{
     IsolationAdmittedCommand, IsolationCommandAuthority, IsolationCommandAuthorityRef,
     IsolationDescriptorBoundCommand, IsolationDescriptorFileIdentity,
     IsolationFilesystemAuthorityCeiling, IsolationLaunchContext, IsolationLiveAccessAuthority,
-    IsolationNetworkAuthorityCeiling, IsolationProjectAuthority, IsolationReadOnlyMountAuthority,
-    IsolationRealizationMemberCommand, IsolationTargetChannelAuthority, IsolationVerifiedCode,
-    IsolationWritableRuntimeViewMountAuthority,
+    IsolationNetworkAuthorityCeiling, IsolationProducerPreparedDirectoryAuthority,
+    IsolationProducerPreparedImmutableFileAuthority,
+    IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
+    IsolationTargetChannelAuthority, IsolationVerifiedCode, IsolationWritableRuntimeViewMountAuthority,
 };
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{
@@ -85,6 +86,121 @@ enum RequestedLaunchLifecycle {
 struct CompiledIsolationLaunch {
     request: lillux::SubprocessRequest,
     provenance: IsolationLaunchProvenance,
+    expected_applied_launch: Option<lillux::LinuxSandboxAppliedLaunchCommitments>,
+    expected_mount_preparation: Option<lillux::LinuxSandboxMountPreparationCommitments>,
+    loopback_transfer: Option<CompiledLoopbackTransfer>,
+}
+
+struct CompiledLoopbackTransfer {
+    receiver: lillux::InheritedDescriptorTransferReceiver,
+    request: AdapterLaunchRequest,
+}
+
+/// A held launch whose exact one-shot listener must be received before the
+/// target can be released. This does not itself qualify the target.
+pub struct AppliedIsolationLaunchWithLoopbackIngress {
+    request: IsolationRequestAwaitingAttachment,
+    transfer: CompiledLoopbackTransfer,
+    pub provenance: IsolationLaunchProvenance,
+    pub expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
+    pub expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
+}
+
+pub struct HeldIsolationLaunchWithLoopbackIngress {
+    held: lillux::ProcessAwaitingAttachment,
+    transfer: CompiledLoopbackTransfer,
+}
+
+/// Exact adapter listener packet and checked socket, still short of applied
+/// launch or namespace qualification. The receipt can bind the subsequent
+/// verifier handoff to this held request without accepting adapter testimony
+/// as a substitute for daemon-owned process evidence.
+pub struct ValidatedHeldLoopbackListener {
+    listener: lillux::loopback::ExactLoopbackListener,
+    receipt: ryeos_isolation_protocol::LoopbackListenerTransferReceipt,
+}
+
+impl ValidatedHeldLoopbackListener {
+    pub fn into_parts(
+        self,
+    ) -> (
+        lillux::loopback::ExactLoopbackListener,
+        ryeos_isolation_protocol::LoopbackListenerTransferReceipt,
+    ) {
+        (self.listener, self.receipt)
+    }
+}
+
+impl AppliedIsolationLaunchWithLoopbackIngress {
+    pub fn require_applied_launch_receipt(mut self) -> Result<Self, EngineError> {
+        self.request = self.request.require_applied_launch_receipt()?;
+        Ok(self)
+    }
+
+    pub fn spawn(self) -> Result<HeldIsolationLaunchWithLoopbackIngress, lillux::SubprocessResult> {
+        Ok(HeldIsolationLaunchWithLoopbackIngress {
+            held: self.request.spawn()?,
+            transfer: self.transfer,
+        })
+    }
+}
+
+impl HeldIsolationLaunchWithLoopbackIngress {
+    /// On refusal the exact held process is returned for the durable owner to
+    /// abort and reap; neither a silent Drop nor a second launch is allowed.
+    pub fn receive_listener(
+        self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        (
+            lillux::ProcessAwaitingAttachment,
+            ValidatedHeldLoopbackListener,
+        ),
+        (EngineError, lillux::ProcessAwaitingAttachment),
+    > {
+        let Self { held, transfer } = self;
+        let result = (|| {
+            let bounds = lillux::DescriptorTransferBounds::new(
+                ryeos_isolation_protocol::MAX_LOOPBACK_LISTENER_RECEIPT_BYTES,
+                1,
+            )
+            .map_err(|error| refused(format!("bound loopback listener transfer: {error}")))?;
+            let packet = transfer
+                .receiver
+                .receive(bounds, deadline)
+                .map_err(|error| refused(format!("receive loopback listener: {error}")))?;
+            let (bytes, mut descriptors) = packet.into_parts();
+            let receipt = validate_loopback_listener_transfer_receipt(
+                &bytes,
+                descriptors.len(),
+                &transfer.request,
+            )?;
+            let ingress = transfer
+                .request
+                .plan
+                .loopback_ingress
+                .as_ref()
+                .ok_or_else(|| {
+                    refused("loopback ingress disappeared from sealed request".into())
+                })?;
+            let address = ingress
+                .address
+                .parse()
+                .map_err(|error| refused(format!("parse sealed loopback address: {error}")))?;
+            let listener = lillux::loopback::ExactLoopbackListener::from_transferred(
+                descriptors
+                    .pop()
+                    .ok_or_else(|| refused("loopback listener descriptor missing".into()))?,
+                address,
+            )
+            .map_err(|error| refused(format!("validate transferred loopback listener: {error}")))?;
+            Ok(ValidatedHeldLoopbackListener { listener, receipt })
+        })();
+        match result {
+            Ok(listener) => Ok((held, listener)),
+            Err(error) => Err((error, held)),
+        }
+    }
 }
 
 /// Higher-level guard that binds a composed runtime to the exact registered
@@ -195,6 +311,26 @@ impl std::fmt::Debug for IsolationRuntime {
                 &self._generation_lifeline.is_some(),
             )
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod retained_scratch_view_tests {
+    use super::*;
+
+    #[test]
+    fn replacement_scratch_cannot_stand_in_for_retained_view() {
+        let parent = tempfile::tempdir().unwrap();
+        let original = parent.path().join("private");
+        let moved = parent.path().join("retained");
+        std::fs::create_dir(&original).unwrap();
+        let pinned = lillux::PinnedDirectory::open(&original).unwrap().unwrap();
+        let view = pinned.inherited_descriptor_authority().unwrap();
+        require_retained_scratch_view_matches(&pinned, &view, &original).unwrap();
+        std::fs::rename(&original, &moved).unwrap();
+        std::fs::create_dir(&original).unwrap();
+        let replacement = lillux::PinnedDirectory::open(&original).unwrap().unwrap();
+        assert!(require_retained_scratch_view_matches(&replacement, &view, &original).is_err());
     }
 }
 
@@ -681,15 +817,48 @@ fn validate_workspace_view_context(
     project: IsolationProjectAuthority,
     view: Option<&lillux::InheritedDescriptorAuthority>,
 ) -> Result<(), EngineError> {
-    let requires_view = state == IsolationRuntimeState::Enforced
-        && project == IsolationProjectAuthority::RuntimeWorkspace;
-    if requires_view != view.is_some() {
-        return Err(refused(if requires_view {
-            "enforced runtime workspace launch requires its exact retained view; lower/state reconstruction is not launch authority".to_string()
-        } else {
+    if state == IsolationRuntimeState::Enforced
+        && project == IsolationProjectAuthority::RuntimeWorkspace
+        && view.is_none()
+    {
+        return Err(refused("enforced runtime workspace launch requires its exact retained view; lower/state reconstruction is not launch authority".to_string()));
+    }
+    if view.is_some()
+        && !(state == IsolationRuntimeState::Enforced
+            && matches!(
+                project,
+                IsolationProjectAuthority::RuntimeWorkspace
+                    | IsolationProjectAuthority::EphemeralScratch
+            ))
+    {
+        return Err(refused(
             "nonworkspace or explicitly disabled launch cannot carry a retained workspace view"
-                .to_string()
-        }));
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_retained_scratch_view_matches(
+    expected: &lillux::PinnedDirectory,
+    view: &lillux::InheritedDescriptorAuthority,
+    diagnostic_path: &Path,
+) -> Result<(), EngineError> {
+    let retained = view
+        .try_clone_pinned_directory(diagnostic_path.to_path_buf())
+        .map_err(|error| {
+            refused(format!(
+                "retained projectless scratch view cannot be opened: {error}"
+            ))
+        })?;
+    if !expected.is_same_directory(&retained).map_err(|error| {
+        refused(format!(
+            "retained projectless scratch identity cannot be compared: {error}"
+        ))
+    })? {
+        return Err(refused(
+            "projectless scratch differs from its retained pinned view".to_string(),
+        ));
     }
     Ok(())
 }
@@ -2147,6 +2316,7 @@ impl IsolationRuntime {
             RequestedLaunchLifecycle::Run,
             None,
             None,
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunch {
@@ -2204,11 +2374,14 @@ impl IsolationRuntime {
             RequestedLaunchLifecycle::AwaitAttachment,
             scope.as_ref().map(|scope| scope.recovery()),
             None,
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchAwaitingAttachment {
             request: IsolationRequestAwaitingAttachment::new(applied.request, scope),
             provenance: applied.provenance,
+            expected_applied_launch: applied.expected_applied_launch,
+            expected_mount_preparation: applied.expected_mount_preparation,
         })
     }
 
@@ -2241,11 +2414,63 @@ impl IsolationRuntime {
             RequestedLaunchLifecycle::AwaitAttachment,
             scope.as_ref().map(|scope| scope.recovery()),
             Some(devices),
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchAwaitingAttachment {
             request: IsolationRequestAwaitingAttachment::new(applied.request, scope),
             provenance: applied.provenance,
+            expected_applied_launch: applied.expected_applied_launch,
+            expected_mount_preparation: applied.expected_mount_preparation,
+        })
+    }
+
+    /// Compile an exact held scoped target with isolated-loopback ingress.
+    /// This generic compiler does not authenticate the ingress choice: the
+    /// caller must derive it from retained signed authority before invoking
+    /// this API. It never reads an endpoint from target parameters.
+    pub fn apply_awaiting_attachment_in_scope_with_loopback_ingress(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+        scope: lillux::ProcessScope,
+        ingress: &IsolationLoopbackIngress,
+    ) -> Result<AppliedIsolationLaunchWithLoopbackIngress, EngineError> {
+        self.ensure_registered_generation_current()?;
+        ingress
+            .validate()
+            .map_err(|error| refused(error.to_string()))?;
+        let timeout = self.process_scope_control_timeout()?;
+        let provider = self.process_scope_provider.as_ref().ok_or_else(|| {
+            refused("retained scope has no admitted provider generation".to_owned())
+        })?;
+        provider.validate_scope(&scope).map_err(refused)?;
+        if scope.recovery().control_timeout() != timeout {
+            return Err(refused(
+                "retained process scope differs from the admitted control budget".into(),
+            ));
+        }
+        let applied = self.apply_with_provenance_current(
+            request,
+            context,
+            RequestedLaunchLifecycle::AwaitAttachment,
+            Some(scope.recovery()),
+            None,
+            Some(ingress),
+        )?;
+        self.ensure_registered_generation_current()?;
+        Ok(AppliedIsolationLaunchWithLoopbackIngress {
+            request: IsolationRequestAwaitingAttachment::new(applied.request, Some(scope)),
+            transfer: applied
+                .loopback_transfer
+                .ok_or_else(|| refused("compiled loopback transfer is absent".into()))?,
+            provenance: applied.provenance,
+            expected_applied_launch: applied
+                .expected_applied_launch
+                .ok_or_else(|| refused("compiled applied launch commitments are absent".into()))?,
+            expected_mount_preparation: applied
+                .expected_mount_preparation
+                .ok_or_else(|| refused("compiled mount preparation commitments are absent".into()))?,
         })
     }
 
@@ -2256,6 +2481,7 @@ impl IsolationRuntime {
         lifecycle: RequestedLaunchLifecycle,
         process_scope: Option<&lillux::ProcessScopeRecovery>,
         selected_devices: Option<&lillux::CharacterDeviceSet>,
+        loopback_ingress: Option<&IsolationLoopbackIngress>,
     ) -> Result<CompiledIsolationLaunch, EngineError> {
         // Keep this seam backend-neutral. The engine may compile only the
         // signed generic isolation policy/protocol and retain exact descriptor
@@ -2270,6 +2496,11 @@ impl IsolationRuntime {
         if self.state == IsolationRuntimeState::Disabled && selected_devices.is_some() {
             return Err(refused(
                 "exact character-device grants require enforced isolation".to_owned(),
+            ));
+        }
+        if self.state == IsolationRuntimeState::Disabled && loopback_ingress.is_some() {
+            return Err(refused(
+                "isolated loopback ingress requires enforced isolation".into(),
             ));
         }
         let verified_command_authority = context
@@ -2386,6 +2617,12 @@ impl IsolationRuntime {
             _ => {}
         }
         if self.state == IsolationRuntimeState::Disabled {
+            if !context.producer_prepared_mounts.is_empty() {
+                return Err(refused(
+                    "scoped producer prepared directories require enforced isolation"
+                        .to_string(),
+                ));
+            }
             if context.filesystem_authority_ceiling
                 == IsolationFilesystemAuthorityCeiling::CapturedExecution
                 || context.network_authority_ceiling == IsolationNetworkAuthorityCeiling::Isolated
@@ -2627,6 +2864,9 @@ impl IsolationRuntime {
             return Ok(CompiledIsolationLaunch {
                 request,
                 provenance: self.launch_provenance(None),
+                expected_applied_launch: None,
+                expected_mount_preparation: None,
+                loopback_transfer: None,
             });
         }
         if !request.inherited_fds.is_empty() {
@@ -2824,7 +3064,47 @@ impl IsolationRuntime {
         };
         let retained_read_only_project =
             immutable_project_handle.is_some() || retained_live_project_handle.is_some();
-        let canonical_cwd = canonicalize_context_mount("working directory", &cwd_destination)?;
+        let prepared_cwd = context
+            .producer_prepared_mounts
+            .iter()
+            .find(|mount| mount.destination() == cwd_destination);
+        if prepared_cwd.is_some()
+            && self
+                .inspection
+                .filesystem
+                .readable
+                .iter()
+                .chain(&self.inspection.filesystem.writable)
+                .any(|configured| configured == "{cwd}")
+        {
+            return Err(refused(
+                "prepared producer cwd cannot resolve pathname-based {cwd} policy authority"
+                    .to_string(),
+            ));
+        }
+        let canonical_cwd = if prepared_cwd.is_some() {
+            // The adapter's host-side cwd remains the already-pinned scratch
+            // root. Only the sealed target plan uses the mounted destination.
+            canonical_project.clone()
+        } else {
+            canonicalize_context_mount("working directory", &cwd_destination)?
+        };
+        if !context.producer_prepared_mounts.is_empty() {
+            if context.project_authority != IsolationProjectAuthority::EphemeralScratch {
+                return Err(refused(
+                    "scoped producer prepared directories require projectless scratch authority"
+                        .to_string(),
+                ));
+            }
+            let workspace = context.workspace_view.ok_or_else(|| {
+                refused("prepared directories lack retained workspace authority".to_string())
+            })?;
+            for mount in context.producer_prepared_mounts {
+                mount.verify_retained_descendant(workspace).map_err(|error| {
+                    refused(format!("prepared directory is not the retained descendant: {error}"))
+                })?;
+            }
+        }
         let mount_namespace = MountNamespace {
             project_destination: &project_destination,
             canonical_project: &canonical_project,
@@ -2945,6 +3225,9 @@ impl IsolationRuntime {
                     "projectless scratch does not match its daemon-owned child authority"
                         .to_string(),
                 ));
+            }
+            if let Some(view) = context.workspace_view {
+                require_retained_scratch_view_matches(&expected, view, &canonical_project)?;
             }
             let handle = expected.inherited_descriptor_authority().map_err(|error| {
                 refused(format!(
@@ -3480,6 +3763,44 @@ impl IsolationRuntime {
             let destination = external.destination();
             validate_namespace_destination("external realization mount", destination)?;
             match external.scope() {
+                IsolationReadOnlyMountScope::RuntimeConfiguration => {
+                    ryeos_state::objects::validate_session_runtime_configuration_destination(
+                        destination.to_str().ok_or_else(|| {
+                            refused("runtime configuration destination is not UTF-8".into())
+                        })?,
+                    )
+                    .map_err(|error| refused(error.to_string()))?;
+                    if paths_overlap(destination, &project_destination)
+                        || paths_overlap(destination, &command_path)
+                        || context
+                            .state_root
+                            .is_some_and(|root| paths_overlap(destination, root))
+                        || context
+                            .checkpoint_dir
+                            .is_some_and(|root| paths_overlap(destination, root))
+                        || self
+                            .app_root
+                            .as_deref()
+                            .is_some_and(|root| paths_overlap(destination, root))
+                        || readable_mounts
+                            .iter()
+                            .any(|mount| paths_overlap(destination, &mount.destination))
+                        || writable_mounts
+                            .iter()
+                            .any(|mount| paths_overlap(destination, &mount.destination))
+                        || self
+                            .network_runtime_files
+                            .iter()
+                            .any(|file| paths_overlap(destination, &file.destination))
+                        || ["/usr", "/bin", "/sbin", "/lib", "/lib64"]
+                            .iter()
+                            .any(|root| paths_overlap(destination, Path::new(root)))
+                    {
+                        return Err(refused(
+                            "runtime configuration overlaps another launch authority".into(),
+                        ));
+                    }
+                }
                 IsolationReadOnlyMountScope::ExecutionRuntimeRealization => {
                     let root = Path::new(ryeos_state::objects::EXECUTION_RUNTIME_REALIZATIONS_ROOT);
                     if destination == root || !destination.starts_with(root) {
@@ -3528,6 +3849,29 @@ impl IsolationRuntime {
                         )));
                     }
                 }
+                IsolationReadOnlyMountScope::RuntimeEndpoint => {
+                    let root = Path::new(ryeos_state::objects::SESSION_RUNTIME_ENDPOINTS_ROOT);
+                    if destination == root || !destination.starts_with(root) {
+                        return Err(refused(format!(
+                            "session runtime endpoint {} is not a strict child of {}",
+                            destination.display(),
+                            root.display(),
+                        )));
+                    }
+                    if paths_overlap(destination, &project_destination)
+                        || paths_overlap(destination, &command_path)
+                        || readable_mounts
+                            .iter()
+                            .any(|mount| paths_overlap(destination, &mount.destination))
+                        || writable_mounts
+                            .iter()
+                            .any(|mount| paths_overlap(destination, &mount.destination))
+                    {
+                        return Err(refused(
+                            "session runtime endpoint overlaps another launch authority".into(),
+                        ));
+                    }
+                }
             }
             if external_destinations.iter().any(|other: &PathBuf| {
                 destination.starts_with(other) || other.starts_with(destination)
@@ -3542,7 +3886,11 @@ impl IsolationRuntime {
                 source: external.source_path().to_path_buf(),
                 destination: destination.to_path_buf(),
                 source_handle: external.source().clone(),
-                layer: if external.scope() == IsolationReadOnlyMountScope::StateOverlay {
+                layer: if matches!(
+                    external.scope(),
+                    IsolationReadOnlyMountScope::StateOverlay
+                        | IsolationReadOnlyMountScope::RuntimeEndpoint
+                ) {
                     40
                 } else {
                     30
@@ -3632,6 +3980,63 @@ impl IsolationRuntime {
             }
             runtime_view_destinations.push(destination.to_path_buf());
         }
+        if context.producer_prepared_mounts.len()
+            > ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_DIRECTORIES
+        {
+            return Err(refused("prepared producer directory count exceeds its bound".to_string()));
+        }
+        let mut producer_prepared_mounts = context.producer_prepared_mounts.iter().collect::<Vec<_>>();
+        producer_prepared_mounts.sort_by(|left, right| left.id().cmp(right.id()));
+        let mut prepared_destinations: Vec<PathBuf> = Vec::with_capacity(producer_prepared_mounts.len());
+        let mut prepared_immutable_files = Vec::new();
+        let mut immutable_destinations = BTreeSet::new();
+        let mut prepared_ids = BTreeSet::new();
+        for mount in &producer_prepared_mounts {
+            let destination = mount.destination();
+            if !prepared_ids.insert(mount.id()) {
+                return Err(refused("prepared producer directory ID is duplicated".to_string()));
+            }
+            let expected = ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(mount.id())
+                .map_err(|error| refused(format!("invalid prepared producer directory: {error}")))?;
+            if destination != expected {
+                return Err(refused("prepared producer destination differs from signed ID".to_string()));
+            }
+            validate_namespace_destination("prepared producer directory", destination)?;
+            if paths_overlap(destination, &project_destination)
+                || writable_mounts.iter().any(|other| paths_overlap(destination, &other.destination))
+                || readable_mounts.iter().any(|other| paths_overlap(destination, &other.destination))
+                || runtime_view_destinations.iter().any(|other| paths_overlap(destination, other))
+                || prepared_destinations.iter().any(|other| paths_overlap(destination, other))
+                || context.state_root.is_some_and(|path| paths_overlap(destination, path))
+                || context.checkpoint_dir.is_some_and(|path| paths_overlap(destination, path))
+            {
+                return Err(refused(format!(
+                    "prepared producer directory {} overlaps another launch authority",
+                    destination.display()
+                )));
+            }
+            prepared_destinations.push(destination.to_path_buf());
+            for file in mount.immutable_files() {
+                if file.destination().parent() != Some(destination)
+                    || !immutable_destinations.insert(file.destination().to_path_buf())
+                {
+                    return Err(refused(
+                        "prepared immutable file is not a unique direct child".to_string(),
+                    ));
+                }
+                validate_namespace_destination("prepared immutable file", file.destination())?;
+                file.verify_sealed_content().map_err(|error| {
+                    refused(format!("prepared immutable file is not sealed exact content: {error}"))
+                })?;
+                prepared_immutable_files.push(file);
+            }
+        }
+        if prepared_immutable_files.len()
+            > ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_IMMUTABLE_FILES
+        {
+            return Err(refused("prepared immutable file count exceeds signed bound".to_string()));
+        }
+        prepared_immutable_files.sort_by(|left, right| left.destination().cmp(right.destination()));
         readable_mounts.sort_by(|left, right| {
             // The protocol applies realization trees before their read-only
             // state overlays regardless of where the node lives. Sorting by
@@ -3705,7 +4110,9 @@ impl IsolationRuntime {
         }) || readable_mounts.iter().any(|mount| {
             canonical_cwd.starts_with(&mount.source)
                 && cwd_destination.starts_with(&mount.destination)
-        });
+        }) || producer_prepared_mounts
+            .iter()
+            .any(|mount| cwd_destination == mount.destination());
         if !cwd_is_visible {
             return Err(refused(format!(
                 "working directory {} is not visible through a readable or writable node-policy mount",
@@ -3871,6 +4278,28 @@ impl IsolationRuntime {
                         10,
                     )?;
                 }
+            }
+            for (index, mount) in producer_prepared_mounts.iter().enumerate() {
+                add_mount(
+                    "producer-prepared",
+                    index,
+                    mount.source().clone(),
+                    mount.destination(),
+                    IsolationMountAccess::Writable,
+                    IsolationAuthorityPurpose::WritableMount,
+                    10,
+                )?;
+            }
+            for (index, file) in prepared_immutable_files.iter().enumerate() {
+                add_mount(
+                    "producer-prepared-immutable",
+                    index,
+                    file.source().clone(),
+                    file.destination(),
+                    IsolationMountAccess::ReadOnly,
+                    IsolationAuthorityPurpose::ReadOnlyMount,
+                    20,
+                )?;
             }
             for (index, mount) in readable_mounts
                 .iter()
@@ -4164,6 +4593,7 @@ impl IsolationRuntime {
                     }
                 }
             },
+            loopback_ingress: loopback_ingress.cloned(),
             devices: IsolationDeviceSurface::Minimal,
             character_devices: character_device_plan,
             private_tmp: true,
@@ -4206,11 +4636,21 @@ impl IsolationRuntime {
             )));
         }
         let plan_digest = redacted_plan_digest(&plan)?;
+        let expected_applied_launch = expected_applied_launch_commitments(&plan)?;
+        let expected_mount_preparation =
+            expected_mount_preparation_commitments(&plan, &authorities)?;
         let artifact_fds = backend
             .artifact_handles
             .iter()
             .map(|(role, handle)| inherited_fd(handle).map(|fd| (*role, fd)))
             .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let (transfer_receiver, transfer_child) = if loopback_ingress.is_some() {
+            let (receiver, child) = lillux::inherited_descriptor_transfer_pair()
+                .map_err(|error| refused(format!("create isolated loopback transfer: {error}")))?;
+            (Some(receiver), Some(child))
+        } else {
+            (None, None)
+        };
         let launch_request = AdapterLaunchRequest {
             protocol: IsolationAdapterProtocolVersion::Current,
             plan,
@@ -4218,6 +4658,11 @@ impl IsolationRuntime {
             artifacts: artifact_fds,
             adapter_fd: inherited_fd(&backend.adapter_handle)?,
             status_fd,
+            loopback_transfer_fd: transfer_child
+                .as_ref()
+                .map(|child| child.inherited_descriptor())
+                .transpose()
+                .map_err(|error| refused(format!("inspect loopback transfer endpoint: {error}")))?,
             lifecycle: adapter_lifecycle,
         };
         launch_request
@@ -4234,6 +4679,9 @@ impl IsolationRuntime {
         let request_handle = lillux::sealed_memfd(c"ryeos-isolation-request", &request_bytes)
             .map_err(|error| refused(format!("seal isolation request: {error}")))?;
         let request_fd = inherited_fd(&request_handle)?.to_string();
+        if let Some(child) = transfer_child.as_ref() {
+            child.retain_for_child(&mut inherited_fds);
+        }
         inherited_fds.extend(authority_handles);
         inherited_fds.extend(backend.artifact_handles.values().cloned());
         // The exact signed adapter is both the initial executable and the
@@ -4290,6 +4738,12 @@ impl IsolationRuntime {
                 supervised_status: Some(supervised_status),
             },
             provenance: self.launch_provenance(Some(plan_digest)),
+            expected_applied_launch: Some(expected_applied_launch),
+            expected_mount_preparation: Some(expected_mount_preparation),
+            loopback_transfer: transfer_receiver.map(|receiver| CompiledLoopbackTransfer {
+                receiver,
+                request: launch_request,
+            }),
         })
     }
 
@@ -4646,9 +5100,14 @@ impl IsolationRuntime {
             }
         };
         validate_namespace_destination("verified-code admitted mount", mount.destination())?;
-        if mount.scope() == IsolationReadOnlyMountScope::StateOverlay {
+        if matches!(
+            mount.scope(),
+            IsolationReadOnlyMountScope::StateOverlay
+                | IsolationReadOnlyMountScope::RuntimeConfiguration
+                | IsolationReadOnlyMountScope::RuntimeEndpoint
+        ) {
             return Err(refused(format!(
-                "verified code {} is covered by an ineligible state-overlay mount",
+                "verified code {} is covered by an ineligible configuration mount",
                 verified.source_path.display()
             )));
         }
@@ -4980,6 +5439,29 @@ impl IsolationRuntime {
             scope_admission: ProcessScopeAdmission::DefinitionValidation,
         })
         .expect("compiled disabled isolation fixture policy is valid")
+    }
+
+    /// Construct the explicit disabled execution boundary with exact app-root
+    /// and runtime-workspace descriptor authority. Downstream composed tests
+    /// use this instead of the authoring-only runtime when they exercise the
+    /// real workspace lifecycle owner.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn disabled_for_test_execution(app_root: &Path) -> Result<Self, EngineError> {
+        let app_root_authority = lillux::PinnedDirectory::open_or_create(app_root)
+            .map_err(|error| refused(format!("open test app-root authority: {error}")))?;
+        Self::resolve(IsolationRuntimeResolution {
+            policy: IsolationPolicy::disabled_for_authoring(),
+            source: None,
+            digest: None,
+            app_root: Some(app_root.to_path_buf()),
+            app_root_authority: Some(Arc::new(app_root_authority)),
+            app_root_destination: None,
+            daemon_socket: None,
+            backend: None,
+            process_scope_provider: None,
+            process_scope_authority_digest: None,
+            scope_admission: ProcessScopeAdmission::Execution,
+        })
     }
 }
 
@@ -6157,6 +6639,141 @@ fn validate_workspace_view_receipt(
     Ok(())
 }
 
+/// Correlate one received listener to the exact sealed held-launch request.
+/// This is only a packet check; socket type/address, applied launch, namespace
+/// ownership and scope settlement require independent checks by their owners.
+fn validate_loopback_listener_transfer_receipt(
+    bytes: &[u8],
+    descriptor_count: usize,
+    request: &AdapterLaunchRequest,
+) -> Result<ryeos_isolation_protocol::LoopbackListenerTransferReceipt, EngineError> {
+    if bytes.len() > ryeos_isolation_protocol::MAX_LOOPBACK_LISTENER_RECEIPT_BYTES
+        || descriptor_count != 1
+        || request.plan.loopback_ingress.is_none()
+        || request.loopback_transfer_fd.is_none()
+        || !matches!(
+            request.lifecycle,
+            AdapterLaunchLifecycle::AwaitAttachment { .. }
+        )
+    {
+        return Err(refused("invalid loopback listener transfer shape".into()));
+    }
+    let receipt: ryeos_isolation_protocol::LoopbackListenerTransferReceipt =
+        ryeos_isolation_protocol::from_json_slice_strict(bytes)
+            .map_err(|error| refused(format!("decode loopback listener receipt: {error}")))?;
+    receipt
+        .validate()
+        .map_err(|error| refused(format!("validate loopback listener receipt: {error}")))?;
+    let canonical = lillux::canonical_json(
+        &serde_json::to_value(&receipt)
+            .map_err(|error| refused(format!("encode loopback listener receipt: {error}")))?,
+    )
+    .map_err(|error| refused(format!("canonicalize loopback listener receipt: {error}")))?;
+    let request_digest = workspace_transfer_value_digest(
+        serde_json::to_value(request)
+            .map_err(|error| refused(format!("encode loopback launch request: {error}")))?,
+    )?;
+    if canonical.as_bytes() != bytes
+        || receipt.protocol != request.protocol
+        || receipt.request_digest != request_digest
+    {
+        return Err(refused(
+            "loopback listener receipt changed its exact invocation".into(),
+        ));
+    }
+    Ok(receipt)
+}
+
+fn expected_applied_launch_commitments(
+    plan: &IsolationPlan,
+) -> Result<lillux::LinuxSandboxAppliedLaunchCommitments, EngineError> {
+    // This projection is computed by the independent compiler before the
+    // signed adapter sees the sealed plan. The mount destination is the
+    // executable passed to Lillux, not its descriptor/source authority ID.
+    let executable = plan
+        .mounts
+        .iter()
+        .find(|mount| mount.source == plan.target.executable)
+        .ok_or_else(|| refused("compiled target executable has no mount".into()))?;
+    let executable = PathBuf::from(executable.destination.as_str());
+    let argv0 = std::ffi::OsString::from(&plan.target.argv0);
+    let arguments = plan
+        .target
+        .arguments
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect::<Vec<_>>();
+    let cwd = PathBuf::from(plan.target.cwd.as_str());
+    let environment = plan
+        .environment
+        .values
+        .iter()
+        .map(|(name, value)| {
+            (
+                std::ffi::OsString::from(name),
+                std::ffi::OsString::from(value),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
+        lillux::LinuxSandboxAppliedLaunchTarget {
+            executable: &executable,
+            argv0: &argv0,
+            arguments: &arguments,
+            cwd: &cwd,
+            environment: &environment,
+        },
+    )
+    .map_err(|error| refused(format!("compile applied target commitments: {error}")))
+}
+
+fn expected_mount_preparation_commitments(
+    plan: &IsolationPlan,
+    authorities: &[IsolationAuthority],
+) -> Result<lillux::LinuxSandboxMountPreparationCommitments, EngineError> {
+    // This compiler reads the admitted source descriptors and signed plan
+    // before the adapter sees its sealed request. It does not trust the
+    // adapter's later native translation or its child-origin receipt.
+    let by_id = authorities
+        .iter()
+        .map(|authority| (&authority.id, authority.inherited_fd))
+        .collect::<BTreeMap<_, _>>();
+    let mounts = plan
+        .mounts
+        .iter()
+        .map(|mount| {
+            let source_fd = *by_id
+                .get(&mount.source)
+                .ok_or_else(|| refused("compiled mount source has no admitted descriptor".into()))?;
+            Ok(lillux::LinuxSandboxMount {
+                source_fd,
+                destination: PathBuf::from(mount.destination.as_str()),
+                access: match mount.access {
+                    IsolationMountAccess::ReadOnly => lillux::LinuxSandboxMountAccess::ReadOnly,
+                    IsolationMountAccess::Writable => lillux::LinuxSandboxMountAccess::Writable,
+                },
+                layer: mount.layer,
+            })
+        })
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    let descendants = plan
+        .project_workspace
+        .as_ref()
+        .map(|workspace| {
+            workspace
+                .writable_descendant_mounts
+                .iter()
+                .map(|mount| PathBuf::from(mount.destination.as_str()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    lillux::LinuxSandboxMountPreparationCommitments::from_admitted_mounts(
+        &mounts,
+        &descendants,
+    )
+    .map_err(|error| refused(format!("compile final-root mount commitments: {error}")))
+}
+
 fn refused(reason: String) -> EngineError {
     EngineError::IsolationPolicyRefused { reason }
 }
@@ -6339,6 +6956,77 @@ mod tests {
             .join(TEST_ISOLATION_POLICY_RELATIVE_PATH);
         std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
         std::fs::write(policy_path, serde_yaml::to_string(policy).unwrap()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn admitted_realization_member_promotion_checks_exact_pinned_bytes() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let app_root = tempfile::tempdir().unwrap();
+        let backend = resolved_backend();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(backend.selection.clone());
+        write_policy(app_root.path(), &policy);
+        let runtime =
+            IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend))).unwrap();
+
+        let source = app_root.path().join("retained-runtime");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("codex"), b"exact-executable").unwrap();
+        std::fs::set_permissions(source.join("codex"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let pinned = lillux::PinnedDirectory::open(&source).unwrap().unwrap();
+        let mount = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            source.clone(),
+            PathBuf::from("/ryeos/realizations/codex_runtime"),
+            pinned.inherited_descriptor_authority().unwrap(),
+        );
+        let expected = lillux::sha256_hex(b"exact-executable");
+        let promoted = runtime
+            .bind_admitted_realization_member_command(&mount, Path::new("codex"), &expected)
+            .unwrap();
+        assert_eq!(promoted.command().identity().content_hash, expected);
+        std::fs::rename(source.join("codex"), source.join("old-codex")).unwrap();
+        std::fs::write(source.join("codex"), b"replacement-bytes").unwrap();
+        std::fs::set_permissions(source.join("codex"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let (retained_bytes, _) = promoted
+            .command()
+            .executable()
+            .read_regular_file_stable_bounded(1024)
+            .unwrap();
+        assert_eq!(retained_bytes, b"exact-executable");
+        assert!(
+            runtime
+                .bind_admitted_realization_member_command(&mount, Path::new("codex"), &expected)
+                .is_err()
+        );
+        assert!(
+            runtime
+                .bind_admitted_realization_member_command(
+                    &mount,
+                    Path::new("codex"),
+                    &"0".repeat(64),
+                )
+                .is_err()
+        );
+        assert!(
+            runtime
+                .bind_admitted_realization_member_command(&mount, Path::new("../codex"), &expected)
+                .is_err()
+        );
+        std::fs::write(source.join("codex"), b"exact-executable").unwrap();
+        std::fs::set_permissions(source.join("codex"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert!(
+            runtime
+                .bind_admitted_realization_member_command(&mount, Path::new("codex"), &expected)
+                .unwrap_err()
+                .to_string()
+                .contains("expected 0o755")
+        );
     }
 
     #[cfg(unix)]
@@ -6710,6 +7398,7 @@ mod tests {
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/descriptor-bound-disabled",
                     thread_id: "T-descriptor-bound-disabled",
@@ -6795,6 +7484,7 @@ mod tests {
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/verified-command",
                     thread_id: "T-verified-command",
@@ -6862,6 +7552,7 @@ mod tests {
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/sealed-code",
                     thread_id: "T-sealed-code",
@@ -6991,6 +7682,7 @@ mod tests {
                     verified_command: None,
                     external_read_only_mounts: std::slice::from_ref(&admitted_mount),
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/enforced-handoff",
                     thread_id: "T-enforced-handoff",
@@ -7187,7 +7879,41 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("covered by an ineligible state-overlay mount"),
+                .contains("covered by an ineligible configuration mount"),
+            "{error}"
+        );
+
+        let configuration_source = tempfile::tempdir().unwrap();
+        let configuration_path = configuration_source.path().join("policy");
+        std::fs::write(&configuration_path, b"closed=true\n").unwrap();
+        let configuration_file =
+            lillux::open_pinned_regular_file_no_follow(&configuration_path).unwrap();
+        let configuration = IsolationReadOnlyMountAuthority::new_runtime_configuration(
+            configuration_path.clone(),
+            PathBuf::from("/etc/qualification/runtime.conf"),
+            configuration_file.inherited_descriptor_authority().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&configuration_path, b"closed=false\n").unwrap();
+        assert_eq!(
+            configuration
+                .source()
+                .read_regular_file_stable_bounded(64)
+                .unwrap()
+                .0,
+            b"closed=true\n"
+        );
+        let error = runtime
+            .prepare_verified_code_from_admitted_mount(
+                &IsolationVerifiedCode {
+                    source_path: configuration.destination().to_path_buf(),
+                    content_hash: lillux::sha256_hex(b"closed=true\n"),
+                },
+                std::slice::from_ref(&configuration),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("ineligible configuration mount"),
             "{error}"
         );
 
@@ -7368,6 +8094,7 @@ mod tests {
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/immutable-project",
                     thread_id: "T-immutable-project",
@@ -7472,6 +8199,15 @@ mod tests {
             ),
         ] {
             let mut external_mounts = vec![runtime_mount.clone(), project_mount.clone()];
+            let configuration_destination = Path::new("/etc/qualification-runtime-policy");
+            external_mounts.push(
+                IsolationReadOnlyMountAuthority::new_runtime_configuration(
+                    baseline.path().to_path_buf(),
+                    configuration_destination.to_path_buf(),
+                    baseline.inherited_descriptor_authority().unwrap(),
+                )
+                .unwrap(),
+            );
             if let Some(state_root) = exact_state {
                 external_mounts.push(IsolationReadOnlyMountAuthority::new_state_overlay(
                     baseline.path().to_path_buf(),
@@ -7498,10 +8234,51 @@ mod tests {
                 verified_command: Some(&command),
                 external_read_only_mounts: &external_mounts,
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: &[],
                 item_ref: "worker:tests/captured-plan",
                 thread_id: "T-captured-plan",
             };
+            // These host fixture paths are below /tmp, which is refused by
+            // configuration admission before the planner can consider overlap.
+            for forbidden in [project.path(), private_state.as_path()] {
+                assert!(
+                    IsolationReadOnlyMountAuthority::new_runtime_configuration(
+                        baseline.path().to_path_buf(),
+                        forbidden.to_path_buf(),
+                        baseline.inherited_descriptor_authority().unwrap(),
+                    )
+                    .is_err()
+                );
+            }
+            for forbidden in [
+                network_destination,
+                configuration_destination,
+                Path::new("/usr/share/qualification-policy"),
+            ] {
+                let mut conflicting_mounts = external_mounts.clone();
+                conflicting_mounts.push(
+                    IsolationReadOnlyMountAuthority::new_runtime_configuration(
+                        baseline.path().to_path_buf(),
+                        forbidden.to_path_buf(),
+                        baseline.inherited_descriptor_authority().unwrap(),
+                    )
+                    .unwrap(),
+                );
+                assert!(
+                    runtime
+                        .apply_with_provenance(
+                            request(),
+                            IsolationLaunchContext {
+                                external_read_only_mounts: &conflicting_mounts,
+                                ..context
+                            }
+                        )
+                        .is_err(),
+                    "{}",
+                    forbidden.display()
+                );
+            }
             if exact_state.is_some() {
                 for invalid_root in [node_state.as_path(), content.path()] {
                     let error = runtime
@@ -7587,6 +8364,11 @@ mod tests {
                 if host_network { "host" } else { "isolated" }
             );
             let mounts = request["plan"]["mounts"].as_array().unwrap();
+            assert!(mounts.iter().any(|mount| {
+                mount["destination"].as_str() == configuration_destination.to_str()
+                    && mount["access"] == "read_only"
+                    && mount["layer"] == 30
+            }));
             assert_eq!(
                 mounts.iter().any(|mount| {
                     mount["destination"].as_str() == network_destination.to_str()
@@ -7626,6 +8408,9 @@ mod tests {
             }
             for mount in mounts {
                 let destination = mount["destination"].as_str().unwrap();
+                if Some(destination) == configuration_destination.to_str() {
+                    continue;
+                }
                 if host_network && Some(destination) == network_destination.to_str() {
                     continue;
                 }
@@ -7696,6 +8481,7 @@ mod tests {
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/mutated-command",
                     thread_id: "T-mutated-command",
@@ -7816,6 +8602,7 @@ mod tests {
                 verified_command: None,
                 external_read_only_mounts: std::slice::from_ref(&external),
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: &[],
                 item_ref: "tool:tests/external-mount",
                 thread_id: "T-external-mount",
@@ -7879,6 +8666,7 @@ mod tests {
                     verified_command: None,
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: std::slice::from_ref(&runtime_view),
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "worker:tests/runtime-view-disabled",
                     thread_id: "T-runtime-view-disabled",
@@ -7974,6 +8762,7 @@ mod tests {
             verified_command: Some(&command),
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &views,
+            producer_prepared_mounts: &[],
             target_channels: &[],
             item_ref: "worker:tests/runtime-view",
             thread_id: "T-runtime-view",
@@ -8008,6 +8797,7 @@ mod tests {
                 request(),
                 IsolationLaunchContext {
                     writable_runtime_view_mounts: &duplicates,
+                    producer_prepared_mounts: &[],
                     ..context
                 },
             )
@@ -8018,6 +8808,113 @@ mod tests {
                 .to_string()
                 .contains("overlaps another launch mount or workspace")
         );
+
+        let prepared_root = project
+            .create_child(std::ffi::OsStr::new("prepared"), 0o700)
+            .unwrap();
+        let prepared_home = prepared_root
+            .create_child(std::ffi::OsStr::new("codex-home"), 0o700)
+            .unwrap();
+        prepared_home
+            .atomic_create_regular(std::ffi::OsStr::new("config.toml"), b"model = 'fixture'\n", 0o600)
+            .unwrap()
+            .unwrap();
+        let prepared_config = prepared_home
+            .open_pinned_regular(std::ffi::OsStr::new("config.toml"), false)
+            .unwrap()
+            .unwrap();
+        let captured_config = prepared_config
+            .capture_sealed_bounded(&prepared_config.observation().unwrap(), 65536)
+            .unwrap();
+        let immutable_config = IsolationProducerPreparedImmutableFileAuthority::new(
+            &ryeos_state::external_content::products::producer_recipe::ProducerPreparedImmutableFile {
+                prepared_directory_id: "codex-home".into(),
+                leaf_name: "config.toml".into(),
+                maximum_bytes: 65536,
+                expected_sha256: lillux::sha256_hex(b"model = 'fixture'\n"),
+            },
+            captured_config,
+        )
+        .unwrap();
+        let workspace_view = project.inherited_descriptor_authority().unwrap();
+        let prepared = IsolationProducerPreparedDirectoryAuthority::new(
+            "codex-home".into(),
+            "prepared/codex-home".into(),
+            prepared_home.inherited_descriptor_authority().unwrap(),
+        )
+        .unwrap()
+        .with_immutable_files(vec![immutable_config])
+        .unwrap();
+        let prepared_destination = prepared.destination().to_string_lossy().into_owned();
+        let prepared_request = || {
+            let mut selected = request();
+            selected.cwd = Some(prepared_destination.clone());
+            selected.envs = vec![
+                ("CODEX_HOME".into(), prepared_destination.clone()),
+                ("HOME".into(), prepared_destination.clone()),
+            ];
+            selected
+        };
+        let prepared_mounts = [prepared.clone()];
+        let prepared_context = IsolationLaunchContext {
+            workspace_view: Some(&workspace_view),
+            writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &prepared_mounts,
+            ..context
+        };
+        let applied = runtime
+            .apply_with_provenance(prepared_request(), prepared_context)
+            .unwrap();
+        let (request_bytes, _) = applied
+            .request
+            .inherited_fds
+            .last()
+            .unwrap()
+            .read_regular_file_stable_bounded(ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64)
+            .unwrap();
+        let adapter_request: AdapterLaunchRequest = serde_json::from_slice(&request_bytes).unwrap();
+        assert_eq!(adapter_request.plan.target.cwd.as_str(), prepared_destination);
+        assert_eq!(
+            adapter_request.plan.environment.values.get("CODEX_HOME"),
+            Some(&prepared_destination)
+        );
+        assert_eq!(
+            adapter_request.plan.environment.values.get("HOME"),
+            Some(&prepared_destination)
+        );
+        let prepared_mount = adapter_request
+            .plan
+            .mounts
+            .iter()
+            .find(|mount| mount.destination.as_str() == prepared_destination)
+            .unwrap();
+        assert_eq!(prepared_mount.access, IsolationMountAccess::Writable);
+        assert!(adapter_request.authorities.iter().any(|authority| {
+            authority.id == prepared_mount.source
+                && authority.purpose == IsolationAuthorityPurpose::WritableMount
+        }));
+        let immutable_mount = adapter_request
+            .plan
+            .mounts
+            .iter()
+            .find(|mount| mount.destination.as_str() == format!("{prepared_destination}/config.toml"))
+            .unwrap();
+        assert_eq!(immutable_mount.access, IsolationMountAccess::ReadOnly);
+        assert_eq!(immutable_mount.layer, 20);
+        assert!(adapter_request.authorities.iter().any(|authority| {
+            authority.id == immutable_mount.source
+                && authority.purpose == IsolationAuthorityPurpose::ReadOnlyMount
+        }));
+        let duplicates = [prepared.clone(), prepared];
+        assert!(runtime
+            .apply_with_provenance(
+                prepared_request(),
+                IsolationLaunchContext {
+                    producer_prepared_mounts: &duplicates,
+                    ..prepared_context
+                },
+            )
+            .is_err());
     }
 
     #[cfg(target_os = "linux")]
@@ -8112,6 +9009,7 @@ mod tests {
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &views,
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "worker:tests/runtime-view-workspace",
                     thread_id: "T-runtime-view-workspace",
@@ -8173,6 +9071,7 @@ mod tests {
                 IsolationLaunchContext {
                     immutable_project: None,
                     writable_runtime_view_mounts: std::slice::from_ref(&direct),
+                    producer_prepared_mounts: &[],
                     workspace_view: Some(&workspace_view),
                     project_path: project.path(),
                     project_authority: IsolationProjectAuthority::RuntimeWorkspace,
@@ -8246,6 +9145,7 @@ mod tests {
                 verified_command: None,
                 external_read_only_mounts: &[],
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: &[],
                 item_ref: "worker:tests/captured",
                 thread_id: "T-captured",
@@ -8301,6 +9201,7 @@ mod tests {
                 verified_command: None,
                 external_read_only_mounts: &[],
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: std::slice::from_ref(&channel),
                 item_ref: "worker:tests/channel",
                 thread_id: "T-channel",
@@ -8407,6 +9308,7 @@ mod tests {
                     verified_command: None,
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "graph:tests/native-cow",
                     thread_id: "T-native-cow",
@@ -8455,6 +9357,7 @@ mod tests {
             verified_command: None,
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
             target_channels: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
@@ -8514,6 +9417,7 @@ mod tests {
             verified_command: None,
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
             target_channels: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
@@ -8564,6 +9468,7 @@ mod tests {
             verified_command: None,
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
             target_channels: &[],
             item_ref: "tool:tests/live",
             thread_id: "T-live",
@@ -8642,6 +9547,7 @@ mod tests {
                     verified_command: None,
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/runtime-workspace",
                     thread_id: "T-runtime-workspace",
@@ -8748,7 +9654,12 @@ mod tests {
                 arguments: vec!["first-secret".to_string()],
                 cwd: IsolationPath::new("/workspace").unwrap(),
             },
-            mounts: Vec::new(),
+            mounts: vec![IsolationMount {
+                source: IsolationAuthorityId::new("target").unwrap(),
+                destination: IsolationPath::new("/run/ryeos/verified-code/tool").unwrap(),
+                access: IsolationMountAccess::ReadOnly,
+                layer: 0,
+            }],
             fixed_parent_views: Vec::new(),
             project_workspace: None,
             target_channels: Vec::new(),
@@ -8756,6 +9667,7 @@ mod tests {
                 values: BTreeMap::from([("API_TOKEN".to_string(), "first-token".to_string())]),
             },
             network: IsolationNetwork::Isolated,
+            loopback_ingress: None,
             devices: IsolationDeviceSurface::Minimal,
             character_devices: Vec::new(),
             private_tmp: true,
@@ -8765,15 +9677,130 @@ mod tests {
             nested_sandbox: false,
         };
         let digest = redacted_plan_digest(&plan).unwrap();
+        let target = expected_applied_launch_commitments(&plan).unwrap();
 
         plan.target.arguments[0] = "second-secret".to_string();
         plan.environment
             .values
             .insert("API_TOKEN".to_string(), "second-token".to_string());
         assert_eq!(redacted_plan_digest(&plan).unwrap(), digest);
+        let changed = expected_applied_launch_commitments(&plan).unwrap();
+        assert_eq!(target.executable_sha256, changed.executable_sha256);
+        assert_eq!(target.cwd_sha256, changed.cwd_sha256);
+        assert_ne!(target.argv_sha256, changed.argv_sha256);
+        assert_ne!(target.environment_sha256, changed.environment_sha256);
 
         plan.network = IsolationNetwork::Host;
         assert_ne!(redacted_plan_digest(&plan).unwrap(), digest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn engine_mount_expectation_moves_with_exact_plan_before_adapter_contact() {
+        use std::os::fd::AsRawFd as _;
+
+        let source = tempfile::tempfile().unwrap();
+        let id = IsolationAuthorityId::new("target").unwrap();
+        let authority = IsolationAuthority {
+            id: id.clone(),
+            inherited_fd: source.as_raw_fd() as u32,
+            purpose: IsolationAuthorityPurpose::Executable,
+        };
+        let mut plan = IsolationPlan {
+            target: IsolationTarget {
+                executable: id.clone(),
+                argv0: "tool".into(),
+                arguments: Vec::new(),
+                cwd: IsolationPath::new("/workspace").unwrap(),
+            },
+            mounts: vec![IsolationMount {
+                source: id,
+                destination: IsolationPath::new("/run/ryeos/verified-code/tool").unwrap(),
+                access: IsolationMountAccess::ReadOnly,
+                layer: 0,
+            }],
+            fixed_parent_views: Vec::new(),
+            project_workspace: None,
+            target_channels: Vec::new(),
+            environment: IsolationEnvironment { values: BTreeMap::new() },
+            network: IsolationNetwork::Isolated,
+            loopback_ingress: None,
+            devices: IsolationDeviceSurface::Minimal,
+            character_devices: Vec::new(),
+            private_tmp: true,
+            proc_filesystem: ryeos_isolation_protocol::IsolationProcFilesystem::Empty,
+            pid_namespace: IsolationPidNamespace::Isolated,
+            shared_process_group: true,
+            nested_sandbox: false,
+        };
+        let expected = expected_mount_preparation_commitments(&plan, &[authority.clone()]).unwrap();
+        assert_eq!(expected.schema, 1);
+        assert_eq!(expected.mount_count, 1);
+        plan.mounts[0].access = IsolationMountAccess::Writable;
+        let writable = expected_mount_preparation_commitments(&plan, &[authority.clone()]).unwrap();
+        assert_ne!(writable.destination_access_sha256, expected.destination_access_sha256);
+        plan.mounts[0].access = IsolationMountAccess::ReadOnly;
+        plan.mounts[0].destination = IsolationPath::new("/run/ryeos/verified-code/other").unwrap();
+        let moved = expected_mount_preparation_commitments(&plan, &[authority]).unwrap();
+        assert_ne!(moved.destination_access_sha256, expected.destination_access_sha256);
+    }
+
+    #[test]
+    fn loopback_receipt_requires_exact_held_request_and_one_descriptor() {
+        let plan = IsolationPlan {
+            target: IsolationTarget {
+                executable: IsolationAuthorityId::new("target").unwrap(),
+                argv0: "tool".into(),
+                arguments: vec!["arg".into()],
+                cwd: IsolationPath::new("/workspace").unwrap(),
+            },
+            mounts: Vec::new(),
+            fixed_parent_views: Vec::new(),
+            project_workspace: None,
+            target_channels: Vec::new(),
+            environment: IsolationEnvironment {
+                values: BTreeMap::new(),
+            },
+            network: IsolationNetwork::Isolated,
+            loopback_ingress: Some(ryeos_isolation_protocol::IsolationLoopbackIngress {
+                address: "127.0.0.1:7411".into(),
+            }),
+            devices: IsolationDeviceSurface::Minimal,
+            character_devices: Vec::new(),
+            private_tmp: true,
+            proc_filesystem: ryeos_isolation_protocol::IsolationProcFilesystem::Empty,
+            pid_namespace: IsolationPidNamespace::Isolated,
+            shared_process_group: true,
+            nested_sandbox: false,
+        };
+        let mut request = AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            plan,
+            authorities: Vec::new(),
+            artifacts: BTreeMap::new(),
+            adapter_fd: 10,
+            status_fd: 11,
+            loopback_transfer_fd: Some(12),
+            lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
+                release_fd: 13,
+                release_keepalive_fd: 14,
+            },
+        };
+        let digest =
+            workspace_transfer_value_digest(serde_json::to_value(&request).unwrap()).unwrap();
+        let receipt = ryeos_isolation_protocol::LoopbackListenerTransferReceipt {
+            protocol: request.protocol,
+            request_digest: digest,
+        };
+        let bytes = lillux::canonical_json(&serde_json::to_value(receipt).unwrap()).unwrap();
+        validate_loopback_listener_transfer_receipt(bytes.as_bytes(), 1, &request).unwrap();
+        assert!(
+            validate_loopback_listener_transfer_receipt(bytes.as_bytes(), 0, &request).is_err()
+        );
+        request.plan.target.arguments.push("changed".into());
+        assert!(
+            validate_loopback_listener_transfer_receipt(bytes.as_bytes(), 1, &request).is_err()
+        );
     }
 
     #[cfg(unix)]

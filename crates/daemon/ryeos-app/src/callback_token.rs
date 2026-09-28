@@ -7,6 +7,38 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::execution_provenance::ExecutionProvenance;
+use ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose;
+
+/// Protected root intent for one daemon-owned producer. This is a live bearer
+/// projection of the sealed qualification purpose, not permission to launch
+/// from an arbitrary Tool callback. The scoped-child handler must additionally
+/// recheck the durable owner and signed recipe before its irreversible cut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedScopedProducerGrant {
+    pub purpose: ProductQualificationLaunchPurpose,
+    pub root_thread_id: String,
+    pub launch_owner: String,
+    /// Node isolation class captured before this root may launch a producer.
+    pub isolation_class: ryeos_engine::isolation::IsolationLaunchProvenance,
+}
+
+impl AdmittedScopedProducerGrant {
+    pub fn validate(&self) -> Result<()> {
+        self.purpose.validate()?;
+        if self.root_thread_id.is_empty() || self.launch_owner.is_empty() {
+            bail!("scoped producer grant has no exact root launch owner");
+        }
+        if self.isolation_class.plan_digest.is_some()
+            || self.isolation_class.mode != ryeos_engine::isolation::IsolationMode::Enforce
+            || self.isolation_class.backend_status
+                != ryeos_engine::isolation::IsolationBackendStatus::Available
+            || self.isolation_class.backend.is_none()
+        {
+            bail!("scoped producer grant has no available enforced isolation class");
+        }
+        Ok(())
+    }
+}
 
 /// Hook identity admitted at the same launch boundary that mints callback
 /// authority. Runtime callback input may select one of these identities; it
@@ -44,6 +76,25 @@ impl CallbackRuntimeMethodSurface {
         Self { exact: None }
     }
 
+    /// The only runtime methods admitted for a product-qualification verifier
+    /// with an exact scoped-producer grant. It may drive and settle that one
+    /// daemon-owned attempt, but it cannot dispatch managed children, publish,
+    /// or acquire unrelated runtime authority through its callback bearer.
+    pub fn qualification_scoped_producer() -> Self {
+        Self::exact(vec![
+            "runtime.scoped_child_expected_source".into(),
+            "runtime.scoped_child_expected_isolation_class".into(),
+            "runtime.scoped_child_start".into(),
+            "runtime.scoped_child_resume".into(),
+            "runtime.scoped_child_observe".into(),
+            "runtime.scoped_child_abort".into(),
+            "runtime.scoped_child_write".into(),
+            "runtime.scoped_child_read".into(),
+            "runtime.scoped_child_close_input".into(),
+        ])
+        .expect("fixed qualification callback surface is canonical")
+    }
+
     pub fn exact(mut methods: Vec<String>) -> Result<Self> {
         if methods.is_empty() {
             bail!("exact callback runtime-method surface is empty");
@@ -76,6 +127,22 @@ impl CallbackRuntimeMethodSurface {
             return Ok(());
         }
         bail!("callback capability does not authorize runtime method `{method}`")
+    }
+
+    /// Stable evidence identity for a closed callback surface. Qualification
+    /// retains this digest so a later verifier cannot silently widen or
+    /// reinterpret the methods available to its producer-driving bearer.
+    pub fn exact_surface_digest(&self) -> Result<String> {
+        let methods = self.exact.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("unbounded callback surface has no evidence identity")
+        })?;
+        let coordinate = serde_json::json!({
+            "schema": "ryeos.callback_runtime_method_surface.v1",
+            "methods": methods,
+        });
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&coordinate)?.as_bytes(),
+        ))
     }
 
     fn is_exact(&self) -> bool {
@@ -413,6 +480,9 @@ pub struct CallbackCapability {
     /// Absence preserves the ordinary callback contract. This is bound once
     /// before the protected child channel is exposed and can never be widened.
     pub workload_client_grant: Option<AdmittedWorkloadClientGrant>,
+    /// Absent on every ordinary Tool and managed runtime. Bound at most once,
+    /// before a protected verifier's callback token is exposed.
+    pub scoped_producer_grant: Option<AdmittedScopedProducerGrant>,
 }
 
 impl CallbackCapability {
@@ -530,6 +600,7 @@ impl CallbackCapabilityStore {
             depth,
             accounting_scope: None,
             workload_client_grant: None,
+            scoped_producer_grant: None,
         };
 
         self.capabilities.lock().unwrap().insert(token, cap.clone());
@@ -660,6 +731,33 @@ impl CallbackCapabilityStore {
                     bail!("callback workload-client grant was already bound");
                 }
                 cap.workload_client_grant = Some(grant);
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Bind protected qualification intent once, while the newly minted token
+    /// remains private to the launcher. A later callback cannot create or
+    /// replace this authority.
+    pub fn set_scoped_producer_grant(
+        &self,
+        token: &str,
+        grant: AdmittedScopedProducerGrant,
+    ) -> Result<bool> {
+        grant.validate()?;
+        Ok(match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                if cap.scoped_producer_grant.is_some() {
+                    bail!("callback scoped-producer grant was already bound");
+                }
+                if cap.thread_id != grant.root_thread_id
+                    || cap.launch_owner.as_deref() != Some(grant.launch_owner.as_str())
+                    || cap.item_ref.as_deref() != Some(grant.purpose.verifier_ref.as_str())
+                {
+                    bail!("callback scoped-producer grant contradicts its root bearer");
+                }
+                cap.scoped_producer_grant = Some(grant);
                 true
             }
             None => false,
@@ -983,6 +1081,7 @@ mod tests {
             .validate(&cap.token, "T-test123", PathBuf::from("/project").as_path())
             .unwrap();
         assert_eq!(validated.thread_id, "T-test123");
+        assert!(validated.scoped_producer_grant.is_none());
     }
 
     #[test]
@@ -1025,6 +1124,57 @@ mod tests {
                 .is_err(),
             "an exact bearer must never be widened or replaced in place"
         );
+    }
+
+    #[test]
+    fn qualification_callback_surface_excludes_managed_work_and_publication() {
+        let surface = CallbackRuntimeMethodSurface::qualification_scoped_producer();
+        let digest = surface.exact_surface_digest().unwrap();
+        assert!(lillux::valid_hash(&digest));
+        assert_eq!(
+            digest,
+            CallbackRuntimeMethodSurface::qualification_scoped_producer()
+                .exact_surface_digest()
+                .unwrap()
+        );
+        assert_ne!(
+            digest,
+            CallbackRuntimeMethodSurface::exact(vec!["runtime.scoped_child_start".into()])
+                .unwrap()
+                .exact_surface_digest()
+                .unwrap()
+        );
+        assert!(
+            CallbackRuntimeMethodSurface::complete_runtime_protocol()
+                .exact_surface_digest()
+                .is_err()
+        );
+        for method in [
+            "runtime.scoped_child_expected_source",
+            "runtime.scoped_child_expected_isolation_class",
+            "runtime.scoped_child_start",
+            "runtime.scoped_child_resume",
+            "runtime.scoped_child_observe",
+            "runtime.scoped_child_abort",
+            "runtime.scoped_child_write",
+            "runtime.scoped_child_read",
+            "runtime.scoped_child_close_input",
+        ] {
+            surface.authorize(method).unwrap();
+        }
+        for method in [
+            "runtime.dispatch_action",
+            "runtime.spawn_follow_child",
+            "runtime.author_item",
+            "runtime.publish_artifact",
+            "runtime.provider_attempt_prepare",
+            "runtime.vault_get",
+        ] {
+            assert!(
+                surface.authorize(method).is_err(),
+                "unexpected method: {method}"
+            );
+        }
     }
 
     #[test]
@@ -1346,6 +1496,7 @@ mod tests {
             depth: 0,
             accounting_scope: None,
             workload_client_grant: None,
+            scoped_producer_grant: None,
         };
 
         let cloned = cap.clone();

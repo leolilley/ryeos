@@ -254,7 +254,18 @@ pub(super) fn probe() -> Result<(), String> {
         );
         // Always reap the exact creator, including malformed/failed receipt.
         // Its bounded alarm also prevents an inspection wait from hanging.
-        require_probe_exit((LinuxSandboxProcess { pid: creator }).wait()?)?;
+        require_probe_exit(
+            (LinuxSandboxProcess {
+                pid: creator,
+                namespace_lifetime: None,
+                launch_failure: None,
+                applied_launch: None,
+                observed_applied_launch: None,
+                mount_preparation: None,
+                termination_requested: false,
+            })
+            .wait()?,
+        )?;
         let (payload, mut descriptors) = received.map_err(|error| error.to_string())?.into_parts();
         if payload != b"view" || descriptors.len() != 1 {
             return Err("template probe received an unexpected capability packet".to_string());
@@ -263,7 +274,7 @@ pub(super) fn probe() -> Result<(), String> {
             descriptors.pop().unwrap().for_child()?,
         )?;
         bounded_probe_child(|| {
-            enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+            enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
             mount_private_root()?;
             create_directory_target(&rooted(&PathBuf::from("/project"))?)?;
             mount_overlay(&LinuxSandboxOverlay {
@@ -287,7 +298,7 @@ pub(super) fn probe() -> Result<(), String> {
                 .map_err(|error| error.to_string())
         })?;
         bounded_probe_child(|| {
-            enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+            enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
             mount_private_root()?;
             create_directory_target(&rooted(&PathBuf::from("/project"))?)?;
             mount_overlay(&LinuxSandboxOverlay {
@@ -322,7 +333,18 @@ fn bounded_probe_child(operation: impl FnOnce() -> Result<(), String>) -> Result
         arm_probe_child(parent);
         finish_probe_child(operation());
     }
-    require_probe_exit((LinuxSandboxProcess { pid }).wait()?)
+    require_probe_exit(
+        (LinuxSandboxProcess {
+            pid,
+            namespace_lifetime: None,
+            launch_failure: None,
+            applied_launch: None,
+            observed_applied_launch: None,
+            mount_preparation: None,
+            termination_requested: false,
+        })
+        .wait()?,
+    )
 }
 
 fn arm_probe_child(parent: libc::pid_t) {
@@ -474,7 +496,7 @@ mod tests {
         // Both borrowers begin at the original host-side owner, not by
         // joining or nesting below the now-dead creator's user namespace.
         isolated_probe(|| {
-            enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+            enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
             mount_private_root()?;
             attach_probe_clone(&template)?;
             let source = reanchor_overlay_descendant_source(
@@ -501,7 +523,7 @@ mod tests {
         })
         .unwrap();
         isolated_probe(|| {
-            enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+            enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
             mount_private_root()?;
             attach_probe_clone(&template)?;
             assert_bytes("/tmp/project/seed", b"first borrower")?;
@@ -588,7 +610,7 @@ mod tests {
                 mount_source_stat(File::open("/proc/self/ns/mnt").unwrap().as_raw_fd())?.st_ino;
 
             isolated_probe(|| {
-                enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+                enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
                 let user =
                     mount_source_stat(File::open("/proc/self/ns/user").unwrap().as_raw_fd())?
                         .st_ino;
@@ -624,7 +646,7 @@ mod tests {
                 return Err("child deletion or private-mount isolation failed".to_string());
             }
             isolated_probe(|| {
-                enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+                enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
                 mount_private_root()?;
                 attach_probe_clone(&template)?;
                 assert_bytes("/tmp/project/seed", b"child")?;

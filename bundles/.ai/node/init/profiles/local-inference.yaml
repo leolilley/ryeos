@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T07:24:52Z:165921bbfcff903764ae74e9b309af8d2dc06f08e6cc7f855975cb4eeece32c1:Bl/OLI172TA1K+QYR4sSCf5D/rgy4gxgEtTGxrP8meh5UFUDHZ0889upMj6Cjk5vzDShDOpNJQtAMnVHJwzaDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-27T22:01:05Z:2b957b6bfa06d38d94489b61363e85a7610f5565ee2c1596e3f4465b75bfb7c9:5FXt7JrM7kp2hDZKxmjfyZmgLbOO5yzmyBixjWqGgsoN3MpO7Q8nugi0PYNUT5xLUQhY4tyS+8qEMe2sxlwNAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -6,6 +6,11 @@ exact_bundles:
   - local-inference
   - standard
 policies:
+  bundle_publication:
+    schema: 2
+    # Publication is disabled until the operator installs measured release authority.
+    catalogs: []
+
   accounting:
     schema: 2
     issue_acceptance_window_ms: 60000
@@ -90,11 +95,12 @@ policies:
       standard:
         - ryeos.register.command.dispatch.direct_execute_item_ref
   execution:
-    schema: 3
+    schema: 4
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
+    producer_resource_ceiling: null
     resource_authority:
       cleanup_allowance_ms: 30000
       admission:
@@ -254,3 +260,6 @@ policies:
       max_active_streams_per_subject: 1
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
+  ui_browser_sessions:
+    schema: 1
+    max_live_binding_attachments_per_session: 16

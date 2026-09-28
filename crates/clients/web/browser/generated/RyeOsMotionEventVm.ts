@@ -7,4 +7,4 @@ export type RyeOsMotionEventVm =
   | { type: "tile_exit"; tile_id: string }
   | { type: "tile_split"; source_tile_id: string; new_tile_id: string; axis: RyeOsSplitAxisVm }
   | { type: "focus_changed"; tile_id: string }
-  | { type: "tab_changed"; workspace_number: bigint };
+  | { type: "tab_changed"; view_set_number: bigint };

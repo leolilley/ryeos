@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-15T01:39:00Z:67dced6f77e5b433f14a9f2d4c23cd7474332442600c69534972d2abe7b6d43a:Y8RFP9RhybOzU3w7L6YybYE9WoeAVSH7TP94wpEJR+RWr0ZSZXpZrGVnCM2G1QNR5+ajk7oKFsimotquzQ+IDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T07:22:30Z:17fd2825446ad9c2cd246d79dbde5682dde632d0666530d3cb3be7743e5f5e93:oyP+oqlj3wLJZSRGQq7i3KfkJ5YqzvVTrDTFyE0zU4WnVGXt8JOr3HGoyw10t4BqPYQNLBTRoC/0uFFzMIq7AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -18,7 +18,7 @@ against this tree.
 The core rule is:
 
 ```text
-RyeOS UI is an assistant workspace over durable logical work.
+RyeOS UI is a surface of independently composable view sets over durable logical work.
 A chain root is the stable work address; placement threads are execution bodies.
 Conversation, activity, evidence, files, and inspectors are lenses.
 Project and node are scopes.
@@ -33,6 +33,9 @@ chain rather than creating a new assistant in the product model.
 
 `surface:ryeos/ui/assistant` composes these signed top-level lenses:
 
+- Development: a nested three-region view set with durable work navigation,
+  one explicitly routed conversation, exact retained candidate changes, and a
+  bounded live execution field;
 - Home: exact operator attention, active executions, recent movement, and
   projects;
 - Work: principal-scoped chains grouped by durable chain root;
@@ -47,6 +50,28 @@ affordance copies those coordinates into `input.route`, where drafts key on the
 stable logical-work address. A restart, new worker epoch, or cross-site
 continuation must therefore read as movement within the same work, not a new
 agent or unrelated conversation.
+
+The Development set keeps two distinct authored contexts. Its conversation
+uses the conversation view instance's explicit input route. Its navigator
+writes the view-set-scoped `selection.work`, which the change inventory and
+execution field share. Selecting evidence must never silently retarget a
+composer. The navigator does not manufacture a project or thread from browser
+state, and until work is explicitly selected the inspector views remain
+honestly unselected. Candidate changes come from the retained candidate owner
+and the execution diagram comes from
+`service:ui/ryeos-ui/field/execution`; neither is synthetic renderer content.
+Candidate inspection distinguishes a retained candidate from one not yet
+captured and from work without a dedicated candidate session. Child-tree
+projections expose bounded coverage and truncation instead of presenting a
+partial closure as complete. Execution evidence reports whether durable launch
+posture is retained, missing, unreadable, or corrupt; an empty posture section
+is not evidence of complete coverage.
+The explorer, conversation, changes and execution regions are ordinary view
+groups in the signed nested layout tree. They are not fixed Svelte product
+panes, and the four supporting slots remain free for independently authored
+persistent views. Their short group labels are signed arrangement metadata:
+they identify a stable region above its selectable member tabs, survive saved
+view-set round trips, and never create another renderer-owned navigation model.
 
 All sources and affordances come from the daemon-compiled effective signed
 surface/view closure. Browser and terminal clients send only a binding digest,
@@ -401,22 +426,22 @@ same work route and preserve a path to exact activity/evidence.
 
 ```text
 surface:ryeos/ui/assistant
-`-- assistant workspace
-    |-- navigation: signed destination-to-view bindings
-    |-- center: selected lens
-    |-- bottom: view:ryeos/input
-    `-- top: node/project status
+`-- operator surface
+    |-- view-set strip: independently retained compositions
+    |-- active view set: one authored layout of mounted views
+    |-- optional top/left/right/bottom slots: ordinary supporting views
+    `-- navigation: signed destination-to-view bindings
 
 surface:ryeos/ui/thread
 `-- focused thread surface
-    |-- center: view:ryeos/thread/transcript
-    `-- bottom: routed input
+    `-- initial view set
+        |-- center: view:ryeos/thread/transcript
+        `-- optional conversation input view
 
 surface:ryeos/ui/thread-crystal
 `-- focused thread surface over the prism backdrop
-    |-- center: view:ryeos/thread/transcript
-    |-- bottom: routed input
-    `-- background: view:ryeos/backdrop/prism
+    |-- initial view set: view:ryeos/thread/transcript
+    `-- backdrop: view:ryeos/backdrop/prism
 
 surface:ryeos/ui/workbench
 `-- project work surface

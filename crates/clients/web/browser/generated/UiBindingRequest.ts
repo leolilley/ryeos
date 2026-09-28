@@ -9,6 +9,8 @@ import type { UiBindingPayload } from "./UiBindingPayload";
  * substitutes or dispatches anything.
  */
 export interface UiBindingRequest {
+  binding_attachment_id: string;
+  binding_generation: bigint;
   binding_digest: string;
   coordinate: UiBindingCoordinate;
   payload: UiBindingPayload;

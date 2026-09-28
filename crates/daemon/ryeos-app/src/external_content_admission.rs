@@ -110,6 +110,17 @@ pub(crate) fn consumer_authority(
     }
 }
 
+/// Expose the production consumer-authority derivation only to composed
+/// admission fixtures. Tests still have to supply a real resolved definition
+/// and exact subject authority; this seam does not mint either one.
+#[cfg(feature = "test-support")]
+pub fn derive_consumer_authority_for_test(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    subject_resolution_authority: &ryeos_engine::contracts::SubjectResolutionAuthority,
+) -> anyhow::Result<ryeos_state::objects::ExternalContentConsumerAuthority> {
+    consumer_authority(resolution, subject_resolution_authority)
+}
+
 /// Whether the admitted effective bundle definition contains any project-
 /// scoped contributor. The outer execution subject alone is deliberately not
 /// evidence of this: fixed bundle pins remain reusable under a pinned launch.
@@ -117,7 +128,7 @@ pub(crate) fn consumer_authority(
 /// committed by the effective definition and must retain generation scope.
 /// A source closure is owned by the resolution root itself; its mere presence
 /// therefore cannot turn a bundle root into project authority.
-fn bundle_consumer_depends_on_project(
+pub(crate) fn bundle_consumer_depends_on_project(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
 ) -> bool {
     let project_source = |ancestor: &ryeos_engine::resolution::ResolvedAncestor| {
@@ -133,6 +144,34 @@ fn bundle_consumer_depends_on_project(
             .composed
             .derived
             .contains_key(ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY)
+}
+
+/// A pinned-project binding may name either an executable rooted in the
+/// project snapshot, or a trusted bundle executable whose admitted effective
+/// definition actually incorporates that exact project generation. The
+/// latter is required for bundle-owned Tools whose product selections are
+/// resolved from project-owned relationship Configs.
+pub(crate) fn is_pinned_project_consumer_resolution(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> bool {
+    use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace};
+    use ryeos_engine::resolution::TrustClass;
+
+    match (resolution.root.source_space, &resolution.root.source_root) {
+        (ItemSpace::Project, ItemSourceRoot::Project) => matches!(
+            resolution.effective_trust_class,
+            TrustClass::TrustedProject | TrustClass::UntrustedProject
+        ),
+        (ItemSpace::Bundle, ItemSourceRoot::Bundle { .. }) => {
+            resolution.root.trust_class == TrustClass::TrustedBundle
+                && matches!(
+                    resolution.effective_trust_class,
+                    TrustClass::TrustedBundle | TrustClass::TrustedProject
+                )
+                && bundle_consumer_depends_on_project(resolution)
+        }
+        _ => false,
+    }
 }
 
 fn pinned_project_consumer_authority(
@@ -217,48 +256,63 @@ pub fn preview_external_content_pins(
     let mut previews = Vec::with_capacity(declarations.len());
     let mut ready_for_admission = true;
     for declaration in &declarations {
-        let (observed_digest, binding_digest, status, ready) = match declaration.locator.as_ref() {
-            Some(locator) => {
-                let base_path = resolve_named_root(engine, roots, &locator.root)?;
-                let base = lillux::PinnedDirectory::open(&base_path)?.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "external content root `{}` is unavailable",
-                        locator.root.label()
-                    )
-                })?;
-                let policy = ExternalCapturePolicy::new(
-                    locator.path.clone(),
-                    state.ignore_matcher.as_ref(),
-                )?;
-                let manifest = ryeos_state::capture_external_content_at(
-                    &base,
-                    &locator.path,
-                    capture_kind(declaration.kind),
-                    &declaration.exclude,
-                    &policy,
-                    &mut budget,
-                    &mut sink,
-                )?;
-                let observed = ryeos_state::external_content_manifest_digest(&manifest)?;
-                let status = match declaration.mode {
-                    ryeos_engine::external_content::ExternalContentMode::Captured => "captured",
-                    ryeos_engine::external_content::ExternalContentMode::Pinned
-                        if declaration.digest.as_deref() == Some(observed.as_str()) =>
-                    {
-                        "matched"
-                    }
-                    ryeos_engine::external_content::ExternalContentMode::Pinned => "mismatched",
-                };
-                let ready = status != "mismatched";
-                (Some(observed), None, status, ready)
+        let (observed_digest, binding_digest, status, ready) = if declaration
+            .bundle_binary
+            .is_some()
+        {
+            let (captured, manifest) =
+                capture_declared_bundle_binary(engine, roots, resolution, declaration)?;
+            budget.charge_entry()?;
+            budget.charge_bytes(manifest.total_bytes)?;
+            let observed = ryeos_state::external_content_manifest_digest(&manifest)?;
+            // The source manifest and publisher are checked during capture;
+            // the retained realization commits the exact captured bytes.
+            drop(captured);
+            (Some(observed), None, "captured", true)
+        } else {
+            match declaration.locator.as_ref() {
+                Some(locator) => {
+                    let base_path = resolve_named_root(engine, roots, &locator.root)?;
+                    let base = lillux::PinnedDirectory::open(&base_path)?.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "external content root `{}` is unavailable",
+                            locator.root.label()
+                        )
+                    })?;
+                    let policy = ExternalCapturePolicy::new(
+                        locator.path.clone(),
+                        state.ignore_matcher.as_ref(),
+                    )?;
+                    let manifest = ryeos_state::capture_external_content_at(
+                        &base,
+                        &locator.path,
+                        capture_kind(declaration.kind),
+                        &declaration.exclude,
+                        &policy,
+                        &mut budget,
+                        &mut sink,
+                    )?;
+                    let observed = ryeos_state::external_content_manifest_digest(&manifest)?;
+                    let status = match declaration.mode {
+                        ryeos_engine::external_content::ExternalContentMode::Captured => "captured",
+                        ryeos_engine::external_content::ExternalContentMode::Pinned
+                            if declaration.digest.as_deref() == Some(observed.as_str()) =>
+                        {
+                            "matched"
+                        }
+                        ryeos_engine::external_content::ExternalContentMode::Pinned => "mismatched",
+                    };
+                    let ready = status != "mismatched";
+                    (Some(observed), None, status, ready)
+                }
+                None => preview_retained_external_content(
+                    state,
+                    contract,
+                    resolution,
+                    subject_resolution_authority,
+                    declaration,
+                )?,
             }
-            None => preview_retained_external_content(
-                state,
-                contract,
-                resolution,
-                subject_resolution_authority,
-                declaration,
-            )?,
         };
         ready_for_admission &= ready;
         previews.push(ExternalContentPinPreview {
@@ -315,9 +369,9 @@ pub fn preview_portable_content_dependency_with_realizations(
     let mut previews = Vec::with_capacity(declarations.len());
     let mut ready_for_admission = true;
     for declaration in &declarations {
-        if declaration.locator.is_some() {
+        if declaration.locator.is_some() || declaration.bundle_binary.is_some() {
             anyhow::bail!(
-                "portable content dependency `{}` contains an ambient locator",
+                "portable content dependency `{}` contains a source selector",
                 declaration.id
             );
         }
@@ -682,6 +736,71 @@ pub fn admit_external_realizations_in_publication(
     )
 }
 
+/// Retain only the signed literal pins of a consumer whose product slot is
+/// still pending qualification. This is evidence input for an independently
+/// admitted verifier, never a launchable realization of the consumer: the
+/// ordinary admission path must continue to require a qualified selection.
+pub(crate) fn admit_pending_consumer_literal_realizations_in_publication(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: &mut ryeos_engine::resolution::ResolutionOutput,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    publication: &mut Option<PendingCasPublication>,
+) -> anyhow::Result<(
+    AdmittedExternalRealizations,
+    Vec<ExternalContentDeclaration>,
+)> {
+    let contract = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.external_content_contract())
+        .ok_or_else(|| anyhow::anyhow!("pending consumer has no signed content contract"))?;
+    let declarer = ryeos_engine::external_content::declaring_authority(resolution)?;
+    let shape = ryeos_engine::external_content::authored_external_content_shape(
+        &resolution.composed.composed,
+        Some(contract),
+        declarer,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("pending consumer has no signed content shape"))?;
+    if shape.product_slots.is_empty()
+        || ryeos_engine::external_content::resolved_external_product_selections(resolution)?
+            .is_some()
+    {
+        anyhow::bail!("literal-only admission requires an unselected product slot");
+    }
+    let declarations = ryeos_engine::external_content::external_content_declarations_for_binding(
+        resolution,
+        Some(contract),
+        declarer,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("pending consumer has no literal declarations"))?;
+    if declarations.is_empty()
+        || declarations.iter().any(|declaration| {
+            declaration.mode != ryeos_engine::external_content::ExternalContentMode::Pinned
+                || declaration.locator.is_some()
+                || declaration.bundle_binary.is_some()
+                || declaration.digest.is_none()
+        })
+    {
+        anyhow::bail!("pending consumer literals must be exact retained pins");
+    }
+    let admitted = admit_declarations_in_publication(
+        state,
+        Some(engine),
+        Some(roots),
+        resolution,
+        Some(contract),
+        declarations.clone(),
+        &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+        None,
+        publication,
+        kind,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("pending consumer produced no literal realization"))?;
+    Ok((admitted, declarations))
+}
+
 /// Admit the locator-free pinned declarations of a prepared content
 /// dependency. The signed launch policy supplies only mechanical ceilings;
 /// manifest identity and consumer binding remain owned by the resolved item
@@ -711,6 +830,7 @@ pub fn admit_portable_content_dependency_in_publication(
         || declarations.iter().any(|declaration| {
             declaration.mode != ryeos_engine::external_content::ExternalContentMode::Pinned
                 || declaration.locator.is_some()
+                || declaration.bundle_binary.is_some()
                 || declaration.digest.is_none()
         })
     {
@@ -788,12 +908,13 @@ fn admit_declarations_in_publication(
     let mut large_total = 0u64;
     let retained_consumer = declarations
         .iter()
-        .any(|declaration| declaration.locator.is_none())
+        .any(|declaration| declaration.locator.is_none() && declaration.bundle_binary.is_none())
         .then(|| consumer_authority(resolution, subject_resolution_authority))
         .transpose()?;
     for declaration in &declarations {
         if declaration.mode == ryeos_engine::external_content::ExternalContentMode::Pinned
             && declaration.locator.is_none()
+            && declaration.bundle_binary.is_none()
             && let Some(digest) = declaration.digest.as_deref()
             && let Some(value) = cas.get_object(digest)?
             && value.get("kind").and_then(serde_json::Value::as_str)
@@ -816,6 +937,7 @@ fn admit_declarations_in_publication(
         }
         if declaration.mode == ryeos_engine::external_content::ExternalContentMode::Pinned
             && declaration.locator.is_none()
+            && declaration.bundle_binary.is_none()
             && let Some(digest) = declaration.digest.as_deref()
             && let Some(large_manifest) =
                 ryeos_state::objects::load_if_large_content_manifest(&cas, digest)?
@@ -835,6 +957,60 @@ fn admit_declarations_in_publication(
                     .as_ref()
                     .expect("locator-free declaration resolved consumer authority"),
             )?);
+            continue;
+        }
+
+        if declaration.bundle_binary.is_some() {
+            let engine = engine.ok_or_else(|| {
+                anyhow::anyhow!("bundle binary admission has no engine authority")
+            })?;
+            let roots = roots.ok_or_else(|| {
+                anyhow::anyhow!("bundle binary admission has no resolution roots")
+            })?;
+            let (captured, manifest) =
+                capture_declared_bundle_binary(engine, roots, resolution, declaration)?;
+            budget.charge_entry()?;
+            budget.charge_bytes(manifest.total_bytes)?;
+            let mut reader = captured.handle.stable_regular_reader_exact(
+                manifest.total_bytes,
+                &captured.identity.content_hash,
+                MAX_CAPTURE_FILE_BYTES,
+            )?;
+            let mut bytes = Vec::with_capacity(manifest.total_bytes as usize);
+            std::io::Read::read_to_end(&mut reader, &mut bytes)?;
+            reader.finish()?;
+            let outcome = cas.put_blob(&bytes)?;
+            if outcome.hash != captured.identity.content_hash
+                || bytes.len() as u64 != manifest.total_bytes
+            {
+                anyhow::bail!("signed bundle binary changed during CAS capture");
+            }
+            sink.staged_roots
+                .protect_blob_hash_admitted(&guard, &outcome.hash)?;
+            if outcome.created {
+                sink.stored_blobs += 1;
+            } else {
+                sink.reused_blobs += 1;
+            }
+            let manifest_hash = sink.staged_roots.store_object_admitted(
+                &guard,
+                &cas,
+                &serde_json::to_value(&manifest)?,
+            )?;
+            let verified = ryeos_state::VerifiedExternalContentClosure::load(&cas, &manifest_hash)?;
+            if verified.manifest() != &manifest {
+                anyhow::bail!("stored bundle binary realization differs from verified source");
+            }
+            realized.push(RealizedExternalContent {
+                id: declaration.id.clone(),
+                kind: declaration.kind,
+                mode: declaration.mode,
+                manifest_hash,
+                entry_count: manifest.entry_count,
+                total_bytes: manifest.total_bytes,
+                mount_root: declaration.mount_root,
+                mount: declaration.mount.clone(),
+            });
             continue;
         }
 
@@ -898,10 +1074,7 @@ fn admit_declarations_in_publication(
         });
     }
 
-    if let Some(inherited) = inherited {
-        realized.extend(inherited.iter().cloned());
-    }
-    let realized = RealizedExternalContentSet::new(realized)?;
+    let realized = merge_child_and_inherited_realizations(realized, inherited)?;
     resolution.composed.derived.insert(
         ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY.to_owned(),
         realized.to_value()?,
@@ -933,6 +1106,145 @@ fn admit_declarations_in_publication(
     }))
 }
 
+/// A child must admit its own declaration before it can execute a realization
+/// command. The parent can already carry those exact bytes for the graph; keep
+/// one retained identity in that case, while refusing any same-id disagreement.
+fn merge_child_and_inherited_realizations(
+    mut child: Vec<RealizedExternalContent>,
+    inherited: Option<&RealizedExternalContentSet>,
+) -> anyhow::Result<RealizedExternalContentSet> {
+    if let Some(inherited) = inherited {
+        for parent in inherited.iter() {
+            match child.iter().find(|entry| entry.id == parent.id) {
+                Some(entry) if entry == parent => {}
+                Some(_) => anyhow::bail!(
+                    "child external realization `{}` conflicts with inherited identity",
+                    parent.id
+                ),
+                None => child.push(parent.clone()),
+            }
+        }
+    }
+    RealizedExternalContentSet::new(child)
+}
+
+#[cfg(test)]
+mod merge_realization_tests {
+    use super::*;
+    use ryeos_engine::external_content::ExternalContentMode;
+    use ryeos_state::objects::ExternalContentMountRoot;
+
+    fn entry(id: &str, hash: char) -> RealizedExternalContent {
+        RealizedExternalContent {
+            id: id.into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: hash.to_string().repeat(64),
+            entry_count: 1,
+            total_bytes: 42,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: id.into(),
+        }
+    }
+
+    #[test]
+    fn exact_child_declaration_reuses_inherited_realization_once() {
+        let parent = RealizedExternalContentSet::new(vec![
+            entry("platform", 'a'),
+            entry("registry-inputs", 'b'),
+        ])
+        .unwrap();
+        let merged =
+            merge_child_and_inherited_realizations(vec![entry("platform", 'a')], Some(&parent))
+                .unwrap();
+        assert_eq!(merged, parent);
+    }
+
+    #[test]
+    fn conflicting_child_identity_cannot_shadow_inherited_realization() {
+        let parent = RealizedExternalContentSet::new(vec![entry("platform", 'a')]).unwrap();
+        let error =
+            merge_child_and_inherited_realizations(vec![entry("platform", 'b')], Some(&parent))
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with inherited identity")
+        );
+    }
+
+    #[test]
+    fn same_manifest_cannot_hide_other_inherited_identity_changes() {
+        let original = entry("platform", 'a');
+        let parent = RealizedExternalContentSet::new(vec![original.clone()]).unwrap();
+        for change in [
+            |value: &mut RealizedExternalContent| value.kind = ExternalContentKind::File,
+            |value: &mut RealizedExternalContent| value.mode = ExternalContentMode::Captured,
+            |value: &mut RealizedExternalContent| value.entry_count += 1,
+            |value: &mut RealizedExternalContent| value.total_bytes += 1,
+            |value: &mut RealizedExternalContent| {
+                value.mount_root = ExternalContentMountRoot::Project
+            },
+            |value: &mut RealizedExternalContent| value.mount = "other-location".into(),
+        ] {
+            let mut changed = original.clone();
+            change(&mut changed);
+            let error =
+                merge_child_and_inherited_realizations(vec![changed], Some(&parent)).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("conflicts with inherited identity")
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_child_mount_overlap_remains_forbidden() {
+        let parent = RealizedExternalContentSet::new(vec![entry("platform", 'a')]).unwrap();
+        for mount in ["platform", "platform/nested"] {
+            let mut child = entry("different", 'b');
+            child.mount = mount.into();
+            assert!(merge_child_and_inherited_realizations(vec![child], Some(&parent)).is_err());
+        }
+        let mut inherited_child = entry("nested", 'a');
+        inherited_child.mount = "platform/nested".into();
+        let parent = RealizedExternalContentSet::new(vec![inherited_child]).unwrap();
+        assert!(
+            merge_child_and_inherited_realizations(vec![entry("platform", 'b')], Some(&parent))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn child_duplicate_ids_remain_invalid_with_or_without_inheritance() {
+        let parent = RealizedExternalContentSet::new(vec![entry("platform", 'a')]).unwrap();
+        for inherited in [None, Some(&parent)] {
+            assert!(
+                merge_child_and_inherited_realizations(
+                    vec![entry("platform", 'a'), entry("platform", 'a')],
+                    inherited,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn disjoint_child_and_inherited_realizations_are_both_retained() {
+        let parent = RealizedExternalContentSet::new(vec![entry("platform", 'a')]).unwrap();
+        let child = entry("new-input", 'b');
+        assert_eq!(
+            merge_child_and_inherited_realizations(vec![child.clone()], Some(&parent)).unwrap(),
+            RealizedExternalContentSet::new(vec![entry("platform", 'a'), child.clone()]).unwrap()
+        );
+        assert_eq!(
+            merge_child_and_inherited_realizations(vec![child.clone()], None).unwrap(),
+            RealizedExternalContentSet::new(vec![child]).unwrap()
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn seal_pinned_content_realization(
     declaration: &ExternalContentDeclaration,
@@ -946,7 +1258,7 @@ fn seal_pinned_content_realization(
     consumer: &ryeos_state::objects::ExternalContentConsumerAuthority,
 ) -> anyhow::Result<RealizedExternalContent> {
     require_admission_binding(state, cas, digest, consumer)?;
-    if declaration.locator.is_some() {
+    if declaration.locator.is_some() || declaration.bundle_binary.is_some() {
         anyhow::bail!(
             "external content `{}` must bind retained bytes without a live locator",
             declaration.id
@@ -1122,7 +1434,7 @@ fn seal_pinned_large_realization(
             )
         })?;
     require_admission_binding(state, cas, digest, consumer)?;
-    if declaration.locator.is_some() {
+    if declaration.locator.is_some() || declaration.bundle_binary.is_some() {
         anyhow::bail!(
             "external content `{}` must bind large bytes from the retained store, not a live locator",
             declaration.id
@@ -1199,6 +1511,48 @@ fn resolve_named_root(
     }
 }
 
+/// Resolve a bundle-owned binary through the installed bundle's signed
+/// executor manifest, then construct the same one-file realization used by a
+/// descriptor-relative file capture. The sealed descriptor is the only source
+/// subsequently copied into CAS; no live bundle path is reopened.
+fn capture_declared_bundle_binary(
+    engine: &ryeos_engine::engine::Engine,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    declaration: &ExternalContentDeclaration,
+) -> anyhow::Result<(
+    ryeos_engine::binary_resolver::CapturedExecutable,
+    ryeos_state::objects::ExternalContentManifestObject,
+)> {
+    let (ryeos_engine::contracts::ItemSourceRoot::Bundle { name }, ItemSpace::Bundle) =
+        (&resolution.root.source_root, resolution.root.source_space)
+    else {
+        anyhow::bail!("bundle binary source requires exact declaring bundle authority");
+    };
+    let binary_ref = declaration
+        .bundle_binary
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("bundle binary source selector is absent"))?;
+    let root = resolve_named_root(engine, roots, &ExternalContentRoot::Bundle(name.clone()))?;
+    let captured = ryeos_engine::binary_resolver::capture_bundle_binary_ref(
+        binary_ref,
+        &root,
+        &engine.node_trust_store,
+    )?;
+    if Some(captured.identity.signer_fingerprint.as_str())
+        != resolution.root.signer_fingerprint.as_deref()
+    {
+        anyhow::bail!("bundle binary signer differs from its declaring item signer");
+    }
+    let observation = captured.handle.regular_file_observation()?;
+    let manifest = ryeos_state::external_content::single_file_manifest_from_verified_blob(
+        &captured.identity.content_hash,
+        observation.size(),
+        0o755,
+    )?;
+    Ok((captured, manifest))
+}
+
 fn capture_kind(kind: ExternalContentKind) -> ExternalContentCaptureKind {
     match kind {
         ExternalContentKind::Tree => ExternalContentCaptureKind::Tree,
@@ -1249,6 +1603,7 @@ mod consumer_authority_tests {
             snapshot_hash: "d".repeat(64),
         };
         let declarative = consumer_authority(&resolution, &generation).unwrap();
+        assert!(is_pinned_project_consumer_resolution(&resolution));
         assert!(declarative.source_closure().is_none());
         assert!(consumer_authority(&resolution, &SubjectResolutionAuthority::LiveFs).is_err());
         let source = ryeos_state::objects::EffectiveSourceClosureProjection {
@@ -1272,6 +1627,7 @@ mod consumer_authority_tests {
             name: "standard".into(),
         };
         resolution.root.trust_class = TrustClass::TrustedBundle;
+        assert!(!is_pinned_project_consumer_resolution(&resolution));
         // The outer execution generation can be pinned while this declaration-
         // bearing consumer remains bundle-owned. Project relationship/product
         // evidence is retained by the separate selection/binding contract; it
@@ -1302,6 +1658,7 @@ mod consumer_authority_tests {
         project_contributor.trust_class = TrustClass::TrustedProject;
         project_contributor.resolved_ref = "config:project/relationship".into();
         resolution.ancestors.push(project_contributor);
+        assert!(is_pinned_project_consumer_resolution(&resolution));
         let project_composed_bundle = consumer_authority(&resolution, &generation).unwrap();
         assert!(matches!(
             project_composed_bundle,
@@ -1385,6 +1742,8 @@ mod consumer_authority_tests {
             ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY.to_owned(),
             selections,
         );
+        resolution.ancestors.clear();
+        assert!(is_pinned_project_consumer_resolution(&resolution));
         assert!(matches!(
             consumer_authority(&resolution, &generation).unwrap(),
             ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject { .. }

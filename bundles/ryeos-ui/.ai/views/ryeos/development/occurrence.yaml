@@ -1,0 +1,51 @@
+# ryeos:signed:2026-09-19T05:26:03Z:a053b7a25885598cb94f3e0bacf101b509ab23c2219589b2ac99a13675582e59:xfXbnzvD7kxs2L/jAHQGG8iROsT/pQECnqvNNw+6EGS7PKXZYYo9KMnLHrcUvKizimoPIoPYftlU8imlFrd+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: development-occurrence
+title: Occurrence
+version: "1.0.0"
+description: Exact selected execution occurrence with directly connected retained evidence and coverage
+
+widget: sections
+sources:
+  detail:
+    ref: service:ui/ryeos-ui/execution/occurrence
+    params:
+      thread_id: "@facet:selection.work.thread"
+      occurrence_id: "@facet:selection.execution.entity_id"
+
+sections:
+  - title: Occurrence
+    source_channel: detail
+    collection: occurrence
+    projection:
+      primary: label
+      meta: status
+      expand:
+        fields: [id, kind, canonical_ref, effective_definition_digest, attributes.thread.id, attributes.graph_run_id, attributes.node, attributes.step, attributes.attempt, attributes.iteration, event_ref, provenance]
+  - title: Direct evidence
+    source_channel: detail
+    collection: evidence
+    projection:
+      primary: label
+      meta: kind
+      expand:
+        fields: [id, status, event_ref, artifact_ref, attributes, provenance]
+  - title: Relationships
+    source_channel: detail
+    collection: relations
+    projection:
+      primary: kind
+      meta: target_id
+      expand:
+        fields: [id, source_id, target_id, status, provenance]
+  - title: Coverage
+    source_channel: detail
+    collection: coverage
+    projection:
+      primary: state
+      meta: warning_count
+      expand:
+        fields: [truncated, warnings]
+
+refresh:
+  on_facet: selection.execution
+  on_hint: [thread, activity]

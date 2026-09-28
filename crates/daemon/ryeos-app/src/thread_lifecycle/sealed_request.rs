@@ -139,7 +139,9 @@ where
 /// requests cannot prove whether a selected witness was omitted during
 /// persistence, so they are classified before nested decoding.
 /// v20 requires the exact local-or-received product witness source proof.
-pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 20;
+/// v21 seals the daemon-derived product-qualification launch purpose. Absent
+/// remains meaningful for ordinary execution; it cannot be inferred on replay.
+pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 21;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -565,6 +567,8 @@ pub struct SealedRootExecutionRequest {
     resolution_subject_authority: ryeos_engine::contracts::SubjectResolutionAuthority,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     candidate_evaluation: Option<CandidateEvaluationAuthority>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    product_qualification: Option<ProductQualificationLaunchPurpose>,
     execution_hints: HashMap<String, Value>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     scheduled_fire: Option<ryeos_engine::contracts::ScheduledFireContext>,
@@ -585,11 +589,19 @@ impl SealedRootExecutionRequest {
         capsule.validate()?;
         let sealed: Self = serde_json::from_value(capsule.sealed_invocation.clone())
             .context("decode admitted capsule sealed invocation")?;
+        if sealed.schema_version != SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION {
+            bail!(
+                "admitted capsule sealed request schema mismatch: retained={}, current={}",
+                sealed.schema_version,
+                SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION
+            );
+        }
         if let Some(authority) = sealed.candidate_evaluation.as_ref() {
             authority
                 .validate()
                 .context("validate sealed candidate-evaluation authority")?;
         }
+        sealed.validate_product_qualification_purpose()?;
         sealed.validate_handler_context()?;
         sealed.validate_executor_route_against_capsule(capsule)?;
         if sealed.admitted_program_value()? != capsule.exact_program
@@ -734,7 +746,7 @@ impl SealedRootExecutionRequest {
         {
             bail!("sealed resolved-item authority differs from its admitted resolution closure");
         }
-        Ok(Self {
+        let sealed = Self {
             schema_version: SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION,
             kind: request.kind.clone(),
             item_ref: request.item_ref.clone(),
@@ -777,13 +789,16 @@ impl SealedRootExecutionRequest {
             candidate_evaluation: admission
                 .candidate_evaluation_scope()
                 .map(|scope| scope.authority().clone()),
+            product_qualification: admission.product_qualification_purpose().cloned(),
             execution_hints: admission.plan_context.execution_hints.values.clone(),
             scheduled_fire: admission.plan_context.scheduled_fire.clone(),
             validate_only: admission.plan_context.validate_only,
             resolved_history_policy: admission.resolved_history_policy.clone(),
             resolved_result_policy: admission.resolved_result_policy.clone(),
             captured_history_policy: admission.captured_history_policy.clone(),
-        })
+        };
+        sealed.validate_product_qualification_purpose()?;
+        Ok(sealed)
     }
 
     pub fn runtime_ref(&self) -> &str {
@@ -792,6 +807,138 @@ impl SealedRootExecutionRequest {
 
     pub fn executor_ref(&self) -> &str {
         &self.executor_ref
+    }
+
+    pub fn product_qualification_purpose(&self) -> Option<&ProductQualificationLaunchPurpose> {
+        self.product_qualification.as_ref()
+    }
+
+    /// A claim-bearing verifier must get an actual process scope when its
+    /// admitted signed policy demands whole-descendant natural emptiness.
+    /// This is read from the sealed root, never a later policy lookup or an
+    /// executor-selected optional resource.
+    pub fn requires_process_scope_for_qualification(&self) -> Result<bool> {
+        self.validate_product_qualification_purpose()?;
+        Ok(self.product_qualification.as_ref().is_some_and(|purpose| {
+            purpose.policy_source.policy.minimum_verifier_process_settlement
+                == ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority::ScopeEmpty
+        }))
+    }
+
+    fn validate_product_qualification_purpose(&self) -> Result<()> {
+        let Some(purpose) = &self.product_qualification else {
+            return Ok(());
+        };
+        purpose.validate()?;
+        let SealedPrincipal::Local { fingerprint, .. } = &self.planning_principal else {
+            bail!("qualification verifier cannot use delegated principal authority");
+        };
+        // Name the failed invariant without echoing any protected coordinate.
+        // A blanket refusal makes a post-birth admission failure impossible to
+        // distinguish from an altered source or launch parameter.
+        let projectless_lane = self.project_context == ProjectContext::None
+            && matches!(
+                self.project_authority,
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
+            );
+        let pinned_snapshot = match (&self.project_context, &self.project_authority) {
+            (
+                ProjectContext::SnapshotHash { hash: context_hash },
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    snapshot_hash,
+                    realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                    workspace_outputs: None,
+                    ..
+                },
+            ) if context_hash == snapshot_hash => Some(snapshot_hash.as_str()),
+            _ => None,
+        };
+        let pinned_lane = pinned_snapshot.is_some();
+        let authority_matches_context = if projectless_lane {
+            self.project_binding_subject_authority
+                == ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+                && self.resolution_subject_authority
+                    == ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+        } else if let Some(snapshot_hash) = pinned_snapshot {
+            let expected = ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: snapshot_hash.to_owned(),
+            };
+            self.project_binding_subject_authority == expected
+                && self.resolution_subject_authority == expected
+        } else {
+            false
+        };
+        let checks = [
+            ("candidate evaluation", self.candidate_evaluation.is_none()),
+            ("scheduled fire", self.scheduled_fire.is_none()),
+            (
+                "project context and authority",
+                projectless_lane || pinned_lane,
+            ),
+            ("project binding authority", authority_matches_context),
+            ("reference bindings", self.ref_bindings.is_empty()),
+            ("usage subject", self.usage_subject.is_none()),
+            ("usage assertion", self.usage_subject_asserted_by.is_none()),
+            ("target site", self.target_site_id.is_none()),
+            ("launch mode", self.launch_mode == "wait"),
+            (
+                "requested owner",
+                self.requested_by.as_deref() == Some(purpose.owner_fingerprint.as_str()),
+            ),
+            (
+                "planning principal",
+                fingerprint == &purpose.owner_fingerprint,
+            ),
+            ("verifier ref", self.item_ref == purpose.verifier_ref),
+            (
+                "verifier source space",
+                self.verified_subject.source_space == ItemSpace::Bundle,
+            ),
+            (
+                "verifier trust",
+                self.verified_trust_class == TrustClass::Trusted,
+            ),
+            (
+                "resolution trust",
+                self.resolution_output.effective_trust_class == ResolutionTrustClass::TrustedBundle,
+            ),
+            (
+                "verifier definition",
+                // Root admission checked the pre-realization definition.
+                // This sealed request carries the finalized definition after
+                // the exact fixed external pin was realized.
+                self.resolution_output
+                    .effective_definition_digest()?
+                    .as_str()
+                    == purpose.verifier_realized_definition_digest,
+            ),
+            (
+                "verifier parameters",
+                ryeos_state::objects::canonical_value_digest(&self.parameters)?
+                    == purpose.admitted_parameters_digest,
+            ),
+        ];
+        if let Some((name, _)) = checks.iter().find(|(_, matches)| !matches) {
+            bail!("sealed qualification purpose contradicts admitted verifier root: {name}");
+        }
+        let is_exact_root_subject = |selected: &ryeos_state::external_content::products::composition::ProductSelectionInput| {
+            matches!(
+                selected.target,
+                ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
+            ) && selected.selection.declaration_id == purpose.subject_declaration_id
+                && selected.selection.witness_hash == purpose.product_witness_hash
+                && selected.selection.witness_source == purpose.witness_source
+                && selected.selection.qualification_hash.is_none()
+        };
+        match (pinned_lane, self.product_selections.as_slice()) {
+            (true, [selected]) if is_exact_root_subject(selected) => {}
+            // Preserve the legacy projectless fixed-pin lane (with its
+            // optional pre-existing selected-root admission form).
+            (false, []) => {}
+            (false, [selected]) if is_exact_root_subject(selected) => {}
+            _ => bail!("sealed qualification subject selection differs from launch purpose"),
+        }
+        Ok(())
     }
 
     /// Return the credential selector from a portable worker invocation.
@@ -887,6 +1034,21 @@ impl SealedRootExecutionRequest {
         ryeos_state::objects::canonical_value_digest(&self.parameters)
     }
 
+    /// Private producer input for this exact admitted qualification root.
+    /// The callback may select a signed scenario, but cannot replace the
+    /// verifier's sealed parameters or receive a second input authority.
+    pub(crate) fn admitted_qualification_producer_stdin(
+        &self,
+        expected: &ProductQualificationLaunchPurpose,
+    ) -> Result<String> {
+        self.validate_product_qualification_purpose()?;
+        if self.product_qualification.as_ref() != Some(expected) {
+            bail!("producer input requires the exact admitted qualification purpose");
+        }
+        lillux::canonical_json(&self.parameters)
+            .context("encode exact admitted qualification producer input")
+    }
+
     /// Verify and expose the immutable effective resolution for sanitized
     /// definition projection. This never re-resolves current content.
     pub fn admitted_effective_resolution(
@@ -906,6 +1068,66 @@ impl SealedRootExecutionRequest {
 
     pub fn project_context(&self) -> &ProjectContext {
         &self.project_context
+    }
+
+    /// Reconstruct the immutable planning inputs needed to re-admit this
+    /// verifier. A pinned local path is rebound only to the newly verified
+    /// materialization of the same sealed snapshot; the project authority,
+    /// principal, site, hints, and schedule remain capsule-owned.
+    pub(crate) fn qualification_plan_context(
+        &self,
+        pinned_effective_path: Option<&Path>,
+    ) -> Result<PlanContext> {
+        if self.validate_only {
+            bail!("qualification verifier capsule was admitted in validation-only mode");
+        }
+        let requested_by = self.planning_principal.restore()?;
+        let project_context = match (&self.project_authority, &self.project_context) {
+            (
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. },
+                ProjectContext::None,
+            ) if pinned_effective_path.is_none() => ProjectContext::None,
+            (
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                    ..
+                },
+                ProjectContext::LocalPath { .. },
+            ) => ProjectContext::LocalPath {
+                path: pinned_effective_path
+                    .context("pinned verifier has no verified effective project path")?
+                    .to_path_buf(),
+            },
+            (
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    snapshot_hash,
+                    realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                    ..
+                },
+                ProjectContext::SnapshotHash { hash },
+            ) if hash == snapshot_hash && pinned_effective_path.is_some() => {
+                ProjectContext::SnapshotHash { hash: hash.clone() }
+            }
+            _ => {
+                bail!("qualification verifier project context is not a supported sealed authority")
+            }
+        };
+        let plan_context = PlanContext {
+            requested_by,
+            project_context,
+            subject_resolution_authority: self.project_binding_subject_authority.clone(),
+            current_site_id: self.current_site_id.clone(),
+            origin_site_id: self.origin_site_id.clone(),
+            execution_hints: ExecutionHints {
+                values: self.execution_hints.clone(),
+            },
+            scheduled_fire: self.scheduled_fire.clone(),
+            validate_only: false,
+        };
+        plan_context
+            .subject_resolution_authority
+            .validate_for_project_context(&plan_context.project_context)?;
+        Ok(plan_context)
     }
 
     /// Execution-filesystem subject authority sealed at fresh admission.
@@ -1045,6 +1267,9 @@ impl SealedRootExecutionRequest {
         resume: &crate::launch_metadata::ResumeContext,
         handler_context: Option<crate::handler_context::HandlerContext>,
     ) -> Result<Self> {
+        if self.product_qualification.is_some() {
+            bail!("qualification verifier purpose cannot continue into a new invocation");
+        }
         if !self.product_selections.is_empty() || !resume.product_selections.is_empty() {
             bail!("continuations cannot carry product selectors in the first composition lane");
         }
@@ -1309,6 +1534,7 @@ impl SealedRootExecutionRequest {
             resolution_subject_authority:
                 ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
             candidate_evaluation: None,
+            product_qualification: None,
             execution_hints: HashMap::new(),
             scheduled_fire: None,
             validate_only: false,
@@ -1343,6 +1569,34 @@ impl SealedRootExecutionRequest {
         fixture
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn with_storage_test_parameters(mut self, parameters: Value) -> Self {
+        assert!(
+            parameters.is_object(),
+            "storage fixture parameters are an object"
+        );
+        self.parameters = parameters;
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn with_storage_test_ref_bindings(
+        mut self,
+        ref_bindings: BTreeMap<String, String>,
+        resolved_ref_bindings: BTreeMap<String, Value>,
+    ) -> Self {
+        assert_eq!(
+            ref_bindings.keys().collect::<Vec<_>>(),
+            resolved_ref_bindings.keys().collect::<Vec<_>>(),
+            "storage fixture binding names must align"
+        );
+        self.ref_bindings = ref_bindings;
+        self.resolved_ref_bindings = resolved_ref_bindings;
+        self
+    }
+
     pub fn restore(
         &self,
         engine: &Arc<Engine>,
@@ -1355,6 +1609,7 @@ impl SealedRootExecutionRequest {
                 SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION
             );
         }
+        self.validate_product_qualification_purpose()?;
         if self.validate_only {
             bail!("persisted root execution request cannot be validate-only");
         }
@@ -1448,6 +1703,7 @@ impl SealedRootExecutionRequest {
             captured_history_policy: self.captured_history_policy.clone(),
             project_binding,
             candidate_evaluation: None,
+            product_qualification: self.product_qualification.clone(),
             admitted_request_snapshot: None,
             selected_executor_route: None,
         };
@@ -2016,6 +2272,398 @@ mod authority_tests {
                 fingerprint: "session:test".to_string(),
                 scopes: Vec::new(),
             })
+        );
+    }
+
+    #[test]
+    fn sealed_qualification_purpose_is_explicit_and_cannot_upgrade_ordinary_root() {
+        let fixture = SealedRootExecutionRequest::storage_test_fixture();
+        assert!(fixture.product_qualification_purpose().is_none());
+        assert!(!fixture.requires_process_scope_for_qualification().unwrap());
+        let mut missing = serde_json::to_value(&fixture).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("product_qualification");
+        assert!(serde_json::from_value::<SealedRootExecutionRequest>(missing).is_err());
+
+        let parameters_digest = fixture.admitted_parameters_digest().unwrap();
+        let mut injected = serde_json::to_value(&fixture).unwrap();
+        injected["product_qualification"] = json!({
+            "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
+            "launch_id": format!("L-{}", "a".repeat(32)),
+            "owner_fingerprint": "session:test",
+            "product_witness_hash": "b".repeat(64),
+            "witness_source": {"kind":"local_capture"},
+            "relationship_name": "runtime_to_worker",
+            "consumer_content": null,
+            "policy_source": {
+                "canonical_ref": "config:test/qualification_policy",
+                "raw_content_digest": "c".repeat(64),
+                "effective_definition_digest": "d".repeat(64),
+                "publisher_fingerprint": "e".repeat(64),
+                "policy": {
+                    "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_POLICY_SCHEMA,
+                    "verifier_ref": "tool:test/qualify_runtime",
+                    "subject_declaration_id": "runtime",
+                    "allowed_claims": ["command_probe"],
+                    "minimum_verifier_process_settlement": "scope_empty",
+                    "verifier_parameters": {}
+                }
+            },
+            "subject_declaration_id": "runtime",
+            "subject_manifest_hash": "f".repeat(64),
+            "required_claims": ["command_probe"],
+            "admitted_parameters_digest": parameters_digest,
+            "verifier_ref": "tool:test/qualify_runtime",
+            "verifier_effective_definition_digest": "1".repeat(64),
+            "verifier_realized_definition_digest": "2".repeat(64)
+        });
+        let sealed: SealedRootExecutionRequest = serde_json::from_value(injected).unwrap();
+        assert!(
+            sealed
+                .product_qualification_purpose()
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        assert!(sealed.validate_product_qualification_purpose().is_err());
+        assert!(sealed.requires_process_scope_for_qualification().is_err());
+        let root = tempfile::tempdir().unwrap();
+        assert!(sealed.restore(&empty_engine(), root.path()).is_err());
+    }
+
+    #[test]
+    fn sealed_qualification_checks_realized_not_pre_realization_definition() {
+        let mut sealed = SealedRootExecutionRequest::storage_test_fixture();
+        let verifier_ref = "tool:test/qualify_runtime";
+        sealed.item_ref = verifier_ref.to_owned();
+        sealed.launch_mode = "wait".to_owned();
+        sealed.verified_subject.source_space = ItemSpace::Bundle;
+        sealed.verified_subject.source_root = ItemSourceRoot::Bundle {
+            name: "test".to_owned(),
+        };
+        sealed.verified_trust_class = TrustClass::Trusted;
+        sealed.resolution_output.effective_trust_class = ResolutionTrustClass::TrustedBundle;
+        sealed.resolution_output.root.source_space = ItemSpace::Bundle;
+        sealed.resolution_output.root.source_root = ItemSourceRoot::Bundle {
+            name: "test".to_owned(),
+        };
+        sealed.resolution_output.root.trust_class = ResolutionTrustClass::TrustedBundle;
+        sealed.resolution_output.root.signer_fingerprint = Some("e".repeat(64));
+        let realized = sealed
+            .resolution_output
+            .effective_definition_digest()
+            .unwrap();
+        sealed.effective_definition_digest = realized.clone();
+        let admitted = "1".repeat(64);
+        assert_ne!(admitted, realized.as_str());
+        let parameters_digest = sealed.admitted_parameters_digest().unwrap();
+        sealed.product_qualification = Some(serde_json::from_value(json!({
+            "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
+            "launch_id": format!("L-{}", "a".repeat(32)),
+            "owner_fingerprint": "session:test",
+            "product_witness_hash": "b".repeat(64),
+            "witness_source": {"kind":"local_capture"},
+            "relationship_name": "runtime_to_worker",
+            "consumer_content": null,
+            "policy_source": {
+                "canonical_ref": "config:test/qualification_policy",
+                "raw_content_digest": "c".repeat(64),
+                "effective_definition_digest": "d".repeat(64),
+                "publisher_fingerprint": "e".repeat(64),
+                "policy": {
+                    "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_POLICY_SCHEMA,
+                    "verifier_ref": verifier_ref,
+                    "subject_declaration_id": "runtime",
+                    "allowed_claims": ["command_probe"],
+                    "minimum_verifier_process_settlement": "scope_empty",
+                    "verifier_parameters": {}
+                }
+            },
+            "subject_declaration_id": "runtime",
+            "subject_manifest_hash": "f".repeat(64),
+            "required_claims": ["command_probe"],
+            "admitted_parameters_digest": parameters_digest,
+            "verifier_ref": verifier_ref,
+            "verifier_effective_definition_digest": admitted,
+            "verifier_realized_definition_digest": realized.as_str()
+        })).unwrap());
+        sealed.validate_product_qualification_purpose().unwrap();
+
+        sealed
+            .product_qualification
+            .as_mut()
+            .unwrap()
+            .verifier_realized_definition_digest = "2".repeat(64);
+        assert!(
+            sealed
+                .validate_product_qualification_purpose()
+                .unwrap_err()
+                .to_string()
+                .contains("verifier definition")
+        );
+    }
+
+    #[test]
+    fn pinned_qualification_requires_exact_snapshot_and_one_root_subject_selection() {
+        use ryeos_state::objects::{
+            EnvironmentAuthority, PinnedProjectRealization, PinnedTerminalPublication,
+        };
+
+        let verifier_ref = "tool:test/qualify_runtime";
+        let mut sealed = SealedRootExecutionRequest::storage_test_fixture();
+        sealed.item_ref = verifier_ref.to_owned();
+        sealed.launch_mode = "wait".to_owned();
+        sealed.verified_subject.source_space = ItemSpace::Bundle;
+        sealed.verified_subject.source_root = ItemSourceRoot::Bundle {
+            name: "test".to_owned(),
+        };
+        sealed.verified_trust_class = TrustClass::Trusted;
+        sealed.resolution_output.effective_trust_class = ResolutionTrustClass::TrustedBundle;
+        sealed.resolution_output.root.source_space = ItemSpace::Bundle;
+        sealed.resolution_output.root.source_root = ItemSourceRoot::Bundle {
+            name: "test".to_owned(),
+        };
+        sealed.resolution_output.root.trust_class = ResolutionTrustClass::TrustedBundle;
+        sealed.resolution_output.root.signer_fingerprint = Some("e".repeat(64));
+        sealed.effective_definition_digest = sealed
+            .resolution_output
+            .effective_definition_digest()
+            .unwrap();
+
+        let snapshot_hash = "a".repeat(64);
+        sealed.project_context = ProjectContext::SnapshotHash {
+            hash: snapshot_hash.clone(),
+        };
+        sealed.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:qualification".to_owned(),
+            Some(PathBuf::from("/ryeos/pinned-snapshots").join(&snapshot_hash)),
+            snapshot_hash.clone(),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let pinned_subject_authority =
+            ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: snapshot_hash.clone(),
+            };
+        sealed.project_binding_subject_authority = pinned_subject_authority.clone();
+        sealed.resolution_subject_authority = pinned_subject_authority;
+
+        let parameters_digest = sealed.admitted_parameters_digest().unwrap();
+        let realized = sealed
+            .resolution_output
+            .effective_definition_digest()
+            .unwrap()
+            .as_str()
+            .to_owned();
+        sealed.product_qualification = Some(serde_json::from_value(json!({
+            "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
+            "launch_id": format!("L-{}", "a".repeat(32)),
+            "owner_fingerprint": "session:test",
+            "product_witness_hash": "b".repeat(64),
+            "witness_source": {"kind":"local_capture"},
+            "relationship_name": "runtime_to_qualified_runtime",
+            "consumer_content": null,
+            "policy_source": {
+                "canonical_ref": "config:test/qualification_policy",
+                "raw_content_digest": "c".repeat(64),
+                "effective_definition_digest": "d".repeat(64),
+                "publisher_fingerprint": "e".repeat(64),
+                "policy": {
+                    "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_POLICY_SCHEMA,
+                    "verifier_ref": verifier_ref,
+                    "subject_declaration_id": "subject",
+                    "allowed_claims": ["command_probe"],
+                    "minimum_verifier_process_settlement": "scope_empty",
+                    "verifier_parameters": {}
+                }
+            },
+            "subject_declaration_id": "subject",
+            "subject_manifest_hash": "f".repeat(64),
+            "required_claims": ["command_probe"],
+            "admitted_parameters_digest": parameters_digest,
+            "verifier_ref": verifier_ref,
+            "verifier_effective_definition_digest": "1".repeat(64),
+            "verifier_realized_definition_digest": realized
+        })).unwrap());
+        sealed.product_selections = vec![
+            ryeos_state::external_content::products::composition::ProductSelectionInput {
+                target: ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {},
+                selection: ryeos_state::external_content::products::composition::ProductSelection {
+                    declaration_id: "subject".to_owned(),
+                    witness_hash: "b".repeat(64),
+                    witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+                    qualification_hash: None,
+                },
+            },
+        ];
+
+        sealed.validate_product_qualification_purpose().unwrap();
+
+        let mut empty = sealed.clone();
+        empty.product_selections.clear();
+        assert!(empty.validate_product_qualification_purpose().is_err());
+
+        let mut mismatched_snapshot = sealed.clone();
+        mismatched_snapshot.project_context = ProjectContext::SnapshotHash {
+            hash: "9".repeat(64),
+        };
+        assert!(
+            mismatched_snapshot
+                .validate_product_qualification_purpose()
+                .is_err()
+        );
+
+        let mut live = sealed.clone();
+        live.project_context = ProjectContext::LocalPath {
+            path: PathBuf::from("/project"),
+        };
+        assert!(live.validate_product_qualification_purpose().is_err());
+
+        let mut cow = sealed.clone();
+        cow.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:qualification".to_owned(),
+            Some(PathBuf::from("/ryeos/pinned-snapshots").join("a".repeat(64))),
+            "a".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(cow.validate_product_qualification_purpose().is_err());
+
+        let mut extra = sealed.clone();
+        extra
+            .product_selections
+            .push(extra.product_selections[0].clone());
+        assert!(extra.validate_product_qualification_purpose().is_err());
+
+        let mut non_root = sealed.clone();
+        non_root.product_selections[0].target =
+            ryeos_state::external_content::products::composition::ProductSelectionTarget::ContentDependency {
+                binding: "subject".to_owned(),
+            };
+        assert!(non_root.validate_product_qualification_purpose().is_err());
+
+        let mut output_bearing = sealed;
+        let mut authority = serde_json::to_value(&output_bearing.project_authority).unwrap();
+        authority["workspace_outputs"] = json!({
+            "partition": {
+                "schema": ryeos_state::objects::WORKSPACE_OUTPUT_PARTITION_SCHEMA,
+                "recipe_binding": "recipe",
+                "recipe_ref": "config:test/recipe",
+                "recipe_raw_content_digest": "1".repeat(64),
+                "declarations_hash": "2".repeat(64),
+                "project_snapshot_policy_hash": "3".repeat(64),
+                "roots": [],
+                "products": [],
+                "partition_identity": "4".repeat(64),
+                "capture_policy_digest": "5".repeat(64)
+            },
+            "capture_hash": null
+        });
+        output_bearing.project_authority = serde_json::from_value(authority).unwrap();
+        assert!(
+            output_bearing
+                .validate_product_qualification_purpose()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn qualification_plan_context_rebinds_only_the_pinned_snapshot_path() {
+        use ryeos_state::objects::{EnvironmentAuthority, PinnedProjectRealization};
+
+        let original = PathBuf::from("/retained/snapshot/project");
+        let verified = PathBuf::from("/materialized/current/project");
+        let snapshot_hash = "a".repeat(64);
+        let authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:qualification".to_string(),
+            Some(original),
+            snapshot_hash.clone(),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let mut sealed = SealedRootExecutionRequest::storage_test_fixture_with_project_identity(
+            ProjectContext::LocalPath {
+                path: PathBuf::from("/stale/old/materialization"),
+            },
+            authority,
+        );
+        sealed.current_site_id = "site:qualification".to_string();
+        sealed.origin_site_id = "site:origin".to_string();
+        sealed
+            .execution_hints
+            .insert("lane".to_string(), json!("native"));
+
+        let context = sealed
+            .qualification_plan_context(Some(&verified))
+            .expect("the exact pinned snapshot can be rebound to its verified materialization");
+
+        assert_eq!(
+            context.requested_by,
+            sealed.planning_principal.restore().unwrap()
+        );
+        assert_eq!(context.current_site_id, sealed.current_site_id);
+        assert_eq!(context.origin_site_id, sealed.origin_site_id);
+        assert_eq!(context.execution_hints.values, sealed.execution_hints);
+        assert_eq!(context.scheduled_fire, sealed.scheduled_fire);
+        assert_eq!(
+            context.project_context,
+            ProjectContext::LocalPath { path: verified }
+        );
+        assert_eq!(
+            context.subject_resolution_authority,
+            ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration { snapshot_hash }
+        );
+        assert!(!context.validate_only);
+    }
+
+    #[test]
+    fn qualification_plan_context_fails_closed_for_unpinned_project_authority() {
+        use ryeos_state::objects::{
+            EnvironmentAuthority, PinnedProjectRealization, PinnedTerminalPublication,
+        };
+
+        let base = "b".repeat(64);
+        let cow = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:qualification".to_string(),
+            None,
+            base.clone(),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let sealed = SealedRootExecutionRequest::storage_test_fixture_with_project_identity(
+            ProjectContext::LocalPath {
+                path: PathBuf::from("/project"),
+            },
+            cow,
+        );
+
+        assert!(
+            sealed
+                .qualification_plan_context(Some(Path::new("/materialized")))
+                .unwrap_err()
+                .to_string()
+                .contains("not a supported sealed authority")
+        );
+        assert!(
+            sealed
+                .qualification_plan_context(None)
+                .unwrap_err()
+                .to_string()
+                .contains("not a supported sealed authority")
         );
     }
 

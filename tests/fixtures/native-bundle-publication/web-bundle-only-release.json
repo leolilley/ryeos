@@ -1,0 +1,35 @@
+{
+  "schema": "ryeos.bundle_only_release_acceptance.v1",
+  "bundle": "web",
+  "cargo_packages": ["ryeos-web-tools"],
+  "build_argv": ["cargo", "build", "--release", "--locked", "--target", "x86_64-unknown-linux-gnu", "-p", "ryeos-web-tools"],
+  "substrate_image_before": "ghcr.io/leolilley/ryeos-substrate@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "substrate_image_after": "ghcr.io/leolilley/ryeos-substrate@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "catalog_operations": [
+    "service:bundle-release/catalog-request-publication",
+    "service:bundle-release/catalog-remote-publish"
+  ],
+  "resolved_coordinate": {
+    "catalog_publication_attestation_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+    "catalog_publication_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+    "catalog_snapshot_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+    "set_attestation_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+    "set_hash": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "installed": {
+    "core": "7777777777777777777777777777777777777777777777777777777777777777",
+    "standard": "8888888888888888888888888888888888888888888888888888888888888888",
+    "web": "9999999999999999999999999999999999999999999999999999999999999999"
+  },
+  "selected": {
+    "core": "7777777777777777777777777777777777777777777777777777777777777777",
+    "standard": "8888888888888888888888888888888888888888888888888888888888888888",
+    "web": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "fetch": ["core", "standard", "web"],
+  "apply": [
+    {"bundle": "core", "action": "keep"},
+    {"bundle": "standard", "action": "keep"},
+    {"bundle": "web", "action": "replace"}
+  ]
+}

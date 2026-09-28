@@ -194,6 +194,33 @@ impl From<IsolationRealizationMemberCommand> for IsolationAdmittedCommand {
     }
 }
 
+impl IsolationAdmittedCommand {
+    /// Compare complete live command bindings, including the open executable
+    /// and a realization member's pinned tree placement. A code digest alone
+    /// cannot establish that two commands have the same execution authority.
+    pub fn same_binding_as(&self, other: &Self) -> anyhow::Result<bool> {
+        let same_descriptor = |left: &IsolationDescriptorBoundCommand,
+                               right: &IsolationDescriptorBoundCommand| {
+            Ok::<bool, anyhow::Error>(
+                left.identity() == right.identity()
+                    && left.file_identity() == right.file_identity()
+                    && left.executable().same_file_identity(right.executable())?,
+            )
+        };
+        match (self, other) {
+            (Self::DescriptorBound(left), Self::DescriptorBound(right)) => {
+                same_descriptor(left, right)
+            }
+            (Self::RealizationMember(left), Self::RealizationMember(right)) => Ok(
+                left.realization_root() == right.realization_root()
+                    && left.realization_destination() == right.realization_destination()
+                    && same_descriptor(left.command(), right.command())?,
+            ),
+            _ => Ok(false),
+        }
+    }
+}
+
 impl IsolationDescriptorBoundCommand {
     pub fn new(
         identity: IsolationVerifiedCode,
@@ -331,14 +358,219 @@ impl IsolationWritableRuntimeViewMountAuthority {
     }
 }
 
+/// One producer-owned, workspace-descendant directory admitted for a scoped
+/// launch. The signed ID selects only its fixed isolated destination; the
+/// descriptor and relative coordinate must still be checked against the
+/// retained workspace view when the launch plan is compiled.
+#[derive(Debug, Clone)]
+pub struct IsolationProducerPreparedDirectoryAuthority {
+    id: String,
+    destination: PathBuf,
+    source: lillux::InheritedDescriptorAuthority,
+    workspace_relative_path: String,
+    immutable_files: Vec<IsolationProducerPreparedImmutableFileAuthority>,
+}
+
+/// A sealed byte copy of one signed direct-child file. Its only admissible
+/// namespace destination is beneath the matching prepared directory mount.
+#[derive(Debug, Clone)]
+pub struct IsolationProducerPreparedImmutableFileAuthority {
+    destination: PathBuf,
+    source: lillux::InheritedDescriptorAuthority,
+    content_sha256: String,
+}
+
+impl IsolationProducerPreparedImmutableFileAuthority {
+    pub fn new(
+        declaration: &ryeos_state::external_content::products::producer_recipe::ProducerPreparedImmutableFile,
+        captured: lillux::CapturedRegularFile,
+    ) -> anyhow::Result<Self> {
+        declaration.validate()?;
+        anyhow::ensure!(
+            !captured.bytes().is_empty()
+                && captured.bytes().len() as u64 <= declaration.maximum_bytes,
+            "captured producer immutable file is empty or exceeds its signed bound"
+        );
+        anyhow::ensure!(
+            captured.digest() == declaration.expected_sha256,
+            "captured producer immutable file differs from signed content hash"
+        );
+        Ok(Self {
+            destination: declaration.destination()?,
+            source: captured.authority().clone(),
+            content_sha256: captured.digest().to_owned(),
+        })
+    }
+
+    pub fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    pub fn content_sha256(&self) -> &str {
+        &self.content_sha256
+    }
+
+    pub(crate) fn source(&self) -> &lillux::InheritedDescriptorAuthority {
+        &self.source
+    }
+
+    pub fn verify_sealed_content(&self) -> anyhow::Result<()> {
+        let (bytes, _) = self.source.read_regular_file_stable_bounded(
+            ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_IMMUTABLE_FILE_BYTES,
+        )?;
+        anyhow::ensure!(
+            !bytes.is_empty() && lillux::sha256_hex(&bytes) == self.content_sha256,
+            "sealed producer immutable file content differs from captured digest"
+        );
+        Ok(())
+    }
+}
+
+impl IsolationProducerPreparedDirectoryAuthority {
+    pub fn new(
+        id: String,
+        workspace_relative_path: String,
+        source: lillux::InheritedDescriptorAuthority,
+    ) -> anyhow::Result<Self> {
+        let destination = ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(
+            &id,
+        )?;
+        ryeos_state::objects::validate_canonical_project_relative_path(&workspace_relative_path)
+            .map_err(|error| anyhow::anyhow!("invalid prepared workspace path: {error}"))?;
+        source
+            .directory_identity()
+            .map_err(|error| anyhow::anyhow!("prepared source is not a directory: {error}"))?;
+        source
+            .try_clone_pinned_directory(source.path().to_path_buf())?
+            .require_owner_private_directory()?;
+        Ok(Self {
+            id,
+            destination,
+            source,
+            workspace_relative_path,
+            immutable_files: Vec::new(),
+        })
+    }
+
+    pub fn with_immutable_files(
+        mut self,
+        files: Vec<IsolationProducerPreparedImmutableFileAuthority>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            files.len()
+                <= ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_IMMUTABLE_FILES,
+            "prepared immutable file count exceeds signed structural bound"
+        );
+        let mut destinations = std::collections::BTreeSet::new();
+        for file in &files {
+            anyhow::ensure!(
+                file.destination.parent() == Some(self.destination.as_path())
+                    && destinations.insert(file.destination.clone()),
+                "immutable file must be a unique direct child of its prepared directory"
+            );
+            file.verify_sealed_content()?;
+        }
+        self.immutable_files = files;
+        Ok(self)
+    }
+
+    pub fn immutable_files(&self) -> &[IsolationProducerPreparedImmutableFileAuthority] {
+        &self.immutable_files
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    /// Identity of the exact descriptor later consumed by the prepared mount.
+    /// Callers may retain and compare it, but must not interpret OS fields.
+    pub fn source_directory_identity(&self) -> anyhow::Result<lillux::PinnedDirectoryIdentity> {
+        self.source.directory_identity().map_err(anyhow::Error::msg)
+    }
+
+    pub(crate) fn source(&self) -> &lillux::InheritedDescriptorAuthority {
+        &self.source
+    }
+
+    pub(crate) fn workspace_relative_path(&self) -> &str {
+        &self.workspace_relative_path
+    }
+
+    pub(crate) fn verify_retained_descendant(
+        &self,
+        workspace: &lillux::InheritedDescriptorAuthority,
+    ) -> anyhow::Result<()> {
+        let expected = workspace
+            .open_directory_descendant(Path::new(self.workspace_relative_path()))?
+            .ok_or_else(|| anyhow::anyhow!("prepared workspace descendant is absent"))?;
+        anyhow::ensure!(
+            expected.same_file_identity(&self.source)?,
+            "prepared directory differs from retained workspace descendant"
+        );
+        self.source
+            .try_clone_pinned_directory(self.source.path().to_path_buf())?
+            .require_owner_private_directory()?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IsolationReadOnlyMountScope {
     ProjectRealization,
     ExecutionRuntimeRealization,
     StateOverlay,
+    RuntimeConfiguration,
+    RuntimeEndpoint,
 }
 
 impl IsolationReadOnlyMountAuthority {
+    /// Configuration data only: seal the exact bounded regular-file bytes so
+    /// even a later host-side mutation cannot alter this admitted delivery.
+    pub fn new_runtime_configuration(
+        source_path: PathBuf,
+        destination: PathBuf,
+        source: lillux::InheritedDescriptorAuthority,
+    ) -> anyhow::Result<Self> {
+        let (bytes, _) = source.read_regular_file_stable_bounded(
+            ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES as u64,
+        )?;
+        Self::new_runtime_configuration_bytes(source_path, destination, &bytes)
+    }
+
+    /// Configuration bytes produced by a protected runtime owner rather than
+    /// an authored source file. The immutable memfd is the only delivery
+    /// authority: `source_path` remains a non-authoritative diagnostic label.
+    /// This is used for occurrence-private configuration that cannot be
+    /// published into a source closure or written to persistent storage.
+    pub fn new_runtime_configuration_bytes(
+        source_path: PathBuf,
+        destination: PathBuf,
+        bytes: &[u8],
+    ) -> anyhow::Result<Self> {
+        ryeos_state::objects::validate_session_runtime_configuration_destination(
+            destination
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("runtime configuration path is not UTF-8"))?,
+        )?;
+        if bytes.is_empty() {
+            anyhow::bail!("runtime configuration is empty");
+        }
+        if bytes.len() > ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES {
+            anyhow::bail!("runtime configuration exceeds its byte bound");
+        }
+        Ok(Self {
+            source_path,
+            destination,
+            source: lillux::sealed_memfd(c"ryeos-runtime-configuration", &bytes)
+                .map_err(anyhow::Error::msg)?,
+            scope: IsolationReadOnlyMountScope::RuntimeConfiguration,
+        })
+    }
+
     pub fn new_execution_runtime(
         source_path: PathBuf,
         destination: PathBuf,
@@ -376,6 +608,24 @@ impl IsolationReadOnlyMountAuthority {
             source,
             scope: IsolationReadOnlyMountScope::StateOverlay,
         }
+    }
+
+    /// Mount one daemon-created local endpoint at its derived short address in
+    /// this launch's private namespace. The opened socket descriptor is the
+    /// authority; callers cannot redirect it to an ambient host coordinate.
+    pub fn new_runtime_endpoint(
+        source_path: PathBuf,
+        endpoint_name: &str,
+        source: lillux::InheritedDescriptorAuthority,
+    ) -> anyhow::Result<Self> {
+        let destination =
+            ryeos_state::objects::session_runtime_endpoint_destination(endpoint_name)?;
+        Ok(Self {
+            source_path,
+            destination,
+            source,
+            scope: IsolationReadOnlyMountScope::RuntimeEndpoint,
+        })
     }
 
     pub(crate) fn source_path(&self) -> &Path {
@@ -501,10 +751,11 @@ pub struct IsolationLaunchContext<'a> {
     /// definition/subject generation. Never reconstruct it from a cache path.
     pub immutable_project: Option<&'a ryeos_state::PinnedProjectMaterialization>,
     /// Exact retained view from the admitted workspace owner's bound slot.
-    /// Enforced RuntimeWorkspace launches require it. It is never rebuilt
-    /// from lower/backend-state paths; nonworkspace and disabled launches
-    /// must not carry one. The caller proves workspace/incarnation ownership
-    /// before retrieving this descriptor, not by parsing its path.
+    /// Enforced RuntimeWorkspace launches require it. An enforced
+    /// EphemeralScratch launch may also carry its exact pinned private root,
+    /// which isolation compares with the daemon-owned scratch child before
+    /// compiling the mount. Other and disabled launches must not carry one.
+    /// The caller proves ownership before retrieving this descriptor.
     pub workspace_view: Option<&'a lillux::InheritedDescriptorAuthority>,
     pub filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling,
     pub network_authority_ceiling: IsolationNetworkAuthorityCeiling,
@@ -526,6 +777,9 @@ pub struct IsolationLaunchContext<'a> {
     /// Exact daemon-prepared writable runtime-view directories. These are
     /// descriptor authority, not external content and not node-policy paths.
     pub writable_runtime_view_mounts: &'a [IsolationWritableRuntimeViewMountAuthority],
+    /// Exact scoped-producer prepared descendants of the retained private
+    /// workspace. Their destinations derive only from signed logical IDs.
+    pub producer_prepared_mounts: &'a [IsolationProducerPreparedDirectoryAuthority],
     pub target_channels: &'a [IsolationTargetChannelAuthority],
     pub item_ref: &'a str,
     pub thread_id: &'a str,
@@ -534,6 +788,63 @@ pub struct IsolationLaunchContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn admitted_command_binding_includes_descriptor_variant_and_realization_tree() {
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        let first_root = lillux::PinnedDirectory::open(first_root.path()).unwrap().unwrap();
+        let second_root = lillux::PinnedDirectory::open(second_root.path()).unwrap().unwrap();
+        let descriptor = lillux::sealed_memfd(c"admitted-command", b"exact-code").unwrap();
+        let identity = IsolationVerifiedCode {
+            source_path: "/runtime/bin/verifier".into(),
+            content_hash: lillux::sha256_hex(b"exact-code"),
+        };
+        let file_identity = IsolationDescriptorFileIdentity {
+            device: 1,
+            inode: 2,
+            size: 10,
+            modified_seconds: 0,
+            modified_nanoseconds: 0,
+            changed_seconds: 0,
+            changed_nanoseconds: 0,
+            mode: 0,
+            file_type: 0,
+        };
+        let command = IsolationDescriptorBoundCommand::new(
+            identity.clone(), descriptor.clone(), file_identity,
+        );
+        let standalone = IsolationAdmittedCommand::DescriptorBound(command.clone());
+        let member = IsolationAdmittedCommand::RealizationMember(
+            IsolationRealizationMemberCommand::new(
+                command.clone(), first_root.identity().unwrap(), "/runtime".into(),
+            ),
+        );
+        assert!(standalone.same_binding_as(&standalone.clone()).unwrap());
+        assert!(member.same_binding_as(&member.clone()).unwrap());
+        assert!(!standalone.same_binding_as(&member).unwrap());
+        let other_descriptor = IsolationAdmittedCommand::DescriptorBound(
+            IsolationDescriptorBoundCommand::new(
+                identity, lillux::sealed_memfd(c"other-command", b"exact-code").unwrap(),
+                file_identity,
+            ),
+        );
+        assert!(!standalone.same_binding_as(&other_descriptor).unwrap());
+        let other_root = IsolationAdmittedCommand::RealizationMember(
+            IsolationRealizationMemberCommand::new(
+                command.clone(), second_root.identity().unwrap(), "/runtime".into(),
+            ),
+        );
+        assert!(!member.same_binding_as(&other_root).unwrap());
+        let other_destination = IsolationAdmittedCommand::RealizationMember(
+            IsolationRealizationMemberCommand::new(
+                command, first_root.identity().unwrap(), "/other".into(),
+            ),
+        );
+        assert!(!member.same_binding_as(&other_destination).unwrap());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -592,6 +903,58 @@ mod tests {
             IsolationWritableRuntimeViewMountAuthority::new("XDG_CACHE_HOME".to_string(), file)
                 .unwrap_err();
         assert!(invalid.to_string().contains("not a directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn producer_prepared_directory_requires_pinned_directory_and_canonical_coordinate() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join("prepared/codex-home")).unwrap();
+        std::fs::set_permissions(
+            source.path().join("prepared/codex-home"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let source = lillux::PinnedDirectory::open(source.path())
+            .unwrap()
+            .unwrap();
+        let workspace = source.inherited_descriptor_authority().unwrap();
+        let descendant = workspace
+            .open_directory_descendant(Path::new("prepared/codex-home"))
+            .unwrap()
+            .unwrap();
+        let valid = IsolationProducerPreparedDirectoryAuthority::new(
+            "codex-home".into(),
+            "prepared/codex-home".into(),
+            descendant,
+        )
+        .unwrap();
+        valid.verify_retained_descendant(&workspace).unwrap();
+        let wrong = IsolationProducerPreparedDirectoryAuthority::new(
+            "codex-home".into(),
+            "prepared/codex-home".into(),
+            workspace.clone(),
+        )
+        .unwrap();
+        assert!(wrong.verify_retained_descendant(&workspace).is_err());
+        assert_eq!(valid.id(), "codex-home");
+        assert_eq!(valid.workspace_relative_path(), "prepared/codex-home");
+        assert_eq!(
+            valid.destination(),
+            Path::new("/ryeos/producer-prepared/codex-home")
+        );
+        assert!(IsolationProducerPreparedDirectoryAuthority::new(
+            "../escape".into(),
+            "prepared/codex-home".into(),
+            source.inherited_descriptor_authority().unwrap(),
+        )
+        .is_err());
+        assert!(IsolationProducerPreparedDirectoryAuthority::new(
+            "codex-home".into(),
+            "prepared/../escape".into(),
+            source.inherited_descriptor_authority().unwrap(),
+        )
+        .is_err());
     }
 
     #[test]

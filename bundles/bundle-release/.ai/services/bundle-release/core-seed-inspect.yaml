@@ -1,0 +1,18 @@
+# ryeos:signed:2026-09-20T11:15:48Z:a458f80383fad8ed5e27ee354f1a79aca07a83702ff629f942e51cbba0c2c9ea:9Vo0/7Wt5Zl37HelTMeWndh6N/Om0qABMfgFhQSjVUjLrMYm3hDwlDo0y/tWu5Iu7QTNwgVMTefNceobkzLtCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: core-seed-inspect
+version: "1.0.0"
+description: Derive the exact initial Core release input from a verified source snapshot and signed ownership policy.
+endpoint: bundle_release.core_seed_inspect
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/core-seed-inspect"]
+schema:
+  project_path: string
+  bundle_name: string
+  source_snapshot_hash: string
+  target: object
+  build_profile: string
+  catalog_namespace: string

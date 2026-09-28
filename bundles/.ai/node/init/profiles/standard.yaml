@@ -1,10 +1,15 @@
-# ryeos:signed:2026-09-17T07:24:33Z:2d5bb06ae31f326e5278261bd5ed23a763c3f7e6c62cfa90472afc36992ceaca:UnffaGN6OIcsmaZW1+ZXbputR5NA++uzoVl3joNfP4DPRIKxgoi/X9BpIsMmQuL5R50z5h8LfGQVXF+TKoG1Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-27T22:01:05Z:787f9f346b0bf4317f838883b3e44a70e8ba4ff2115cecc7069bd7d938a95c03:a31SYWNR4FzEw4z9GNRWSmFaEMylq8MjhXUJO2ISyuAhBDVcDz56SPHw7f1uHfg7f/Cui3E64szJzDHNmhjXCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
   - core
   - standard
 policies:
+  bundle_publication:
+    schema: 2
+    # Publication is disabled until the operator installs measured release authority.
+    catalogs: []
+
   accounting:
     schema: 2
     issue_acceptance_window_ms: 60000
@@ -88,11 +93,12 @@ policies:
       standard:
         - ryeos.register.command.dispatch.direct_execute_item_ref
   execution:
-    schema: 3
+    schema: 4
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
+    producer_resource_ceiling: null
     resource_authority: null
   object_closure:
     schema: 1
@@ -224,3 +230,6 @@ policies:
     schema: 1
     enabled: false
     limits: null
+  ui_browser_sessions:
+    schema: 1
+    max_live_binding_attachments_per_session: 16

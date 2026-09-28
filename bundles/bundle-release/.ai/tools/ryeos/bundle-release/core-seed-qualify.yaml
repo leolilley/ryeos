@@ -1,0 +1,25 @@
+# ryeos:signed:2026-09-24T08:05:55Z:dae9a40a8b228a0e20664f34f83bb2ab70f162341d08080dc4ab759720e67731:I6Z88Cv42ulW9hVXAlMYpmlz780UF8w056RYjy2yNqCaHPg1WpmtK9cXkPTN+BZ/VnYeqe5vgMTZJsz0KyrOAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/bundle-release
+name: core-seed-qualify
+version: "1.0.0"
+description: Verify the exact admitted signed Core seed without executing it.
+executor_id: tool:ryeos/bundle-release/runtime
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_core_seed_qualify, kind: tree, mount_root: execution_runtime, mount: python-gnu}
+  - id: subject
+    relationship_ref: config:bundle-release/core-seed-capture-products
+    relationship: signed_core_seed_to_qualifier_input
+    kind: tree
+    mount_root: execution_runtime
+    mount: core-seed
+env_config:
+  interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
+config:
+  command: "${interpreter}"
+  args: ["-I", "-B", {source_member: "lib/core-seed-qualify.py"}]
+  input_data: "${params_json}"
+  timeout_secs: 300

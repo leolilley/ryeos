@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-18T03:43:10Z:58c5f46a2f1fe8462ff8eb1a737fc7f57da83bab841d0d95d82038c5c43e5262:BH+xPqANg+UrNRwkgRvq4Q2oEaWjqRXe7Gu5HzyOsqLAy73RWoIOIOhQIUiS4JyDbqV43LeE6UrS297SYJVdBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T11:34:21Z:7f598f8a63c33abd02f35630f3da9ba48f532e03a2b252d5db02450a90816b8a:51V5Zss9SPl6uF9I3t7JfpgBm1bl5+/Ssn/xwqCbt+5oqRMekn2UWsWTphPU5Y1oE00fsQaNQmoWFk5ngkAvAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -6,8 +6,14 @@ exact_bundles:
   - core
   - hosted-node
   - opencode
+  - render-sandbox
   - standard
 policies:
+  bundle_publication:
+    schema: 2
+    # Publication is disabled until the operator installs measured release authority.
+    catalogs: []
+
   accounting:
     schema: 2
     issue_acceptance_window_ms: 60000
@@ -97,14 +103,21 @@ policies:
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
       hosted-node: []
+      render-sandbox: []
       standard:
         - ryeos.register.command.dispatch.direct_execute_item_ref
   execution:
-    schema: 3
+    schema: 4
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
+    producer_resource_ceiling:
+      maximum_wall_time_ms: 600000
+      maximum_stdout_bytes: 6291456
+      maximum_stderr_bytes: 2097152
+      maximum_memory_bytes: 2147483648
+      maximum_processes: 64
     resource_authority: null
   object_closure:
     schema: 1
@@ -274,3 +287,6 @@ policies:
       max_active_streams_per_subject: 1
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
+  ui_browser_sessions:
+    schema: 1
+    max_live_binding_attachments_per_session: 16

@@ -22,28 +22,6 @@ pub struct WorkspaceLayout {
 }
 
 impl WorkspaceLayout {
-    pub fn create(execution_root: &Path, workspace_id: &str) -> Result<Self> {
-        validate_workspace_id(workspace_id)?;
-        let execution_root = lillux::PinnedDirectory::open_or_create(execution_root)?;
-        execution_root.set_mode(0o700)?;
-        let workspace =
-            execution_root.open_or_create_child(std::ffi::OsStr::new(workspace_id), 0o700)?;
-        workspace.set_mode(0o700)?;
-        let project = workspace.open_or_create_child(std::ffi::OsStr::new(PROJECT_DIR), 0o700)?;
-        project.set_mode(0o700)?;
-        for entry in workspace.entries_no_follow_bounded(3)? {
-            if entry.entry_type != lillux::PinnedEntryType::Directory
-                || !matches!(entry.name.to_str(), Some(PROJECT_DIR | BACKEND_STATE_DIR))
-            {
-                anyhow::bail!(
-                    "execution workspace contains unexpected entry: {}",
-                    workspace.path().join(entry.name).display()
-                );
-            }
-        }
-        Ok(Self::from_root(workspace.path().to_path_buf()))
-    }
-
     pub fn from_root(root: PathBuf) -> Self {
         Self {
             project: root.join(PROJECT_DIR),
@@ -67,7 +45,8 @@ impl WorkspaceLayout {
     }
 }
 
-fn validate_workspace_id(value: &str) -> Result<()> {
+/// Canonical journal/layout coordinate, separate from host component safety.
+pub fn validate_workspace_id(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 160
         || !value
@@ -92,11 +71,20 @@ mod tests {
     }
 
     #[test]
-    fn native_create_has_only_the_project_generation() {
-        let parent = tempfile::tempdir().unwrap();
-        let created = WorkspaceLayout::create(parent.path(), "workspace-one").unwrap();
-        let reopened = WorkspaceLayout::from_project(&created.project).unwrap();
-        assert_eq!(created, reopened);
-        assert!(!created.backend_state.exists());
+    fn workspace_ids_are_bounded_canonical_coordinates() {
+        validate_workspace_id("W-native_workspace-01").unwrap();
+        validate_workspace_id(&"x".repeat(160)).unwrap();
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a.b",
+            "with space",
+            "雪",
+            &"x".repeat(161),
+        ] {
+            assert!(validate_workspace_id(invalid).is_err(), "{invalid}");
+        }
     }
 }

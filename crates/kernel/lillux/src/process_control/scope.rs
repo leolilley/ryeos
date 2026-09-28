@@ -434,6 +434,24 @@ pub enum ProcessScopeCapability {
     Recovery,
 }
 
+/// Kernel-enforced ceilings for every task in one exact execution scope.
+/// These are scope-wide limits, unlike per-process rlimits or account-wide
+/// process limits. A backend without equivalent enforcement must refuse them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessScopeResourceLimits {
+    pub maximum_memory_bytes: u64,
+    pub maximum_processes: u32,
+}
+
+impl ProcessScopeResourceLimits {
+    pub fn validate(self) -> Result<(), String> {
+        if self.maximum_memory_bytes == 0 || self.maximum_processes == 0 {
+            return Err("process scope resource limits must be positive".to_owned());
+        }
+        Ok(())
+    }
+}
+
 /// Node-authorized stable backend selection. Ephemeral resource identities are
 /// captured by the opened provider and journaled allocation, not authored into
 /// a policy which must survive reboot. Its platform-specific shape belongs
@@ -528,6 +546,11 @@ pub struct ProcessScope {
     // in a resource whose prior execution may already have been settled.
     launch_available: bool,
 }
+
+/// A one-shot launch handle whose exact scope-wide memory and task ceilings
+/// were installed and read back before any workload could enter the scope.
+#[derive(Debug)]
+pub struct ResourceLimitedProcessScope(ProcessScope);
 
 /// Even a failure before target attachment retains the exact allocated scope
 /// evidence. Callers must not lose its cleanup obligation with a spawn error.
@@ -1488,6 +1511,41 @@ fn valid_boot_id(value: &str) -> bool {
 }
 
 impl ProcessScope {
+    /// Install and read back scope-wide limits while this exact reservation is
+    /// still empty. A failure grants no weaker launch path; the owner must
+    /// retire the unlaunched reservation through its durable journal.
+    pub fn into_resource_limited(
+        mut self,
+        limits: ProcessScopeResourceLimits,
+    ) -> Result<ResourceLimitedProcessScope, (ProcessScopeRecovery, String)> {
+        if let Err(error) = limits.validate() {
+            self.launch_available = false;
+            return Err((self.recovery.clone(), error));
+        }
+        if !self.launch_available {
+            return Err((
+                self.recovery.clone(),
+                "resource limits require an unused process scope".to_owned(),
+            ));
+        }
+        let result = match &self.backend {
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2(scope) => scope.install_resource_limits(limits),
+            #[cfg(not(target_os = "linux"))]
+            _ => Err("process scope resource limits are unavailable on this OS".to_owned()),
+        };
+        match result {
+            Ok(()) => Ok(ResourceLimitedProcessScope(self)),
+            Err(error) => {
+                // A partial kernel write or failed readback cannot return an
+                // unrestricted launch handle. Journal-owned recovery still
+                // permits exact cleanup of this unused scope.
+                self.launch_available = false;
+                Err((self.recovery.clone(), error))
+            }
+        }
+    }
+
     pub(crate) fn occupancy_watchdog_kill_descriptor(&self) -> Result<std::fs::File, String> {
         match &self.backend {
             #[cfg(target_os = "linux")]
@@ -1685,6 +1743,30 @@ impl ProcessScope {
     }
 }
 
+impl ResourceLimitedProcessScope {
+    pub fn recovery(&self) -> &ProcessScopeRecovery {
+        self.0.recovery()
+    }
+
+    /// Hand the already-limited exact scope to an isolation adapter. This
+    /// does not create a fresh launch right or remove kernel limits; callers
+    /// must still use the held attachment/release protocol.
+    pub fn into_process_scope(self) -> ProcessScope {
+        self.0
+    }
+
+    pub fn spawn_awaiting_attachment(
+        self,
+        request: crate::SubprocessRequest,
+    ) -> Result<crate::ProcessAwaitingAttachment, ProcessScopeLaunchError> {
+        self.0.spawn_awaiting_attachment(request)
+    }
+
+    pub fn retire_unlaunched(self, timeout: Duration) -> Result<(), String> {
+        self.0.retire_unlaunched(timeout)
+    }
+}
+
 impl QuiescedProcessScope {
     /// Release a journaled workspace barrier, terminating the same scope if
     /// resume cannot be proved. An error always leaves durable settlement to
@@ -1732,6 +1814,31 @@ impl QuiescedProcessScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scope_resource_limits_reject_unbounded_dimensions() {
+        let valid = ProcessScopeResourceLimits {
+            maximum_memory_bytes: 1,
+            maximum_processes: 1,
+        };
+        assert!(valid.validate().is_ok());
+        assert!(
+            ProcessScopeResourceLimits {
+                maximum_memory_bytes: 0,
+                ..valid
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            ProcessScopeResourceLimits {
+                maximum_processes: 0,
+                ..valid
+            }
+            .validate()
+            .is_err()
+        );
+    }
 
     fn configuration() -> serde_json::Value {
         serde_json::json!({"version": SCOPE_CONFIGURATION_VERSION, "backend": {
@@ -2077,6 +2184,21 @@ mod tests {
         assert!(refused.result.stderr.contains("not a new launch"));
         let running = pending.release_after_attachment().unwrap();
         assert_eq!(running.scope_recovery(), Some(&recovery));
+        for _ in 0..100 {
+            if marker.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read(&marker).unwrap(), b"ran");
+        let running = match running.wait_for_natural_exit(Duration::from_millis(100)) {
+            Ok(_) => panic!("live scoped descendant was misreported as natural exit"),
+            Err(running) => running,
+        };
+        assert!(
+            !recovery.is_empty(Duration::from_secs(1)).unwrap(),
+            "natural wait must retain the live descendant for explicit cleanup"
+        );
         let completed = running.wait();
         assert!(completed.success, "{}", completed.stderr);
         assert_eq!(std::fs::read(&marker).unwrap(), b"ran");
@@ -2087,6 +2209,37 @@ mod tests {
             .unwrap();
         provider.retire(&recovery, Duration::from_secs(5)).unwrap();
         assert!(provider.recover(&recovery, Duration::from_secs(5)).is_err());
+
+        // A distinct scope with no surviving descendants may complete
+        // naturally. The wrapper remains unreaped until kernel emptiness is
+        // observed, then the existing owner performs ordinary settlement.
+        let scope = provider
+            .reserve(
+                &format!("natural-{:032x}", rand::random::<u128>()),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        let natural_recovery = scope.recovery().clone();
+        let mut exits = request();
+        exits.args = vec!["-c".to_owned(), "exit 0".to_owned()];
+        let running = scope
+            .spawn_awaiting_attachment(exits)
+            .unwrap()
+            .release_after_attachment()
+            .unwrap();
+        let natural = match running.wait_for_natural_exit(Duration::from_secs(5)) {
+            Ok(result) => result,
+            Err(running) => {
+                running.abort();
+                panic!("empty scope did not complete naturally");
+            }
+        };
+        assert!(natural.success, "{}", natural.stderr);
+        natural_recovery.wait_empty(Duration::ZERO).unwrap();
+        provider
+            .retire(&natural_recovery, Duration::from_secs(5))
+            .unwrap();
+
         // Only replay of an already-authorized disposal treats missing as
         // removed. It must not change passive liveness/recovery semantics.
         recovery.retire_after_settlement().unwrap();

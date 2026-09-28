@@ -185,11 +185,24 @@ impl ProductRelationship {
         &self,
         evidence: &ProductCaptureEvidence,
     ) -> anyhow::Result<()> {
-        self.validate()?;
-        evidence.validate()?;
+        self.validate_compatible_product_evidence(evidence)?;
         if evidence.relationships.select(&self.name)? != self {
             bail!("product witness retained a different signed relationship");
         }
+        Ok(())
+    }
+
+    /// Check that a separately signed consumer allowance admits the exact
+    /// product described by an authenticated capture witness. The capture
+    /// recipe and the consumer relationship intentionally have independent
+    /// identities: a retained product is reusable without republishing its
+    /// historical witness for every later consumer.
+    pub fn validate_compatible_product_evidence(
+        &self,
+        evidence: &ProductCaptureEvidence,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        evidence.validate()?;
         if self.producer.canonical_ref != evidence.root_producer.canonical_ref
             || self.producer.recipe_binding != evidence.recipe_binding
             || self.producer.product_name != evidence.declaration.name
@@ -313,6 +326,12 @@ pub enum ProductSelectionTarget {
     ContentDependency {
         binding: String,
     },
+    /// Exact product testimony for one execution dependency selected by a
+    /// managed launch preparer. The binding is part of the signed runtime
+    /// launch contract; it is not a caller-supplied item reference.
+    ExecutionDependency {
+        binding: String,
+    },
     /// Exact target-local product testimony for one operation exposed through
     /// an admitted workload-client grant. The workload never receives or
     /// authors this selector; boot admission converts it to an ordinary root
@@ -326,7 +345,9 @@ impl ProductSelectionTarget {
     pub fn validate(&self) -> anyhow::Result<()> {
         match self {
             Self::Root {} => Ok(()),
-            Self::ContentDependency { binding } => validate_binding_name(binding),
+            Self::ContentDependency { binding } | Self::ExecutionDependency { binding } => {
+                validate_binding_name(binding)
+            }
             Self::WorkloadExecution { item_ref } => {
                 validate_canonical_unsuffixed_ref("workload execution", item_ref)
             }
@@ -595,6 +616,12 @@ pub struct AdmittedProductQualification {
 }
 
 impl ResolvedExternalProductSelection {
+    /// Measurement of the existing semantic projection, not a bearer grant.
+    /// Transport receipt location is retained separately from executable identity.
+    pub fn semantic_identity_digest(&self) -> anyhow::Result<String> {
+        crate::objects::canonical_value_digest(&self.semantic_identity_value()?)
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA {
             bail!("unsupported resolved external product selection schema");
@@ -875,6 +902,36 @@ fn validate_mount(mount: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn resolved_selection_digest_preserves_existing_semantic_identity() {
+        let evidence = super::super::qualification::tests::dynamic_evidence();
+        let selections = evidence.verifier_root_selections.unwrap();
+        let original = selections.iter().next().unwrap().1;
+        let digest = original.semantic_identity_digest().unwrap();
+        assert_eq!(
+            digest,
+            crate::objects::canonical_value_digest(&original.semantic_identity_value().unwrap())
+                .unwrap()
+        );
+
+        let mut received = original.clone();
+        received.witness_source = super::super::transfer::ProductWitnessSource::Received {
+            acceptance_hash: "b".repeat(64),
+        };
+        assert_eq!(digest, received.semantic_identity_digest().unwrap());
+
+        let mut changed = original.clone();
+        changed.relationship_raw_content_digest = "f".repeat(64);
+        assert_ne!(digest, changed.semantic_identity_digest().unwrap());
+        changed = original.clone();
+        changed.pre_selection_effective_definition_digest = "e".repeat(64);
+        assert_ne!(digest, changed.semantic_identity_digest().unwrap());
+
+        changed = original.clone();
+        changed.declaration_id = "contradictory".into();
+        assert!(changed.semantic_identity_digest().is_err());
+    }
+
+    #[test]
     fn receipt_source_is_retained_but_not_selected_program_identity() {
         use super::super::transfer::ProductWitnessSource;
         let local = super::ProductSelection {
@@ -1014,6 +1071,8 @@ mod tests {
             workspace_output_capture_hash: None,
             producer_partition_identity: None,
             recipe_binding: relationship.producer.recipe_binding.clone(),
+            recipe_purpose:
+                crate::external_content::products::ProductRecipePurpose::GeneralProductV1,
             recipe_ref: "config:test/recipe".to_owned(),
             recipe_raw_content_digest: "d".repeat(64),
             declarations_hash: declarations.content_hash().unwrap(),
@@ -1085,6 +1144,113 @@ mod tests {
         let mut changed = relationship;
         changed.producer.canonical_ref = "graph:test/other".to_owned();
         assert!(changed.validate_product_evidence(&evidence).is_err());
+    }
+
+    #[test]
+    fn later_consumer_relationship_reuses_exact_retained_product_without_recapture() {
+        let capture_relationship = relationship();
+        let evidence = evidence(capture_relationship.clone());
+        let mut consumer_relationship = capture_relationship;
+        consumer_relationship.name = "runtime_to_later_consumer".to_owned();
+        consumer_relationship.consumer = ProductRelationshipConsumer {
+            canonical_ref: "graph:test/later-consumer".to_owned(),
+            declaration_id: "runtime".to_owned(),
+        };
+        consumer_relationship
+            .validate_compatible_product_evidence(&evidence)
+            .unwrap();
+        assert!(
+            consumer_relationship
+                .validate_product_evidence(&evidence)
+                .is_err()
+        );
+
+        let mut wrong_producer = consumer_relationship.clone();
+        wrong_producer.producer.canonical_ref = "graph:test/other-producer".to_owned();
+        assert!(
+            wrong_producer
+                .validate_compatible_product_evidence(&evidence)
+                .is_err()
+        );
+        let mut wrong_parameters = consumer_relationship.clone();
+        wrong_parameters.producer.parameters = json!({"profile": "debug", "target": "test"});
+        assert!(
+            wrong_parameters
+                .validate_compatible_product_evidence(&evidence)
+                .is_err()
+        );
+        let mut widened = consumer_relationship;
+        widened.required_product.bounds.maximum_total_bytes = 8_192;
+        assert!(
+            widened
+                .validate_compatible_product_evidence(&evidence)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn later_relationship_changes_semantic_identity_without_changing_witness() {
+        let evidence = super::super::qualification::tests::dynamic_evidence();
+        let selections = evidence.verifier_root_selections.unwrap();
+        let original = selections.iter().next().unwrap().1;
+        let mut later = original.clone();
+        later.relationship_ref = "config:test/later-consumer-allowance".into();
+        later.relationship_raw_content_digest = "f".repeat(64);
+        later.relationship_name = "later_runtime_allowance".into();
+        later.relationship.name = later.relationship_name.clone();
+        later.validate().unwrap();
+        assert_eq!(original.witness_hash, later.witness_hash);
+        assert_eq!(original.witness_coordinate, later.witness_coordinate);
+        assert_eq!(original.manifest_hash, later.manifest_hash);
+        assert_eq!(original.qualification, later.qualification);
+        assert_ne!(
+            original.semantic_identity_digest().unwrap(),
+            later.semantic_identity_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn compatible_relationship_still_refuses_wrong_producer_product_and_bounds() {
+        let capture = relationship();
+        let evidence = evidence(capture.clone());
+        for mutate in [
+            (|value: &mut ProductRelationship| {
+                value.producer.canonical_ref = "graph:test/wrong".into()
+            }) as fn(&mut ProductRelationship),
+            |value| value.producer.recipe_binding = "wrong_recipe".into(),
+            |value| value.producer.product_name = "wrong_product".into(),
+            |value| value.producer.parameters = json!({"profile":"debug","target":"test"}),
+            |value| value.required_product.shape = ProductShape::File,
+            |value| value.required_product.storage = ProductStorage::LargeContent,
+            |value| value.required_product.bounds.maximum_entries = 9,
+            |value| value.required_product.bounds.maximum_depth = 5,
+            |value| value.required_product.bounds.maximum_file_bytes = 2048,
+            |value| value.required_product.bounds.maximum_total_bytes = 8192,
+        ] {
+            let mut later = capture.clone();
+            later.name = "later_allowance".into();
+            mutate(&mut later);
+            later.validate().unwrap();
+            assert!(
+                later
+                    .validate_compatible_product_evidence(&evidence)
+                    .is_err()
+            );
+            assert!(later.validate_product_evidence(&evidence).is_err());
+        }
+        // Valid historical capture metrics can exceed a later narrower allowance.
+        for (entries, bytes) in [(5, 7), (1, 2049)] {
+            let mut larger = evidence.clone();
+            larger.entry_count = entries;
+            larger.total_bytes = bytes;
+            larger.validate().unwrap();
+            assert!(
+                capture
+                    .validate_compatible_product_evidence(&larger)
+                    .is_err()
+            );
+            assert!(capture.validate_product_evidence(&larger).is_err());
+        }
     }
 
     #[test]

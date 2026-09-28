@@ -400,6 +400,19 @@ fn validate_protocol_descriptor(
                 detail,
             })?;
     }
+    if desc.requires_qualification_purpose
+        && (desc.callback_channel != CallbackChannel::Http
+            || desc.execution_evidence.is_none()
+            || desc.lifecycle.mode != crate::protocol_vocabulary::LifecycleMode::Managed
+            || desc.capabilities.allows_pushed_head
+            || desc.capabilities.allows_target_site
+            || desc.capabilities.allows_detached)
+    {
+        return Err(ProtocolError::MalformedYaml {
+            path: path.to_owned(),
+            detail: "qualification-only protocol requires managed HTTP callbacks, a projector and no dispatch capabilities".to_owned(),
+        });
+    }
 
     Ok(())
 }
@@ -486,5 +499,26 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn qualification_only_protocol_requires_closed_managed_callback_contract() {
+        let mut desc = descriptor(
+            "http",
+            "  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }\n  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }\n",
+        );
+        desc.requires_qualification_purpose = true;
+        assert!(validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).is_err());
+        desc.lifecycle.mode = crate::protocol_vocabulary::LifecycleMode::Managed;
+        desc.capabilities.allows_detached = false;
+        desc.execution_evidence = Some(
+            serde_yaml::from_str(
+                "handler: handler:ryeos/core/scoped-qualification-execution-evidence\nconfig: {}\nlimits:\n  max_request_bytes: 2097152\n  max_response_bytes: 2097152\n  max_events: 128\n  max_event_bytes: 65536\n  max_calls: 1\n  max_call_bytes: 65536\n",
+            )
+            .unwrap(),
+        );
+        validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).unwrap();
+        desc.capabilities.allows_target_site = true;
+        assert!(validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).is_err());
     }
 }

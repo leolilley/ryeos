@@ -51,16 +51,17 @@ pub fn ensure_signer_trusted(
 
 /// Deterministic test signer with real Ed25519 cryptography.
 ///
-/// Only available in test builds. Uses a fixed seed (all 42s) to generate
-/// a deterministic keypair. Produces real Ed25519 signatures that can be
-/// verified using the contained public key.
-#[cfg(test)]
+/// Only available in test builds or to explicitly opted-in composed test
+/// harnesses. Uses a fixed seed (all 42s) to generate a deterministic keypair.
+/// Produces real Ed25519 signatures that can be verified using the contained
+/// public key.
+#[cfg(any(test, feature = "test-support"))]
 pub struct TestSigner {
     signing_key: lillux::crypto::SigningKey,
     fingerprint: String,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestSigner {
     /// Create a new test signer with a deterministic keypair.
     pub fn new() -> Self {
@@ -89,7 +90,7 @@ impl TestSigner {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Signer for TestSigner {
     fn sign(&self, data: &[u8]) -> Vec<u8> {
         use lillux::crypto::Signer as Ed25519Signer;

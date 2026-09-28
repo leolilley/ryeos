@@ -3138,6 +3138,19 @@ pub async fn execute_command(
                 &persisted_result,
             )?;
             notify_projection_change(placement_thread_id);
+            // The qualification gate is deliberately after both immutable
+            // settlement testimony and the rebuildable outbox projection, but
+            // before the caller can receive an acknowledgement. The parent
+            // SIGKILLs this daemon at the gate; no unwind or request cleanup
+            // is allowed to manufacture the recovered result.
+            #[cfg(feature = "crash-qualification-test-support")]
+            test_support::reach_settled_command_before_response(
+                placement_thread_id,
+                idempotency_key,
+                record.command_sequence,
+                &request_digest,
+                &result,
+            )?;
             Ok(json!({
                 "command_sequence": record.command_sequence,
                 "state": "completed",
@@ -3152,12 +3165,16 @@ pub async fn execute_command(
                 .worker_instance_id
                 .as_deref()
                 .ok_or_else(|| anyhow!("failed command has no worker identity"))?;
-            state.state_store.fence_abandoned_worker_process(
+            if let Err(cleanup_error) = state.state_store.fence_abandoned_worker_process(
                 worker_instance_id,
                 placement_thread_id,
                 worker_boot_epoch,
                 cleanup_state,
-            )?;
+            ) {
+                bail!(
+                    "worker contact failed: {error}; local worker cleanup is {cleanup_state}, but durable fencing failed: {cleanup_error}"
+                );
+            }
             append_command_fact_once(
                 state,
                 &session,
@@ -3175,6 +3192,146 @@ pub async fn execute_command(
             bail!(
                 "worker contact failed; command outcome is unknown, cleanup is {cleanup_state}, and it will not be resent: {error}"
             )
+        }
+    }
+}
+
+/// Feature-only process-kill qualification of the lost-acknowledgement cut.
+/// Production builds do not compile or accept this inherited channel.
+#[cfg(feature = "crash-qualification-test-support")]
+pub mod test_support {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, OnceLock};
+
+    use anyhow::{Context as _, Result, anyhow, bail, ensure};
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+
+    pub const COMMAND_SETTLED_KEY_ENV: &str = "RYEOSD_TEST_COMMAND_SETTLED_KEY";
+    pub const COMMAND_SETTLED_FD_ENV: &str = "RYEOSD_TEST_COMMAND_SETTLED_FD";
+    pub const COMMAND_SETTLED_SCHEMA: &str = "ryeos.test.command_settled_before_response.v1";
+
+    static GATE: OnceLock<SettledCommandGate> = OnceLock::new();
+
+    struct SettledCommandGate {
+        selected_idempotency_key: String,
+        reached: AtomicBool,
+        channel: Mutex<lillux::InheritedDuplexChannel>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct SettledCommandCutEvidence {
+        pub schema: String,
+        pub placement_thread_id: String,
+        pub idempotency_key: String,
+        pub command_sequence: u64,
+        pub request_digest: String,
+        pub response_digest: String,
+    }
+
+    impl SettledCommandCutEvidence {
+        pub fn validate(&self) -> Result<()> {
+            ensure!(
+                self.schema == COMMAND_SETTLED_SCHEMA,
+                "command cut schema changed"
+            );
+            ensure!(
+                !self.placement_thread_id.is_empty() && self.placement_thread_id.len() <= 256,
+                "command cut has no bounded placement identity"
+            );
+            ensure!(
+                valid_key(&self.idempotency_key),
+                "command cut has no bounded selected key"
+            );
+            ensure!(self.command_sequence > 0, "command cut has no sequence");
+            ensure!(
+                lillux::valid_hash(&self.request_digest)
+                    && lillux::valid_hash(&self.response_digest),
+                "command cut has a noncanonical digest"
+            );
+            Ok(())
+        }
+    }
+
+    fn valid_key(value: &str) -> bool {
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    }
+
+    /// Adopt the parent's exact inherited Lillux channel before any hosted
+    /// worker can start. Partial configuration fails daemon startup closed.
+    pub fn initialize_from_env() -> Result<()> {
+        let selected = std::env::var(COMMAND_SETTLED_KEY_ENV).ok();
+        let descriptor = std::env::var(COMMAND_SETTLED_FD_ENV).ok();
+        let (Some(selected), Some(_)) = (selected, descriptor) else {
+            if std::env::var_os(COMMAND_SETTLED_KEY_ENV).is_some()
+                || std::env::var_os(COMMAND_SETTLED_FD_ENV).is_some()
+            {
+                bail!("command settlement crash key and channel must be supplied together");
+            }
+            return Ok(());
+        };
+        ensure!(
+            valid_key(&selected),
+            "command settlement crash key is invalid"
+        );
+        // SAFETY: this feature-only daemon is spawned by the qualification
+        // parent, which minted the exact connected Lillux channel and granted
+        // this child unique authority to consume its inherited descriptor.
+        let channel =
+            unsafe { lillux::take_inherited_duplex_channel_from_env(COMMAND_SETTLED_FD_ENV) }
+                .map_err(anyhow::Error::msg)
+                .context("adopt inherited command-settlement crash channel")?;
+        GATE.set(SettledCommandGate {
+            selected_idempotency_key: selected,
+            reached: AtomicBool::new(false),
+            channel: Mutex::new(channel),
+        })
+        .map_err(|_| anyhow!("command settlement crash gate initialized twice"))
+    }
+
+    pub(super) fn reach_settled_command_before_response(
+        placement_thread_id: &str,
+        idempotency_key: &str,
+        command_sequence: u64,
+        request_digest: &str,
+        response: &Value,
+    ) -> Result<()> {
+        let Some(gate) = GATE.get() else {
+            return Ok(());
+        };
+        if gate.selected_idempotency_key != idempotency_key {
+            return Ok(());
+        }
+        ensure!(
+            !gate.reached.swap(true, Ordering::AcqRel),
+            "selected command settlement crash gate reached twice"
+        );
+        let evidence = SettledCommandCutEvidence {
+            schema: COMMAND_SETTLED_SCHEMA.to_owned(),
+            placement_thread_id: placement_thread_id.to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
+            command_sequence,
+            request_digest: request_digest.to_owned(),
+            response_digest: ryeos_state::objects::canonical_value_digest(response)?,
+        };
+        evidence.validate()?;
+        let mut channel = gate
+            .channel
+            .lock()
+            .map_err(|_| anyhow!("command settlement crash channel lock poisoned"))?;
+        serde_json::to_writer(&mut *channel, &evidence)
+            .context("write exact command-settlement crash evidence")?;
+        channel.write_all(b"\n")?;
+        channel.flush()?;
+        drop(channel);
+        loop {
+            std::thread::park();
         }
     }
 }
@@ -3200,24 +3357,9 @@ fn admitted_session_capsule(
     state: &AppState,
     capsule_hash: &str,
 ) -> Result<ryeos_state::objects::AdmittedPersistentSessionCapsule> {
-    let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
-    authority.ensure_guard(&guard)?;
-    let value = authority
-        .cas_store()?
-        .get_object(capsule_hash)?
-        .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
-    // Check the retained bytes before even classifying an unsupported envelope.
-    // A schema mismatch must not hide CAS corruption.
-    if ryeos_state::objects::canonical_value_digest(&value)? != capsule_hash {
-        bail!("admitted session capsule content hash changed");
-    }
-    let capsule =
-        ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
-    if capsule.content_hash()? != capsule_hash {
-        bail!("admitted session capsule content hash changed");
-    }
-    Ok(capsule)
+    state
+        .state_store
+        .admitted_persistent_session_capsule(capsule_hash)
 }
 
 /// An already-terminal, detached placement has no command recovery authority.
@@ -5397,6 +5539,135 @@ fn require_persisted_completion_fence(
     Ok(())
 }
 
+fn dedicated_session_has_external_candidate(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+) -> Result<bool> {
+    let capsule = state
+        .state_store
+        .admitted_persistent_session_capsule(&session.admitted_capsule_hash)?;
+    capsule.validate()?;
+    Ok(capsule.external_candidate.is_some())
+}
+
+/// Settle the remote candidate independently of the local provider process.
+/// The completed path first requires exact C import; cancellation skips import
+/// but still durably revokes input and proves occurrence termination. Tokio's
+/// notification is only a wake hint: the deadline and every completion fact
+/// are sampled from Lillux/durable state on each pass.
+async fn prepare_external_candidate_termination(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    reason: &str,
+    completion_fence: Option<&HostedCommandCompletionFence>,
+) -> Result<Option<lillux::time::MonotonicDeadline>> {
+    if !dedicated_session_has_external_candidate(state, session)? {
+        return Ok(None);
+    }
+    if reason == "cancelled"
+        && crate::external_placement::external_candidate_cleanup_is_proved(
+            state,
+            &session.placement_thread_id,
+        )?
+    {
+        return Ok(None);
+    }
+    let timeout = crate::external_placement::external_candidate_settlement_timeout(
+        state,
+        &session.placement_thread_id,
+    )?;
+    let deadline = lillux::time::MonotonicDeadline::after(timeout);
+    if reason == "completed" {
+        let completion = completion_fence
+            .context("completed external candidate has no exact completion fence")?;
+        loop {
+            match crate::external_placement::advance_external_candidate_completion(
+                state,
+                &session.placement_thread_id,
+                &completion.request_digest,
+            )? {
+                crate::external_placement::ExternalCandidateCompletionProgress::Imported(_) => {
+                    break;
+                }
+                crate::external_placement::ExternalCandidateCompletionProgress::AwaitingImport => {
+                    wait_for_external_candidate_progress(
+                        state,
+                        session,
+                        deadline,
+                        "candidate import",
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    crate::external_placement::request_external_candidate_cleanup(
+        state,
+        &session.placement_thread_id,
+    )?;
+    Ok(Some(deadline))
+}
+
+async fn settle_external_candidate_termination(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    deadline: Option<lillux::time::MonotonicDeadline>,
+) -> Result<()> {
+    let Some(deadline) = deadline else {
+        return Ok(());
+    };
+    // Process retirement releases the relay owner, but only its durable
+    // closure proves that protocol I/O settled. A failed Drop/join must not
+    // be converted into allocation or capacity settlement.
+    if !state
+        .state_store
+        .external_connector_retired(&session.placement_thread_id)?
+    {
+        bail!("external connector retirement remains unproved");
+    }
+    loop {
+        match crate::external_placement::advance_external_candidate_cleanup(
+            state,
+            &session.placement_thread_id,
+        )? {
+            crate::external_placement::ExternalCandidateCleanupProgress::Proved => return Ok(()),
+            crate::external_placement::ExternalCandidateCleanupProgress::Pending => {
+                wait_for_external_candidate_progress(
+                    state,
+                    session,
+                    deadline,
+                    "occurrence cleanup",
+                )
+                .await?;
+            }
+        }
+    }
+}
+
+async fn wait_for_external_candidate_progress(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    deadline: lillux::time::MonotonicDeadline,
+    operation: &str,
+) -> Result<()> {
+    let remaining = deadline.remaining();
+    if remaining.is_zero() {
+        bail!("external candidate {operation} exceeded its retained settlement timeout");
+    }
+    // Keep the wake bounded so a missed/coalesced notification can delay but
+    // never strand reconciliation. Monotonic expiry remains Lillux-owned.
+    let wake = remaining.min(lillux::time::Duration::from_millis(50));
+    let current = current_session(state, &session.placement_thread_id)?;
+    wait_for_projection_change(
+        state,
+        &session.placement_thread_id,
+        current.updated_at_ms,
+        wake,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Drain and terminally settle one session after its caller has already
 /// proved owner/root authority. This is shared by authenticated services and
 /// the callback-owned controller so duration expiry cannot orphan a worker.
@@ -5498,6 +5769,12 @@ pub async fn terminate_session_with_bounded_outcome(
         validate_bounded_budget_outcome_authority(state, &session, outcome)?;
     }
     if session.state == "terminal" {
+        if !crate::external_placement::external_candidate_cleanup_is_proved(
+            state,
+            placement_thread_id,
+        )? {
+            bail!("terminal dedicated session retains unresolved external cleanup");
+        }
         if let Some(outcome) = bounded_outcome.as_ref() {
             state
                 .state_store
@@ -5549,6 +5826,9 @@ pub async fn terminate_session_with_bounded_outcome(
                 .state_store
                 .reserve_dedicated_session_bounded_outcome(placement_thread_id, outcome)?;
         }
+        let deadline =
+            prepare_external_candidate_termination(state, &session, reason, None).await?;
+        settle_external_candidate_termination(state, &session, deadline).await?;
         state
             .state_store
             .terminalize_unattached_dedicated_session(placement_thread_id, reason)?;
@@ -5619,6 +5899,8 @@ pub async fn terminate_session_with_bounded_outcome(
             .state_store
             .reserve_dedicated_session_bounded_outcome(placement_thread_id, outcome)?;
     }
+    let external_deadline =
+        prepare_external_candidate_termination(state, &session, reason, completion_fence).await?;
     let worker = state
         .state_store
         .worker_process(worker_instance_id)?
@@ -5635,6 +5917,7 @@ pub async fn terminate_session_with_bounded_outcome(
             bail!("dedicated worker cleanup remains unproved");
         }
     }
+    settle_external_candidate_termination(state, &session, external_deadline).await?;
     let after_retire = current_session(state, placement_thread_id)?;
     if !matches!(
         after_retire.state.as_str(),
@@ -5749,6 +6032,12 @@ pub fn abort_session_for_root_stop(state: &AppState, placement_thread_id: &str) 
     let _credential_operation =
         acquire_credential_profile_operation_sync(&session.credential_profile_id);
     if session.state == "terminal" {
+        if !crate::external_placement::external_candidate_cleanup_is_proved(
+            state,
+            placement_thread_id,
+        )? {
+            bail!("terminal root-owned session retains unresolved external cleanup");
+        }
         finish_terminal_credential_cleanup(state, &session)?;
         return Ok(());
     }
@@ -5756,6 +6045,12 @@ pub fn abort_session_for_root_stop(state: &AppState, placement_thread_id: &str) 
         session.state.as_str(),
         "freezing" | "frozen" | "verifying" | "qualifying" | "publish_ready" | "discarding"
     ) {
+        if !crate::external_placement::external_candidate_cleanup_is_proved(
+            state,
+            placement_thread_id,
+        )? {
+            bail!("candidate disposition retained unresolved external cleanup");
+        }
         state
             .state_store
             .cancel_dedicated_candidate_for_root_stop(&session.placement_thread_id)?;
@@ -5764,6 +6059,11 @@ pub fn abort_session_for_root_stop(state: &AppState, placement_thread_id: &str) 
     }
     if session.state == "publishing" {
         bail!("candidate publication is already at a possible irreversible contact boundary");
+    }
+    if crate::external_placement::advance_external_candidate_cleanup(state, placement_thread_id)?
+        != crate::external_placement::ExternalCandidateCleanupProgress::Proved
+    {
+        bail!("root-owned external candidate cleanup remains unresolved");
     }
     match (
         session.worker_instance_id.as_deref(),

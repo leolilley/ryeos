@@ -1,0 +1,7 @@
+# ryeos:signed:2026-09-28T06:27:49Z:609e00822f2cb8e560a74feae5b152c8a8361b2be625866f587c8d8060a0389a:murkjm9YMwAFSlNPyF/3fkTVS9tas2t7jEznnfqfHo316rQSWjf/G0oZncHi5EnoiIE8OI0MxNVGv8ZhImqBDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.runtime-snapshot
+required_caps: ["ryeos.execute.service.external-content/runtime-snapshot"]
+schema:
+  operation_id: string
+description: Read one exact retained runtime snapshot operation owned by the admitted operator without provider contact

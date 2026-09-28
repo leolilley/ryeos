@@ -2511,12 +2511,22 @@ impl NodeAdmittedObjectsClosureRequestOptions {
             .node_policy
             .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
         )?;
-        Self::admit(requested, policy).with_context(|| {
+        Self::for_policy(policy, requested).with_context(|| {
             format!(
                 "admit remote closure operation against `{}` node policy",
                 ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy::SECTION_NAME
             )
         })
+    }
+
+    /// Admit an offline remote closure fetch against one already verified
+    /// node-policy section. Stopped-node CLI operations use this instead of
+    /// constructing an online `AppState` solely to reach identical policy.
+    pub fn for_policy(
+        policy: &ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy,
+        requested: ObjectsClosureRequestOptions,
+    ) -> Result<Self> {
+        Self::admit(requested, policy)
     }
 
     pub fn admit(
@@ -4409,6 +4419,7 @@ mod tests {
             max_total_blob_bytes: 128 * 1024 * 1024,
             max_response_bytes: 256 * 1024 * 1024,
             max_links_per_object: 100_000,
+            local_verification: None,
         }
     }
 

@@ -1,0 +1,38 @@
+# ryeos:signed:2026-09-28T12:03:48Z:d7aae4e96cdf74de1f0b5a16a9bb0703500430e8296274af8afa7832decfd992:FvzDzPafbN8b0CogHI1hmLGRl3Zmyf79WV90Aacb8klUYcyPGJnv0ymnv8U8sy6wgptDv+UJ0wZ9Z1nG4OEYCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex
+version: "1.0.0"
+description: Produce a credential-free guest owner for an explicitly selected controller public root on an enforced-isolation authoring node
+effects: live
+product_recipe: config:codex/guest-owner-runtime-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.codex/guest-runtime/produce-owner
+      - ryeos.execute.config.codex/guest-owner-runtime-products
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties:
+      controller_public_key: {type: string}
+    required: [controller_public_key]
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:codex/guest-runtime/produce-owner
+        ref_bindings: {}
+        params:
+          controller_public_key: "${inputs.controller_public_key}"
+        thread: inline
+      assign:
+        production: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.production}"

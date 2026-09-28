@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T07:24:33Z:f758ed524c8ee75c5ef7f758e0673f9ff44f3dd5930adff4655613fbbc71ae09:SBnq32ejtFFNqarMPLobpoKh9vmyW0LmOeT4QwcKYz9oUEZqSyqiVw9QezvsPMb+14VUNv0kHM2/qJ7BWJXkBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-27T22:01:04Z:5ecc24cc31c01988d08da1673b1353163f9f368820fc73612754c6cae6e7a5fe:2Y7f1b36C2e60SfYkX4d1HjkF9MLvlfMj+wnkrYSO+zlk/XIFLWSwsPqbUBkkVHsrO24E0IML3YtpBk+tli+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -7,6 +7,11 @@ exact_bundles:
   - tv-tracker-authoring
   - web
 policies:
+  bundle_publication:
+    schema: 2
+    # Publication is disabled until the operator installs measured release authority.
+    catalogs: []
+
   accounting:
     schema: 2
     issue_acceptance_window_ms: 60000
@@ -92,11 +97,12 @@ policies:
       tv-tracker-authoring: []
       web: []
   execution:
-    schema: 3
+    schema: 4
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
+    producer_resource_ceiling: null
     resource_authority: null
   object_closure:
     schema: 1
@@ -228,3 +234,6 @@ policies:
     schema: 1
     enabled: false
     limits: null
+  ui_browser_sessions:
+    schema: 1
+    max_live_binding_attachments_per_session: 16

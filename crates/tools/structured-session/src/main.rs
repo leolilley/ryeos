@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, ChildStdin, Command};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 use lillux::time::{Duration, MonotonicDeadline};
@@ -33,6 +31,9 @@ const SERVER_REQUEST_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 // enough for that request to expire and send its fail-closed upstream reply.
 // The enclosing persistent-session contract admits a one-hour request bound.
 const ROUTE_CALL_TIMEOUT: Duration = Duration::from_secs(16 * 60);
+// Local best-effort cooperation only; the daemon retains the authoritative
+// enclosing-lifetime cleanup budget and escalation policy.
+const BRIDGE_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,10 +59,81 @@ struct Frame {
     body: Option<Value>,
 }
 
+/// Owned by the executable entrypoint, never by a protocol mutex or command
+/// task. Retained through terminal process exit even when local cleanup times
+/// out; ordinary error unwinding must not enter the child's blocking Drop.
+#[derive(Default)]
+struct BridgeLifecycle {
+    process: Option<lillux::SubordinateProcess>,
+    diagnostics: Option<lillux::SubordinateDiagnosticDrain>,
+    executable_authorities: Vec<lillux::InheritedDescriptorAuthority>,
+    broker: Option<workload_client_broker::RunningWorkloadClientBroker>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LocalExitObservation {
+    child_reaped: bool,
+    diagnostic_reader: Option<lillux::SubordinateDiagnosticDrainEnd>,
+    diagnostic_reader_absent: bool,
+}
+
+impl LocalExitObservation {
+    fn settled(&self) -> bool {
+        self.child_reaped
+            && (self.diagnostic_reader_absent
+                || matches!(
+                    self.diagnostic_reader,
+                    Some(
+                        lillux::SubordinateDiagnosticDrainEnd::Eof
+                            | lillux::SubordinateDiagnosticDrainEnd::Cancelled
+                    )
+                ))
+    }
+}
+
+impl BridgeLifecycle {
+    fn process(&mut self) -> Result<&mut lillux::SubordinateProcess> {
+        self.process
+            .as_mut()
+            .ok_or_else(|| anyhow!("structured workload child is absent"))
+    }
+
+    /// Local observations only. Neither this result nor bridge exit substitutes
+    /// for daemon-owned descendant/writer settlement and candidate freeze.
+    fn shutdown_until(&mut self, deadline: MonotonicDeadline) -> LocalExitObservation {
+        let child_reaped = match self.process.as_mut() {
+            None => true,
+            Some(process) => {
+                match process.try_exit() {
+                    Ok(Some(_)) => true,
+                    Ok(None) => {
+                        // Keep the exact child even if signaling or waiting
+                        // fails. Never authorize escalation through this path.
+                        let _ = process
+                            .cooperative_termination()
+                            .and_then(|signal| signal.request());
+                        matches!(process.wait_exact_child_until(deadline), Ok(Some(_)))
+                    }
+                    Err(_) => false,
+                }
+            }
+        };
+        let diagnostic_reader = self
+            .diagnostics
+            .as_mut()
+            .and_then(|drain| drain.cancel_until(deadline));
+        LocalExitObservation {
+            child_reaped,
+            diagnostic_reader,
+            diagnostic_reader_absent: self.diagnostics.is_none(),
+        }
+    }
+}
+
 struct StructuredWorkload {
-    child: Child,
     io: WorkloadIo,
     incoming: Receiver<Result<Value, String>>,
+    workload_reader: Option<lillux::task::HostTask<WorkloadReaderExit>>,
     responses: HashMap<String, Value>,
     server_requests: HashMap<String, PendingServerRequest>,
     workload_channel: Option<workload_client_broker::WorkloadClientChannel>,
@@ -76,7 +148,7 @@ struct StructuredWorkload {
     early_command_observations: Vec<Value>,
     next_id: u64,
     fatal: Option<String>,
-    workspace: String,
+    route_workspace: String,
     workload_home: String,
     ceremony_active: bool,
     bound_session_id: Option<String>,
@@ -133,8 +205,17 @@ enum WorkloadInvocationDelivery {
 /// the child, discovered from its stdout listening line, with requests and
 /// server-sent events carrying the same message envelopes.
 enum WorkloadIo {
-    Stdio(ChildStdin),
+    Stdio(lillux::SubordinateProcessInput),
     Http(HttpWorkload),
+}
+
+#[derive(Debug)]
+enum WorkloadReaderExit {
+    ReceiverClosed,
+    OutputClosed,
+    OutputLimitExceeded,
+    OutputReadFailed,
+    Panicked,
 }
 
 struct HttpWorkload {
@@ -179,6 +260,9 @@ type WorkloadCommandResult = (String, std::result::Result<WorkloadCommandOutput,
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StructuredSessionProfile {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    external_candidate:
+        Option<ryeos_state::external_execution::admission::ExternalCandidateRequirement>,
     schema_version: u32,
     transport: ProfileTransport,
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -193,6 +277,8 @@ struct StructuredSessionProfile {
     workload_client: Option<StructuredSessionWorkloadClient>,
     baseline_config: String,
     baseline_destination: String,
+    auxiliary_configs: Vec<ryeos_state::objects::SessionConfigurationFile>,
+    runtime_configs: Vec<ryeos_state::objects::SessionRuntimeConfigurationFile>,
     portable_state: Option<ryeos_state::objects::PortableSessionStateContract>,
     credential_subject: Option<ryeos_state::objects::CredentialSubjectProjectionContract>,
     initialization: Vec<InitializationStep>,
@@ -593,6 +679,7 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
     validate_workload_executable_member(&profile.workload_executable)?;
     if let Some(contract) = &profile.portable_state {
         contract.validate()?;
+        contract.validate_configuration_exclusions(&profile.auxiliary_configs)?;
     }
     if let Some(contract) = &profile.credential_subject {
         contract.validate()?;
@@ -601,6 +688,19 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
         "structured-session baseline destination",
         &profile.baseline_destination,
     )?;
+    ryeos_state::objects::validate_session_auxiliary_configs(
+        &profile.baseline_destination,
+        &profile.auxiliary_configs,
+    )?;
+    ryeos_state::objects::validate_session_runtime_configs(&profile.runtime_configs)?;
+    if let Some(requirement) = &profile.external_candidate {
+        // The controller's exclusive-session start owner admits and prepares
+        // the exact connector, configuration adapter, capability, and contact
+        // permit before this bridge is spawned. The provider-neutral bridge
+        // validates the retained requirement shape but must not duplicate or
+        // synthesize that protected authority from provider-specific files.
+        requirement.validate()?;
+    }
     if profile.workload_args.len() > 64
         || profile
             .workload_args
@@ -850,13 +950,30 @@ fn reject_nonlocal_schema_refs(value: &Value, depth: usize) -> Result<()> {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    // Panic payloads can include provider messages or configuration. The
+    // executable reports only a category and never resumes protocol work.
+    std::panic::set_hook(Box::new(|_| {
+        eprintln!("ryeos-structured-session-bridge: internal panic");
+    }));
+    let mut lifecycle = BridgeLifecycle::default();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut lifecycle)))
+        .unwrap_or_else(|_| Err(anyhow!("structured-session bridge panicked")));
+    let local_exit = lifecycle.shutdown_until(MonotonicDeadline::after(BRIDGE_EXIT_GRACE));
+    let failed = result.is_err() || !local_exit.settled();
+    if let Err(error) = result {
         eprintln!("ryeos-structured-session-bridge: {error:#}");
-        std::process::exit(1);
     }
+    if !local_exit.settled() {
+        eprintln!("ryeos-structured-session-bridge: local cleanup incomplete: {local_exit:?}");
+    }
+    // Preserve all outstanding owners until this executable's terminal
+    // boundary. In particular, do not unwind an unresolved child's blocking
+    // destructor or release broker/source keepalives on an ordinary return.
+    // The daemon must still prove its complete enclosing lifetime settled.
+    std::process::exit(i32::from(failed));
 }
 
-fn run() -> Result<()> {
+fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
     lillux::disable_process_core_dumps().map_err(anyhow::Error::msg)?;
     let workspace = required_env("RYEOS_WORKSPACE")?;
     let workload_home = required_env("RYEOS_WORKLOAD_HOME")?;
@@ -883,11 +1000,7 @@ fn run() -> Result<()> {
         .nth(1)
         .map(std::path::PathBuf::from)
         .ok_or_else(|| anyhow!("structured-session bridge requires an admitted profile"))?;
-    let profile_bytes = lillux::read_regular_file_bounded_no_follow(&profile_path, 64 * 1024)
-        .context("read structured-session profile through Lillux")?;
-    if profile_bytes.is_empty() || profile_bytes.len() > 64 * 1024 {
-        bail!("structured-session profile is empty or exceeds its bound");
-    }
+    let profile_bytes = read_admitted_profile_bytes(&profile_path)?;
     let profile: StructuredSessionProfile =
         serde_json::from_slice(&profile_bytes).context("decode structured-session profile")?;
     if profile.schema_version
@@ -954,11 +1067,7 @@ fn run() -> Result<()> {
         )?;
     inherited_descriptors.append(&mut environment_descriptors);
     inherited_descriptors.append(&mut workload_handles);
-    let workload_client_broker = if std::env::var_os(
-        ryeos_runtime::workload_client::WORKLOAD_CLIENT_CHANNEL_ENV,
-    )
-    .is_some()
-    {
+    if std::env::var_os(ryeos_runtime::workload_client::WORKLOAD_CLIENT_CHANNEL_ENV).is_some() {
         let workload_client = profile.workload_client.as_ref().ok_or_else(|| {
             anyhow!("workload-client channel was supplied to a profile that did not admit it")
         })?;
@@ -979,7 +1088,8 @@ fn run() -> Result<()> {
             supported
                 .push(ryeos_runtime::workload_client::WorkloadClientIngress::StructuredSession);
         }
-        let broker = workload_client_broker::start(channel, &supported)?;
+        lifecycle.broker = Some(workload_client_broker::start(channel, &supported)?);
+        let broker = lifecycle.broker.as_ref().expect("installed broker owner");
         if let Some(endpoint) = broker.endpoint() {
             let endpoint_env = workload_client
                 .cli_endpoint_env
@@ -992,15 +1102,29 @@ fn run() -> Result<()> {
                 bail!("workload-client endpoint collided with admitted process environment");
             }
         }
-        Some(broker)
-    } else {
-        None
-    };
+    }
     verify_compatibility_baseline_config(
         std::path::Path::new(&workload_home),
         &baseline_config,
         &profile.baseline_destination,
     )?;
+    for config in &profile.auxiliary_configs {
+        verify_compatibility_baseline_config(
+            std::path::Path::new(&workload_home),
+            &profile_path
+                .parent()
+                .ok_or_else(|| anyhow!("structured-session profile has no parent"))?
+                .join(&config.source),
+            &config.destination,
+        )?;
+    }
+    for config in &profile.runtime_configs {
+        let source = profile_path
+            .parent()
+            .ok_or_else(|| anyhow!("structured-session profile has no parent"))?
+            .join(&config.source);
+        verify_runtime_configuration(&source, std::path::Path::new(&config.destination))?;
+    }
     let schemas = load_profile_schemas(
         profile_path
             .parent()
@@ -1024,6 +1148,7 @@ fn run() -> Result<()> {
         }
     }
     let mut app = StructuredWorkload::start(
+        lifecycle,
         executable.to_str().ok_or_else(|| {
             anyhow!("pinned structured-session workload executable path is not UTF-8")
         })?,
@@ -1046,17 +1171,14 @@ fn run() -> Result<()> {
     // Retain the broker owner for the complete workload lifetime. Its worker
     // threads retain the listener and protected channel; this guard documents
     // that their endpoint is scoped to this bridge boot.
-    app.workload_channel = workload_client_broker
-        .as_ref()
-        .map(|broker| broker.channel());
-    let _workload_client_broker = workload_client_broker;
+    app.workload_channel = lifecycle.broker.as_ref().map(|broker| broker.channel());
     if let Err(error) = app.initialize() {
         // Upstream stderr can contain credentials and must stay private.
         // Report only the exact child's OS status, never its output. This is
         // diagnostic context, not daemon-owned cleanup/settlement testimony.
-        return Err(match app.child.try_wait() {
+        return Err(match lifecycle.process()?.try_exit() {
             Ok(Some(status)) => error.context(format!(
-                "structured workload initialization failed; child status: {status}"
+                "structured workload initialization failed; child status: {status:?}"
             )),
             Ok(None) => error
                 .context("structured workload initialization failed; child exit not yet observed"),
@@ -1067,7 +1189,9 @@ fn run() -> Result<()> {
     }
     protect_profile_home(std::path::Path::new(&workload_home))?;
     let mut workload_termination = Some(
-        lillux::CooperativeChildTermination::for_child(&app.child)
+        lifecycle
+            .process()?
+            .cooperative_termination()
             .map_err(anyhow::Error::msg)
             .context("pin structured-session workload termination authority")?,
     );
@@ -1086,10 +1210,11 @@ fn run() -> Result<()> {
         .try_clone()
         .context("clone RyeOS session reader descriptor")?;
     let (session_sender, session_incoming) = sync_channel(128);
-    thread::Builder::new()
-        .name("ryeos-session-control-reader".to_owned())
-        .spawn(move || read_session_frames(reader, session_sender))
-        .context("start bounded RyeOS session reader")?;
+    lillux::task::spawn_host_task("ryeos-session-control-reader", move || {
+        read_session_frames(reader, session_sender)
+    })
+    .context("start bounded RyeOS session reader")?
+    .detach();
     let mut next_observation_sequence = 1u64;
     let mut previous_observation_digest: Option<String> = None;
     let mut pending_observation: Option<PendingObservationBatch> = None;
@@ -1321,28 +1446,27 @@ fn run() -> Result<()> {
                 let request_id = request_id.to_owned();
                 let workload = Arc::clone(&app);
                 let sender = workload_result_sender.clone();
-                let workspace = workspace.clone();
-                thread::Builder::new()
-                    .name("ryeos-structured-session-command".to_owned())
-                    .spawn(move || {
-                        let outcome = workload
-                            .lock()
-                            .map_err(|_| "structured-session workload state is poisoned".to_owned())
-                            .and_then(|mut workload| {
-                                workload.command_progress = Some(request_id.clone());
-                                let result = if control {
-                                    workload.handle_control(body)
-                                } else {
-                                    workload.handle(body, &workspace)
-                                };
-                                workload.command_progress = None;
-                                result
-                                    .map(WorkloadCommandOutput::Final)
-                                    .map_err(|error| error.to_string())
-                            });
-                        let _ = sender.send((request_id, outcome));
-                    })
-                    .context("spawn structured-session command worker")?;
+                lillux::task::spawn_host_task("ryeos-structured-session-command", move || {
+                    let outcome = workload
+                        .lock()
+                        .map_err(|_| "structured-session workload state is poisoned".to_owned())
+                        .and_then(|mut workload| {
+                            workload.command_progress = Some(request_id.clone());
+                            let result = if control {
+                                workload.handle_control(body)
+                            } else {
+                                let route_workspace = workload.route_workspace.clone();
+                                workload.handle(body, &route_workspace)
+                            };
+                            workload.command_progress = None;
+                            result
+                                .map(WorkloadCommandOutput::Final)
+                                .map_err(|error| error.to_string())
+                        });
+                    let _ = sender.send((request_id, outcome));
+                })
+                .context("spawn structured-session command worker")?
+                .detach();
             }
             FrameKind::Cancel => {
                 let request_id = frame
@@ -1417,6 +1541,20 @@ fn run() -> Result<()> {
     }
 }
 
+fn read_admitted_profile_bytes(path: &std::path::Path) -> Result<Vec<u8>> {
+    let profile_bytes = lillux::read_regular_file_bounded_no_follow(
+        path,
+        u64::try_from(ryeos_state::objects::MAX_STRUCTURED_SESSION_PROFILE_BYTES)?,
+    )
+    .context("read structured-session profile through Lillux")?;
+    if profile_bytes.is_empty()
+        || profile_bytes.len() > ryeos_state::objects::MAX_STRUCTURED_SESSION_PROFILE_BYTES
+    {
+        bail!("structured-session profile is empty or exceeds its bound");
+    }
+    Ok(profile_bytes)
+}
+
 /// Verify the seed prepared by the daemon's persistent-session launch owner.
 /// Do not repair or replace it here: the enforced backend has already mounted
 /// the exact admitted source read-only at this name, so even a same-content
@@ -1429,9 +1567,10 @@ fn verify_compatibility_baseline_config(
     source: &std::path::Path,
     destination_name: &str,
 ) -> Result<()> {
-    let admitted = lillux::read_regular_file_bounded_no_follow(source, 64 * 1024)
+    let byte_limit = ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES;
+    let admitted = lillux::read_regular_file_bounded_no_follow(source, byte_limit as u64)
         .context("read admitted structured-session baseline config through Lillux")?;
-    if admitted.is_empty() || admitted.len() > 64 * 1024 {
+    if admitted.is_empty() || admitted.len() > byte_limit {
         bail!("admitted structured-session baseline config is empty or exceeds its bound");
     }
     let home = lillux::PinnedDirectory::open(workload_home)?
@@ -1441,9 +1580,25 @@ fn verify_compatibility_baseline_config(
         .open_pinned_regular(destination_name, false)
         .context("open daemon-prepared compatibility seed through Lillux")?
         .ok_or_else(|| anyhow!("daemon-prepared compatibility seed is missing"))?;
-    if incumbent.read_bounded(64 * 1024)? != admitted {
+    if incumbent.read_bounded(byte_limit as u64)? != admitted {
         bail!("daemon-prepared compatibility seed differs from the admitted baseline");
     }
+    Ok(())
+}
+
+fn verify_runtime_configuration(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<()> {
+    let limit = ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES;
+    let admitted = lillux::read_regular_file_bounded_no_follow(source, limit as u64)?;
+    let mounted = lillux::open_pinned_regular_file_no_follow(destination)?;
+    if admitted.is_empty() || mounted.read_bounded(limit as u64)? != admitted {
+        bail!("mounted runtime configuration differs from admitted source");
+    }
+    // Byte equality alone cannot prove that a provider will subsequently open
+    // the same configuration: every ancestor must also be non-replaceable.
+    mounted.verified_read_only_namespace_path()?;
     Ok(())
 }
 
@@ -1932,6 +2087,7 @@ fn protect_profile_home(root: &std::path::Path) -> Result<()> {
 
 impl StructuredWorkload {
     fn start(
+        lifecycle: &mut BridgeLifecycle,
         executable: &str,
         workspace: &str,
         workload_home: &str,
@@ -1947,25 +2103,24 @@ impl StructuredWorkload {
         session_process_environment: &BTreeMap<String, String>,
         inherited_descriptors: Vec<lillux::InheritedDescriptorAuthority>,
     ) -> Result<Self> {
-        let mut command = Command::new(executable);
-        lillux::configure_command_argv0(&mut command, workload_argv0)
-            .map_err(anyhow::Error::msg)?;
-        // Adopting the session control channel can consume fd 0. Lillux must
-        // preserve the newly configured pipes through the child exec; plain
-        // Stdio::piped plus a pre-exec hook can otherwise close stdin again.
-        lillux::configure_command_piped_stdio(&mut command);
-        command
-            .args(&profile.workload_args)
-            .current_dir(workspace)
-            .env_clear()
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
-            .env(&profile.workload_home_env, workload_home)
-            .env("HOME", workload_home);
+        // The trusted app-server still starts in the controller's pinned B
+        // workspace. Its signed route cwd must instead name the guest view
+        // when the admitted session executes tools in an external candidate.
+        let route_workspace = profile
+            .external_candidate
+            .as_ref()
+            .map(|requirement| requirement.runtime_recipe.cwd.clone())
+            .unwrap_or_else(|| workspace.to_owned());
+        let mut process_environment = BTreeMap::from([
+            ("LANG".to_owned(), "C".to_owned()),
+            ("LC_ALL".to_owned(), "C".to_owned()),
+            (profile.workload_home_env.clone(), workload_home.to_owned()),
+            ("HOME".to_owned(), workload_home.to_owned()),
+        ]);
         if let Some(path) = executable_path {
-            command.env("PATH", path);
+            process_environment.insert("PATH".to_owned(), path.to_owned());
         }
-        command.envs(session_process_environment);
+        process_environment.extend(session_process_environment.clone());
         let http_boot = match (&profile.transport, &profile.http_sse) {
             (ProfileTransport::HttpSse, Some(credentials)) => {
                 let username = hex_encode(&lillux::crypto::generate_random_bytes::<16>());
@@ -1986,7 +2141,7 @@ impl StructuredWorkload {
                     if session_process_environment.contains_key(name) {
                         bail!("admitted session inputs collide with the workload XDG home");
                     }
-                    command.env(name, value);
+                    process_environment.insert(name.to_owned(), value);
                 }
                 if let Some(seed_env) = &credentials.seed_path_env {
                     generated.push((
@@ -1998,7 +2153,7 @@ impl StructuredWorkload {
                     if session_process_environment.contains_key(name) {
                         bail!("HTTP credential environment collides with admitted session inputs");
                     }
-                    command.env(name, value);
+                    process_environment.insert(name.clone(), value.clone());
                 }
                 let authorization =
                     base64_standard(format!("{}:{}", generated[0].1, generated[1].1));
@@ -2007,34 +2162,61 @@ impl StructuredWorkload {
             (ProfileTransport::StdioJsonRpc, None) => None,
             _ => bail!("structured-session transport contradicts its credential block"),
         };
-        lillux::configure_owner_private_creation_mask(&mut command);
-        lillux::configure_inherited_descriptor_authorities(&mut command, &inherited_descriptors)
-            .map_err(anyhow::Error::msg)?;
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("start pinned structured-session workload `{executable}`"))?;
-        let output = child
-            .stdout
-            .take()
+        if lifecycle.process.is_some() || lifecycle.diagnostics.is_some() {
+            bail!("structured workload lifecycle already owns a child or reader");
+        }
+        lifecycle.executable_authorities = inherited_descriptors.clone();
+        lifecycle.process = Some(
+            lillux::SubordinateProcess::spawn(lillux::SubordinateProcessRequest {
+                cmd: executable.to_owned(),
+                argv0: Some(workload_argv0.to_owned()),
+                args: profile.workload_args.clone(),
+                cwd: workspace.to_owned(),
+                envs: process_environment.into_iter().collect(),
+                limits: None,
+                inherited_fds: inherited_descriptors,
+            })
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("start pinned structured-session workload `{executable}`"))?,
+        );
+        let process = lifecycle.process.as_mut().expect("installed child owner");
+        let output = process
+            .take_output()
+            .map_err(anyhow::Error::msg)
             .context("capture structured workload stdout")?;
-        let stderr = child
-            .stderr
-            .take()
+        let stderr = process
+            .take_error()
+            .map_err(anyhow::Error::msg)
             .context("capture structured workload stderr")?;
+        // Drain before any readiness exchange: the provider may emit more
+        // than pipe capacity before announcing its HTTP listener or replying
+        // to the first stdio request. Starting this after readiness deadlocks
+        // that valid startup. Keep ownership across all later startup errors.
+        lifecycle.diagnostics = Some(
+            stderr
+                .start_discarding()
+                .context("start structured-session private stderr drain")?,
+        );
         let (sender, incoming) = sync_channel(1024);
+        let mut workload_reader = None;
         let io = match http_boot {
             None => {
-                let input = child
-                    .stdin
-                    .take()
+                let input = process
+                    .take_input()
+                    .map_err(anyhow::Error::msg)
                     .context("capture structured workload stdin")?;
-                thread::Builder::new()
-                    .name("ryeos-structured-session-workload-reader".to_owned())
-                    .spawn({
+                workload_reader = Some(
+                    lillux::task::spawn_host_task("ryeos-structured-session-workload-reader", {
                         let sender = sender.clone();
-                        move || read_app_server(output, sender)
+                        move || match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            read_app_server(output, sender)
+                        })) {
+                            Ok(exit) => exit,
+                            Err(_) => WorkloadReaderExit::Panicked,
+                        }
                     })
-                    .context("start bounded structured workload reader")?;
+                    .context("start bounded structured workload reader")?,
+                );
                 WorkloadIo::Stdio(input)
             }
             Some(authorization) => {
@@ -2088,31 +2270,32 @@ impl StructuredWorkload {
                 let sse_path = http_contract.event_path.clone();
                 let event_type_pointer = http_contract.event_type_pointer.clone();
                 let event_properties_pointer = http_contract.event_properties_pointer.clone();
-                thread::Builder::new()
-                    .name("ryeos-structured-session-event-reader".to_owned())
-                    .spawn(move || {
-                        read_http_events(
-                            sse_client,
-                            sse_base,
-                            sse_authorization,
-                            sse_path,
-                            event_type_pointer,
-                            event_properties_pointer,
-                            asks,
-                            sse_sender,
-                        )
-                    })
-                    .context("start structured workload event reader")?;
+                lillux::task::spawn_host_task("ryeos-structured-session-event-reader", move || {
+                    read_http_events(
+                        sse_client,
+                        sse_base,
+                        sse_authorization,
+                        sse_path,
+                        event_type_pointer,
+                        event_properties_pointer,
+                        asks,
+                        sse_sender,
+                    )
+                })
+                .context("start structured workload event reader")?
+                .detach();
                 let (request_sender, request_receiver) =
                     sync_channel::<HttpRequest>(HTTP_REQUEST_QUEUE_CAPACITY);
                 let request_receiver = Arc::new(Mutex::new(request_receiver));
                 for worker_index in 0..HTTP_REQUEST_WORKERS {
                     let requests = Arc::clone(&request_receiver);
                     let responses = sender.clone();
-                    thread::Builder::new()
-                        .name(format!("ryeos-structured-session-http-{worker_index}"))
-                        .spawn(move || http_request_worker(requests, responses))
-                        .context("start bounded structured workload HTTP executor")?;
+                    lillux::task::spawn_host_task(
+                        &format!("ryeos-structured-session-http-{worker_index}"),
+                        move || http_request_worker(requests, responses),
+                    )
+                    .context("start bounded structured workload HTTP executor")?
+                    .detach();
                 }
                 WorkloadIo::Http(HttpWorkload {
                     base_url,
@@ -2124,14 +2307,10 @@ impl StructuredWorkload {
                 })
             }
         };
-        thread::Builder::new()
-            .name("ryeos-structured-session-stderr-drain".to_owned())
-            .spawn(move || drain_private_stderr(stderr))
-            .context("start bounded structured-session stderr drain")?;
         Ok(Self {
-            child,
             io,
             incoming,
+            workload_reader,
             responses: HashMap::new(),
             server_requests: HashMap::new(),
             workload_channel: None,
@@ -2146,7 +2325,7 @@ impl StructuredWorkload {
             early_command_observations: Vec::new(),
             next_id: 1,
             fatal: None,
-            workspace: workspace.to_owned(),
+            route_workspace,
             workload_home: workload_home.to_owned(),
             ceremony_active: false,
             bound_session_id: None,
@@ -2168,8 +2347,11 @@ impl StructuredWorkload {
                 );
             }
             if let Some(notification) = step.notification {
-                self.send(&json!({"method":notification,"params":step.params}))
-                    .context("send admitted initialization notification")?;
+                self.send(
+                    &json!({"method":notification,"params":step.params}),
+                    MonotonicDeadline::after(Duration::from_secs(30)),
+                )
+                .context("send admitted initialization notification")?;
                 continue;
             }
             let result = self
@@ -2242,7 +2424,7 @@ impl StructuredWorkload {
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow!("runtime route control has no route id"))?;
                 let payload = control.get("payload").cloned().unwrap_or_else(|| json!({}));
-                let workspace = self.workspace.clone();
+                let workspace = self.route_workspace.clone();
                 self.handle_route(route_id, payload, &workspace, RouteAudience::Runtime)
             }
             Some("runtime_recover") => {
@@ -2323,7 +2505,7 @@ impl StructuredWorkload {
             .to_owned();
         let mut resume_payload = Map::new();
         resume_payload.insert(request_field, Value::String(upstream_session_id.to_owned()));
-        let workspace = self.workspace.clone();
+        let workspace = self.route_workspace.clone();
         let resume_result = self.handle_route(
             &recovery.resume_route,
             Value::Object(resume_payload),
@@ -2614,12 +2796,12 @@ impl StructuredWorkload {
             .next_id
             .checked_add(1)
             .ok_or_else(|| anyhow!("structured workload request id overflow"))?;
-        self.send(&json!({"id":id,"method":method,"params":params}))?;
+        let deadline = MonotonicDeadline::after(timeout);
+        self.send(&json!({"id":id,"method":method,"params":params}), deadline)?;
         let key = id.to_string();
         if !self.outstanding.insert(key.clone()) {
             bail!("structured-session request id was reused");
         }
-        let deadline = MonotonicDeadline::after(timeout);
         loop {
             self.service_pending_controls()?;
             self.expire_server_requests()?;
@@ -2658,19 +2840,19 @@ impl StructuredWorkload {
         }
     }
 
-    fn send(&mut self, message: &Value) -> Result<()> {
+    fn send(&mut self, message: &Value, deadline: MonotonicDeadline) -> Result<()> {
         if matches!(self.io, WorkloadIo::Http(_)) {
             return self.send_http(message);
         }
         let WorkloadIo::Stdio(input) = &mut self.io else {
             bail!("structured-session transport is not current");
         };
-        serde_json::to_writer(&mut *input, message)
-            .context("encode structured workload message")?;
+        let mut frame =
+            serde_json::to_vec(message).context("encode structured workload message")?;
+        frame.push(b'\n');
         input
-            .write_all(b"\n")
-            .context("frame structured workload message")?;
-        input.flush().context("flush structured workload message")
+            .write_all_until(&frame, deadline)
+            .context("write structured workload message within its deadline")
     }
 
     /// Dispatch one admitted message over the HTTP transport. Requests run
@@ -2771,7 +2953,10 @@ impl StructuredWorkload {
         response: &Value,
     ) -> Result<()> {
         if matches!(self.io, WorkloadIo::Stdio(_)) {
-            return self.send(&json!({"id":request_id,"result":response}));
+            return self.send(
+                &json!({"id":request_id,"result":response}),
+                MonotonicDeadline::after(SERVER_REQUEST_REPLY_TIMEOUT),
+            );
         }
         let WorkloadIo::Http(http) = &mut self.io else {
             bail!("structured-session transport is not current");
@@ -2819,7 +3004,7 @@ impl StructuredWorkload {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(()),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                bail!("structured workload reader disconnected")
+                bail!("{}", self.workload_reader_disconnected()?)
             }
         }
     }
@@ -2834,9 +3019,21 @@ impl StructuredWorkload {
                     bail!("structured workload reader failed: {reason}")
                 }
                 Err(TryRecvError::Empty) => return Ok(()),
-                Err(TryRecvError::Disconnected) => bail!("structured workload reader disconnected"),
+                Err(TryRecvError::Disconnected) => {
+                    bail!("{}", self.workload_reader_disconnected()?)
+                }
             }
         }
+    }
+
+    fn workload_reader_disconnected(&mut self) -> Result<String> {
+        let exit = self
+            .workload_reader
+            .take()
+            .map(|reader| reader.join())
+            .transpose()
+            .map_err(|_| anyhow!("structured workload reader task panicked"))?;
+        Ok(format!("structured workload reader disconnected: {exit:?}"))
     }
 
     fn route(&mut self, message: Value) -> Result<()> {
@@ -3221,7 +3418,10 @@ impl StructuredWorkload {
     ) -> Result<()> {
         let result = render_workload_invocation_result(template, outcome)?;
         self.validate_schema(schema, &result)?;
-        self.send(&json!({"id":rpc_id,"result":result}))
+        self.send(
+            &json!({"id":rpc_id,"result":result}),
+            MonotonicDeadline::after(SERVER_REQUEST_REPLY_TIMEOUT),
+        )
     }
 
     fn push_event(&mut self, event: Value) -> Result<()> {
@@ -3519,14 +3719,10 @@ fn validate_template_value(value: &Value, max_string_bytes: usize) -> Result<()>
     visit(value, 0, &mut 0, max_string_bytes)
 }
 
-impl Drop for StructuredWorkload {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn read_app_server(output: impl Read, sender: SyncSender<Result<Value, String>>) {
+fn read_app_server(
+    output: impl Read,
+    sender: SyncSender<Result<Value, String>>,
+) -> WorkloadReaderExit {
     let mut reader = BufReader::new(output);
     loop {
         let mut line = Vec::new();
@@ -3536,11 +3732,11 @@ fn read_app_server(output: impl Read, sender: SyncSender<Result<Value, String>>)
         {
             Ok(0) => {
                 let _ = sender.send(Err("structured workload stdout closed".to_owned()));
-                return;
+                return WorkloadReaderExit::OutputClosed;
             }
             Ok(_) if line.len() > MAX_APP_SERVER_LINE_BYTES => {
                 let _ = sender.send(Err("structured workload line exceeds bound".to_owned()));
-                return;
+                return WorkloadReaderExit::OutputLimitExceeded;
             }
             Ok(_) => {
                 while matches!(line.last(), Some(b'\n' | b'\r')) {
@@ -3549,27 +3745,13 @@ fn read_app_server(output: impl Read, sender: SyncSender<Result<Value, String>>)
                 let message = serde_json::from_slice(&line)
                     .map_err(|error| format!("invalid structured workload JSON: {error}"));
                 if sender.send(message).is_err() {
-                    return;
+                    return WorkloadReaderExit::ReceiverClosed;
                 }
             }
             Err(error) => {
                 let _ = sender.send(Err(format!("read structured workload stdout: {error}")));
-                return;
+                return WorkloadReaderExit::OutputReadFailed;
             }
-        }
-    }
-}
-
-fn drain_private_stderr(stderr: impl Read) {
-    // Diagnostics are intentionally not forwarded: upstream stderr may
-    // contain device material, host paths, prompts, or credentials. Draining
-    // prevents child blockage while retaining no second secret-bearing log.
-    let mut reader = BufReader::new(stderr);
-    let mut buffer = [0u8; 8192];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
         }
     }
 }
@@ -3587,57 +3769,55 @@ fn wait_for_loopback_listening<R: Read + Send + 'static>(
 ) -> Result<String> {
     let prefix = prefix.to_owned();
     let (announced, receiver) = sync_channel(1);
-    thread::Builder::new()
-        .name("ryeos-structured-session-http-stdout".to_owned())
-        .spawn(move || {
-            let mut reader = BufReader::new(output);
-            let mut line = Vec::new();
-            loop {
-                line.clear();
-                let read = (&mut reader)
-                    .take((MAX_APP_SERVER_LINE_BYTES + 1) as u64)
-                    .read_until(b'\n', &mut line);
-                let announcement = match read {
-                    Ok(0) => Err(
-                        "structured workload stdout closed before announcing its listener"
-                            .to_owned(),
-                    ),
-                    Ok(_) if line.len() > MAX_APP_SERVER_LINE_BYTES => {
-                        Err("structured workload listening line exceeds its bound".to_owned())
-                    }
-                    Ok(_) => {
-                        let text = String::from_utf8_lossy(&line);
-                        let port = text.find(&prefix).and_then(|start| {
-                            let port = text[start + prefix.len()..]
-                                .trim_end()
-                                .trim_end_matches(['\r', '\n'])
-                                .trim();
-                            (port.len() <= 5
-                                && !port.is_empty()
-                                && port.bytes().all(|byte| byte.is_ascii_digit()))
-                            .then(|| format!("http://127.0.0.1:{port}"))
-                        });
-                        let Some(endpoint) = port else {
-                            continue;
-                        };
-                        Ok(endpoint)
-                    }
-                    Err(error) => Err(format!(
-                        "read structured workload listener announcement: {error}"
-                    )),
-                };
-                let ready = announcement.is_ok();
-                if announced.send(announcement).is_err() {
-                    return;
+    lillux::task::spawn_host_task("ryeos-structured-session-http-stdout", move || {
+        let mut reader = BufReader::new(output);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let read = (&mut reader)
+                .take((MAX_APP_SERVER_LINE_BYTES + 1) as u64)
+                .read_until(b'\n', &mut line);
+            let announcement = match read {
+                Ok(0) => Err(
+                    "structured workload stdout closed before announcing its listener".to_owned(),
+                ),
+                Ok(_) if line.len() > MAX_APP_SERVER_LINE_BYTES => {
+                    Err("structured workload listening line exceeds its bound".to_owned())
                 }
-                if ready {
-                    drain_discard(reader);
-                    return;
+                Ok(_) => {
+                    let text = String::from_utf8_lossy(&line);
+                    let port = text.find(&prefix).and_then(|start| {
+                        let port = text[start + prefix.len()..]
+                            .trim_end()
+                            .trim_end_matches(['\r', '\n'])
+                            .trim();
+                        (port.len() <= 5
+                            && !port.is_empty()
+                            && port.bytes().all(|byte| byte.is_ascii_digit()))
+                        .then(|| format!("http://127.0.0.1:{port}"))
+                    });
+                    let Some(endpoint) = port else {
+                        continue;
+                    };
+                    Ok(endpoint)
                 }
+                Err(error) => Err(format!(
+                    "read structured workload listener announcement: {error}"
+                )),
+            };
+            let ready = announcement.is_ok();
+            if announced.send(announcement).is_err() {
                 return;
             }
-        })
-        .context("start bounded structured workload listener reader")?;
+            if ready {
+                drain_discard(reader);
+                return;
+            }
+            return;
+        }
+    })
+    .context("start bounded structured workload listener reader")?
+    .detach();
     receiver
         .recv_timeout(deadline.remaining())
         .map_err(|error| {
@@ -4275,6 +4455,21 @@ mod tests {
     use std::os::unix::process::CommandExt as _;
 
     #[test]
+    fn admitted_profile_file_accepts_new_bound_and_refuses_oversize() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("admitted-profile.json");
+        let bytes = vec![b' '; 96 * 1024];
+        std::fs::write(&profile, &bytes).unwrap();
+        assert_eq!(read_admitted_profile_bytes(&profile).unwrap(), bytes);
+        std::fs::write(
+            &profile,
+            vec![b' '; ryeos_state::objects::MAX_STRUCTURED_SESSION_PROFILE_BYTES + 1],
+        )
+        .unwrap();
+        assert!(read_admitted_profile_bytes(&profile).is_err());
+    }
+
+    #[test]
     fn invocation_identity_and_progress_ack_are_exact() {
         let required = BTreeMap::from([
             ("/message/params/tool".to_owned(), json!("execute")),
@@ -4381,6 +4576,39 @@ mod tests {
     }
 
     #[test]
+    fn signed_environment_selection_is_injected_and_cannot_be_overridden() {
+        let selection = json!([{
+            "environmentId": "ryeos-external-candidate",
+            "cwd": "/workspace",
+            "runtimeWorkspaceRoots": ["/workspace"]
+        }]);
+        let rule: RouteRule = serde_json::from_value(json!({
+            "id":"session.start",
+            "method":"thread/start",
+            "effect_class":"session_mutation",
+            "request_schema":"request.json",
+            "response_schema":"response.json",
+            "fixed_params":{"environments":selection},
+            "workspace_fields":["cwd"],
+            "forbidden_non_null_fields":[],
+            "forbidden_fields":[],
+            "response_predicates":[],
+            "observations":[],
+            "result_retention":"ephemeral",
+            "ceremony":null
+        }))
+        .unwrap();
+        let mut admitted = json!({});
+        apply_route_parameters(&rule, &mut admitted, "/workspace").unwrap();
+        assert_eq!(admitted["environments"], selection);
+        assert_eq!(admitted["cwd"], "/workspace");
+        for caller_value in [Value::Null, json!([]), json!([{"environmentId":"local"}])] {
+            let mut overridden = json!({"environments":caller_value});
+            assert!(apply_route_parameters(&rule, &mut overridden, "/workspace").is_err());
+        }
+    }
+
+    #[test]
     fn observation_batches_respect_the_exact_serialized_byte_ceiling() {
         let mut queue = EventQueue::default();
         for index in 0..8 {
@@ -4403,6 +4631,39 @@ mod tests {
         assert_eq!(queue.events.len(), 8 - usize::try_from(count).unwrap());
     }
 
+    #[test]
+    fn external_candidate_profile_accepts_the_current_closed_requirement() {
+        let mut profile = gating_approval_profile();
+        profile.external_candidate = Some(
+            ryeos_state::external_execution::admission::ExternalCandidateRequirement {
+                schema: 6,
+                required_lifecycle_capabilities: Default::default(),
+                protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
+                connector_protocol:
+                    ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
+                provider_declaration_id: "codex-hosted".into(),
+                provider_configuration_destination: "environments.toml".into(),
+                runtime_product_declaration_id: "candidate_runtime".into(),
+                runtime_recipe: ryeos_state::external_execution::admission::ExternalCandidateRuntimeRecipe {
+                    schema: 2,
+                    runtime_mount_destination: "/runtime".into(),
+                    executable_relative_path: "bin/codex".into(),
+                    argv0: "codex".into(),
+                    arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+                    cwd: "/workspace".into(),
+                    environment: std::collections::BTreeMap::new(),
+                    max_stdout_bytes: 1024 * 1024,
+                    max_stderr_bytes: 1024 * 1024,
+                    proc_filesystem: ryeos_state::external_execution::admission::ExternalCandidateProcFilesystem::PidNamespaceNested,
+                    contain_process_group: false,
+                    nested_sandbox: true,
+                },
+            },
+        );
+        validate_structured_session_profile(&profile).unwrap();
+    }
+
     fn gating_approval_profile() -> StructuredSessionProfile {
         serde_json::from_value(json!({
             "schema_version":ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
@@ -4420,6 +4681,9 @@ mod tests {
             "workload_client":null,
             "baseline_config":"baseline.conf",
             "baseline_destination":"config.toml",
+            "auxiliary_configs":[],
+            "runtime_configs":[],
+            "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
             "initialization":[],
@@ -4513,7 +4777,8 @@ mod tests {
         }
         let (_, controls) = sync_channel(1);
         let (results, progress_results) = sync_channel(1);
-        let mut workload = StructuredWorkload::start("/bin/sh", root.path().to_str().unwrap(), root.path().to_str().unwrap(),
+        let mut lifecycle = BridgeLifecycle::default();
+        let mut workload = StructuredWorkload::start(&mut lifecycle, "/bin/sh", root.path().to_str().unwrap(), root.path().to_str().unwrap(),
             profile, "session".to_owned(), HashSet::from([RouteEffectClass::SessionMutation]),
             HashMap::from([("invoke.json".to_owned(),json!({"type":"object"})),
                 ("invoked.json".to_owned(),json!({"type":"object","required":["success"],"properties":{"success":{"type":"boolean"}}}))]),
@@ -4537,7 +4802,10 @@ mod tests {
             let key = canonical_id(&json!(1)).unwrap();
             workload.outstanding.insert(key.clone());
             workload
-                .send(&json!({"id":1,"method":"operation/run","params":{}}))
+                .send(
+                    &json!({"id":1,"method":"operation/run","params":{}}),
+                    MonotonicDeadline::after(Duration::from_secs(5)),
+                )
                 .unwrap();
             workload.receive_one(Duration::from_secs(1)).unwrap();
             let (request_id, progress) = progress_results
@@ -4575,7 +4843,11 @@ mod tests {
         };
         assert_eq!(reply["result"]["ok"], true);
         assert!(workload.workload_invocations.is_empty());
-        workload.child.wait().unwrap();
+        assert!(
+            lifecycle
+                .shutdown_until(MonotonicDeadline::after(BRIDGE_EXIT_GRACE))
+                .settled()
+        );
     }
 
     #[test]
@@ -4686,7 +4958,7 @@ mod tests {
         let (control_sender, controls) = sync_channel(1);
         let (result_sender, results) = sync_channel(1);
         let observed_events = Arc::clone(&events);
-        let controller = thread::spawn(move || {
+        let controller = std::thread::spawn(move || {
             let deadline = MonotonicDeadline::after(Duration::from_secs(2));
             loop {
                 if observed_events
@@ -4718,7 +4990,9 @@ mod tests {
                 lillux::time::sleep(Duration::from_millis(1));
             }
         });
+        let mut lifecycle = BridgeLifecycle::default();
         let mut workload = StructuredWorkload::start(
+            &mut lifecycle,
             "/bin/sh",
             root.path().to_str().unwrap(),
             workload_home.to_str().unwrap(),
@@ -4818,6 +5092,12 @@ mod tests {
 import base64, json, os, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# Exercise startup backpressure before publishing the listener. This must not
+# wait for HTTP readiness to begin draining, and no diagnostic bytes are public.
+import sys
+sys.stderr.buffer.write(b"private-startup-diagnostic\n" * 100000)
+sys.stderr.buffer.flush()
+
 expected = "Basic " + base64.b64encode(
     ("%s:%s" % (os.environ["FX_HTTP_USER"], os.environ["FX_HTTP_PASSWORD"])).encode()
 ).decode()
@@ -4877,16 +5157,17 @@ server.serve_forever()
 "#;
 
     fn http_sse_profile() -> StructuredSessionProfile {
-        serde_json::from_value(json!({
-            "schema_version":ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
-            "transport":"http_sse",
-            "http_sse":{
-                "username_env":"FX_HTTP_USER","password_env":"FX_HTTP_PASSWORD",
-                "listener_stdout_prefix":"listening on http://127.0.0.1:",
-                "readiness_path":"/health","readiness_schema":"health.json",
+        let http_sse = json!({
+            "username_env":"FX_HTTP_USER","password_env":"FX_HTTP_PASSWORD",
+            "listener_stdout_prefix":"listening on http://127.0.0.1:",
+            "readiness_path":"/health","readiness_schema":"health.json",
             "event_path":"/event","event_type_pointer":"/type","event_properties_pointer":"/properties",
             "ignored_notification_projection":"properties"
-            },
+        });
+        let mut profile = json!({
+            "schema_version":ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
+            "transport":"http_sse",
+            "http_sse":http_sse,
             "configuration_authority":"immutable_argv",
             "workload_realization_id":"fixture-http",
             "workload_executable":"python3",
@@ -4896,73 +5177,176 @@ server.serve_forever()
             "workload_client":null,
             "baseline_config":"baseline.conf",
             "baseline_destination":"fixture.conf",
+            "auxiliary_configs":[],
+            "runtime_configs":[],
+            "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
             "initialization":[],
             "recovery":null,
             "route_sets":{"session":["session.read","session.start"]},
-            "routes":[{
-                "id":"session.start",
-                "method":"session.start",
-                "effect_class":"session_mutation",
-                "http_method":"POST",
-                "http_path":"/session",
-                "http_body_schema":"empty.json",
-                "http_path_parameters":{},
-                "request_schema":"empty.json",
-                "response_schema":"start.json",
-                "fixed_params":{},
-                "workspace_fields":[],
-                "forbidden_non_null_fields":[],
-                "response_predicates":[],
-                "observations":[],
-                "result_retention":"ephemeral",
-                "ceremony":null,
-                "session_binding":{
-                    "action":"bind_new",
-                    "request_field":null,
-                    "response_pointer":"/result/session_id"
-                }
-            },{
-                "id":"session.read",
-                "method":"session.read",
-                "audience":"runtime",
-                "effect_class":"pure_read",
-                "http_method":"GET",
-                "http_path":"/session/{session_id}",
-                "http_body_schema":"empty.json",
-                "http_path_parameters":{"session_id":{"source":"bound_session"}},
-                "request_schema":"empty.json",
-                "response_schema":"read.json",
-                "fixed_params":{},
-                "workspace_fields":[],
-                "forbidden_non_null_fields":[],
-                "response_predicates":[],
-                "observations":[],
-                "result_retention":"ephemeral",
-                "ceremony":null,
-                "session_binding":{
-                    "action":"require",
-                    "request_field":"session_id",
-                    "response_pointer":null
-                }
-            }],
-            "notifications":[{
-                "method":"session.created",
-                "schema":"event.json",
-                "upstream_session_pointer":null,
-                "event_type":"session.created",
-                "durable":true,
-                "payload":{"op":"object","fields":{
-                    "session_id":{"op":"pointer","pointer":"/message/params/sessionID"}
-                }},
-                "observations":[],
-                "ceremony_clear":false
-            }],
             "ignored_notifications":{},
             "server_requests":[]
-        }))
-        .unwrap()
+        });
+        profile["routes"] = json!([{
+            "id":"session.start",
+            "method":"session.start",
+            "effect_class":"session_mutation",
+            "http_method":"POST",
+            "http_path":"/session",
+            "http_body_schema":"empty.json",
+            "http_path_parameters":{},
+            "request_schema":"empty.json",
+            "response_schema":"start.json",
+            "fixed_params":{},
+            "workspace_fields":[],
+            "forbidden_non_null_fields":[],
+            "response_predicates":[],
+            "observations":[],
+            "result_retention":"ephemeral",
+            "ceremony":null,
+            "session_binding":{
+                "action":"bind_new",
+                "request_field":null,
+                "response_pointer":"/result/session_id"
+            }
+        },{
+            "id":"session.read",
+            "method":"session.read",
+            "audience":"runtime",
+            "effect_class":"pure_read",
+            "http_method":"GET",
+            "http_path":"/session/{session_id}",
+            "http_body_schema":"empty.json",
+            "http_path_parameters":{"session_id":{"source":"bound_session"}},
+            "request_schema":"empty.json",
+            "response_schema":"read.json",
+            "fixed_params":{},
+            "workspace_fields":[],
+            "forbidden_non_null_fields":[],
+            "response_predicates":[],
+            "observations":[],
+            "result_retention":"ephemeral",
+            "ceremony":null,
+            "session_binding":{
+                "action":"require",
+                "request_field":"session_id",
+                "response_pointer":null
+            }
+        }]);
+        profile["notifications"] = json!([{
+            "method":"session.created",
+            "schema":"event.json",
+            "upstream_session_pointer":null,
+            "event_type":"session.created",
+            "durable":true,
+            "payload":{"op":"object","fields":{
+                "session_id":{"op":"pointer","pointer":"/message/params/sessionID"}
+            }},
+            "observations":[],
+            "ceremony_clear":false
+        }]);
+        serde_json::from_value(profile).unwrap()
+    }
+
+    #[test]
+    fn startup_failure_retains_child_and_diagnostic_owners() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = http_sse_profile();
+        profile.workload_args = vec![
+            "-c".to_owned(),
+            "import sys; sys.stderr.buffer.write(b'private' * 400000); sys.stderr.buffer.flush()"
+                .to_owned(),
+        ];
+        let (_, controls) = sync_channel(1);
+        let (results, _) = sync_channel(1);
+        let mut lifecycle = BridgeLifecycle::default();
+        let result = StructuredWorkload::start(
+            &mut lifecycle,
+            "/usr/bin/python3",
+            root.path().to_str().unwrap(),
+            root.path().to_str().unwrap(),
+            profile,
+            "session".to_owned(),
+            HashSet::new(),
+            HashMap::new(),
+            Arc::new(Mutex::new(EventQueue::default())),
+            controls,
+            results,
+            "python3",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+        );
+        assert!(result.is_err(), "missing HTTP listener must fail startup");
+        assert!(lifecycle.process.is_some());
+        assert!(lifecycle.diagnostics.is_some());
+        let observed = lifecycle.shutdown_until(MonotonicDeadline::after(BRIDGE_EXIT_GRACE));
+        assert!(observed.settled(), "{observed:?}");
+    }
+
+    #[test]
+    fn exit_observation_does_not_lock_protocol_state_or_escalate() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = gating_approval_profile();
+        profile.workload_args = vec![
+            "-c".to_owned(),
+            "trap '' TERM; printf '%s\\n' '{\"ready\":true}'; IFS= read -r value".to_owned(),
+        ];
+        let (_, controls) = sync_channel(1);
+        let (results, _) = sync_channel(1);
+        let mut lifecycle = BridgeLifecycle::default();
+        let workload = StructuredWorkload::start(
+            &mut lifecycle,
+            "/bin/sh",
+            root.path().to_str().unwrap(),
+            root.path().to_str().unwrap(),
+            profile,
+            "session".to_owned(),
+            HashSet::new(),
+            HashMap::new(),
+            Arc::new(Mutex::new(EventQueue::default())),
+            controls,
+            results,
+            "/bin/sh",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            workload
+                .incoming
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            json!({"ready":true})
+        );
+        let app = Arc::new(Mutex::new(workload));
+        let _held_protocol_lock = app.lock().unwrap();
+        let timer = lillux::time::MonotonicTimer::start();
+        let observed =
+            lifecycle.shutdown_until(MonotonicDeadline::after(Duration::from_millis(30)));
+        assert!(!observed.settled());
+        assert!(!observed.child_reaped);
+        assert!(timer.elapsed() < Duration::from_secs(1));
+        assert!(lifecycle.process().unwrap().try_exit().unwrap().is_none());
+        assert!(lifecycle.diagnostics.is_some());
+        // Test-only cleanup owns this disposable direct child. The production
+        // bridge deliberately does not perform this forceful escalation.
+        assert!(
+            lifecycle
+                .process()
+                .unwrap()
+                .kill_exact_child_until(MonotonicDeadline::after(Duration::from_secs(2)))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            lifecycle
+                .shutdown_until(MonotonicDeadline::after(BRIDGE_EXIT_GRACE))
+                .settled()
+        );
     }
 
     #[test]
@@ -4996,7 +5380,9 @@ server.serve_forever()
         let (result_sender, results) = sync_channel(1);
         let _results = results;
         let _control_keepalive = control_sender;
+        let mut lifecycle = BridgeLifecycle::default();
         let mut workload = StructuredWorkload::start(
+            &mut lifecycle,
             "/usr/bin/python3",
             root.path().to_str().unwrap(),
             workload_home.to_str().unwrap(),
@@ -5046,6 +5432,11 @@ server.serve_forever()
             }))
             .unwrap();
         assert_eq!(read["response"]["result"]["path"], "/session/ses_fixture");
+        assert!(
+            lifecycle
+                .shutdown_until(MonotonicDeadline::after(BRIDGE_EXIT_GRACE))
+                .settled()
+        );
     }
 
     #[test]
@@ -5500,6 +5891,40 @@ server.serve_forever()
     }
 
     #[test]
+    fn runtime_configuration_verification_is_read_only_and_refuses_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("mounted");
+        std::fs::write(&source, b"policy=[]\n").unwrap();
+        assert!(verify_runtime_configuration(&source, &destination).is_err());
+        assert!(!destination.exists());
+        std::fs::write(&destination, b"policy=[]\n").unwrap();
+        // Even exact bytes on an ordinary writable filesystem are not an
+        // admitted namespace configuration. Native coverage exercises success.
+        assert!(verify_runtime_configuration(&source, &destination).is_err());
+        std::fs::write(&destination, b"policy=[1]\n").unwrap();
+        assert!(
+            verify_runtime_configuration(&source, &destination)
+                .unwrap_err()
+                .to_string()
+                .contains("differs from admitted source")
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"policy=[1]\n");
+        std::fs::write(&destination, b"policy=[]\n").unwrap();
+        let link = root.path().join("symlink");
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+        assert!(verify_runtime_configuration(&link, &destination).is_err());
+        assert!(verify_runtime_configuration(&source, &link).is_err());
+        std::fs::write(&source, b"").unwrap();
+        std::fs::write(&destination, b"").unwrap();
+        assert!(verify_runtime_configuration(&source, &destination).is_err());
+        let oversized = vec![b'x'; ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES + 1];
+        std::fs::write(&source, &oversized).unwrap();
+        std::fs::write(&destination, &oversized).unwrap();
+        assert!(verify_runtime_configuration(&source, &destination).is_err());
+    }
+
+    #[test]
     fn compatibility_baseline_verification_preserves_the_daemon_prepared_file() {
         use std::os::unix::fs::MetadataExt as _;
 
@@ -5568,7 +5993,7 @@ server.serve_forever()
     #[test]
     fn structured_workload_creates_owner_only_files_and_directories() {
         let root = tempfile::tempdir().unwrap();
-        let mut command = Command::new("/bin/sh");
+        let mut command = std::process::Command::new("/bin/sh");
         command
             .arg("-c")
             .arg("touch child-file && mkdir child-dir")
@@ -5665,34 +6090,6 @@ server.serve_forever()
         // SAFETY: F_GETFD only observes the borrowed descriptor.
         let flags = unsafe { libc::fcntl(left.as_raw_fd(), libc::F_GETFD) };
         assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
-    }
-
-    #[test]
-    fn private_stderr_drain_continues_beyond_retention_limits() {
-        struct CountingReader {
-            remaining: usize,
-            consumed: Arc<std::sync::atomic::AtomicUsize>,
-        }
-        impl Read for CountingReader {
-            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
-                let count = output.len().min(self.remaining);
-                output[..count].fill(b'x');
-                self.remaining -= count;
-                self.consumed
-                    .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
-                Ok(count)
-            }
-        }
-        let expected = 10 * 1024 * 1024;
-        let consumed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        drain_private_stderr(CountingReader {
-            remaining: expected,
-            consumed: Arc::clone(&consumed),
-        });
-        assert_eq!(
-            consumed.load(std::sync::atomic::Ordering::Relaxed),
-            expected
-        );
     }
 
     #[test]

@@ -11,16 +11,18 @@ use std::path::{Component, Path};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
-use ryeos_state::objects::AdmittedStructuredSessionProfile;
+use ryeos_state::objects::{
+    AdmittedStructuredSessionProfile, MAX_SESSION_CONFIGURATION_FILE_BYTES,
+    MAX_STRUCTURED_SESSION_PROFILE_BYTES, SessionConfigurationFile,
+    SessionRuntimeConfigurationFile, validate_session_auxiliary_configs,
+    validate_session_runtime_configs,
+};
 
-const MAX_PROFILE_BYTES: usize = 64 * 1024;
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-/// v6 makes the HTTP/SSE ignored-event representation explicit. Earlier
-/// profiles relied on a transport-side inference between an event envelope
-/// and its properties; that made the signed schema ambiguous. This remains a
-/// clean authority cut, so prior profiles are not reinterpreted.
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 6;
+/// v10 commits an external provider's generated private configuration
+/// destination so capture/restore exclusions are sealed before node contact.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 10;
 
 /// The closed workload transport vocabulary. The admission compiler and the
 /// bridge must accept exactly this set; adding a transport is a schema
@@ -52,7 +54,7 @@ pub fn compile(
     profile_bytes: &[u8],
     source_files: &BTreeMap<String, Vec<u8>>,
 ) -> Result<AdmittedStructuredSessionProfile> {
-    if profile_bytes.is_empty() || profile_bytes.len() > MAX_PROFILE_BYTES {
+    if profile_bytes.is_empty() || profile_bytes.len() > MAX_STRUCTURED_SESSION_PROFILE_BYTES {
         bail!("structured-session profile is empty or exceeds its byte ceiling");
     }
     let profile: Value = serde_json::from_slice(profile_bytes)
@@ -71,6 +73,9 @@ pub fn compile(
         "workload_client",
         "baseline_config",
         "baseline_destination",
+        "auxiliary_configs",
+        "runtime_configs",
+        "external_candidate",
         "portable_state",
         "credential_subject",
         "initialization",
@@ -245,6 +250,11 @@ pub fn compile(
             }
         }
         _ => bail!("structured-session workload_client must be present and nullable"),
+    }
+    if !object["external_candidate"].is_null() && !object["workload_client"].is_null() {
+        bail!(
+            "external candidate profile must declare workload_client null; delegated workload authority is not admitted"
+        );
     }
     if let Some(portable_state) = object
         .get("portable_state")
@@ -988,10 +998,34 @@ pub fn compile(
     }
     let baseline_source = value_string(object, "baseline_config")?.to_owned();
     let baseline_destination = value_string(object, "baseline_destination")?.to_owned();
+    let auxiliary_configs: Vec<SessionConfigurationFile> =
+        serde_json::from_value(object["auxiliary_configs"].clone())
+            .context("decode signed auxiliary configuration inventory")?;
+    validate_session_auxiliary_configs(&baseline_destination, &auxiliary_configs)?;
+    let runtime_configs: Vec<SessionRuntimeConfigurationFile> =
+        serde_json::from_value(object["runtime_configs"].clone())
+            .context("decode signed runtime configuration inventory")?;
+    validate_session_runtime_configs(&runtime_configs)?;
+    for config in &runtime_configs {
+        let bytes = source_files
+            .get(&config.source)
+            .ok_or_else(|| anyhow!("runtime configuration is absent from captured source"))?;
+        if bytes.is_empty() || bytes.len() > MAX_SESSION_CONFIGURATION_FILE_BYTES {
+            bail!("runtime configuration exceeds its byte bound");
+        }
+    }
+    for config in &auxiliary_configs {
+        let bytes = source_files.get(&config.source).ok_or_else(|| {
+            anyhow!("structured-session auxiliary configuration is absent from captured source")
+        })?;
+        if bytes.is_empty() || bytes.len() > MAX_SESSION_CONFIGURATION_FILE_BYTES {
+            bail!("structured-session auxiliary configuration exceeds its byte bound");
+        }
+    }
     let baseline = source_files
         .get(&baseline_source)
         .ok_or_else(|| anyhow!("structured-session baseline is absent from the captured source"))?;
-    if baseline.is_empty() || baseline.len() > MAX_SCHEMA_BYTES {
+    if baseline.is_empty() || baseline.len() > MAX_SESSION_CONFIGURATION_FILE_BYTES {
         bail!("structured-session baseline exceeds its byte bound");
     }
     let admitted = AdmittedStructuredSessionProfile {
@@ -1000,6 +1034,8 @@ pub fn compile(
         schema_hashes,
         baseline_source,
         baseline_destination,
+        auxiliary_configs,
+        runtime_configs,
     };
     admitted.validate()?;
     Ok(admitted)
@@ -1924,6 +1960,9 @@ mod tests {
             "workload_client":null,
             "baseline_config":"baseline.conf",
             "baseline_destination":"runtime.conf",
+            "auxiliary_configs":[],
+            "runtime_configs":[],
+            "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
             "configuration_authority":"immutable_argv",
@@ -1989,6 +2028,95 @@ mod tests {
         profile["routes"][0]["http_path"] = json!("/session");
         profile["routes"][0]["http_body_schema"] = json!("schema/request.json");
         profile["routes"][0]["http_path_parameters"] = json!({});
+    }
+
+    #[test]
+    fn runtime_configuration_requires_exact_source_and_retained_inventory() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        let mut files = schemas();
+        profile["runtime_configs"] = json!([{
+            "source":"policy/requirements.toml", "destination":"/etc/qualification/requirements.toml"
+        }]);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        files.insert(
+            "policy/requirements.toml".into(),
+            b"permitted=[]\n".to_vec(),
+        );
+        let admitted = compile(&serde_json::to_vec(&profile).unwrap(), &files).unwrap();
+        admitted.validate().unwrap();
+        assert_eq!(admitted.runtime_configs.len(), 1);
+        let mut changed = admitted.clone();
+        changed.runtime_configs[0].destination = "/etc/qualification/changed".into();
+        assert!(changed.validate().is_err());
+        for length in [0, MAX_SESSION_CONFIGURATION_FILE_BYTES + 1] {
+            files.insert("policy/requirements.toml".into(), vec![b'x'; length]);
+            assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        }
+        files.insert(
+            "policy/requirements.toml".into(),
+            b"permitted=[]\n".to_vec(),
+        );
+        profile["runtime_configs"][0]["destination"] = json!("/tmp/replaceable/policy");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        profile.as_object_mut().unwrap().remove("runtime_configs");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+    }
+
+    #[test]
+    fn auxiliary_configuration_requires_exact_bounded_source_and_current_shape() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        let mut files = schemas();
+        profile["auxiliary_configs"] = json!([
+            {"source":"environment.conf", "destination":"environment.conf"}
+        ]);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        files.insert("environment.conf".into(), b"local=false\n".to_vec());
+        let admitted = compile(&serde_json::to_vec(&profile).unwrap(), &files).unwrap();
+        assert_eq!(admitted.auxiliary_configs.len(), 1);
+        admitted.validate().unwrap();
+        let mut divergent = admitted.clone();
+        divergent.auxiliary_configs[0].destination = "different.conf".into();
+        assert!(divergent.validate().is_err());
+
+        for invalid in [
+            Value::Null,
+            json!({}),
+            json!([{"source":"environment.conf","destination":"runtime.conf"}]),
+            json!([{"source":"../environment.conf","destination":"environment.conf"}]),
+            json!([{"source":"environment.conf","destination":"sub/environment.conf"}]),
+            json!([{"source":"environment.conf","destination":"environment.conf","optional":true}]),
+            json!([
+                {"source":"environment.conf","destination":"z.conf"},
+                {"source":"environment.conf","destination":"a.conf"}
+            ]),
+            json!([
+                {"source":"environment.conf","destination":"environment.conf"},
+                {"source":"environment.conf","destination":"environment.conf"}
+            ]),
+        ] {
+            let mut invalid_profile = profile.clone();
+            invalid_profile["auxiliary_configs"] = invalid;
+            assert!(compile(&serde_json::to_vec(&invalid_profile).unwrap(), &files).is_err());
+        }
+        let mut missing = profile.clone();
+        missing.as_object_mut().unwrap().remove("auxiliary_configs");
+        assert!(compile(&serde_json::to_vec(&missing).unwrap(), &files).is_err());
+        for length in [0, MAX_SESSION_CONFIGURATION_FILE_BYTES + 1] {
+            files.insert("environment.conf".into(), vec![b'x'; length]);
+            assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        }
+        files.insert(
+            "environment.conf".into(),
+            vec![b'x'; MAX_SESSION_CONFIGURATION_FILE_BYTES],
+        );
+        compile(&serde_json::to_vec(&profile).unwrap(), &files).unwrap();
+        files.insert(
+            "baseline.conf".into(),
+            vec![b'x'; MAX_SESSION_CONFIGURATION_FILE_BYTES + 1],
+        );
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
     }
 
     #[test]
@@ -2306,6 +2434,127 @@ mod tests {
                 .to_string()
                 .contains("notification count exceeds its aggregate bound")
         );
+    }
+
+    #[test]
+    fn external_candidate_requirement_is_explicit_closed_and_identity_bearing() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        let local = compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).unwrap();
+        assert!(local.external_candidate_requirement().unwrap().is_none());
+        profile
+            .as_object_mut()
+            .unwrap()
+            .remove("external_candidate");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+        profile["external_candidate"] = json!({"schema":6,
+        "protocol":ryeos_state::external_execution::admission::PROTOCOL,
+        "connector_protocol":ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
+        "execution_route":"connector_only",
+        "required_lifecycle_capabilities":[],
+        "provider_declaration_id":"codex-hosted",
+        "provider_configuration_destination":"environments.toml",
+        "runtime_product_declaration_id":"candidate_runtime",
+        "runtime_recipe":{
+            "schema":2,
+            "runtime_mount_destination":"/runtime",
+            "executable_relative_path":"bin/codex",
+            "argv0":"codex",
+            "arguments":["exec-server","--listen","stdio"],
+            "cwd":"/workspace",
+            "environment":{"LANG":"C.UTF-8"},
+            "max_stdout_bytes":1048576,
+            "max_stderr_bytes":1048576,
+            "proc_filesystem":"pid_namespace_nested",
+            "contain_process_group":false,
+            "nested_sandbox":true
+        }});
+        let external = compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).unwrap();
+        assert!(external.external_candidate_requirement().unwrap().is_some());
+        assert_ne!(local.profile_hash, external.profile_hash);
+        let mut large_profile = profile.clone();
+        large_profile["external_candidate"]["runtime_recipe"]["arguments"] =
+            json!(["a".repeat(48 * 1024), "b".repeat(42 * 1024)]);
+        let large_bytes = serde_json::to_vec(&large_profile).unwrap();
+        assert!(large_bytes.len() > 64 * 1024);
+        let large = compile(&large_bytes, &schemas()).unwrap();
+        assert!(large.contract.to_string().len() > 64 * 1024);
+        let mut oversized_raw = large_bytes;
+        oversized_raw.resize(MAX_STRUCTURED_SESSION_PROFILE_BYTES + 1, b' ');
+        assert!(
+            compile(&oversized_raw, &schemas())
+                .unwrap_err()
+                .to_string()
+                .contains("byte ceiling")
+        );
+        let mut reconciled = profile.clone();
+        reconciled["external_candidate"]["required_lifecycle_capabilities"] =
+            json!(["exact_allocation_reconciliation"]);
+        let reconciled = compile(&serde_json::to_vec(&reconciled).unwrap(), &schemas()).unwrap();
+        assert_ne!(external.profile_hash, reconciled.profile_hash);
+        assert_ne!(
+            external.external_candidate_requirement().unwrap(),
+            reconciled.external_candidate_requirement().unwrap()
+        );
+        let mut portable = profile.clone();
+        portable["portable_state"] = json!({
+            "schema":1,
+            "restore_contract":"ryeos.worker_session.restore.v1",
+            "max_depth":8,
+            "max_entries":8,
+            "max_file_bytes":1024,
+            "max_total_bytes":2048,
+            "selectors":[
+                {"pattern":"environments.toml","class":"forbidden_or_unknown","max_matches":1},
+                {"pattern":"sessions/{session_id}.json","class":"portable_session_state","max_matches":1}
+            ]
+        });
+        compile(&serde_json::to_vec(&portable).unwrap(), &schemas()).unwrap();
+        portable["portable_state"]["selectors"] = json!([
+            {"pattern":"sessions/{session_id}.json","class":"portable_session_state","max_matches":1}
+        ]);
+        assert!(compile(&serde_json::to_vec(&portable).unwrap(), &schemas()).is_err());
+        let mut delegated = profile.clone();
+        delegated["workload_client"] = json!({
+            "cli_endpoint_env":crate::protocol_vocabulary::WORKLOAD_CLIENT_ENDPOINT_ENV,
+            "structured_session":null
+        });
+        assert!(compile(&serde_json::to_vec(&delegated).unwrap(), &schemas()).is_err());
+        let valid = profile.clone();
+        for field in [
+            "schema",
+            "protocol",
+            "connector_protocol",
+            "execution_route",
+            "required_lifecycle_capabilities",
+            "provider_declaration_id",
+            "provider_configuration_destination",
+            "runtime_product_declaration_id",
+            "runtime_recipe",
+        ] {
+            let mut invalid = valid.clone();
+            invalid["external_candidate"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
+        }
+        let mut invalid = valid.clone();
+        invalid["external_candidate"]["schema"] = json!(5);
+        assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
+        let mut invalid = valid.clone();
+        invalid["external_candidate"]["required_lifecycle_capabilities"] =
+            json!(["unknown_lifecycle_capability"]);
+        assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
+        let mut invalid = valid.clone();
+        invalid["external_candidate"]["runtime_recipe"]["executable_relative_path"] =
+            json!("../bin/codex");
+        assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
+        let mut invalid = valid.clone();
+        invalid["external_candidate"]["execution_route"] = json!("local_or_connector");
+        assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
+        profile["external_candidate"]["url"] = json!("https://arbitrary.invalid");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
     }
 
     #[test]

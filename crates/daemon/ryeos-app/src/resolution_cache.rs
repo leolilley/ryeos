@@ -116,6 +116,21 @@ impl ResolutionMaterializationBinding {
         Ok(binding)
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn admitted_for_test(
+        subject_authority: SubjectResolutionAuthority,
+        active_project_root: Option<PathBuf>,
+        materialization_lifeline: Option<Arc<TempDirGuard>>,
+        pinned_materialization: Option<ryeos_state::PinnedProjectMaterialization>,
+    ) -> anyhow::Result<Self> {
+        Self::admitted(
+            subject_authority,
+            active_project_root,
+            materialization_lifeline,
+            pinned_materialization,
+        )
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         self.validate_structure()
     }

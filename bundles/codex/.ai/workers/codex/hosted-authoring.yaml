@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-17T07:24:33Z:6142117aad331c4172382f63ca8ed8eb25725e37525c72dcdf476a4075c00116:bNfErLV+d45D7xF9GtOej3XDwXWNwEqRMtTxGcUYpJuYnq5Tz9ca5MF7jGosuuTycIvZwvUPf/hJX/lQNETEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T03:48:42Z:8da1bbcc515deafdfa9289d22afe71c47c0e41cbb2748dbe014620972794af86:Nxb0UkpgkeBRtrL2whQWfDAKGV986w+8QrAExoHkvgZRo9XXnjtrsUe53MPB5F1z9VcZCiezegI5p9yYOWr/Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 version: "1.0.3"
 executor_id: "@subprocess"
 description: "Codex authoring profile; select through config:codex/environments/authoring."
 execution_protocol: protocol:ryeos/core/structured_session
+external_product_slots: []
 filesystem_authority: captured_execution
 supported_target:
   os: linux
@@ -19,7 +20,7 @@ session_resources:
 source:
   root: "lib/hosted"
   entry: "authoring.profile.json"
-  digest: "7f695f93b433d989306337b8a17398c41fe884850cf208dcb394f5b50d32d329"
+  digest: "19f769419b262ab765ee85a6e6ac425433c68103435f9ee46dac4b73186966e5"
 
 external_content:
   # Runtime dependencies must never create mountpoints in the project CoW.

@@ -808,6 +808,7 @@ mod tests {
                 network_authority_ceiling: None,
                 filesystem_authority_ceiling: None,
                 target: None,
+                endpoint: None,
                 resource_authority_ceiling: None,
                 aliases: std::collections::HashMap::new(),
                 alias_max_depth: 8,

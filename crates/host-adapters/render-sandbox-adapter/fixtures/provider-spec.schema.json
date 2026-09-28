@@ -1,0 +1,394 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RyeOS Render Sandbox lifecycle provider specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "provider_profile",
+    "settings_schema_digest",
+    "qualification_settings_schema_digest",
+    "origin_profile",
+    "routes",
+    "operations"
+  ],
+  "properties": {
+    "schema": { "const": 2 },
+    "provider_profile": { "const": "render_sandbox_v1" },
+    "settings_schema_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "qualification_settings_schema_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "origin_profile": { "const": "render_api_v1" },
+    "routes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sandbox_collection",
+        "sandbox_by_id",
+        "sandbox_terminate_by_id",
+        "sandbox_file_upload_token_by_id",
+        "sandbox_run_stream_token_by_id"
+      ],
+      "properties": {
+        "sandbox_collection": { "$ref": "#/$defs/collection_route" },
+        "sandbox_by_id": { "$ref": "#/$defs/by_id_route" },
+        "sandbox_terminate_by_id": { "$ref": "#/$defs/terminate_route" },
+        "sandbox_file_upload_token_by_id": { "$ref": "#/$defs/file_upload_token_route" },
+        "sandbox_run_stream_token_by_id": { "$ref": "#/$defs/run_stream_token_route" }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allocate",
+        "qualification_create",
+        "qualification_verify",
+        "reconcile_allocation",
+        "activate_supervisor",
+        "reconcile_supervisor_activation",
+        "terminate",
+        "reconcile_termination"
+      ],
+      "properties": {
+        "allocate": { "$ref": "#/$defs/allocate_operation" },
+        "qualification_create": { "$ref": "#/$defs/qualification_create_operation" },
+        "qualification_verify": { "$ref": "#/$defs/qualification_verify_operation" },
+        "reconcile_allocation": { "$ref": "#/$defs/pending_operation" },
+        "activate_supervisor": { "$ref": "#/$defs/pending_operation" },
+        "reconcile_supervisor_activation": {
+          "$ref": "#/$defs/pending_operation"
+        },
+        "terminate": { "$ref": "#/$defs/terminate_operation" },
+        "reconcile_termination": { "$ref": "#/$defs/reconcile_termination_operation" }
+      }
+    }
+  },
+  "$defs": {
+    "literal_v1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["literal"],
+      "properties": { "literal": { "const": "v1" } }
+    },
+    "literal_sandboxes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["literal"],
+      "properties": { "literal": { "const": "sandboxes" } }
+    },
+    "literal_terminate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["literal"],
+      "properties": { "literal": { "const": "terminate" } }
+    },
+    "literal_files": {
+      "type": "object", "additionalProperties": false, "required": ["literal"],
+      "properties": { "literal": { "const": "files" } }
+    },
+    "literal_upload": {
+      "type": "object", "additionalProperties": false, "required": ["literal"],
+      "properties": { "literal": { "const": "upload" } }
+    },
+    "literal_runs": {
+      "type": "object", "additionalProperties": false, "required": ["literal"],
+      "properties": { "literal": { "const": "runs" } }
+    },
+    "literal_stream": {
+      "type": "object", "additionalProperties": false, "required": ["literal"],
+      "properties": { "literal": { "const": "stream" } }
+    },
+    "literal_token": {
+      "type": "object", "additionalProperties": false, "required": ["literal"],
+      "properties": { "literal": { "const": "token" } }
+    },
+    "occurrence_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bound"],
+      "properties": { "bound": { "const": "occurrence_id" } }
+    },
+    "owner_id_query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownerId"],
+      "properties": {
+        "ownerId": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source"],
+          "properties": { "source": { "const": "settings.owner_id" } }
+        }
+      }
+    },
+    "owner_and_operation_path_query": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ownerId", "path"],
+      "properties": {
+        "ownerId": { "$ref": "#/$defs/settings_owner_source" },
+        "path": {
+          "type": "object", "additionalProperties": false,
+          "required": ["source"],
+          "properties": { "source": { "const": "operation.upload_path" } }
+        }
+      }
+    },
+    "collection_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["segments"],
+      "properties": {
+        "segments": {
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/literal_v1" },
+            { "$ref": "#/$defs/literal_sandboxes" }
+          ],
+          "minItems": 2,
+          "maxItems": 2,
+          "items": false
+        }
+      }
+    },
+    "by_id_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["segments", "query"],
+      "properties": {
+        "segments": {
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/literal_v1" },
+            { "$ref": "#/$defs/literal_sandboxes" },
+            { "$ref": "#/$defs/occurrence_binding" }
+          ],
+          "minItems": 3,
+          "maxItems": 3,
+          "items": false
+        },
+        "query": { "$ref": "#/$defs/owner_id_query" }
+      }
+    },
+    "terminate_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["segments", "query"],
+      "properties": {
+        "segments": {
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/literal_v1" },
+            { "$ref": "#/$defs/literal_sandboxes" },
+            { "$ref": "#/$defs/occurrence_binding" },
+            { "$ref": "#/$defs/literal_terminate" }
+          ],
+          "minItems": 4,
+          "maxItems": 4,
+          "items": false
+        },
+        "query": { "$ref": "#/$defs/owner_id_query" }
+      }
+    },
+    "file_upload_token_route": {
+      "type": "object", "additionalProperties": false,
+      "required": ["segments", "query"],
+      "properties": {
+        "segments": {
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/literal_v1" },
+            { "$ref": "#/$defs/literal_sandboxes" },
+            { "$ref": "#/$defs/occurrence_binding" },
+            { "$ref": "#/$defs/literal_files" },
+            { "$ref": "#/$defs/literal_upload" },
+            { "$ref": "#/$defs/literal_token" }
+          ],
+          "minItems": 6, "maxItems": 6, "items": false
+        },
+        "query": { "$ref": "#/$defs/owner_and_operation_path_query" }
+      }
+    },
+    "run_stream_token_route": {
+      "type": "object", "additionalProperties": false,
+      "required": ["segments", "query"],
+      "properties": {
+        "segments": {
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/literal_v1" },
+            { "$ref": "#/$defs/literal_sandboxes" },
+            { "$ref": "#/$defs/occurrence_binding" },
+            { "$ref": "#/$defs/literal_runs" },
+            { "$ref": "#/$defs/literal_stream" },
+            { "$ref": "#/$defs/literal_token" }
+          ],
+          "minItems": 6, "maxItems": 6, "items": false
+        },
+        "query": { "$ref": "#/$defs/owner_id_query" }
+      }
+    },
+    "settings_owner_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": { "source": { "const": "settings.owner_id" } }
+    },
+    "settings_plan_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": { "source": { "const": "settings.plan" } }
+    },
+    "settings_region_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": { "source": { "const": "settings.region" } }
+    },
+    "settings_snapshot_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": { "source": { "const": "settings.snapshot_id" } }
+    },
+    "reservation_lifetime_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": { "const": "reservation.maximum_lifetime_seconds" }
+      }
+    },
+    "qualification_lifetime_source": {
+      "type": "object", "additionalProperties": false, "required": ["source"],
+      "properties": { "source": { "const": "qualification.maximum_lifetime_seconds" } }
+    },
+    "qualification_snapshot_source": {
+      "type": "object", "additionalProperties": false, "required": ["source"],
+      "properties": { "source": { "const": "qualification.locator.snapshot_id" } }
+    },
+    "create_body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "plan",
+        "region",
+        "timeoutSeconds",
+        "networkPolicy",
+        "snapshotId"
+      ],
+      "properties": {
+        "ownerId": { "$ref": "#/$defs/settings_owner_source" },
+        "plan": { "$ref": "#/$defs/settings_plan_source" },
+        "region": { "$ref": "#/$defs/settings_region_source" },
+        "timeoutSeconds": { "$ref": "#/$defs/reservation_lifetime_source" },
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["literal"],
+          "properties": {
+            "literal": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["default"],
+              "properties": { "default": { "const": "deny-all" } }
+            }
+          }
+        },
+        "snapshotId": { "$ref": "#/$defs/settings_snapshot_source" }
+      }
+    },
+    "pending_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": { "kind": { "const": "unsupported_pending" } }
+    },
+    "qualification_create_operation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "route", "precondition_profile", "body", "bind_proof_profile", "no_occurrence_proof_profile"],
+      "properties": {
+        "kind": { "const": "create_once" },
+        "route": { "const": "sandbox_collection" },
+        "precondition_profile": { "const": "render_bound_runtime_snapshot_v1" },
+        "body": {
+          "type": "object", "additionalProperties": false,
+          "required": ["ownerId", "plan", "region", "timeoutSeconds", "networkPolicy", "snapshotId"],
+          "properties": {
+            "ownerId": { "$ref": "#/$defs/settings_owner_source" },
+            "plan": { "$ref": "#/$defs/settings_plan_source" },
+            "region": { "$ref": "#/$defs/settings_region_source" },
+            "timeoutSeconds": { "$ref": "#/$defs/qualification_lifetime_source" },
+            "networkPolicy": { "type": "object", "additionalProperties": false, "required": ["literal"], "properties": { "literal": { "type": "object", "additionalProperties": false, "required": ["default"], "properties": { "default": { "const": "deny-all" } } } } },
+            "snapshotId": { "$ref": "#/$defs/qualification_snapshot_source" }
+          }
+        },
+        "bind_proof_profile": { "const": "render_sandbox_create_201_v1" },
+        "no_occurrence_proof_profile": { "const": "render_no_request_sent_v1" }
+      }
+    },
+    "qualification_verify_operation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "precondition_profile", "mutation_route", "observation_route"],
+      "properties": {
+        "kind": { "const": "upload_then_run_once" },
+        "precondition_profile": { "const": "render_bound_qualification_occurrence_v1" },
+        "mutation_route": { "const": "sandbox_file_upload_token_by_id" },
+        "observation_route": { "const": "sandbox_run_stream_token_by_id" }
+      }
+    },
+    "allocate_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "route",
+        "precondition_profile",
+        "body",
+        "bind_proof_profile",
+        "no_occurrence_proof_profile"
+      ],
+      "properties": {
+        "kind": { "const": "create_once" },
+        "route": { "const": "sandbox_collection" },
+        "precondition_profile": { "const": "render_configured_runtime_snapshot_v1" },
+        "body": { "$ref": "#/$defs/create_body" },
+        "bind_proof_profile": { "const": "render_sandbox_create_201_v1" },
+        "no_occurrence_proof_profile": { "const": "render_no_request_sent_v1" }
+      }
+    },
+    "terminate_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "mutation_route",
+        "observation_route",
+        "terminal_proof_profile"
+      ],
+      "properties": {
+        "kind": { "const": "terminate_once_then_observe_exact" },
+        "mutation_route": { "const": "sandbox_terminate_by_id" },
+        "observation_route": { "const": "sandbox_by_id" },
+        "terminal_proof_profile": { "const": "render_sandbox_terminal_v1" }
+      }
+    },
+    "reconcile_termination_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "route", "terminal_proof_profile"],
+      "properties": {
+        "kind": { "const": "observe_exact_occurrence" },
+        "route": { "const": "sandbox_by_id" },
+        "terminal_proof_profile": { "const": "render_sandbox_terminal_v1" }
+      }
+    }
+  }
+}

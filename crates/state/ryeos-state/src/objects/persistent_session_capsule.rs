@@ -25,7 +25,17 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // v11 places enforced typed-entry session source in the execution runtime,
 // not the project namespace. Do not recover an older capsule with changed
 // workload-visible source paths and project-shadow semantics.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 11;
+// v12 retains the complete signed auxiliary configuration inventory. A prior
+// capsule cannot authorize preparing these additional profile-home files.
+// v13 additionally retains the exact immutable namespace configuration inventory.
+// v14 retains external candidate program requirements separately from placement authority.
+// v16 requires endpoint intent/selection in the retained ordinary provider
+// process plan; an external command environment is not provider placement.
+// v17 separately owns the exact guest-runtime product proof. The candidate
+// executable product selection is not a substitute for placement qualification.
+// v18 also binds the published product owner's principal, so retained proof
+// authentication never guesses the owner from a later node configuration.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 18;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES: usize = 4_096;
@@ -167,6 +177,60 @@ pub struct PortableSessionStateContract {
 }
 
 impl PortableSessionStateContract {
+    /// Configuration is restored from signed source, never from a portable
+    /// session attachment or a rebuildable cache classification.
+    pub fn validate_configuration_exclusions(
+        &self,
+        configs: &[SessionConfigurationFile],
+    ) -> anyhow::Result<()> {
+        for config in configs {
+            self.validate_configuration_destination_exclusion(
+                &config.destination,
+                "auxiliary configuration",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Generated private configuration has the same capture prohibition as
+    /// signed auxiliary configuration, but no portable source file. The exact
+    /// destination is committed by the external-candidate requirement and
+    /// rejoined to the installed provider declaration before materialization.
+    pub fn validate_generated_configuration_exclusion(
+        &self,
+        destination: &str,
+    ) -> anyhow::Result<()> {
+        validate_session_configuration_destination(destination)?;
+        self.validate_configuration_destination_exclusion(
+            destination,
+            "generated private configuration",
+        )
+    }
+
+    fn validate_configuration_destination_exclusion(
+        &self,
+        destination: &str,
+        label: &str,
+    ) -> anyhow::Result<()> {
+        if !self.selectors.iter().any(|selector| {
+            selector.pattern == destination
+                && selector.class == PortableSessionStateClass::ForbiddenOrUnknown
+        }) {
+            anyhow::bail!("{label} requires an exact forbidden portable-state selector");
+        }
+        for selector in &self.selectors {
+            // '*' stands for any safe session identity here. The selector
+            // matcher is used only to detect potential overlap, not to select
+            // or restore a real session.
+            if selector.class == PortableSessionStateClass::PortableSessionState
+                && super::portable_state_selector_matches(selector, destination, "*")?
+            {
+                anyhow::bail!("{label} overlaps portable session state");
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != 1
             || self.restore_contract != "ryeos.worker_session.restore.v1"
@@ -323,6 +387,8 @@ impl PersistentSessionWireContract {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersistentSessionAuthority {
+    pub external_candidate:
+        Option<crate::external_execution::admission::AdmittedExternalCandidateProgram>,
     pub exact_program_hash: String,
     pub lifecycle: PersistentSessionLifecycleContract,
     pub wire: PersistentSessionWireContract,
@@ -406,6 +472,7 @@ pub enum SessionRuntimeViewDelivery {
 }
 
 pub const SESSION_RUNTIME_VIEWS_ROOT: &str = "/ryeos/runtime-views";
+pub const SESSION_RUNTIME_ENDPOINTS_ROOT: &str = "/run/ryeos/session-endpoints";
 const MAX_SESSION_ENVIRONMENT_NAME_BYTES: usize = 128;
 // Preserve the authored-map bound while accounting for one derived destination
 // per entry, including both name spellings and fixed JSON envelope overhead.
@@ -418,6 +485,23 @@ pub const MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES: usize =
 pub fn runtime_view_mount_destination(name: &str) -> anyhow::Result<std::path::PathBuf> {
     validate_session_process_environment_name(name)?;
     Ok(std::path::Path::new(SESSION_RUNTIME_VIEWS_ROOT).join(name))
+}
+
+/// Derive one controller-owned, occurrence-private endpoint coordinate in the
+/// isolated session namespace. The caller supplies only a canonical logical
+/// name; neither authored content nor provider input can select an ambient
+/// host path. The fixed namespace root also keeps local IPC addresses short
+/// independently of the retained state-root spelling.
+pub fn session_runtime_endpoint_destination(name: &str) -> anyhow::Result<std::path::PathBuf> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        anyhow::bail!("session runtime endpoint name is not canonical");
+    }
+    Ok(std::path::Path::new(SESSION_RUNTIME_ENDPOINTS_ROOT).join(name))
 }
 
 impl PreparedSessionProcessEnvironment {
@@ -545,6 +629,9 @@ pub fn validate_session_process_environment_relative_path(path: &str) -> anyhow:
 
 impl PersistentSessionAuthority {
     pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(program) = &self.external_candidate {
+            program.validate()?;
+        }
         super::thread_snapshot::validate_canonical_hash(
             "persistent-session exact program hash",
             &self.exact_program_hash,
@@ -601,9 +688,47 @@ impl PersistentSessionAuthority {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedExternalRuntimeQualification {
+    pub binding_hash: String,
+    pub guest_runtime_manifest_hash: String,
+    pub owner_principal: String,
+    pub proof: crate::external_content::products::composition::AdmittedProductQualification,
+}
+
+impl RetainedExternalRuntimeQualification {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        super::thread_snapshot::validate_canonical_hash(
+            "external runtime binding",
+            &self.binding_hash,
+        )?;
+        super::thread_snapshot::validate_canonical_hash(
+            "external guest runtime manifest",
+            &self.guest_runtime_manifest_hash,
+        )?;
+        super::thread_snapshot::validate_canonical_hash(
+            "external runtime qualification attestation",
+            &self.proof.attestation_hash,
+        )?;
+        let owner = self.owner_principal.strip_prefix("fp:").ok_or_else(|| {
+            anyhow::anyhow!("external runtime qualification owner must be a fingerprint principal")
+        })?;
+        super::thread_snapshot::validate_canonical_hash("external runtime owner", owner)?;
+        self.proof.evidence.validate()?;
+        if self.proof.evidence.result.subject_manifest_hash != self.guest_runtime_manifest_hash {
+            anyhow::bail!("retained external runtime proof differs from guest manifest");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedPersistentSessionCapsule {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub external_candidate:
+        Option<crate::external_execution::admission::AdmittedExternalCandidateProgram>,
     pub schema: u32,
     pub kind: String,
     pub exact_program: Value,
@@ -613,6 +738,9 @@ pub struct AdmittedPersistentSessionCapsule {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub retained_product_selections:
         Option<crate::external_content::products::composition::ResolvedExternalProductSelections>,
+    /// Separate CAS-owned proof of the placement guest runtime, if applicable.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub retained_external_runtime_qualification: Option<RetainedExternalRuntimeQualification>,
     pub lifecycle: PersistentSessionLifecycleContract,
     pub wire: PersistentSessionWireContract,
     pub artifact_identity: AdmittedLaunchArtifactIdentity,
@@ -677,6 +805,7 @@ impl AdmittedPersistentSessionCapsule {
 
     pub fn authority(&self) -> PersistentSessionAuthority {
         PersistentSessionAuthority {
+            external_candidate: self.external_candidate.clone(),
             exact_program_hash: self.exact_program_hash.clone(),
             lifecycle: self.lifecycle.clone(),
             wire: self.wire.clone(),
@@ -709,20 +838,29 @@ impl AdmittedPersistentSessionCapsule {
             anyhow::bail!("persistent-session retained program exceeds its byte bound");
         }
         self.authority().validate()?;
+        if let Some(proof) = &self.retained_external_runtime_qualification {
+            if self.external_candidate.is_none() {
+                anyhow::bail!("external runtime proof has no external candidate");
+            }
+            proof.validate()?;
+        }
         super::thread_snapshot::validate_canonical_hash(
             "persistent-session execution realization hash",
             &self.execution_realization_hash,
         )?;
-        let admitted = self
+        let admitted_source = self
             .exact_program
             .get("resolution_output")
             .and_then(|resolution| resolution.get("composed"))
             .and_then(|composed| composed.get("derived"))
             .and_then(|derived| derived.get(super::SOURCE_CLOSURE_DERIVED_KEY))
             .map(super::EffectiveSourceClosureProjection::from_value)
-            .transpose()?
-            .map(|projection| projection.binding_hash);
-        if self.source_binding_hash != admitted {
+            .transpose()?;
+        if self.source_binding_hash
+            != admitted_source
+                .as_ref()
+                .map(|projection| projection.binding_hash.clone())
+        {
             anyhow::bail!("persistent-session source binding contradicts its exact program");
         }
         if let Some(hash) = &self.source_binding_hash {
@@ -739,9 +877,12 @@ impl AdmittedPersistentSessionCapsule {
         } else if self.wire.wire_protocol == "ryeos.structured-session" {
             anyhow::bail!("structured-session capsule has no admitted profile identity");
         }
-        if self.executable_search.len() > MAX_EXECUTABLE_SEARCH_PATH_ENTRIES {
-            anyhow::bail!("persistent-session executable search exceeds its entry bound");
-        }
+        let requirement = self
+            .structured_session_profile
+            .as_ref()
+            .map(AdmittedStructuredSessionProfile::external_candidate_requirement)
+            .transpose()?
+            .flatten();
         let realized = self
             .exact_program
             .get("resolution_output")
@@ -750,6 +891,41 @@ impl AdmittedPersistentSessionCapsule {
             .and_then(|derived| derived.get(super::EXTERNAL_REALIZATIONS_DERIVED_KEY))
             .map(super::ExternalContentRealizationSet::from_value)
             .transpose()?;
+        let expected = requirement
+            .as_ref()
+            .map(|requirement| {
+                let profile = self.structured_session_profile.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("external candidate has no admitted session profile")
+                })?;
+                let source = admitted_source.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("external candidate has no admitted source closure")
+                })?;
+                let realizations = realized.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("external candidate has no exact provider realization")
+                })?;
+                let qualification_use =
+                    crate::external_execution::admission::ExternalCandidateQualificationUse::from_admitted_inputs(
+                        requirement,
+                        profile,
+                        source,
+                        realizations,
+                        &self.executable_search,
+                        &self.process_environment,
+                    )?;
+                requirement.resolve_for_use(
+                    self.retained_product_selections.as_ref(),
+                    &qualification_use,
+                )
+            })
+            .transpose()?;
+        if self.external_candidate != expected {
+            anyhow::bail!(
+                "external candidate program contradicts its signed profile or retained products"
+            );
+        }
+        if self.executable_search.len() > MAX_EXECUTABLE_SEARCH_PATH_ENTRIES {
+            anyhow::bail!("persistent-session executable search exceeds its entry bound");
+        }
         let mut identities = BTreeSet::new();
         for entry in &self.executable_search {
             entry.validate()?;
@@ -837,6 +1013,136 @@ impl AdmittedPersistentSessionCapsule {
     }
 }
 
+/// One immutable configuration file in the admitted worker source closure.
+/// Destinations are flat names in the exclusively held workload profile home;
+/// they are not arbitrary filesystem write authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionConfigurationFile {
+    pub source: String,
+    pub destination: String,
+}
+
+pub const MAX_SESSION_CONFIGURATION_FILE_BYTES: usize = 64 * 1024;
+/// Bounds both authored profile input and its retained canonical contract.
+/// Leaves room for the 96 KiB external runtime recipe and other signed policy
+/// without accepting an unbounded document before parsing.
+pub const MAX_STRUCTURED_SESSION_PROFILE_BYTES: usize = 192 * 1024;
+pub const MAX_SESSION_AUXILIARY_CONFIGS: usize = 16;
+
+/// Immutable data from captured worker source, mounted at an exact path in
+/// the isolated namespace. This is never a host write or executable grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRuntimeConfigurationFile {
+    pub source: String,
+    pub destination: String,
+}
+
+impl SessionRuntimeConfigurationFile {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        super::validate_canonical_project_relative_path(&self.source)
+            .map_err(|error| anyhow::anyhow!("invalid runtime configuration source: {error}"))?;
+        if self.source.len() > 4096 {
+            anyhow::bail!("runtime configuration source exceeds its path bound");
+        }
+        validate_session_runtime_configuration_destination(&self.destination)
+    }
+}
+
+pub fn validate_session_runtime_configuration_destination(destination: &str) -> anyhow::Result<()> {
+    // These are portable POSIX namespace coordinates, never ambient host
+    // paths. Do not let Path's normalization conceal doubled separators/dots.
+    if destination.len() > 4096
+        || !destination.starts_with('/')
+        || destination.contains('\\')
+        || destination.chars().any(char::is_control)
+        || destination[1..]
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+    {
+        anyhow::bail!(
+            "runtime configuration destination is not an exact absolute namespace file path"
+        );
+    }
+    let path = std::path::Path::new(destination);
+    // Protected control/kernel namespaces cannot be shadowed by source data.
+    for reserved in ["/proc", "/dev", "/sys", "/tmp", "/ryeos", "/run/ryeos"] {
+        let reserved = std::path::Path::new(reserved);
+        if path.starts_with(reserved) || reserved.starts_with(path) {
+            anyhow::bail!("runtime configuration overlaps a protected namespace");
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_session_runtime_configs(
+    configs: &[SessionRuntimeConfigurationFile],
+) -> anyhow::Result<()> {
+    if configs.len() > MAX_SESSION_AUXILIARY_CONFIGS {
+        anyhow::bail!("runtime configuration inventory exceeds its bound");
+    }
+    let mut previous: Option<&str> = None;
+    for (index, config) in configs.iter().enumerate() {
+        config.validate()?;
+        if previous.is_some_and(|prior| prior >= config.destination.as_str()) {
+            anyhow::bail!("runtime configuration destinations must be sorted and unique");
+        }
+        let path = std::path::Path::new(&config.destination);
+        if configs[..index].iter().any(|other| {
+            let other = std::path::Path::new(&other.destination);
+            path.starts_with(other) || other.starts_with(path)
+        }) {
+            anyhow::bail!("runtime configuration file destinations overlap");
+        }
+        previous = Some(&config.destination);
+    }
+    Ok(())
+}
+
+impl SessionConfigurationFile {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_session_configuration_destination(&self.source)?;
+        validate_session_configuration_destination(&self.destination)?;
+        Ok(())
+    }
+}
+
+pub fn validate_session_configuration_destination(value: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || matches!(value, "." | "..")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        anyhow::bail!("session configuration must use a bounded relative file name");
+    }
+    Ok(())
+}
+
+pub fn validate_session_auxiliary_configs(
+    baseline_destination: &str,
+    configs: &[SessionConfigurationFile],
+) -> anyhow::Result<()> {
+    if configs.len() > MAX_SESSION_AUXILIARY_CONFIGS {
+        anyhow::bail!("session auxiliary configuration inventory exceeds its bound");
+    }
+    let mut previous: Option<&str> = None;
+    for config in configs {
+        config.validate()?;
+        if config.destination == baseline_destination
+            || previous.is_some_and(|prior| prior >= config.destination.as_str())
+        {
+            anyhow::bail!(
+                "session auxiliary destinations must be sorted, unique and distinct from the baseline"
+            );
+        }
+        previous = Some(&config.destination);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedStructuredSessionProfile {
@@ -847,10 +1153,29 @@ pub struct AdmittedStructuredSessionProfile {
     pub schema_hashes: std::collections::BTreeMap<String, String>,
     pub baseline_source: String,
     pub baseline_destination: String,
+    pub auxiliary_configs: Vec<SessionConfigurationFile>,
+    pub runtime_configs: Vec<SessionRuntimeConfigurationFile>,
 }
 
 impl AdmittedStructuredSessionProfile {
+    pub fn external_candidate_requirement(
+        &self,
+    ) -> anyhow::Result<Option<crate::external_execution::admission::ExternalCandidateRequirement>>
+    {
+        let value = self.contract.get("external_candidate").ok_or_else(|| {
+            anyhow::anyhow!("structured-session external candidate requirement is missing")
+        })?;
+        let requirement: Option<
+            crate::external_execution::admission::ExternalCandidateRequirement,
+        > = serde_json::from_value(value.clone())?;
+        if let Some(requirement) = &requirement {
+            requirement.validate()?;
+        }
+        Ok(requirement)
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
+        let external_candidate = self.external_candidate_requirement()?;
         super::thread_snapshot::validate_canonical_hash(
             "structured-session profile hash",
             &self.profile_hash,
@@ -862,14 +1187,57 @@ impl AdmittedStructuredSessionProfile {
         if contract.is_empty() {
             anyhow::bail!("structured-session contract is empty");
         }
-        self.portable_state_contract()?
-            .map(|contract| contract.validate())
-            .transpose()?;
+        let workload_client = contract.get("workload_client").ok_or_else(|| {
+            anyhow::anyhow!("structured-session workload client contract is missing")
+        })?;
+        if external_candidate.is_some() && !workload_client.is_null() {
+            anyhow::bail!(
+                "external candidate profile must retain workload_client null and an empty delegation boundary"
+            );
+        }
+        let declared: Vec<SessionConfigurationFile> = serde_json::from_value(
+            contract.get("auxiliary_configs").cloned().ok_or_else(|| {
+                anyhow::anyhow!("structured-session auxiliary configuration inventory is missing")
+            })?,
+        )?;
+        if declared != self.auxiliary_configs {
+            anyhow::bail!("structured-session auxiliary configuration contradicts its contract");
+        }
+        validate_session_auxiliary_configs(&self.baseline_destination, &self.auxiliary_configs)?;
+        if let Some(external_candidate) = external_candidate.as_ref() {
+            let destination = &external_candidate.provider_configuration_destination;
+            if destination == &self.baseline_destination
+                || self
+                    .auxiliary_configs
+                    .iter()
+                    .any(|config| &config.destination == destination)
+            {
+                anyhow::bail!(
+                    "generated private configuration collides with signed session configuration"
+                );
+            }
+        }
+        let runtime: Vec<SessionRuntimeConfigurationFile> =
+            serde_json::from_value(contract.get("runtime_configs").cloned().ok_or_else(|| {
+                anyhow::anyhow!("structured-session runtime configuration inventory is missing")
+            })?)?;
+        if runtime != self.runtime_configs {
+            anyhow::bail!("structured-session runtime configuration contradicts its contract");
+        }
+        validate_session_runtime_configs(&self.runtime_configs)?;
+        if let Some(contract) = self.portable_state_contract()? {
+            contract.validate_configuration_exclusions(&self.auxiliary_configs)?;
+            if let Some(external_candidate) = external_candidate.as_ref() {
+                contract.validate_generated_configuration_exclusion(
+                    &external_candidate.provider_configuration_destination,
+                )?;
+            }
+        }
         self.credential_subject_contract()?
             .map(|contract| contract.validate())
             .transpose()?;
         let canonical = lillux::canonical_json(&self.contract)?;
-        if canonical.len() > 64 * 1024
+        if canonical.len() > MAX_STRUCTURED_SESSION_PROFILE_BYTES
             || lillux::sha256_hex(canonical.as_bytes()) != self.profile_hash
         {
             anyhow::bail!("structured-session contract contradicts its admitted hash");
@@ -948,6 +1316,174 @@ impl AdmittedStructuredSessionProfile {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_configuration_inventory_is_canonical_bounded_and_nonoverlapping() {
+        use super::*;
+        let file = SessionRuntimeConfigurationFile {
+            source: "policy/requirements.toml".into(),
+            destination: "/etc/qualification/requirements.toml".into(),
+        };
+        validate_session_runtime_configs(&[file.clone()]).unwrap();
+        for destination in [
+            "",
+            "/",
+            "relative",
+            "//etc/file",
+            "/etc/./file",
+            "/etc/../file",
+            "/etc/file/",
+            "/etc/a\\b",
+            "/etc/a\0b",
+            "/proc/policy",
+            "/dev/policy",
+            "/sys/policy",
+            "/tmp/policy/file",
+            "/ryeos/policy",
+            "/run",
+            "/run/ryeos/policy",
+        ] {
+            let mut invalid = file.clone();
+            invalid.destination = destination.into();
+            assert!(
+                validate_session_runtime_configs(&[invalid]).is_err(),
+                "{destination:?}"
+            );
+        }
+        for source in [
+            "",
+            "../policy",
+            "/etc/policy",
+            "a//b",
+            "a/./b",
+            "a/../b",
+            "a\\b",
+        ] {
+            let mut invalid = file.clone();
+            invalid.source = source.into();
+            assert!(validate_session_runtime_configs(&[invalid]).is_err());
+        }
+        assert!(validate_session_runtime_configs(&[file.clone(), file.clone()]).is_err());
+        let mut parent = file.clone();
+        parent.destination = "/etc/qualification".into();
+        assert!(validate_session_runtime_configs(&[parent, file.clone()]).is_err());
+        assert!(
+            validate_session_runtime_configs(&vec![file; MAX_SESSION_AUXILIARY_CONFIGS + 1])
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SessionRuntimeConfigurationFile>(serde_json::json!({
+                "source":"a", "destination":"/etc/a", "writable":true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn auxiliary_configuration_inventory_is_closed_and_bounded() {
+        use super::*;
+        let file = SessionConfigurationFile {
+            source: "admitted.conf".into(),
+            destination: "runtime.conf".into(),
+        };
+        validate_session_auxiliary_configs("baseline.conf", &[file.clone()]).unwrap();
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "/runtime",
+            "dir/file",
+            "file/",
+            "file\\name",
+            "a\0b",
+        ] {
+            let mut bad = file.clone();
+            bad.destination = invalid.into();
+            assert!(validate_session_auxiliary_configs("baseline.conf", &[bad]).is_err());
+        }
+        assert!(validate_session_auxiliary_configs("runtime.conf", &[file.clone()]).is_err());
+        assert!(
+            validate_session_auxiliary_configs("baseline.conf", &[file.clone(), file.clone()])
+                .is_err()
+        );
+        assert!(
+            validate_session_auxiliary_configs(
+                "baseline.conf",
+                &vec![file; MAX_SESSION_AUXILIARY_CONFIGS + 1]
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SessionConfigurationFile>(
+                serde_json::json!({"source":"a", "destination":"b", "optional":true})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn auxiliary_configuration_cannot_be_restored_as_session_state() {
+        use super::*;
+        let configs = vec![SessionConfigurationFile {
+            source: "signed.conf".into(),
+            destination: "environment.conf".into(),
+        }];
+        let mut contract = PortableSessionStateContract {
+            schema: 1,
+            restore_contract: "ryeos.worker_session.restore.v1".into(),
+            max_depth: 8,
+            max_entries: 8,
+            max_file_bytes: 1024,
+            max_total_bytes: 2048,
+            selectors: vec![
+                PortableSessionStateSelector {
+                    pattern: "environment.conf".into(),
+                    class: PortableSessionStateClass::ForbiddenOrUnknown,
+                    max_matches: 1,
+                },
+                PortableSessionStateSelector {
+                    pattern: "sessions/{session_id}.json".into(),
+                    class: PortableSessionStateClass::PortableSessionState,
+                    max_matches: 1,
+                },
+            ],
+        };
+        contract.validate().unwrap();
+        contract
+            .validate_configuration_exclusions(&configs)
+            .unwrap();
+        contract
+            .validate_generated_configuration_exclusion("environment.conf")
+            .unwrap();
+        for class in [
+            PortableSessionStateClass::NodePrivateCredentialState,
+            PortableSessionStateClass::RebuildableCache,
+        ] {
+            contract.selectors[0].class = class;
+            assert!(
+                contract
+                    .validate_configuration_exclusions(&configs)
+                    .is_err()
+            );
+            assert!(
+                contract
+                    .validate_generated_configuration_exclusion("environment.conf")
+                    .is_err()
+            );
+        }
+        contract.selectors[0].class = PortableSessionStateClass::ForbiddenOrUnknown;
+        contract.selectors[1].pattern = "{session_id}.conf".into();
+        assert!(
+            contract
+                .validate_configuration_exclusions(&configs)
+                .is_err()
+        );
+        assert!(
+            contract
+                .validate_generated_configuration_exclusion("environment.conf")
+                .is_err()
+        );
+    }
+
     #[test]
     fn prepared_session_environment_requires_exact_runtime_view_delivery() {
         use super::*;
@@ -1108,7 +1644,7 @@ mod tests {
 
     #[test]
     fn predecessor_capsule_schema_is_refused_without_translation() {
-        for schema in [1, 9, 10] {
+        for schema in [1, 9, 10, 13] {
             let value = serde_json::json!({
                 "schema": schema,
                 "kind": PERSISTENT_SESSION_CAPSULE_KIND

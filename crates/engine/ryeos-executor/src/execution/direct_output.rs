@@ -197,7 +197,117 @@ fn settle(completion: &mut ExecutionCompletion, observed: Result<StreamSummary>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_engine::dispatch::interpret_external_terminal;
     use ryeos_engine::protocol_vocabulary::StreamingChunkKind;
+
+    fn external_observation(
+        reason: ryeos_state::external_execution::ExternalCommandTerminationReason,
+        target_exit: ryeos_state::external_execution::ExternalTargetExit,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> ryeos_state::external_execution::ExternalCommandTermination {
+        use ryeos_state::external_execution::ExternalCommandOutputCommitment;
+        let commitment = |bytes: &[u8]| ExternalCommandOutputCommitment {
+            bytes: bytes.len() as u64,
+            sha256: lillux::sha256_hex(bytes),
+            truncated: false,
+        };
+        ryeos_state::external_execution::ExternalCommandTermination {
+            reason,
+            target_exit,
+            stdout: commitment(stdout),
+            stderr: commitment(stderr),
+        }
+    }
+
+    #[test]
+    fn external_normal_exit_uses_ordinary_tool_result_semantics() {
+        use ryeos_state::external_execution::{
+            ExternalCommandTerminationReason::TargetExited, ExternalTargetExit::Code,
+        };
+        for code in [0, 7] {
+            for stdout in [
+                br#"{"success":true,"answer":42}"#.as_slice(),
+                br#"{"success":false,"error":"bad input"}"#.as_slice(),
+                b"opaque output".as_slice(),
+                b"invalid utf8: \xff".as_slice(),
+            ] {
+                let stderr = b"ordinary target diagnostic";
+                let actual = interpret_external_terminal(
+                    &external_observation(TargetExited, Code(code), stdout, stderr),
+                    stdout,
+                    stderr,
+                );
+                let expected = ryeos_engine::dispatch::interpret_terminal_output(
+                    code,
+                    &String::from_utf8_lossy(stdout),
+                    &String::from_utf8_lossy(stderr),
+                );
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn external_interruption_or_signal_never_parses_success_output() {
+        use ryeos_state::external_execution::{
+            ExternalCommandTerminationReason as Reason, ExternalTargetExit,
+        };
+        let stdout = br#"{"success":true,"answer":42}"#;
+        for (reason, exit, status) in [
+            (
+                Reason::Cancelled,
+                ExternalTargetExit::Code(0),
+                ThreadTerminalStatus::Cancelled,
+            ),
+            (
+                Reason::Deadline,
+                ExternalTargetExit::Code(0),
+                ThreadTerminalStatus::Killed,
+            ),
+            (
+                Reason::OutputLimit,
+                ExternalTargetExit::Code(0),
+                ThreadTerminalStatus::Failed,
+            ),
+            (
+                Reason::Fault,
+                ExternalTargetExit::Code(0),
+                ThreadTerminalStatus::Failed,
+            ),
+            (
+                Reason::TargetExited,
+                ExternalTargetExit::Signal(9),
+                ThreadTerminalStatus::Failed,
+            ),
+        ] {
+            let mut observation = external_observation(reason, exit, stdout, b"");
+            observation.stdout.truncated = reason == Reason::OutputLimit;
+            let completion = interpret_external_terminal(&observation, stdout, b"");
+            assert_eq!(completion.status, status);
+            assert!(completion.result.is_none());
+            assert!(completion.error.is_some());
+            assert!(completion.final_cost.is_none());
+            assert!(completion.metadata.is_none());
+        }
+        // Defense in depth: malformed normal-exit evidence is not upgraded to
+        // success by interpretation; journal validation must also reject it.
+        let mut observation = external_observation(
+            Reason::TargetExited,
+            ExternalTargetExit::Code(0),
+            stdout,
+            b"",
+        );
+        observation.stderr.truncated = true;
+        assert!(
+            interpret_external_terminal(&observation, stdout, b"")
+                .result
+                .is_none()
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

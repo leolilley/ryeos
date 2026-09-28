@@ -3432,6 +3432,14 @@ mod tests {
             &requirements,
         )
         .unwrap_err();
+        assert!(format!("{error:#}").contains("protected process-scope authority identity"));
+
+        // A valid authority identity does not override a negative readiness
+        // observation. Exercise that distinct rejection with a complete status.
+        let mut unavailable = target_status(false, "protected_authority_absent", "enforce", "host");
+        unavailable["isolation"]["process_scopes"]["authority_digest"] =
+            serde_json::json!(format!("sha256:{}", "b".repeat(64)));
+        let error = target_readiness_evidence(&unavailable, &requirements).unwrap_err();
         assert!(format!("{error:#}").contains("protected_authority_absent"));
 
         let error = target_readiness_evidence(

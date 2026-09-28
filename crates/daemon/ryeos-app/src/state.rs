@@ -78,6 +78,12 @@ pub struct AppState {
     pub commands: Arc<CommandService>,
     pub callback_tokens: Arc<CallbackCapabilityStore>,
     pub thread_auth: Arc<ThreadAuthStore>,
+    /// Exact live-controller exclusion lifetime. This is a required
+    /// composition-root authority rather than an optional extension: work
+    /// admitted by this controller may retain it while a blocking host call
+    /// settles, preventing a replacement controller from overlapping the old
+    /// generation.
+    pub controller_lifetime: Arc<crate::state_lock::StateLockLease>,
     /// Generic extension state bag for composition-root state that
     /// doesn't belong in core (e.g., UI state). Populated by the
     /// daemon composition root. Use `extensions.get::<T>()` to
@@ -97,6 +103,22 @@ pub struct AppState {
     pub service_descriptors: &'static [ServiceDescriptor],
     /// Node-config snapshot loaded at startup.
     pub node_config: Arc<NodeConfigSnapshot>,
+    /// Installed trusted lifecycle adapters. Empty is a fail-closed supported
+    /// state: external profiles cannot reserve or contact an allocator.
+    pub external_placement_backends:
+        Arc<crate::external_placement::ExternalPlacementBackendRegistry>,
+    /// Exact controller-side connector artifacts. Empty is fail-closed and
+    /// external profile admission refuses before provider contact.
+    pub external_candidate_connectors:
+        Arc<crate::external_placement::ExternalCandidateConnectorRegistry>,
+    /// Signed provider-owned configuration serializers. These are distinct
+    /// from lifecycle adapters and from the connector executable itself.
+    pub external_provider_configurations:
+        Arc<crate::external_placement::ExternalProviderConfigurationRegistry>,
+    /// Process-local coalescing for durable controller-side candidate import.
+    /// The signed transcript and CAS remain authoritative across restart.
+    pub external_candidate_imports:
+        Arc<crate::external_candidate_import::ExternalCandidateImportPool>,
     /// Exact atomic node-owned semantic policy generation loaded at startup.
     pub node_policy: Arc<NodePolicySnapshot>,
     /// Operator-secret store. Read at request-build time and merged
@@ -138,6 +160,14 @@ pub struct AppState {
     /// policy generation. Allocation remains owned by exact durable process
     /// occurrences, not by this selection catalog.
     pub execution_resources: Arc<crate::execution_resources::ExecutionResourcePool>,
+    /// Process-local exact launch materials for scoped producer children.
+    /// Empty after daemon restart; never reconstructed from durable paths.
+    pub scoped_producer_authorities:
+        Arc<crate::scoped_producer_authority::ScopedProducerAuthorityRegistry>,
+    /// Exact live scoped children and their consumed launch-material lifelines.
+    /// Empty after restart; callbacks cannot reconstruct process ownership.
+    pub scoped_producer_processes:
+        Arc<crate::scoped_producer_process::ScopedProducerProcessRegistry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -260,6 +290,148 @@ impl AppState {
                     outbox_oldest_created_at_ms: None,
                 },
             },
+        })
+    }
+}
+
+/// Minimal real application composition for cross-crate protocol tests. The
+/// caller owns the directory lifetime. No API handlers, placement binding, or
+/// vault authority is preinstalled; composed tests must add only the exact
+/// production boundary they exercise.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+
+    use super::{AppState, CatalogHealth};
+
+    pub fn build(root: &std::path::Path) -> Result<AppState> {
+        let runtime_state_dir = root.join(".ai/state");
+        let runtime_db_path = root.join("runtime.sqlite3");
+        let key_path = root.join("identity/node-key.pem");
+        let config = crate::config::Config {
+            bind: "127.0.0.1:0".parse()?,
+            db_path: runtime_db_path.clone(),
+            uds_path: root.join("test.sock"),
+            app_root: root.to_path_buf(),
+            node_signing_key_path: key_path.clone(),
+            operator_signing_key_path: root.join("identity/operator-key.pem"),
+            authorized_keys_dir: root.join("auth"),
+        };
+        let identity = crate::identity::NodeIdentity::create(&key_path)?;
+        crate::identity::NodeIdentity::create(&config.operator_signing_key_path)?;
+        let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
+            &identity,
+        ));
+        let mut head_trust = ryeos_state::refs::TrustStore::new();
+        head_trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+        let write_barrier = crate::write_barrier::WriteBarrier::new();
+        let state_store = Arc::new(crate::state_store::StateStore::new_with_head_trust(
+            root.to_path_buf(),
+            runtime_state_dir,
+            runtime_db_path,
+            signer,
+            write_barrier.clone(),
+            Arc::new(head_trust),
+        )?);
+        let engine = Arc::new(ryeos_engine::engine::Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        ));
+        let kind_profiles = Arc::new(crate::kind_profiles::KindProfileRegistry::build(None));
+        let events = Arc::new(crate::event_store_service::EventStoreService::new(
+            state_store.clone(),
+        ));
+        let event_streams = Arc::new(crate::event_stream::ThreadEventHub::new(16));
+        let threads = Arc::new(
+            crate::thread_lifecycle::ThreadLifecycleService::new_for_test_with_site_id(
+                state_store.clone(),
+                engine.clone(),
+                kind_profiles.clone(),
+                events.clone(),
+                event_streams.clone(),
+                "site:composed-test",
+            )?,
+        );
+        let commands = Arc::new(crate::command_service::CommandService::new(
+            state_store.clone(),
+            kind_profiles,
+            events.clone(),
+        ));
+        let controller_lifetime = crate::state_lock::test_controller_lifetime(root)?;
+        Ok(AppState {
+            config: Arc::new(config),
+            daemon_build: crate::build_info::get(),
+            isolation: Arc::new(
+                ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            ),
+            state_store,
+            engine,
+            engine_cache: crate::engine_cache::EngineCache::new(
+                crate::engine_cache::EngineCacheConfig::default(),
+            ),
+            resolution_cache: Arc::new(crate::resolution_cache::ResolutionCache::new(128)),
+            identity: Arc::new(identity),
+            threads,
+            live_input: Arc::new(crate::live_input_queue::LiveInputQueue::new()),
+            events,
+            event_streams,
+            commands,
+            callback_tokens: Arc::new(crate::callback_token::CallbackCapabilityStore::new()),
+            thread_auth: Arc::new(crate::callback_token::ThreadAuthStore::new()),
+            controller_lifetime,
+            extensions: Arc::new(crate::extension_state::ExtensionState::new()),
+            write_barrier: Arc::new(write_barrier),
+            started_at: std::time::Instant::now(),
+            started_at_iso: String::new(),
+            catalog_health: CatalogHealth {
+                status: "ok".into(),
+                missing_services: Vec::new(),
+            },
+            services: Arc::new(crate::service_registry::ServiceRegistry::new()),
+            service_descriptors: &[],
+            node_config: Arc::new(crate::node_config::NodeConfigSnapshot {
+                external_execution: Vec::new(),
+                runtime_snapshot_production: Vec::new(),
+                runtime_snapshot_qualification: Vec::new(),
+                bundles: Vec::new(),
+                routes: Vec::new(),
+                commands: Vec::new(),
+            }),
+            external_placement_backends: Arc::new(Default::default()),
+            external_candidate_connectors: Arc::new(Default::default()),
+            external_provider_configurations: Arc::new(Default::default()),
+            external_candidate_imports: Arc::new(Default::default()),
+            node_policy: Arc::new(crate::node_policy::NodePolicySnapshot::from_test_records(
+                Vec::new(),
+            )),
+            vault: Arc::new(crate::vault::EmptyVault),
+            command_registry: Arc::new(ryeos_runtime::CommandRegistry::from_records(
+                &[],
+                &Default::default(),
+            )?),
+            authorizer: Arc::new(ryeos_runtime::authorizer::Authorizer::new()),
+            scheduler_db: Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory()?),
+            scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
+            scheduler_reload_tx: None,
+            ignore_matcher: Arc::new(crate::ignore::IgnoreMatcher::from_config(
+                &crate::ignore::IgnoreConfig {
+                    patterns: Vec::new(),
+                },
+            )?),
+            vault_fingerprint: None,
+            accounting: None,
+            persistent_sessions: Arc::new(crate::persistent_session::PersistentSessionPool::new()),
+            execution_resources: Arc::new(
+                crate::execution_resources::ExecutionResourcePool::deny_all(),
+            ),
+            scoped_producer_authorities: Arc::new(Default::default()),
+            scoped_producer_processes: Arc::new(Default::default()),
         })
     }
 }

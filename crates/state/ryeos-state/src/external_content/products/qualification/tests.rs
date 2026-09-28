@@ -11,6 +11,7 @@ use super::super::{ProductBounds, ProductProducerAdmission, ProductShape, Produc
 use crate::objects::{
     EXTERNAL_CONTENT_MANIFEST_KIND, ExternalContentKind, ExternalContentMountRoot,
 };
+#[cfg(test)]
 use crate::signer::TestSigner;
 use serde_json::json;
 
@@ -20,8 +21,425 @@ fn policy() -> ProductQualificationPolicy {
         verifier_ref: "tool:fixtures/qualify_runtime".into(),
         subject_declaration_id: "runtime".into(),
         allowed_claims: vec!["command_probe".into(), "extension_probe".into()],
+        minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
         verifier_parameters: json!({"scope":"bounded_fixture"}),
+        consumer_execution_context: None,
+        producer_scenarios: BTreeMap::new(),
     }
+}
+
+#[test]
+fn consumer_execution_context_requires_typed_canonical_refs() {
+    let mut policy = policy();
+    policy.consumer_execution_context = Some(ProductQualificationConsumerExecutionContext {
+        worker_ref: "worker:codex/external-hosted-authoring".into(),
+        product_declaration_id: "guest-runtime".into(),
+        environment_ref: "config:codex/environments/external-authoring".into(),
+        worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
+        environment_binding: "environment".into(),
+    });
+    policy.validate().unwrap();
+    let relationship_consumer = ProductRelationshipConsumer {
+        canonical_ref: "worker:codex/external-hosted-authoring".into(),
+        declaration_id: "guest-runtime".into(),
+    };
+    policy
+        .consumer_execution_context
+        .as_ref()
+        .unwrap()
+        .validate_relationship_consumer(&relationship_consumer)
+        .unwrap();
+    let result = ProductQualificationResult {
+        schema: PRODUCT_QUALIFICATION_RESULT_SCHEMA.into(),
+        subject_manifest_hash: "a".repeat(64),
+        claims: vec!["command_probe".into()],
+        probe_evidence: json!({}),
+    };
+    assert!(
+        result
+            .validate_claims_for(&policy, &["command_probe".into()])
+            .is_err()
+    );
+    let mut wrong_consumer = relationship_consumer.clone();
+    wrong_consumer.declaration_id = "other-runtime".into();
+    assert!(
+        policy
+            .consumer_execution_context
+            .as_ref()
+            .unwrap()
+            .validate_relationship_consumer(&wrong_consumer)
+            .is_err()
+    );
+    policy
+        .consumer_execution_context
+        .as_mut()
+        .unwrap()
+        .worker_ref = "tool:codex/external-hosted-authoring".into();
+    assert!(policy.validate().is_err());
+    policy
+        .consumer_execution_context
+        .as_mut()
+        .unwrap()
+        .worker_ref = "worker:codex/external-hosted-authoring".into();
+    policy
+        .consumer_execution_context
+        .as_mut()
+        .unwrap()
+        .environment_ref = "worker:codex/external-authoring".into();
+    assert!(policy.validate().is_err());
+    policy
+        .consumer_execution_context
+        .as_mut()
+        .unwrap()
+        .environment_ref = "config:codex/environments/external-authoring".into();
+    policy
+        .consumer_execution_context
+        .as_mut()
+        .unwrap()
+        .environment_binding
+        .clear();
+    assert!(policy.validate().is_err());
+}
+
+#[test]
+fn launch_purpose_retains_same_generation_consumer_definitions() {
+    let mut purpose = launch_purpose();
+    let context = ProductQualificationConsumerExecutionContext {
+        worker_ref: "worker:codex/external-hosted-authoring".into(),
+        product_declaration_id: "guest-runtime".into(),
+        environment_ref: "config:codex/environments/external-authoring".into(),
+        worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
+        environment_binding: "environment".into(),
+    };
+    purpose.policy_source.policy.consumer_execution_context = Some(context.clone());
+    purpose.policy_source.policy.producer_scenarios.insert(
+        "direct_codex".into(),
+        ProductQualificationProducerScenario {
+            recipe_ref: "config:codex/direct-probe".into(),
+        },
+    );
+    purpose.producer_recipe_sources.insert(
+        "direct_codex".into(),
+        ProductProducerRecipeSourceIdentity {
+            bundle_generation_identity: "generation-1".into(),
+            canonical_ref: "config:codex/direct-probe".into(),
+            raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
+            publisher_fingerprint: "c".repeat(64),
+            recipe_digest: "d".repeat(64),
+        },
+    );
+    assert!(purpose.validate().is_err());
+    let definition = |reference: &str| ProductQualificationBundleDefinitionIdentity {
+        canonical_ref: reference.into(),
+        raw_content_digest: "a".repeat(64),
+        effective_definition_digest: "b".repeat(64),
+        publisher_fingerprint: "c".repeat(64),
+    };
+    purpose.consumer_definitions = Some(ProductQualificationConsumerDefinitionIdentity {
+        bundle_generation_identity: "generation-1".into(),
+        worker: definition(&context.worker_ref),
+        environment: definition(&context.environment_ref),
+        worker_execution: definition(&context.worker_execution_ref),
+    });
+    assert!(purpose.validate().is_err());
+    purpose.consumer_content = Some(ProductQualificationConsumerContentIdentity {
+        definitions: purpose.consumer_definitions.as_ref().unwrap().clone(),
+        relationship_definition: definition("config:codex/guest-runtime-products"),
+        worker_source: EffectiveSourceClosureProjection {
+            schema: crate::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+            binding_hash: "1".repeat(64),
+            content_manifest_hash: "2".repeat(64),
+            owner_key: "3".repeat(64),
+            file_count: 1,
+            total_bytes: 1,
+        },
+        worker_profile_hash: "4".repeat(64),
+        worker_preselection_effective_definition_digest: "5".repeat(64),
+        worker_literals: ExternalContentRealizationSet::new(vec![
+            crate::objects::ExternalContentRealization {
+                id: "codex".into(),
+                kind: ExternalContentKind::File,
+                mode: ExternalContentMode::Pinned,
+                manifest_hash: "6".repeat(64),
+                entry_count: 1,
+                total_bytes: 1,
+                mount_root: ExternalContentMountRoot::ExecutionRuntime,
+                mount: "codex".into(),
+            },
+        ])
+        .unwrap(),
+        environment_realized_effective_definition_digest: "7".repeat(64),
+        environment_realizations: ExternalContentRealizationSet::new(vec![
+            crate::objects::ExternalContentRealization {
+                id: "authoring-tools".into(),
+                kind: ExternalContentKind::Tree,
+                mode: ExternalContentMode::Pinned,
+                manifest_hash: "8".repeat(64),
+                entry_count: 1,
+                total_bytes: 1,
+                mount_root: ExternalContentMountRoot::ExecutionRuntime,
+                mount: "authoring-tools".into(),
+            },
+        ])
+        .unwrap(),
+        executable_search: vec![ExecutableSearchPathEntry {
+            realization_id: "authoring-tools".into(),
+            relative_directory: "bin".into(),
+        }],
+        process_environment: BTreeMap::new(),
+        runtime_member: ProductQualificationConsumerRuntimeMemberIdentity {
+            product_declaration_id: "guest-runtime".into(),
+            relative_path: "bin/codex".into(),
+            executable_sha256: "9".repeat(64),
+        },
+    });
+    purpose.validate().unwrap();
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .runtime_member
+        .product_declaration_id = "other-runtime".into();
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .runtime_member
+        .product_declaration_id = context.product_declaration_id.clone();
+    purpose.validate().unwrap();
+    let mut no_scenarios = purpose.clone();
+    no_scenarios.policy_source.policy.producer_scenarios.clear();
+    no_scenarios.producer_recipe_sources.clear();
+    assert!(no_scenarios.validate().is_err());
+    purpose
+        .producer_recipe_sources
+        .get_mut("direct_codex")
+        .unwrap()
+        .bundle_generation_identity = "another-generation".into();
+    assert!(purpose.validate().is_err());
+    purpose
+        .producer_recipe_sources
+        .get_mut("direct_codex")
+        .unwrap()
+        .bundle_generation_identity = "generation-1".into();
+    purpose.validate().unwrap();
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .process_environment
+        .insert(
+            "TOOL_PATH".into(),
+            SessionProcessEnvironmentValue::RealizationPath {
+                realization_id: "ambient-tool".into(),
+                relative_path: "content".into(),
+                path_kind: crate::objects::SessionProcessEnvironmentPathKind::File,
+            },
+        );
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .process_environment
+        .clear();
+    purpose.validate().unwrap();
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .environment_realizations =
+        ExternalContentRealizationSet::new(vec![crate::objects::ExternalContentRealization {
+            id: "codex".into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: "8".repeat(64),
+            entry_count: 1,
+            total_bytes: 1,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "authoring-tools".into(),
+        }])
+        .unwrap();
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .environment_realizations =
+        ExternalContentRealizationSet::new(vec![crate::objects::ExternalContentRealization {
+            id: "authoring-tools".into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: "8".repeat(64),
+            entry_count: 1,
+            total_bytes: 1,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "authoring-tools".into(),
+        }])
+        .unwrap();
+    purpose.validate().unwrap();
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .worker_profile_hash = "not-a-hash".into();
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .worker_profile_hash = "4".repeat(64);
+    purpose
+        .consumer_definitions
+        .as_mut()
+        .unwrap()
+        .environment
+        .canonical_ref = "config:codex/environments/other".into();
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_definitions
+        .as_mut()
+        .unwrap()
+        .environment
+        .canonical_ref = context.environment_ref.clone();
+    purpose
+        .consumer_definitions
+        .as_mut()
+        .unwrap()
+        .bundle_generation_identity
+        .clear();
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_definitions
+        .as_mut()
+        .unwrap()
+        .bundle_generation_identity = "generation-1".into();
+    purpose
+        .consumer_definitions
+        .as_mut()
+        .unwrap()
+        .worker_execution
+        .publisher_fingerprint = "not-a-hash".into();
+    assert!(purpose.validate().is_err());
+}
+
+#[cfg(test)]
+fn launch_purpose() -> ProductQualificationLaunchPurpose {
+    let policy = policy();
+    ProductQualificationLaunchPurpose {
+        schema: PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
+        launch_id: format!("L-{}", "a".repeat(32)),
+        owner_fingerprint: "fp:operator".into(),
+        product_witness_hash: "b".repeat(64),
+        witness_source: ProductWitnessSource::LocalCapture {},
+        relationship_name: "runtime_to_worker".into(),
+        policy_source: ProductQualificationPolicySource {
+            canonical_ref: "config:fixtures/qualification_policy".into(),
+            raw_content_digest: "c".repeat(64),
+            effective_definition_digest: "d".repeat(64),
+            publisher_fingerprint: "e".repeat(64),
+            policy: policy.clone(),
+        },
+        consumer_definitions: None,
+        consumer_content: None,
+        producer_recipe_sources: BTreeMap::new(),
+        subject_declaration_id: policy.subject_declaration_id.clone(),
+        subject_manifest_hash: "f".repeat(64),
+        required_claims: vec!["command_probe".into()],
+        admitted_parameters_digest: policy.admitted_parameters_digest().unwrap(),
+        verifier_ref: policy.verifier_ref.clone(),
+        verifier_effective_definition_digest: "1".repeat(64),
+        verifier_realized_definition_digest: "2".repeat(64),
+    }
+}
+
+#[test]
+fn launch_purpose_pins_every_signed_producer_recipe_source() {
+    let mut purpose = launch_purpose();
+    let recipe_ref = "config:fixtures/producer".to_owned();
+    purpose.policy_source.policy.producer_scenarios.insert(
+        "native_codex".into(),
+        ProductQualificationProducerScenario {
+            recipe_ref: recipe_ref.clone(),
+        },
+    );
+    assert!(purpose.validate().is_err());
+    purpose.producer_recipe_sources.insert(
+        "native_codex".into(),
+        ProductProducerRecipeSourceIdentity {
+            bundle_generation_identity: "generation-1".into(),
+            canonical_ref: recipe_ref,
+            raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
+            publisher_fingerprint: "c".repeat(64),
+            recipe_digest: "d".repeat(64),
+        },
+    );
+    purpose.validate().unwrap();
+    purpose
+        .producer_recipe_sources
+        .get_mut("native_codex")
+        .unwrap()
+        .canonical_ref = "config:fixtures/other".into();
+    assert!(purpose.validate().is_err());
+}
+
+#[test]
+fn launch_purpose_requires_exact_signed_policy_subject_parameters_and_owner_coordinate() {
+    let purpose = launch_purpose();
+    purpose.validate().unwrap();
+    let mut wire = serde_json::to_value(&purpose).unwrap();
+    wire.as_object_mut().unwrap().remove("witness_source");
+    assert!(serde_json::from_value::<ProductQualificationLaunchPurpose>(wire).is_err());
+    for mutate in [
+        (|p: &mut ProductQualificationLaunchPurpose| p.launch_id = "L-bad".into())
+            as fn(&mut ProductQualificationLaunchPurpose),
+        |p| p.owner_fingerprint = "".into(),
+        |p| p.product_witness_hash = "bad".into(),
+        |p| p.subject_declaration_id = "other".into(),
+        |p| p.subject_manifest_hash = "bad".into(),
+        |p| p.required_claims = vec!["unapproved".into()],
+        |p| p.admitted_parameters_digest = "0".repeat(64),
+        |p| p.verifier_ref = "tool:fixtures/other".into(),
+        |p| p.verifier_effective_definition_digest = "bad".into(),
+        |p| p.verifier_realized_definition_digest = "bad".into(),
+    ] {
+        let mut changed = purpose.clone();
+        mutate(&mut changed);
+        assert!(changed.validate().is_err());
+    }
+}
+
+#[test]
+fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
+    let mut policy_wire = serde_json::to_value(policy()).unwrap();
+    policy_wire
+        .as_object_mut()
+        .unwrap()
+        .remove("minimum_verifier_process_settlement");
+    assert!(ProductQualificationPolicy::from_value(&policy_wire).is_err());
+    policy_wire["minimum_verifier_process_settlement"] = json!("unknown");
+    assert!(ProductQualificationPolicy::from_value(&policy_wire).is_err());
+    policy_wire["minimum_verifier_process_settlement"] = json!("scope_empty");
+    ProductQualificationPolicy::from_value(&policy_wire).unwrap();
+
+    let mut evidence = evidence();
+    evidence.verifier.process_settlement_authority =
+        Some(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent);
+    assert!(evidence.validate().is_err());
+    evidence
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement =
+        VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
+    evidence.validate().unwrap();
+    evidence.verifier.process_settlement_authority =
+        Some(VerifierProcessSettlementAuthority::ScopeEmpty);
+    evidence.validate().unwrap();
+    evidence.verifier.process_settlement_authority = None;
+    assert!(evidence.validate().is_err());
 }
 
 #[test]
@@ -35,6 +453,8 @@ fn execution_proof_requires_exact_bounded_participants_and_contract_identity() {
     graph.verifier.canonical_ref = "graph:fixtures/qualify_runtime".into();
     graph.policy_source.policy.verifier_ref = graph.verifier.canonical_ref.clone();
     graph.verifier.artifact_identity = graph_artifact_identity();
+    graph.verifier.process_settlement_witness_digest = None;
+    graph.verifier.process_settlement_authority = None;
     graph.execution_proof = execution_proof(&graph.verifier.artifact_identity);
     let mut child = direct.verifier.clone();
     child.chain_root_id = "T-probe".into();
@@ -52,6 +472,18 @@ fn execution_proof_requires_exact_bounded_participants_and_contract_identity() {
         });
     graph.validate().unwrap();
     assert_eq!(graph.execution_verifiers().count(), 2);
+    let mut weak_participant = graph.clone();
+    weak_participant.execution_proof.participants[0]
+        .verifier
+        .process_settlement_authority =
+        Some(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent);
+    assert!(weak_participant.validate().is_err());
+    weak_participant
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement =
+        VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
+    weak_participant.validate().unwrap();
     for mutate in [
         (|p: &mut ProductQualificationParticipant| p.call_id = "".into())
             as fn(&mut ProductQualificationParticipant),
@@ -107,6 +539,93 @@ fn execution_proof_requires_exact_bounded_participants_and_contract_identity() {
     );
 }
 
+#[test]
+fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
+    let mut evidence = evidence();
+    let mut wire = serde_json::to_value(&evidence).unwrap();
+    wire["execution_proof"]
+        .as_object_mut()
+        .unwrap()
+        .remove("scoped_attempt");
+    assert!(ProductQualificationEvidence::from_value(&wire).is_err());
+
+    let source = ProductProducerRecipeSourceIdentity {
+        bundle_generation_identity: "generation-1".into(),
+        canonical_ref: "config:fixtures/producer".into(),
+        raw_content_digest: "a".repeat(64),
+        effective_definition_digest: "b".repeat(64),
+        publisher_fingerprint: "c".repeat(64),
+        recipe_digest: "d".repeat(64),
+    };
+    evidence.policy_source.policy.producer_scenarios.insert(
+        "native_codex".into(),
+        ProductQualificationProducerScenario {
+            recipe_ref: source.canonical_ref.clone(),
+        },
+    );
+    let scoped = ProductQualificationScopedAttemptProof {
+        attempt_id: format!("scoped-{}", "a".repeat(64)),
+        launch_owner_digest: "b".repeat(64),
+        scenario_id: "native_codex".into(),
+        producer_source: source,
+        process_identity_digest: "c".repeat(64),
+        scope_allocation_digest: "d".repeat(64),
+        scope_recovery_digest: "d".repeat(64),
+        mount_preparation_digest: "e".repeat(64),
+        natural_empty_receipt_digest: "f".repeat(64),
+        observation_object_hash: "1".repeat(64),
+        recovery_death_evidence_digest: "2".repeat(64),
+        retirement_evidence_digest: "2".repeat(64),
+        callback_method_surface_digest: "3".repeat(64),
+    };
+    evidence.execution_proof.scoped_attempt = Some(scoped);
+    evidence.validate().unwrap();
+
+    let mut wrong_scenario = evidence.clone();
+    wrong_scenario
+        .execution_proof
+        .scoped_attempt
+        .as_mut()
+        .unwrap()
+        .scenario_id = "other".into();
+    assert!(wrong_scenario.validate().is_err());
+    let mut wrong_source = evidence.clone();
+    wrong_source
+        .execution_proof
+        .scoped_attempt
+        .as_mut()
+        .unwrap()
+        .producer_source
+        .canonical_ref = "config:fixtures/other".into();
+    assert!(wrong_source.validate().is_err());
+    let mut bad_digest = evidence.clone();
+    bad_digest
+        .execution_proof
+        .scoped_attempt
+        .as_mut()
+        .unwrap()
+        .observation_object_hash = "not-a-hash".into();
+    assert!(bad_digest.validate().is_err());
+    let mut mixed = evidence.clone();
+    mixed
+        .execution_proof
+        .participants
+        .push(ProductQualificationParticipant {
+            call_id: "probe".into(),
+            operation_id: "4".repeat(64),
+            request_hash: "5".repeat(64),
+            action_digest: "6".repeat(64),
+            inherited_realizations_digest: "7".repeat(64),
+            verifier: evidence.verifier.clone(),
+        });
+    assert!(mixed.validate().is_err());
+    let mut graph = evidence;
+    graph.verifier.artifact_identity = graph_artifact_identity();
+    graph.execution_proof = execution_proof(&graph.verifier.artifact_identity);
+    graph.execution_proof.scoped_attempt = mixed.execution_proof.scoped_attempt;
+    assert!(graph.validate().is_err());
+}
+
 pub(crate) fn execution_proof(
     artifact: &AdmittedLaunchArtifactIdentity,
 ) -> ProductQualificationExecutionProof {
@@ -134,9 +653,11 @@ pub(crate) fn execution_proof(
             binary_signer_fingerprint: "2".repeat(64),
         },
         participants: Vec::new(),
+        scoped_attempt: None,
     }
 }
 
+#[cfg(test)]
 pub(crate) fn graph_artifact_identity() -> AdmittedLaunchArtifactIdentity {
     AdmittedLaunchArtifactIdentity::ManagedRuntime {
         runtime_ref: "runtime:fixtures/graph".into(),
@@ -231,6 +752,8 @@ pub(crate) fn evidence() -> ProductQualificationEvidence {
             subject_declaration_id: policy.subject_declaration_id.clone(),
             subject_manifest_hash: result.subject_manifest_hash.clone(),
             terminal_snapshot_hash: "4".repeat(64),
+            process_settlement_witness_digest: Some("9".repeat(64)),
+            process_settlement_authority: Some(VerifierProcessSettlementAuthority::ScopeEmpty),
             result_digest: result.digest().unwrap(),
         },
         policy_source: ProductQualificationPolicySource {
@@ -240,6 +763,7 @@ pub(crate) fn evidence() -> ProductQualificationEvidence {
             publisher_fingerprint: "7".repeat(64),
             policy,
         },
+        consumer_content: None,
         verifier_root_selections: None,
         execution_proof: execution_proof(&artifact_identity()),
         result,
@@ -334,6 +858,8 @@ fn logical_root_is_owned_by_launch_driver_not_kind_name() {
     };
     assert!(verifier.validate().is_err());
     verifier.admitted_project_root = None;
+    verifier.process_settlement_witness_digest = None;
+    verifier.process_settlement_authority = None;
     verifier.validate().unwrap();
     verifier.canonical_ref = "tool:fixtures/qualify_runtime".into();
     verifier.validate().unwrap();
@@ -406,6 +932,7 @@ fn subject_selection(evidence: &ProductQualificationEvidence) -> ResolvedExterna
     }
 }
 
+#[cfg(test)]
 pub(crate) fn dynamic_evidence() -> ProductQualificationEvidence {
     let mut evidence = evidence();
     let selection = subject_selection(&evidence);
@@ -475,6 +1002,7 @@ fn finite_policy_and_compact_evidence_round_trip() {
     evidence.validate().unwrap();
     let wire = serde_json::to_value(&evidence).unwrap();
     assert!(wire["verifier_root_selections"].is_null());
+    assert!(wire["consumer_content"].is_null());
     assert_eq!(
         ProductQualificationEvidence::from_value(&wire).unwrap(),
         evidence
@@ -485,6 +1013,12 @@ fn finite_policy_and_compact_evidence_round_trip() {
         .unwrap()
         .remove("verifier_root_selections");
     assert!(ProductQualificationEvidence::from_value(&missing_required_null).is_err());
+    let mut missing_consumer_content = wire.clone();
+    missing_consumer_content
+        .as_object_mut()
+        .unwrap()
+        .remove("consumer_content");
+    assert!(ProductQualificationEvidence::from_value(&missing_consumer_content).is_err());
     assert_eq!(
         ProductQualificationPolicy::from_value(&serde_json::to_value(policy()).unwrap()).unwrap(),
         policy()
@@ -625,6 +1159,63 @@ fn policy_is_closed_bounded_and_has_no_shell_or_wildcard_lane() {
     assert!(value.validate().is_err());
     let mut wire = serde_json::to_value(policy()).unwrap();
     wire["command"] = json!("host-python");
+    assert!(ProductQualificationPolicy::from_value(&wire).is_err());
+}
+
+#[test]
+fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
+    let mut value = policy();
+    value.producer_scenarios.insert(
+        "native_codex".into(),
+        ProductQualificationProducerScenario {
+            recipe_ref: "config:fixtures/independent-runtime/native-codex-producer".into(),
+        },
+    );
+    assert!(value.validate().is_ok());
+    assert_eq!(
+        ProductQualificationPolicy::from_value(&serde_json::to_value(&value).unwrap())
+            .unwrap()
+            .producer_scenarios,
+        value.producer_scenarios
+    );
+
+    for name in ["", "NativeCodex", "native.codex", "../escape"] {
+        let mut invalid = policy();
+        invalid.producer_scenarios.insert(
+            name.into(),
+            ProductQualificationProducerScenario {
+                recipe_ref: "config:fixtures/recipe".into(),
+            },
+        );
+        assert!(invalid.validate().is_err(), "accepted scenario {name:?}");
+    }
+    for reference in [
+        "bin:fixtures/producer",
+        "tool:fixtures/producer",
+        "config:fixtures/producer@latest",
+        " config:fixtures/producer",
+        "config:../producer",
+    ] {
+        let mut invalid = value.clone();
+        invalid
+            .producer_scenarios
+            .get_mut("native_codex")
+            .unwrap()
+            .recipe_ref = reference.into();
+        assert!(invalid.validate().is_err(), "accepted recipe {reference:?}");
+    }
+    let mut too_many = policy();
+    for index in 0..=MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS {
+        too_many.producer_scenarios.insert(
+            format!("scenario_{index}"),
+            ProductQualificationProducerScenario {
+                recipe_ref: "config:fixtures/recipe".into(),
+            },
+        );
+    }
+    assert!(too_many.validate().is_err());
+    let mut wire = serde_json::to_value(value).unwrap();
+    wire["producer_scenarios"]["native_codex"]["command"] = json!("/bin/sh");
     assert!(ProductQualificationPolicy::from_value(&wire).is_err());
 }
 

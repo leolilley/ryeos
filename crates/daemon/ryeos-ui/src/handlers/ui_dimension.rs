@@ -151,28 +151,27 @@ fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
 }
 
 pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let session = crate::seat_auth::compiled_ui_session()
-        .or_else(|| {
-            session_id_from_context(&ctx).and_then(|session_id| {
-                get_ui_state(&state)
-                    .expect("UiState not set")
-                    .browser_sessions
-                    .get_session(&session_id)
-            })
-        })
-        .ok_or_else(|| {
-            HandlerError::Forbidden("compiled UI session required for ryeos-ui dimension".into())
-        })?;
+    let attachment = crate::seat_auth::compiled_ui_attachment().ok_or_else(|| {
+        HandlerError::Forbidden("compiled UI attachment required for ryeos-ui dimension".into())
+    })?;
+    let session_id = session_id_from_context(&ctx)
+        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
+    let session = get_ui_state(&state)
+        .expect("UiState not set")
+        .browser_sessions
+        .get_session(&session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
 
-    let project_access = crate::seat_auth::session_project_access(&session)?;
+    let project_access = crate::seat_auth::attachment_project_access(&attachment)?;
     let project_path = project_access
         .as_ref()
         .map(|access| access.path().to_path_buf());
-    let project_identity = crate::seat_auth::session_project_query_identity(&session)?;
+    let project_identity = crate::seat_auth::attachment_project_query_identity(&attachment)?;
 
     let projection = build_dimension_projection(
         &state,
         &session,
+        &attachment,
         project_path.as_ref(),
         project_identity.as_ref(),
     )?;
@@ -183,6 +182,7 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
 fn build_dimension_projection(
     state: &AppState,
     session: &crate::browser_session::BrowserSession,
+    attachment: &crate::browser_session::AdmittedBindingAttachment,
     project_path: Option<&PathBuf>,
     project_identity: Option<&PathBuf>,
 ) -> Result<RyeOsDimensionProjection> {
@@ -296,10 +296,10 @@ fn build_dimension_projection(
         generated_at: lillux::time::iso8601_now(),
         session: SessionInfo {
             session_id: session.session_id.clone(),
-            surface_ref: session.surface_ref.clone(),
+            surface_ref: attachment.surface_ref.clone(),
             user_principal_id: session.user_principal_id.clone(),
-            binding_digest: session.compiled_binding.binding_digest.clone(),
-            posture: session.compiled_binding.posture,
+            binding_digest: attachment.compiled_binding.binding_digest.clone(),
+            posture: attachment.compiled_binding.posture,
         },
         local_node: LocalNode {
             identity,

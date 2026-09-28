@@ -1,0 +1,23 @@
+# ryeos:signed:2026-09-18T23:48:30Z:41d0fadbadadf656d04e11cabea2f6849f52c6d05d6a794896e18a7abb537f05:jnWGkCNB+QpNrGPcEPo0y1tRoGuDbyhnXNDersE/Y2dOAvYAFaTb9vO1UibhQBVetReaF7WXq1JFaoKBtL7qDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: project-document
+title: Document
+version: "1.0.0"
+description: Bounded project document following the explicit file selection
+
+widget: document
+sources:
+  default:
+    ref: service:ui/ryeos-ui/files/read
+    role: file_read
+    params:
+      root: "@facet:selection.file.root"
+      project_path: "@session:project_root"
+      path: "@facet:selection.file.path"
+    activation: on_demand
+    requires_project: true
+projections:
+  path: path
+  content: content
+  truncated: truncated
+refresh:
+  on_facet: selection

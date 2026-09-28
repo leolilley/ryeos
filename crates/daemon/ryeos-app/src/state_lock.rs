@@ -9,6 +9,7 @@
 //! including panic).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -16,7 +17,18 @@ use anyhow::Result;
 ///
 /// Holds the lock file open for the lifetime of the guard. Drop releases.
 pub struct StateLock {
-    inner: lillux::ExactExclusiveFileLock,
+    inner: Arc<lillux::ExactExclusiveFileLock>,
+}
+
+/// Retained proof that the exact operator state lock remains held.
+///
+/// Unlike [`StateLock`], this authority cannot be acquired directly and does
+/// not authorize stopped-node operations. It exists so work already admitted
+/// by the live controller can keep replacement controllers excluded until the
+/// work has actually stopped, including after a bounded async-runtime shutdown
+/// gives up waiting for an uninterruptible blocking call.
+pub struct StateLockLease {
+    inner: Arc<lillux::ExactExclusiveFileLock>,
 }
 
 impl std::fmt::Debug for StateLock {
@@ -33,7 +45,7 @@ impl StateLock {
     /// Returns an error if another process holds the lock.
     pub fn acquire(lock_path: &Path) -> Result<Self> {
         Ok(Self {
-            inner: lillux::ExactExclusiveFileLock::acquire(lock_path)?,
+            inner: Arc::new(lillux::ExactExclusiveFileLock::acquire(lock_path)?),
         })
     }
 
@@ -41,7 +53,9 @@ impl StateLock {
     /// teardown of a crashed predecessor generation.
     pub fn acquire_with_timeout(lock_path: &Path, timeout: std::time::Duration) -> Result<Self> {
         Ok(Self {
-            inner: lillux::ExactExclusiveFileLock::acquire_with_timeout(lock_path, timeout)?,
+            inner: Arc::new(lillux::ExactExclusiveFileLock::acquire_with_timeout(
+                lock_path, timeout,
+            )?),
         })
     }
 
@@ -50,11 +64,35 @@ impl StateLock {
     /// exclusion without changing the inspected state namespace.
     pub fn acquire_existing_read_only(lock_path: &Path) -> Result<Self> {
         Ok(Self {
-            inner: lillux::ExactExclusiveFileLock::acquire_existing_read_only(lock_path)?,
+            inner: Arc::new(lillux::ExactExclusiveFileLock::acquire_existing_read_only(
+                lock_path,
+            )?),
         })
     }
 
     /// Require this guard to protect the exact operational lock of `app_root`.
+    pub fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
+        self.inner.ensure_path_binding(&default_lock_path(app_root))
+    }
+
+    /// Retain only the live controller's exclusion lifetime. The returned
+    /// lease cannot be promoted into stopped-node mutation authority.
+    pub fn retain(&self) -> StateLockLease {
+        StateLockLease {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl std::fmt::Debug for StateLockLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateLockLease").finish_non_exhaustive()
+    }
+}
+
+impl StateLockLease {
+    /// Require this retained lease to protect the exact operational lock of
+    /// `app_root` before it is attached to admitted blocking work.
     pub fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
         self.inner.ensure_path_binding(&default_lock_path(app_root))
     }
@@ -66,6 +104,19 @@ pub fn default_lock_path(app_root: &Path) -> PathBuf {
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("operator.lock")
+}
+
+/// Compose the live-controller lifetime used by an isolated application test.
+///
+/// Production composition must retain the lease from the state lock it
+/// acquired before startup. A test application has no outer daemon process,
+/// so this helper performs that same acquisition once and returns only the
+/// restricted lifetime authority carried by [`crate::state::AppState`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_controller_lifetime(app_root: &Path) -> Result<Arc<StateLockLease>> {
+    let lock = StateLock::acquire(&default_lock_path(app_root))?;
+    lock.ensure_protects_app_root(app_root)?;
+    Ok(Arc::new(lock.retain()))
 }
 
 #[cfg(test)]
@@ -157,6 +208,20 @@ mod tests {
         assert!(StateLock::acquire(&lock_path).is_err());
         drop(acquired);
         StateLock::acquire(&lock_path).expect("released bounded lock was not reacquirable");
+    }
+
+    #[test]
+    fn retained_lease_excludes_replacement_after_primary_guard_drops() {
+        let tmpdir = TempDir::new().unwrap();
+        let lock_path = tmpdir.path().join("test.lock");
+        let holder = StateLock::acquire(&lock_path).unwrap();
+        let lease = holder.retain();
+
+        drop(holder);
+        assert!(StateLock::acquire(&lock_path).is_err());
+
+        drop(lease);
+        StateLock::acquire(&lock_path).expect("replacement remained excluded after final lease");
     }
 
     #[test]

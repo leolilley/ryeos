@@ -215,6 +215,8 @@ fn build_app_state(
     event_streams: Arc<ryeos_app::event_stream::ThreadEventHub>,
 ) -> AppState {
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+        external_execution: Vec::new(),
+        runtime_snapshot_production: Vec::new(),
         bundles: vec![],
         routes: vec![],
         commands: vec![],
@@ -223,6 +225,8 @@ fn build_app_state(
         Arc::new(ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap());
     let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
+    let controller_lifetime =
+        ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
     let state = AppState {
         config: Arc::new(config),
         daemon_build: ryeos_app::build_info::get(),
@@ -243,6 +247,7 @@ fn build_app_state(
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
+        controller_lifetime,
         extensions: Arc::new(ryeos_app::extension_state::ExtensionState::new()),
         write_barrier: Arc::new(write_barrier),
         started_at: std::time::Instant::now(),
@@ -254,6 +259,10 @@ fn build_app_state(
         services: Arc::new(ryeos_api::registry::build_service_registry()),
         service_descriptors: ryeos_api::handlers::ALL,
         node_config: Arc::new(snapshot),
+        external_placement_backends: Arc::new(Default::default()),
+        external_candidate_connectors: Arc::new(Default::default()),
+        external_provider_configurations: Arc::new(Default::default()),
+        external_candidate_imports: Arc::new(Default::default()),
         node_policy: Arc::new(
             ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
                 Arc::new(
@@ -280,6 +289,8 @@ fn build_app_state(
         execution_resources: Arc::new(
             ryeos_app::execution_resources::ExecutionResourcePool::deny_all(),
         ),
+        scoped_producer_authorities: Arc::new(Default::default()),
+        scoped_producer_processes: Arc::new(Default::default()),
     };
 
     state
@@ -298,5 +309,6 @@ fn test_object_closure_policy()
         max_total_blob_bytes: 128 * 1024 * 1024,
         max_response_bytes: 256 * 1024 * 1024,
         max_links_per_object: 100_000,
+        local_verification: None,
     }
 }

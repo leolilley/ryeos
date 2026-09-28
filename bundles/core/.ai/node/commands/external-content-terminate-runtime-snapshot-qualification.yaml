@@ -1,0 +1,11 @@
+# ryeos:signed:2026-09-28T09:42:59Z:ee4230c27bc0bdc6b1cb32c820129f6f0952af3fa1aa9936a00d4c706ab27488:qXEJTYibVP0xejyvSzyrhIFdWIKSkh72E4l/pAwDxpxtg+sqsyMRC9rptpmHFuWzByC30SZdpckzq8gwbFE2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, terminate-runtime-snapshot-qualification]
+description: Terminate one restored qualification Sandbox; replay observes only
+forms:
+  - slots:
+      - field: qualification_operation_id
+help:
+  usage: ryeos external-content terminate-runtime-snapshot-qualification <qualification-operation-id>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/terminate-runtime-snapshot-qualification

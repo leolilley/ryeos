@@ -182,6 +182,64 @@ fn raw_stdout_observer_retains_unread_bytes_after_settlement() {
 }
 
 #[test]
+fn explicit_stdout_offset_replays_lost_ack_without_advancing_reader() {
+    use lillux::time::MonotonicDeadline;
+
+    let mut process = lillux::spawn(shell("printf abcdef")).unwrap();
+    let mut reader = process.take_stdout_reader().unwrap();
+    assert!(process.wait().success);
+    let mut bytes = [0; 3];
+    let deadline = || MonotonicDeadline::after(Duration::from_secs(1));
+    assert_eq!(reader.read_from_until(0, &mut bytes, deadline()).unwrap(), 3);
+    assert_eq!(&bytes, b"abc");
+    assert_eq!(reader.read_from_until(0, &mut bytes, deadline()).unwrap(), 3);
+    assert_eq!(&bytes, b"abc");
+    assert_eq!(reader.read_from_until(3, &mut bytes, deadline()).unwrap(), 3);
+    assert_eq!(&bytes, b"def");
+    assert_eq!(reader.read_from_until(6, &mut bytes, deadline()).unwrap(), 0);
+    assert_eq!(
+        reader
+            .read_from_until(7, &mut bytes, deadline())
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(reader.read(&mut bytes).unwrap(), 3);
+    assert_eq!(&bytes, b"abc");
+}
+
+#[test]
+fn raw_stdout_observation_deadline_retains_reader_and_process_owner() {
+    use lillux::time::MonotonicDeadline;
+
+    let mut process = lillux::spawn(shell("/bin/sleep 0.1; printf ready")).unwrap();
+    let mut reader = process.take_stdout_reader().unwrap();
+    let mut bytes = [0; 5];
+    let error = reader
+        .read_until(
+            &mut bytes,
+            MonotonicDeadline::after(Duration::from_millis(10)),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert_eq!(
+        reader
+            .read_until(&mut bytes, MonotonicDeadline::after(Duration::from_secs(2)))
+            .unwrap(),
+        bytes.len()
+    );
+    assert_eq!(&bytes, b"ready");
+    let result = process.wait();
+    assert!(result.success, "{result:?}");
+    assert_eq!(
+        reader
+            .read_until(&mut bytes, MonotonicDeadline::after(Duration::ZERO))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn raw_stdout_observer_reports_existing_output_bound() {
     let mut request = shell("printf abcdefgh");
     request.limits = Some(SubprocessLimits {

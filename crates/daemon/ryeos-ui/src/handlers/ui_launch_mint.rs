@@ -25,6 +25,25 @@ use crate::state::get_ui_state;
 
 const UI_LAUNCH_MINT_CAP: &str = "ryeos.execute.service.ui/launch/mint";
 
+pub(crate) fn binding_request_bounds(
+    state: &AppState,
+) -> Result<ryeos_client_base::ui::UiBindingRequestBounds> {
+    let maximum = state
+        .node_config
+        .routes
+        .iter()
+        .find(|route| {
+            route.response.source.as_deref()
+                == Some(super::ui_invocations_dispatch::DESCRIPTOR.service_ref)
+        })
+        .map(|route| route.limits.body_bytes_max)
+        .ok_or_else(|| HandlerError::Internal("UI binding dispatch route is absent".into()))?;
+    Ok(ryeos_client_base::ui::UiBindingRequestBounds {
+        max_request_bytes: maximum,
+        max_input_bytes: maximum,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -43,11 +62,7 @@ pub struct Response {
     pub token: String,
     pub launch_url: String,
     pub session_id: String,
-}
-
-pub(crate) struct ProjectReplacement {
-    pub(crate) launch_url: String,
-    pub(crate) session_id: String,
+    pub attachment: ryeos_client_base::ui::UiBindingAttachment,
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -70,14 +85,17 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             HandlerError::Forbidden(format!("{UI_LAUNCH_MINT_CAP} capability required")).into(),
         );
     }
-    let project_authority = req
+    let authorized_project = req
         .project_path
         .as_deref()
         .map(|project_path| {
             super::ui_projects::authorize_launch_project(&ctx, &state, project_path)
         })
-        .transpose()?
-        .map(Arc::new);
+        .transpose()?;
+    let registered_project_id = authorized_project
+        .as_ref()
+        .and_then(|(_, registered_project_id)| registered_project_id.clone());
+    let project_authority = authorized_project.map(|(authority, _)| Arc::new(authority));
 
     let user_principal_id = match req.user_principal_id.clone() {
         Some(principal) => {
@@ -106,18 +124,47 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     let (compiled_binding, effective_surface) =
         compile_session_binding(&req, &ctx, &state, project_authority.as_deref())?;
+    let _project_registry_gate = match (
+        registered_project_id.as_deref(),
+        project_authority.as_deref(),
+    ) {
+        (Some(registered_project_id), Some(project_authority)) => Some(
+            super::ui_projects::lock_launch_project_registration(
+                &ctx,
+                &state,
+                registered_project_id,
+                project_authority.path(),
+            )
+            .await?,
+        ),
+        (None, _) => None,
+        (Some(_), None) => {
+            return Err(HandlerError::Internal(
+                "registered launch project has no retained directory authority".into(),
+            )
+            .into());
+        }
+    };
     let launch_ctx = LaunchContext {
         compiled_binding: std::sync::Arc::new(compiled_binding),
         effective_surface,
         granted_caps: ctx.scopes.clone(),
         user_principal_id,
         project_authority,
+        registered_project_id,
     };
 
-    let (session_id, token) = get_ui_state(&state)
+    let session_policy = state.node_policy.require::<
+        ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy,
+    >()?;
+    let (session_id, token, attachment) = get_ui_state(&state)
         .expect("UiState not set")
         .browser_sessions
-        .mint_token(launch_ctx);
+        .mint_token(
+            launch_ctx,
+            usize::try_from(session_policy.max_live_binding_attachments_per_session)?,
+            state.node_policy.generation_digest(),
+        )?;
 
     let bind = &state.config.bind;
     let launch_path = launch_path_for_token(&state, &token)?;
@@ -128,59 +175,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         token,
         launch_url,
         session_id,
+        attachment: attachment.public_descriptor(binding_request_bounds(&state)?),
     };
 
     serde_json::to_value(response).map_err(Into::into)
 }
 
-/// Mint the successor of an already authenticated UI session after an
-/// authority-bearing context change. The old binding is immutable; project
-/// selection therefore creates a new binding under the durable principal and
-/// grants retained by the server, never under browser-supplied authority.
-pub(crate) fn mint_project_replacement(
-    session: &crate::browser_session::BrowserSession,
-    project_authority: Arc<lillux::PinnedDirectory>,
-    state: &AppState,
-) -> Result<ProjectReplacement> {
-    let ctx = HandlerContext::new(
-        session.compiled_binding.binding.principal_id.clone(),
-        session.granted_caps.clone(),
-        true,
-    );
-    project_authority.ensure_path_binding()?;
-    let project_path = project_authority.path().to_string_lossy().into_owned();
-    let req = Request {
-        ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-        surface_ref: session.surface_ref.clone(),
-        project_path: Some(project_path),
-        user_principal_id: session.user_principal_id.clone(),
-    };
-    let (compiled_binding, effective_surface) =
-        compile_session_binding(&req, &ctx, state, Some(project_authority.as_ref()))?;
-    let (session_id, token) = get_ui_state(state)
-        .expect("UiState not set")
-        .browser_sessions
-        .mint_replacement_token(
-            &session.session_id,
-            LaunchContext {
-                compiled_binding: Arc::new(compiled_binding),
-                effective_surface,
-                granted_caps: session.granted_caps.clone(),
-                user_principal_id: session.user_principal_id.clone(),
-                project_authority: Some(project_authority),
-            },
-        );
-    Ok(ProjectReplacement {
-        // This response is consumed by an already loaded browser. A relative
-        // Local activation path preserves its authenticated origin through reverse
-        // proxies and remote node front doors; the node's listen address is
-        // not browser routing authority. Native clients use `session_id`.
-        launch_url: launch_path_for_token(state, &token)?,
-        session_id,
-    })
-}
-
-fn compile_session_binding(
+pub(crate) fn compile_session_binding(
     req: &Request,
     ctx: &HandlerContext,
     state: &AppState,
@@ -363,8 +364,11 @@ pub(crate) fn compile_target(
         UiDispatchMode::SessionLocal => CompiledUiDispatchClass::SessionLocal,
     };
     let result_effect = extract_ui_result_effect(metadata)?.map(|effect| match effect {
-        ryeos_app::service_registry::UiResultEffect::ReplaceSession => {
-            crate::compiled_binding::CompiledUiResultEffect::ReplaceSession
+        ryeos_app::service_registry::UiResultEffect::AdmitBindingAttachment => {
+            crate::compiled_binding::CompiledUiResultEffect::AdmitBindingAttachment
+        }
+        ryeos_app::service_registry::UiResultEffect::ResumeParticularViewSet => {
+            crate::compiled_binding::CompiledUiResultEffect::ResumeParticularViewSet
         }
     });
     let declared_source_safe = extract_ui_read_only(metadata)?;

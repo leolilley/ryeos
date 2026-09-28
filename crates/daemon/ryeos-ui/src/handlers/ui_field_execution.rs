@@ -23,6 +23,8 @@ use super::ui_field::{
 
 const SERVICE_REF: &str = "service:ui/ryeos-ui/field/execution";
 const ENDPOINT: &str = "ui.ryeos.field.execution";
+const OCCURRENCE_SERVICE_REF: &str = "service:ui/ryeos-ui/execution/occurrence";
+const OCCURRENCE_ENDPOINT: &str = "ui.ryeos.execution.occurrence";
 const DEFAULT_MAX_DEPTH: usize = 32;
 const MAX_DEPTH: usize = 64;
 const DEFAULT_MAX_NODES: usize = 500;
@@ -50,6 +52,13 @@ struct ExecutionRequest {
     max_nodes: usize,
     #[serde(default)]
     expansions: Vec<FieldExpansionRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OccurrenceRequest {
+    thread_id: String,
+    occurrence_id: String,
 }
 
 const fn default_max_depth() -> usize {
@@ -397,6 +406,108 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     }
     serde_json::to_value(document).map_err(Into::into)
+}
+
+/// Resolve one exact occurrence from the already-authorized execution field.
+/// This deliberately reuses the field assembler instead of creating a second
+/// execution/evidence owner. The selected id is accepted only when the field
+/// emitted it as an occurrence inside the caller's exact thread closure.
+pub async fn handle_occurrence(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let request: OccurrenceRequest = serde_json::from_value(params).map_err(|error| {
+        HandlerError::BadRequest(format!("invalid execution occurrence request: {error}"))
+    })?;
+    let thread_id = request.thread_id.trim();
+    let occurrence_id = request.occurrence_id.trim();
+    if thread_id.is_empty() || occurrence_id.is_empty() {
+        return Err(HandlerError::BadRequest(
+            "thread_id and occurrence_id are required".to_string(),
+        )
+        .into());
+    }
+    let document: super::ui_field::FieldFactsDocument = serde_json::from_value(
+        handle(
+            json!({
+                "thread_id": thread_id,
+                "max_depth": DEFAULT_MAX_DEPTH,
+                "max_nodes": DEFAULT_MAX_NODES,
+            }),
+            ctx,
+            state,
+        )
+        .await?,
+    )
+    .context("decode assembled execution field")?;
+    project_occurrence(document, occurrence_id)
+}
+
+fn project_occurrence(
+    document: super::ui_field::FieldFactsDocument,
+    occurrence_id: &str,
+) -> Result<Value> {
+    let Some(occurrence) = document
+        .entities
+        .iter()
+        .find(|entity| entity.id == occurrence_id && entity.kind == "occurrence")
+        .cloned()
+    else {
+        let detail = if document.truncated {
+            "selected occurrence was not present in the bounded, truncated execution coverage"
+        } else if !document.warnings.is_empty() {
+            "selected occurrence was not present in execution coverage carrying warnings"
+        } else {
+            "selected occurrence is not present in the authorized execution"
+        };
+        return Err(HandlerError::Conflict(detail.to_string()).into());
+    };
+    let relations = document
+        .relations
+        .iter()
+        .filter(|relation| {
+            relation.source_id == occurrence_id || relation.target_id == occurrence_id
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    // Structural containment and definition edges explain where the occurrence
+    // sits, but they are not retained evidence for it. Keep every adjacent
+    // edge in `relations` while limiting the evidence collection to facts that
+    // directly evidence, observe, or were produced by this exact occurrence.
+    let evidence_ids = relations
+        .iter()
+        .filter(|relation| {
+            matches!(
+                relation.kind.as_str(),
+                "evidenced_by" | "observes" | "produced"
+            )
+        })
+        .flat_map(|relation| [&relation.source_id, &relation.target_id])
+        .filter(|id| id.as_str() != occurrence_id)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let evidence = document
+        .entities
+        .iter()
+        .filter(|entity| evidence_ids.contains(&entity.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "schema_version": "ryeos.ui.execution.occurrence.v1",
+        "subject": document.subject,
+        "cursor": document.cursor,
+        "occurrence": [occurrence],
+        "evidence": evidence,
+        "relations": relations,
+        "coverage": [{
+            "state": if document.truncated { "truncated" } else if !document.warnings.is_empty() { "warnings" } else { "complete" },
+            "truncated": document.truncated,
+            "warning_count": document.warnings.len(),
+            "warnings": document.warnings,
+        }],
+    }))
 }
 
 fn include_tree_row(
@@ -2388,6 +2499,16 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
 };
 
+pub const OCCURRENCE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: OCCURRENCE_SERVICE_REF,
+    endpoint: OCCURRENCE_ENDPOINT,
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_occurrence(params, ctx, state).await })
+    },
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2599,6 +2720,81 @@ mod tests {
         assert!(ids.contains("occurrence:T-root:G-1:4:0:0"));
         assert!(ids.contains("occurrence:T-root:G-1:5:0:0"));
         assert!(ids.contains("occurrence:T-root:G-1:5:1:0"));
+    }
+
+    #[test]
+    fn occurrence_projection_returns_only_exact_direct_evidence_and_coverage() {
+        let mut assembler = assembler();
+        assembler
+            .add_event(event(
+                1,
+                ryeos_state::event_types::GRAPH_STEP_STARTED,
+                json!({
+                    "graph_run_id": "G-exact",
+                    "definition_ref": "graph:test/exact",
+                    "effective_definition_digest": "d".repeat(64),
+                    "node": "build",
+                    "step": 2,
+                }),
+            ))
+            .unwrap();
+        let facts = assembler.finish().unwrap();
+        let projected =
+            project_occurrence(facts.clone(), "occurrence:T-root:G-exact:2:0:0").unwrap();
+        assert_eq!(projected["occurrence"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            projected["occurrence"][0]["id"],
+            "occurrence:T-root:G-exact:2:0:0"
+        );
+        assert_eq!(projected["coverage"][0]["state"], "complete");
+        assert!(
+            projected["relations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|relation| {
+                    relation["source_id"] == "occurrence:T-root:G-exact:2:0:0"
+                        || relation["target_id"] == "occurrence:T-root:G-exact:2:0:0"
+                })
+        );
+        let evidence = projected["evidence"].as_array().unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0]["kind"], "event");
+        assert!(
+            evidence
+                .iter()
+                .all(|entity| { entity["kind"] != "graph_run" && entity["kind"] != "graph_node" })
+        );
+        let mut warned = facts.clone();
+        warned.warnings.push(json!({"code": "history_unavailable"}));
+        let projected = project_occurrence(warned, "occurrence:T-root:G-exact:2:0:0").unwrap();
+        assert_eq!(projected["coverage"][0]["state"], "warnings");
+        assert_eq!(projected["coverage"][0]["warning_count"], 1);
+
+        let mut truncated = facts;
+        truncated.truncated = true;
+        let projected = project_occurrence(truncated, "occurrence:T-root:G-exact:2:0:0").unwrap();
+        assert_eq!(projected["coverage"][0]["state"], "truncated");
+    }
+
+    #[test]
+    fn absent_occurrence_is_an_explicit_conflict() {
+        let error = project_occurrence(assembler().finish().unwrap(), "occurrence:missing")
+            .expect_err("absence must not become an empty successful inspector");
+        assert!(format!("{error:#}").contains("not present in the authorized execution"));
+    }
+
+    #[test]
+    fn occurrence_absence_does_not_hide_incomplete_coverage() {
+        let mut facts = assembler().finish().unwrap();
+        facts.warnings.push(json!({"code": "history_unavailable"}));
+        let error = project_occurrence(facts, "occurrence:missing").unwrap_err();
+        assert!(format!("{error:#}").contains("coverage carrying warnings"));
+
+        let mut facts = assembler().finish().unwrap();
+        facts.truncated = true;
+        let error = project_occurrence(facts, "occurrence:missing").unwrap_err();
+        assert!(format!("{error:#}").contains("truncated execution coverage"));
     }
 
     #[test]

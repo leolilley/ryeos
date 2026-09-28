@@ -381,6 +381,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         verified_command: Some(verified_command),
         external_read_only_mounts: &admitted_mounts,
         writable_runtime_view_mounts: &[],
+        producer_prepared_mounts: &[],
         target_channels: &[],
         item_ref: &isolation_item_ref,
         thread_id,

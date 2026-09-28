@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -254,6 +254,19 @@ struct HeldPersistentSession {
     process: ryeos_app::thread_lifecycle::SpawnedPersistentSessionAwaitingAttachment,
     socket: lillux::InheritedDuplexChannel,
     lifelines: Vec<Box<dyn Send + Sync>>,
+    retirement_observer: Option<ryeos_app::persistent_session::PersistentSessionCleanupObserver>,
+}
+
+fn settle_launch_retirement(
+    process_cleanup: Result<()>,
+    observer: Option<&ryeos_app::persistent_session::PersistentSessionCleanupObserver>,
+) -> Result<()> {
+    // Never remove launch reservations while process cleanup is unproved.
+    process_cleanup?;
+    if let Some(observer) = observer {
+        observer().context(ryeos_app::persistent_session::PersistentSessionCleanupUnproved)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -1032,6 +1045,9 @@ pub(crate) fn admit_or_verify_prepared_sessions(
                 target_environment,
                 target_evidence,
                 content_target_contract,
+                roots,
+                subject_resolution_authority,
+                handler_context,
                 outer_filesystem_authority_ceiling,
                 outer_network_authority_ceiling,
                 outer_resource_authority_ceiling,
@@ -1428,6 +1444,7 @@ fn captured_target_content_declarations(
                 kind: entry.kind,
                 mode: ryeos_state::objects::ExternalContentMode::Pinned,
                 locator: None,
+                bundle_binary: None,
                 digest: Some(entry.manifest_hash.clone()),
                 exclude: Vec::new(),
                 metadata_hint: None,
@@ -1497,7 +1514,9 @@ fn prepare_product_selections(
                     "product content dependency `{name}` is executable; select its products through root execution admission"
                 );
             }
-            ryeos_app::operator_external_content::product_composition::select_products(
+            let qualification_project_context_resolver =
+                super::project_source::qualification_project_context_resolver(state);
+            ryeos_app::operator_external_content::product_composition::select_products_with_project_context_resolver(
                 state,
                 context,
                 engine,
@@ -1505,6 +1524,7 @@ fn prepare_product_selections(
                 subject,
                 &mut resolution,
                 &dependency.product_selections,
+                Some(qualification_project_context_resolver.as_ref()),
             )?;
             dependency.resolution =
                 ryeos_engine::resolution::RetainedResolutionOutput::capture(&resolution);
@@ -2039,14 +2059,13 @@ fn admit_session_capsule(
     environment: &BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>,
     evidence_attachments: &[PreparedEvidenceAttachment],
     content_target_contract: Option<&ryeos_engine::kind_registry::KindExternalContentDecl>,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    subject_resolution_authority: &SubjectResolutionAuthority,
+    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
     outer_filesystem_authority_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
     outer_network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
     outer_resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
 ) -> Result<(String, Vec<ryeos_state::PendingCasPublication>)> {
-    let session = validate_persistent_session_protocol(&protocol.descriptor)
-        .map_err(|error| anyhow!(error))?;
-    validate_session_process_control(state, session)?;
-    let roots = engine.resolution_roots(None);
     let mut resolution = dependency.resolution.clone();
     let mut publication = None;
     let captured_source = ryeos_app::source_closure_admission::admit_source_closure_in_publication(
@@ -2054,34 +2073,41 @@ fn admit_session_capsule(
         engine,
         &dependency.captured_verified_subject()?.resolved.kind,
         &mut resolution,
-        &roots,
+        roots,
         None,
         None,
         &mut publication,
         None,
     )?;
+    if !dependency.product_selections.is_empty() {
+        let context = handler_context
+            .context("execution-dependency product selection has no authenticated ingress")?;
+        ryeos_app::effective_program_preparation::prepare_hookless_preselection_effective_program(
+            engine,
+            &dependency.captured_verified_subject()?.resolved.kind,
+            &mut resolution,
+        )?;
+        ryeos_app::operator_external_content::product_composition::select_products(
+            state,
+            context,
+            engine,
+            roots,
+            subject_resolution_authority,
+            &mut resolution,
+            &dependency.product_selections,
+        )?;
+    }
     let captured_external =
         ryeos_app::external_content_admission::admit_external_realizations_in_publication(
             state,
             engine,
             &dependency.captured_verified_subject()?.resolved.kind,
             &mut resolution,
-            &roots,
-            &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+            roots,
+            subject_resolution_authority,
             inherited_content,
             &mut publication,
         )?;
-    if let Some(value) = resolution
-        .composed
-        .derived
-        .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
-    {
-        let realized = ryeos_state::objects::ExternalContentRealizationSet::from_value(value)?;
-        super::external_content::require_supported_mount_roots(
-            realized.iter().map(|entry| entry.mount_root),
-            state.isolation.is_enforced() || supports_private_descriptor_realizations(session),
-        )?;
-    }
     if let Some(contract) = content_target_contract {
         validate_captured_target_content(state, &resolution, contract, evidence_attachments)?;
     }
@@ -2099,7 +2125,7 @@ fn admit_session_capsule(
             .and_then(|schema| schema.execution.as_ref())
             .and_then(|execution| execution.external_content.as_ref()),
         &[],
-        &roots,
+        roots,
         None,
         captured_external
             .as_ref()
@@ -2199,25 +2225,75 @@ fn admit_session_capsule(
         let captured = captured_source
             .as_ref()
             .ok_or_else(|| anyhow!("structured-session worker has no admitted source closure"))?;
-        let entry = match &captured.binding().logical_binding {
-            ryeos_state::objects::SourceLogicalBinding::Worker { entry, .. } => entry,
-            _ => bail!("structured-session worker has a non-worker source binding"),
-        };
-        let mut source_files = BTreeMap::new();
-        for file in &captured.manifest().entries {
-            let bytes = cas
-                .get_blob(&file.blob_hash)?
-                .ok_or_else(|| anyhow!("captured structured-session source blob is absent"))?;
-            source_files.insert(file.path.clone(), bytes);
-        }
-        let profile_bytes = source_files.get(entry).ok_or_else(|| {
-            anyhow!("structured-session entry is absent from its captured source closure")
-        })?;
         let profile =
-            ryeos_engine::structured_session_profile::compile(profile_bytes, &source_files)?;
+            ryeos_app::source_closure_admission::compile_admitted_structured_worker_profile(
+                captured, &guard,
+            )?;
+        if (!profile.auxiliary_configs.is_empty() || !profile.runtime_configs.is_empty())
+            && !state.isolation.is_enforced()
+        {
+            bail!("signed session configuration inventory requires enforced read-only isolation");
+        }
         validate_required_session_environment(&profile, environment)?;
         Some(profile)
     } else {
+        None
+    };
+    let external_candidate = match structured_session_profile.as_ref() {
+        Some(profile) => match profile.external_candidate_requirement()? {
+            Some(requirement) => {
+                let derived = &finalized.resolution().composed.derived;
+                let source = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(
+                    derived
+                        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+                        .context("external candidate has no admitted source projection")?,
+                )?;
+                let realized = ryeos_state::objects::ExternalContentRealizationSet::from_value(
+                    derived
+                        .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+                        .context("external candidate has no admitted provider realization")?,
+                )?;
+                let qualification_use = ryeos_state::external_execution::admission::ExternalCandidateQualificationUse::from_admitted_inputs(
+                    &requirement,
+                    profile,
+                    &source,
+                    &realized,
+                    executable_search,
+                    environment,
+                )?;
+                Some(
+                    requirement.resolve_for_use(
+                        retained_product_selections.as_ref(),
+                        &qualification_use,
+                    )?,
+                )
+            }
+            None => None,
+        },
+        None => None,
+    };
+    if let Some(value) = finalized
+        .resolution()
+        .composed
+        .derived
+        .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+    {
+        let realized = ryeos_state::objects::ExternalContentRealizationSet::from_value(value)?;
+        super::external_content::require_supported_mount_roots(
+            realized.iter().map(|entry| entry.mount_root),
+            external_candidate.is_some()
+                || state.isolation.is_enforced()
+                || supports_private_descriptor_realizations(session),
+        )?;
+    }
+    let retained_external_runtime_qualification = if let Some(program) = external_candidate.as_ref()
+    {
+        // This capsule is never booted under the controller's local process
+        // scope. Its signed connector route and external placement
+        // incarnation own start, cleanup, and death proof instead.
+        ryeos_app::external_placement::preflight_external_candidate_program(state, program)?
+    } else {
+        validate_session_process_control(state, session)?;
         None
     };
     let execution_closure = {
@@ -2231,10 +2307,12 @@ fn admit_session_capsule(
             protocol,
             &engine.node_trust_store,
             Some(&workspace),
+            None,
         )?
     };
     authority.ensure_guard(&guard)?;
     let session_authority = PersistentSessionAuthority {
+        external_candidate: external_candidate.clone(),
         exact_program_hash: exact_program_hash.clone(),
         lifecycle: lifecycle.clone(),
         wire: wire.clone(),
@@ -2259,11 +2337,13 @@ fn admit_session_capsule(
         anyhow!("persistent-session admission produced no durable CAS publication")
     })?;
     let capsule = AdmittedPersistentSessionCapsule {
+        external_candidate,
         schema: PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
         kind: PERSISTENT_SESSION_CAPSULE_KIND.to_owned(),
         exact_program: exact_program_value,
         exact_program_hash,
         retained_product_selections,
+        retained_external_runtime_qualification,
         lifecycle,
         wire,
         artifact_identity,
@@ -2314,6 +2394,17 @@ fn verify_session_capsule(
 ) -> Result<AdmittedPersistentSessionCapsule> {
     let capsule =
         load_capsule(state, capsule_hash).context(SessionCapsuleVerificationStage::Load)?;
+    if capsule.external_candidate.is_some() {
+        ryeos_app::external_placement::verify_retained_external_candidate_capsule(state, &capsule)
+            .context(SessionCapsuleVerificationStage::Load)?;
+    } else {
+        validate_session_process_control(
+            state,
+            &retained_session_protocol(engine, &capsule)
+                .context(SessionCapsuleVerificationStage::RetainedProtocol)?,
+        )
+        .context(SessionCapsuleVerificationStage::ProcessControl)?;
+    }
     validate_capsule_nested_authority(
         &capsule,
         outer_filesystem_authority_ceiling,
@@ -2321,12 +2412,6 @@ fn verify_session_capsule(
         outer_resource_authority_ceiling,
     )
     .context(SessionCapsuleVerificationStage::NestedAuthority)?;
-    validate_session_process_control(
-        state,
-        &retained_session_protocol(engine, &capsule)
-            .context(SessionCapsuleVerificationStage::RetainedProtocol)?,
-    )
-    .context(SessionCapsuleVerificationStage::ProcessControl)?;
     let exact =
         retained_exact_program(&capsule).context(SessionCapsuleVerificationStage::ExactProgram)?;
     let retained_dependency =
@@ -2489,6 +2574,7 @@ where
     D: FnMut(Value) -> Result<()>,
 {
     let capsule = load_capsule(state, capsule_hash)?;
+    require_candidate_connector_ready(capsule.external_candidate.as_ref())?;
     validate_capsule_current_trust(&state.engine, &capsule)?;
     if retained_session_protocol(&state.engine, &capsule)?.process_mode
         != PersistentSessionProcessMode::PooledRequests
@@ -2748,6 +2834,7 @@ fn start_capsule_process(
         exact,
         &workspace,
         None,
+        None,
         &session_protocol,
         None,
         &BTreeMap::new(),
@@ -2758,6 +2845,7 @@ fn start_capsule_process(
         &workspace_name,
         None,
         None,
+        None,
     )?;
     held.lifelines.push(Box::new(workspace_lifeline));
     let pooled_owner_coordinate = workspace_name;
@@ -2766,7 +2854,10 @@ fn start_capsule_process(
         .attach_pooled_resource_owner(&pooled_owner_coordinate, &held.process.process_identity)
     {
         let process_identity = held.process.process_identity.clone();
-        let cleanup = held.process.abort_and_reap();
+        let cleanup = settle_launch_retirement(
+            held.process.abort_and_reap(),
+            held.retirement_observer.as_ref(),
+        );
         return Err(match cleanup {
             Ok(()) => {
                 let evidence = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
@@ -2785,9 +2876,11 @@ fn start_capsule_process(
                     )),
                 }
             }
-            Err(cleanup) => error.context(format!(
-                "pooled owner attachment cleanup remained incomplete: {cleanup:#}"
-            )),
+            Err(cleanup) => error
+                .context(format!(
+                    "pooled owner attachment cleanup remained incomplete: {cleanup:#}"
+                ))
+                .context(ryeos_app::persistent_session::PersistentSessionCleanupUnproved),
         });
     }
     if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
@@ -2795,7 +2888,10 @@ fn start_capsule_process(
         &held.process.process_identity.resource_operations,
     ) {
         let process_identity = held.process.process_identity.clone();
-        let cleanup = held.process.abort_and_reap();
+        let cleanup = settle_launch_retirement(
+            held.process.abort_and_reap(),
+            held.retirement_observer.as_ref(),
+        );
         let settlement = cleanup.as_ref().ok().map(|()| {
             let proposed =
                 ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(&process_identity)?;
@@ -2817,7 +2913,7 @@ fn start_capsule_process(
             (Ok(()), Some(Ok(()))) => error,
             (cleanup, settlement) => error.context(format!(
                 "pooled resource issue cleanup remained incomplete: process={cleanup:?}, settlement={settlement:?}"
-            )),
+            )).context(ryeos_app::persistent_session::PersistentSessionCleanupUnproved),
         });
     }
     let cleanup_observer = resource_cleanup_observer(
@@ -2886,6 +2982,14 @@ fn start_capsule_process(
                     ));
                 }
             }
+            if let Err(cleanup) = settle_launch_retirement(
+                ryeos_app::process::assert_reaped_process_group_absent(&released_process_identity),
+                held.retirement_observer.as_ref(),
+            ) {
+                error = error
+                    .context(format!("release-failure retirement unproved: {cleanup:#}"))
+                    .context(ryeos_app::persistent_session::PersistentSessionCleanupUnproved);
+            }
             return Err(error);
         }
     };
@@ -2893,6 +2997,7 @@ fn start_capsule_process(
         running,
         socket: held.socket,
         lifelines: held.lifelines,
+        retirement_observer: held.retirement_observer,
         expected_boot_identity: None,
         observation_sink: None,
         cleanup_observer,
@@ -3005,34 +3110,361 @@ fn prepare_session_process_environment(
     Ok((prepared, mounts))
 }
 
+fn prepare_external_guest_inputs(
+    state: &AppState,
+    placement: &str,
+    capsule: &AdmittedPersistentSessionCapsule,
+    exact: &PersistentSessionExactProgram,
+    workspace_view: &lillux::InheritedDescriptorAuthority,
+    base_snapshot_hash: &str,
+) -> Result<ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority> {
+    use ryeos_external_execution_contract::{
+        ExternalGuestInputProjection, GuestBaseSnapshotInput, GuestMountAccess,
+        GuestMountContentAuthority, GuestMountInput, GuestMountKind, GuestMountRole,
+        GuestProductManifestKind, GuestWorkspaceOutputAuthorityInput,
+    };
+    use ryeos_state::objects::{SessionProcessEnvironmentValue, runtime_view_mount_destination};
+
+    let program = capsule
+        .external_candidate
+        .as_ref()
+        .context("external guest input preparation has no admitted program")?;
+    let state_authority = state.state_store.pinned_state_authority()?;
+    let state_guard = state_authority.acquire_shared_guard()?;
+    let base_transfer = ryeos_project_capture::prepare_project_snapshot_transfer(
+        &state_authority,
+        &state_guard,
+        base_snapshot_hash,
+    )?;
+    drop(state_guard);
+    let base_descriptor = base_transfer.descriptor();
+    let (producer_chain_root_id, admitted_launch_capsule_hash, retained_launch_capsule) = state
+        .state_store
+        .admitted_launch_capsule_with_coordinates(placement)?
+        .context("external guest workspace authority lost its admitted capsule")?;
+    ensure!(
+        retained_launch_capsule
+            .project_authority
+            .operational_snapshot_projection()
+            == Some(base_snapshot_hash),
+        "external guest workspace authority changed its base snapshot"
+    );
+    let (workspace_outputs, workspace_output_descriptor) = retained_launch_capsule
+        .project_authority
+        .workspace_outputs()
+        .map(|outputs| {
+            validate_external_workspace_output_transfer(outputs)?;
+            let bytes = lillux::canonical_json(&serde_json::to_value(outputs)?)?;
+            ensure!(
+                bytes.len() <= ryeos_state::objects::MAX_WORKSPACE_OUTPUT_PARTITION_BYTES,
+                "external guest workspace-output authority exceeds its bound"
+            );
+            let authority_hash = lillux::sha256_hex(bytes.as_bytes());
+            let descriptor =
+                lillux::sealed_memfd(c"ryeos-workspace-output-authority", bytes.as_bytes())
+                    .map_err(anyhow::Error::msg)?;
+            let input = GuestWorkspaceOutputAuthorityInput {
+                descriptor: descriptor
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                authority_hash,
+                bytes: bytes.len() as u64,
+                producer_chain_root_id: producer_chain_root_id.clone(),
+                producer_thread_id: placement.to_owned(),
+                admitted_launch_capsule_hash: admitted_launch_capsule_hash.clone(),
+            };
+            Ok::<_, anyhow::Error>((input, descriptor))
+        })
+        .transpose()?
+        .map_or((None, None), |(input, descriptor)| {
+            (Some(input), Some(descriptor))
+        });
+    program.verify_selections(capsule.retained_product_selections.as_ref())?;
+    let resolution = exact.resolution_output.restore();
+    let runtime_id = &program.requirement.runtime_product_declaration_id;
+    let super::external_guest_inputs::PreparedProductInputs {
+        mut inputs,
+        mut authorities,
+        manifest_authorities,
+        leases,
+        destinations,
+    } = super::external_guest_inputs::prepare_product_inputs(
+        state,
+        &resolution,
+        Path::new("/workspace"),
+        Some(super::external_guest_inputs::RuntimeDestinationOverride {
+            realization_id: runtime_id,
+            destination: Path::new(&program.requirement.runtime_recipe.runtime_mount_destination),
+        }),
+    )?;
+    let realized = ryeos_state::objects::ExternalContentRealizationSet::from_value(
+        resolution
+            .composed
+            .derived
+            .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+            .context("external guest lost its exact realization projection")?,
+    )?;
+    ensure!(
+        destinations
+            == ryeos_state::external_execution::admission::ExternalCandidateGuestEnvironment::expected_destinations(
+                &program.requirement,
+                &realized,
+            )?,
+        "external guest materialized destinations differ from retained realization authority"
+    );
+    // Runtime selection is session authority, not generic product redemption.
+    let runtime = inputs
+        .iter()
+        .find(|input| input.authority_id == *runtime_id)
+        .context("external guest runtime product has no realized authority")?;
+    let GuestMountContentAuthority::ProductManifest {
+        manifest_kind,
+        manifest_hash,
+        ..
+    } = &runtime.content_authority
+    else {
+        bail!("external guest runtime lost its product manifest authority");
+    };
+    ensure!(
+        match manifest_kind {
+            GuestProductManifestKind::Content =>
+                program.runtime_manifest_kind
+                    == ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+            GuestProductManifestKind::LargeContent =>
+                program.runtime_manifest_kind
+                    == ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
+        } && *manifest_hash == program.runtime_manifest_hash,
+        "external guest runtime manifest changed its admitted product authority"
+    );
+
+    for (name, value) in &capsule.process_environment {
+        if let SessionProcessEnvironmentValue::RuntimeViewDirectory { relative_path } = value {
+            let mut relative = PathBuf::from(".ai/cache/ryeos-runtime");
+            if relative_path != "." {
+                relative.push(relative_path);
+            }
+            let source = workspace_view.open_or_create_private_directory_descendant(&relative)?;
+            let destination = runtime_view_mount_destination(name)?;
+            let destination = destination
+                .to_str()
+                .context("external guest scratch destination is not UTF-8")?
+                .to_owned();
+            let binding_hash = lillux::sha256_hex(
+                lillux::canonical_json(&json!({
+                    "domain": "ryeos.external-guest-private-scratch.v1",
+                    "base_snapshot_hash": base_snapshot_hash,
+                    "environment_name": name,
+                    "workspace_relative_path": relative,
+                }))?
+                .as_bytes(),
+            );
+            inputs.push(GuestMountInput {
+                role: GuestMountRole::PrivateScratch,
+                authority_id: format!("scratch-{name}"),
+                descriptor: source.inherited_descriptor().map_err(anyhow::Error::msg)?,
+                destination: destination.clone(),
+                kind: GuestMountKind::Directory,
+                access: GuestMountAccess::PrivateWritable,
+                normalized_mode: None,
+                content_authority: GuestMountContentAuthority::PrivateScratch { binding_hash },
+                bytes: 0,
+            });
+            authorities.push(source);
+        }
+    }
+    let resolved_environment =
+        ryeos_state::external_execution::admission::ExternalCandidateGuestEnvironment::derive(
+            &program.requirement.runtime_recipe,
+            &capsule.process_environment,
+            &capsule.executable_search,
+            &destinations,
+        )?;
+    let projection = ExternalGuestInputProjection {
+        schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+        base_snapshot: GuestBaseSnapshotInput {
+            descriptor: base_descriptor
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?,
+            snapshot_hash: base_snapshot_hash.to_owned(),
+            closure_digest: base_transfer.closure_digest().to_owned(),
+            object_count: base_transfer.object_count(),
+            blob_count: base_transfer.blob_count(),
+            total_bytes: base_transfer.total_bytes(),
+        },
+        workspace_outputs,
+        inputs,
+        executable_search: resolved_environment.executable_search,
+        environment: resolved_environment.environment,
+    };
+    let mut lifelines: Vec<Box<dyn Send + Sync>> = leases
+        .into_iter()
+        .map(|lease| Box::new(lease) as Box<dyn Send + Sync>)
+        .collect();
+    lifelines.push(Box::new(base_transfer));
+    ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority::new(
+        projection,
+        base_descriptor,
+        workspace_output_descriptor,
+        authorities,
+        manifest_authorities,
+        lifelines,
+    )
+}
+
+fn validate_external_workspace_output_transfer(
+    outputs: &ryeos_state::objects::WorkspaceOutputAuthority,
+) -> Result<()> {
+    use ryeos_state::external_content::products::ProductStorage;
+
+    outputs.validate()?;
+    ensure!(
+        outputs
+            .partition
+            .roots
+            .iter()
+            .all(|root| root.storage == ProductStorage::Content),
+        "external candidate workspace outputs require the content storage tier; large-content transfer is not admitted"
+    );
+    Ok(())
+}
+
+fn await_external_candidate_ready(
+    state: &AppState,
+    placement: &str,
+    guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+) -> Result<()> {
+    let result = await_external_candidate_ready_inner(state, placement, guest_inputs);
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(fence_external_candidate_start_failure(
+            state,
+            placement,
+            error,
+            "external candidate startup failed",
+        )),
+    }
+}
+
+fn fence_external_candidate_start_failure(
+    state: &AppState,
+    placement: &str,
+    error: anyhow::Error,
+    operation: &str,
+) -> anyhow::Error {
+    let request =
+        ryeos_app::external_placement::request_external_candidate_cleanup(state, placement);
+    let proved = request.is_ok()
+        && ryeos_app::external_placement::external_candidate_cleanup_is_proved(state, placement)
+            .unwrap_or(false);
+    let error = error.context(format!("{operation}; durable cleanup request={request:?}"));
+    if proved {
+        error
+    } else {
+        // A controller process need not have launched yet. The contacted
+        // external occurrence is an independent cleanup obligation and must
+        // still fence the dedicated session, credential and workspace.
+        error.context(ryeos_app::persistent_session::PersistentSessionCleanupUnproved)
+    }
+}
+
+fn await_external_candidate_ready_inner(
+    state: &AppState,
+    placement: &str,
+    guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+) -> Result<()> {
+    use ryeos_app::external_placement::ExternalCandidateStartProgress;
+    let deadline =
+        ryeos_app::external_placement::external_candidate_startup_deadline(state, placement)?;
+    let mut guest_inputs = Some(guest_inputs);
+    loop {
+        ensure!(
+            !deadline.has_elapsed(),
+            "external candidate did not reach authenticated readiness before its signed timeout"
+        );
+        let progress = ryeos_app::external_placement::advance_external_candidate_start(
+            state, placement, deadline,
+        )
+        .map_err(anyhow::Error::from)?;
+        let progress = if progress == ExternalCandidateStartProgress::OccurrenceBound {
+            let inputs = guest_inputs
+                .take()
+                .context("external candidate activation already consumed its guest inputs")?;
+            ryeos_app::external_placement::advance_external_candidate_start_with_guest_inputs(
+                state, placement, inputs, deadline,
+            )
+            .map_err(anyhow::Error::from)?
+        } else {
+            progress
+        };
+        match progress {
+            ExternalCandidateStartProgress::Ready(_) => return Ok(()),
+            ExternalCandidateStartProgress::AllocationPending
+            | ExternalCandidateStartProgress::OccurrenceBound
+            | ExternalCandidateStartProgress::SupervisorPending
+            | ExternalCandidateStartProgress::AttachmentPending
+            | ExternalCandidateStartProgress::ChannelAttached => {
+                lillux::time::sleep(
+                    deadline
+                        .remaining()
+                        .min(lillux::time::Duration::from_millis(50)),
+                );
+            }
+            ExternalCandidateStartProgress::CleanupProved => {
+                bail!("external candidate ended without an executable occurrence")
+            }
+            ExternalCandidateStartProgress::CleanupRequired => {
+                bail!("external candidate startup requires authoritative cleanup")
+            }
+        }
+    }
+}
+
 fn prepare_structured_session_baseline(
     profile: &ryeos_state::objects::AdmittedStructuredSessionProfile,
     source_directory: &lillux::PinnedDirectory,
     state_root: &Path,
     enforced: bool,
 ) -> Result<Option<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>> {
-    // The profile compiler resolves baseline_source relative to the captured
+    prepare_structured_session_configuration_file(
+        &profile.baseline_source,
+        &profile.baseline_destination,
+        source_directory,
+        state_root,
+        enforced,
+    )
+}
+
+fn prepare_structured_session_configuration_file(
+    source: &str,
+    destination: &str,
+    source_directory: &lillux::PinnedDirectory,
+    state_root: &Path,
+    enforced: bool,
+) -> Result<Option<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>> {
+    // The profile compiler resolves source relative to the captured
     // source manifest root. The worker-visible mount/entry path is not an
-    // ambient daemon path, nor an authority for reopening the baseline.
+    // ambient daemon path, nor an authority for reopening configuration.
+    let byte_limit = ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES;
     let source_file = source_directory
-        .open_pinned_regular_descendant(Path::new(&profile.baseline_source), false)?
-        .ok_or_else(|| anyhow!("admitted structured-session baseline is missing"))?;
-    let bytes = source_file.read_bounded(64 * 1024)?;
+        .open_pinned_regular_descendant(Path::new(source), false)?
+        .ok_or_else(|| anyhow!("admitted structured-session configuration is missing"))?;
+    let bytes = source_file.read_bounded(byte_limit as u64)?;
     if bytes.is_empty() {
-        bail!("admitted structured-session baseline is empty");
+        bail!("admitted structured-session configuration is empty");
     }
 
     let state_directory = lillux::PinnedDirectory::open(state_root)?
         .ok_or_else(|| anyhow!("structured-session state root is missing"))?;
-    let destination_name = std::ffi::OsStr::new(&profile.baseline_destination);
+    let destination_name = std::ffi::OsStr::new(destination);
     let incumbent = state_directory
         .open_pinned_regular(destination_name, false)
-        .context("open workload compatibility seed through Lillux")?;
+        .context("open workload configuration through Lillux")?;
     let current_matches = incumbent
         .as_ref()
         .map(|entry| {
             Ok::<bool, anyhow::Error>(
-                entry.permission_mode()? == 0o400 && entry.read_bounded(64 * 1024)? == bytes,
+                entry.permission_mode()? == 0o400
+                    && entry.read_bounded(byte_limit as u64)? == bytes,
             )
         })
         .transpose()?
@@ -3040,13 +3472,13 @@ fn prepare_structured_session_baseline(
     if !current_matches {
         state_directory
             .atomic_write_pinned_if_same(destination_name, incumbent.as_ref(), &bytes, 0o400)
-            .context("publish workload compatibility seed through Lillux")?;
+            .context("publish workload configuration through Lillux")?;
     }
     if !enforced {
         return Ok(None);
     }
     let source_path = source_file.path().to_path_buf();
-    let destination = state_root.join(&profile.baseline_destination);
+    let destination = state_root.join(destination);
     let source_descriptor = source_file.inherited_descriptor_authority()?;
     Ok(Some(
         ryeos_engine::isolation::IsolationReadOnlyMountAuthority::new_state_overlay(
@@ -3057,6 +3489,55 @@ fn prepare_structured_session_baseline(
     ))
 }
 
+fn prepare_structured_session_configurations(
+    profile: &ryeos_state::objects::AdmittedStructuredSessionProfile,
+    source_directory: &lillux::PinnedDirectory,
+    state_root: &Path,
+    enforced: bool,
+) -> Result<Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>> {
+    ryeos_state::objects::validate_session_auxiliary_configs(
+        &profile.baseline_destination,
+        &profile.auxiliary_configs,
+    )?;
+    ryeos_state::objects::validate_session_runtime_configs(&profile.runtime_configs)?;
+    // Mode bits are not a same-UID write boundary. Refuse both fresh launch
+    // and recovery before modifying the profile home unless the backend will
+    // mount every additional config from admitted source read-only.
+    if (!profile.auxiliary_configs.is_empty() || !profile.runtime_configs.is_empty()) && !enforced {
+        bail!("signed session configuration inventory requires enforced read-only isolation");
+    }
+    let mut mounts = Vec::new();
+    if let Some(mount) =
+        prepare_structured_session_baseline(profile, source_directory, state_root, enforced)?
+    {
+        mounts.push(mount);
+    }
+    for config in &profile.auxiliary_configs {
+        let mount = prepare_structured_session_configuration_file(
+            &config.source,
+            &config.destination,
+            source_directory,
+            state_root,
+            enforced,
+        )?
+        .ok_or_else(|| anyhow!("auxiliary session configuration has no read-only authority"))?;
+        mounts.push(mount);
+    }
+    for config in &profile.runtime_configs {
+        let file = source_directory
+            .open_pinned_regular_descendant(Path::new(&config.source), false)?
+            .ok_or_else(|| anyhow!("admitted runtime configuration is missing"))?;
+        mounts.push(
+            ryeos_engine::isolation::IsolationReadOnlyMountAuthority::new_runtime_configuration(
+                file.path().to_path_buf(),
+                PathBuf::from(&config.destination),
+                file.inherited_descriptor_authority()?,
+            )?,
+        );
+    }
+    Ok(mounts)
+}
+
 fn spawn_capsule_process_held(
     state: &AppState,
     capsule_hash: &str,
@@ -3064,6 +3545,7 @@ fn spawn_capsule_process_held(
     exact: &PersistentSessionExactProgram,
     workspace: &Path,
     workspace_view: Option<&lillux::InheritedDescriptorAuthority>,
+    external_workspace_authority: Option<&lillux::InheritedDescriptorAuthority>,
     session_protocol: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
     state_root: Option<&Path>,
     runtime_environment: &BTreeMap<String, String>,
@@ -3074,6 +3556,7 @@ fn spawn_capsule_process_held(
     resource_owner_coordinate: &str,
     process_scope_allocation: Option<&lillux::ProcessScopeAllocation>,
     process_scope: Option<lillux::ProcessScope>,
+    placement_thread_id: Option<&str>,
 ) -> Result<HeldPersistentSession> {
     let resolution = exact.resolution_output.restore();
     // A typed source-entry consumer does not require a project-code shadow.
@@ -3199,14 +3682,12 @@ fn spawn_capsule_process_held(
         // configuration authority. An enforced generic isolation backend adds
         // a read-only overlay for the compatibility baseline, but the
         // structured-session substrate does not require one.
-        if let Some(overlay) = prepare_structured_session_baseline(
+        mounts.extend(prepare_structured_session_configurations(
             profile,
             bound_source.source_directory(),
             state_root,
             state.isolation.is_enforced(),
-        )? {
-            mounts.push(overlay);
-        }
+        )?);
     }
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
@@ -3251,65 +3732,136 @@ fn spawn_capsule_process_held(
         session_protocol.workspace_authority,
         state.isolation.is_enforced(),
     )?;
-    let session_process_environment = (!capsule.process_environment.is_empty())
-        .then(|| {
-            lillux::canonical_json(&serde_json::to_value(&prepared_environment)?)
-                .map_err(anyhow::Error::from)
-        })
-        .transpose()?;
-    plan.bind_persistent_session_spawn_environment(
-        external_env.as_deref(),
-        external_env.as_ref().map(|_| realization_workspace),
-        external_env.as_ref().map(|_| {
-            if state.isolation.is_enforced() {
-                ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace
-            } else {
-                ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot
+    let mut inherited_fds = Vec::new();
+    let mut external_lifelines: Vec<Box<dyn Send + Sync>> = Vec::new();
+    let mut retirement_observer = None;
+    if capsule.external_candidate.is_some() {
+        let placement = placement_thread_id
+            .context("external candidate session has no exact placement owner")?;
+        let workspace_view = external_workspace_authority
+            .context("external candidate session has no retained workspace authority")?;
+        let session = state
+            .state_store
+            .dedicated_session(placement)?
+            .context("external candidate placement lost its dedicated session")?;
+        let workspace_record = state
+            .state_store
+            .execution_workspace(&session.workspace_id)?
+            .context("external candidate placement lost its workspace")?;
+        ensure!(
+            session.workspace_id == workspace_record.workspace_id
+                && workspace_record.thread_id.as_deref() == Some(placement),
+            "external candidate workspace changed its placement owner"
+        );
+        let guest_inputs = prepare_external_guest_inputs(
+            state,
+            placement,
+            capsule,
+            exact,
+            workspace_view,
+            &workspace_record.base_snapshot,
+        )?;
+        await_external_candidate_ready(state, placement, guest_inputs)?;
+        let state_root =
+            state_root.context("external candidate provider has no protected state root")?;
+        let connector = ryeos_app::external_connector::prepare_external_candidate_connector(
+            state, placement, state_root,
+        )
+        .map_err(|error| {
+            fence_external_candidate_start_failure(
+                state,
+                placement,
+                error,
+                "prepare external candidate connector",
+            )
+        })?;
+        let (connector_mounts, connector_descriptors, connector_lifelines, settlement) =
+            connector.into_parts();
+        retirement_observer = Some(settlement);
+        mounts.extend(connector_mounts);
+        inherited_fds.extend(connector_descriptors);
+        external_lifelines.extend(connector_lifelines);
+        external_lifelines.push(Box::new(
+            ryeos_app::external_placement::ExternalCandidateCleanupLifeline::new(state, placement),
+        ));
+    }
+    let process = (|| {
+        let session_process_environment = (!capsule.process_environment.is_empty())
+            .then(|| {
+                lillux::canonical_json(&serde_json::to_value(&prepared_environment)?)
+                    .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
+        plan.bind_persistent_session_spawn_environment(
+            external_env.as_deref(),
+            external_env.as_ref().map(|_| realization_workspace),
+            external_env.as_ref().map(|_| {
+                if state.isolation.is_enforced() {
+                    ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace
+                } else {
+                    ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot
+                }
+            }),
+            source_env,
+            source_entry,
+            executable_search_env.as_deref(),
+        )?;
+        let mut runtime_environment = runtime_environment.clone();
+        if let Some(environment) = session_process_environment {
+            let name = ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV.to_owned();
+            if runtime_environment
+                .insert(name.clone(), environment)
+                .is_some()
+            {
+                bail!("session process environment collides with runtime authority");
             }
-        }),
-        source_env,
-        source_entry,
-        executable_search_env.as_deref(),
-    )?;
-    let mut runtime_environment = runtime_environment.clone();
-    if let Some(environment) = session_process_environment {
-        let name = ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV.to_owned();
-        if runtime_environment
-            .insert(name.clone(), environment)
-            .is_some()
-        {
-            bail!("session process environment collides with runtime authority");
         }
-    }
-    let mut runtime_env_allowlist = session_protocol.runtime_env_allowlist.clone();
-    if let Some(name) = session_protocol.readiness_identity_env.as_ref() {
-        runtime_env_allowlist.push(name.clone());
-    }
-    plan.bind_persistent_session_runtime_environment(&runtime_environment, &runtime_env_allowlist)?;
-    // `realization_workspace` is only the daemon-owned location for sealed
-    // runtime inputs when outer isolation is disabled.  The process authority
-    // remains the canonical runtime-workspace `project` child; substituting
-    // the nested realization view here would change the admitted workspace
-    // identity and fail the runtime-workspace layout check.
-    let process = plan.spawn_persistent_session_held(
-        state,
-        workspace,
-        workspace_view,
-        mounts,
-        writable_runtime_view_mounts,
-        extra_target_channels,
-        &capsule.lifecycle,
-        session_protocol.workspace_authority,
-        session_protocol.network_authority,
-        state_root,
-        &format!("session-{}", &capsule_hash[..24]),
-        accounting_scope,
-        funding_owner,
-        resource_owner_kind,
-        resource_owner_coordinate,
-        process_scope_allocation,
-        process_scope,
-    )?;
+        let mut runtime_env_allowlist = session_protocol.runtime_env_allowlist.clone();
+        if let Some(name) = session_protocol.readiness_identity_env.as_ref() {
+            runtime_env_allowlist.push(name.clone());
+        }
+        plan.bind_persistent_session_runtime_environment(
+            &runtime_environment,
+            &runtime_env_allowlist,
+        )?;
+        // `realization_workspace` is only the daemon-owned location for sealed
+        // runtime inputs when outer isolation is disabled.  The process authority
+        // remains the canonical runtime-workspace `project` child; substituting
+        // the nested realization view here would change the admitted workspace
+        // identity and fail the runtime-workspace layout check.
+        plan.spawn_persistent_session_held(
+            state,
+            workspace,
+            workspace_view,
+            mounts,
+            writable_runtime_view_mounts,
+            inherited_fds,
+            extra_target_channels,
+            &capsule.lifecycle,
+            session_protocol.workspace_authority,
+            session_protocol.network_authority,
+            state_root,
+            &format!("session-{}", &capsule_hash[..24]),
+            accounting_scope,
+            funding_owner,
+            resource_owner_kind,
+            resource_owner_coordinate,
+            process_scope_allocation,
+            process_scope,
+        )
+    })()
+    .map_err(|error: anyhow::Error| {
+        if error.is::<ryeos_app::persistent_session::PersistentSessionCleanupUnproved>() {
+            // Preserve the reserved namespace; handle destruction is not death proof.
+            return error;
+        }
+        match settle_launch_retirement(Ok(()), retirement_observer.as_ref()) {
+            Ok(()) => error,
+            Err(cleanup) => error
+                .context(format!("launch reservation cleanup failed: {cleanup:#}"))
+                .context(ryeos_app::persistent_session::PersistentSessionCleanupUnproved),
+        }
+    })?;
     let mut lifelines: Vec<Box<dyn Send + Sync>> = Vec::with_capacity(leases.len());
     // The pool owns the exact worker epoch/process; retain its alias in the
     // same lifecycle carrier until that process is retired. A launch plan's
@@ -3325,10 +3877,12 @@ fn spawn_capsule_process_held(
     if let Some(source) = source {
         lifelines.push(Box::new(source));
     }
+    lifelines.extend(external_lifelines);
     Ok(HeldPersistentSession {
         process,
         socket: daemon_socket,
         lifelines,
+        retirement_observer,
     })
 }
 
@@ -3376,6 +3930,19 @@ pub fn start_exclusive_capsule(
         Some(&workspace_lifeline),
         &identity.placement_thread_id,
     )?;
+    let owned_external_workspace = (capsule.external_candidate.is_some()
+        && workspace_view.is_none())
+    .then(|| workspace_lifeline.borrow_owned_effective_directory())
+    .transpose()?;
+    let external_workspace_authority = capsule
+        .external_candidate
+        .is_some()
+        .then(|| {
+            workspace_view
+                .as_ref()
+                .or(owned_external_workspace.as_ref())
+        })
+        .flatten();
     let reservation = state.persistent_sessions.reserve_exclusive(
         &identity.placement_thread_id,
         &capsule.lifecycle,
@@ -3461,6 +4028,7 @@ pub fn start_exclusive_capsule(
         &exact,
         workspace,
         workspace_view.as_ref(),
+        external_workspace_authority,
         &session_protocol,
         state_root,
         &runtime_environment,
@@ -3471,6 +4039,7 @@ pub fn start_exclusive_capsule(
         &identity.worker_instance_id,
         scope_allocation.as_ref(),
         scope,
+        Some(&identity.placement_thread_id),
     )
     .map_err(|error| {
         // Preparation itself can fail after reservation but before spawn.
@@ -3518,7 +4087,11 @@ pub fn start_exclusive_capsule(
     };
     if let Err(error) = state.state_store.attach_worker_process(&record) {
         let process_identity = held.process.process_identity.clone();
-        let cleanup = held.process.abort_and_reap().err();
+        let cleanup = settle_launch_retirement(
+            held.process.abort_and_reap(),
+            held.retirement_observer.as_ref(),
+        )
+        .err();
         return Err(match cleanup {
             Some(cleanup) => {
                 let reason = format!("exclusive held-process attachment cleanup failed: {cleanup}");
@@ -3559,7 +4132,10 @@ pub fn start_exclusive_capsule(
         &held.process.process_identity.resource_operations,
     ) {
         let process_identity = held.process.process_identity.clone();
-        let cleanup = held.process.abort_and_reap();
+        let cleanup = settle_launch_retirement(
+            held.process.abort_and_reap(),
+            held.retirement_observer.as_ref(),
+        );
         let financial = cleanup.as_ref().ok().map(|()| {
             let proposed =
                 ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(&process_identity)?;
@@ -3643,6 +4219,12 @@ pub fn start_exclusive_capsule(
                     "settle resource operation after release failure also failed: {financial:#}"
                 ));
             }
+            if let Err(cleanup) = settle_launch_retirement(
+                ryeos_app::process::assert_reaped_process_group_absent(&released_process_identity),
+                held.retirement_observer.as_ref(),
+            ) {
+                error = error.context(format!("release-failure retirement unproved: {cleanup:#}"));
+            }
             if let Err(settlement) = state.state_store.settle_worker_process(
                 &identity.worker_instance_id,
                 &identity.placement_thread_id,
@@ -3661,6 +4243,7 @@ pub fn start_exclusive_capsule(
         running,
         socket: held.socket,
         lifelines: held.lifelines,
+        retirement_observer: held.retirement_observer,
         expected_boot_identity: Some(identity.boot_identity_hash.clone()),
         observation_sink: Some(observation_sink),
         cleanup_observer,
@@ -3798,6 +4381,15 @@ fn validate_required_session_environment(
         if !environment.contains_key(name) {
             bail!("required process environment `{name}` is absent from admitted session inputs");
         }
+    }
+    Ok(())
+}
+
+fn require_candidate_connector_ready(
+    program: Option<&ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram>,
+) -> Result<()> {
+    if program.is_some() {
+        bail!("external candidate execution requires its protected connector and contact permit");
     }
     Ok(())
 }
@@ -4003,6 +4595,63 @@ fn canonical_hash(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workspace_output_authority(
+        storage: ryeos_state::external_content::products::ProductStorage,
+    ) -> ryeos_state::objects::WorkspaceOutputAuthority {
+        let policy = ryeos_state::objects::ProjectSnapshotPolicy::new(
+            ryeos_state::project_sync::ProjectSyncScope::FullProject,
+            Vec::new(),
+            Vec::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let bounds = ryeos_state::external_content::products::ProductBounds {
+            maximum_entries: 8,
+            maximum_depth: 4,
+            maximum_file_bytes: 1024,
+            maximum_total_bytes: 4096,
+        };
+        let mut partition = ryeos_state::objects::WorkspaceOutputPartition {
+            schema: ryeos_state::objects::WORKSPACE_OUTPUT_PARTITION_SCHEMA.into(),
+            recipe_binding: "remote_products".into(),
+            recipe_ref: "config:fixtures/remote-products".into(),
+            recipe_raw_content_digest: "d".repeat(64),
+            declarations_hash: "e".repeat(64),
+            project_snapshot_policy_hash: ryeos_state::objects::canonical_value_digest(
+                &policy.to_value(),
+            )
+            .unwrap(),
+            roots: vec![ryeos_state::objects::WorkspaceOutputRoot {
+                name: "artifact".into(),
+                path: "products/artifact".into(),
+                storage,
+                declared_bounds: bounds.clone(),
+                effective_bounds: bounds,
+            }],
+            products: Vec::new(),
+            partition_identity: String::new(),
+            capture_policy_digest: String::new(),
+        };
+        partition.capture_policy_digest = partition.derived_capture_policy_digest(&policy).unwrap();
+        partition.partition_identity = partition.derived_partition_identity().unwrap();
+        ryeos_state::objects::WorkspaceOutputAuthority::initial(partition).unwrap()
+    }
+
+    #[test]
+    fn external_workspace_output_storage_refuses_before_placement_contact() {
+        use ryeos_state::external_content::products::ProductStorage;
+
+        validate_external_workspace_output_transfer(&workspace_output_authority(
+            ProductStorage::Content,
+        ))
+        .unwrap();
+        let error = validate_external_workspace_output_transfer(&workspace_output_authority(
+            ProductStorage::LargeContent,
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("large-content transfer"));
+    }
 
     fn realization_delivery_session(
         process_mode: PersistentSessionProcessMode,
@@ -4737,11 +5386,13 @@ session:
         )
         .unwrap();
         AdmittedPersistentSessionCapsule {
+            external_candidate: None,
             schema: PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
             kind: PERSISTENT_SESSION_CAPSULE_KIND.to_owned(),
             exact_program,
             exact_program_hash,
             retained_product_selections: None,
+            retained_external_runtime_qualification: None,
             lifecycle: PersistentSessionLifecycleContract {
                 max_processes: 1,
                 max_inflight_per_process: 1,
@@ -5009,6 +5660,8 @@ session:
             schema_hashes: BTreeMap::from([("fixture.json".to_owned(), "b".repeat(64))]),
             baseline_source: "baseline.toml".to_owned(),
             baseline_destination: "config.toml".to_owned(),
+            auxiliary_configs: Vec::new(),
+            runtime_configs: Vec::new(),
         };
 
         let overlay = prepare_structured_session_baseline(
@@ -5080,6 +5733,165 @@ session:
                 true,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn runtime_configuration_preparation_never_writes_a_host_destination() {
+        use ryeos_state::objects::{
+            AdmittedStructuredSessionProfile, SessionRuntimeConfigurationFile,
+        };
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("baseline.conf"), b"baseline=true\n").unwrap();
+        std::fs::write(source.path().join("policy.conf"), b"closed=true\n").unwrap();
+        let directory = lillux::PinnedDirectory::open(source.path())
+            .unwrap()
+            .unwrap();
+        let destination = "/etc/qualification-runtime-policy";
+        let before = std::fs::read(destination).ok();
+        let profile = AdmittedStructuredSessionProfile {
+            profile_hash: "a".repeat(64),
+            contract: json!({"fixture":true}),
+            schema_hashes: BTreeMap::new(),
+            baseline_source: "baseline.conf".into(),
+            baseline_destination: "baseline.conf".into(),
+            auxiliary_configs: Vec::new(),
+            runtime_configs: vec![SessionRuntimeConfigurationFile {
+                source: "policy.conf".into(),
+                destination: destination.into(),
+            }],
+        };
+        assert!(
+            prepare_structured_session_configurations(&profile, &directory, state.path(), false)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
+        let mounts =
+            prepare_structured_session_configurations(&profile, &directory, state.path(), true)
+                .unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read(destination).ok(), before);
+    }
+
+    #[test]
+    fn auxiliary_configuration_preparation_requires_read_only_authority() {
+        use ryeos_state::objects::{AdmittedStructuredSessionProfile, SessionConfigurationFile};
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("baseline.conf"), b"baseline=true\n").unwrap();
+        std::fs::write(source.path().join("environment.conf"), b"local=false\n").unwrap();
+        let source_directory = lillux::PinnedDirectory::open(source.path())
+            .unwrap()
+            .unwrap();
+        let profile = AdmittedStructuredSessionProfile {
+            profile_hash: "a".repeat(64),
+            contract: json!({"fixture":true}),
+            schema_hashes: BTreeMap::new(),
+            baseline_source: "baseline.conf".into(),
+            baseline_destination: "runtime.conf".into(),
+            auxiliary_configs: vec![SessionConfigurationFile {
+                source: "environment.conf".into(),
+                destination: "environment.conf".into(),
+            }],
+            runtime_configs: Vec::new(),
+        };
+        assert!(
+            prepare_structured_session_configurations(
+                &profile,
+                &source_directory,
+                state.path(),
+                false,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
+        let mounts = prepare_structured_session_configurations(
+            &profile,
+            &source_directory,
+            state.path(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(
+            std::fs::read(state.path().join("environment.conf")).unwrap(),
+            b"local=false\n"
+        );
+    }
+
+    #[test]
+    fn external_candidate_capsule_cannot_omit_or_invent_its_program_authority() {
+        use ryeos_state::external_execution::admission::{
+            AdmittedExternalCandidateProgram, ExternalCandidateProcFilesystem,
+            ExternalCandidateRequirement, ExternalCandidateRuntimeRecipe, PROTOCOL,
+        };
+        let mut capsule = capsule_fixture(&retained_program_fixture("/fixture/worker.yaml", 'a'));
+        capsule.validate().unwrap();
+        require_candidate_connector_ready(capsule.external_candidate.as_ref()).unwrap();
+        let original = capsule.authority().digest().unwrap();
+        let mut missing = serde_json::to_value(&capsule).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("external_candidate");
+        assert!(AdmittedPersistentSessionCapsule::from_current_value(&missing).is_err());
+        let runtime_recipe = ExternalCandidateRuntimeRecipe {
+            schema: 2,
+            runtime_mount_destination: "/runtime".into(),
+            executable_relative_path: "bin/codex".into(),
+            argv0: "codex".into(),
+            arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+            cwd: "/workspace".into(),
+            environment: std::collections::BTreeMap::new(),
+            max_stdout_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024 * 1024,
+            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
+            contain_process_group: false,
+            nested_sandbox: true,
+        };
+        let runtime_recipe_digest = runtime_recipe.digest().unwrap();
+        let requirement = ExternalCandidateRequirement {
+            schema: 6,
+            required_lifecycle_capabilities: Default::default(),
+            protocol: PROTOCOL.into(),
+            connector_protocol:
+                ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+            execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
+            provider_declaration_id: "codex-hosted".into(),
+            provider_configuration_destination: "environments.toml".into(),
+            runtime_product_declaration_id: "candidate_runtime".into(),
+            runtime_recipe,
+        };
+        let qualification_use =
+            ryeos_state::external_execution::admission::test_support::fixture_qualification_use(
+                &requirement,
+            )
+            .unwrap();
+        capsule.external_candidate = Some(AdmittedExternalCandidateProgram {
+            requirement,
+            qualification_use,
+            runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+            runtime_manifest_hash: "1".repeat(64),
+            runtime_witness_hash: "2".repeat(64),
+            qualification_attestation_hash: "3".repeat(64),
+            selection_identity_digest: "4".repeat(64),
+            runtime_recipe_digest,
+        });
+        assert_ne!(original, capsule.authority().digest().unwrap());
+        assert!(
+            capsule
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("signed profile")
+        );
+        assert!(
+            require_candidate_connector_ready(capsule.external_candidate.as_ref())
+                .unwrap_err()
+                .to_string()
+                .contains("protected connector")
         );
     }
 

@@ -32,7 +32,7 @@ fn store_structured_session_capsule_with_schema(
         PersistentSessionWireContract,
     };
 
-    let contract = json!({"fixture":"terminal-replay"});
+    let contract = json!({"fixture":"terminal-replay", "auxiliary_configs":[], "runtime_configs":[], "external_candidate":null, "workload_client":null});
     let profile_hash = ryeos_state::objects::canonical_value_digest(&contract).unwrap();
     let schema_hashes =
         std::collections::BTreeMap::from([("request.json".to_owned(), "e".repeat(64))]);
@@ -40,6 +40,7 @@ fn store_structured_session_capsule_with_schema(
     let exact_program_hash = ryeos_state::objects::canonical_value_digest(&exact_program).unwrap();
     let executable_blob_hash = "9".repeat(64);
     let capsule = AdmittedPersistentSessionCapsule {
+        external_candidate: None,
         schema: PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
         kind: PERSISTENT_SESSION_CAPSULE_KIND.to_owned(),
         exact_program,
@@ -100,12 +101,15 @@ fn store_structured_session_capsule_with_schema(
         execution_realization_hash: "8".repeat(64),
         source_binding_hash: None,
         retained_product_selections: None,
+        retained_external_runtime_qualification: None,
         structured_session_profile: Some(AdmittedStructuredSessionProfile {
             profile_hash: profile_hash.clone(),
             contract,
             schema_hashes: schema_hashes.clone(),
             baseline_source: "baseline.toml".to_owned(),
             baseline_destination: "config.toml".to_owned(),
+            auxiliary_configs: Vec::new(),
+            runtime_configs: Vec::new(),
         }),
         executable_search: Vec::new(),
         process_environment: std::collections::BTreeMap::new(),

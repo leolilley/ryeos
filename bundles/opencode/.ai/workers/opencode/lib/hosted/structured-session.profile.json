@@ -1,5 +1,6 @@
 {
-  "schema_version": 6,
+  "schema_version": 10,
+  "external_candidate": null,
   "transport": "http_sse",
   "http_sse": {
     "username_env": "OPENCODE_SERVER_USERNAME",
@@ -31,6 +32,8 @@
   "workload_client": null,
   "baseline_config": "opencode.baseline.json",
   "baseline_destination": "opencode.json",
+  "auxiliary_configs": [],
+  "runtime_configs": [],
   "portable_state": null,
   "credential_subject": null,
   "initialization": [],

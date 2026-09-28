@@ -192,6 +192,10 @@ pub struct ExternalContentDeclaration {
     pub kind: ExternalContentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locator: Option<ExternalContentLocator>,
+    /// An executable in the declaring bundle's signed binary manifest. This
+    /// is a source selector, not a host path or a retained-manifest alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_binary: Option<String>,
     pub mode: ExternalContentMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
@@ -225,6 +229,24 @@ impl ExternalContentDeclaration {
     ) -> anyhow::Result<()> {
         validate_declaration_id(&self.id)?;
         validate_relative_path("external content mount target", &self.mount)?;
+        if let Some(binary_ref) = &self.bundle_binary {
+            if self.locator.is_some() {
+                anyhow::bail!("bundle binary content cannot also declare a locator");
+            }
+            if self.kind != ExternalContentKind::File
+                || self.mode != ExternalContentMode::Captured
+                || !self.exclude.is_empty()
+                || !matches!(declarer, DeclaringAuthority::Bundle(_))
+            {
+                anyhow::bail!(
+                    "bundle binary content requires a captured file in its declaring bundle"
+                );
+            }
+            let Some(name) = binary_ref.strip_prefix("bin:") else {
+                anyhow::bail!("bundle binary content requires a canonical `bin:<name>` ref");
+            };
+            crate::binary_resolver::validate_bin_name(name, binary_ref)?;
+        }
         match &self.locator {
             Some(locator) => {
                 validate_relative_path("external content locator path", &locator.path)?;
@@ -237,7 +259,9 @@ impl ExternalContentDeclaration {
                 }
             }
             None => {
-                if self.mode != ExternalContentMode::Pinned || self.digest.is_none() {
+                if self.bundle_binary.is_none()
+                    && (self.mode != ExternalContentMode::Pinned || self.digest.is_none())
+                {
                     anyhow::bail!(
                         "external content `{}` may omit its locator only when pinned to a digest",
                         self.id
@@ -475,6 +499,7 @@ pub fn effective_external_content_declarations(
             kind: slot.kind,
             mode: ExternalContentMode::Pinned,
             locator: None,
+            bundle_binary: None,
             digest: Some(selection.manifest_hash.clone()),
             exclude: Vec::new(),
             metadata_hint: None,
@@ -706,6 +731,17 @@ fn validate_kind_contract(
                 locator.root.label()
             );
         }
+        if declaration.bundle_binary.is_some()
+            && !contract
+                .allowed_roots
+                .iter()
+                .any(|root| root == "bundle_binary:own")
+        {
+            anyhow::bail!(
+                "external content `{}` names a bundle binary without its signed kind grant",
+                declaration.id
+            );
+        }
     }
     Ok(())
 }
@@ -808,6 +844,64 @@ fn path_contains(parent: &str, child: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundle_binary_requires_own_bundle_signed_kind_grant_and_capture() {
+        let value = serde_json::json!({"external_content": [{
+            "id": "owner",
+            "kind": "file",
+            "bundle_binary": "bin:ryeos-external-guest-occurrence-owner",
+            "mode": "captured",
+            "mount_root": "project",
+            "mount": "runtime/owner"
+        }]});
+        let granted = contract(&["bundle_binary:own"], 1);
+        assert!(
+            declarations_from_composed(&value, Some(&granted), DeclaringAuthority::Bundle("codex"))
+                .is_ok()
+        );
+        assert!(
+            declarations_from_composed(
+                &value,
+                Some(&contract(&["bundle:own"], 1)),
+                DeclaringAuthority::Bundle("codex")
+            )
+            .is_err()
+        );
+        assert!(
+            declarations_from_composed(&value, Some(&granted), DeclaringAuthority::Project)
+                .is_err()
+        );
+        for (field, replacement) in [
+            ("bundle_binary", serde_json::json!("bin:../owner")),
+            ("kind", serde_json::json!("tree")),
+            ("mode", serde_json::json!("pinned")),
+            ("digest", serde_json::json!("a".repeat(64))),
+        ] {
+            let mut invalid = value.clone();
+            invalid["external_content"][0][field] = replacement;
+            assert!(
+                declarations_from_composed(
+                    &invalid,
+                    Some(&granted),
+                    DeclaringAuthority::Bundle("codex")
+                )
+                .is_err()
+            );
+        }
+        let mut ambiguous = value;
+        ambiguous["external_content"][0]["locator"] = serde_json::json!({
+            "root": "bundle:codex", "path": ".ai/bin/owner"
+        });
+        assert!(
+            declarations_from_composed(
+                &ambiguous,
+                Some(&granted),
+                DeclaringAuthority::Bundle("codex")
+            )
+            .is_err()
+        );
+    }
 
     fn contract(roots: &[&str], max: usize) -> crate::kind_registry::KindExternalContentDecl {
         crate::kind_registry::KindExternalContentDecl {

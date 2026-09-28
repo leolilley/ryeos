@@ -894,6 +894,7 @@ mod tests {
                 root: ExternalContentRoot::ProjectFiles,
                 path: format!("vendor/{id}"),
             }),
+            bundle_binary: None,
             mode,
             digest: digest.map(str::to_owned),
             exclude: Vec::new(),

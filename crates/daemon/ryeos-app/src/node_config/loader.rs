@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 
 use ryeos_engine::contracts::SignatureEnvelope;
@@ -50,7 +50,9 @@ struct VerifiedItem {
     path: PathBuf,
     ctx: NodeItemContext,
     signer_fingerprint: String,
+    signer_verifying_key: [u8; 32],
     body: Value,
+    signed_source: std::sync::Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,9 +100,20 @@ impl NodeConfigSource {
 pub(crate) struct NodeConfigAdmission {
     pub(crate) source_file: PathBuf,
     pub(crate) command_provenance: ryeos_runtime::CommandProvenance,
+    /// Exact bytes verified by the loader, never a re-read of source_file.
+    pub(crate) signed_source: std::sync::Arc<str>,
+    pub(crate) signer_fingerprint: String,
+    pub(crate) signer_verifying_key: [u8; 32],
 }
 
 pub(crate) struct NodeConfigSnapshotBuilder {
+    external_execution: Vec<super::sections::external_execution::InstalledExternalExecutionBinding>,
+    runtime_snapshot_production: Vec<
+        super::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+    >,
+    runtime_snapshot_qualification: Vec<
+        super::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+    >,
     bundles: Vec<BundleRecord>,
     routes: Vec<RawRouteSpec>,
     commands: Vec<CommandRecord>,
@@ -113,6 +126,9 @@ impl NodeConfigSnapshotBuilder {
         command_registration_authority: CommandRegistrationAuthority,
     ) -> Result<Self> {
         Ok(Self {
+            external_execution: Vec::new(),
+            runtime_snapshot_production: Vec::new(),
+            runtime_snapshot_qualification: Vec::new(),
             bundles: validate_prospective_bundle_records(bundles)?,
             routes: Vec::new(),
             commands: Vec::new(),
@@ -123,9 +139,10 @@ impl NodeConfigSnapshotBuilder {
     fn admit(
         &mut self,
         record: Box<dyn super::CompiledNodeConfigItem>,
-        context: &NodeItemContext,
+        verified: &VerifiedItem,
         source: &NodeConfigSource,
     ) -> Result<()> {
+        let context = &verified.ctx;
         if record.section_name() != context.section {
             bail!(
                 "node-config compiler `{}` returned record for section `{}`",
@@ -136,6 +153,9 @@ impl NodeConfigSnapshotBuilder {
         let admission = NodeConfigAdmission {
             source_file: context.source_file.clone(),
             command_provenance: source.command_provenance()?,
+            signed_source: verified.signed_source.clone(),
+            signer_fingerprint: verified.signer_fingerprint.clone(),
+            signer_verifying_key: verified.signer_verifying_key,
         };
         record.admit(self, &admission)
     }
@@ -144,12 +164,62 @@ impl NodeConfigSnapshotBuilder {
         self.routes.push(record);
     }
 
+    pub(crate) fn push_external_execution(
+        &mut self,
+        record: super::sections::external_execution::InstalledExternalExecutionBinding,
+    ) -> Result<()> {
+        if self
+            .external_execution
+            .iter()
+            .any(|prior| prior.id() == record.id())
+        {
+            bail!("duplicate external execution binding identity");
+        }
+        self.external_execution.push(record);
+        Ok(())
+    }
+
+    pub(crate) fn push_runtime_snapshot_production(
+        &mut self,
+        record: super::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+    ) -> Result<()> {
+        if self
+            .runtime_snapshot_production
+            .iter()
+            .any(|prior| prior.id() == record.id())
+        {
+            bail!("duplicate runtime snapshot production binding identity");
+        }
+        self.runtime_snapshot_production.push(record);
+        Ok(())
+    }
+
+    pub(crate) fn push_runtime_snapshot_qualification(
+        &mut self,
+        record: super::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+    ) -> Result<()> {
+        if self.runtime_snapshot_qualification.iter().any(|prior| prior.id() == record.id()) {
+            bail!("duplicate runtime snapshot qualification binding identity");
+        }
+        self.runtime_snapshot_qualification.push(record);
+        Ok(())
+    }
+
     pub(crate) fn push_command(&mut self, record: CommandRecord) {
         self.commands.push(record);
     }
 
     fn finish(self) -> Result<NodeConfigSnapshot> {
         check_bundle_collisions(&self.bundles)?;
+        for qualification in &self.runtime_snapshot_qualification {
+            ensure!(
+                self.runtime_snapshot_production.iter().any(|producer| {
+                    producer.id() == qualification.production_binding_id()
+                        && producer.digest() == qualification.production_binding_digest()
+                }),
+                "snapshot qualification has no exact current producer binding"
+            );
+        }
         ryeos_runtime::CommandRegistry::from_records(
             &self.commands,
             &self.command_registration_authority.runtime_policy(),
@@ -157,6 +227,9 @@ impl NodeConfigSnapshotBuilder {
         .context("validate loaded command registry")?;
 
         Ok(NodeConfigSnapshot {
+            external_execution: self.external_execution,
+            runtime_snapshot_production: self.runtime_snapshot_production,
+            runtime_snapshot_qualification: self.runtime_snapshot_qualification,
             bundles: self.bundles,
             routes: self.routes,
             commands: self.commands,
@@ -259,6 +332,11 @@ fn verify_and_parse(
             trust_class
         );
     }
+    let signer_verifying_key = trust_store
+        .get(&signer_fingerprint)
+        .context("verified node-config signer disappeared from trust store")?
+        .verifying_key
+        .to_bytes();
 
     let body_str = strip_signature(&content);
     let body: Value = serde_yaml::from_str(&body_str)
@@ -327,7 +405,9 @@ fn verify_and_parse(
         path: path.to_path_buf(),
         ctx,
         signer_fingerprint,
+        signer_verifying_key,
         body,
+        signed_source: content.into(),
     })
 }
 
@@ -453,7 +533,7 @@ impl<'a> BootstrapLoader<'a> {
                                     section_name
                                 )
                             })?;
-                    builder.admit(record, &verified.ctx, &scan_root.source)?;
+                    builder.admit(record, &verified, &scan_root.source)?;
                     count = count.saturating_add(1);
                 }
             }
@@ -711,6 +791,509 @@ fn check_bundle_collisions(records: &[BundleRecord]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_binding_admission_is_node_owned_and_rotation_preserves_capacity() {
+        use super::super::sections::external_execution::{ExternalExecutionSection, SECTION_NAME};
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles").is_dir())
+            .unwrap()
+            .to_path_buf();
+        let trust = TrustStore::load_from_dir(
+            &workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers"),
+        )
+        .unwrap();
+        let system = temp_system_with_command_registration_policy(&workspace);
+        let identity = crate::identity::NodeIdentity::load(
+            &system.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let dir = system.path().join(".ai/node").join(SECTION_NAME);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("primary.yaml");
+        let controller_tls_roots = vec![base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"fixture controller TLS root",
+        )];
+        let settings_schema_digest = "3".repeat(64);
+        let settings = serde_json::json!({"region":"singapore", "plan":"standard"});
+        let settings_digest =
+            super::super::sections::external_execution::adapter_settings_digest(&settings).unwrap();
+        let mut body = serde_json::json!({"kind":"node", "schema":10,
+            "protocol":ryeos_state::external_execution::admission::PROTOCOL,
+            "workload": {
+                "kind":"structured_session",
+                "provider_declaration_id":"codex-hosted",
+                "provider_configuration_destination":"environments.toml",
+                "runtime_manifest_hash":"b".repeat(64),
+                "runtime_selection_identity":"c".repeat(64),
+                "configuration_adapter_artifact_hash":"2".repeat(64),
+                "configuration_adapter_artifact_bytes":4096,
+                "connector_protocol":ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
+                "connector_artifact_hash":"f".repeat(64),
+                "connector_artifact_bytes":4096
+            },
+            "backend":"qualified-backend", "account":"account-1",
+            "capacity_group":"candidate-workers",
+            "credential_generation":"a".repeat(64),
+            "settings_schema_digest":settings_schema_digest,
+            "settings_digest":settings_digest,
+            "settings":settings,
+            "backend_artifact_hash":"d".repeat(64),
+            "backend_artifact_bytes":4096,
+            "supervisor_artifact_hash":"1".repeat(64),
+            "supervisor_artifact_bytes":4096,
+            "launcher_artifact_hash":"e".repeat(64),
+            "launcher_artifact_bytes":4096,
+            "network_policy":"supervisor_pinned_owner_only_candidate_denied_v1",
+            "storage_policy":"ephemeral_private_candidate_v1",
+            "cleanup_proof":"provider_terminal_occurrence_v1",
+            "controller_transport": {
+                "schema":2,
+                "https_origin":"https://controller.example:7443",
+                "route_contract":ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT,
+                "tls_root_bundle_digest":
+                    ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                        &controller_tls_roots,
+                    ).unwrap(),
+                "connect_timeout_ms":5000,
+                "request_timeout_ms":10000,
+                "maximum_response_bytes":1048576,
+                "network_inputs": {
+                    "resolver":{"source":"/etc/resolv.conf", "max_bytes":65536},
+                    "hosts":{"source":"/etc/hosts", "max_bytes":65536}
+                }
+            },
+            "controller_tls_root_certificates_der_base64":controller_tls_roots,
+            "max_active":2, "timeout_seconds":300, "contact_timeout_seconds":30,
+            "observation_timeout_seconds":60, "cleanup_timeout_seconds":120,
+            "max_workspace_bytes":1048576, "max_export_bytes":524288,
+            "max_transfer_bytes":2097152,
+            "max_guest_package_regular_bytes":1048576,
+            "max_guest_package_framed_bytes":2097152 });
+        let write = |body: &Value| {
+            fs::write(
+                &path,
+                crate::node_document::render_signed_item(SECTION_NAME, "primary", body, &identity)
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        write(&body);
+        let loader = BootstrapLoader {
+            app_root: system.path(),
+            trust_store: &trust,
+        };
+        let load = || {
+            loader.load_full(
+                &NodeConfigTable::new(),
+                &[],
+                &command_policy([]),
+                &crate::node_policy::NodePolicyTable::new(),
+            )
+        };
+        let first = load().unwrap();
+        let binding = &first.external_execution[0];
+        assert_eq!(binding.id(), "primary");
+        assert!(binding.credential_access().is_ok());
+        let runtime_recipe =
+            ryeos_state::external_execution::admission::ExternalCandidateRuntimeRecipe {
+                schema: 2,
+                runtime_mount_destination: "/runtime".into(),
+                executable_relative_path: "bin/codex".into(),
+                argv0: "codex".into(),
+                arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+                cwd: "/workspace".into(),
+                environment: std::collections::BTreeMap::new(),
+                max_stdout_bytes: 1024 * 1024,
+                max_stderr_bytes: 1024 * 1024,
+                proc_filesystem:
+                    ryeos_state::external_execution::admission::ExternalCandidateProcFilesystem::PidNamespaceNested,
+                contain_process_group: false,
+                nested_sandbox: true,
+            };
+        let runtime_recipe_digest = runtime_recipe.digest().unwrap();
+        let requirement =
+            ryeos_state::external_execution::admission::ExternalCandidateRequirement {
+                schema: 6,
+                required_lifecycle_capabilities: Default::default(),
+                protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
+                connector_protocol:
+                    ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
+                provider_declaration_id: "codex-hosted".into(),
+                provider_configuration_destination: "environments.toml".into(),
+                runtime_product_declaration_id: "runtime".into(),
+                runtime_recipe,
+            };
+        let qualification_use =
+            ryeos_state::external_execution::admission::test_support::fixture_qualification_use(
+                &requirement,
+            )
+            .unwrap();
+        let program =
+            ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
+                requirement,
+                qualification_use,
+                runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+                runtime_manifest_hash: "b".repeat(64),
+                runtime_witness_hash: "1".repeat(64),
+                qualification_attestation_hash: "2".repeat(64),
+                selection_identity_digest: "c".repeat(64),
+                runtime_recipe_digest,
+            };
+        binding.check_program(&program).unwrap();
+        for field in [
+            "runtime",
+            "selection",
+            "protocol",
+            "connector_protocol",
+            "provider_configuration_destination",
+            "requirement_schema",
+            "malformed",
+        ] {
+            let mut changed = program.clone();
+            match field {
+                "runtime" => changed.runtime_manifest_hash = "f".repeat(64),
+                "selection" => changed.selection_identity_digest = "f".repeat(64),
+                "protocol" => changed.requirement.protocol = "other".into(),
+                "connector_protocol" => changed.requirement.connector_protocol = "other".into(),
+                "provider_configuration_destination" => {
+                    changed.requirement.provider_configuration_destination = "other.toml".into()
+                }
+                "requirement_schema" => changed.requirement.schema = 2,
+                _ => changed.runtime_witness_hash = "not-a-hash".into(),
+            }
+            assert!(binding.check_program(&changed).is_err());
+        }
+        assert!(!format!("{binding:?}").contains(&"a".repeat(64)));
+
+        for (field, value) in [
+            (
+                "/controller_transport/https_origin",
+                serde_json::json!("http://controller.example:7443"),
+            ),
+            (
+                "/controller_transport/https_origin",
+                serde_json::json!("https://controller.example:7443/path"),
+            ),
+            (
+                "/controller_transport/route_contract",
+                serde_json::json!("ryeos.external-channel.other"),
+            ),
+            (
+                "/controller_transport/tls_root_bundle_digest",
+                serde_json::json!("not-a-digest"),
+            ),
+            (
+                "/controller_transport/connect_timeout_ms",
+                serde_json::json!(0),
+            ),
+            (
+                "/controller_transport/request_timeout_ms",
+                serde_json::json!(30_001),
+            ),
+            (
+                "/controller_transport/maximum_response_bytes",
+                serde_json::json!(4_095),
+            ),
+            ("/workload/connector_protocol", serde_json::json!("other")),
+            (
+                "/workload/connector_artifact_hash",
+                serde_json::json!("not-a-digest"),
+            ),
+            ("/workload/connector_artifact_bytes", serde_json::json!(0)),
+        ] {
+            let mut invalid = body.clone();
+            *invalid.pointer_mut(field).unwrap() = value;
+            write(&invalid);
+            assert!(
+                load().is_err(),
+                "invalid controller transport field {field}"
+            );
+        }
+        write(&body);
+
+        // A valid direct workload has no provider/runtime-selection fields and
+        // grants no candidate export. Loading its signed shape is not direct
+        // execution admission: the existing session check must refuse it.
+        let mut direct = body.clone();
+        direct["workload"] = serde_json::json!({"kind":"direct_command"});
+        direct["max_export_bytes"] = serde_json::json!(0);
+        write(&direct);
+        let direct_loaded = load().unwrap();
+        let error = direct_loaded.external_execution[0]
+            .check_program(&program)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot authorize a structured session")
+        );
+        assert_ne!(
+            binding.digest(),
+            direct_loaded.external_execution[0].digest()
+        );
+        assert_eq!(
+            binding.capacity_owner(),
+            direct_loaded.external_execution[0].capacity_owner()
+        );
+        direct["workload"]["provider_declaration_id"] = serde_json::json!("codex-hosted");
+        write(&direct);
+        assert!(load().is_err());
+        write(&body);
+
+        let rotated_tls_roots = vec![base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"rotated fixture controller TLS root",
+        )];
+        body["controller_tls_root_certificates_der_base64"] = serde_json::json!(rotated_tls_roots);
+        body["controller_transport"]["tls_root_bundle_digest"] = Value::String(
+            ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                &rotated_tls_roots,
+            )
+            .unwrap(),
+        );
+        write(&body);
+        let transport_rotated = load().unwrap();
+        assert_ne!(
+            binding.digest(),
+            transport_rotated.external_execution[0].digest()
+        );
+        assert_eq!(
+            binding.capacity_owner(),
+            transport_rotated.external_execution[0].capacity_owner()
+        );
+        body["credential_generation"] = Value::String("e".repeat(64));
+        write(&body);
+        let second = load().unwrap();
+        assert_ne!(
+            transport_rotated.external_execution[0].digest(),
+            second.external_execution[0].digest()
+        );
+        assert_eq!(
+            binding.capacity_owner(),
+            second.external_execution[0].capacity_owner()
+        );
+        let section = ExternalExecutionSection;
+        assert_eq!(section.source_scope(), NodeConfigSourceScope::AppRootOnly);
+        let files = scan_yaml_files(&dir, false).unwrap();
+        let verified = verify_and_parse(&files[0], &dir, SECTION_NAME, &trust).unwrap();
+        assert!(verify_section_signer(&section, &verified, &"f".repeat(64)).is_err());
+        let record = section.parse(&verified.ctx, &verified.body).unwrap();
+        let mut builder = NodeConfigSnapshotBuilder::new(&[], command_policy([])).unwrap();
+        let source = NodeConfigSource::Node {
+            command_registration_caps: Vec::new(),
+        };
+        builder.admit(record, &verified, &source).unwrap();
+        assert!(
+            builder
+                .admit(
+                    section.parse(&verified.ctx, &verified.body).unwrap(),
+                    &verified,
+                    &source
+                )
+                .is_err()
+        );
+        fs::copy(&path, dir.join("primary.yml")).unwrap();
+        assert!(load().is_err());
+        fs::remove_file(dir.join("primary.yml")).unwrap();
+        let bundle = tempfile::tempdir().unwrap();
+        let bundle_section = bundle.path().join(".ai/node").join(SECTION_NAME);
+        fs::create_dir_all(&bundle_section).unwrap();
+        fs::copy(&path, bundle_section.join("primary.yaml")).unwrap();
+        let contributed = BundleRecord {
+            name: "test".into(),
+            path: bundle.path().into(),
+            source_file: path.clone(),
+        };
+        assert!(
+            loader
+                .load_full(
+                    &NodeConfigTable::new(),
+                    &[contributed],
+                    &command_policy([("test", Vec::new())]),
+                    &crate::node_policy::NodePolicyTable::new()
+                )
+                .is_err()
+        );
+        for (field, invalid) in [
+            ("max_active", 0),
+            ("max_active", 65),
+            ("timeout_seconds", 0),
+            ("timeout_seconds", 3601),
+            ("contact_timeout_seconds", 0),
+            ("contact_timeout_seconds", 61),
+            ("observation_timeout_seconds", 0),
+            ("observation_timeout_seconds", 301),
+            ("cleanup_timeout_seconds", 0),
+            ("cleanup_timeout_seconds", 601),
+        ] {
+            let original = body[field].clone();
+            body[field] = Value::from(invalid);
+            write(&body);
+            assert!(load().is_err());
+            body[field] = original;
+        }
+        for (active, timeout) in [(1, 1), (64, 3600)] {
+            body["max_active"] = Value::from(active);
+            body["timeout_seconds"] = Value::from(timeout);
+            write(&body);
+            assert_eq!(
+                load().unwrap().external_execution[0].capacity_owner(),
+                binding.capacity_owner()
+            );
+        }
+        for field in ["network_policy", "storage_policy", "cleanup_proof"] {
+            let original = body[field].clone();
+            body[field] = Value::String("unsupported".into());
+            write(&body);
+            assert!(load().is_err(), "unsupported {field} was admitted");
+            body[field] = original;
+        }
+        for (field, invalid) in [
+            ("max_workspace_bytes", 0_u64),
+            ("max_workspace_bytes", (1_u64 << 40) + 1),
+            ("max_export_bytes", 0),
+            ("max_export_bytes", 1_048_577),
+            ("max_transfer_bytes", 524_287),
+            ("max_transfer_bytes", (1_u64 << 40) + 1),
+            ("max_guest_package_regular_bytes", 0),
+            ("max_guest_package_regular_bytes", 2_097_152),
+            ("max_guest_package_framed_bytes", 1_048_576),
+            ("max_guest_package_framed_bytes", (4_u64 << 30) + 1),
+        ] {
+            let original = body[field].clone();
+            body[field] = Value::from(invalid);
+            write(&body);
+            assert!(load().is_err(), "invalid {field} budget was admitted");
+            body[field] = original;
+        }
+        for field in [
+            "max_guest_package_regular_bytes",
+            "max_guest_package_framed_bytes",
+        ] {
+            let original = body.as_object_mut().unwrap().remove(field).unwrap();
+            write(&body);
+            assert!(load().is_err(), "missing {field} budget was admitted");
+            body[field] = original;
+        }
+        for (regular, framed) in [
+            (1_048_576_u64, 2_097_152_u64),
+            ((4_u64 << 30) - 1, 4_u64 << 30),
+        ] {
+            body["max_guest_package_regular_bytes"] = Value::from(regular);
+            body["max_guest_package_framed_bytes"] = Value::from(framed);
+            write(&body);
+            let admitted = load().unwrap();
+            let contract = admitted.external_execution[0].backend_contract();
+            assert_eq!(contract.max_guest_package_regular_bytes, regular);
+            assert_eq!(contract.max_guest_package_framed_bytes, framed);
+        }
+        body["max_guest_package_regular_bytes"] = Value::from(1_048_576_u64);
+        body["max_guest_package_framed_bytes"] = Value::from(2_097_152_u64);
+        for field in ["backend", "account", "capacity_group"] {
+            let original = body[field].clone();
+            body[field] = Value::String("other".into());
+            write(&body);
+            assert_ne!(
+                load().unwrap().external_execution[0].capacity_owner(),
+                binding.capacity_owner()
+            );
+            body[field] = original;
+        }
+        body["secret"] = Value::String("must-not-be-accepted".into());
+        write(&body);
+        assert!(load().is_err());
+    }
+
+    #[test]
+    fn admission_retains_verified_bytes_after_source_replacement() {
+        #[derive(Debug, Clone)]
+        struct CheckSource {
+            expected: std::sync::Arc<str>,
+            signer: String,
+        }
+        impl super::super::CompiledNodeConfigItem for CheckSource {
+            fn section_name(&self) -> &'static str {
+                "routes"
+            }
+            fn admit(
+                self: Box<Self>,
+                _: &mut NodeConfigSnapshotBuilder,
+                admission: &NodeConfigAdmission,
+            ) -> Result<()> {
+                assert_eq!(admission.signed_source, self.expected);
+                assert_eq!(admission.signer_fingerprint, self.signer);
+                assert_ne!(
+                    fs::read_to_string(&admission.source_file)?,
+                    self.expected.as_ref()
+                );
+                Ok(())
+            }
+        }
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles").is_dir())
+            .unwrap()
+            .to_path_buf();
+        let trust = TrustStore::load_from_dir(
+            &workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers"),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("current.yaml");
+        fs::copy(
+            workspace.join("bundles/ryeos-ui/.ai/node/routes/ui/session/current.yaml"),
+            &path,
+        )
+        .unwrap();
+        let original = fs::read_to_string(&path).unwrap();
+        let expected_signer = ryeos_engine::item_resolution::parse_signature_header(
+            &original,
+            &node_config_envelope(),
+        )
+        .unwrap()
+        .signer_fingerprint;
+        let files = scan_yaml_files(dir.path(), false).unwrap();
+        let verified = verify_and_parse(&files[0], dir.path(), "routes", &trust).unwrap();
+        let check = CheckSource {
+            expected: original.into(),
+            signer: expected_signer,
+        };
+        fs::write(&path, "replaced after verification").unwrap();
+        let mut builder = NodeConfigSnapshotBuilder::new(
+            &[],
+            CommandRegistrationAuthority {
+                claim_rules: Vec::new(),
+                system_source_caps: Vec::new(),
+                bundle_source_caps: Default::default(),
+            },
+        )
+        .unwrap();
+        builder
+            .admit(
+                Box::new(check.clone()),
+                &verified,
+                &NodeConfigSource::Node {
+                    command_registration_caps: Vec::new(),
+                },
+            )
+            .unwrap();
+        let replacement = dir.path().join("replacement.yaml");
+        fs::write(&replacement, "atomic replacement after verification").unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        builder
+            .admit(
+                Box::new(check),
+                &verified,
+                &NodeConfigSource::Node {
+                    command_registration_caps: Vec::new(),
+                },
+            )
+            .unwrap();
+    }
 
     #[test]
     fn strip_signature_removes_signed_line() {

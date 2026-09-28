@@ -30,6 +30,7 @@ pub(super) fn reconstruct_current_direct_artifact_identity(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     context: &HandlerContext,
+    request_engine: &Arc<ryeos_engine::engine::Engine>,
     resolved: &ResolvedExecutionRequest,
     finalized_program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
     logical_project_root: Option<&std::path::Path>,
@@ -40,16 +41,16 @@ pub(super) fn reconstruct_current_direct_artifact_identity(
     // publication; transport locality must not replace principal/site proof.
     crate::operator_authority::require_admitted_operator(state, context)?;
 
-    state.engine.with_checked_bundle_generation(|_| {
+    request_engine.with_checked_bundle_generation(|_| {
         let admission = resolved
             .root_admission
             .as_ref()
             .context("current qualification verifier has no root admission")?;
-        if !Arc::ptr_eq(admission.request_engine(), &state.engine) {
-            bail!("current qualification verifier uses a different engine generation");
+        if !Arc::ptr_eq(admission.request_engine(), request_engine) {
+            bail!("current qualification verifier uses a different request engine");
         }
         admission.ensure_matches_request(resolved)?;
-        admission.ensure_matches_plan_context(&state.engine, &resolved.plan_context)?;
+        admission.ensure_matches_plan_context(request_engine, &resolved.plan_context)?;
 
         let EffectivePrincipal::Local(principal) = &resolved.plan_context.requested_by else {
             bail!("independent product qualification rejects delegated verifier principals");
@@ -63,13 +64,22 @@ pub(super) fn reconstruct_current_direct_artifact_identity(
         if resolved.requested_by.as_deref() != Some(context.fingerprint.as_str()) {
             bail!("current qualification verifier owner differs from its handler authority");
         }
-        if resolved.plan_context.project_context != ProjectContext::None
-            || !matches!(
-                admission.project_authority(),
-                ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
-            )
-        {
-            bail!("current direct qualification verifier must be projectless");
+        match (
+            &resolved.plan_context.project_context,
+            admission.project_authority(),
+        ) {
+            (
+                ProjectContext::None,
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. },
+            ) => {}
+            (
+                ProjectContext::LocalPath { .. } | ProjectContext::SnapshotHash { .. },
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                    ..
+                },
+            ) => {}
+            _ => bail!("current direct qualification verifier has unsupported project authority"),
         }
         let verified_subject = admission.verified_subject();
         let finalized_resolution = finalized_program.resolution();
@@ -96,24 +106,31 @@ pub(super) fn reconstruct_current_direct_artifact_identity(
             bail!("current qualification verifier artifact changed its admitted authored program");
         }
 
-        let mut prepared = crate::thread_lifecycle::prepare_bundle_item_plan_for_qualification(
-            &state.engine,
+        let prepared = crate::thread_lifecycle::prepare_bundle_item_plan_for_qualification(
+            request_engine,
             resolved,
             state.isolation.as_ref(),
             finalized_program,
             logical_project_root,
         )?;
-        prepared.bind_realization_command_guarded(
+        let protocol =
+            crate::thread_lifecycle::resolve_direct_terminator_protocol(request_engine, resolved)?;
+        // Fresh consumption checks today's exact executable closure against
+        // the original qualified execution. It does not launch that verifier
+        // again or require this consumer to have its execution capabilities.
+        // The consuming projection returns identity only; actual execution
+        // keeps its enforced-isolation binding and descriptor admission.
+        let artifact = prepared.into_current_artifact_identity_guarded(
             authority,
             guard,
-            &state.engine,
+            request_engine,
             finalized_resolution,
-            state.isolation.as_ref(),
+            &state.node_config.external_execution,
+            state.isolation.verified_command_file_bytes(),
+            logical_project_root,
+            resolved,
+            protocol,
         )?;
-        prepared.bind_logical_project_root(logical_project_root)?;
-        let protocol =
-            crate::thread_lifecycle::resolve_direct_terminator_protocol(&state.engine, resolved)?;
-        let artifact = prepared.admitted_artifact_identity(resolved, protocol)?;
         let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             executable_identity,
             ..

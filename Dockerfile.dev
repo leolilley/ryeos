@@ -42,6 +42,7 @@ COPY bundles/browser     /opt/ryeos/browser
 COPY bundles/ryeos-ui     /opt/ryeos/ryeos-ui
 COPY bundles/hosted-node /opt/ryeos/hosted-node
 COPY bundles/codex       /opt/ryeos/codex
+COPY bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY bundles/opencode    /opt/ryeos/opencode
 COPY bundles/local-inference /opt/ryeos/local-inference
 
@@ -63,6 +64,6 @@ LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD ["ryeos", "node", "status"]
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

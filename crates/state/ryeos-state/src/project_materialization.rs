@@ -201,14 +201,29 @@ impl PinnedProjectMaterialization {
         closure: &VerifiedProjectSnapshotClosure,
         path: &Path,
     ) -> anyhow::Result<Self> {
+        let root = lillux::PinnedDirectory::open(path)?.ok_or_else(|| {
+            anyhow::anyhow!("materialized project root is missing: {}", path.display())
+        })?;
+        Self::verify_pinned_from_closure(authority, guard, closure, root)
+    }
+
+    /// Verify a materialization from its already-authenticated directory
+    /// descriptor without reopening its diagnostic pathname.
+    ///
+    /// This is the production boundary for inherited or namespace-private
+    /// materializations whose pathname is deliberately not authority in the
+    /// current process. The complete tree is still checked against the exact
+    /// CAS closure before this method returns project authority.
+    pub fn verify_pinned_from_closure(
+        authority: &PinnedStateAuthority,
+        guard: &CasMutationGuard,
+        closure: &VerifiedProjectSnapshotClosure,
+        root: lillux::PinnedDirectory,
+    ) -> anyhow::Result<Self> {
         authority.ensure_guard(guard)?;
         let cas = Arc::new(authority.cas_store()?);
         let snapshot_hash = closure.snapshot_hash();
         let expected = Arc::clone(&closure.tree.files);
-
-        let root = lillux::PinnedDirectory::open(path)?.ok_or_else(|| {
-            anyhow::anyhow!("materialized project root is missing: {}", path.display())
-        })?;
         let observed = observe_materialized_tree(&root, &expected)?;
         if observed.as_ref() != expected.as_ref() {
             anyhow::bail!(
@@ -350,6 +365,23 @@ impl PinnedProjectMaterialization {
             files.push((suffix.to_owned(), project_file.clone()));
         }
         Ok(files)
+    }
+
+    /// Enumerate the complete authoritative file map for a fresh private
+    /// materialization. Callers receive CAS identities and normalized modes,
+    /// never authority derived from walking the mutable checkout pathname.
+    pub fn authoritative_entries(
+        &self,
+        max_entries: usize,
+    ) -> anyhow::Result<Vec<(String, ProjectFile)>> {
+        if self.expected_tree.len() > max_entries {
+            anyhow::bail!("authoritative project exceeds {max_entries} files");
+        }
+        Ok(self
+            .expected_tree
+            .iter()
+            .map(|(relative, file)| (relative.clone(), file.clone()))
+            .collect())
     }
 
     /// Read one exact project-relative file from the authoritative CAS

@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-19T06:15:34Z:82f7347ebf9e18df1fde7b40d53d56574e2bd08b2137db6ec7565f3d3daab3da:baR1CnE9cDKT8/F62QN5ep5KIWP8hPq1ipkiVt2QMqtlOTOfry3I90FIZMZaPJpic2jm+o+exhJN7nOs/SlJCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: session-attachment-detach
+version: "1.0.0"
+description: Explicitly detach one non-surface binding attachment from the authenticated browser session.
+endpoint: ui.session.attachments.detach
+# Lifecycle routes preserve the authenticated browser context directly.
+ui_dispatch: verified
+record_thread: false
+availability: daemon_only

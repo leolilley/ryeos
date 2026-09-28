@@ -180,6 +180,8 @@ struct CommandObservation {
     operation: TurnOperation,
     #[serde(default)]
     completion_fence: Option<HostedCommandCompletionFence>,
+    #[serde(default)]
+    child_executions: Option<Vec<Value>>,
 }
 
 #[derive(Deserialize)]
@@ -680,6 +682,15 @@ async fn run_bounded_turn(
         Some(state) => bail!("session-start left invalid bounded worker state `{state}`"),
         None => bail!("session-start projection has no bounded worker state"),
     }
+    if let Err(error) = require_bounded_upstream_session(session) {
+        return cancel_bounded_session(
+            client,
+            thread_id,
+            bounded_outcome(DedicatedSessionBoundedOutcomeKind::WorkerFailure),
+            &format!("session-start did not establish an upstream session: {error}"),
+        )
+        .await;
+    }
     let turn_settlement = match issue_bounded_step(
         client,
         thread_id,
@@ -839,6 +850,17 @@ async fn run_bounded_turn(
     }
 }
 
+fn require_bounded_upstream_session(session: &Value) -> Result<()> {
+    let remote_thread_id = session
+        .get("remote_thread_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("dedicated session has no retained upstream session identity"))?;
+    if remote_thread_id.is_empty() || remote_thread_id.len() > 4_096 {
+        bail!("retained upstream session identity is outside its bound");
+    }
+    Ok(())
+}
+
 async fn await_post_completion_recovery(
     client: &UdsRuntimeClient,
     thread_id: &str,
@@ -915,7 +937,7 @@ async fn load_bounded_turn_observation(
         .await
         .map_err(|error| anyhow!(error.to_string()))?;
     let observation: CommandObservation = serde_json::from_value(observation)
-        .context("decode exact bounded-turn command observation")?;
+        .map_err(|error| anyhow!("decode exact bounded-turn command observation: {error}"))?;
     validate_bounded_turn_observation(
         &observation,
         thread_id,
@@ -1102,7 +1124,8 @@ fn validate_bounded_turn_observation(
         "running"
             if observation.operation.completion_operation_id.is_none()
                 && observation.operation.completion_source.is_null()
-                && observation.completion_fence.is_none() => {}
+                && observation.completion_fence.is_none()
+                && observation.child_executions.is_none() => {}
         "completed"
             if observation
                 .operation
@@ -1110,7 +1133,8 @@ fn validate_bounded_turn_observation(
                 .as_deref()
                 .is_some_and(lillux::valid_hash)
                 && !observation.operation.completion_source.is_null()
-                && observation.completion_fence.is_some() => {}
+                && observation.completion_fence.is_some()
+                && observation.child_executions.is_some() => {}
         _ => bail!("bounded turn observation has an invalid operation state"),
     }
     if let Some(fence) = &observation.completion_fence {
@@ -1203,6 +1227,7 @@ mod tests {
                 turn_id: "turn-7".to_owned(),
                 completion_operation_id: "e".repeat(64),
             }),
+            child_executions: Some(Vec::new()),
         }
     }
 
@@ -1303,6 +1328,19 @@ mod tests {
         assert!(
             validate_goal_payload("turn-start", &json!({"input":"x".repeat(262_145)})).is_err()
         );
+    }
+
+    #[test]
+    fn bounded_turn_requires_session_start_to_retain_upstream_identity() {
+        require_bounded_upstream_session(&json!({"remote_thread_id":"upstream-7"})).unwrap();
+        for invalid in [
+            json!({}),
+            json!({"remote_thread_id":null}),
+            json!({"remote_thread_id":""}),
+            json!({"remote_thread_id":"x".repeat(4_097)}),
+        ] {
+            assert!(require_bounded_upstream_session(&invalid).is_err());
+        }
     }
 
     #[test]

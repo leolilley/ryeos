@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T07:27:13Z:762f64b7b1736a7231bd78c76bf5434fd830bed832e9d7f5354d03e865bcb089:uiSbMTdnlQ6/yYcavxJs4HntUo1axQ1684rdeytSzk37JwwpaZrpz8lqipNCVrglNMNMpjcDD150qJDJUqcHAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-22T12:09:24Z:d317b33aca75ec495dd0db802f5b631e40898975ebeb05d529255f8ae363f162:zu17wOGTO6SmAaRLHj4QTJ57GV3c4gkieim4yZChyUagfYmxt7jF+GapyPd3fKvEfGobGxs+12OrsMOYX3h7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
@@ -74,6 +74,174 @@ def source_manifest_digest() -> str:
 
 
 class CodexContractTests(unittest.TestCase):
+    def test_all_profiles_explicitly_disable_both_native_delegation_versions(self) -> None:
+        # Config precedence gives MultiAgentV2 priority over agents.enabled.
+        # Assert explicit baseline AND immutable argument values, not an
+        # upstream feature default or a substring in serialized TOML.
+        for name in ("structured-session.profile.json", "authoring.profile.json",
+                     "external-authoring.profile.json"):
+            with self.subTest(profile=name):
+                profile = json.loads((SOURCE / name).read_text())
+                baseline = tomllib.loads((SOURCE / profile["baseline_config"]).read_text())
+                features = [tomllib.loads(arg)["features"]
+                            for arg in profile["workload_args"]
+                            if arg.startswith("features=")]
+                agents = [tomllib.loads(arg)["agents"]
+                          for arg in profile["workload_args"]
+                          if arg.startswith("agents=")]
+                self.assertEqual(features, [baseline["features"]])
+                self.assertEqual(agents, [baseline["agents"]])
+                self.assertIs(baseline["agents"]["enabled"], False)
+                self.assertIs(features[0]["multi_agent"], False)
+                self.assertIs(features[0]["multi_agent_v2"], False)
+                # A disabled default is deliberately not claimed as an
+                # effective code-mode prohibition; model metadata can win.
+                self.assertIs(features[0]["code_mode"]["enabled"], False)
+
+    def test_guest_runtime_producer_uses_the_pinned_codex_member(self) -> None:
+        activation = yaml.safe_load(
+            (BUNDLE / ".ai/config/codex/guest-runtime-activation.yaml").read_text()
+        )
+        producer = yaml.safe_load(
+            (BUNDLE / ".ai/tools/codex/guest-runtime/produce.yaml").read_text()
+        )
+        recipe = yaml.safe_load(
+            (BUNDLE / ".ai/config/codex/guest-runtime-products.yaml").read_text()
+        )
+        graph = yaml.safe_load(
+            (BUNDLE / ".ai/graphs/codex/guest-runtime-production.yaml").read_text()
+        )
+        original = yaml.safe_load(ACTIVATION_PATH.read_text())
+        exact_member = next(
+            member
+            for member in original["sources"][0]["members"]
+            if member["path"] == "bin/codex"
+        )
+        self.assertEqual(activation["consumer_ref"], "tool:codex/guest-runtime/produce")
+        self.assertEqual(activation["sources"][0]["sha256"], original["sources"][0]["sha256"])
+        self.assertEqual(activation["sources"][0]["members"], [exact_member])
+        self.assertEqual(activation["components"][0]["id"], "codex-guest-input")
+        self.assertEqual(producer["external_content"][0]["id"], "codex-guest-input")
+        self.assertEqual(
+            producer["external_content"][0]["digest"],
+            yaml.safe_load(WORKER_PATH.read_text())["external_content"][0]["digest"],
+        )
+        self.assertEqual(producer["config"]["command"], "bin:codex/ryeos-codex-guest-runtime-producer")
+        self.assertEqual(recipe["build_products"]["products"][0]["path"], "products/codex-guest-runtime")
+        self.assertEqual(graph["product_recipe"], "config:codex/guest-runtime-products")
+        self.assertEqual(
+            graph["config"]["nodes"]["produce"]["action"]["item_id"],
+            "tool:codex/guest-runtime/produce",
+        )
+        producer_source = (
+            BUNDLE.parent.parent
+            / "crates/tools/codex-guest-runtime-producer/src/main.rs"
+        ).read_text()
+        self.assertIn(exact_member["sha256"], producer_source)
+
+    def test_existing_local_profiles_do_not_claim_external_placement(self) -> None:
+        # External placement needs its own signed worker and qualified guest
+        # product; it must not silently repurpose the established local path.
+        for name in ("structured-session.profile.json", "authoring.profile.json"):
+            profile = json.loads((SOURCE / name).read_text())
+            self.assertIsNone(profile["external_candidate"], name)
+        for path in (
+            WORKER_PATH,
+            TRUSTED_WORKER_PATH,
+            WORKER_PATH.with_name("hosted-authoring.yaml"),
+            WORKER_PATH.with_name("trusted-hosted-authoring.yaml"),
+        ):
+            worker = yaml.safe_load(path.read_text())
+            self.assertEqual(worker["external_product_slots"], [], path)
+
+    def test_external_authoring_profile_is_distinct_and_fail_closed(self) -> None:
+        worker = yaml.safe_load(
+            (BUNDLE / ".ai/workers/codex/external-hosted-authoring.yaml").read_text()
+        )
+        environment = yaml.safe_load(
+            (BUNDLE / ".ai/config/codex/environments/external-authoring.yaml").read_text()
+        )
+        local_authoring_environment = yaml.safe_load(
+            (BUNDLE / ".ai/config/codex/environments/authoring.yaml").read_text()
+        )
+        product = yaml.safe_load(
+            (BUNDLE / ".ai/config/codex/guest-runtime-products.yaml").read_text()
+        )
+        profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
+        relationship = product["product_relationships"]["relationships"][0]
+        self.assertEqual(worker["execution_protocol"], "protocol:ryeos/core/trusted_structured_session")
+        self.assertEqual(worker["external_product_slots"][0]["id"], "guest-runtime")
+        self.assertEqual(relationship["consumer"], {
+            "canonical_ref": "worker:codex/external-hosted-authoring",
+            "declaration_id": "guest-runtime",
+        })
+        self.assertEqual(relationship["qualification"], {
+            "policy_ref": None,
+            "required_claims": [],
+        })
+        self.assertEqual(environment["worker_ref"], "worker:codex/external-hosted-authoring")
+        self.assertIsNone(environment["workload_client"])
+        bounded_turn = yaml.safe_load(
+            (BUNDLE / ".ai/worker-executions/codex/bounded-turn.yaml").read_text()
+        )
+        self.assertIsNone(bounded_turn["config"]["worker_ref"])
+        self.assertEqual(bounded_turn["config"]["environment_binding"], "environment")
+        self.assertEqual(bounded_turn["config"]["candidate_disposition"], "retained_for_review")
+        self.assertEqual(
+            environment["configuration"]["executable_search"],
+            [{"realization_id": "authoring-tools", "relative_directory": "bin"}],
+        )
+        self.assertEqual(
+            environment["external_content"],
+            local_authoring_environment["external_content"],
+            "external Codex must use the already-produced closed authoring runtime",
+        )
+        self.assertEqual(profile["external_candidate"]["execution_route"], "connector_only")
+        self.assertEqual(profile["external_candidate"]["runtime_product_declaration_id"], "guest-runtime")
+        session_start = next(route for route in profile["routes"] if route["id"] == "session.start")
+        self.assertEqual(session_start["fixed_params"]["environments"], [{
+            "environmentId": "ryeos-external-candidate",
+            "cwd": "/workspace",
+            "runtimeWorkspaceRoots": ["/workspace"],
+        }])
+        self.assertNotIn("environments", session_start["workspace_fields"])
+        self.assertNotIn("environments", session_start["forbidden_fields"])
+        self.assertNotIn("PATH", profile["external_candidate"]["runtime_recipe"]["environment"])
+        self.assertIsNone(profile["workload_client"])
+        self.assertIn(
+            {"pattern": "environments.toml", "class": "forbidden_or_unknown", "max_matches": 1},
+            profile["portable_state"]["selectors"],
+        )
+        for name, consumer in (
+            ("external-authoring-activation", "worker:codex/external-hosted-authoring"),
+        ):
+            activation = yaml.safe_load((BUNDLE / f".ai/config/codex/{name}.yaml").read_text())
+            self.assertEqual(activation["consumer_ref"], consumer)
+
+    def test_controller_side_extensions_are_closed_in_config_and_immutable_argv(self) -> None:
+        for name in ("structured-session.profile.json", "authoring.profile.json"):
+            profile = json.loads((SOURCE / name).read_text())
+            baseline = tomllib.loads((SOURCE / profile["baseline_config"]).read_text())
+            overrides = {}
+            arguments = profile["workload_args"]
+            for offset, argument in enumerate(arguments):
+                if argument == "-c":
+                    parsed = tomllib.loads(arguments[offset + 1])
+                    self.assertFalse(set(parsed) & set(overrides), "ambiguous repeated override")
+                    overrides.update(parsed)
+            for config in (baseline, overrides):
+                self.assertEqual(config["notify"], [])
+                self.assertEqual(config["mcp_servers"], {})
+                self.assertEqual(config["orchestrator"], {
+                    "skills": {"enabled": False}, "mcp": {"enabled": False}})
+                for feature in ("plugins", "remote_plugin", "hooks", "skill_mcp_dependency_install"):
+                    self.assertIs(config["features"][feature], False, (name, feature))
+            start = next(route for route in profile["routes"] if route["id"] == "session.start")
+            self.assertIn("selectedCapabilityRoots", start["forbidden_fields"])
+            # Selected executor roots can contribute MCP independently of the
+            # plugin feature. Presence must be refused, including null/empty.
+            self.assertNotIn("selectedCapabilityRoots", start["fixed_params"])
+
     def test_runtime_realizations_never_write_project_mountpoints(self) -> None:
         # These are process dependencies, not project data. Creating their
         # mountpoints in a writable project overlay contaminates frozen source.
@@ -82,7 +250,9 @@ class CodexContractTests(unittest.TestCase):
             TRUSTED_WORKER_PATH,
             WORKER_PATH.with_name("hosted-authoring.yaml"),
             WORKER_PATH.with_name("trusted-hosted-authoring.yaml"),
+            WORKER_PATH.with_name("external-hosted-authoring.yaml"),
             ENVIRONMENT_PATH,
+            BUNDLE / ".ai/config/codex/environments/external-authoring.yaml",
         ):
             definition = yaml.safe_load(path.read_text())
             self.assertTrue(definition["external_content"])
@@ -140,8 +310,8 @@ class CodexContractTests(unittest.TestCase):
                         "equals": "never",
                     }, predicates)
                     self.assertIn({
-                        "pointer": "/response/result/sandbox/networkAccess",
-                        "equals": True,
+                        "pointer": "/response/result/sandbox/type",
+                        "equals": "dangerFullAccess",
                     }, predicates)
             expected_code_mode_host = name == "authoring.profile.json"
             self.assertEqual(
@@ -330,7 +500,10 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn("workload_client: null", environment)
 
     def test_minimal_profile_has_no_workload_ingress_or_socket_allowance(self) -> None:
-        self.assertEqual(self.profile["schema_version"], 6)
+        self.assertEqual(self.profile["schema_version"], 10)
+        self.assertIsNone(self.profile["external_candidate"])
+        self.assertEqual(self.profile["auxiliary_configs"], [])
+        self.assertEqual(self.profile["runtime_configs"], [])
         self.assertEqual(self.profile["transport"], "stdio_jsonrpc")
         self.assertIsNone(self.profile["workload_client"])
         immutable_args = "\n".join(self.profile["workload_args"])
@@ -733,12 +906,11 @@ class CodexContractTests(unittest.TestCase):
             TRUSTED_WORKER_PATH,
             WORKER_PATH.with_name("hosted-authoring.yaml"),
             WORKER_PATH.with_name("trusted-hosted-authoring.yaml"),
+            WORKER_PATH.with_name("external-hosted-authoring.yaml"),
         ):
-            worker = path.read_text(encoding="utf-8")
-            source = worker[worker.index("\nsource:\n") :]
-            match = re.search(r'(?m)^  digest: "([0-9a-f]{64})"$', source)
-            self.assertIsNotNone(match, "worker source digest is absent")
-            self.assertEqual(match.group(1), source_manifest_digest())
+            source = yaml.safe_load(path.read_text(encoding="utf-8"))["source"]
+            self.assertRegex(source["digest"], r"^[0-9a-f]{64}$")
+            self.assertEqual(source["digest"], source_manifest_digest())
 
 
 if __name__ == "__main__":

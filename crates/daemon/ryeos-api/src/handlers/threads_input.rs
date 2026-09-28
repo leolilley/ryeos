@@ -291,6 +291,9 @@ fn build_and_launch_error(
         BuildAndLaunchError::Materialization(error) => {
             HandlerError::Internal(format!("launch materialization failed: {error}"))
         }
+        error @ BuildAndLaunchError::RuntimeCleanupUnresolved { .. } => {
+            HandlerError::Internal(error.to_string())
+        }
         BuildAndLaunchError::Internal(error) => HandlerError::Internal(error.to_string()),
     }
 }

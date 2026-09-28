@@ -1,13 +1,18 @@
 <script lang="ts">
   import type { RyeOsChromeVm, RyeOsSessionVm, RyeOsTransportVm } from "../generated";
+  import { dispatchUi } from "../runtime/context";
 
   interface Props {
     chrome: RyeOsChromeVm;
     session: RyeOsSessionVm;
     transport: RyeOsTransportVm;
+    navigationAvailable: boolean;
+    navigationOpen: boolean;
+    onToggleNavigation: (opener: HTMLElement) => void;
   }
 
-  let { chrome, session, transport }: Props = $props();
+  let { chrome, session, transport, navigationAvailable, navigationOpen, onToggleNavigation }: Props = $props();
+  const dispatch = dispatchUi();
 </script>
 
 <header class="system-bar">
@@ -19,10 +24,15 @@
     <span class="presence" data-tone={chrome.health_tone}>●</span>
     <span>{session.user_principal_id ?? "local"}</span>
     <span class="separator">/</span>
-    <span>{session.project_path ?? session.surface_ref}</span>
+    <span title="Signed surface">{session.surface_ref}</span>
   </div>
   <div class="system-state">
     <span>{chrome.health_label}</span>
     <span class="transport" data-freshness={transport.freshness}>{transport.freshness}</span>
+    {#if navigationAvailable}
+      <button class="system-navigation" aria-controls="ryeos-navigation" aria-expanded={navigationOpen} onclick={(event) => onToggleNavigation(event.currentTarget)}>Views</button>
+    {/if}
+    <button class="system-launch" data-focus-key="shell:launch" onclick={() => dispatch({ type: "open_overlay", overlay_id: "views" })}>Launch</button>
+    <button class="system-commands" data-focus-key="shell:commands" aria-label="Open context commands" title="Context commands" onclick={() => dispatch({ type: "open_overlay", overlay_id: "commands" })}>⌘</button>
   </div>
 </header>

@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-17T06:36:51Z:05bd215423c94cadbb39df6815bdf46cc2f732d3ae2af7f70d47d29e525463dc:PM492VddsDh9X6MhQp4ttDyuBe3mgi0gdx1WDdSvT6D+5hy2aISDrCoPH5/zPtjL0gVNpMQX4yBI1I6EhTo6CQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-09-21T02:32:22Z:741fa275c8dfa4cc69dc7f18bd0b71e1ec0aa7bd19caf61043a30b2fe697a8d8:XVpeRJiLgoRBlEVRay+Awht7h/bcISJk22ikft/idicR7PiU10IAI1/W//yjaQEDAmbW3XAMrOnw1aP3Qpl4AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/repository-validation
-#   version: "1.0.0"
+#   version: "1.1.0"
 #   description: Check workspace dependency direction and cycles
 #   executor_id: tool:ryeos/development/authoring-environment-production/runtime
 #   execution_protocol: protocol:ryeos/core/opaque

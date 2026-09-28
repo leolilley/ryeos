@@ -11,7 +11,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
 
 use crate::state::AppState;
-use crate::state_store::NewEventRecord;
+use crate::state_store::{NewEventRecord, StateStore};
 
 const CACHE_ROOTS: usize = 16;
 const RECENT_FACTS: usize = 512;
@@ -168,7 +168,28 @@ impl ReplayIndex {
 #[derive(Default)]
 struct ReplayCache {
     clock: u64,
-    roots: HashMap<String, ReplayIndex>,
+    roots: HashMap<RootCacheKey, CachedRoot>,
+}
+
+/// A root-thread coordinate is unique only within its retained state store.
+/// The pointer is a process-local lookup key, never authority: the weak owner
+/// below must still upgrade to the exact current store before cache reuse.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct RootCacheKey {
+    state_store_address: usize,
+    root_thread_id: String,
+}
+
+struct CachedRoot {
+    state_store: Weak<StateStore>,
+    index: ReplayIndex,
+}
+
+fn root_cache_key(state: &AppState, root_thread_id: &str) -> RootCacheKey {
+    RootCacheKey {
+        state_store_address: Arc::as_ptr(&state.state_store) as usize,
+        root_thread_id: root_thread_id.to_owned(),
+    }
 }
 
 /// Exact result of authoritative root replay for one event/operation identity.
@@ -187,33 +208,50 @@ fn replay_cache() -> &'static std::sync::Mutex<ReplayCache> {
     CACHE.get_or_init(Default::default)
 }
 
-fn take_index(root_thread_id: &str) -> ReplayIndex {
+fn take_index(state: &AppState, root_thread_id: &str) -> ReplayIndex {
+    let key = root_cache_key(state, root_thread_id);
     replay_cache()
         .lock()
         .expect("authoritative root replay cache poisoned")
         .roots
-        .remove(root_thread_id)
+        .remove(&key)
+        .and_then(|cached| {
+            cached
+                .state_store
+                .upgrade()
+                .filter(|owner| Arc::ptr_eq(owner, &state.state_store))
+                .map(|_| cached.index)
+        })
         .unwrap_or_default()
 }
 
-fn put_index(root_thread_id: &str, mut index: ReplayIndex) {
+fn put_index(state: &AppState, root_thread_id: &str, mut index: ReplayIndex) {
     let mut cache = replay_cache()
         .lock()
         .expect("authoritative root replay cache poisoned");
     cache.clock = cache.clock.wrapping_add(1);
     index.last_used = cache.clock;
+    cache
+        .roots
+        .retain(|_, cached| cached.state_store.strong_count() != 0);
     while cache.roots.len() >= CACHE_ROOTS {
         let Some(oldest) = cache
             .roots
             .iter()
-            .min_by_key(|(_, candidate)| candidate.last_used)
+            .min_by_key(|(_, candidate)| candidate.index.last_used)
             .map(|(root, _)| root.clone())
         else {
             break;
         };
         cache.roots.remove(&oldest);
     }
-    cache.roots.insert(root_thread_id.to_owned(), index);
+    cache.roots.insert(
+        root_cache_key(state, root_thread_id),
+        CachedRoot {
+            state_store: Arc::downgrade(&state.state_store),
+            index,
+        },
+    );
 }
 
 fn scan_tail(
@@ -341,7 +379,7 @@ fn lookup_under_lock(
         event_type: event_type.to_owned(),
         operation_id: operation_id.to_owned(),
     };
-    let mut index = take_index(root_thread_id);
+    let mut index = take_index(state, root_thread_id);
     let initialized = index.initialized;
     let exact_before = index.recent.get(&key).filter(|fact| fact.complete).cloned();
     let may_contain_before = index.bloom_may_contain(&key);
@@ -414,7 +452,7 @@ fn lookup_under_lock(
             },
         );
     }
-    put_index(root_thread_id, index);
+    put_index(state, root_thread_id, index);
     if lookup.count > 1 {
         lookup.payload = None;
     }
@@ -602,6 +640,26 @@ pub fn append_once_with_followups(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn identical_thread_coordinates_in_independent_stores_do_not_share_replay_state() {
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        let first = crate::state::test_support::build(first_root.path()).unwrap();
+        let second = crate::state::test_support::build(second_root.path()).unwrap();
+        let thread_id = "T-authoritative-root-cache-isolation";
+        let mut prior = ReplayIndex::default();
+        prior.initialized = true;
+        prior.verified_through = Some(42);
+        put_index(&first, thread_id, prior);
+
+        let other = take_index(&second, thread_id);
+        assert!(!other.initialized);
+        assert_eq!(other.verified_through, None);
+        let retained = take_index(&first, thread_id);
+        assert!(retained.initialized);
+        assert_eq!(retained.verified_through, Some(42));
+    }
 
     #[test]
     fn replay_index_is_bounded_and_incidental_hits_are_not_authority() {

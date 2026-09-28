@@ -1,0 +1,20 @@
+# ryeos:signed:2026-09-23T10:50:14Z:771d4ea0bae63cf579bbeef3c0ffa87027dc01a4bd3dc41eb07f54b7e8d3d090:rrak28QQ4pTu3YTuS0XVPghS2FCTj1fUI46vCl1xr5JnIAq9NiK3chz/TKb8hrFSfRFxRJVdshJ2m/wbc8hYCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/bundle-release
+name: portable-signed-capture
+version: "1.0.0"
+description: Apply the exact publisher-signed manifest to an admitted portable bundle.
+executor_id: tool:ryeos/bundle-release/runtime
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-tool-products, relationship: python_to_portable_signed_capture_tool, kind: tree, mount_root: execution_runtime, mount: python-gnu}
+  - {id: unsigned_bundle, relationship_ref: config:bundle-release/portable-build-products, relationship: portable_bundle_to_signed_capture_tool, kind: tree, mount_root: execution_runtime, mount: unsigned-native-bundle}
+env_config:
+  interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
+config:
+  command: "${interpreter}"
+  args: ["-I", "-B", {source_member: "lib/signed-capture.py"}]
+  input_data: "${params_json}"
+  timeout_secs: 300

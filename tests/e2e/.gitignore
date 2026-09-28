@@ -1,5 +1,15 @@
 *
 !.gitignore
+!external-execution/test_allocation_journal.py
+!external-execution/README.md
+!external-execution/support/
+!external-execution/support/**
+!external-execution/synthetic-lifecycle-adapter/
+!external-execution/synthetic-lifecycle-adapter/Cargo.toml
+!external-execution/synthetic-lifecycle-adapter/src/
+!external-execution/synthetic-lifecycle-adapter/src/**
+!external-execution/synthetic-lifecycle-adapter/tests/
+!external-execution/synthetic-lifecycle-adapter/tests/**
 !*/
 !*/.ai/
 !*/.ai/config/
@@ -94,6 +104,10 @@ __pycache__/
 !authoring-environment/hosted-environment-integration-20260909.json
 !authoring-environment/probe_pinned_codex_broker.py
 !authoring-environment/probe_pinned_codex_tools.py
+!authoring-environment/probe_pinned_codex_command_transport.py
+!authoring-environment/probe_pinned_codex_external_execution.py
+!authoring-environment/test_external_execution_probe.py
+!authoring-environment/pinned-codex-external-routing.json
 !authoring-environment/pinned-codex-tools-capability.json
 !authoring-environment/test_probe.py
 !authoring-environment/qualify.py
@@ -104,7 +118,6 @@ __pycache__/
 !development-cargo/qualification.json
 !development-cargo/remote-environment-preparation.json
 !development-cargo/README.md
-!development-cargo/REMOTE-DEVELOPMENT-COMPLETION.md
 !development-cargo/candidate-task.md
 !development-cargo/strict-json-key-amendment.txt
 !development-cargo/test_candidate_evaluation.py

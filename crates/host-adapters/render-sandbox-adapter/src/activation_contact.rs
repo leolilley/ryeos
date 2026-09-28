@@ -1,0 +1,623 @@
+//! One-shot Render guest activation contact, still disabled by the signed
+//! provider profile until installed snapshot and lost-run-stream qualification.
+//!
+//! The daemon has already committed one durable activation claim before this
+//! adapter is invoked. Every stage may have reached Render even if its reply
+//! is lost. This module never retries and reconciliation must never call it.
+
+use std::io::Read as _;
+
+use anyhow::{Result, ensure};
+use lillux::network::{NetworkCancellation, NetworkContext};
+use lillux::time::MonotonicDeadline;
+use ryeos_external_execution_contract::canonical_json;
+use ryeos_http_transport::{
+    Deadlines, Header, HttpClient, HttpRequest, HttpResponse, Limits, RequestBodySource,
+};
+use zeroize::Zeroizing;
+
+use crate::provider_spec::{ProviderSpec, RouteName};
+use crate::proxy_route::{
+    BoundConnectToken, MAX_CONNECT_RESPONSE_BYTES, ProxyOperation, bind_connect_response,
+    connect_token_url, validate_proxy_route,
+};
+use crate::{
+    ActivationDeliveryPlan, IDLE_TIMEOUT, SETUP_TIMEOUT, Settings, api_url, has_json_content_type,
+    read_credential, send_api_request, tls_roots, validate_api_url,
+};
+
+const MAX_UPLOAD_RESPONSE_BYTES: u64 = 16 * 1024;
+const MAX_RUN_RESPONSE_BYTES: u64 = 1024 * 1024;
+
+/// The test seam keeps order and at-most-once behavior independent of HTTP.
+/// It is not an alternate lifecycle or a provider abstraction above this
+/// Render adapter.
+trait OneShotContact {
+    fn upload_bytes(&mut self, path: &str, bytes: &[u8], sha256: &str) -> Result<()>;
+    fn upload_file(
+        &mut self,
+        path: &str,
+        authority: &lillux::InheritedDescriptorAuthority,
+        bytes: u64,
+        sha256: &str,
+    ) -> Result<()>;
+    fn run(&mut self, command: &str) -> Result<()>;
+}
+
+fn contact_once(
+    contact: &mut impl OneShotContact,
+    delivery: &ActivationDeliveryPlan,
+    signed_import: &[u8],
+    package: &lillux::InheritedDescriptorAuthority,
+) -> Result<()> {
+    ensure!(
+        signed_import.len() as u64 == delivery.signed_import_bytes
+            && lillux::sha256_hex(signed_import) == delivery.signed_import_sha256,
+        "signed import changed before Render upload"
+    );
+    contact.upload_bytes(
+        delivery.signed_import_remote_path,
+        signed_import,
+        &delivery.signed_import_sha256,
+    )?;
+    contact.upload_file(
+        delivery.guest_package_remote_path,
+        package,
+        delivery.guest_package_bytes,
+        &delivery.guest_package_sha256,
+    )?;
+    contact.run(&delivery.owner_command)
+}
+
+/// This function must only be called from the first claimed activation, never
+/// reconciliation. Even a successful run response remains merely Pending:
+/// only the independently authenticated supervisor channel can establish
+/// Ready. The installed Render profile currently does not enable this call.
+pub(crate) fn first_activation_contact(
+    network: &NetworkContext,
+    provider_spec: &ProviderSpec,
+    settings: &Settings,
+    occurrence_id: &str,
+    delivery: &ActivationDeliveryPlan,
+    signed_import: &[u8],
+    package: &lillux::InheritedDescriptorAuthority,
+    deadline: MonotonicDeadline,
+    cancellation: &NetworkCancellation,
+) -> Result<()> {
+    preflight_delivery_before_credential(delivery, signed_import, package)?;
+    let mut contact = RenderContact::new(
+        network,
+        provider_spec,
+        settings,
+        occurrence_id,
+        deadline,
+        cancellation,
+    )?;
+    contact_once(&mut contact, delivery, signed_import, package)
+}
+
+fn preflight_delivery_before_credential(
+    delivery: &ActivationDeliveryPlan,
+    signed_import: &[u8],
+    package: &lillux::InheritedDescriptorAuthority,
+) -> Result<()> {
+    ensure!(
+        signed_import.len() as u64 == delivery.signed_import_bytes
+            && lillux::sha256_hex(signed_import) == delivery.signed_import_sha256,
+        "signed import changed before Render credential access"
+    );
+    verify_package_before_contact(
+        package,
+        delivery.guest_package_bytes,
+        &delivery.guest_package_sha256,
+    )
+}
+
+/// Recheck the original sealed package descriptor immediately before any
+/// credential access or provider token mint. This is a point observation, not
+/// writer exclusion; the streaming body independently checks its exact digest.
+pub(crate) fn verify_package_before_contact(
+    package: &lillux::InheritedDescriptorAuthority,
+    expected_bytes: u64,
+    expected_sha256: &str,
+) -> Result<()> {
+    package.require_owned_regular()?;
+    let observation = package.regular_file_observation()?;
+    ensure!(
+        observation.full_permission_mode()? == 0o400
+            && observation.size() == expected_bytes
+            && package.digest_regular_file_stable_exact(&observation)? == expected_sha256,
+        "inherited guest package changed its declared delivery identity"
+    );
+    Ok(())
+}
+
+pub(crate) struct RenderContact<'a> {
+    network: &'a NetworkContext,
+    provider_spec: &'a ProviderSpec,
+    settings: &'a Settings,
+    occurrence_id: &'a str,
+    credential: Zeroizing<String>,
+    deadline: MonotonicDeadline,
+    cancellation: &'a NetworkCancellation,
+}
+
+impl RenderContact<'_> {
+    pub(crate) fn new<'a>(
+        network: &'a NetworkContext,
+        provider_spec: &'a ProviderSpec,
+        settings: &'a Settings,
+        occurrence_id: &'a str,
+        deadline: MonotonicDeadline,
+        cancellation: &'a NetworkCancellation,
+    ) -> Result<RenderContact<'a>> {
+        Ok(RenderContact {
+            network,
+            provider_spec,
+            settings,
+            occurrence_id,
+            credential: read_credential()?,
+            deadline,
+            cancellation,
+        })
+    }
+
+    pub(crate) fn mint(
+        &self,
+        operation: ProxyOperation<'_>,
+        command: Option<&str>,
+    ) -> Result<BoundConnectToken> {
+        let (route, upload_path) = match operation {
+            ProxyOperation::UploadFile { remote_path } => {
+                (RouteName::SandboxFileUploadTokenById, Some(remote_path))
+            }
+            ProxyOperation::RunStream => (RouteName::SandboxRunStreamTokenById, None),
+            ProxyOperation::DownloadFile { .. } => {
+                anyhow::bail!("guest activation cannot mint a download token")
+            }
+        };
+        let (url, target) = api_url(
+            self.provider_spec,
+            route,
+            Some(self.occurrence_id),
+            self.settings,
+            upload_path,
+        )?;
+        validate_api_url(
+            &url,
+            &target.path_segments,
+            target.owner_id_query.as_deref(),
+            target.upload_path_query.as_deref(),
+        )?;
+        ensure!(
+            url == connect_token_url(self.occurrence_id, &self.settings.owner_id, operation)?,
+            "signed Render token route differs from the fixed adapter operation"
+        );
+        let body = command
+            .map(|command| canonical_json(&serde_json::json!({ "command": command })))
+            .transpose()?;
+        let response = send_api_request(
+            self.network,
+            &url,
+            "POST",
+            body,
+            &self.credential,
+            self.deadline,
+            self.settings,
+            self.cancellation,
+        )?;
+        ensure!(
+            response.status == 201 && has_json_content_type(&response.headers),
+            "Render token mint did not return the exact JSON success shape"
+        );
+        let mut bytes = Zeroizing::new(Vec::new());
+        response
+            .body
+            .take(MAX_CONNECT_RESPONSE_BYTES as u64 + 1)
+            .read_to_end(&mut *bytes)
+            .map_err(|_| anyhow::anyhow!("Render token mint body is unreadable"))?;
+        ensure!(
+            !bytes.is_empty() && bytes.len() <= MAX_CONNECT_RESPONSE_BYTES,
+            "Render token mint body exceeds its bound"
+        );
+        bind_connect_response(
+            &bytes,
+            self.occurrence_id,
+            &self.settings.region,
+            operation,
+            lillux::time::timestamp_millis(),
+        )
+    }
+
+    pub(crate) fn send_proxy(
+        &self,
+        token: BoundConnectToken,
+        operation: ProxyOperation<'_>,
+        body: RequestBodySource,
+        content_type: &'static str,
+        accept: &'static str,
+        response_limit: u64,
+    ) -> Result<HttpResponse> {
+        let request = proxy_request(
+            self.settings,
+            self.occurrence_id,
+            token,
+            operation,
+            body,
+            content_type,
+            accept,
+            response_limit,
+            self.deadline,
+            self.cancellation,
+        )?;
+        HttpClient::new(self.network.clone())
+            .execute(request)
+            .map_err(anyhow::Error::from)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn proxy_request(
+    settings: &Settings,
+    occurrence_id: &str,
+    token: BoundConnectToken,
+    operation: ProxyOperation<'_>,
+    body: RequestBodySource,
+    content_type: &'static str,
+    accept: &'static str,
+    response_limit: u64,
+    deadline: MonotonicDeadline,
+    cancellation: &NetworkCancellation,
+) -> Result<HttpRequest> {
+    ensure!(
+        token.expires_at_ms > lillux::time::timestamp_millis(),
+        "Render proxy token expired before use"
+    );
+    validate_proxy_route(
+        token.route.as_str(),
+        &token.method,
+        occurrence_id,
+        &settings.region,
+        operation,
+    )?;
+    let mut authorization = Zeroizing::new(b"Bearer ".to_vec());
+    authorization.extend_from_slice(token.bearer.as_bytes());
+    let mut limits = Limits::control_plane();
+    limits.request_body_bytes = body.exact_len();
+    limits.response_body_bytes = response_limit;
+    limits.response_body_wire_bytes = response_limit.saturating_mul(2);
+    Ok(HttpRequest {
+        method: token.method,
+        url: token.route,
+        headers: vec![
+            Header::new_sensitive("Authorization", authorization),
+            Header::new("Content-Type", content_type),
+            Header::new("Accept", accept),
+        ],
+        body,
+        tls_roots_der: tls_roots(settings)?,
+        limits,
+        deadlines: Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, deadline),
+        cancellation: cancellation.clone(),
+    })
+}
+
+impl OneShotContact for RenderContact<'_> {
+    fn upload_bytes(&mut self, path: &str, bytes: &[u8], sha256: &str) -> Result<()> {
+        ensure!(
+            bytes.len()
+                <= ryeos_external_execution_contract::guest_import_authorization::MAX_GUEST_IMPORT_AUTHORIZATION_BYTES
+                    + 256
+                && lillux::sha256_hex(bytes) == sha256,
+            "Render signed-import upload changed its exact bytes"
+        );
+        let operation = ProxyOperation::UploadFile { remote_path: path };
+        let token = self.mint(operation, None)?;
+        let response = self.send_proxy(
+            token,
+            operation,
+            RequestBodySource::from_bytes(bytes.to_vec()),
+            "application/octet-stream",
+            "application/json",
+            MAX_UPLOAD_RESPONSE_BYTES,
+        )?;
+        ensure!(
+            (200..300).contains(&response.status),
+            "Render signed-import upload did not succeed"
+        );
+        Ok(())
+    }
+
+    fn upload_file(
+        &mut self,
+        path: &str,
+        authority: &lillux::InheritedDescriptorAuthority,
+        bytes: u64,
+        sha256: &str,
+    ) -> Result<()> {
+        let operation = ProxyOperation::UploadFile { remote_path: path };
+        let token = self.mint(operation, None)?;
+        let response = self.send_proxy(
+            token,
+            operation,
+            RequestBodySource::from_inherited_regular_file(authority.clone(), bytes, sha256.into()),
+            "application/octet-stream",
+            "application/json",
+            MAX_UPLOAD_RESPONSE_BYTES,
+        )?;
+        ensure!(
+            (200..300).contains(&response.status),
+            "Render exact guest-package upload did not succeed"
+        );
+        Ok(())
+    }
+
+    fn run(&mut self, command: &str) -> Result<()> {
+        let operation = ProxyOperation::RunStream;
+        let token = self.mint(operation, Some(command))?;
+        let body = canonical_json(&serde_json::json!({ "command": command }))?;
+        let response = self.send_proxy(
+            token,
+            operation,
+            RequestBodySource::from_bytes(body),
+            "application/json",
+            "text/event-stream",
+            MAX_RUN_RESPONSE_BYTES,
+        )?;
+        ensure!(
+            response.status == 200,
+            "Render run proxy did not return the expected stream status"
+        );
+        // Dropping the stream is deliberate only after an installed test proves
+        // the guest owner survives lost client streams. This code is unreachable
+        // from the current signed provider profile.
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn proxy_settings() -> Settings {
+        Settings {
+            schema: 2,
+            owner_id: "tea-owner".into(),
+            plan: crate::RenderPlan::Starter,
+            region: "oregon".into(),
+            snapshot_id: "snp-fixture".into(),
+            tls_roots_der_base64: vec![
+                base64::engine::general_purpose::STANDARD.encode(b"exact-test-root"),
+            ],
+        }
+    }
+
+    fn upload_token(uri: &str) -> BoundConnectToken {
+        BoundConnectToken {
+            execution_id: "exe-fixture".into(),
+            expires_at_ms: lillux::time::timestamp_millis() + 60_000,
+            method: "PUT".into(),
+            route: url::Url::parse(uri).unwrap(),
+            bearer: Zeroizing::new("private-token-sentinel".into()),
+        }
+    }
+
+    #[test]
+    fn signed_token_routes_match_fixed_render_operations() {
+        let settings = proxy_settings();
+        let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
+        let spec = ProviderSpec::parse(
+            include_bytes!("../fixtures/provider-spec.json"),
+            &schema_digest,
+        )
+        .unwrap();
+        for (route, operation, upload_path) in [
+            (
+                RouteName::SandboxFileUploadTokenById,
+                ProxyOperation::UploadFile {
+                    remote_path: "/ryeos/activation/guest-package",
+                },
+                Some("/ryeos/activation/guest-package"),
+            ),
+            (
+                RouteName::SandboxRunStreamTokenById,
+                ProxyOperation::RunStream,
+                None,
+            ),
+        ] {
+            let (url, target) =
+                api_url(&spec, route, Some("sbx-fixture"), &settings, upload_path).unwrap();
+            validate_api_url(
+                &url,
+                &target.path_segments,
+                target.owner_id_query.as_deref(),
+                target.upload_path_query.as_deref(),
+            )
+            .unwrap();
+            assert_eq!(
+                url,
+                connect_token_url("sbx-fixture", &settings.owner_id, operation).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_request_binds_bearer_to_exact_sandbox_and_body() {
+        let settings = proxy_settings();
+        let cancellation = NetworkCancellation::default();
+        let deadline = MonotonicDeadline::after(lillux::time::Duration::from_secs(30));
+        let path = "/ryeos/activation/guest-package";
+        let uri = "https://sbx-fixture.oregon.sandbox.onrender.com/files/upload?path=%2Fryeos%2Factivation%2Fguest-package";
+        let request = proxy_request(
+            &settings,
+            "sbx-fixture",
+            upload_token(uri),
+            ProxyOperation::UploadFile { remote_path: path },
+            RequestBodySource::from_bytes(b"exact-package".to_vec()),
+            "application/octet-stream",
+            "application/json",
+            MAX_UPLOAD_RESPONSE_BYTES,
+            deadline,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(request.method, "PUT");
+        assert_eq!(request.url.as_str(), uri);
+        assert_eq!(request.body.exact_len(), 13);
+        assert_eq!(request.limits.request_body_bytes, 13);
+        assert_eq!(
+            request.limits.response_body_bytes,
+            MAX_UPLOAD_RESPONSE_BYTES
+        );
+        assert_eq!(request.headers[0].value(), b"Bearer private-token-sentinel");
+        assert!(!format!("{:?}", request.headers[0]).contains("private-token-sentinel"));
+        assert_eq!(request.tls_roots_der, vec![b"exact-test-root".to_vec()]);
+        for (occurrence, route) in [
+            ("sbx-other", uri),
+            (
+                "sbx-fixture",
+                "https://sbx-other.oregon.sandbox.onrender.com/files/upload?path=%2Fryeos%2Factivation%2Fguest-package",
+            ),
+        ] {
+            assert!(
+                proxy_request(
+                    &settings,
+                    occurrence,
+                    upload_token(route),
+                    ProxyOperation::UploadFile { remote_path: path },
+                    RequestBodySource::from_bytes(b"exact-package".to_vec()),
+                    "application/octet-stream",
+                    "application/json",
+                    MAX_UPLOAD_RESPONSE_BYTES,
+                    deadline,
+                    &cancellation,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    struct CountingContact {
+        calls: Vec<&'static str>,
+        fail_at: Option<&'static str>,
+    }
+
+    impl CountingContact {
+        fn record(&mut self, stage: &'static str) -> Result<()> {
+            self.calls.push(stage);
+            ensure!(self.fail_at != Some(stage), "simulated lost response");
+            Ok(())
+        }
+    }
+
+    impl OneShotContact for CountingContact {
+        fn upload_bytes(&mut self, _: &str, _: &[u8], _: &str) -> Result<()> {
+            self.record("import")
+        }
+        fn upload_file(
+            &mut self,
+            _: &str,
+            _: &lillux::InheritedDescriptorAuthority,
+            _: u64,
+            _: &str,
+        ) -> Result<()> {
+            self.record("package")
+        }
+        fn run(&mut self, _: &str) -> Result<()> {
+            self.record("run")
+        }
+    }
+
+    #[test]
+    fn one_shot_sequence_stops_at_first_uncertain_contact() {
+        let bytes = b"signed-import";
+        let plan = ActivationDeliveryPlan {
+            signed_import_remote_path: "/ryeos/activation/signed-import.json",
+            signed_import_sha256: lillux::sha256_hex(bytes),
+            signed_import_bytes: bytes.len() as u64,
+            guest_package_remote_path: "/ryeos/activation/guest-package",
+            guest_package_sha256: "a".repeat(64),
+            guest_package_bytes: 1,
+            owner_command: "exec /ryeos/guest-runtime/bin/owner --assignment-b64 abc".into(),
+        };
+        let parent = tempfile::tempdir().unwrap();
+        let source = lillux::PinnedDirectory::open(parent.path())
+            .unwrap()
+            .unwrap();
+        std::fs::write(parent.path().join("package"), b"x").unwrap();
+        let package = source
+            .open_pinned_regular(std::ffi::OsStr::new("package"), false)
+            .unwrap()
+            .unwrap()
+            .inherited_descriptor_authority()
+            .unwrap();
+        for (fail_at, expected) in [
+            (Some("import"), vec!["import"]),
+            (Some("package"), vec!["import", "package"]),
+            (Some("run"), vec!["import", "package", "run"]),
+            (None, vec!["import", "package", "run"]),
+        ] {
+            let mut contact = CountingContact {
+                calls: Vec::new(),
+                fail_at,
+            };
+            let result = contact_once(&mut contact, &plan, bytes, &package);
+            assert_eq!(result.is_err(), fail_at.is_some());
+            assert_eq!(contact.calls, expected);
+        }
+        let mut contact = CountingContact {
+            calls: Vec::new(),
+            fail_at: None,
+        };
+        assert!(contact_once(&mut contact, &plan, b"changed", &package).is_err());
+        assert!(contact.calls.is_empty());
+    }
+
+    #[test]
+    fn source_drift_refuses_before_credential_or_token_mint() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("package");
+        std::fs::write(&path, b"exact-package").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let root = lillux::PinnedDirectory::open(parent.path())
+            .unwrap()
+            .unwrap();
+        let package = root
+            .open_pinned_regular(std::ffi::OsStr::new("package"), false)
+            .unwrap()
+            .unwrap()
+            .inherited_descriptor_authority()
+            .unwrap();
+        let signed_import = b"signed-import";
+        let plan = ActivationDeliveryPlan {
+            signed_import_remote_path: "/ryeos/activation/signed-import.json",
+            signed_import_sha256: lillux::sha256_hex(signed_import),
+            signed_import_bytes: signed_import.len() as u64,
+            guest_package_remote_path: "/ryeos/activation/guest-package",
+            guest_package_sha256: lillux::sha256_hex(b"exact-package"),
+            guest_package_bytes: b"exact-package".len() as u64,
+            owner_command: "fixed-owner-command".into(),
+        };
+        preflight_delivery_before_credential(&plan, signed_import, &package).unwrap();
+        assert!(preflight_delivery_before_credential(&plan, b"changed", &package).is_err());
+        let mut changed_digest = plan;
+        changed_digest.guest_package_sha256 = "a".repeat(64);
+        assert!(
+            preflight_delivery_before_credential(&changed_digest, signed_import, &package).is_err()
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            preflight_delivery_before_credential(
+                &ActivationDeliveryPlan {
+                    guest_package_sha256: lillux::sha256_hex(b"exact-package"),
+                    ..changed_digest
+                },
+                signed_import,
+                &package,
+            )
+            .is_err()
+        );
+    }
+}

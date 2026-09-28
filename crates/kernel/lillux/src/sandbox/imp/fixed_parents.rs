@@ -456,7 +456,7 @@ mod tests {
             assert!(pid >= 0);
             if pid == 0 {
                 let result = (|| {
-                    enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+                    enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
                     let source = reanchor_mount_source(source.file().as_raw_fd())?;
                     mount_private_root()?;
                     let target = rooted(&PathBuf::from("/project"))?;
@@ -555,7 +555,7 @@ mod tests {
         assert!(pid >= 0);
         if pid == 0 {
             let result = (|| {
-                enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+                enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
                 let source = reanchor_mount_source(source.file().as_raw_fd())?;
                 mount_private_root()?;
                 create_target(

@@ -19,10 +19,8 @@ fn principal_launch_context(user_principal_id: String) -> ryeos_ui::browser_sess
 }
 
 fn session_context(state: &ryeos_app::state::AppState, principal: &str) -> HandlerContext {
-    let (session_id, token) = get_ui_state(state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(principal_launch_context(principal.to_string()));
+    let (session_id, token) =
+        test_state::mint_launch(state, principal_launch_context(principal.to_string()));
     assert_eq!(
         get_ui_state(state)
             .unwrap()

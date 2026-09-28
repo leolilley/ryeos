@@ -13,6 +13,16 @@ Run focused source checks with:
 PYTHONDONTWRITEBYTECODE=1 python3 tests/e2e/repository-validation/test_validation.py
 ```
 
+## Current source checks
+
+The source checker now enforces forbidden owners through the complete production
+dependency closure, including inherited aliases and target/build dependencies.
+Source tests cover a helper hiding a forbidden controller dependency and a cyclic
+graph. Development-only fixture dependencies are excluded. External-candidate
+guest/runtime/contract boundaries are selected in the repository Config. These
+changes have source-test evidence only; the older installed observations below
+do not qualify this newer checker generation.
+
 ## Observed installed execution, 2026-09-07
 
 `qualification.json` records actual installed CLI execution on the disposable

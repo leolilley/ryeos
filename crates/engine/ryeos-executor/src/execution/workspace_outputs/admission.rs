@@ -11,7 +11,7 @@ use ryeos_engine::external_content::{
 use ryeos_engine::resolution::ResolutionOutput;
 use ryeos_state::external_content::products::ProductSource;
 use ryeos_state::external_content::products::admission::{
-    PRODUCT_RECIPE_BINDING_SCHEMA, admitted_product_recipe_from_prepared,
+    PRODUCT_RECIPE_BINDING_FACT_SCHEMA, admitted_product_recipe_from_prepared,
 };
 use ryeos_state::objects::workspace_output_capture::{
     WORKSPACE_OUTPUT_PARTITION_SCHEMA, WorkspaceOutputPartition, WorkspaceOutputRoot,
@@ -27,7 +27,7 @@ pub(crate) fn derive_initial_partition(
 ) -> anyhow::Result<Option<WorkspaceOutputPartition>> {
     let mut recipes = prepared.runtime_facts.iter().filter(|(_, fact)| {
         fact.get("schema").and_then(serde_json::Value::as_str)
-            == Some(PRODUCT_RECIPE_BINDING_SCHEMA)
+            == Some(PRODUCT_RECIPE_BINDING_FACT_SCHEMA)
     });
     let Some((binding, _)) = recipes.next() else {
         return Ok(None);
@@ -170,7 +170,7 @@ pub(crate) fn verify_prepared_partition(
         .iter()
         .filter_map(|(name, fact)| {
             (fact.get("schema").and_then(serde_json::Value::as_str)
-                == Some(PRODUCT_RECIPE_BINDING_SCHEMA))
+                == Some(PRODUCT_RECIPE_BINDING_FACT_SCHEMA))
             .then_some(name)
         })
         .collect::<Vec<_>>();
@@ -220,7 +220,7 @@ pub(crate) fn requires_output_partition(prepared: &PreparedRuntimeLaunch) -> any
     let value = serde_json::to_value(prepared)?;
     for (binding, fact) in &prepared.runtime_facts {
         if fact.get("schema").and_then(serde_json::Value::as_str)
-            == Some(PRODUCT_RECIPE_BINDING_SCHEMA)
+            == Some(PRODUCT_RECIPE_BINDING_FACT_SCHEMA)
             && admitted_product_recipe_from_prepared(&value, binding)?
                 .declarations
                 .requires_workspace_output_capture()
@@ -324,7 +324,9 @@ mod tests {
         KindComposedView, ResolutionDigestNode, ResolutionOutput, ResolutionStepName,
         ResolvedAncestor, TrustClass,
     };
-    use ryeos_state::external_content::products::admission::AdmittedProductRecipeBinding;
+    use ryeos_state::external_content::products::admission::{
+        AdmittedProductRecipeBinding, PRODUCT_RECIPE_BINDING_SCHEMA,
+    };
     use ryeos_state::external_content::products::composition::ProductRelationships;
     use ryeos_state::external_content::products::{
         PRODUCT_DECLARATIONS_SCHEMA, ProductBounds, ProductDeclaration, ProductDeclarations,
@@ -394,6 +396,8 @@ mod tests {
             binding_name: "product_recipe".to_owned(),
             recipe_ref: "config:test/two-products".to_owned(),
             recipe_raw_content_digest: "a".repeat(64),
+            purpose:
+                ryeos_state::external_content::products::ProductRecipePurpose::GeneralProductV1,
             declarations_hash: declarations.content_hash().unwrap(),
             declarations,
             relationships: ProductRelationships::empty(),
@@ -442,7 +446,7 @@ mod tests {
                 .map(|recipe| {
                     BTreeMap::from([(
                         recipe.binding_name.clone(),
-                        serde_json::to_value(recipe).unwrap(),
+                        recipe.runtime_fact_value().unwrap(),
                     )])
                 })
                 .unwrap_or_default(),

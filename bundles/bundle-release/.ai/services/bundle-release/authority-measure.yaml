@@ -1,0 +1,29 @@
+# ryeos:signed:2026-09-23T12:15:50Z:8ea2011b521f2f9ea8e52d327aa68f0b34f167bde501b8d06a572ef1d95025d8:RxdbXYE78ZVdtqvTiF7GvvTlRuWgFEYE5X1Rs6ncC2NMjMeuv/vgsq4CKZUnjFHfaAhocPcDZSqWHOvmtgs1Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: authority-measure
+version: "1.0.0"
+description: Re-admit exact retained qualification testimony and compose a reviewable bundle-publication policy candidate without installing policy or publishing content.
+endpoint: bundle_release.authority_measure
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/authority-measure"]
+schema:
+  calibration_run_attestation_hash: string
+  project_path: string
+  catalog_namespace: string
+  publisher_fingerprint: string
+  authorized_uploaders: array
+  trust_epoch: integer
+  portable_qualification_owner_principal: string
+  portable_qualification_attestation_hash: string
+  native_qualification_owner_principal: string
+  native_qualification_attestation_hash: string
+  substrate_qualification_owner_principal: string
+  substrate_qualification_attestation_hash: string
+  core_seed_qualification_owner_principal: string
+  core_seed_qualification_attestation_hash: string
+  substrate_build_witness_hash: string
+  substrate_build_signer_fingerprint: string
+  publisher_executable_path: string

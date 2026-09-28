@@ -1,0 +1,13 @@
+# ryeos:signed:2026-09-28T07:15:22Z:3a33cc04760905c1f3997a16278a556e4aa80f6bc9222b7b7c6db7336eb7a610:Q8OsX9mP5F1eZd8Win2ucMnBLZ4gUTzjZwsSpUyVYJ5IDowcnInqwYCBsBUFZa1DQjf+8I/k9cSzYMuXOmpbCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, launch-product-qualification]
+description: Launch the signed verifier for one exact product qualification relationship
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content launch-product-qualification '{\"launch_id\":\"<launch-id>\",\"witness_hash\":\"<exact-witness-hash>\",\"witness_source\":{\"kind\":\"local_capture\"},\"relationship_name\":\"<signed-qualification-relationship>\",\"project_context\":{\"snapshot_hash\":\"<exact-lowercase-project-snapshot-hash>\"}}'; use \"project_context\":null only for a signed projectless fixed-pin verifier"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/launch-product-qualification

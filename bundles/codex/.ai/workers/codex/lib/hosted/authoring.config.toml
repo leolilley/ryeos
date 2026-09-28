@@ -1,8 +1,9 @@
-# ryeos:signed:2026-09-17T03:41:16Z:dadb63637f98ea0d2df45fe2a871eeb0e20fa5fdfb3bb1c083fa93ca7c8670ab:9nQXei7xxUoLzr6xjsLATIjFxTqLZp8ZDNYILWJuBz98UPssecZHxYNmteLOma23HmeLFzHPeQHjsO451BrDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T06:52:09Z:91b586d175c2f412068397a342d40a0957664a72ff5bc2b076bcc411ce74e841:BlSSPZ3NJevvzDjC0lwBcjsIPeBNCfwaz25E5P6GfYZvwLyNIF/zS3OXJMXV4bx9yq17QQh4Kyg4dDuxPUyOCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 forced_login_method = "chatgpt"
 cli_auth_credentials_store = "file"
 model_provider = "openai"
 mcp_servers = {}
+notify = []
 check_for_update_on_startup = false
 approval_policy = "never"
 approvals_reviewer = "user"
@@ -41,9 +42,12 @@ enabled = false
 
 [features]
 apps = false
+plugins = false
+skill_mcp_dependency_install = false
 remote_plugin = false
 hooks = false
 multi_agent = false
+multi_agent_v2 = false
 memories = false
 network_proxy = false
 # The authoring worker needs Codex's exact pinned host for its ordinary
@@ -52,5 +56,13 @@ network_proxy = false
 code_mode_host = true
 
 [features.code_mode]
-# Model-authored JavaScript execution is a separate feature and remains off.
+# This is the default, not an effective-tool-mode prohibition: pinned Codex
+# model metadata can select code mode first. Qualification must cover that
+# mode's host and nested tool routing as well as direct tools.
+enabled = false
+
+[orchestrator.skills]
+enabled = false
+
+[orchestrator.mcp]
 enabled = false

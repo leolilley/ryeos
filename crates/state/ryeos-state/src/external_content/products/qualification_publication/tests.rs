@@ -269,6 +269,8 @@ fn graph_qualification_owns_and_authenticates_both_runtime_closures() {
     evidence.verifier.canonical_ref = "graph:fixtures/qualify_runtime".into();
     evidence.policy_source.policy.verifier_ref = evidence.verifier.canonical_ref.clone();
     evidence.verifier.artifact_identity = qualification::tests::graph_artifact_identity();
+    evidence.verifier.process_settlement_witness_digest = None;
+    evidence.verifier.process_settlement_authority = None;
     evidence.execution_proof =
         qualification::tests::execution_proof(&evidence.verifier.artifact_identity);
     seed_verifier_realization(&authority, &signer, &mut evidence);

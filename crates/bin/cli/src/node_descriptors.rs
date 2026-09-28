@@ -126,6 +126,8 @@ mod tests {
     #[test]
     fn exposes_snapshot_commands_without_legacy_alias_conversion() {
         let snapshot = NodeConfigSnapshot {
+            external_execution: Vec::new(),
+            runtime_snapshot_production: Vec::new(),
             bundles: vec![],
             routes: vec![],
             commands: vec![ryeos_runtime::CommandDef {

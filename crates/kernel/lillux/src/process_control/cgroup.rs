@@ -1153,6 +1153,7 @@ impl DelegatedCgroup {
 #[derive(Debug)]
 pub struct ProcessCgroup {
     identity: CgroupIdentity,
+    directory: PinnedDirectory,
     events: File,
     freeze: File,
     kill: File,
@@ -1162,6 +1163,44 @@ pub struct ProcessCgroup {
 }
 
 impl ProcessCgroup {
+    /// Configure only the already-reserved empty leaf. The parent must have
+    /// delegated both controllers; absent or unwritable controls fail closed.
+    pub(crate) fn install_resource_limits(
+        &self,
+        limits: super::scope::ProcessScopeResourceLimits,
+    ) -> Result<(), String> {
+        limits.validate()?;
+        if self.events()?.populated {
+            return Err("cannot change resource limits on a populated process scope".to_owned());
+        }
+        let directory = self.directory.try_clone_descriptor().map_err(display)?;
+        // Open every required controller before the first mutation. A host
+        // that did not delegate memory and pids cannot silently downgrade the
+        // admitted product to rlimits or an unbounded cgroup.
+        let memory = open_control(&directory, c"memory.max", libc::O_RDWR)?;
+        let swap = open_control(&directory, c"memory.swap.max", libc::O_RDWR)?;
+        let processes = open_control(&directory, c"pids.max", libc::O_RDWR)?;
+        for (control, name, value) in [
+            (
+                &memory,
+                "memory.max",
+                limits.maximum_memory_bytes.to_string(),
+            ),
+            // The memory ceiling includes no separately available swap budget.
+            (&swap, "memory.swap.max", "0".to_owned()),
+            (&processes, "pids.max", limits.maximum_processes.to_string()),
+        ] {
+            write_control(control, value.as_bytes())?;
+            if read_control(control)?.trim() != value {
+                return Err(format!("{name} did not retain the exact resource ceiling"));
+            }
+        }
+        if self.events()?.populated {
+            return Err("process scope became populated during resource configuration".to_owned());
+        }
+        Ok(())
+    }
+
     pub(crate) fn clone_kill_descriptor(&self) -> Result<File, String> {
         self.kill
             .try_clone()
@@ -1351,6 +1390,7 @@ impl ProcessCgroup {
             placement: open_control(&fd, c"cgroup.procs", libc::O_WRONLY)?,
             members,
             freeze_owned: AtomicBool::new(false),
+            directory,
         })
     }
 
@@ -1851,6 +1891,36 @@ fn display(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an explicit disposable cgroup-v2 parent with memory and pids controllers delegated"]
+    fn native_scope_resource_limits_install_and_read_back() {
+        let root = std::env::var_os("LILLUX_TEST_CGROUP_PARENT")
+            .expect("set an explicit disposable delegation with memory and pids controllers");
+        let parent = DelegatedCgroup::open(Path::new(&root)).unwrap();
+        let name = format!("limited-{:032x}", rand::random::<u128>());
+        let scope = parent.create(&name, Duration::from_secs(5)).unwrap();
+        let identity = scope.identity().clone();
+        let limits = super::super::scope::ProcessScopeResourceLimits {
+            maximum_memory_bytes: 64 * 1024 * 1024,
+            maximum_processes: 4,
+        };
+        scope.install_resource_limits(limits).unwrap();
+        let fd = scope.directory.try_clone_descriptor().unwrap();
+        for (name, expected) in [
+            (c"memory.max".as_ref(), "67108864"),
+            (c"memory.swap.max".as_ref(), "0"),
+            (c"pids.max".as_ref(), "4"),
+        ] {
+            let control = open_control(&fd, name, libc::O_RDONLY).unwrap();
+            assert_eq!(read_control(&control).unwrap().trim(), expected);
+        }
+        assert!(!scope.events().unwrap().populated);
+        drop(scope);
+        parent
+            .retire_empty(&identity, Duration::from_secs(5))
+            .unwrap();
+    }
 
     #[test]
     fn membership_scan_is_streamed_and_does_not_create_a_process_count_limit() {

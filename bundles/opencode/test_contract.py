@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-10T10:47:37Z:25e50a308d5611b0bf544e6c85458daa3c84d74c41d7d11e4e5a93144d39151d:qyD+QkzLCUGrm28Cw/SijltzskUHi2jn+6QUj5va+InzyIMVGzBrY+wutDxG2MqFKm8RRAx7j19Zk6ULwrVsBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-22T11:18:29Z:c041f289429417c1d30f17584f117f9ca4d57c1aedea0d2283e8d8642c884fc6:x/Hh3xK0up8KGQIjp0cyJvyOH0hE6hDSIWYSN+JW16AZdBuB8LKtUCTdhTo2GTndaE8MV00xDzRL4oc9VpX+BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance checks for the OpenCode provider data."""
 
@@ -60,7 +60,10 @@ def source_digest() -> str:
 class OpenCodeContractTests(unittest.TestCase):
     def test_profile_uses_the_closed_http_projection_contract(self) -> None:
         profile = json.loads(PROFILE.read_text())
-        self.assertEqual(profile["schema_version"], 6)
+        self.assertEqual(profile["schema_version"], 10)
+        self.assertIsNone(profile["external_candidate"])
+        self.assertEqual(profile["auxiliary_configs"], [])
+        self.assertEqual(profile["runtime_configs"], [])
         self.assertEqual(profile["transport"], "http_sse")
         self.assertEqual(profile["http_sse"]["event_path"], "/event")
         self.assertEqual(profile["http_sse"]["readiness_path"], "/global/health")

@@ -12,9 +12,10 @@ use std::path::PathBuf;
 use ryeos_isolation_protocol::{
     AdapterInspectionRequest, AdapterInspectionResponse, AdapterLaunchLifecycle,
     AdapterLaunchRequest, AdapterWorkspaceRequest, AdapterWorkspaceResponse,
-    IsolationAdapterProtocolVersion, IsolationAuthorityPurpose, IsolationCapability,
-    IsolationDiagnostic, IsolationDiagnosticCode, IsolationMountAccess, IsolationNetwork,
-    IsolationTargetTriple, LauncherRefusalDocument, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+    ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA, IsolationAdapterProtocolVersion,
+    IsolationAuthorityPurpose, IsolationCapability, IsolationDiagnostic, IsolationDiagnosticCode,
+    IsolationMountAccess, IsolationNetwork, IsolationTargetTriple, LauncherRefusalDocument,
+    LoopbackListenerTransferReceipt, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
     MAX_WORKSPACE_MUTATIONS, MAX_WORKSPACE_RESPONSE_BYTES, MAX_WORKSPACE_VIEW_RECEIPT_BYTES,
     WorkspaceLifecycleOperation, WorkspaceMutation, WorkspaceMutationKind,
     WorkspaceViewTransferReceipt, from_json_slice_strict,
@@ -96,12 +97,70 @@ fn launch(request_fd: u32) -> ! {
         Err(error) => fail(&error),
     };
     let status_fd = request.status_fd;
-    let result = translate_launch(&request).and_then(lillux::launch_linux_sandbox);
-    let process = match result {
+    let native = match translate_launch(&request) {
+        Ok(native) => native,
+        Err(error) => emit_refusal(status_fd, error),
+    };
+    let result = if let Some(ingress) = &request.plan.loopback_ingress {
+        let address = match ingress.address.parse() {
+            Ok(address) => address,
+            Err(error) => emit_refusal(
+                status_fd,
+                format!("parse admitted loopback address: {error}"),
+            ),
+        };
+        let transfer_fd = request.loopback_transfer_fd.unwrap_or_else(|| {
+            emit_refusal(status_fd, "loopback transfer descriptor missing".into())
+        });
+        let request_digest = canonical_digest(&request).unwrap_or_else(|error| {
+            emit_refusal(
+                status_fd,
+                format!("commit loopback launch request: {error}"),
+            )
+        });
+        let receipt = LoopbackListenerTransferReceipt {
+            protocol: request.protocol,
+            request_digest,
+        };
+        receipt.validate().unwrap_or_else(|error| {
+            emit_refusal(
+                status_fd,
+                format!("invalid loopback transfer receipt: {error}"),
+            )
+        });
+        let payload = canonical_bytes(&receipt).unwrap_or_else(|error| {
+            emit_refusal(status_fd, format!("serialize loopback transfer: {error}"))
+        });
+        lillux::launch_linux_sandbox_with_loopback_ingress(
+            native.clone(),
+            address,
+            transfer_fd,
+            &payload,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+        )
+    } else {
+        lillux::launch_linux_sandbox(native.clone())
+    };
+    let mut process = match result {
         Ok(process) => process,
         Err(error) => emit_refusal(status_fd, error),
     };
-    let target = serde_json::json!({ "child-pid": process.child_pid() });
+    let mount_preparation = process.mount_preparation_receipt().unwrap_or_else(|error| {
+        emit_refusal(status_fd, format!("final-root mount preparation missing: {error}"))
+    });
+    let expected_mounts = mount_preparation.matches_request(&native).unwrap_or_else(|error| {
+        emit_refusal(status_fd, format!("compare final-root mount preparation: {error}"))
+    });
+    if mount_preparation.owned_child_pid != process.child_pid() || !expected_mounts {
+        emit_refusal(
+            status_fd,
+            "final-root mount preparation differs from translated signed plan".into(),
+        );
+    }
+    let target = serde_json::json!({
+        "child-pid": process.child_pid(),
+        "mount-preparation": mount_preparation,
+    });
     let mut bytes = match serde_json::to_vec(&target) {
         Ok(bytes) => bytes,
         Err(error) => emit_refusal(status_fd, format!("serialize target status: {error}")),
@@ -110,10 +169,91 @@ fn launch(request_fd: u32) -> ! {
     if let Err(error) = lillux::write_inherited_descriptor(status_fd, &bytes) {
         emit_refusal(status_fd, format!("publish target status: {error}"));
     }
+    // PID-first attachment is mandatory: a held target cannot reach its
+    // pre-exec receipt until the controller durably attaches and releases it.
+    // This second document is trusted-adapter testimony from Lillux's private
+    // child pipe, never target stdout or stderr.
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(3600));
+    let receipt = loop {
+        if deadline.has_elapsed() {
+            emit_refusal(
+                status_fd,
+                "applied-launch receipt exceeded adapter safety deadline".into(),
+            );
+        }
+        match process.try_observe_applied_launch() {
+            Ok(Some(receipt)) => break receipt,
+            Ok(None) => lillux::time::sleep(lillux::time::Duration::from_millis(1)),
+            Err(error) => emit_refusal(
+                status_fd,
+                format!("applied-launch receipt refused: {error}"),
+            ),
+        }
+    };
+    let exact_request = match receipt.matches_request(&native) {
+        Ok(exact) => exact,
+        Err(error) => emit_refusal(
+            status_fd,
+            format!("compare applied-launch receipt: {error}"),
+        ),
+    };
+    if !applied_receipt_matches_held(
+        &receipt,
+        &mount_preparation,
+        process.child_pid(),
+        exact_request,
+    ) {
+        emit_refusal(
+            status_fd,
+            "applied-launch receipt or post-release mounts differ from translated signed plan".into(),
+        );
+    }
+    let mut receipt_line = match serde_json::to_vec(&serde_json::json!({
+        "schema": ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
+        "applied-launch": receipt,
+    })) {
+        Ok(bytes) => bytes,
+        Err(error) => emit_refusal(
+            status_fd,
+            format!("serialize applied-launch receipt: {error}"),
+        ),
+    };
+    receipt_line.push(b'\n');
+    if let Err(error) = lillux::write_inherited_descriptor(status_fd, &receipt_line) {
+        emit_refusal(
+            status_fd,
+            format!("publish applied-launch receipt: {error}"),
+        );
+    }
+    // SAFETY: the launcher alone owns this inherited status coordinate. It
+    // has no Rust owner, and Lillux's target closes it before untrusted exec.
+    // Closing now gives the parent an exact two-document EOF fence while the
+    // target remains under this adapter's process ownership.
+    let status_owner = match unsafe { lillux::take_inherited_descriptor_authority(status_fd) } {
+        Ok(owner) => owner,
+        Err(error) => fail(&format!("retire applied-launch status descriptor: {error}")),
+    };
+    drop(status_owner);
     match process.wait() {
         Ok(status) => lillux::exit_with_linux_sandbox_status(status),
         Err(error) => fail(&error),
     }
+}
+
+fn applied_receipt_matches_held(
+    receipt: &lillux::LinuxSandboxAppliedLaunchReceipt,
+    held: &lillux::LinuxSandboxMountPreparationReceipt,
+    child_pid: u32,
+    exact_request: bool,
+) -> bool {
+    exact_request
+        && held.owned_child_pid == child_pid
+        && receipt.owned_child_pid == child_pid
+        && receipt.matches_post_release_mounts(&lillux::LinuxSandboxMountPreparationCommitments {
+            schema: held.schema,
+            mount_count: held.mount_count,
+            destination_access_sha256: held.destination_access_sha256,
+        })
 }
 
 fn translate_launch(request: &AdapterLaunchRequest) -> Result<lillux::LinuxSandboxRequest, String> {
@@ -658,6 +798,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn applied_status_requires_exact_held_mount_echo_before_publication() {
+        let held = lillux::LinuxSandboxMountPreparationReceipt {
+            schema: 1,
+            owned_child_pid: 42,
+            mount_count: 3,
+            destination_access_sha256: [7; 32],
+        };
+        let mut receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 42,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 3,
+                destination_access_sha256: [7; 32],
+            },
+        };
+        assert!(applied_receipt_matches_held(&receipt, &held, 42, true));
+        assert!(!applied_receipt_matches_held(&receipt, &held, 42, false));
+        receipt.post_release_mount_view.destination_access_sha256[0] ^= 1;
+        assert!(!applied_receipt_matches_held(&receipt, &held, 42, true));
+        receipt.post_release_mount_view.destination_access_sha256[0] ^= 1;
+        receipt.owned_child_pid = 43;
+        assert!(!applied_receipt_matches_held(&receipt, &held, 42, true));
+    }
+
+    #[test]
     fn workspace_translation_preserves_each_normalized_mutation() {
         assert_eq!(
             lillux::sandbox::MAX_LINUX_OVERLAY_SYMLINK_TARGET_BYTES,
@@ -732,6 +906,9 @@ mod tests {
         assert!(capabilities.contains(&IsolationCapability::FilesystemWorkspaceDelta));
         assert!(capabilities.contains(&IsolationCapability::ProcessIsolatedPidNamespace));
         assert!(!capabilities.contains(&IsolationCapability::ProcessHostPidNamespace));
+        // The native launch slice exists, but controller receiver ownership
+        // and joined qualification are not yet wired: admission stays closed.
+        assert!(!capabilities.contains(&IsolationCapability::NetworkIsolatedLoopbackIngress));
     }
 
     #[test]

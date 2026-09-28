@@ -291,9 +291,17 @@ pub fn normalize_params_with_contract(
 
     for (field, decl) in &contract.fields {
         let Some(raw) = obj.get(field).cloned() else {
+            // The lightweight contract historically described requiredness for
+            // downstream handlers without enforcing it in the shared CLI
+            // normalizer. Enforce presence narrowly for required-nullable
+            // fields: these distinguish an explicit authority choice (for
+            // example `null` = projectless) from an omitted, invalid request.
+            if decl.required && decl.nullable {
+                return Err(format!("--{} is required", flag_name(field)));
+            }
             continue;
         };
-        let normalized = normalize_field_value(field, raw, decl.ty)?;
+        let normalized = normalize_field_value(field, raw, decl.ty, decl.nullable)?;
         obj.insert(field.clone(), normalized);
     }
 
@@ -304,8 +312,12 @@ fn normalize_field_value(
     field: &str,
     value: serde_json::Value,
     ty: InvocationInputType,
+    nullable: bool,
 ) -> Result<serde_json::Value, String> {
     use serde_json::Value;
+    if value.is_null() && nullable {
+        return Ok(value);
+    }
     match ty {
         InvocationInputType::String => match value {
             Value::String(_) => Ok(value),
@@ -1005,6 +1017,58 @@ mod tests {
         .unwrap();
 
         assert_eq!(result["ref_bindings"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn command_contract_accepts_explicit_null_only_for_required_nullable_object() {
+        let nullable = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({"project_context": "object|null"}),
+        )
+        .unwrap()
+        .unwrap();
+        let ordinary = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({"project_context": "object"}),
+        )
+        .unwrap()
+        .unwrap();
+        let optional_nullable = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({"project_context": "object|null?"}),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            normalize_params_with_contract(
+                serde_json::json!({"project_context": null}),
+                Some(&nullable),
+            )
+            .unwrap(),
+            serde_json::json!({"project_context": null}),
+        );
+        assert!(
+            normalize_params_with_contract(
+                serde_json::json!({"project_context": null}),
+                Some(&ordinary),
+            )
+            .unwrap_err()
+            .contains("must be an object")
+        );
+        assert!(
+            normalize_params_with_contract(serde_json::json!({}), Some(&nullable))
+                .unwrap_err()
+                .contains("--project-context is required")
+        );
+        // Preserve historical handling of ordinary non-nullable fields; this
+        // wire-contract correction must not impose requiredness globally.
+        assert_eq!(
+            normalize_params_with_contract(serde_json::json!({}), Some(&ordinary)).unwrap(),
+            serde_json::json!({}),
+        );
+        assert_eq!(
+            normalize_params_with_contract(serde_json::json!({}), Some(&optional_nullable))
+                .unwrap(),
+            serde_json::json!({}),
+        );
     }
 
     #[test]

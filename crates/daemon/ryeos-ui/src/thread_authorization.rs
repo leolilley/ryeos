@@ -29,10 +29,12 @@ enum ExactThreadCaller {
 impl ExactThreadCaller {
     fn from_seat(caller: &SeatCaller) -> Result<Self, HandlerError> {
         Ok(match caller {
-            SeatCaller::Session(session) => Self::Session {
-                canonical_project_root: crate::seat_auth::session_project_query_identity(session)
-                    .map_err(|_| HandlerError::NotFound)?,
-                principal_id: Some(session.compiled_binding.binding.principal_id.clone()),
+            SeatCaller::Attachment(attachment) => Self::Session {
+                canonical_project_root: crate::seat_auth::attachment_project_query_identity(
+                    attachment,
+                )
+                .map_err(|_| HandlerError::NotFound)?,
+                principal_id: Some(attachment.compiled_binding.binding.principal_id.clone()),
             },
             SeatCaller::Operator { fingerprint } => Self::Operator {
                 principal_id: fingerprint.clone(),

@@ -1,30 +1,43 @@
-# ryeos:signed:2026-09-15T01:11:43Z:c3a27725b50c128d93bfa3532d566a4706903d775f89e493555c48508c99b9eb:ZQOwRF48pMmDLJYkcMR9pyv1qpTpBP3+pfwAn9UL89M7167lgyX+8A3F0Xi9eCYr8tFe47wvyc4lhJVr4VNbCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T07:22:30Z:1fae73b470f22cc3ed7269955ede439d0e3b5abcc994a4849b93e7119473f2ec:DQhycxWz0789C4dF/LWbuys+fy7nqz4wMl6/wKxe7Y7UprLuGzVHG56PJbBzerANFjEWVTmUuSVY0GNWgVy/Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-children
 title: Children
 version: "1.0.0"
 description: Exact execution-tree closure for the selected work placement
 
-widget: table
+widget: sections
 sources:
   default:
     ref: service:ui/ryeos-ui/thread/tree
     params:
       thread_id: "@facet:selection.work.thread"
       max_depth: 16
-      limit: 500
-    collection: items
+      max_nodes: 500
 
-projections:
-  columns:
-    - { label: status, field: status, present: words }
-    - { label: work, field: item_ref, present: leaf }
-    - { label: relation, field: relation, present: words }
-  expand:
-    fields: [thread_id, chain_root_id, item_ref, kind, status, relation, depth, current_site_id, origin_site_id]
-  tone:
-    field: status
-    map: { running: accent, failed: danger, killed: danger, timed_out: danger, cancelled: warn, completed: good }
-    default: neutral
+sections:
+  - title: Coverage
+    source_channel: default
+    collection: coverage
+    projection:
+      primary: state
+      meta: reason
+      expand:
+        fields: [root_thread_id, retained, truncated]
+      tone:
+        field: state
+        map: { complete: good, truncated: warn, unselected: neutral }
+        default: neutral
+  - title: Threads
+    source_channel: default
+    collection: threads
+    projection:
+      primary: item_ref
+      meta: status
+      expand:
+        fields: [thread_id, chain_root_id, kind, tree.relation, tree.depth, current_site_id, origin_site_id]
+      tone:
+        field: status
+        map: { running: accent, failed: danger, killed: danger, timed_out: danger, cancelled: warn, completed: good }
+        default: neutral
 
 refresh:
   on_facet: selection

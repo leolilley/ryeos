@@ -202,6 +202,9 @@ pub struct StartedPersistentSession {
     /// One-shot settlement owned by the same process registry. It is invoked
     /// only after checked reap/death proof, never from request completion.
     pub cleanup_observer: Option<PersistentSessionCleanupObserver>,
+    /// Non-financial launch-authority settlement after checked process reap.
+    /// Failure prevents successful retirement independently of resource accounting.
+    pub retirement_observer: Option<PersistentSessionCleanupObserver>,
     /// Finite resource occupancy authority for this exact process occurrence.
     /// `None` is valid only for sessions without a financially bounded
     /// selected execution resource.
@@ -297,7 +300,9 @@ struct SessionProcess {
     /// Decoded frames acquire additional exact serialized-byte permits before
     /// they can leave the reader thread.
     _reader_budget: BacklogBytePermit,
-    _lifelines: Vec<Box<dyn Send + Sync>>,
+    /// Retired explicitly after proved process cleanup, even when callers
+    /// retain another Arc to this session. Not evidence of process death.
+    lifelines: Mutex<Vec<Box<dyn Send + Sync>>>,
 }
 
 const MAX_PENDING_SESSION_REQUESTS: usize = 32;
@@ -449,6 +454,10 @@ impl SessionProcess {
     }
 
     fn retire(&self) -> Result<()> {
+        // Serialize retirement and retain all execution lifelines until the
+        // process owner has established cleanup. Arc destruction is not the
+        // retirement boundary.
+        let mut lifelines = self.lifelines.lock().unwrap_or_else(|p| p.into_inner());
         self.closed.store(true, Ordering::Release);
         self.backlog.changed.notify_all();
         self.observation_sender
@@ -484,8 +493,17 @@ impl SessionProcess {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
         {
-            observer().context("settle persistent-session resource operation after reap")?;
+            if let Err(error) = observer() {
+                let reason =
+                    format!("persistent-session resource settlement remains unproved: {error}");
+                *self
+                    .cleanup_unproved
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) = Some(reason.clone());
+                bail!("{reason}");
+            }
         }
+        lifelines.clear();
         Ok(())
     }
 }
@@ -2292,8 +2310,19 @@ impl ExclusivePersistentSessionReservation {
     ) -> Result<ExclusivePersistentSessionStartGuard> {
         if self.inner.shutdown.load(Ordering::Acquire) {
             self.release_reservation();
-            let StartedPersistentSession { running, .. } = started;
-            return match running.abort_and_reap_checked() {
+            let StartedPersistentSession {
+                running,
+                cleanup_observer,
+                retirement_observer,
+                lifelines: _lifelines,
+                ..
+            } = started;
+            let observer = combine_retirement_observers(cleanup_observer, retirement_observer);
+            return match running
+                .abort_and_reap_checked()
+                .map_err(anyhow::Error::from)
+                .and_then(|()| observer.map(|observer| observer()).unwrap_or(Ok(())))
+            {
                 Ok(()) => Err(anyhow!(
                     "persistent-session admission is closed for daemon shutdown"
                 )),
@@ -2864,12 +2893,15 @@ fn ready_process(
         expected_boot_identity,
         observation_sink,
         cleanup_observer,
+        retirement_observer,
         resource_occupancy_limit,
         resource_cleanup_allowance_ms,
         resource_attribution_sink,
         resource_eligibility,
     } = started;
-    if cleanup_observer.is_some()
+    let resource_cleanup_present = cleanup_observer.is_some();
+    let cleanup_observer = combine_retirement_observers(cleanup_observer, retirement_observer);
+    if resource_cleanup_present
         && (resource_occupancy_limit.is_none()
             || resource_attribution_sink.is_none()
             || resource_eligibility.is_none())
@@ -2886,17 +2918,14 @@ fn ready_process(
             }),
         };
     }
-    if cleanup_observer.is_none()
+    if !resource_cleanup_present
         && (resource_occupancy_limit.is_some()
             || resource_attribution_sink.is_some()
             || resource_eligibility.is_some())
     {
         let error = anyhow!("persistent-session resource evidence is incomplete");
         return match running.abort_and_reap_checked() {
-            Ok(()) => Err(ReadyProcessFailure {
-                error,
-                cleanup_unproved: false,
-            }),
+            Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
             Err(cleanup) => Err(ReadyProcessFailure {
                 error: error.context(format!(
                     "incomplete resource-evidence cleanup could not be proved: {cleanup}"
@@ -2906,12 +2935,14 @@ fn ready_process(
         };
     }
     if let Some(limit) = &resource_occupancy_limit {
-        let cleanup = Duration::from_millis(resource_cleanup_allowance_ms.ok_or_else(|| {
-            ReadyProcessFailure {
-                error: anyhow!("bounded persistent-session resource lacks a cleanup reserve"),
-                cleanup_unproved: false,
-            }
-        })?);
+        let Some(cleanup_ms) = resource_cleanup_allowance_ms else {
+            return Err(refuse_ready_process(
+                running,
+                anyhow!("bounded persistent-session resource lacks a cleanup reserve"),
+                cleanup_observer.as_ref(),
+            ));
+        };
+        let cleanup = Duration::from_millis(cleanup_ms);
         let request = Duration::from_millis(lifecycle.request_timeout_ms);
         match limit.window(cleanup).map_err(anyhow::Error::msg) {
             Ok(lillux::time::OccupancyWindowState::Service { remaining })
@@ -2961,13 +2992,13 @@ fn ready_process(
             }
         };
     let timeout = Duration::from_millis(lifecycle.ready_timeout_ms);
-    socket
-        .set_nonblocking(true)
-        .context("configure persistent-session channel as nonblocking")
-        .map_err(|error| ReadyProcessFailure {
-            error,
-            cleanup_unproved: false,
-        })?;
+    if let Err(error) = socket.set_nonblocking(true) {
+        return Err(refuse_ready_process(
+            running,
+            anyhow!(error).context("configure persistent-session channel as nonblocking"),
+            cleanup_observer.as_ref(),
+        ));
+    }
     let deadline = MonotonicDeadline::after(timeout);
     let mut reader = FrameReader::default();
     let frame = match loop {
@@ -3065,7 +3096,7 @@ fn ready_process(
         closed: Arc::new(AtomicBool::new(false)),
         backlog,
         _reader_budget: reader_budget,
-        _lifelines: lifelines,
+        lifelines: Mutex::new(lifelines),
     })
 }
 
@@ -3080,10 +3111,45 @@ fn settle_ready_cleanup(
         },
         Err(settlement) => ReadyProcessFailure {
             error: error.context(format!(
-                "persistent-session resource settlement after reap failed: {settlement:#}"
+                "persistent-session settlement after reap failed: {settlement:#}"
             )),
             cleanup_unproved: true,
         },
+    }
+}
+
+fn refuse_ready_process(
+    running: ryeos_engine::dispatch::RunningExecution,
+    error: anyhow::Error,
+    observer: Option<&PersistentSessionCleanupObserver>,
+) -> ReadyProcessFailure {
+    match running.abort_and_reap_checked() {
+        Ok(()) => settle_ready_cleanup(error, observer),
+        Err(cleanup) => ReadyProcessFailure {
+            error: error.context(format!(
+                "persistent-session refusal cleanup unproved: {cleanup}"
+            )),
+            cleanup_unproved: true,
+        },
+    }
+}
+
+fn combine_retirement_observers(
+    resource: Option<PersistentSessionCleanupObserver>,
+    retirement: Option<PersistentSessionCleanupObserver>,
+) -> Option<PersistentSessionCleanupObserver> {
+    match (resource, retirement) {
+        (None, observer) | (observer, None) => observer,
+        (Some(resource), Some(retirement)) => Some(Arc::new(move || {
+            // Both obligations must be attempted even when one fails.
+            match (resource(), retirement()) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                (Err(error), Err(retirement)) => Err(error.context(format!(
+                    "launch-authority settlement also failed: {retirement:#}"
+                ))),
+            }
+        })),
     }
 }
 
@@ -4036,6 +4102,8 @@ while True:
             filesystem_authority_ceiling:
                 ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             target_requirement: None,
+            endpoint_requirement: ryeos_engine::contracts::ExecutionEndpointRequirement::Local {},
+            external_endpoint_binding: None,
             resource_authority_ceiling:
                 ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
             cache_key: "fixture".to_owned(),
@@ -4101,6 +4169,7 @@ while True:
             expected_boot_identity: None,
             observation_sink,
             cleanup_observer: None,
+            retirement_observer: None,
             resource_occupancy_limit: None,
             resource_cleanup_allowance_ms: None,
             resource_attribution_sink: None,
@@ -4341,6 +4410,127 @@ while True:
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn exclusive_retirement_releases_lifelines_with_an_extra_session_owner() {
+        struct RetainedLifetime(Arc<AtomicBool>);
+        impl Drop for RetainedLifetime {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let pool = PersistentSessionPool::new();
+        let id = "e".repeat(64);
+        pool.reserve_exclusive(&id, &test_lifecycle(), &test_wire())
+            .unwrap()
+            .bind(fake_framed_session().unwrap())
+            .unwrap();
+        let retained = {
+            let state = pool.inner.state.lock().unwrap();
+            Arc::clone(&state.exclusive.get(&id).unwrap().process)
+        };
+        let released = Arc::new(AtomicBool::new(false));
+        retained
+            .lifelines
+            .lock()
+            .unwrap()
+            .push(Box::new(RetainedLifetime(Arc::clone(&released))));
+        assert_eq!(
+            pool.retire_exclusive(&id).unwrap(),
+            ExclusiveRetirementOutcome::Reaped
+        );
+        assert!(released.load(Ordering::Acquire));
+        assert!(retained.lifelines.lock().unwrap().is_empty());
+        retained.retire().unwrap();
+    }
+
+    #[test]
+    fn retirement_settlement_is_independent_of_financial_resource_authority() {
+        let pool = PersistentSessionPool::new();
+        let id = "retirement-only".to_owned();
+        let settled = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&settled);
+        let mut started = fake_framed_session().unwrap();
+        started.retirement_observer = Some(Arc::new(move || {
+            observed.store(true, Ordering::Release);
+            Ok(())
+        }));
+        pool.reserve_exclusive(&id, &test_lifecycle(), &test_wire())
+            .unwrap()
+            .bind(started)
+            .unwrap();
+        assert!(!settled.load(Ordering::Acquire));
+        assert_eq!(
+            pool.retire_exclusive(&id).unwrap(),
+            ExclusiveRetirementOutcome::Reaped
+        );
+        assert!(settled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn retirement_settlement_failure_prevents_success_and_retry_bypass() {
+        let pool = PersistentSessionPool::new();
+        let id = "retirement-failure";
+        let mut started = fake_framed_session().unwrap();
+        started.retirement_observer = Some(Arc::new(|| {
+            anyhow::bail!("launch reservation test refusal")
+        }));
+        pool.reserve_exclusive(id, &test_lifecycle(), &test_wire())
+            .unwrap()
+            .bind(started)
+            .unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                pool.retire_exclusive(id).unwrap(),
+                ExclusiveRetirementOutcome::Unproved
+            );
+        }
+    }
+
+    #[test]
+    fn retirement_settlement_attempts_both_obligations_and_preserves_failure() {
+        let retired = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&retired);
+        let observer = combine_retirement_observers(
+            Some(Arc::new(|| anyhow::bail!("resource test failure"))),
+            Some(Arc::new(move || {
+                observed.store(true, Ordering::Release);
+                anyhow::bail!("retirement test failure")
+            })),
+        )
+        .unwrap();
+        let error = observer().unwrap_err();
+        assert!(retired.load(Ordering::Acquire));
+        let message = format!("{error:#}");
+        assert!(message.contains("resource test failure"));
+        assert!(message.contains("retirement test failure"));
+    }
+
+    #[test]
+    fn exclusive_retirement_cannot_retry_past_failed_resource_settlement() {
+        let pool = PersistentSessionPool::new();
+        let id = "f".repeat(64);
+        pool.reserve_exclusive(&id, &test_lifecycle(), &test_wire())
+            .unwrap()
+            .bind(fake_framed_session().unwrap())
+            .unwrap();
+        let retained = {
+            let state = pool.inner.state.lock().unwrap();
+            Arc::clone(&state.exclusive.get(&id).unwrap().process)
+        };
+        *retained.cleanup_observer.lock().unwrap() = Some(Arc::new(|| {
+            anyhow::bail!("test resource settlement refused")
+        }));
+        retained.lifelines.lock().unwrap().push(Box::new(()));
+        let retained_count = retained.lifelines.lock().unwrap().len();
+        for _ in 0..2 {
+            assert_eq!(
+                pool.retire_exclusive(&id).unwrap(),
+                ExclusiveRetirementOutcome::Unproved
+            );
+            assert_eq!(retained.lifelines.lock().unwrap().len(), retained_count);
+        }
     }
 
     #[test]

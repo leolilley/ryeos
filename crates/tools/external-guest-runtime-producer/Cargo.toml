@@ -1,0 +1,18 @@
+[package]
+name = "ryeos-external-guest-runtime-producer"
+version = "0.5.100"
+edition = "2024"
+description = "Exact external guest-owner runtime product producer"
+license.workspace = true
+repository = "https://github.com/leolilley/ryeos"
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+lillux = { workspace = true }
+ryeos-external-execution = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

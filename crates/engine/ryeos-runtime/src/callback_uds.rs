@@ -78,6 +78,160 @@ impl UdsRuntimeClient {
         }
     }
 
+    /// Read the pre-launch producer source pinned by this root's sealed
+    /// qualification purpose. This selects no executable or child attempt.
+    pub async fn scoped_child_expected_source(
+        &self,
+        thread_id: &str,
+        scenario_id: &str,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "scenario_id": scenario_id});
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.scoped_child_expected_source", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    /// Read the root's protected pre-launch isolation class. No child attempt
+    /// is selected or started by this point read.
+    pub async fn scoped_child_expected_isolation_class(
+        &self,
+        thread_id: &str,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id});
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.scoped_child_expected_isolation_class", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    /// Start the finite producer selected by a signed qualification scenario.
+    /// The caller supplies no executable, recipe, scope or attempt identity.
+    /// An ambiguous transport result must be reconciled with
+    /// `resume_scoped_child`, never by launching a different scenario.
+    pub async fn start_scoped_child(
+        &self,
+        thread_id: &str,
+        scenario_id: &str,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "scenario_id": scenario_id});
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.scoped_child_start", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    /// Recover only the exact retained same-generation attempt locator after
+    /// a lost START acknowledgement. This method cannot mint work.
+    pub async fn resume_scoped_child(&self, thread_id: &str) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id});
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.scoped_child_resume", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    /// Observe one retained attempt. Its response can take the signed child
+    /// wall time, so use a dedicated connection; the daemon's callback and
+    /// recipe deadlines bound the operation rather than the shared RPC timer.
+    pub async fn observe_scoped_child(
+        &self,
+        thread_id: &str,
+        attempt_id: &str,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "attempt_id": attempt_id});
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request_dedicated("runtime.scoped_child_observe", params, None)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    /// Cleanup-only retirement of one exact released attempt. The daemon
+    /// durably fences natural observation before checked process/scope abort.
+    /// Repeating the same coordinates after a lost response cannot relaunch
+    /// work or manufacture a clean producer observation.
+    pub async fn abort_scoped_child(
+        &self,
+        thread_id: &str,
+        attempt_id: &str,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "attempt_id": attempt_id});
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request_dedicated("runtime.scoped_child_abort", params, None)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    /// Write one signed-bounded frame to the exact retained child. A lost
+    /// response may repeat these same coordinates only to recover a durable
+    /// delivered ACK; a pending write is never sent again.
+    pub async fn write_scoped_child(
+        &self,
+        thread_id: &str,
+        attempt_id: &str,
+        sequence: u32,
+        bytes: &[u8],
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({
+            "thread_id": thread_id,
+            "attempt_id": attempt_id,
+            "sequence": sequence,
+            "bytes": bytes,
+        });
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request_dedicated("runtime.scoped_child_write", params, None)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    /// Read the existing bounded capture from an explicit byte offset. A
+    /// repeated offset is safe after a lost response; it never touches input.
+    pub async fn read_scoped_child(
+        &self,
+        thread_id: &str,
+        attempt_id: &str,
+        offset: u64,
+        maximum_bytes: u32,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({
+            "thread_id": thread_id,
+            "attempt_id": attempt_id,
+            "offset": offset,
+            "maximum_bytes": maximum_bytes,
+        });
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request_dedicated("runtime.scoped_child_read", params, None)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    /// Ordered input EOF. This is not a child-exit or scope-empty receipt.
+    pub async fn close_scoped_child_input(
+        &self,
+        thread_id: &str,
+        attempt_id: &str,
+        sequence: u32,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({
+            "thread_id": thread_id,
+            "attempt_id": attempt_id,
+            "sequence": sequence,
+        });
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.scoped_child_close_input", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     fn serialize_dispatch_action_request(
         request: DispatchActionRequest,
     ) -> Result<(Value, bool), CallbackError> {

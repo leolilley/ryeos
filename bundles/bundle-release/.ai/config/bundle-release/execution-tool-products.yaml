@@ -1,0 +1,77 @@
+# ryeos:signed:2026-09-23T04:20:49Z:3a816790b0f0fe3c5547c134b46c3633868041fb1b18fb64f4f560d393466c3e:KjNMI+sKPpzqmyfO6NzusrP8VZUbZFBUC7zI/ZNlLdAe//KFM5acQIViWVE3f9eip6WDNN6JXuGd8NUC9yjKBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: bundle-release
+version: "1.0.0"
+description: Exact qualified execution products admitted independently by release Tools.
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: python_to_portable_build_tool
+      producer: &python_producer {canonical_ref: graph:ryeos/development/gnu-python-production, recipe_binding: product_recipe, product_name: runtime, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/bundle-release/portable-build, declaration_id: python}
+      required_product: &python_product {shape: tree, storage: large_content, bounds: {maximum_entries: 10000, maximum_depth: 64, maximum_file_bytes: 134217728, maximum_total_bytes: 268435456}}
+      qualification: &python_qualification {policy_ref: config:ryeos/environments/qualification/gnu-python, required_claims: [gnu_python_extension_startup_providers_v1, gnu_python_zlib_1_3_2]}
+    - name: python_to_native_build_tool
+      producer: *python_producer
+      consumer: {canonical_ref: tool:ryeos/bundle-release/native-build, declaration_id: python}
+      required_product: *python_product
+      qualification: *python_qualification
+    - name: python_to_signed_capture_tool
+      producer: *python_producer
+      consumer: {canonical_ref: tool:ryeos/bundle-release/signed-capture, declaration_id: python}
+      required_product: *python_product
+      qualification: *python_qualification
+    - name: python_to_portable_signed_capture_tool
+      producer: *python_producer
+      consumer: {canonical_ref: tool:ryeos/bundle-release/portable-signed-capture, declaration_id: python}
+      required_product: *python_product
+      qualification: *python_qualification
+    - name: python_to_core_seed_build_tool
+      producer: *python_producer
+      consumer: {canonical_ref: tool:ryeos/bundle-release/core-seed-build, declaration_id: python}
+      required_product: *python_product
+      qualification: *python_qualification
+    - name: python_to_core_seed_capture_tool
+      producer: *python_producer
+      consumer: {canonical_ref: tool:ryeos/bundle-release/core-seed-capture, declaration_id: python}
+      required_product: *python_product
+      qualification: *python_qualification
+    - name: python_to_substrate_build_tool
+      producer: *python_producer
+      consumer: {canonical_ref: tool:ryeos/bundle-release/substrate-build, declaration_id: python}
+      required_product: *python_product
+      qualification: *python_qualification
+    - name: python_to_substrate_qualify_tool
+      producer: *python_producer
+      consumer: {canonical_ref: tool:ryeos/bundle-release/substrate-qualify, declaration_id: python}
+      required_product: *python_product
+      qualification: *python_qualification
+    - name: platform_to_native_build_tool
+      producer: &platform_producer {canonical_ref: graph:ryeos/development/platform-production, recipe_binding: product_recipe, product_name: platform, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/bundle-release/native-build, declaration_id: platform}
+      required_product: &platform_product {shape: tree, storage: large_content, bounds: {maximum_entries: 25000, maximum_depth: 64, maximum_file_bytes: 268435456, maximum_total_bytes: 1073741824}}
+      qualification: &platform_qualification {policy_ref: config:ryeos/environments/qualification/development-platform, required_claims: [development_platform_abi_v1, development_platform_target_x86_64_linux_gnu_v1]}
+    - name: platform_to_core_seed_build_tool
+      producer: *platform_producer
+      consumer: {canonical_ref: tool:ryeos/bundle-release/core-seed-build, declaration_id: platform}
+      required_product: *platform_product
+      qualification: *platform_qualification
+    - name: cargo_vendor_to_native_build_tool
+      producer: &vendor_producer {canonical_ref: graph:ryeos/development/cargo-vendor-production, recipe_binding: product_recipe, product_name: cargo_vendor, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/bundle-release/native-build, declaration_id: cargo-vendor}
+      required_product: &vendor_product {shape: tree, storage: large_content, bounds: {maximum_entries: 50000, maximum_depth: 64, maximum_file_bytes: 134217728, maximum_total_bytes: 1073741824}}
+      qualification: &vendor_qualification {policy_ref: config:ryeos/environments/qualification/cargo-vendor, required_claims: [cargo_vendor_lock_closure_v1, cargo_vendor_offline_checksums_v1]}
+    - name: cargo_vendor_to_core_seed_build_tool
+      producer: *vendor_producer
+      consumer: {canonical_ref: tool:ryeos/bundle-release/core-seed-build, declaration_id: cargo-vendor}
+      required_product: *vendor_product
+      qualification: *vendor_qualification
+    - name: static_link_inputs_to_native_build_tool
+      producer: &static_link_producer {canonical_ref: graph:ryeos/development/static-link-inputs-production, recipe_binding: product_recipe, product_name: static_link_inputs, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/bundle-release/native-build, declaration_id: static-link-inputs}
+      required_product: &static_link_product {shape: tree, storage: large_content, bounds: {maximum_entries: 64, maximum_depth: 8, maximum_file_bytes: 8388608, maximum_total_bytes: 16777216}}
+      qualification: &static_link_qualification {policy_ref: config:ryeos/environments/qualification/static-link-inputs, required_claims: [static_link_inputs_x86_64_linux_gnu_v1]}
+    - name: static_link_inputs_to_core_seed_build_tool
+      producer: *static_link_producer
+      consumer: {canonical_ref: tool:ryeos/bundle-release/core-seed-build, declaration_id: static-link-inputs}
+      required_product: *static_link_product
+      qualification: *static_link_qualification

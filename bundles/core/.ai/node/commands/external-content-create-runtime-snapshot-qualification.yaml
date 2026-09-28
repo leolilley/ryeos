@@ -1,0 +1,13 @@
+# ryeos:signed:2026-09-28T09:42:59Z:118498697ef96e0636294ca2c216abe13878d45cd0d95a1465e313954effba43:pitfBDXAbnUK+0c9KiFbY1oGCR4bYSWoOdygux8DObpjzExd/Z3jFfWi6rQKP6QPQvXZ/dfIVVsXfg5uMiJ2Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, create-runtime-snapshot-qualification]
+description: Create one restored Sandbox for exact runtime snapshot qualification
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content create-runtime-snapshot-qualification '{\"qualification_binding_id\":\"<signed-binding>\",\"snapshot_operation_id\":\"<exact-operation>\"}'"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/create-runtime-snapshot-qualification

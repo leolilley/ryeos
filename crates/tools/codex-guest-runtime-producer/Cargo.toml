@@ -1,0 +1,19 @@
+[package]
+name = "ryeos-codex-guest-runtime-producer"
+version = "0.5.100"
+edition = "2024"
+description = "Exact Codex guest runtime product producer"
+license.workspace = true
+repository = "https://github.com/leolilley/ryeos"
+
+[[bin]]
+name = "ryeos-codex-guest-runtime-producer"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+lillux = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

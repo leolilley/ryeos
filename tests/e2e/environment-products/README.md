@@ -214,6 +214,15 @@ qualification. The single selected D1 and both ordinary manifest bindings must
 all succeed before the harness proceeds; one ready slot is never reported as
 partial readiness.
 
+Composition also returns `selection_identity_digests`, keyed by every admitted
+declaration ID. These are canonical semantic measurements of the reverified
+resolved selections, not manifest hashes or bearer authority. Different slots
+may share bytes while retaining different identities. Binding authoring must
+compose the actual intended consumer: its source and pre-selection definition
+are part of the identity. Launch independently re-admits retained evidence.
+The response checker requires the exact key set and valid hashes; its pure
+Python tests do not prove the digest calculation or a live composition.
+
 The finite sequence is:
 
 1. Run the recorded producer twice and require the same ordered distribution

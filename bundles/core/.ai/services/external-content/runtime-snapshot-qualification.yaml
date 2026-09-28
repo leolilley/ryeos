@@ -1,0 +1,7 @@
+# ryeos:signed:2026-09-28T09:42:59Z:0b1259d3574e804a9b7a77b19f12a049e42def5911c189a4b9a942451e5b779c:QJcflK+ReQRvXCTiIUv9GXOXQeO8C2AH4/iSIPJL8W+4gSrrKpXyiovjLumkD76fA4WjJR85keUthU1fDxOsAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.runtime-snapshot-qualification
+required_caps: ["ryeos.execute.service.external-content/runtime-snapshot-qualification"]
+schema:
+  operation_id: string
+description: Read one exact operator-owned restored qualification operation without provider contact

@@ -85,6 +85,24 @@ fn handler_context(session_id: &str) -> HandlerContext {
     )
 }
 
+fn open_request(state: &ryeos_app::state::AppState, session_id: &str) -> Value {
+    let session = get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .get_session(session_id)
+        .expect("active session");
+    let coordinate = session
+        .attachments
+        .get(&session.surface_attachment_id)
+        .expect("surface attachment")
+        .coordinate();
+    serde_json::json!({
+        "binding_attachment_id": coordinate.binding_attachment_id,
+        "binding_generation": coordinate.binding_generation,
+        "binding_digest": coordinate.binding_digest,
+    })
+}
+
 fn append_request(
     opened: &Value,
     operation_id: &str,
@@ -118,10 +136,8 @@ fn append_request(
 #[tokio::test]
 async fn ui_seat_open_reattaches_running_session_seat() {
     let (_tmp, state) = build_test_state_with_live_bundles();
-    let (session_id, token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(session_context(Some("fp:user-1".into())));
+    let (session_id, token) =
+        test_state::mint_launch(&state, session_context(Some("fp:user-1".into())));
     assert_eq!(
         get_ui_state(&state)
             .unwrap()
@@ -133,7 +149,7 @@ async fn ui_seat_open_reattaches_running_session_seat() {
 
     let first = invoke_seat_route(
         &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        serde_json::json!({}),
+        open_request(&state, &session_id),
         ctx.clone(),
         Arc::new(state.clone()),
     )
@@ -141,7 +157,7 @@ async fn ui_seat_open_reattaches_running_session_seat() {
     .expect("open seat");
     let second = invoke_seat_route(
         &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        serde_json::json!({}),
+        open_request(&state, &session_id),
         ctx,
         Arc::new(state.clone()),
     )
@@ -165,11 +181,45 @@ async fn ui_seat_open_reattaches_running_session_seat() {
 }
 
 #[tokio::test]
+async fn ui_seat_open_rejects_stale_attachment_policy_generation() {
+    let (_tmp, state) = build_test_state_with_live_bundles();
+    let stale_digest = "99".repeat(32);
+    let mut context = session_context(None);
+    Arc::make_mut(&mut context.compiled_binding)
+        .binding
+        .node_policy_generation_digest = stale_digest.clone();
+    let (session_id, token, _) = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .mint_token(context, 16, &stale_digest)
+        .expect("mint stale-policy fixture");
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
+
+    let error = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        open_request(&state, &session_id),
+        handler_context(&session_id),
+        Arc::new(state),
+    )
+    .await
+    .expect_err("stale node-policy attachment must not create a seat");
+    assert!(format!("{error:?}").contains("ui_binding_stale"));
+}
+
+#[tokio::test]
 async fn same_principal_sessions_cannot_reattach_each_others_seats() {
     let (_tmp, state) = build_test_state_with_live_bundles();
+    let (first_id, first_token) =
+        test_state::mint_launch(&state, session_context(Some("fp:user-1".into())));
+    let (second_id, second_token) =
+        test_state::mint_launch(&state, session_context(Some("fp:user-1".into())));
     let sessions = &get_ui_state(&state).unwrap().browser_sessions;
-    let (first_id, first_token) = sessions.mint_token(session_context(Some("fp:user-1".into())));
-    let (second_id, second_token) = sessions.mint_token(session_context(Some("fp:user-1".into())));
     assert_eq!(
         sessions.consume_launch_token(&first_token),
         Some(first_id.clone())
@@ -181,7 +231,7 @@ async fn same_principal_sessions_cannot_reattach_each_others_seats() {
 
     let first = invoke_seat_route(
         &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        serde_json::json!({}),
+        open_request(&state, &first_id),
         handler_context(&first_id),
         Arc::new(state.clone()),
     )
@@ -189,7 +239,7 @@ async fn same_principal_sessions_cannot_reattach_each_others_seats() {
     .expect("open first session seat");
     let second = invoke_seat_route(
         &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        serde_json::json!({}),
+        open_request(&state, &second_id),
         handler_context(&second_id),
         Arc::new(state.clone()),
     )
@@ -203,10 +253,7 @@ async fn same_principal_sessions_cannot_reattach_each_others_seats() {
 #[tokio::test]
 async fn ui_seat_append_replay_and_close_round_trip() {
     let (_tmp, state) = build_test_state_with_live_bundles();
-    let (session_id, token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(session_context(None));
+    let (session_id, token) = test_state::mint_launch(&state, session_context(None));
     assert_eq!(
         get_ui_state(&state)
             .unwrap()
@@ -219,7 +266,7 @@ async fn ui_seat_append_replay_and_close_round_trip() {
 
     let opened = invoke_seat_route(
         &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        serde_json::json!({}),
+        open_request(&state, &session_id),
         ctx.clone(),
         state.clone(),
     )
@@ -299,10 +346,7 @@ async fn ui_seat_append_replay_and_close_round_trip() {
 #[tokio::test]
 async fn ui_seat_append_is_exactly_idempotent_and_rejects_contradictions_and_gaps() {
     let (_tmp, state) = build_test_state_with_live_bundles();
-    let (session_id, token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(session_context(None));
+    let (session_id, token) = test_state::mint_launch(&state, session_context(None));
     assert_eq!(
         get_ui_state(&state)
             .unwrap()
@@ -314,7 +358,7 @@ async fn ui_seat_append_is_exactly_idempotent_and_rejects_contradictions_and_gap
     let state = Arc::new(state);
     let opened = invoke_seat_route(
         &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        json!({}),
+        open_request(&state, &session_id),
         ctx.clone(),
         state.clone(),
     )
@@ -432,7 +476,7 @@ async fn ui_seat_append_is_exactly_idempotent_and_rejects_contradictions_and_gap
 
     let rotated = invoke_seat_route(
         &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        json!({}),
+        open_request(&state, &session_id),
         ctx.clone(),
         state.clone(),
     )
@@ -474,9 +518,9 @@ async fn ui_seat_append_is_exactly_idempotent_and_rejects_contradictions_and_gap
 #[tokio::test]
 async fn ui_seat_new_open_invalidates_stale_and_foreign_producers() {
     let (_tmp, state) = build_test_state_with_live_bundles();
+    let (owner_id, owner_token) = test_state::mint_launch(&state, session_context(None));
+    let (foreign_id, foreign_token) = test_state::mint_launch(&state, session_context(None));
     let sessions = &get_ui_state(&state).unwrap().browser_sessions;
-    let (owner_id, owner_token) = sessions.mint_token(session_context(None));
-    let (foreign_id, foreign_token) = sessions.mint_token(session_context(None));
     assert_eq!(
         sessions.consume_launch_token(&owner_token),
         Some(owner_id.clone())
@@ -489,7 +533,7 @@ async fn ui_seat_new_open_invalidates_stale_and_foreign_producers() {
     let owner_ctx = handler_context(&owner_id);
     let first = invoke_seat_route(
         &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        json!({}),
+        open_request(&state, &owner_id),
         owner_ctx.clone(),
         state.clone(),
     )
@@ -497,7 +541,7 @@ async fn ui_seat_new_open_invalidates_stale_and_foreign_producers() {
     .expect("open seat");
     let second = invoke_seat_route(
         &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        json!({}),
+        open_request(&state, &owner_id),
         owner_ctx.clone(),
         state.clone(),
     )

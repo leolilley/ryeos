@@ -1,0 +1,17 @@
+# ryeos:signed:2026-09-20T11:15:48Z:54e2533c12ba7423dea5076913cac3f377a282265ba887f7e8b14eeb7b6c6353:JvOpC4seVjT+9U4ja4Sj7emAS/aO0dDafM8qMAROq/A5J3TUQLOeYvTiAshjLGTQj9K5U7c8XjFgpxgF8iWSBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: substrate-release-authorization
+version: "1.0.0"
+description: Ask the constrained publisher to re-verify and attest one retained substrate release.
+endpoint: bundle_release.substrate_release_authorization
+ui_read_only: false
+state_access: read_write
+record_thread: true
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/substrate-release-authorization"]
+schema:
+  catalog_namespace: string
+  bundle_publication_policy_section_digest: string
+  trust_epoch: integer
+  substrate_release_hash: string
+  expected_publisher_fingerprint: string

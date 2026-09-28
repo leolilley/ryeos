@@ -31,6 +31,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         let preparation_snapshot_hash = req.project_snapshot_hash.clone();
         let preparation_project_path = req.project_path.clone();
         let checkout_id = format!("external-content-selected-bind-{}", uuid::Uuid::new_v4());
+        let qualification_project_context_resolver =
+            super::qualification_project_context::resolver(state.as_ref());
         let prepared = tokio::task::spawn_blocking(move || {
             let mut prepared = match preparation_kind {
                 ryeos_app::operator_external_content::BindConsumerKind::InstalledBundle => {
@@ -60,6 +62,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 &preparation_state,
                 &product_owner_context,
                 &selections,
+                Some(qualification_project_context_resolver),
             )?;
             anyhow::Ok(prepared)
         })

@@ -82,6 +82,7 @@ COPY --from=builder /build/bundles/browser   /opt/ryeos/browser
 COPY --from=builder /build/bundles/ryeos-ui  /opt/ryeos/ryeos-ui
 COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 COPY --from=builder /build/bundles/codex     /opt/ryeos/codex
+COPY --from=builder /build/bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY --from=builder /build/bundles/opencode  /opt/ryeos/opencode
 COPY --from=builder /build/bundles/local-inference /opt/ryeos/local-inference
 
@@ -108,6 +109,6 @@ LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD ["ryeos", "node", "status"]
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

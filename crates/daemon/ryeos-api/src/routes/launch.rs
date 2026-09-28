@@ -93,6 +93,56 @@ fn permits_missing_thread_diagnostic_root(error: &DispatchError) -> bool {
     error.permits_prebirth_diagnostic_root()
 }
 
+/// Own a durably reserved accepted-launch coordinate until the background
+/// task has captured its own settlement guard. Any admission return or unwind
+/// before that handoff leaves a terminal, owner-queryable refusal.
+pub(crate) struct AcceptedLaunchAdmissionGuard {
+    state: AppState,
+    pub(crate) reserved_thread_id: String,
+    armed: bool,
+}
+
+impl AcceptedLaunchAdmissionGuard {
+    pub(crate) fn reserve(
+        state: &AppState,
+        launch_id: &str,
+        requested_by: &str,
+    ) -> Result<Self, ryeos_app::state_store::LaunchPlanningReservationError> {
+        let reserved_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+        state.state_store.reserve_launch_planning_with_id(
+            launch_id,
+            &reserved_thread_id,
+            requested_by,
+        )?;
+        Ok(Self {
+            state: state.clone(),
+            reserved_thread_id,
+            armed: true,
+        })
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AcceptedLaunchAdmissionGuard {
+    fn drop(&mut self) {
+        if self.armed
+            && let Err(error) = self
+                .state
+                .state_store
+                .settle_launch_planning_admission_exit(&self.reserved_thread_id)
+        {
+            tracing::error!(
+                thread_id = %self.reserved_thread_id,
+                error = %error,
+                "failed to settle accepted launch admission exit"
+            );
+        }
+    }
+}
+
 struct LaunchPlanningTaskGuard {
     state: AppState,
     reserved_thread_id: String,
@@ -307,6 +357,7 @@ pub(crate) fn preflight_dispatch_launch(
         usage_subject,
         usage_subject_asserted_by,
         launch_timings,
+        pinned_project_snapshot: None,
     })
 }
 
@@ -329,6 +380,7 @@ struct BorrowedDispatchPreflight<'a> {
     usage_subject: Option<&'a ryeos_state::UsageSubject>,
     usage_subject_asserted_by: Option<&'a str>,
     launch_timings: Option<&'a ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    pinned_project_snapshot: Option<&'a str>,
 }
 
 fn preflight_dispatch_launch_core(
@@ -348,7 +400,29 @@ fn preflight_dispatch_launch_core(
         ))
     })?;
     let subject_resolution_authority = request.provenance.subject_resolution_authority();
-    let project_context = if matches!(
+    let project_context = if let Some(snapshot_hash) = request.pinned_project_snapshot {
+        if !matches!(
+            request.provenance.project_authority(),
+            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                snapshot_hash: authority_hash,
+                realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                workspace_outputs: None,
+                ..
+            } if authority_hash == snapshot_hash
+        ) || subject_resolution_authority
+            != (ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: snapshot_hash.to_owned(),
+            })
+        {
+            return Err(DispatchError::ProjectSource(
+                "pinned qualification preflight requires its exact read-only snapshot authority"
+                    .to_string(),
+            ));
+        }
+        ProjectContext::SnapshotHash {
+            hash: snapshot_hash.to_owned(),
+        }
+    } else if matches!(
         subject_resolution_authority,
         ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
     ) {
@@ -417,6 +491,9 @@ pub(crate) struct OwnedDispatchPreflight {
     pub usage_subject: Option<ryeos_state::UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
     pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    /// Internal daemon-only marker for protected pinned qualification. It is
+    /// never sourced from the public launch request or a project path.
+    pub pinned_project_snapshot: Option<String>,
 }
 
 /// Keep verified resolution/composition off the async HTTP executor. Every
@@ -452,6 +529,7 @@ pub(crate) async fn preflight_dispatch_launch_off_thread(
             usage_subject: request.usage_subject.as_ref(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.as_deref(),
             launch_timings: request.launch_timings.as_ref(),
+            pinned_project_snapshot: request.pinned_project_snapshot.as_deref(),
         })
     })
     .await
@@ -507,6 +585,36 @@ pub(crate) fn spawn_dispatch_launch_with_handoff(
         Some(handoff),
     );
     (task, ready)
+}
+
+/// Keep a request-owned scratch checkout alive until the accepted dispatch
+/// task is terminal, including when handoff reported a failure or a mismatched
+/// identity while the task could still be running. Dropping the join handle
+/// detaches work; it does not prove the workspace is no longer borrowed.
+pub(crate) fn retain_launch_workspace_until_task_terminal(
+    task: tokio::task::JoinHandle<Result<(), LaunchSpawnError>>,
+    workspace_guard: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
+    thread_id: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let _workspace_guard = workspace_guard;
+        match task.await {
+            Ok(Ok(())) => {
+                tracing::debug!(thread_id = %thread_id, "accepted dispatch completed");
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    code = %error.code(),
+                    error = %error,
+                    "accepted dispatch failed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(thread_id = %thread_id, error = %error, "accepted dispatch task stopped");
+            }
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -916,6 +1024,34 @@ mod tests {
                 .is_cancelled()
         );
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_handoff_failure_keeps_scratch_workspace_until_task_terminal() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("scratch");
+        std::fs::create_dir(&workspace).unwrap();
+        let guard = Arc::new(ryeos_app::temp_dir_guard::TempDirGuard::new(
+            workspace.clone(),
+        ));
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = wait.await;
+            Err(LaunchSpawnError::PlanningCancelled(
+                "test terminal".to_string(),
+            ))
+        });
+        // Handoff can report a refusal before the dispatch task itself has
+        // settled. Returning from the request must not release its workspace.
+        let keeper = retain_launch_workspace_until_task_terminal(
+            task,
+            Some(guard),
+            "T-accepted-handoff-test".to_string(),
+        );
+        assert!(workspace.exists());
+        release.send(()).unwrap();
+        keeper.await.unwrap();
+        assert!(!workspace.exists());
     }
 
     #[tokio::test(flavor = "current_thread")]

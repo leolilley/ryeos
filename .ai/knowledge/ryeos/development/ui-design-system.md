@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-17T00:05:36Z:8631e5797d399d86c8825ff236e7f9372e07d8d044340830c2b64d136a5247ff:Ur/6upWYEb90Zba5ZnonRVRVtNyZhoqCf4CXx5gs6XaZdcAn6nZYAB5VZB3Wl3S8TcDxrzFNCQyGjpoBt8bRBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T03:38:25Z:1ba5e736e8079023aad4751372f7dcd3d373d861da6aa3502d04ba95741a7145:j6yFfWZL/wDJ3OTk2i3cv8DNAe0F05lAISSobHdirxVR+WPcmP9yyGwVRpbCLtD4DTR8awvfNi5+xRlmUiOyAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-design-system"
 title: "RyeOS UI Visual Language and Composition Rules"
-description: "Contributor specification for Gruvbox styling, nested tiled workspaces, view groups, contextual input and renderer ownership"
+description: "Contributor specification for Gruvbox styling, nested tiled view sets, view groups, contextual input and renderer ownership"
 entry_type: reference
-version: "2.0.0"
+version: "3.0.0"
 ```
 
 # RyeOS UI visual language and composition rules
@@ -19,7 +19,7 @@ corrected design agreed on 2026-09-16. Read it with `ui-development.md`,
 The approved visual study is in
 `crates/clients/web/tests/browser/design/`. It is standalone HTML/CSS with
 synthetic content, not the production renderer. Its appearance was approved;
-its controls, named workspaces, grouped tabs and operational claims are not
+its controls, named view sets, grouped tabs and operational claims are not
 implementation evidence. Reproduce the treatment through real shared UI
 contracts, not hardcoded specimen DOM.
 
@@ -37,7 +37,7 @@ planning files are unavailable.
 ## Design identity
 
 RyeOS is a composable working environment, not a website dashboard with a fixed
-sidebar and a single page. Preserve the launcher, workspaces, views, tiling,
+sidebar and a single page. Preserve the launcher, view sets, views, tiling,
 optional edge slots and authored background/scene character. Improve their
 proportions and relationships rather than removing them.
 
@@ -84,7 +84,7 @@ Ambient/background content remains an authored surface decision. Retain the
 geometric identity where declared; tune contrast and opacity so content stays
 legible. Do not globally erase scenes, force every view transparent, or add
 background exceptions keyed to view refs. Main reading areas may be opaque
-while the surrounding workspace retains its background.
+while the surrounding view set retains its background.
 
 ## Typography and geometry
 
@@ -121,15 +121,18 @@ dependency. System stacks are acceptable until an exact family is selected.
 
 ## Composition contract: intended implementation
 
-The workspace model will support arbitrary nested horizontal/vertical splits,
+The view-set model supports arbitrary nested horizontal/vertical splits,
 with a group of view tabs at each leaf. This is an extension of the existing
 shared layout machinery, not another UI framework.
 
 - A surface signs the available views, sources, actions and initial arrangements.
-- A workspace owns its live layout, view groups, selection/focus and optional
-  anchored slots. Workspace tabs select arrangements, not hardcoded product pages.
-- A split allocates space. A group orders view-instance references and selects
-  an active member. A view instance owns its local content/input state.
+- A view set owns its live layout, view groups, selection/focus and optional
+  anchored slots. Top-level tabs select view sets, not hardcoded product pages.
+- A split allocates space. A group orders view-instance references, selects an
+  active member, and may carry one bounded authored label for its stable role
+  in the arrangement. The renderer presents that label separately from the
+  group's member tabs; it must not infer a product pane from a view ref. A view
+  instance owns its local content/input state.
 - The layout tree is the single placement authority. Master/stack becomes an
   arrange operation, not a second mutable ordered-layout authority.
 - Move preserves view identity, draft, local state and bound subject.
@@ -137,9 +140,10 @@ shared layout machinery, not another UI framework.
 - Optional edge slots remain anchored supporting regions, using the same
   view/group machinery where practical. Top/left/right/bottom remain available;
   none is globally required or forbidden.
-- Contextual input belongs with the view it serves. A separately authored
-  workspace-wide input remains valid. An input capability must not erase
-  the view's content.
+- Contextual input belongs to the exact mounted view instance it serves. A
+  bottom-slot conversation or terminal is still an ordinary view; it does not
+  control whichever other view was most recently focused. Its subject and
+  executable binding are explicit and remain fenced across layout changes.
 - The launcher remains transient and available throughout. It can open a view,
   open alongside, or instantiate an admitted arrangement. These are local
   composition operations, not grants of executable authority.
@@ -198,7 +202,7 @@ to make an arrangement render.
 ## Interaction and component acceptance
 
 Support drag-to-split/tab, tab reordering, divider resizing, moving between
-workspaces, closing, temporary maximisation and restoring saved arrangements.
+view sets, closing, temporary maximisation and restoring saved arrangements.
 Provide keyboard and menu equivalents; drag cannot be the only path.
 A normal view/tab switch is not an execution. Dirty drafts need deliberate
 retention/discard behavior, not silent loss.
@@ -219,7 +223,7 @@ actual production components and, after the model change, an actual shared-model
 projection. Mark synthetic data clearly; do not imply execution evidence.
 
 Check the populated tiled arrangement, launcher, an alternate arrangement and
-the empty workspace. Include all edge slots, nested splits, grouped tabs,
+the empty view set. Include all edge slots, nested splits, grouped tabs,
 long labels, unavailable actions, content plus input, focus and draft retention.
 Inspect at 1600×1000 (study reference), 1440×900, 1024×768, 390×844 and 200% zoom.
 Check terminal at 120×40 and 80×24. Respect reduced motion and forced colours.

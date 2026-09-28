@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-18T02:34:00Z:02184086546da16aa19d56b6691117b3186c605d41a002c5520c0779c9c25a33:SY7wUa/H4jfLF6HRIZJUrNR57TvMylW63Uy1YksPtP1qKM3Z2H5ycFQiS3WHUkg6c7ZjtqUAhl/Rcf2OjGptAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-27T21:20:25Z:c6c23087b8a3741eebadb9f9ea3b8139e3e6e0a4e570edf7db4920b106c40f36:nuQ2F1KaItVTUYm8CPIicv9ZOh53cs/qHH2S8c7iSgDx9CuoQwe9nhMbAj52g4IDcwzo8JIhsZP7O0mDy675Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "local-inference"
 version: "1.0.0"
 executor_id: "@subprocess"
 description: "Hermetic Qwen3 0.6B CPU worker with an exact 4096-process real-UID ceiling."
 execution_protocol: protocol:ryeos/core/persistent_session
+external_product_slots: []
 supported_target:
   os: linux
   arch: x86_64

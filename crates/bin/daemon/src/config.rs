@@ -44,6 +44,11 @@ pub struct Cli {
     #[cfg(feature = "handoff-test-support")]
     #[arg(long, hide = true)]
     pub handoff_phase_cut_boundary: Option<String>,
+
+    /// Test-only release gate at the committed scoped-producer reservation.
+    #[cfg(feature = "handoff-test-support")]
+    #[arg(long, hide = true)]
+    pub scoped_reserved_attempt_gate: bool,
 }
 
 impl Cli {

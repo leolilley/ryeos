@@ -382,48 +382,120 @@ pub fn load_prospective_isolation(
     policy: &ryeos_engine::isolation::IsolationPolicy,
     policy_generation_digest: &str,
 ) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
-    let backend = if policy.mode == ryeos_engine::isolation::IsolationMode::Disabled {
-        None
-    } else {
-        let selection = policy.backend.clone().context(
-            "enforced isolation policy requires an explicit signed bundle backend selection",
-        )?;
-        let mut selected = None;
-        for root in bundle_roots {
-            let Ok(manifest) = ryeos_bundle::manifest::load_verified_manifest(
-                &root.join(ryeos_engine::AI_DIR),
-                &selection.bundle,
-                node_trust_store,
-            ) else {
-                continue;
-            };
-            if selected.replace((root, manifest)).is_some() {
-                anyhow::bail!(
-                    "prospective bundle set contains more than one selected isolation bundle `{}`",
-                    selection.bundle
-                );
-            }
-        }
-        let (root, manifest) = selected.with_context(|| {
-            format!(
-                "prospective bundle set removes selected isolation bundle `{}`",
-                selection.bundle
-            )
-        })?;
-        Some(resolve_verified_isolation_backend(
-            selection,
-            root,
-            manifest,
-            node_trust_store,
-            "prospective ",
-        )?)
-    };
+    let backend = resolve_isolation_backend_for_roots(
+        bundle_roots,
+        node_trust_store,
+        policy,
+        "prospective ",
+    )?;
     ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_definition_validation(
         app_root,
         policy.clone(),
         crate::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
         format!("sha256:{policy_generation_digest}"),
         backend,
+    )
+    .map(Arc::new)
+    .map_err(anyhow::Error::from)
+}
+
+fn resolve_isolation_backend_for_roots(
+    bundle_roots: &[PathBuf],
+    node_trust_store: &TrustStore,
+    policy: &ryeos_engine::isolation::IsolationPolicy,
+    diagnostic_prefix: &str,
+) -> Result<Option<Arc<ryeos_engine::isolation::ResolvedIsolationBackend>>> {
+    if policy.mode == ryeos_engine::isolation::IsolationMode::Disabled {
+        return Ok(None);
+    }
+    let selection = policy.backend.clone().context(
+        "enforced isolation policy requires an explicit signed bundle backend selection",
+    )?;
+    let mut selected = None;
+    for root in bundle_roots {
+        let Ok(manifest) = ryeos_bundle::manifest::load_verified_manifest(
+            &root.join(ryeos_engine::AI_DIR),
+            &selection.bundle,
+            node_trust_store,
+        ) else {
+            continue;
+        };
+        if selected.replace((root, manifest)).is_some() {
+            anyhow::bail!(
+                "{diagnostic_prefix}bundle set contains more than one selected isolation bundle `{}`",
+                selection.bundle
+            );
+        }
+    }
+    let (root, manifest) = selected.with_context(|| {
+        format!(
+            "{diagnostic_prefix}bundle set removes selected isolation bundle `{}`",
+            selection.bundle
+        )
+    })?;
+    resolve_verified_isolation_backend(
+        selection,
+        root,
+        manifest,
+        node_trust_store,
+        diagnostic_prefix,
+    )
+    .map(Some)
+}
+
+/// Compose a real execution-admission isolation generation from exact signed
+/// bundle roots. This is deliberately test-support only: production nodes use
+/// the registered generation and its daemon-owned policy snapshot.
+#[cfg(any(test, feature = "test-support"))]
+pub fn load_test_execution_isolation(
+    app_root: &std::path::Path,
+    bundle_roots: &[PathBuf],
+    node_trust_store: &TrustStore,
+    policy: ryeos_engine::isolation::IsolationPolicy,
+) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
+    let backend = resolve_isolation_backend_for_roots(
+        bundle_roots,
+        node_trust_store,
+        &policy,
+        "test execution ",
+    )?;
+    ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy(
+        app_root,
+        policy,
+        crate::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
+        format!("sha256:{}", "0".repeat(64)),
+        backend,
+    )
+    .map(Arc::new)
+    .map_err(anyhow::Error::from)
+}
+
+/// Compose a real daemon execution-admission isolation generation for tests
+/// that exercise callback IPC. Unlike definition-validation construction, this
+/// retains the exact already-bound daemon socket inode before any launch.
+#[cfg(any(test, feature = "test-support"))]
+pub fn load_test_daemon_execution_isolation(
+    app_root: &std::path::Path,
+    daemon_socket: &std::path::Path,
+    bundle_roots: &[PathBuf],
+    node_trust_store: &TrustStore,
+    policy: ryeos_engine::isolation::IsolationPolicy,
+) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
+    let backend = resolve_isolation_backend_for_roots(
+        bundle_roots,
+        node_trust_store,
+        &policy,
+        "test daemon execution ",
+    )?;
+    ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_daemon(
+        app_root,
+        daemon_socket,
+        policy,
+        crate::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
+        format!("sha256:{}", "0".repeat(64)),
+        backend,
+        None,
+        None,
     )
     .map(Arc::new)
     .map_err(anyhow::Error::from)

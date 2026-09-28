@@ -97,6 +97,43 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(count, 1)
             self.assertEqual(failures, ["sample.md:1: forbidden text"])
 
+    def test_helper_cannot_hide_a_forbidden_transitive_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nmembers=["guest", "helper", "controller"]\n'
+                '[workspace.dependencies]\n'
+                'alias={package="controller",path="controller"}\n')
+            for name in ("guest", "helper", "controller"):
+                (root / name).mkdir()
+                (root / name / "Cargo.toml").write_text(f'[package]\nname="{name}"\n')
+            (root / "guest/Cargo.toml").write_text(
+                '[package]\nname="guest"\n[dependencies]\nhelper="1"\n')
+            (root / "helper/Cargo.toml").write_text(
+                '[package]\nname="helper"\n'
+                '[target.\'cfg(unix)\'.build-dependencies]\nalias={workspace=true}\n')
+            self.config["dependency_layers"]["forbidden_edges"] = {"guest": ["controller"]}
+            self.assertEqual(owner.dependency_layers(root, self.config)[0], [
+                "forbidden dependency: guest -> helper -> controller"])
+            # Development fixtures are not part of the shipped dependency closure.
+            (root / "helper/Cargo.toml").write_text(
+                '[package]\nname="helper"\n[dev-dependencies]\nalias={workspace=true}\n')
+            self.assertEqual(owner.dependency_layers(root, self.config), ([], 3))
+
+    def test_transitive_inspection_terminates_and_reports_dependency_cycles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Cargo.toml").write_text('[workspace]\nmembers=["a", "b", "c"]\n')
+            for name, dependency in (("a", "b"), ("b", "a"), ("c", "a")):
+                (root / name).mkdir()
+                (root / name / "Cargo.toml").write_text(
+                    f'[package]\nname="{name}"\n[dependencies]\n{dependency}="1"\n')
+            self.config["dependency_layers"]["forbidden_edges"] = {"c": ["b"]}
+            failures, count = owner.dependency_layers(root, self.config)
+            self.assertEqual(count, 3)
+            self.assertIn("forbidden dependency: c -> a -> b", failures)
+            self.assertIn("workspace dependency cycle: a -> b -> a", failures)
+
     def test_missing_root_symlink_and_oversized_input_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -136,6 +173,57 @@ class ValidationTests(unittest.TestCase):
             rule["roots"] = ["source"]
             rule["exclude"] = ["source/b.md"]
             self.assertEqual(owner.text_check(root, self.config, "naming"), ([], 1))
+
+    def test_product_marker_excludes_only_one_explicit_harness_region(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "source").mkdir()
+            (root / "source/owner.rs").write_text(
+                "fn product() { safe(); }\n#[cfg(test)]\nmod tests {\n"
+                "  fn harness() { std::process::Command::new(\"fixture\"); }\n}\n")
+            rule = self.config["text_checks"]["host-capability-ownership"][0]
+            self.config["text_checks"]["host-capability-ownership"] = [rule]
+            rule["roots"] = ["source/owner.rs"]
+            rule["patterns"] = [r"std::process::Command"]
+            self.assertEqual(
+                owner.text_check(root, self.config, "host-capability-ownership"),
+                ([], 1),
+            )
+            (root / "source/owner.rs").write_text(
+                "fn product() { std::process::Command::new(\"bad\"); }\n"
+                "#[cfg(test)]\nmod tests {}\n")
+            findings, count = owner.text_check(
+                root, self.config, "host-capability-ownership")
+            self.assertEqual(count, 1)
+            self.assertEqual(findings, ["source/owner.rs:1: forbidden text"])
+            (root / "source/owner.rs").write_text("fn no_marker() {}\n")
+            with self.assertRaisesRegex(ValueError, "product marker is not unique"):
+                owner.text_check(root, self.config, "host-capability-ownership")
+
+    def test_connector_pipe_owner_tripwire_catches_direct_aliases_and_detach(self):
+        selected = [rule for rule in self.config["text_checks"]["host-capability-ownership"]
+                    if rule["roots"] == [
+                        "crates/tools/external-candidate-connector/src/main.rs",
+                        "tests/e2e/external-execution/synthetic-lifecycle-adapter/src/bin/routed_guest.rs"]]
+        self.assertEqual(len(selected), 1)
+        self.config["text_checks"]["host-capability-ownership"] = selected
+        selected[0]["roots"] = ["connector.rs"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "connector.rs"
+            for text in ("std::io::stdin().lock();", "io::stdout().lock();",
+                         "use std::io::{stdin as input, stdout};",
+                         "use std::io as streams;", "use std as portable;",
+                         "use std::{io as streams};", "task.detach();"):
+                source.write_text(text)
+                findings, count = owner.text_check(root, self.config, "host-capability-ownership")
+                self.assertEqual(count, 1)
+                self.assertTrue(findings, text)
+            source.write_text("input.read_chunk(&mut bytes, None);\n"
+                              "let kind = std::io::ErrorKind::Interrupted;\n"
+                              "use std::io::{Read, Write};\n")
+            self.assertEqual(owner.text_check(root, self.config, "host-capability-ownership"),
+                             ([], 1))
 
     def test_entries_reuse_existing_python_without_new_worker_grants(self):
         import yaml

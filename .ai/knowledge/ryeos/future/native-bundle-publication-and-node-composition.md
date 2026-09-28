@@ -1,23 +1,52 @@
-<!-- ryeos:signed:2026-09-18T23:55:30Z:936ee3ef7f21bdd1c65676a807a592e5ca782d723a4b895f540f9ca93d9e16ca:MCg8gN+qlb97W4Od7zD4KqWThEp6DhpiBmP0EG2GCsNmLcpXe96t37OQ6gobqSjMOGD20nn8C/TgyVJjeAfWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-22T02:52:14Z:4afff42150c42e6febc259d466b5d9a760ade78b3175434d9dde588c54b9390e:wgAQPb471T44tDk4d5jGNdctTIH/QZP0/82MVsw518kaN/mDGDLQBmexJQCy1+sRSrxsSAfr1jY03SFxA9oNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: native-bundle-publication-and-node-composition
 title: Native Bundle Publication and Node Composition
 description: Scheduled direction for independently publishing exact RyeOS bundle generations and composing nodes without rebuilding the substrate image
 entry_type: design
-version: "0.3.0"
-status: scheduled_design
+version: "0.5.0"
+status: implementation_under_qualification
 ```
 
 # Native bundle publication and node composition
 
 ## Status
 
-Scheduled design for the next release-distribution slice. The object schemas,
-catalog APIs, bundle-set activation transaction, bundle-source profile, and
-RyeOS-native release Graph described here have not landed. The current GHCR
-release process remains authoritative until this path passes its acceptance
-gates.
+Implementation is under qualification, not merely scheduled design. Publication
+contracts, catalog handlers, calibration and bundle-set transaction source,
+release-authority initialization selection and release Graphs exist in the
+current development tree. Their existence is not end-to-end acceptance.
+The 2026-09-22 checkpoint has a verified and imported corrected Stage-0
+compiler artifact and a retained platform product witness. Independent live
+platform qualification remains open; it does not yet prove this campaign published,
+transferred and activated a bundle on another node without an image rebuild.
+The image/tag release runbook remains the established shipping path until the
+native path passes its acceptance gates.
+
+Continue from the dated checkpoint in
+[`source-local-bundle-development.md`](../development/source-local-bundle-development.md)
+and the ownership rules in
+[`development-operation-ownership.md`](../development/development-operation-ownership.md).
+That checkpoint owns concrete local evidence and pending steps; this document
+owns the architectural direction. The external Stage-0 publisher seeds missing
+compiler bytes once per selected toolchain change. It is neither the normal
+bundle publication workflow nor a reason to rebuild the serving substrate for
+each bundle update. Complete native development execution remains a longer-term
+direction, and bootstrap exceptions must not grow into a second release system.
+
+Current calibration requires qualified Python, platform and Cargo-vendor
+products. This initial authority setup is distinct from recurring updates:
+data-only production uses the Python-only graph; binary-bearing production uses
+the selected build targets and retained compiler/dependency products. Reuse
+calibration while its measured identities and policy remain admissible; changes
+that invalidate the measurement require recalibration. The current completion
+campaign proves both successor classes across nodes, unchanged substrate
+identity, pre-commit recovery and refusal of post-execution rollback in v1.
+The original acceptance properties below remain mandatory. Full worker development acceptance,
+Stage1 reproduction, durable cache optimization and self-hosted CI migration
+remain separate work. The dated execution-closure implementation plan owns the
+remaining sequence, while this document retains the architectural boundaries.
 
 ## Purpose
 
@@ -35,6 +64,16 @@ changes, while bundle generations are built, qualified, signed, and uploaded
 independently. A deployed bundle-source node serves a bounded current catalog
 and explicitly retained immutable release closures. Other nodes select an exact bundle set, fetch its closure, apply local
 admission, and compose their installed generation.
+
+The canonical publication topology crosses an authenticated remote boundary:
+the release authority uploads the exact bounded closure through a pinned RyeOS
+named remote to a persistent bundle-source node and advances its catalog with
+the resulting durable upload session. The normal RyeOS remote client preserves
+authenticated node identity; this path does not introduce a parallel bearer
+protocol. Sharing a substrate image does not imply sharing a CAS or collapsing
+those authorities. A deliberately combined node may use local closure staging
+as an explicit optimization, but the normal release Graph and default release
+profile do not depend on or receive that capability.
 
 This is also the first concrete release slice of the
 [RyeOS-native development platform](ryeos-native-development-platform.md).
@@ -116,11 +155,21 @@ operator action, or delegated capability that independently verifies and signs
 only the exact qualified subject selected by policy. Build completion must not
 grant a generic sign-any-hash operation.
 
+Transport admission is separate from publisher custody. Each catalog explicitly
+lists `authorized_uploaders` as node fingerprints; membership permits transport
+only alongside the required service capabilities. The publisher is not implicitly
+an uploader. Upload sessions retain their actual authenticated owner, while every
+artifact signature must independently satisfy the pinned publisher policy. No
+release node needs the publisher private key to upload a signed release.
+
 Bundle-source and consumer nodes independently admit publishers through a
 `bundle_publication` section in their existing atomic, operator-signed node-
 policy generation. It binds catalog namespace, fingerprint, accepted
 claim/policy, trust epoch, and any delegation. This avoids a parallel policy
-authority. The two sections may legitimately differ. General trust-store
+authority. The current implementation binds the complete section digest in
+release evidence, so release, source, consumer, and constrained-publisher policy
+must use the same section. Independent differing sections require a future
+explicit policy-equivalence or delegation contract. General trust-store
 membership alone does not authorize a key for every catalog. Publication must
 prove the snapshot publisher, namespace owner, publication-attestation issuer,
 and selected source section agree or carry an explicit admitted delegation;
@@ -311,6 +360,21 @@ The first implementation may build from a Git checkout, but it must capture an
 exact source coordinate or closure before claiming a release result. A mutable
 checkout is an input workspace, not durable release identity.
 
+The implemented native-build admission path now treats the checkout only as
+source provenance. After the constrained publisher authors the exact
+per-release recipe, the release node re-materializes and re-hashes the admitted
+Git archive, installs that recipe at the fixed project-overlay Config identity,
+captures the augmented project as a pinned generation, verifies that the
+snapshot overlay resolves the publisher-authored raw digest, and executes from
+that generation. The post-sign transformation follows the same model: the
+publisher authors an exact signed-capture recipe bound to the fixed trusted-
+bundle qualification policy, a second admitted producer captures the signed
+tree, and the parameter-free qualifier derives its subject facts from that
+admitted signed-tree realization. The generation retains both immutable
+accepted results, the publisher materialization, the signed witness, and its
+qualification so authorization can verify the complete build-to-release chain
+without mutating the original accepted result.
+
 For an affected bundle, the first implementation rebuilds every binary payload
 owned by that bundle. It must not preserve unselected output from an ambient
 target directory. Later optimization may reuse outputs only from a verified
@@ -352,6 +416,13 @@ The service surface should remain small:
 - exact catalog resolution and inspection;
 - publisher-authorized catalog publication; and
 - operator diagnostics, retention, and repair.
+
+Normal publication always uses the authenticated named-remote upload route
+from the release authority to the bundle-source node, followed by catalog publication against
+the exact expected predecessor. A local-stage route may exist for a dedicated
+combined topology where both roles intentionally share a CAS. It is not part
+of the default release-authority capability set and must never silently replace
+a failed or missing remote transport configuration.
 
 The current `objects/put` session is bound to a principal-scoped project HEAD
 and cannot be reused unchanged. The catalog path needs its own typed durable
@@ -544,6 +615,9 @@ lineage.
 - Publish one data-only bundle, then one non-core native bundle.
 - Keep a thin GitHub trigger only where current bootstrap requires it.
 - Prove bundle-only publication performs no image build and no daemon build.
+- Prove the default Graph transfers the bounded closure to a separately
+  deployed bundle-source node; local staging is exercised only by an explicit
+  combined-node profile.
 
 ### Stage 6 — stable substrate deployment
 
@@ -575,6 +649,8 @@ activation contract are qualified.
 The first production cut is complete only when:
 
 - the deployed substrate image remains byte-identical across a bundle-only release;
+- the default release path uploads to a persistent bundle-source node and does
+  not require a shared CAS or local-stage capability;
 - bundle-only production does not build or publish an OCI image or compile
   `ryeosd`;
 - the new generation retains exact scoped evidence claims about source,

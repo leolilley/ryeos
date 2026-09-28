@@ -263,6 +263,7 @@ mod tests {
     fn trow(tone: RyeOsTone, cells: &[&str]) -> RyeOsTableRowVm {
         RyeOsTableRowVm {
             id: cells.first().copied().unwrap_or_default().to_string(),
+            cursor: 0,
             cells: cells.iter().map(|c| c.to_string()).collect(),
             hierarchy: None,
             cell_tones: Vec::new(),

@@ -1,0 +1,117 @@
+{
+  "schema": 2,
+  "provider_profile": "render_sandbox_v1",
+  "settings_schema_digest": "f5b4994d71a6896ddad77bf2a08716fdc3527ea4f91579f084112ca69dad7172",
+  "qualification_settings_schema_digest": "5d50565bccc9ef5986032ef3649e5499c6549c298bc8674a4e5043bf553cfc9c",
+  "origin_profile": "render_api_v1",
+  "routes": {
+    "sandbox_collection": {
+      "segments": [
+        { "literal": "v1" },
+        { "literal": "sandboxes" }
+      ]
+    },
+    "sandbox_by_id": {
+      "segments": [
+        { "literal": "v1" },
+        { "literal": "sandboxes" },
+        { "bound": "occurrence_id" }
+      ],
+      "query": {
+        "ownerId": { "source": "settings.owner_id" }
+      }
+    },
+    "sandbox_terminate_by_id": {
+      "segments": [
+        { "literal": "v1" },
+        { "literal": "sandboxes" },
+        { "bound": "occurrence_id" },
+        { "literal": "terminate" }
+      ],
+      "query": {
+        "ownerId": { "source": "settings.owner_id" }
+      }
+    },
+    "sandbox_file_upload_token_by_id": {
+      "segments": [
+        { "literal": "v1" },
+        { "literal": "sandboxes" },
+        { "bound": "occurrence_id" },
+        { "literal": "files" },
+        { "literal": "upload" },
+        { "literal": "token" }
+      ],
+      "query": {
+        "ownerId": { "source": "settings.owner_id" },
+        "path": { "source": "operation.upload_path" }
+      }
+    },
+    "sandbox_run_stream_token_by_id": {
+      "segments": [
+        { "literal": "v1" },
+        { "literal": "sandboxes" },
+        { "bound": "occurrence_id" },
+        { "literal": "runs" },
+        { "literal": "stream" },
+        { "literal": "token" }
+      ],
+      "query": {
+        "ownerId": { "source": "settings.owner_id" }
+      }
+    }
+  },
+  "operations": {
+    "allocate": {
+      "kind": "create_once",
+      "route": "sandbox_collection",
+      "precondition_profile": "render_configured_runtime_snapshot_v1",
+      "body": {
+        "ownerId": { "source": "settings.owner_id" },
+        "plan": { "source": "settings.plan" },
+        "region": { "source": "settings.region" },
+        "timeoutSeconds": {
+          "source": "reservation.maximum_lifetime_seconds"
+        },
+        "networkPolicy": { "literal": { "default": "deny-all" } },
+        "snapshotId": { "source": "settings.snapshot_id" }
+      },
+      "bind_proof_profile": "render_sandbox_create_201_v1",
+      "no_occurrence_proof_profile": "render_no_request_sent_v1"
+    },
+    "qualification_create": {
+      "kind": "create_once",
+      "route": "sandbox_collection",
+      "precondition_profile": "render_bound_runtime_snapshot_v1",
+      "body": {
+        "ownerId": { "source": "settings.owner_id" },
+        "plan": { "source": "settings.plan" },
+        "region": { "source": "settings.region" },
+        "timeoutSeconds": { "source": "qualification.maximum_lifetime_seconds" },
+        "networkPolicy": { "literal": { "default": "deny-all" } },
+        "snapshotId": { "source": "qualification.locator.snapshot_id" }
+      },
+      "bind_proof_profile": "render_sandbox_create_201_v1",
+      "no_occurrence_proof_profile": "render_no_request_sent_v1"
+    },
+    "qualification_verify": {
+      "kind": "upload_then_run_once",
+      "precondition_profile": "render_bound_qualification_occurrence_v1",
+      "mutation_route": "sandbox_file_upload_token_by_id",
+      "observation_route": "sandbox_run_stream_token_by_id"
+    },
+    "reconcile_allocation": { "kind": "unsupported_pending" },
+    "activate_supervisor": { "kind": "unsupported_pending" },
+    "reconcile_supervisor_activation": { "kind": "unsupported_pending" },
+    "terminate": {
+      "kind": "terminate_once_then_observe_exact",
+      "mutation_route": "sandbox_terminate_by_id",
+      "observation_route": "sandbox_by_id",
+      "terminal_proof_profile": "render_sandbox_terminal_v1"
+    },
+    "reconcile_termination": {
+      "kind": "observe_exact_occurrence",
+      "route": "sandbox_by_id",
+      "terminal_proof_profile": "render_sandbox_terminal_v1"
+    }
+  }
+}

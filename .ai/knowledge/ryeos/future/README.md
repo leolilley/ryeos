@@ -67,6 +67,9 @@ from the former top-level `docs/future` tree include:
 - [`content-addressed-managed-runtime-workers.md`](content-addressed-managed-runtime-workers.md)
   — the future leased-invocation class of the existing `worker` kind; it does
   not define a second kind or replace the fixed local-provider worker;
+- [`data-driven-runtime-verification.md`](data-driven-runtime-verification.md)
+  — future composition of signed verification policy, reusable bounded
+  evidence transport, and runtime-specific protocol interpretation;
 - [`sealed-local-inference.md`](sealed-local-inference.md) — qualification from
   the landed recorded local route to honestly re-derivable execution;
 - [`generation-state-capsules.md`](generation-state-capsules.md) — provider-

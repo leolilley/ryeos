@@ -22,8 +22,7 @@
 //!
 //! ## Differences from `ryeosd::bootstrap::init`
 //!
-//! The fast fixture is structurally a **superset** of `init` with one
-//! intentional omission:
+//! The fast fixture is structurally a **superset** of `init`:
 //!
 //!   * **Adds** publisher self-trust: tests sign their own bundle /
 //!     directive / route content with `FastFixture::publisher`, and the
@@ -35,13 +34,9 @@
 //!     bootstrap aborts. Real `init` doesn't seed this either; the
 //!     operator pins the platform author key manually or via the
 //!     standard install flow.
-//!   * **Omits** `<state>/.ai/node/config.yaml`. Real `init` writes
-//!     this for next-boot persistence, but its content is per-run
-//!     dependent (tempdir paths, picked port). Fast-path tests pass
-//!     all settings via CLI/env which take precedence in
-//!     `Config::load`, and `bootstrap::verify_initialized` does not
-//!     require the file. Writing it would either lie about real values
-//!     or break byte-stability; we skip it.
+//!   * The harness writes `<state>/.ai/node/config.yaml` after selecting
+//!     the exact temporary UDS path and bind. Those paths vary across
+//!     runs and are outside the fixture's byte-stability assertions.
 //!
 //! ## Three-key role split
 //!
@@ -502,6 +497,33 @@ pub fn register_fixture_bundle(
     fs::create_dir_all(abs.join(AI_DIR))?;
     fs::write(abs.join(AI_DIR).join("manifest.yaml"), manifest)?;
 
+    register_presigned_fixture_bundle(state_path, bundle_name, &abs, fixture)
+}
+
+/// Register an already signed test bundle without replacing its manifest.
+/// External lifecycle fixtures declare capabilities in that manifest, so the
+/// generic fixture writer above must not erase them during daemon setup.
+pub fn register_presigned_fixture_bundle(
+    state_path: &Path,
+    bundle_name: &str,
+    bundle_root: &Path,
+    fixture: &FastFixture,
+) -> Result<()> {
+    anyhow::ensure!(
+        !bundle_name.is_empty()
+            && Path::new(bundle_name)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(bundle_name),
+        "synthetic bundle name must be one safe path segment"
+    );
+    let abs = bundle_root
+        .canonicalize()
+        .with_context(|| format!("canonicalize synthetic bundle {}", bundle_root.display()))?;
+    anyhow::ensure!(
+        abs.join(AI_DIR).join("manifest.yaml").is_file(),
+        "presigned fixture bundle has no manifest"
+    );
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
     let body = node_bundle_record_body(bundle_name, &abs)?;
@@ -510,6 +532,34 @@ pub fn register_fixture_bundle(
     fs::write(dir.join(format!("{bundle_name}.yaml")), signed)?;
     authorize_fixture_bundle(state_path, bundle_name, &fixture.node)?;
     Ok(())
+}
+
+/// Write the init-owned bootstrap config after the harness has selected its
+/// exact endpoints. A fabricated UDS path would conflict with the startup
+/// command and would test `--force` instead of ordinary admission.
+pub fn write_harness_bootstrap_config(
+    state_path: &Path,
+    bind: std::net::SocketAddr,
+    uds_path: &Path,
+) -> Result<()> {
+    let config = ryeosd::config::Config {
+        bind,
+        db_path: state_path.join(AI_DIR).join("state/runtime.sqlite3"),
+        uds_path: uds_path.to_path_buf(),
+        app_root: state_path.to_path_buf(),
+        node_signing_key_path: state_path
+            .join(AI_DIR)
+            .join("node/identity/private_key.pem"),
+        operator_signing_key_path: state_path
+            .join(AI_DIR)
+            .join("config/keys/signing/private_key.pem"),
+        authorized_keys_dir: state_path.join(AI_DIR).join("node/auth/authorized_keys"),
+    };
+    fs::write(
+        state_path.join(AI_DIR).join("node/config.yaml"),
+        serde_yaml::to_string(&config)?,
+    )
+    .context("write exact fast-fixture daemon bootstrap config")
 }
 
 /// Create and register a synthetic bundle that owns runtime configuration.

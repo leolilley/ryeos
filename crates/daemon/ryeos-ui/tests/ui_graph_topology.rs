@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_ui::state::get_ui_state;
 
-use test_state::{build_test_state_with_live_bundles, launch_context};
+use test_state::{build_test_state_with_live_bundles, launch_context, mint_launch};
 
 fn workspace_root() -> String {
     ryeos_engine::test_support::workspace_root()
@@ -25,10 +25,7 @@ async fn graph_topology_returns_live_bundle_topology_for_browser_session() {
         ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
         None,
     );
-    let (session_id, token) = get_ui_state(&state)
-        .expect("ui state registered")
-        .browser_sessions
-        .mint_token(launch_context);
+    let (session_id, token) = mint_launch(&state, launch_context);
     assert_eq!(
         get_ui_state(&state)
             .unwrap()

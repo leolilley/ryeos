@@ -1,0 +1,7 @@
+# ryeos:signed:2026-09-28T09:42:59Z:0d781c4e91cf14be56d8bb81c4dd6a1d0264c0aeb213507ecd9690dafcc1710c:oPx4k2U2x4ggW0Nd83NflWAAemY6CmGp/wfkJStgjxVRGAYmyRTj2IaEZ7RjPc+Y402dKzj5zsQdIICygi70DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.terminate-runtime-snapshot-qualification
+required_caps: ["ryeos.execute.service.external-content/terminate-runtime-snapshot-qualification"]
+schema:
+  qualification_operation_id: string
+description: Terminate one exact restored qualification Sandbox; replay observes only and provider terminal status is not guest-writer proof

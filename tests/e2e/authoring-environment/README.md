@@ -1,5 +1,143 @@
 # Authoring environment qualification
 
+## External execution routing checkpoint — 2026-09-19
+
+`probe_pinned_codex_external_execution.py` drives the exact pinned Codex App
+Server with a credential-free scripted Responses endpoint and an actual pinned
+exec-server. Two separate bwrap filesystem views give the same `/workspace`
+path different contents. This is an external diagnostic, not an installed RyeOS
+worker, Render deployment, authenticated channel or Lillux qualification.
+
+```sh
+python3 -B tests/e2e/authoring-environment/probe_pinned_codex_external_execution.py \
+  --package /absolute/path/to/extracted/authored-codex-package
+python3 -B tests/e2e/authoring-environment/probe_pinned_codex_external_execution.py \
+  --package /absolute/path/to/extracted/authored-codex-package --selected-skills
+python3 -B tests/e2e/authoring-environment/probe_pinned_codex_external_execution.py \
+  --package /absolute/path/to/extracted/authored-codex-package --managed-mcp
+python3 -B -m unittest discover -s tests/e2e/authoring-environment \
+  -p test_external_execution_probe.py
+```
+
+The probe verifies all five executable artifacts against the existing activation
+declaration, uses fresh empty profiles, mounts no host home or credentials, and
+starts no paid model or RyeOS daemon. It needs Linux user/mount/PID namespaces
+and loopback sockets. The host's explicitly mounted utilities are fixture
+dependencies, not an admitted production runtime. The namespace views share
+the host network for the loopback endpoints: **this does not qualify egress
+restriction**. Files, processes and listeners are disposed on exit; diagnostic
+stdout and protocol input have finite bounds and protocol waits have deadlines.
+
+`pinned-codex-external-routing.json` records the successful checkpoint:
+
+- Actual shell, patch, image, symlink reads and interactive stdin used the
+  external view; the controller workspace stayed unchanged.
+- A synthetic secret in the controller's profile did not reach tool output.
+- Read-only configuration overlays refused direct write and unlink attempts;
+  the exact environment inventory overrode a conflicting ambient execution URL.
+- Every scripted request retained the same namespace-qualified tool inventory
+  and complete definition digest; later schema/namespace changes are refused.
+- Actual authored immutable feature/notification arguments overrode a hostile
+  fixture profile. Candidate-local configuration did not add controller tools.
+- The optional selected-skills diagnostic discovered and read an exact executor
+  package, then refused an existing, independently readable file outside it.
+  This diagnostic is not permission to enable selected roots in RyeOS.
+- Explicit `environment_id: local` was refused when local was not configured.
+- Killing the executor produced an explicit failure without local execution.
+  The pinned client first attempted recovery for 25 seconds. The fixture's
+  40-second observation deadline accommodates that existing protocol behavior;
+  it neither adds production retries nor grants permission to replay a command.
+
+The fixture uses `gpt-5.5` **embedded tool metadata**, not a real model call.
+The custom loopback provider is diagnostic-only and does not change production
+subscription authentication. Official App Server/configuration documentation
+guided the fixture; exact protocol behavior is tested against pinned 0.147.0.
+
+This establishes the narrow tool-routing mechanism, not full tool/authority
+closure. Candidate-controlled discovery/hooks, all
+registered tool paths, enforced egress, occurrence authentication, authoritative
+writer exclusion, frozen export and durable RyeOS restart remain open. Do not
+activate the current authoring profile by simply adding an execution URL. A
+mutable `environments.toml` can override that URL; the production binding and
+effective configuration must be owned and protected by the runtime.
+
+### Pinned controller-extension audit
+
+The 0.147.0 source review found independently enabled controller paths:
+`plugins` defaults on despite `remote_plugin=false`; notification commands are
+independent of the hooks feature; skill MCP dependency installation defaults on.
+Both authored profiles now explicitly close those paths in baseline and immutable
+argv, disable orchestrator skills/MCP, and refuse caller-supplied
+`selectedCapabilityRoots`. Selected executor roots can add MCP independently
+of the plugins feature. The separately admitted RyeOS dynamic-tool injector is
+unchanged; caller-supplied dynamic tools remain forbidden in the authoring route.
+
+The baseline routing diagnostic advertises six tools; the optional skills
+diagnostic adds `skills.list` and `skills.read`. The latter uses exact observed
+package/resource identities, not reconstructed paths. Startup host discovery,
+enterprise-managed inputs and all other authority surfaces still need qualification.
+
+**Ordinary `mcp_servers={}` is not a deny-all policy.** Pinned configuration
+merges tables, preserving lower-layer server entries. `--managed-mcp` supplies
+a diagnostic read-only `/etc/codex/requirements.toml` containing an empty managed
+MCP allowlist. A configured controller subprocess canary remains in the merged
+ordinary configuration but is not launched during the completed turn. No host
+system file is changed. This proves that pinned mechanism only in the fixture's
+empty enterprise/cloud-policy context—not an unconditional production denial.
+
+Production still requires qualification of the admitted runtime-configuration
+mount and control of higher-priority managed policy before MCP startup. A profile-home
+`requirements.toml` would not be read as system requirements. Do not repurpose
+node networking files or enable the external profile to bypass this gate.
+
+Fixture HTTP handling is serialized, request retention is bounded before append,
+and accepted sockets have a timeout before header parsing. A live incomplete-header
+probe waits for exact acceptance and verifies bounded teardown. These fixture
+properties are not RyeOS transport/recovery evidence. Independent reviews found
+and corrected the previous missing-file escape assertion, namespace-hash omission,
+post-retention request limit, and pre-handler header timeout gap.
+
+### Production configuration work in progress
+
+The implementation branch retains required `auxiliary_configs` in structured
+session profile v8 and retained persistent-session capsule v13. Each entry names
+one signed source file and one flat destination in the existing locked profile
+home. Destinations are sorted/unique, cannot replace the primary baseline, and
+are limited to 16 files of at most 64 KiB each. Primary baseline admission now
+uses that same existing launch-time byte limit.
+
+Admission and recovery refuse nonempty auxiliary inventories without enforced
+read-only isolation. The executor uses pinned source descriptors for overlays;
+the bridge verifies exact bytes before starting the provider. Where portable
+state is supported, exact forbidden selectors reserve configuration names and
+potential portable-session overlap is rejected. Empty inventories remain
+explicit in every current bundle profile; no external authoring profile is
+activated by these changes.
+
+The same profile/capsule now also requires `runtime_configs`: at most 16 exact
+source files (nonempty, at most 64 KiB each), with sorted, unique absolute
+namespace destinations. The executor seals captured source bytes in descriptors;
+the isolation planner mounts them read-only and refuses collisions with existing
+authority, writable views and reserved roots (including private `/tmp`). These
+mounts cannot supply executable authority, and preparation never writes their
+destinations on the host. The bridge checks exact mounted bytes and read-only
+ancestors before provider startup. This is generic configuration delivery, not
+an executor-owned Codex path. Current bundle inventories are empty. Native Lillux
+mount/ancestor checks pass across realized/sealed executables and nested-sandbox
+mode, including descendant exec. Installed bridge admission and effective
+provider-policy qualification remain gates before enabling a profile.
+
+Cargo is now authorized. Rebuilt state framing/export/transcript (8) and capsule
+(10) groups pass. The native terminal-export group (3), absolute-configuration
+exec qualification (1), and ordinary Lillux suite (235 passed, 18 ignored) pass.
+Engine/executor/structured-session test targets pass `cargo check --tests`;
+type checking is not test execution. Rebuilt allocation/channel (14), engine
+profile (14) and isolation (41) tests also pass. A prior build was explicitly interrupted
+for disk space; targeted builds have resumed without relocating or deleting
+other work. Full bundle refresh and installed admission remain required. See
+[external execution qualification](../external-execution/README.md) for the
+exact checkpoint, operator tests and missing lifecycle/channel/export work.
+
 ## Hosted integration checkpoint — 2026-09-09
 
 `hosted-worker-qualification.json` records partial installed two-node evidence,

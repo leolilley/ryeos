@@ -8,11 +8,18 @@ import type { RyeOsSectionVm } from "./RyeOsSectionVm";
 import type { RyeOsTableRowVm } from "./RyeOsTableRowVm";
 import type { RyeOsTextLineVm } from "./RyeOsTextLineVm";
 import type { RyeOsTextPositionVm } from "./RyeOsTextPositionVm";
+import type { RyeOsTileIntentVm } from "./RyeOsTileIntentVm";
 import type { RyeOsTimelineEntryVm } from "./RyeOsTimelineEntryVm";
 
 export type RyeOsViewVm =
   | { type: "field"; field: RyeOsFieldVm }
   | { type: "text"; title: string; lines: RyeOsTextLineVm[]; position: RyeOsTextPositionVm }
+  /**
+   * Bounded textual document content projected from an admitted source.
+   * The view definition names the response fields; this primitive does not
+   * know about files, knowledge items or any other product-specific owner.
+   */
+  | { type: "document"; title: string; path: string; content: string; truncated: boolean; provenance: string }
   /**
    * The generic content widget surface: every bound view renders
    * through rows (typed widget variants arrive with the render pass).
@@ -39,4 +46,5 @@ export type RyeOsViewVm =
    * widget.
    */
   | { type: "table"; title: string; columns: string[]; total_rows: bigint; provenance?: string | null; affordance_hints: string[]; rows: RyeOsTableRowVm[] }
-  | { type: "placeholder"; title: string; message: string };
+  | { type: "placeholder"; title: string; message: string }
+  | { type: "required_subject"; title: string; input: string; facets: string[]; actions: RyeOsTileIntentVm[] };

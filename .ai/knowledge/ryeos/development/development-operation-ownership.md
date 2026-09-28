@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-17T07:24:33Z:b878b26d16d268ef23b607f8f5c3194a4ae8dd760a88f211c614ed8c7ab57f4e:KwWxLabqJ5sAasuihS0Ut5T12CjetbV89hmTgV3Yx8YROTXvqTAHsPrgLZXL0AqjcoAPWGxUoEHiKberx+XBBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-24T03:39:11Z:a47c2e4d0af14f386650d898b1dfa085fadd3e8191d1efdb2c50385f2b06d8e9:afd/U89P1q8ChN5REkxNK8X2pUjHx9GcHiluSXvqUxNop7te9Lp78J6zS0hi8bGrCgg5gpMpuoOauo31Vo4sCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, tooling, production, qualification]
-version: "1.2.0"
+version: "1.5.0"
 description: Canonical owners, external entry boundaries and completion gates for repository operations.
 ---
 
@@ -18,6 +18,94 @@ is available. That is explicitly external evidence, not admitted execution.
 Do not maintain two implementations, route a Tool to ambient host programs, or
 grant a worker installation, acquisition, signing or publication permissions
 merely because the operation has acquired a Tool definition.
+
+## Continuation rules from the Stage-0 handoff correction
+
+The active implementation sequence is section 0 of
+`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
+Finish release-authority prerequisites, calibration/catalog bootstrap, then
+data-only and binary-bearing bundle publication/activation on another node.
+The full development-worker proof is separate. The source inventory below is
+an ownership backlog, not an instruction to complete every row before release.
+
+Read the dated checkpoint in `source-local-bundle-development.md` before
+continuing the native release proof. It records the successful corrected
+artifact, separates observed results from open gates, and identifies the next
+existing authorities to use.
+
+- Put reusable behavior beside its existing RyeOS Tool family, selections in
+  Config, orchestration in Graphs, and qualification fixtures in the existing
+  test family. Check those owners before creating a script or another runbook.
+  Operator-only and bootstrap behavior are not automatic `scripts/release/`
+  exceptions.
+- The Stage-0 export/verification helper is
+  `.ai/tools/ryeos/development/stage0-platform-production/lib/bootstrap.py`.
+  Its tests belong to `tests/e2e/development-toolchain-stage0/test-bootstrap.py`;
+  its usage belongs to the existing source-local development knowledge. Do not
+  recreate a parallel release-script entry or leave a compatibility wrapper.
+- That helper is still an **externally invoked auxiliary implementation**, not
+  an admitted Tool descriptor. A source move or publisher signature does not
+  authorize host Docker, sudo, Python, network or filesystem access inside a
+  worker. A future admitted entry requires its actual environment and policy.
+- Elevate only the unavoidable host boundary. The ordinary user receives the
+  bounded Buildx export and runs verification; do not require root-owned output
+  repair or recursive chown. Keep exact saved verification inputs with output.
+  Check plugin availability and permissions rather than guessing executable
+  names or treating permission-denied discovery as evidence of absence.
+- Repair missing dependencies in the owning exact input contract, including
+  recursive ELF closure, byte hashes and notices. Do not borrow host libraries,
+  add an ambient PATH fallback, manufacture a wrapper, or reuse the previous
+  platform manifest after changing its bytes.
+- Use RyeOS retained generations, materialization and product evidence for
+  source/build identity. Git may serve repository maintenance or external CI,
+  but is not a dependency of native snapshot, capture or bundle publication.
+- Preserve the simple case: explicitly authorized live-filesystem execution
+  remains distinct from captured/isolated release production. Do not impose
+  compiler bootstrap on every worker or relax isolated production because an
+  ordinary live-filesystem Tool is allowed to use its selected environment.
+- Keep development-specific toolchain selections in the project development
+  bundle, generic reusable mechanisms in their existing owner, and node policy
+  in the node's signed generation. Editing an installation seed does not alter
+  live policy; a missing binding is not a reason to widen generic policy.
+- A node-local external-content root is signed node policy. Create a durable
+  directory, inspect its device and inode, and apply those coordinates to that
+  node's live policy generation. Never hard-code one machine's path, device or
+  inode into a portable initialization profile, and never treat an empty
+  portable `roots` map as authority to import from an arbitrary host path.
+- Bind a raw bootstrap closure to its declared bootstrap producer/verifier
+  consumers only. Downstream producers consume an independently qualified product via
+  named Config relationships. Directly rebinding Stage-0 to Cargo-vendor,
+  authoring utilities or routine workers collapses bootstrap provenance into
+  ambient runtime state and is not RyeOS-aligned.
+- Keep D0 literal bindings and selected D1 bindings distinct. A bundle verifier
+  may have an installed-bundle binding for its fixed bootstrap runtime, but
+  resolving a project-owned product relationship makes the selected effective
+  consumer generation-scoped. Re-stage the already verified literal binding
+  and publish it through the selected-binding contract with the exact product
+  selections and admitted owner; do not bypass this with a host path.
+- A retained dynamically linked bootstrap executable is not directly execable
+  merely because its file exists. Isolated Tools must enter it through its
+  retained loader and library path. An `ENOENT` at exec for a present file is
+  evidence to inspect the ELF interpreter, not authority to expose ambient
+  host libraries or weaken isolation.
+- Separate milestones in every status report: source implemented, locally
+  tested, artifact verified, imported, bound, independently qualified,
+  calibrated, published, transferred and activated. Cached export is not
+  independent reproduction. Passing one does not imply the next.
+- Review prerequisite and release process environments together before the next
+  signing/install cycle. One-shot verifiers use the existing private sandbox
+  scratch and dedicated temporary children for Cargo state or a required home;
+  they neither inherit host HOME nor set HOME to the entire `/tmp` root.
+  Persistent-session runtime views are not required for a version probe.
+- Before introducing another prerequisite, name the exact release operation
+  requiring it and its declared closure. Worker-environment utility production,
+  Stage1 reproduction, self-hosted CI and persistent-cache work do not become
+  release gates simply because they share development tooling.
+
+The verified Stage-0 artifact bootstraps a missing development prerequisite.
+Routine non-core bundle updates must reuse admitted environment products;
+they must not repeat compiler acquisition or rebuild the serving host image.
+Do not narrow the agreed end-to-end proof merely to avoid its current gates.
 
 ## Complete source inventory and disposition
 
@@ -44,7 +132,7 @@ by moving source into a different directory.
 | `release/package-bundle-artifact.sh`, `release/verify-bundle-artifact.sh`, `release/test-package-bundle-artifact.sh` | Reusable package/verify behavior belongs beside release Tools. A thin CI distribution entry can remain external before node installation. | Preserve signed bundle closure and exact version/target/build-profile checks with admitted archive/signature tools; same canonical implementation in CI. |
 | `release/prepare-aur.sh`, `release/test-prepare-aur.sh` | Deterministic AUR metadata production Tool with release coordinates/templates as Config; external job alone owns push/distribution credentials. | Identical generated metadata from exact inputs, output refusal tests and no implicit publication. |
 | `release/resolve-version.sh`, `release/test-resolve-version.sh`, `release/official-publisher-fingerprint.sh` | Small external workflow-input adapters may remain for GitHub event/ref/key handoff; reuse existing version/signature owners. Reusable parsing belongs beside release operations if expanded. | Closed input/ref validation and exact official fingerprint; no second version source or private-key exposure. |
-| `pkg/install-local-direct.sh`, `pkg/bundle-sets.sh`, `pkg/test-bundle-sets.sh` | Necessary host package/filesystem/PATH/user/lifecycle entrypoint and its pure installation-data helper. Bundle membership remains signed source data. | Existing install/init authorities own policy generation; explicit reset only. Do not reimplement runtime policy or bundle admission in shell. |
+| `pkg/install-local-direct.sh`, `pkg/bundle-sets.sh`, `pkg/test-bundle-sets.sh` | Necessary host package/filesystem/PATH/user/lifecycle entrypoint and its pure installation-data helper. Bundle membership remains signed source data. The `release-authority` set also installs an identity-measurement copy of the standalone constrained publisher at `/usr/bin/ryeos-bundle-publisher`; this host support artifact is not a signed bundle payload, generic node-image member, or service launch. The key-bearing publisher process has its own service/deployment lifecycle. Other set installs neither add nor remove the host-scoped executable. | Existing install/init authorities own policy generation; explicit reset only. Role-aware preflight refuses release-authority installation before shutdown if its exact publisher candidate is missing. `authority-measure` hashes the installed executable; the separately operated service must run byte-identical code and self-check `/proc/self/exe` against the resulting policy. Do not reimplement runtime policy or bundle admission in shell. |
 | `populate-bundles.sh` | Necessary pre-installed-RyeOS build/staging entry; calls existing bundle publisher. Build selections and artifact production ultimately compose project-owned operations; seed only binaries/registrations needed to boot that path. | Remove independent signature-envelope behavior in favor of the canonical signer; preserve explicit focused builds and source signing, no full gate during release. |
 | `lib/ryeos-terminal.sh`, `pkg/test-ryeos-terminal.sh` | Shared external-shell presentation library and its tests; no standalone Tool or duplicated runtime renderer. | Keep source/install/build status consumers aligned; focused renderer checks. |
 | `ci/install-static-linters.sh`, `ci/lint-workflows-and-shell.sh` | Pre-install CI acquisition/orchestration entry; exact actionlint/ShellCheck are reusable validation Tool inputs, not ambient worker dependencies. | Preserve checksum-pinned acquisition; signed validation operation must bind exact binaries and complete child PATH before replacing CI behavior. |

@@ -27,6 +27,11 @@ pub struct NodeExecutionAdmissionPolicy {
     /// not assert that matching devices were observed or allocated.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub resource_authority: Option<NodeExecutionResourcePolicy>,
+    /// Required-nullable node ceiling for signed product producer recipes.
+    /// `null` denies producer admission; a recipe may only narrow these bounds.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub producer_resource_ceiling:
+        Option<ryeos_state::external_content::products::producer_recipe::ProducerResourceBounds>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,7 +73,7 @@ where
 
 impl NodeExecutionAdmissionPolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.schema != 3 {
+        if self.schema != 4 {
             bail!("node execution policy schema is not current");
         }
         if self.max_live_fanout == 0 {
@@ -101,6 +106,32 @@ impl NodeExecutionAdmissionPolicy {
             policy
                 .validate()
                 .context("validate node execution resource authority")?;
+        }
+        if let Some(ceiling) = &self.producer_resource_ceiling {
+            ceiling
+                .validate()
+                .context("validate node producer ceiling")?;
+        }
+        Ok(())
+    }
+
+    pub fn admit_producer_bounds(
+        &self,
+        bounds: &ryeos_state::external_content::products::producer_recipe::ProducerResourceBounds,
+    ) -> anyhow::Result<()> {
+        bounds.validate()?;
+        let ceiling = self
+            .producer_resource_ceiling
+            .as_ref()
+            .context("node producer admission is disabled")?;
+        ceiling.validate()?;
+        if bounds.maximum_wall_time_ms > ceiling.maximum_wall_time_ms
+            || bounds.maximum_stdout_bytes > ceiling.maximum_stdout_bytes
+            || bounds.maximum_stderr_bytes > ceiling.maximum_stderr_bytes
+            || bounds.maximum_memory_bytes > ceiling.maximum_memory_bytes
+            || bounds.maximum_processes > ceiling.maximum_processes
+        {
+            bail!("producer resource bounds exceed the node ceiling");
         }
         Ok(())
     }
@@ -285,15 +316,27 @@ impl NodePolicySection for NodeExecutionPolicySection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_state::external_content::products::producer_recipe::ProducerResourceBounds;
+
+    fn producer_bounds() -> ProducerResourceBounds {
+        ProducerResourceBounds {
+            maximum_wall_time_ms: 1_000,
+            maximum_stdout_bytes: 2_000,
+            maximum_stderr_bytes: 3_000,
+            maximum_memory_bytes: 4_000,
+            maximum_processes: 5,
+        }
+    }
 
     fn valid_policy() -> NodeExecutionAdmissionPolicy {
         NodeExecutionAdmissionPolicy {
-            schema: 3,
+            schema: 4,
             max_live_fanout: 8,
             max_private_materialization_copy_bytes: 17_179_869_184,
             host_env_passthrough: Vec::new(),
             workload_client: None,
             resource_authority: None,
+            producer_resource_ceiling: None,
         }
     }
 
@@ -333,5 +376,102 @@ mod tests {
             }],
         };
         assert!(policy.admit_execution_target(Some(&target)).is_err());
+    }
+
+    #[test]
+    fn producer_ceiling_is_required_nullable_and_positive() {
+        let mut value = serde_json::to_value(valid_policy()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("producer_resource_ceiling");
+        assert!(serde_json::from_value::<NodeExecutionAdmissionPolicy>(value).is_err());
+
+        let mut policy = valid_policy();
+        assert!(policy.admit_producer_bounds(&producer_bounds()).is_err());
+        policy.producer_resource_ceiling = Some(producer_bounds());
+        assert!(policy.validate().is_ok());
+        policy
+            .producer_resource_ceiling
+            .as_mut()
+            .unwrap()
+            .maximum_processes = 0;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn producer_bounds_may_narrow_but_never_widen_any_node_ceiling() {
+        let mut policy = valid_policy();
+        let ceiling = producer_bounds();
+        policy.producer_resource_ceiling = Some(ceiling.clone());
+        assert!(policy.admit_producer_bounds(&ceiling).is_ok());
+
+        let mut narrower = ceiling.clone();
+        narrower.maximum_wall_time_ms -= 1;
+        narrower.maximum_stdout_bytes -= 1;
+        narrower.maximum_stderr_bytes -= 1;
+        narrower.maximum_memory_bytes -= 1;
+        narrower.maximum_processes -= 1;
+        assert!(policy.admit_producer_bounds(&narrower).is_ok());
+
+        let mut wider = ceiling.clone();
+        wider.maximum_wall_time_ms += 1;
+        assert!(policy.admit_producer_bounds(&wider).is_err());
+        wider = ceiling.clone();
+        wider.maximum_stdout_bytes += 1;
+        assert!(policy.admit_producer_bounds(&wider).is_err());
+        wider = ceiling.clone();
+        wider.maximum_stderr_bytes += 1;
+        assert!(policy.admit_producer_bounds(&wider).is_err());
+        wider = ceiling.clone();
+        wider.maximum_memory_bytes += 1;
+        assert!(policy.admit_producer_bounds(&wider).is_err());
+        wider = ceiling;
+        wider.maximum_processes += 1;
+        assert!(policy.admit_producer_bounds(&wider).is_err());
+    }
+
+    #[test]
+    fn authored_source_profiles_use_the_current_execution_policy_contract() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let profile_dir = repository.join("bundles/.ai/node/init/profiles");
+        let mut profiles = std::fs::read_dir(&profile_dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                assert!(entry.file_type().unwrap().is_file());
+                let path = entry.path();
+                assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("yaml"));
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        profiles.sort();
+        assert_eq!(profiles.len(), 10, "update init-profile policy expectations");
+
+        for profile in profiles {
+            let path = repository.join(format!("bundles/.ai/node/init/profiles/{profile}.yaml"));
+            let source = std::fs::read_to_string(&path).unwrap();
+            let document: serde_json::Value = serde_yaml::from_str(&source).unwrap();
+            let policy: NodeExecutionAdmissionPolicy =
+                serde_json::from_value(document["policies"]["execution"].clone()).unwrap();
+            policy.validate().unwrap();
+            assert_eq!(policy.schema, 4, "{}", path.display());
+            match profile.as_str() {
+                "full" | "contained-workflow" | "development" | "release-authority" => {
+                    assert!(policy.producer_resource_ceiling.is_some(), "{profile}");
+                }
+                "central-host" | "standard" | "local-inference" | "hosted-node"
+                | "hosted-workflow" | "bundle-source" => {
+                    assert!(policy.producer_resource_ceiling.is_none(), "{profile}");
+                }
+                _ => panic!("add an explicit producer-admission expectation for {profile}"),
+            }
+        }
     }
 }

@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-04T09:10:36Z:54a6c84c924312a5428b492e041fa7a8775120e702796c4d513d3246c3e03903:XmwrxhnSqdijvWSA26/ayoE3gmmrN14vvCX/nthypUUPkCpY9KrXqDgfxRZKa50lT1r0ocNCd1+loR9aySUSAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-22T00:31:25Z:dc38ecdc59a65ccd376abea72b3b7076a6492d7f5be9101aa3b9e93ff0d6dd70:VLhq2dE7kJ1QgSMZnlXxusJNaGldvhO1gPJcc4271lvwr/0qThXn8b0+R3wJgNxUisMZ2/lGg0ncEvBHhGIcBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
 title: "Architecture Map"
 description: "Short orientation for crates, bundles, execution flow, and trust boundaries"
 entry_type: reference
-version: "1.6.0"
+version: "1.6.2"
 ```
 
 # Architecture Map
@@ -17,11 +17,14 @@ full design document.
 
 | Area | Path | Owns |
 |---|---|---|
-| Kernel primitives | `crates/kernel/lillux/` | process lifecycle/type state, descriptor and exact-process authority, native Linux sandbox mechanics, durable filesystem/CAS operations, Ed25519/X25519/SHA primitives |
+| Kernel primitives | `crates/kernel/lillux/` | host capabilities and platform implementation: execution, filesystem/CAS access and durability, identity, clocks, waiting, communication primitives, and native containment |
 | Engine | `crates/engine/ryeos-engine/` | item resolution, trust verification, composition, kind-schema projections, plans, immutable node isolation policy |
 | App | `crates/daemon/ryeos-app/` | daemon/app config, engine boot, node-config loading |
 | State | `crates/state/ryeos-state/` | SQLite state, CAS objects, thread state |
 | Runtime shared | `crates/engine/ryeos-runtime/` | callback client, runtime envelopes/types |
+| External execution contract | `crates/engine/ryeos-external-execution-contract/` | bounded wire messages, operation identity and pure validation; no host execution or controller services |
+| External guest runtime | `crates/engine/ryeos-external-execution/` | guest protocol/lifecycle behavior and explicit native backend translation over Lillux; no app/executor dependency |
+| Project capture | `crates/engine/ryeos-project-capture/` | project snapshot capture/transfer using state/CAS and Lillux filesystem capabilities |
 | Tools | `crates/tools/core-tools/` | init, bundle build/verify, trust, vault, sign/fetch actions |
 | CLI | `crates/bin/cli/` | `ryeos` command dispatch and daemon transport |
 | Daemon | `crates/bin/daemon/` | HTTP/UDS server and execution API |
@@ -201,8 +204,42 @@ the apply lock's job).
 
 ## Guardrails for agents
 
+- Read [Host Capability Ownership and Review](host-capability-boundary.md)
+  before changing host operations. It governs complete lifecycle ownership,
+  process placement, blocking I/O, diagnostics and migration review gates.
+  Existing partial adapters and test fixtures do not override that contract.
 - Prefer changing the shared source of truth over adding CLI/app-specific
   mirrors of descriptor semantics.
+- Lillux owns host capabilities and their platform implementation: execution,
+  filesystem access, identity, clocks, waiting and communication primitives.
+  This responsibility applies even when the operation is not security-sensitive
+  or Rust offers a portable API. RyeOS owns the protocols, policies and durable
+  workflows composed from those capabilities.
+- Review complete operations before reviewing imports. Host thread creation,
+  joining, clock sampling, sleeping and timed waiting belong behind Lillux's
+  execution/time boundary. RyeOS decides what work runs and what completion or
+  expiry means. Joining a host thread proves neither descendant death nor
+  candidate freeze; those require their own process/filesystem observations.
+- Pure computation, message formats and data types remain with their consumer.
+  `Duration`, byte buffers, reference counting and ordinary in-memory state
+  protection do not require replacement APIs solely to eliminate `std` imports.
+  Standard I/O traits may describe a Lillux-supplied stream without transferring
+  ownership of the underlying host mechanism.
+- HTML/content handling, HTTP message semantics, provider API behavior and
+  Codex configuration belong to their protocol/provider owner. Audit the host
+  integration of third-party libraries explicitly: connection establishment,
+  name resolution, timeouts, ambient configuration and trust/credential access.
+  A library dependency neither exempts host effects from review nor makes the
+  entire protocol a Lillux primitive.
+- Treat process startup as a launch contract: Lillux supplies host argument,
+  environment, stdio and descriptor mechanisms; the executable interprets its
+  bounded protocol. Reuse existing launch/startup facilities before adding
+  generic wrappers. Typed descriptor adoption must preserve unique ownership
+  and startup environment mutation must precede concurrent execution.
+- Backend-specific translation may consume native Lillux contracts inside an
+  explicit backend boundary. Shared execution policy should express required
+  capabilities and consume their observations. Unsupported capabilities refuse
+  explicitly; renaming a Linux type does not establish cross-platform support.
 - Raw namespace, mount, pivot-root, seccomp, descriptor, pidfd, procfs,
   signal, and bounded process-settle mechanics belong in Lillux. Engine and
   daemon layers carry only typed launch/process authorities and signed RyeOS

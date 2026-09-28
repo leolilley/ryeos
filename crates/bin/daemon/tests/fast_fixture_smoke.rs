@@ -47,6 +47,7 @@ async fn fast_fixture_boots_daemon_without_real_init() {
     );
     assert!(h.state_path.join(".ai/node/vault/private_key.pem").exists());
     assert!(h.state_path.join(".ai/node/vault/public_key.pem").exists());
+    assert!(h.state_path.join(".ai/node/config.yaml").exists());
     assert!(
         h.state_path
             .join(".ai/config/keys/signing/private_key.pem")
@@ -68,8 +69,8 @@ async fn fast_fixture_keys_are_deterministic() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn unsigned_node_execution_limit_contributor_refuses_startup() {
-    let result = DaemonHarness::start_fast_with(
+async fn legacy_bundle_execution_config_cannot_replace_node_policy_generation() {
+    let (h, _) = DaemonHarness::start_fast_with(
         |state_path, _user_space, fixture| {
             register_config_fixture_bundle(
                 state_path,
@@ -88,16 +89,21 @@ async fn unsigned_node_execution_limit_contributor_refuses_startup() {
         },
         |_| {},
     )
-    .await;
+    .await
+    .expect("legacy bundle execution config must not replace node-wide policy");
 
-    let error = match result {
-        Ok(_) => panic!("unsigned node-wide valve must refuse daemon startup"),
-        Err(error) => error,
-    };
-    let diagnostic = format!("{error:#}");
-    assert!(
-        diagnostic.contains("config must carry a signature trusted by this node"),
-        "unexpected startup refusal: {diagnostic}"
+    let trust = ryeos_engine::trust::TrustStore::load(None, &h.state_path.join(".ai/config"))
+        .expect("load exact fixture trust");
+    let generation = ryeos_app::node_policy::generation::load_policy_generation(
+        &h.state_path,
+        &trust,
+        &ryeos_app::node_policy::NodePolicyTable::new(),
+    )
+    .expect("load signed node policy generation");
+    assert_eq!(
+        generation.policies()["execution"]["max_live_fanout"],
+        8,
+        "unsigned legacy bundle config cannot override the signed node-wide limit"
     );
 }
 

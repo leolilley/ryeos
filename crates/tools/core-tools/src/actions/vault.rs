@@ -152,7 +152,11 @@ pub fn run_list(opts: &ListOptions) -> Result<ListReport> {
             .with_context(|| format!("read vault secret key {}", key_path.display()))?;
         read_sealed_secrets(&store_path, &sk)
     })?;
-    let mut keys: Vec<String> = current.keys().cloned().collect();
+    let mut keys: Vec<String> = current
+        .keys()
+        .filter(|key| !ryeos_vault::policy::is_internal_vault_key(key))
+        .cloned()
+        .collect();
     keys.sort();
     Ok(ListReport { store_path, keys })
 }
@@ -160,6 +164,10 @@ pub fn run_list(opts: &ListOptions) -> Result<ListReport> {
 pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
     if opts.keys.is_empty() {
         bail!("ryeos vault remove: at least one KEY required");
+    }
+    // Validate the whole request before mutation, including mixed requests.
+    for key in &opts.keys {
+        validate_key_name(key)?;
     }
     let key_path = default_vault_secret_key_path(&opts.app_root);
     let store_path = default_sealed_store_path(&opts.app_root);
@@ -534,6 +542,46 @@ mod tests {
         })
         .unwrap();
         assert!(report.keys.is_empty());
+    }
+
+    #[test]
+    fn operator_cli_cannot_list_or_remove_protected_generations() {
+        let (state, sk) = fresh_state_with_keypair();
+        let path = default_sealed_store_path(state.path());
+        let protected = format!(
+            "{}{}_{}",
+            ryeos_vault::policy::INTERNAL_PLACEMENT_VAULT_PREFIX,
+            "a".repeat(64),
+            "b".repeat(64)
+        );
+        let runtime = format!(
+            "{}fixture",
+            ryeos_vault::policy::INTERNAL_RUNTIME_VAULT_PREFIX
+        );
+        let entries = std::collections::HashMap::from([
+            ("ORDINARY".to_owned(), "one".to_owned()),
+            (protected.clone(), "private".to_owned()),
+            (runtime.clone(), "runtime".to_owned()),
+        ]);
+        write_sealed_secrets(&path, &sk.public_key(), &entries).unwrap();
+        assert_eq!(
+            run_list(&ListOptions {
+                app_root: state.path().into()
+            })
+            .unwrap()
+            .keys,
+            vec!["ORDINARY"]
+        );
+        for key in [protected, runtime] {
+            assert!(
+                run_remove(&RemoveOptions {
+                    app_root: state.path().into(),
+                    keys: vec!["ORDINARY".into(), key],
+                })
+                .is_err()
+            );
+            assert_eq!(read_sealed_secrets(&path, &sk).unwrap(), entries);
+        }
     }
 
     #[test]

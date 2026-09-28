@@ -1,5 +1,7 @@
 //! Shared RyeOS local node lifecycle and bootstrap semantics.
 
+pub mod bundle_set_apply;
+pub mod bundle_set_update;
 mod control;
 pub mod host_runtime;
 pub mod init;
@@ -20,10 +22,14 @@ use std::time::Duration;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+pub use bundle_set_update::load_current_consumer_publication_policy;
 pub use init::{
     InitCompletionReport, InitOperatorCeremony, InitOperatorProfile, InitOptions, InitPhase,
-    InitProgress, InitReport, load_trusted_init_node_profile, preflight_existing_policy_generation,
-    run_init, run_init_with_operator_ceremony, run_init_with_progress,
+    InitProgress, InitReport, OfflineInitCompletionSigner, ProspectiveInitCompletion,
+    ProspectiveInitCompletionInput, SubstrateIdentity, load_trusted_init_node_profile,
+    load_verified_substrate_identity, preflight_existing_policy_generation,
+    prepare_bundle_set_init_completion, prepare_prospective_init_completion, run_init,
+    run_init_with_operator_ceremony, run_init_with_progress,
     seal_init_completion_after_policy_update, verify_init_completion,
 };
 pub use init_check::{InitDiagnostics, InitState, require_initialized};

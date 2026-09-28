@@ -123,6 +123,7 @@ for path in "$root"/Dockerfile*; do
 done
 
 required_entrypoint='ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]'
+required_healthcheck='HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('\''http://127.0.0.1:'\''+os.environ.get('\''PORT'\'','\''8000'\'')+'\''/_ryeos/ready'\'',timeout=3).read()"]'
 for image in "${daemon_images[@]}"; do
     path="$root/$image"
     instructions="$(dockerfile_instructions "$path")"
@@ -142,6 +143,10 @@ for image in "${daemon_images[@]}"; do
     fi
     if [[ "$(grep -Fxc "$required_entrypoint" <<<"$final_stage")" -ne 1 ]]; then
         echo "$image must declare the exact tini-wrapped entrypoint once" >&2
+        exit 1
+    fi
+    if [[ "$(grep -Fxc "$required_healthcheck" <<<"$final_stage")" -ne 1 ]]; then
+        echo "$image must probe exact daemon admission readiness once" >&2
         exit 1
     fi
 done
@@ -166,7 +171,16 @@ for stage in ryeos-standard ryeos-central-host ryeos-local-inference ryeos-hoste
         echo "Dockerfile.release target $stage must declare the exact tini-wrapped entrypoint once" >&2
         exit 1
     fi
+    if [[ "$(grep -Fxc "$required_healthcheck" <<<"$final_stage")" -ne 1 ]]; then
+        echo "Dockerfile.release target $stage must probe exact daemon admission readiness once" >&2
+        exit 1
+    fi
 done
+contained_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" ryeos-contained-workflow)"
+if [[ "$(grep -Fxc "$required_healthcheck" <<<"$contained_stage")" -ne 1 ]]; then
+    echo "Dockerfile.release target ryeos-contained-workflow must probe exact daemon admission readiness once" >&2
+    exit 1
+fi
 
 # Images that promise an exact source bundle set must copy that same set into
 # their final stage. Publishing a bundle in the builder but omitting it from
@@ -218,6 +232,7 @@ assert_runtime_bundle_inventory Dockerfile.release standard ryeos-standard
 assert_runtime_bundle_inventory Dockerfile.release central-host ryeos-central-host
 assert_runtime_bundle_inventory Dockerfile.release local-inference ryeos-local-inference
 assert_runtime_bundle_inventory Dockerfile.release hosted-workflow ryeos-hosted-workflow
+assert_runtime_bundle_inventory Dockerfile.release hosted-workflow ryeos-contained-workflow
 
 assert_runtime_init_profile() {
     local image="$1" bundle_set="$2" stage="${3:-}" instructions final_stage expected_selector actual_selector
@@ -281,21 +296,40 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
 
     # A fresh root receives the exact mapped first-publication seed.
     RYEOS_INIT_NODE_PROFILE=hosted-workflow
+    unset RYEOS_SUBSTRATE_IMAGE RYEOS_SUBSTRATE_PROTOCOL
+    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
+        echo "entrypoint accepted absent substrate authority" >&2
+        exit 1
+    fi
+    RYEOS_SUBSTRATE_IMAGE=ghcr.io/example/ryeos-substrate:latest
+    RYEOS_SUBSTRATE_PROTOCOL=1
+    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
+        echo "entrypoint accepted mutable substrate authority" >&2
+        exit 1
+    fi
+    RYEOS_SUBSTRATE_IMAGE="ghcr.io/example/ryeos-substrate@sha256:$(printf '1%.0s' {1..64})"
+    RYEOS_SUBSTRATE_PROTOCOL=0
+    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
+        echo "entrypoint accepted zero substrate protocol" >&2
+        exit 1
+    fi
+    RYEOS_SUBSTRATE_PROTOCOL=1
+    substrate_args="--substrate-image-digest sha256:$(printf '1%.0s' {1..64}) --substrate-protocol 1"
     rm -rf "$policy_test_root/.ai"
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081'
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 --node-profile hosted-workflow" ]]
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args --node-profile hosted-workflow" ]]
 
     # A present generation is preserved. Even a malformed occupant takes this
     # path so real RyeOS rejects it instead of silently falling back to seed.
     mkdir -p "$policy_test_root/.ai/node/policies"
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081" ]]
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args" ]]
 
     # Replacement is an explicit one-boot opt-in and remains part of the same
     # locked init transaction as exact bundle reconciliation.
     RYEOS_RESET_NODE_POLICY_GENERATION=1
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 --node-profile hosted-workflow --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args --node-profile hosted-workflow --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
     RYEOS_RESET_NODE_POLICY_GENERATION=invalid
     if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
         echo "entrypoint accepted an invalid policy replacement opt-in" >&2
@@ -305,7 +339,7 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
     rm -rf "$policy_test_root/.ai/node/policies"
     : > "$policy_test_root/.ai/node/policies"
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081" ]]
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args" ]]
 
     # Execution-history schema cuts carry their exact predecessor/current
     # epochs. Repeated boots are handled by the CLI's idempotent cut contract.
@@ -395,6 +429,14 @@ for target in bundle-artifact standard central-host local-inference hosted-workf
         exit 1
     }
 done
+grep -Fq 'target "contained-workflow-qualification"' "$release_bake" || {
+    echo "release Bake contract is missing the contained qualification candidate" >&2
+    exit 1
+}
+if grep -Fq 'contained-workflow-qualification' "$release_workflow"; then
+    echo "contained qualification candidate must not enter official release promotion" >&2
+    exit 1
+fi
 [[ "$(grep -Fc 'cache-to' "$release_bake")" -eq 1 ]] || {
     echo "release Bake contract must export its shared build cache exactly once" >&2
     exit 1

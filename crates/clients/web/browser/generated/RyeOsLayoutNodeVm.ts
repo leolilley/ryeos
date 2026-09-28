@@ -11,4 +11,4 @@ import type { RyeOsViewVm } from "./RyeOsViewVm";
 
 export type RyeOsLayoutNodeVm =
   | { type: "split"; axis: RyeOsSplitAxisVm; ratio: number; first: RyeOsLayoutNodeVm; second: RyeOsLayoutNodeVm }
-  | { type: "tile"; group_id: string; tabs: RyeOsViewTabVm[]; instance_key: RyeOsViewInstanceKey; tile_id: string; focused: boolean; title: string; heading?: RyeOsViewHeadingVm | null; supplement?: RyeOsViewSupplementVm | null; intents: RyeOsTileIntentVm[]; view: RyeOsViewVm; chrome_hidden: boolean; background_transparent: boolean; input?: RyeOsInputVm | null };
+  | { type: "tile"; group_id: string; group_label?: string | null; tabs: RyeOsViewTabVm[]; instance_key: RyeOsViewInstanceKey; tile_id: string; focused: boolean; maximized: boolean; title: string; attachment_label: string | null; heading?: RyeOsViewHeadingVm | null; supplement?: RyeOsViewSupplementVm | null; intents: RyeOsTileIntentVm[]; view: RyeOsViewVm; chrome_hidden: boolean; background_transparent: boolean; input?: RyeOsInputVm | null };

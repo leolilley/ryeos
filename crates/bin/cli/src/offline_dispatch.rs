@@ -644,6 +644,10 @@ fn exec_tool(
                 expand_template(&template, &params_json, project_path)
             }
             ryeos_engine::runtime::RuntimeArgument::Literal(literal) => Ok(literal.literal),
+            ryeos_engine::runtime::RuntimeArgument::SourceMember(_) => Err(CliError::Local {
+                detail: "offline execution cannot redeem admitted source member arguments"
+                    .to_owned(),
+            }),
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -760,6 +764,7 @@ fn exec_tool(
                 // realization to bind; declaring kinds refuse at finalization.
                 external_read_only_mounts: &[],
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: &[],
                 item_ref: tool_ref_str,
                 thread_id: "offline-cli",

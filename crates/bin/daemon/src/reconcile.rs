@@ -10,6 +10,7 @@ use ryeos_app::process::{
     execution_liveness, kill_by_action, resolve_shutdown_action,
 };
 use ryeos_app::runtime_db::WorkspaceState;
+use ryeos_app::runtime_db::scoped_child_attempt::ScopedChildPhase;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::ThreadDetail;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
@@ -1087,6 +1088,63 @@ pub async fn reconcile_live_threads(state: &AppState) -> Result<ActiveThreadReco
     reconcile_active_threads_inner(state, ActiveReconcileMode::Live).await
 }
 
+/// Retire every predecessor qualification child before root recovery can
+/// select a new launch. No phase here authorizes another allocation, process
+/// attachment, release, natural-exit claim, or provider contact.
+fn reconcile_predecessor_scoped_children(state: &AppState) -> Result<usize> {
+    let ids = state.state_store.unsettled_scoped_child_attempt_ids()?;
+    for attempt_id in &ids {
+        let record = state
+            .state_store
+            .scoped_child_attempt(attempt_id)?
+            .ok_or_else(|| anyhow::anyhow!("unsettled scoped child disappeared during recovery"))?;
+        if record.initial.owner.daemon_generation_id
+            == ryeos_app::runtime_db::daemon_generation_id()
+        {
+            anyhow::bail!("startup scoped child recovery found a current-generation launch owner");
+        }
+        match record.phase {
+            ScopedChildPhase::Reserved => {
+                state.state_store.claim_unbound_scoped_child_discard(attempt_id)?;
+                state.state_store.complete_unbound_scoped_child_discard(attempt_id)?;
+            }
+            ScopedChildPhase::UnboundDiscardPending => {
+                state.state_store.complete_unbound_scoped_child_discard(attempt_id)?;
+            }
+            ScopedChildPhase::ScopeBound
+            | ScopedChildPhase::ProcessAttached
+            | ScopedChildPhase::ReleasePermitted
+            | ScopedChildPhase::NaturalScopeEmpty => {
+                let recovery = record.scope_recovery.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("bound scoped child recovery lacks exact scope")
+                })?;
+                state
+                    .state_store
+                    .claim_bound_scoped_child_retirement(attempt_id, recovery)?;
+                state.state_store.prove_bound_scoped_child_death(attempt_id, recovery)?;
+                state.state_store.complete_bound_scoped_child_retirement(attempt_id)?;
+            }
+            ScopedChildPhase::BoundRetirementPending => {
+                let recovery = record.scope_recovery.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("pending scoped child death proof lacks exact scope")
+                })?;
+                state.state_store.prove_bound_scoped_child_death(attempt_id, recovery)?;
+                state.state_store.complete_bound_scoped_child_retirement(attempt_id)?;
+            }
+            ScopedChildPhase::BoundDeathProven => {
+                state.state_store.complete_bound_scoped_child_retirement(attempt_id)?;
+            }
+            ScopedChildPhase::Retired => {
+                anyhow::bail!("retired scoped child appeared in unsettled recovery enumeration");
+            }
+        }
+    }
+    if !state.state_store.unsettled_scoped_child_attempt_ids()?.is_empty() {
+        anyhow::bail!("startup scoped child recovery left unsettled attempts");
+    }
+    Ok(ids.len())
+}
+
 async fn reconcile_active_threads_inner(
     state: &AppState,
     mode: ActiveReconcileMode,
@@ -1114,6 +1172,14 @@ async fn reconcile_active_threads_inner(
             tracing::warn!(
                 count = cleared.len(),
                 "dead-generation launch claims cleared at startup"
+            );
+        }
+        let retired_children = reconcile_predecessor_scoped_children(state)
+            .context("reconcile predecessor scoped qualification children")?;
+        if retired_children != 0 {
+            tracing::warn!(
+                retired = retired_children,
+                "retired predecessor scoped qualification children before root recovery"
             );
         }
         reconcile_dedicated_worker_startup(state).await?;
@@ -2222,6 +2288,15 @@ pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> 
 /// before exclusive capacity is released.
 #[cfg_attr(test, doc(hidden))]
 pub fn reconcile_process_resource_reservations(state: &AppState) -> Result<()> {
+    for reservation in state.state_store.thread_process_scope_reservations()? {
+        // An allocated scope may have admitted a held process before the
+        // predecessor died. Tombstone the root before retiring the scope so
+        // later `created` recovery cannot mistake it for never-contacted work.
+        state.state_store.fence_thread_scope_recovery(&reservation)
+            .with_context(|| format!("fence uncertain scoped launch `{}`", reservation.thread_id))?;
+        ryeos_app::execution_resources::cleanup_thread_scope_only(state, &reservation)
+            .with_context(|| format!("retire retained scope-only thread `{}`", reservation.thread_id))?;
+    }
     for reservation in state.state_store.process_resource_reservations()? {
         ryeos_app::execution_resources::cleanup_process_resource_reservation(state, &reservation)
             .with_context(|| {

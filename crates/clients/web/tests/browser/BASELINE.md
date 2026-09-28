@@ -7,7 +7,7 @@ authority decisions.
 
 ## Source and exact inputs
 
-- Source commit: `87710628f` (`Establish the RyeOS workspace visual system`).
+- Source commit: `87710628f` (`Establish the RyeOS view-set visual system`).
 - Node.js: `24.21.0` (LTS), Linux x64 archive SHA-256
   `fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6`.
 - npm: `11.19.0`, bundled with that Node.js archive.
@@ -28,7 +28,7 @@ authority decisions.
   under `pkg/`, with paths relative to this package directory.
 
 The fixture is produced by the checked-in
-`ryeos-client-base` `workspace_visual_fixture` example. The renderer receives
+`ryeos-client-base` `view_set_visual_fixture` example. The renderer receives
 a fixed ambient random source through its browser-service adapter and the
 browser context enforces reduced motion. No semantic fixture is handwritten in
 JavaScript.

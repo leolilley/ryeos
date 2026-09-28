@@ -225,6 +225,23 @@ impl ExecutionPolicy {
         }
     }
 
+    /// Execute against one already-published immutable project snapshot. This
+    /// is distinct from capturing a live project: callers supply the exact CAS
+    /// identity and the realization is read-only for the whole execution.
+    pub fn local_pinned_snapshot_read_only(
+        response: ExecutionResponse,
+        hash: impl Into<String>,
+    ) -> Self {
+        Self {
+            project: ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::Snapshot { hash: hash.into() },
+                realization: PinnedRealization::ReadOnly,
+                child_policy: ChildProjectPolicy::Inherit,
+            },
+            ..Self::local_live(response)
+        }
+    }
+
     pub fn projectless(response: ExecutionResponse) -> Self {
         Self {
             recovery: ExecutionRecovery::RestartRecoverable,

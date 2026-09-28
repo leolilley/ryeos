@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-11T11:18:48Z:ab53dc27a248093eba9ee57aeb5385041de7719137c79c88f5aca72f3697b6ef:X12btmHSzUw6aIm8gZb/acLhh4EIrZiTBufnkulPNB8kWdBx0BbpLlS6eysvkqXV8/POO/lOP7mLX6NbPIwpCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-21T01:00:45Z:0a0b7b0572eed79607d8529928a4d1d430499c693bdd6651be57da1298d50760:gdYYHe3bg3UCTWeU+4Zi8IbhEyJEh4sJxSpYJJ/kJiWBMFEPYoxJzxAHt3Lg+VGqzmz0y6XEtMnYUlnrPZpiBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
 version: "1.0.1"
 description: Named retained exact Cargo vendor closure
@@ -28,6 +28,20 @@ build_products:
 product_relationships:
   schema: ryeos.product_relationships.v1
   relationships:
+    - name: cargo_vendor_to_qualification_verifier
+      producer:
+        canonical_ref: graph:ryeos/development/cargo-vendor-production
+        recipe_binding: product_recipe
+        product_name: cargo_vendor
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/environments/qualification/cargo-vendor
+        declaration_id: subject
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds: {maximum_entries: 50000, maximum_depth: 64, maximum_file_bytes: 134217728, maximum_total_bytes: 1073741824}
+      qualification: {policy_ref: null, required_claims: []}
     - name: cargo_vendor_to_check
       producer:
         canonical_ref: graph:ryeos/development/cargo-vendor-production
@@ -46,8 +60,8 @@ product_relationships:
           maximum_file_bytes: 134217728
           maximum_total_bytes: 1073741824
       qualification:
-        policy_ref: null
-        required_claims: []
+        policy_ref: config:ryeos/environments/qualification/cargo-vendor
+        required_claims: [cargo_vendor_lock_closure_v1, cargo_vendor_offline_checksums_v1]
     - name: cargo_vendor_to_test
       producer:
         canonical_ref: graph:ryeos/development/cargo-vendor-production
@@ -66,8 +80,8 @@ product_relationships:
           maximum_file_bytes: 134217728
           maximum_total_bytes: 1073741824
       qualification:
-        policy_ref: null
-        required_claims: []
+        policy_ref: config:ryeos/environments/qualification/cargo-vendor
+        required_claims: [cargo_vendor_lock_closure_v1, cargo_vendor_offline_checksums_v1]
     - name: cargo_vendor_to_build
       producer:
         canonical_ref: graph:ryeos/development/cargo-vendor-production
@@ -86,5 +100,5 @@ product_relationships:
           maximum_file_bytes: 134217728
           maximum_total_bytes: 1073741824
       qualification:
-        policy_ref: null
-        required_claims: []
+        policy_ref: config:ryeos/environments/qualification/cargo-vendor
+        required_claims: [cargo_vendor_lock_closure_v1, cargo_vendor_offline_checksums_v1]

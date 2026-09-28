@@ -372,8 +372,33 @@ fn validate_project_response(
     response: &ExecutionEvidenceProjectResponse,
     limits: &ExecutionEvidenceLimitsWire,
 ) -> Result<(), EngineError> {
-    if let ExecutionEvidenceProjectResponse::Projected { calls, .. } = response {
+    if let ExecutionEvidenceProjectResponse::Projected {
+        calls,
+        scoped_attempt,
+        ..
+    } = response
+    {
         validate_calls(calls, limits, |call| &call.call_id)?;
+        if let Some(scoped) = scoped_attempt {
+            if scoped.attempt_id.len() != 71
+                || !scoped.attempt_id.starts_with("scoped-")
+                || !scoped.attempt_id[7..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || scoped.scenario_id.is_empty()
+                || scoped.scenario_id.len() > 128
+                || !scoped
+                    .scenario_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+                || !lillux::valid_hash(&scoped.observation_object_hash)
+                || !calls.is_empty()
+            {
+                return Err(EngineError::Internal(
+                    "execution evidence scoped attempt coordinate is not canonical or mixes managed calls".to_owned(),
+                ));
+            }
+        }
         if calls.iter().any(|call| {
             !lillux::valid_hash(&call.operation_id)
                 || !lillux::valid_hash(&call.action_digest)
@@ -543,6 +568,7 @@ mod tests {
     fn project_response_refuses_malformed_candidate_coordinates() {
         let response = ExecutionEvidenceProjectResponse::Projected {
             result: json!({"accepted": true}),
+            scoped_attempt: None,
             calls: vec![ExecutionEvidenceCandidateCallWire {
                 call_id: "probe".to_owned(),
                 operation_id: "not-a-hash".to_owned(),
@@ -551,6 +577,28 @@ mod tests {
                 result_digest: "3".repeat(64),
             }],
         };
+        assert!(validate_project_response(&response, &limits()).is_err());
+    }
+
+    #[test]
+    fn scoped_project_response_requires_one_canonical_unmixed_attempt() {
+        let mut response = ExecutionEvidenceProjectResponse::Projected {
+            result: json!({"accepted": true}),
+            calls: Vec::new(),
+            scoped_attempt: Some(
+                ryeos_handler_protocol::ExecutionEvidenceCandidateScopedAttemptWire {
+                    attempt_id: format!("scoped-{}", "a".repeat(64)),
+                    scenario_id: "native_codex".into(),
+                    observation_object_hash: "b".repeat(64),
+                },
+            ),
+        };
+        validate_project_response(&response, &limits()).unwrap();
+        let ExecutionEvidenceProjectResponse::Projected { scoped_attempt, .. } = &mut response
+        else {
+            unreachable!()
+        };
+        scoped_attempt.as_mut().unwrap().attempt_id = "scoped-not-a-hash".into();
         assert!(validate_project_response(&response, &limits()).is_err());
     }
 

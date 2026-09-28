@@ -21,6 +21,7 @@ pub mod paths;
 pub mod progress;
 pub mod resolver;
 pub mod scalar_or_vec;
+pub mod scoped_relay_handoff;
 pub mod template;
 pub mod verified_loader;
 pub mod workload_client;

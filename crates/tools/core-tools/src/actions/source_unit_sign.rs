@@ -445,7 +445,7 @@ mod tests {
     use rand::rngs::OsRng;
     use ryeos_engine::contracts::{SignatureEnvelope, ValueShape};
     use ryeos_engine::kind_registry::{ExecutionSchema, ExtensionSpec};
-    use ryeos_engine::source_closure::SourceMaterialization;
+    use ryeos_engine::source_closure::{ExecutorSourceLocation, SourceMaterialization};
     use ryeos_state::objects::{LogicalSourceRoot, SourceClosureFile, SourceClosureManifest};
 
     fn schema(max_file_bytes: u64, max_total_bytes: u64) -> KindSchema {

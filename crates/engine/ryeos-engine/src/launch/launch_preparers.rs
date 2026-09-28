@@ -289,6 +289,7 @@ impl LaunchPreparerRunner {
                 verified_command: Some(&verified_code[0]),
                 external_read_only_mounts: &[],
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: &[],
                 item_ref: &item_ref,
                 thread_id: "launch-preparer",

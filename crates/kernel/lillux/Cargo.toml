@@ -1,6 +1,6 @@
 [package]
 name = "lillux"
-version = "0.5.99"
+version = "0.5.100"
 edition = "2024"
 description = "Lillux microkernel — Execute, Memory, Identity, Time"
 license.workspace = true
@@ -24,14 +24,27 @@ ed25519-dalek = { workspace = true, features = ["pkcs8", "rand_core", "pem"] }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
+ring = "0.17.14"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 hmac = { workspace = true }
 zeroize = { workspace = true }
+hickory-resolver = { version = "0.25.2", default-features = false, features = ["tokio", "system-config"] }
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "io-util"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[[test]]
+name = "invocation_startup"
+path = "tests/invocation_startup.rs"
+harness = false
+
+[[test]]
+name = "private_source_owner"
+path = "tests/private_source_owner.rs"
+harness = false
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

@@ -15,6 +15,7 @@ pub mod capability;
 pub mod chain;
 pub mod event_types;
 pub mod external_content;
+pub mod external_execution;
 pub mod gc;
 pub mod head_cache;
 pub mod ignore;
@@ -36,6 +37,7 @@ pub mod rebuild;
 pub mod recovery;
 pub mod refs;
 pub mod signer;
+pub mod source_verification;
 pub mod sqlite_schema;
 pub mod state_db;
 pub mod sync;
@@ -61,7 +63,7 @@ pub use external_content::{
     LargeContentCapturePolicy, LaunchCaptureBudget, MAX_CAPTURE_BYTES, MAX_CAPTURE_DEPTH,
     MAX_CAPTURE_ENTRIES, MAX_CAPTURE_FILE_BYTES, VerifiedExternalContentClosure,
     capture_external_content_at, capture_file_at, capture_large_file, capture_large_tree,
-    capture_tree, external_content_manifest_digest,
+    capture_tree, external_content_manifest_digest, observe_external_content_tree_exact,
 };
 pub use head_cache::{CachedHead, HeadCache};
 pub use large_object_store::{
@@ -108,10 +110,10 @@ pub use provider_call_observation::{
     ProviderCallObservationSource, ProviderCallReplaySource, provider_call_observation_id,
 };
 pub use recovery::{
-    CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage, HeadOperation,
-    PendingChainHeadTransition, PendingTransitionCursor, ProjectionRecoveryGeneration,
-    RECOVERY_PROTOCOL_GENERATION, RecoveryStore, StagedCasRootHashes, StagedCasRootLease,
-    TransitionPhase,
+    CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
+    DurableExternalCandidateReceipt, HeadOperation, PendingChainHeadTransition,
+    PendingTransitionCursor, ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION,
+    RecoveryStore, StagedCasRootHashes, StagedCasRootLease, TransitionPhase,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;

@@ -9,7 +9,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 use ryeos_runtime::workload_client::{
@@ -23,7 +22,7 @@ type PendingResponses = Arc<Mutex<HashMap<String, SyncSender<WorkloadClientRespo
 pub struct RunningWorkloadClientBroker {
     endpoint: Option<String>,
     channel: WorkloadClientChannel,
-    accept_thread: Option<thread::JoinHandle<()>>,
+    accept_task: Option<lillux::task::HostTask<()>>,
 }
 
 impl RunningWorkloadClientBroker {
@@ -43,8 +42,8 @@ impl Drop for RunningWorkloadClientBroker {
             // Wake accept. Lillux refuses the runtime itself as an invoking peer.
             let _ = lillux::LocalDuplexStream::connect(Path::new(endpoint));
         }
-        if let Some(thread) = self.accept_thread.take() {
-            let _ = thread.join();
+        if let Some(task) = self.accept_task.take() {
+            let _ = task.join();
         }
     }
 }
@@ -108,13 +107,12 @@ impl WorkloadClientChannel {
             .ok_or_else(|| anyhow!("workload ingress is full"))?;
         let (sender, receiver) = sync_channel(1);
         let channel = self.clone();
-        thread::Builder::new()
-            .name("ryeos-workload-invocation".to_owned())
-            .spawn(move || {
-                let _slot = slot;
-                let _ = sender.send(channel.exchange(source, request));
-            })
-            .context("start bounded workload invocation")?;
+        lillux::task::spawn_host_task("ryeos-workload-invocation", move || {
+            let _slot = slot;
+            let _ = sender.send(channel.exchange(source, request));
+        })
+        .context("start bounded workload invocation")?
+        .detach();
         Ok(receiver)
     }
 
@@ -253,51 +251,46 @@ pub fn start(
     };
     let response_pending = Arc::clone(&channel.pending);
     let response_stopping = Arc::clone(&channel.stopping);
-    thread::Builder::new()
-        .name("ryeos-workload-responses".to_owned())
-        .spawn(move || {
-            read_daemon_responses(reader, response_pending, response_stopping, deadline);
-            let _ = interrupt.shutdown();
-        })?;
+    lillux::task::spawn_host_task("ryeos-workload-responses", move || {
+        read_daemon_responses(reader, response_pending, response_stopping, deadline);
+        let _ = interrupt.shutdown();
+    })?
+    .detach();
     let accept_channel = channel.clone();
-    let accept_thread = listener
+    let accept_task = listener
         .map(|listener| {
-            thread::Builder::new()
-                .name("ryeos-workload-accept".to_owned())
-                .spawn(move || {
-                    loop {
-                        let stream = match listener.accept_isolated_descendant() {
-                            Ok(stream) => stream,
-                            Err(_) if accept_channel.stopping.load(Ordering::Acquire) => return,
-                            Err(_) => continue,
-                        };
-                        if accept_channel.stopping.load(Ordering::Acquire) {
-                            return;
-                        }
-                        // An idle listener must not reserve the shared slot and starve
-                        // protocol ingress. Acquire after exact peer admission instead.
-                        let Some(slot) = accept_channel.slots.try_acquire() else {
-                            continue;
-                        };
-                        let channel = accept_channel.clone();
-                        if thread::Builder::new()
-                            .name("ryeos-workload-cli".to_owned())
-                            .spawn(move || {
-                                let _slot = slot;
-                                handle_local_invocation(stream, channel);
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
+            lillux::task::spawn_host_task("ryeos-workload-accept", move || {
+                loop {
+                    let stream = match listener.accept_isolated_descendant() {
+                        Ok(stream) => stream,
+                        Err(_) if accept_channel.stopping.load(Ordering::Acquire) => return,
+                        Err(_) => continue,
+                    };
+                    if accept_channel.stopping.load(Ordering::Acquire) {
+                        return;
                     }
-                })
+                    // An idle listener must not reserve the shared slot and starve
+                    // protocol ingress. Acquire after exact peer admission instead.
+                    let Some(slot) = accept_channel.slots.try_acquire() else {
+                        continue;
+                    };
+                    let channel = accept_channel.clone();
+                    if lillux::task::spawn_host_task("ryeos-workload-cli", move || {
+                        let _slot = slot;
+                        handle_local_invocation(stream, channel);
+                    })
+                    .is_err()
+                    {
+                        return;
+                    }
+                }
+            })
         })
         .transpose()?;
     Ok(RunningWorkloadClientBroker {
         endpoint,
         channel,
-        accept_thread,
+        accept_task,
     })
 }
 
@@ -483,6 +476,9 @@ mod tests {
                 // External test orchestration only: production namespaces and
                 // all peer/descriptor authority remain Lillux-owned. The tmpfs
                 // is mounted only inside this fresh unprivileged namespace.
+                // Retain the exact test executable before covering /tmp: Cargo
+                // targets may live there. Materialize it only into the fresh
+                // namespace so nested current_exe launches remain reachable.
                 let mut command = std::process::Command::new("unshare");
                 command
                     .args([
@@ -492,9 +488,25 @@ mod tests {
                         "--pid",
                         "--fork",
                         "--mount-proc",
-                        "/bin/sh",
+                        "/bin/bash",
                         "-c",
-                        "mount -t tmpfs -o mode=1777 tmpfs /tmp && exec \"$@\"",
+                        r#"set -eu
+exec {probe_fd}< "$1"
+shift
+if [ -n "${RYEOS_TEST_DUAL_CLIENT_BINARY:-}" ]; then
+    exec {client_fd}< "$RYEOS_TEST_DUAL_CLIENT_BINARY"
+fi
+mount -t tmpfs -o mode=1777 tmpfs /tmp
+cp "/proc/self/fd/$probe_fd" /tmp/ryeos-dual-ingress-probe
+chmod 500 /tmp/ryeos-dual-ingress-probe
+exec {probe_fd}<&-
+if [ -n "${RYEOS_TEST_DUAL_CLIENT_BINARY:-}" ]; then
+    cp "/proc/self/fd/$client_fd" /tmp/ryeos-dual-ingress-client
+    chmod 500 /tmp/ryeos-dual-ingress-client
+    exec {client_fd}<&-
+    export RYEOS_TEST_DUAL_CLIENT_BINARY=/tmp/ryeos-dual-ingress-client
+fi
+exec /tmp/ryeos-dual-ingress-probe "$@""#,
                         "probe",
                     ])
                     .arg(std::env::current_exe().unwrap())

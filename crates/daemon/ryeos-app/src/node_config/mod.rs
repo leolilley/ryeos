@@ -115,6 +115,11 @@ pub struct BundleRecord {
 /// Immutable snapshot of all node-config sections loaded at startup.
 #[derive(Debug, Clone)]
 pub struct NodeConfigSnapshot {
+    pub external_execution: Vec<sections::external_execution::InstalledExternalExecutionBinding>,
+    pub runtime_snapshot_production:
+        Vec<sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding>,
+    pub runtime_snapshot_qualification:
+        Vec<sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding>,
     /// All registered bundle records, in load order.
     pub bundles: Vec<BundleRecord>,
     /// All loaded route specifications, in load order.
@@ -171,6 +176,9 @@ impl NodeConfigTable {
             Box::new(sections::bundle::BundleSection),
             Box::new(sections::command::CommandSection),
             Box::new(sections::route::RouteSection),
+            Box::new(sections::external_execution::ExternalExecutionSection),
+            Box::new(sections::runtime_snapshot_production::RuntimeSnapshotProductionSection),
+            Box::new(sections::runtime_snapshot_qualification::RuntimeSnapshotQualificationSection),
         ])
         .expect("built-in node-config section table is valid")
     }

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-09-28T07:15:30Z:eae35786e1a52f05f7226b093e68f10ad4445fec1a25c056726a665b765809eb:f1YEEaegwqrwisSVAr5R+Nlwvw+cjSi7st4eJQFHbUrtYu999e69BL9YY7lRIekbhXoFv68CkZ2EiG9DjXDICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.launch-product-qualification
+required_caps: ["ryeos.execute.service.external-content/launch-product-qualification"]
+schema:
+  launch_id: string
+  witness_hash: string
+  witness_source: object
+  relationship_name: string
+  project_context: object|null
+description: Accept one exact operator-owned product qualification launch; the signed relationship and current Bundle select its verifier and policy, while an explicit nullable project context preserves pinned project authority when required by the verifier slot
