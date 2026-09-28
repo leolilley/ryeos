@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-26T23:42:58Z:ca87c452f3f5c3f339cbe1f4a93fa9ecf4454bbff5598abb7be89c7277d05dce:QeDG26sDfj+oO1y3gEogEML2vz8Pd9icuL+vae3xi2e+0E2ak1NE49YL2yrVab7+0N6lM2TOJ+e5S0Y9y5v7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-28T09:12:30Z:1a80828bfab65e7c61a4308df08259d1360f93bbb6d6ebb588310586ce2d4f0a:1SxtOaEVdu8RM6mnrWs0pWOlVQsV/w3pAjRbVXFnoYOYihucyTw/o5doZAjRzVskI1oyTTMK5osl6POnaCoxCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -22,6 +22,50 @@ For continuation of the native release proof, start with the dated checkpoint
 below and `development-operation-ownership.md`. Historical successful compiler
 or binding evidence elsewhere in this document is not evidence for a newly
 produced platform identity.
+
+### Release-authority profile integration checkpoint — 2026-09-28
+
+The current execution-policy schema requires a nullable producer ceiling.
+`release-authority` must explicitly admit bounded, signed bundle-release
+producers; `bundle-source` explicitly denies producer admission. Both signed
+profiles now use execution schema 4, and the source-profile regression test
+covers all ten declared init profiles. The focused policy/profile test and
+`scripts/pkg/test-bundle-sets.sh` pass. This closes a test-coverage miss from
+branch integration: the prior Rust test covered eight profiles and omitted
+both role-specific profiles.
+
+The release-authority ceiling matches the explicit bounded values already used
+by `full` and `development`. It is an operator-authored initial node-wide
+ceiling, below structural producer maxima but not derived from per-recipe
+measurements. Keep that distinction visible through qualification; do not
+describe the current limits as measured recipe budgets.
+
+The latest focused `release-authority` package population succeeded without a
+substrate-image rebuild. Before installation, read-only validation found that
+the running authority app root still has Core v11 while the candidate source
+uses Core v12, and its existing policy generation is behind the current
+execution schema. Do not retry qualification against that installed state.
+The updated signed `release-authority` source profile has not yet been
+installed; the next step is its scoped install with explicit policy-generation
+replacement, then verify strict preflight, daemon readiness, host supervision,
+and exact executable hashes. Preserve the full consumer and bundle-source
+nodes. Implementation details and current candidate hashes are tracked in
+`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
+
+The first install then stopped at prospective source admission because the
+published Core manifest required isolation adapter v12 but the adapter payload
+was retained from an earlier generation and only spoke v11. The targeted
+population's explicit Cargo list had omitted
+`ryeos-lillux-isolation-adapter`; the population script therefore preserved the
+old static binary. The correction rebuilt only that package and republished
+the selected release-authority set without rebuilding the substrate image.
+The Core payload hash and Cargo artifact hash both equal
+`407ae8612e9fa4c8b28a930f9163a155cb0e4fd8e42c9e41a45be1e9bc13449b`; a sealed
+inspection request to the published binary returned protocol v12. Because the
+failed installer exits before daemon restart and host-upgrade completion, first
+inspect the exact node and host-upgrade state. That read-only command is staged
+in Clip-Kiwi secondary slot #1; do not retry installation until its output is
+reviewed.
 
 ### Constrained publisher deployment boundary — 2026-09-24
 
@@ -1937,3 +1981,96 @@ Use a newly admitted verifier capsule and inspect its recorded authority before 
 not reuse a COW capsule. Keep default live worker execution and existing COW
 semantics unchanged. This source-control selector is not itself a qualification
 or authority bypass.
+
+## Recovering a scoped install without predecessor-state compatibility
+
+The supervised package installer publishes a durable host-upgrade journal
+before replacing binaries. An initialization, verification, or restart failure
+can leave the node stopped and that journal active. Inspect the exact app-root
+binding and journal before retrying. Never unlink or hand-edit supervisor
+state: it retains the original desired state and inhibits unsafely early
+restart. Complete recovery through RyeOS lifecycle operations and call
+`host-upgrade finish` only after the exact installed daemon is ready and
+observed.
+
+An obsolete `runtime.sqlite3` schema is a separate boundary from package or
+adapter compatibility. Normal startup must reject predecessor execution
+authority without migration. If this node's local thread/execution history is
+explicitly disposable, inspect the exact retirement scope with
+`ryeos node reset execution-history --dry-run --app-root <app-root> --json`,
+then, only after choosing that scope, use RyeOS's confirmed reset operation.
+This cutover retires local thread-chain heads, runtime execution history,
+thread artifacts, and scheduler fire history; incompatible-schema runtime-row
+counts are intentionally unavailable. It preserves project HEADs unless
+`--include-project-heads` is separately selected, as well as node identity,
+trust, configuration, installed bundles, vault, and operational state. Never
+delete the SQLite file directly or add an implicit migration to make startup
+accept it. A successful reset invalidates prior thread IDs/capsules as live
+proof coordinates; capture a new clean source snapshot and re-admit any proof
+that must continue.
+
+### GNU Python qualification keeps project-owned relationship authority — 2026-09-28
+
+The signed GNU Python verifier's `subject` slot references
+`config:development/ryeos/gnu-python-products`, whose
+`runtime_to_qualification_verifier` relationship binds the retained runtime
+product to the verifier declaration. That relationship is development-project
+source, not an installed Standard/Core consumer contract. A retained product
+witness attests the producer capture and its relationship contents; it does not
+replace the verifier's current consumer relationship lookup authority.
+
+For retained manifest
+`9bbe57a9fbde797bc0b99a09be779dd3462a4f46cbe569181af9d9ba14dc3ce8`, the live
+release-authority node has a matching active `pinned_project` binding at source
+snapshot `344a321f208044b33e352508102548f226c99931cdf4a0fe818f20cb78f1274a`.
+The verifier's separate `installed_bundle` binding is for its bootstrap Python
+(`800d496...`), not the selected subject. Therefore `--no-project` cannot
+resolve this signed slot or authorize this subject; RyeOS correctly fails
+closed with `effective item not found: config:development/ryeos/gnu-python-products`.
+
+The live binding index was re-audited on 2026-09-28 after the newer import and
+composition. All 43 active bindings for the exact subject manifest are
+`pinned_project`; none is `installed_bundle`. The binding created for snapshot
+`344a321...` is `a1ea7fd...` and its subject ID is
+`cf759edc...`. Running the exact root selection with `--no-project` as the
+unprivileged host user again failed at relationship resolution with the error
+above, before the verifier ran. By contrast, an ordinary `execute` with the
+pinned snapshot returned the expected probe claims; that is execution
+evidence only, not a qualification capsule or publication.
+
+Run this qualification through the protected pinned read-only launch using the
+exact existing project snapshot and its signed project-owned relationship.
+The daemon must derive the inner Root `subject` selection from the signed
+qualification policy and exact witness, while publishing only against the
+outer policy-bearing `runtime_to_qualified_runtime` relationship. Do not copy
+development product relationships into Standard/Core, mint a projectless
+binding, treat a successful ordinary verifier execution as qualification, or
+weaken D1/D2/current-binding checks. If a projectless verifier is desired in a
+future design, first give it a genuinely non-project consumer relationship
+authority and review that ownership change end-to-end.
+
+### Pinned qualification retains selectors separately from D0 — 2026-09-28
+
+The first live pinned `launch-product-qualification` attempt was terminally
+refused before verifier execution with
+`pinned qualification admission has no resolved Root product selection`.
+This did not contradict the active pinned binding or successful ordinary
+verifier run. `RootExecutionAdmission` intentionally retains raw
+`ProductSelectionInputs` separately from its pre-selection `ResolutionOutput`
+(D0); normal dispatch does not embed the resolved product projection in that
+output during preflight. The qualification finalizer had incorrectly assumed
+it would already be present there.
+
+The corrected source finalizer re-resolves the one daemon-derived Root
+selection through the ordinary product-composition path with the exact
+admitted request Engine, read-only snapshot roots, pinned subject authority,
+and authenticated operator. This rechecks the signed project relationship,
+current pinned binding, witness, and consumer slot before continuing the
+existing D1/D2 and qualification-policy checks. It does not use a
+projectless fallback or alter the outer policy-bearing
+`runtime_to_qualified_runtime` publication target. The candidate app release
+check and focused daemon release build pass; the live install and fresh
+qualification attempt remain pending. The last 2026-09-28 implementation
+checkpoint in `.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`
+records exact candidate hashes and install status; do not treat the earlier
+ordinary verifier result as qualification evidence.

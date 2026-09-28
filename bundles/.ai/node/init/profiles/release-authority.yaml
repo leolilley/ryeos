@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T12:15:50Z:33cc53d76a072ed8dfe4ef6704a11bee86b45de45e8521dbfb9876eabe47b181:6rFr9aACGzbfj30tpPvkFfQT3C36n6SMj6y/fwirGRyZAmlAWfSH+PdyRXGdmjhnd7E60S5jSZ8I/o5o7VLCCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T01:36:36Z:b15585d8d65a64853b51a3c595e46576fd558777dff1b7bb7e9c445cf8f00621:E0iX6Ec+sEqCYZXb9JYvthWkv5npM43v2EcmWismbRbAdgzXMK0fTSge48OEe0NAvIeEac9tfCWSHvNjuUFmDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -160,11 +160,21 @@ policies:
         - ryeos.register.command.dispatch.direct_execute_item_ref
       web: []
   execution:
-    schema: 3
+    schema: 4
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
+    # Release-authority runs signed, purpose-scoped bundle-release producers.
+    # This is the explicit initial node-wide ceiling already used by
+    # full/development; producer admission remains disabled in catalog-only
+    # nodes. It is bounded below structural maxima and is not recipe-calibrated.
+    producer_resource_ceiling:
+      maximum_wall_time_ms: 600000
+      maximum_stdout_bytes: 6291456
+      maximum_stderr_bytes: 2097152
+      maximum_memory_bytes: 2147483648
+      maximum_processes: 64
     resource_authority:
       cleanup_allowance_ms: 30000
       admission:

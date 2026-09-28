@@ -113,10 +113,8 @@ pub(super) fn reconstruct_current_direct_artifact_identity(
             finalized_program,
             logical_project_root,
         )?;
-        let protocol = crate::thread_lifecycle::resolve_direct_terminator_protocol(
-            request_engine,
-            resolved,
-        )?;
+        let protocol =
+            crate::thread_lifecycle::resolve_direct_terminator_protocol(request_engine, resolved)?;
         // Fresh consumption checks today's exact executable closure against
         // the original qualified execution. It does not launch that verifier
         // again or require this consumer to have its execution capabilities.

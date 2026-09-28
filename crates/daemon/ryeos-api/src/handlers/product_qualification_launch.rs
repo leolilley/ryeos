@@ -1,11 +1,11 @@
-//! Accepted, projectless launch of the exact signed product verifier.
+//! Accepted launch of the exact signed product verifier.
 //!
 //! The caller owns only the launch coordinate and product relationship. The
-//! daemon resolves the verifier, parameters, fixed subject pin, and purpose
+//! daemon resolves the verifier, parameters, subject selection, and purpose
 //! from current trusted Bundle authority after reserving the launch ID.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use ryeos_app::execution_policy::{ExecutionPolicy, ExecutionResponse};
 use ryeos_app::handler_context::HandlerContext;
@@ -179,36 +179,103 @@ pub async fn handle(
     }
 
     let checkout_id = format!("qualification-{}", reservation.reserved_thread_id);
-    let (workspace, workspace_guard) =
-        create_isolated_no_project_workspace(&state, &checkout_id)
-            .map_err(|error| HandlerError::Internal(error.to_string()))?;
-    let project = resolve_project_context_off_thread(ResolveProjectContextRequest {
-        state: state.as_ref().clone(),
-        source: ProjectSource::LiveFs,
-        project_path: workspace,
-        principal_id: ctx.fingerprint.clone(),
-        checkout_id,
-        pinned_realization: None,
-        normalization: ProjectRootNormalization::Preserve,
-        launch_timings: None,
-    })
-    .await
-    .map_err(|error| HandlerError::Internal(format!("resolve projectless workspace: {error}")))?;
-    let policy = ExecutionPolicy::projectless(ExecutionResponse::Accepted);
-    policy.validate().map_err(|error| {
-        HandlerError::Internal(format!("qualification execution policy: {error}"))
-    })?;
-    let project_authority = ryeos_state::objects::ExecutionProjectAuthority::projectless(
-        ryeos_state::objects::EnvironmentAuthority::None,
-    )
-    .map_err(|error| HandlerError::Internal(format!("projectless authority: {error}")))?;
-    let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_projectless(
-        project.effective_path.clone(),
-        Arc::clone(&project.request_engine),
-        Arc::clone(&workspace_guard),
-        project_authority,
-    )
-    .map_err(|error| HandlerError::Internal(format!("qualification provenance: {error}")))?;
+    let (project, workspace_guard, provenance, lifecycle_authority, pinned_project_snapshot) =
+        if let Some(snapshot_hash) = prepared.pinned_snapshot_hash.as_deref() {
+            // The display locator is synthesized from immutable identity; no
+            // caller filesystem path is accepted or opened for this lane.
+            let display_path = PathBuf::from("/ryeos/pinned-snapshots").join(snapshot_hash);
+            let source = ProjectSource::Snapshot {
+                hash: snapshot_hash.to_owned(),
+            };
+            let project = resolve_project_context_off_thread(ResolveProjectContextRequest {
+                state: state.as_ref().clone(),
+                source: source.clone(),
+                project_path: display_path,
+                principal_id: ctx.fingerprint.clone(),
+                checkout_id: checkout_id.clone(),
+                pinned_realization: Some(
+                    ryeos_executor::execution::project_source::PinnedContextRealization::ReadOnly,
+                ),
+                normalization: ProjectRootNormalization::Preserve,
+                launch_timings: None,
+            })
+            .await
+            .map_err(|error| {
+                HandlerError::Internal(format!("resolve pinned qualification snapshot: {error}"))
+            })?;
+            let policy = ExecutionPolicy::local_pinned_snapshot_read_only(
+                ExecutionResponse::Accepted,
+                snapshot_hash,
+            );
+            let contract = crate::routes::response_modes::execute_mode::resolve_execution_contract(
+                &policy,
+                &source,
+                &project,
+                None,
+                None,
+                &ctx.fingerprint,
+                &ctx.scopes,
+                &state,
+            )
+            .map_err(|error| {
+                HandlerError::Internal(format!("qualification pinned provenance: {error:#}"))
+            })?;
+            let lifeline = project.temp_dir.clone().ok_or_else(|| {
+                HandlerError::Internal(
+                    "pinned qualification snapshot lost its materialization lease".to_string(),
+                )
+            })?;
+            (
+                project,
+                lifeline,
+                contract.provenance,
+                contract.lifecycle_authority,
+                Some(snapshot_hash.to_owned()),
+            )
+        } else {
+            let (workspace, workspace_guard) =
+                create_isolated_no_project_workspace(&state, &checkout_id)
+                    .map_err(|error| HandlerError::Internal(error.to_string()))?;
+            let project = resolve_project_context_off_thread(ResolveProjectContextRequest {
+                state: state.as_ref().clone(),
+                source: ProjectSource::LiveFs,
+                project_path: workspace,
+                principal_id: ctx.fingerprint.clone(),
+                checkout_id,
+                pinned_realization: None,
+                normalization: ProjectRootNormalization::Preserve,
+                launch_timings: None,
+            })
+            .await
+            .map_err(|error| {
+                HandlerError::Internal(format!("resolve projectless workspace: {error}"))
+            })?;
+            let policy = ExecutionPolicy::projectless(ExecutionResponse::Accepted);
+            policy.validate().map_err(|error| {
+                HandlerError::Internal(format!("qualification execution policy: {error}"))
+            })?;
+            let project_authority = ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                ryeos_state::objects::EnvironmentAuthority::None,
+            )
+            .map_err(|error| HandlerError::Internal(format!("projectless authority: {error}")))?;
+            let provenance =
+                ryeos_app::execution_provenance::ExecutionProvenance::root_projectless(
+                    project.effective_path.clone(),
+                    Arc::clone(&project.request_engine),
+                    Arc::clone(&workspace_guard),
+                    project_authority,
+                )
+                .map_err(|error| {
+                    HandlerError::Internal(format!("qualification provenance: {error}"))
+                })?;
+            (
+                project,
+                workspace_guard,
+                provenance,
+                policy.lifecycle_authority(),
+                None,
+            )
+        };
 
     let parsed_ref = ParsedItemRef::parse(&prepared.verifier_ref)
         .map_err(|error| HandlerError::Internal(format!("signed verifier ref: {error}")))?;
@@ -247,6 +314,7 @@ pub async fn handle(
             usage_subject: None,
             usage_subject_asserted_by: None,
             launch_timings: None,
+            pinned_project_snapshot: pinned_project_snapshot.clone(),
         },
     )
     .await
@@ -286,23 +354,54 @@ pub async fn handle(
     let root_admission = preflight.root_admission.ok_or_else(|| {
         HandlerError::Internal("threaded verifier has no root admission".to_string())
     })?;
-    let admitted_definition_digest = root_admission
-        .resolution_output()
-        .effective_definition_digest()
-        .map_err(|error| HandlerError::Internal(format!("verifier D1 identity: {error}")))?
-        .as_str()
-        .to_string();
-    if admitted_definition_digest != prepared.verifier_admitted_definition_digest {
-        return Err(HandlerError::BadRequest(
-            "verifier source changed between product preparation and accepted dispatch".to_string(),
-        ));
-    }
-    require_exact_admitted_fixed_pin(
-        &project.request_engine,
-        &root_admission,
-        &prepared.policy_source.policy.subject_declaration_id,
-        &prepared.subject_manifest_hash,
-    )?;
+    let admitted_definition_digest = if pinned_project_snapshot.is_some() {
+        let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+            &project.request_engine,
+            root_admission.plan_context(),
+            &provenance,
+        )
+        .map_err(|error| {
+            HandlerError::Internal(format!("pinned qualification binding: {error:#}"))
+        })?;
+        ryeos_app::operator_external_content::product_qualification::finalize_pinned_qualification_launch(
+            &state,
+            &ctx,
+            &mut prepared,
+            &root_admission,
+            &project.request_engine,
+            root_admission.plan_context(),
+            &project_binding,
+            &project.effective_path,
+            provenance.project_authority(),
+        )
+        .map_err(|error| HandlerError::BadRequest(format!("pinned verifier identity refused: {error:#}")))?;
+        prepared
+            .verifier_admitted_definition_digest
+            .clone()
+            .ok_or_else(|| {
+                HandlerError::Internal("pinned verifier D1 was not finalized".to_string())
+            })?
+    } else {
+        let admitted = root_admission
+            .resolution_output()
+            .effective_definition_digest()
+            .map_err(|error| HandlerError::Internal(format!("verifier D1 identity: {error}")))?
+            .as_str()
+            .to_string();
+        if Some(admitted.clone()) != prepared.verifier_admitted_definition_digest {
+            return Err(HandlerError::BadRequest(
+                "verifier source changed between product preparation and accepted dispatch"
+                    .to_string(),
+            ));
+        }
+        require_exact_admitted_fixed_pin(
+            &project.request_engine,
+            &root_admission,
+            &prepared.policy_source.policy.subject_declaration_id,
+            &prepared.subject_manifest_hash,
+        )?;
+        admitted
+    };
     let producer_recipe_sources =
         ryeos_app::operator_external_content::product_qualification::
             resolve_current_bundle_producer_recipes_for_policy(
@@ -344,7 +443,12 @@ pub async fn handle(
             })?,
         verifier_ref: prepared.verifier_ref.clone(),
         verifier_effective_definition_digest: admitted_definition_digest,
-        verifier_realized_definition_digest: prepared.verifier_realized_definition_digest.clone(),
+        verifier_realized_definition_digest: prepared
+            .verifier_realized_definition_digest
+            .clone()
+            .ok_or_else(|| {
+            HandlerError::Internal("verifier D2 was not finalized".to_string())
+        })?,
     };
     let root_admission = root_admission
         .for_product_qualification(purpose)
@@ -357,7 +461,7 @@ pub async fn handle(
         &project.effective_path,
         BTreeMap::new(),
         prepared.product_selections.clone(),
-        policy.lifecycle_authority(),
+        lifecycle_authority,
         Some(ctx.clone()),
     )
     .map_err(|error| {
@@ -469,8 +573,15 @@ mod tests {
             "witness_hash":"a".repeat(64),
             "witness_source":{"kind":"local_capture"},
             "relationship_name":"runtime_to_verifier",
+            "project_context":null
         });
         serde_json::from_value::<Request>(request.clone()).unwrap();
+        let mut missing_context = request.clone();
+        missing_context
+            .as_object_mut()
+            .unwrap()
+            .remove("project_context");
+        assert!(serde_json::from_value::<Request>(missing_context).is_err());
         for forbidden in [
             "verifier_ref",
             "parameters",

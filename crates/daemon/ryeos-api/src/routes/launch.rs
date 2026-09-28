@@ -357,6 +357,7 @@ pub(crate) fn preflight_dispatch_launch(
         usage_subject,
         usage_subject_asserted_by,
         launch_timings,
+        pinned_project_snapshot: None,
     })
 }
 
@@ -379,6 +380,7 @@ struct BorrowedDispatchPreflight<'a> {
     usage_subject: Option<&'a ryeos_state::UsageSubject>,
     usage_subject_asserted_by: Option<&'a str>,
     launch_timings: Option<&'a ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    pinned_project_snapshot: Option<&'a str>,
 }
 
 fn preflight_dispatch_launch_core(
@@ -398,7 +400,29 @@ fn preflight_dispatch_launch_core(
         ))
     })?;
     let subject_resolution_authority = request.provenance.subject_resolution_authority();
-    let project_context = if matches!(
+    let project_context = if let Some(snapshot_hash) = request.pinned_project_snapshot {
+        if !matches!(
+            request.provenance.project_authority(),
+            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                snapshot_hash: authority_hash,
+                realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                workspace_outputs: None,
+                ..
+            } if authority_hash == snapshot_hash
+        ) || subject_resolution_authority
+            != (ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: snapshot_hash.to_owned(),
+            })
+        {
+            return Err(DispatchError::ProjectSource(
+                "pinned qualification preflight requires its exact read-only snapshot authority"
+                    .to_string(),
+            ));
+        }
+        ProjectContext::SnapshotHash {
+            hash: snapshot_hash.to_owned(),
+        }
+    } else if matches!(
         subject_resolution_authority,
         ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
     ) {
@@ -467,6 +491,9 @@ pub(crate) struct OwnedDispatchPreflight {
     pub usage_subject: Option<ryeos_state::UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
     pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    /// Internal daemon-only marker for protected pinned qualification. It is
+    /// never sourced from the public launch request or a project path.
+    pub pinned_project_snapshot: Option<String>,
 }
 
 /// Keep verified resolution/composition off the async HTTP executor. Every
@@ -502,6 +529,7 @@ pub(crate) async fn preflight_dispatch_launch_off_thread(
             usage_subject: request.usage_subject.as_ref(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.as_deref(),
             launch_timings: request.launch_timings.as_ref(),
+            pinned_project_snapshot: request.pinned_project_snapshot.as_deref(),
         })
     })
     .await

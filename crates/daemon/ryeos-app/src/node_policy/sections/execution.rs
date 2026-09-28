@@ -437,16 +437,24 @@ mod tests {
             .ancestors()
             .nth(3)
             .unwrap();
-        for profile in [
-            "standard",
-            "hosted-workflow",
-            "central-host",
-            "hosted-node",
-            "local-inference",
-            "contained-workflow",
-            "full",
-            "development",
-        ] {
+        let profile_dir = repository.join("bundles/.ai/node/init/profiles");
+        let mut profiles = std::fs::read_dir(&profile_dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                assert!(entry.file_type().unwrap().is_file());
+                let path = entry.path();
+                assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("yaml"));
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        profiles.sort();
+        assert_eq!(profiles.len(), 10, "update init-profile policy expectations");
+
+        for profile in profiles {
             let path = repository.join(format!("bundles/.ai/node/init/profiles/{profile}.yaml"));
             let source = std::fs::read_to_string(&path).unwrap();
             let document: serde_json::Value = serde_yaml::from_str(&source).unwrap();
@@ -454,10 +462,15 @@ mod tests {
                 serde_json::from_value(document["policies"]["execution"].clone()).unwrap();
             policy.validate().unwrap();
             assert_eq!(policy.schema, 4, "{}", path.display());
-            if ["development", "full", "contained-workflow"].contains(&profile) {
-                assert!(policy.producer_resource_ceiling.is_some(), "{profile}");
-            } else {
-                assert!(policy.producer_resource_ceiling.is_none(), "{profile}");
+            match profile.as_str() {
+                "full" | "contained-workflow" | "development" | "release-authority" => {
+                    assert!(policy.producer_resource_ceiling.is_some(), "{profile}");
+                }
+                "central-host" | "standard" | "local-inference" | "hosted-node"
+                | "hosted-workflow" | "bundle-source" => {
+                    assert!(policy.producer_resource_ceiling.is_none(), "{profile}");
+                }
+                _ => panic!("add an explicit producer-admission expectation for {profile}"),
             }
         }
     }

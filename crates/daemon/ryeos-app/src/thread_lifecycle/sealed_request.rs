@@ -836,20 +836,46 @@ impl SealedRootExecutionRequest {
         // Name the failed invariant without echoing any protected coordinate.
         // A blanket refusal makes a post-birth admission failure impossible to
         // distinguish from an altered source or launch parameter.
+        let projectless_lane = self.project_context == ProjectContext::None
+            && matches!(
+                self.project_authority,
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
+            );
+        let pinned_snapshot = match (&self.project_context, &self.project_authority) {
+            (
+                ProjectContext::SnapshotHash { hash: context_hash },
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    snapshot_hash,
+                    realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                    workspace_outputs: None,
+                    ..
+                },
+            ) if context_hash == snapshot_hash => Some(snapshot_hash.as_str()),
+            _ => None,
+        };
+        let pinned_lane = pinned_snapshot.is_some();
+        let authority_matches_context = if projectless_lane {
+            self.project_binding_subject_authority
+                == ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+                && self.resolution_subject_authority
+                    == ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+        } else if let Some(snapshot_hash) = pinned_snapshot {
+            let expected = ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: snapshot_hash.to_owned(),
+            };
+            self.project_binding_subject_authority == expected
+                && self.resolution_subject_authority == expected
+        } else {
+            false
+        };
         let checks = [
             ("candidate evaluation", self.candidate_evaluation.is_none()),
             ("scheduled fire", self.scheduled_fire.is_none()),
             (
-                "project context",
-                self.project_context == ProjectContext::None,
+                "project context and authority",
+                projectless_lane || pinned_lane,
             ),
-            (
-                "project authority",
-                matches!(
-                    self.project_authority,
-                    ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
-                ),
-            ),
+            ("project binding authority", authority_matches_context),
             ("reference bindings", self.ref_bindings.is_empty()),
             ("usage subject", self.usage_subject.is_none()),
             ("usage assertion", self.usage_subject_asserted_by.is_none()),
@@ -895,16 +921,21 @@ impl SealedRootExecutionRequest {
         if let Some((name, _)) = checks.iter().find(|(_, matches)| !matches) {
             bail!("sealed qualification purpose contradicts admitted verifier root: {name}");
         }
-        match self.product_selections.as_slice() {
-            [] => {}, // Fixed signed pin is checked by product admission/proof.
-            [selected]
-                if matches!(
-                    selected.target,
-                    ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
-                ) && selected.selection.declaration_id == purpose.subject_declaration_id
-                    && selected.selection.witness_hash == purpose.product_witness_hash
-                    && selected.selection.witness_source == purpose.witness_source
-                    && selected.selection.qualification_hash.is_none() => {}
+        let is_exact_root_subject = |selected: &ryeos_state::external_content::products::composition::ProductSelectionInput| {
+            matches!(
+                selected.target,
+                ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
+            ) && selected.selection.declaration_id == purpose.subject_declaration_id
+                && selected.selection.witness_hash == purpose.product_witness_hash
+                && selected.selection.witness_source == purpose.witness_source
+                && selected.selection.qualification_hash.is_none()
+        };
+        match (pinned_lane, self.product_selections.as_slice()) {
+            (true, [selected]) if is_exact_root_subject(selected) => {}
+            // Preserve the legacy projectless fixed-pin lane (with its
+            // optional pre-existing selected-root admission form).
+            (false, []) => {}
+            (false, [selected]) if is_exact_root_subject(selected) => {}
             _ => bail!("sealed qualification subject selection differs from launch purpose"),
         }
         Ok(())
@@ -2371,6 +2402,176 @@ mod authority_tests {
                 .unwrap_err()
                 .to_string()
                 .contains("verifier definition")
+        );
+    }
+
+    #[test]
+    fn pinned_qualification_requires_exact_snapshot_and_one_root_subject_selection() {
+        use ryeos_state::objects::{
+            EnvironmentAuthority, PinnedProjectRealization, PinnedTerminalPublication,
+        };
+
+        let verifier_ref = "tool:test/qualify_runtime";
+        let mut sealed = SealedRootExecutionRequest::storage_test_fixture();
+        sealed.item_ref = verifier_ref.to_owned();
+        sealed.launch_mode = "wait".to_owned();
+        sealed.verified_subject.source_space = ItemSpace::Bundle;
+        sealed.verified_subject.source_root = ItemSourceRoot::Bundle {
+            name: "test".to_owned(),
+        };
+        sealed.verified_trust_class = TrustClass::Trusted;
+        sealed.resolution_output.effective_trust_class = ResolutionTrustClass::TrustedBundle;
+        sealed.resolution_output.root.source_space = ItemSpace::Bundle;
+        sealed.resolution_output.root.source_root = ItemSourceRoot::Bundle {
+            name: "test".to_owned(),
+        };
+        sealed.resolution_output.root.trust_class = ResolutionTrustClass::TrustedBundle;
+        sealed.resolution_output.root.signer_fingerprint = Some("e".repeat(64));
+        sealed.effective_definition_digest = sealed
+            .resolution_output
+            .effective_definition_digest()
+            .unwrap();
+
+        let snapshot_hash = "a".repeat(64);
+        sealed.project_context = ProjectContext::SnapshotHash {
+            hash: snapshot_hash.clone(),
+        };
+        sealed.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:qualification".to_owned(),
+            Some(PathBuf::from("/ryeos/pinned-snapshots").join(&snapshot_hash)),
+            snapshot_hash.clone(),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let pinned_subject_authority =
+            ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: snapshot_hash.clone(),
+            };
+        sealed.project_binding_subject_authority = pinned_subject_authority.clone();
+        sealed.resolution_subject_authority = pinned_subject_authority;
+
+        let parameters_digest = sealed.admitted_parameters_digest().unwrap();
+        let realized = sealed
+            .resolution_output
+            .effective_definition_digest()
+            .unwrap()
+            .as_str()
+            .to_owned();
+        sealed.product_qualification = Some(serde_json::from_value(json!({
+            "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
+            "launch_id": format!("L-{}", "a".repeat(32)),
+            "owner_fingerprint": "session:test",
+            "product_witness_hash": "b".repeat(64),
+            "witness_source": {"kind":"local_capture"},
+            "relationship_name": "runtime_to_qualified_runtime",
+            "consumer_content": null,
+            "policy_source": {
+                "canonical_ref": "config:test/qualification_policy",
+                "raw_content_digest": "c".repeat(64),
+                "effective_definition_digest": "d".repeat(64),
+                "publisher_fingerprint": "e".repeat(64),
+                "policy": {
+                    "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_POLICY_SCHEMA,
+                    "verifier_ref": verifier_ref,
+                    "subject_declaration_id": "subject",
+                    "allowed_claims": ["command_probe"],
+                    "minimum_verifier_process_settlement": "scope_empty",
+                    "verifier_parameters": {}
+                }
+            },
+            "subject_declaration_id": "subject",
+            "subject_manifest_hash": "f".repeat(64),
+            "required_claims": ["command_probe"],
+            "admitted_parameters_digest": parameters_digest,
+            "verifier_ref": verifier_ref,
+            "verifier_effective_definition_digest": "1".repeat(64),
+            "verifier_realized_definition_digest": realized
+        })).unwrap());
+        sealed.product_selections = vec![
+            ryeos_state::external_content::products::composition::ProductSelectionInput {
+                target: ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {},
+                selection: ryeos_state::external_content::products::composition::ProductSelection {
+                    declaration_id: "subject".to_owned(),
+                    witness_hash: "b".repeat(64),
+                    witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+                    qualification_hash: None,
+                },
+            },
+        ];
+
+        sealed.validate_product_qualification_purpose().unwrap();
+
+        let mut empty = sealed.clone();
+        empty.product_selections.clear();
+        assert!(empty.validate_product_qualification_purpose().is_err());
+
+        let mut mismatched_snapshot = sealed.clone();
+        mismatched_snapshot.project_context = ProjectContext::SnapshotHash {
+            hash: "9".repeat(64),
+        };
+        assert!(
+            mismatched_snapshot
+                .validate_product_qualification_purpose()
+                .is_err()
+        );
+
+        let mut live = sealed.clone();
+        live.project_context = ProjectContext::LocalPath {
+            path: PathBuf::from("/project"),
+        };
+        assert!(live.validate_product_qualification_purpose().is_err());
+
+        let mut cow = sealed.clone();
+        cow.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:qualification".to_owned(),
+            Some(PathBuf::from("/ryeos/pinned-snapshots").join("a".repeat(64))),
+            "a".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(cow.validate_product_qualification_purpose().is_err());
+
+        let mut extra = sealed.clone();
+        extra
+            .product_selections
+            .push(extra.product_selections[0].clone());
+        assert!(extra.validate_product_qualification_purpose().is_err());
+
+        let mut non_root = sealed.clone();
+        non_root.product_selections[0].target =
+            ryeos_state::external_content::products::composition::ProductSelectionTarget::ContentDependency {
+                binding: "subject".to_owned(),
+            };
+        assert!(non_root.validate_product_qualification_purpose().is_err());
+
+        let mut output_bearing = sealed;
+        let mut authority = serde_json::to_value(&output_bearing.project_authority).unwrap();
+        authority["workspace_outputs"] = json!({
+            "partition": {
+                "schema": ryeos_state::objects::WORKSPACE_OUTPUT_PARTITION_SCHEMA,
+                "recipe_binding": "recipe",
+                "recipe_ref": "config:test/recipe",
+                "recipe_raw_content_digest": "1".repeat(64),
+                "declarations_hash": "2".repeat(64),
+                "project_snapshot_policy_hash": "3".repeat(64),
+                "roots": [],
+                "products": [],
+                "partition_identity": "4".repeat(64),
+                "capture_policy_digest": "5".repeat(64)
+            },
+            "capture_hash": null
+        });
+        output_bearing.project_authority = serde_json::from_value(authority).unwrap();
+        assert!(
+            output_bearing
+                .validate_product_qualification_purpose()
+                .is_err()
         );
     }
 
