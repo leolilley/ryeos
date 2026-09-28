@@ -608,6 +608,98 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sealed_verifier_handoff_and_observation_join_exact_occurrence() {
+        use ryeos_external_execution_contract::restored_runtime_measurement::{
+            RESTORED_VERIFIER_ADAPTER_PROTOCOL, RestoredVerifierAdapterObservation,
+            RestoredVerifierAdapterRequest, RestoredVerifierAdapterResponse,
+            RestoredVerifierAttemptIntent,
+        };
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            RuntimeSnapshotQualificationIntent, RuntimeSnapshotQualificationOccurrence,
+        };
+
+        let (challenge, source_intent, locator, readiness, stream) = restored_stream_fixture();
+        let mut qualification_intent = RuntimeSnapshotQualificationIntent {
+            schema: 1,
+            operation_id: String::new(),
+            owner_principal: source_intent.owner_principal.clone(),
+            snapshot_operation_id: source_intent.operation_id.clone(),
+            snapshot_intent_digest: source_intent.digest().unwrap(),
+            snapshot_id: locator.snapshot_id.clone(),
+            provider_id: source_intent.provider_id.clone(),
+            provider_group_id: source_intent.provider_group_id.clone(),
+            qualification_profile_digest: "d".repeat(64),
+            adapter_artifact_hash: "e".repeat(64),
+            provider_spec_digest: "f".repeat(64),
+            settings_digest: "1".repeat(64),
+            verifier_artifact_hash: "2".repeat(64),
+            maximum_lifetime_seconds: 900,
+            attempt_deadline_ms: 42,
+        };
+        qualification_intent.operation_id = qualification_intent.derived_operation_id().unwrap();
+        let occurrence = RuntimeSnapshotQualificationOccurrence {
+            schema: 1,
+            operation_id: qualification_intent.operation_id.clone(),
+            occurrence_id: challenge.restored_occurrence_id.clone(),
+            provider_response_sha256: "3".repeat(64),
+            contact_deadline_exceeded: false,
+        };
+        let mut attempt = RestoredVerifierAttemptIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: qualification_intent.operation_id.clone(),
+            restored_occurrence_id: occurrence.occurrence_id.clone(),
+            verifier_artifact_hash: qualification_intent.verifier_artifact_hash.clone(),
+            upload_sha256: "4".repeat(64),
+            upload_bytes: 1024,
+            challenge,
+            attempt_deadline_ms: 42,
+        };
+        attempt.operation_id = attempt.derived_operation_id().unwrap();
+        let request = RestoredVerifierAdapterRequest {
+            protocol: RESTORED_VERIFIER_ADAPTER_PROTOCOL.into(),
+            provider_spec_digest: qualification_intent.provider_spec_digest.clone(),
+            intent: attempt,
+            source_intent,
+            locator,
+            readiness,
+            qualification_intent,
+            occurrence,
+            upload_descriptor: 4,
+            upload_bytes: 1024,
+            upload_sha256: "4".repeat(64),
+        };
+        request.validate().unwrap();
+        let parsed = parse_restored_verifier_stream(
+            &stream,
+            &request.intent.challenge,
+            &request.source_intent,
+            &request.locator,
+            &request.readiness,
+        )
+        .unwrap();
+        let response = RestoredVerifierAdapterResponse::Observed {
+            observation: RestoredVerifierAdapterObservation {
+                schema: 1,
+                operation_id: request.intent.operation_id.clone(),
+                occurrence_id: request.occurrence.occurrence_id.clone(),
+                upload_token_execution_id: "exe-upload".into(),
+                run_token_execution_id: "exe-run".into(),
+                upload_response_sha256: "5".repeat(64),
+                run_stream_sha256: parsed.response_sha256,
+                measurement: parsed.measurement,
+            },
+        };
+        response.validate_for(&request).unwrap();
+        let mut changed = request.clone();
+        changed.occurrence.occurrence_id = "sbx-other".into();
+        assert!(response.validate_for(&changed).is_err());
+        let mut changed = request;
+        changed.upload_sha256 = "6".repeat(64);
+        assert!(response.validate_for(&changed).is_err());
+    }
+
     fn public_root() -> String {
         let signing = lillux::crypto::SigningKey::from_bytes(&[3; 32]);
         format!(

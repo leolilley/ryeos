@@ -18,6 +18,135 @@ use crate::runtime_snapshot::{
 pub const RESTORED_OWNER_MEASUREMENT_PROTOCOL: &str = "ryeos.restored-owner-measurement.v1";
 pub const MAX_RESTORED_OWNER_CHALLENGE_BYTES: usize = 4096;
 pub const MAX_RESTORED_OWNER_RESULT_BYTES: usize = 4096;
+pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v1";
+pub const MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES: usize = 32 * 1024;
+
+/// Sealed, one-contact handoff. The descriptor number is process-local; the
+/// exact upload bytes and hash remain part of the retained attempt. No field
+/// here grants a second attempt or qualifies the restored runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoredVerifierAdapterRequest {
+    pub protocol: String,
+    pub intent: RestoredVerifierAttemptIntent,
+    pub source_intent: RuntimeSnapshotIntent,
+    pub locator: RuntimeSnapshotLocator,
+    pub readiness: RuntimeSnapshotReadinessObservation,
+    pub qualification_intent: RuntimeSnapshotQualificationIntent,
+    pub occurrence: RuntimeSnapshotQualificationOccurrence,
+    pub provider_spec_digest: String,
+    pub upload_descriptor: u32,
+    pub upload_bytes: u64,
+    pub upload_sha256: String,
+}
+
+impl RestoredVerifierAdapterRequest {
+    pub fn validate(&self) -> Result<()> {
+        self.intent.validate_for(
+            &self.source_intent,
+            &self.locator,
+            &self.qualification_intent,
+            &self.occurrence,
+        )?;
+        let readiness_request = RuntimeSnapshotReadinessRequest {
+            protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
+            intent: self.source_intent.clone(),
+            locator: self.locator.clone(),
+            provider_spec_digest: self.source_intent.provider_spec_digest.clone(),
+        };
+        self.readiness.validate_for(&readiness_request)?;
+        ensure!(
+            self.protocol == RESTORED_VERIFIER_ADAPTER_PROTOCOL
+                && self.provider_spec_digest == self.qualification_intent.provider_spec_digest
+                && self.upload_descriptor > 2
+                && self.upload_bytes == self.intent.upload_bytes
+                && self.upload_sha256 == self.intent.upload_sha256,
+            "restored verifier handoff changed its signed or sealed authority"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES,
+            "restored verifier handoff exceeds its bound"
+        );
+        Ok(())
+    }
+}
+
+/// Complete adapter-observed upload and run stream, still not a qualification
+/// claim. The daemon must authenticate the admitted adapter attempt and join
+/// its execution evidence before treating this content as a measurement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoredVerifierAdapterObservation {
+    pub schema: u32,
+    pub operation_id: String,
+    pub occurrence_id: String,
+    pub upload_token_execution_id: String,
+    pub run_token_execution_id: String,
+    pub upload_response_sha256: String,
+    pub run_stream_sha256: String,
+    pub measurement: RestoredOwnerMeasurement,
+}
+
+impl RestoredVerifierAdapterObservation {
+    pub fn validate_for(&self, request: &RestoredVerifierAdapterRequest) -> Result<()> {
+        request.validate()?;
+        ensure!(
+            self.schema == 1
+                && self.operation_id == request.intent.operation_id
+                && self.occurrence_id == request.occurrence.occurrence_id,
+            "restored verifier observation changed its attempt or occurrence"
+        );
+        for execution_id in [
+            &self.upload_token_execution_id,
+            &self.run_token_execution_id,
+        ] {
+            ensure!(
+                execution_id.starts_with("exe-")
+                    && execution_id.len() <= 128
+                    && execution_id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+                "restored verifier token execution identity is invalid"
+            );
+        }
+        require_hash(&self.upload_response_sha256, "upload response")?;
+        require_hash(&self.run_stream_sha256, "run stream")?;
+        self.measurement.validate_content_for_bound_snapshot(
+            &request.intent.challenge,
+            &request.source_intent,
+            &request.locator,
+            &request.readiness,
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RestoredVerifierAdapterResponse {
+    Observed {
+        observation: RestoredVerifierAdapterObservation,
+    },
+    Uncertain {
+        operation_id: String,
+    },
+}
+
+impl RestoredVerifierAdapterResponse {
+    pub fn validate_for(&self, request: &RestoredVerifierAdapterRequest) -> Result<()> {
+        request.validate()?;
+        match self {
+            Self::Observed { observation } => observation.validate_for(request),
+            Self::Uncertain { operation_id } => {
+                ensure!(
+                    operation_id == &request.intent.operation_id,
+                    "uncertain verifier result changed its durable attempt"
+                );
+                Ok(())
+            }
+        }
+    }
+}
 
 /// One independently owned verifier contact after the restored occurrence is
 /// bound. A new nonce or deadline cannot mint another provider attempt for the
