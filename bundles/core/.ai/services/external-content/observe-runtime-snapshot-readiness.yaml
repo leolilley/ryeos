@@ -1,3 +1,4 @@
+# ryeos:signed:2026-09-28T11:11:22Z:2631a040ac13f6e745257ed26f8ca2d0700064be3bfed32e153b88827a18dbc7:84kMV0nZptjxlF3X2LsAD8vJvrOC4DZSavmym4AdejLQazv9fUht51pV9EUZCSst5KAULqQGjw+18DgIRMpeAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.observe-runtime-snapshot-readiness
 required_caps: ["ryeos.execute.service.external-content/observe-runtime-snapshot-readiness"]
