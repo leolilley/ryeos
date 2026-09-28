@@ -18,6 +18,8 @@ pub const RUNTIME_SNAPSHOT_READINESS_PROTOCOL: &str = "ryeos.runtime-snapshot-re
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA: u32 = 1;
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL: &str =
     "ryeos.runtime-snapshot-qualification-adapter.v1";
+pub const RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL: &str =
+    "ryeos.runtime-snapshot-qualification-termination.v1";
 pub const MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES: usize = 24 * 1024;
 pub const MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES: u64 = 64 * 1024 * 1024 + 16 * 1024;
 
@@ -318,6 +320,93 @@ impl RuntimeSnapshotQualificationOccurrence {
         ensure!(
             canonical_json(self)?.len() <= 1024,
             "snapshot qualification occurrence exceeds its bound"
+        );
+        Ok(())
+    }
+}
+
+/// One termination authority for a restored qualification occurrence. It is
+/// distinct from Worker termination and cannot be reminted by changing a
+/// deadline. A provider terminal observation does not itself prove guest
+/// writer exclusion or qualify the runtime product.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotQualificationTerminationIntent {
+    pub schema: u32,
+    pub operation_id: String,
+    pub qualification_operation_id: String,
+    pub occurrence_id: String,
+    pub owner_principal: String,
+    pub provider_id: String,
+    pub provider_spec_digest: String,
+    pub attempt_deadline_ms: i64,
+}
+
+impl RuntimeSnapshotQualificationTerminationIntent {
+    pub fn validate_for(
+        &self,
+        qualification: &RuntimeSnapshotQualificationIntent,
+        occurrence: &RuntimeSnapshotQualificationOccurrence,
+    ) -> Result<()> {
+        occurrence.validate_for(qualification)?;
+        ensure!(
+            self.schema == 1
+                && self.qualification_operation_id == qualification.operation_id
+                && self.occurrence_id == occurrence.occurrence_id
+                && self.owner_principal == qualification.owner_principal
+                && self.provider_id == qualification.provider_id
+                && self.provider_spec_digest == qualification.provider_spec_digest
+                && self.attempt_deadline_ms > 0
+                && self.operation_id == self.derived_operation_id()?,
+            "qualification termination differs from the retained restored occurrence"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= 2048,
+            "qualification termination intent exceeds its bound"
+        );
+        Ok(())
+    }
+
+    pub fn derived_operation_id(&self) -> Result<String> {
+        let coordinates = (
+            RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL,
+            &self.qualification_operation_id,
+            &self.occurrence_id,
+        );
+        Ok(hex::encode(Sha256::digest(canonical_json(&coordinates)?)))
+    }
+}
+
+/// Provider-only terminal observation. The daemon must bind it to a claimed
+/// one-shot attempt, and a separate guest-writer witness remains required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotQualificationTerminalObservation {
+    pub schema: u32,
+    pub operation_id: String,
+    pub occurrence_id: String,
+    pub provider_response_sha256: String,
+    pub terminated_at: String,
+    pub contact_deadline_exceeded: bool,
+}
+
+impl RuntimeSnapshotQualificationTerminalObservation {
+    pub fn validate_for(
+        &self,
+        intent: &RuntimeSnapshotQualificationTerminationIntent,
+    ) -> Result<()> {
+        ensure!(
+            self.schema == 1
+                && self.operation_id == intent.operation_id
+                && self.occurrence_id == intent.occurrence_id
+                && !self.terminated_at.is_empty()
+                && self.terminated_at.len() <= 64,
+            "qualification terminal observation changed its exact occurrence"
+        );
+        require_hash(&self.provider_response_sha256, "terminal response")?;
+        ensure!(
+            canonical_json(self)?.len() <= 1024,
+            "qualification terminal observation exceeds its bound"
         );
         Ok(())
     }
@@ -765,6 +854,43 @@ mod tests {
             },
         };
         bound.validate_for(&request).unwrap();
+        let occurrence = RuntimeSnapshotQualificationOccurrence {
+            schema: 1,
+            operation_id: request.intent.operation_id.clone(),
+            occurrence_id: "sbx-restored".into(),
+            provider_response_sha256: "c".repeat(64),
+            contact_deadline_exceeded: false,
+        };
+        let mut termination = RuntimeSnapshotQualificationTerminationIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: request.intent.operation_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            owner_principal: request.intent.owner_principal.clone(),
+            provider_id: request.intent.provider_id.clone(),
+            provider_spec_digest: request.intent.provider_spec_digest.clone(),
+            attempt_deadline_ms: request.intent.attempt_deadline_ms + 2,
+        };
+        termination.operation_id = termination.derived_operation_id().unwrap();
+        termination.validate_for(&request.intent, &occurrence).unwrap();
+        let mut changed_deadline = termination.clone();
+        changed_deadline.attempt_deadline_ms += 1;
+        assert_eq!(changed_deadline.derived_operation_id().unwrap(), termination.operation_id);
+        let mut switched_occurrence = termination.clone();
+        switched_occurrence.occurrence_id = "sbx-other".into();
+        assert!(switched_occurrence.validate_for(&request.intent, &occurrence).is_err());
+        let terminal = RuntimeSnapshotQualificationTerminalObservation {
+            schema: 1,
+            operation_id: termination.operation_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            provider_response_sha256: "d".repeat(64),
+            terminated_at: "2026-09-28T00:02:00Z".into(),
+            contact_deadline_exceeded: false,
+        };
+        terminal.validate_for(&termination).unwrap();
+        let mut switched_terminal = terminal;
+        switched_terminal.occurrence_id = "sbx-other".into();
+        assert!(switched_terminal.validate_for(&termination).is_err());
         let mut wrong = request.clone();
         wrong.locator.snapshot_id = "snp-other".into();
         assert!(wrong.validate().is_err());
