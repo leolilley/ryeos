@@ -100,6 +100,9 @@ impl InstalledRuntimeSnapshotProductionBinding {
     pub(crate) fn backend(&self) -> &str {
         &self.document.backend
     }
+    pub(crate) fn account(&self) -> &str {
+        &self.document.account
+    }
     pub(crate) fn adapter_artifact_hash(&self) -> &str {
         &self.document.adapter_artifact_hash
     }

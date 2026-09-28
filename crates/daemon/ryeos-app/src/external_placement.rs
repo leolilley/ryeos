@@ -55,6 +55,23 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     fn supervisor_artifact(&self) -> (&str, u64);
     fn launcher_artifact(&self) -> (&str, u64);
     fn settings_schema_digest(&self) -> &str;
+    /// One already-claimed snapshot attempt. The caller must establish the
+    /// current signed producer binding, product witness and durable CAS before
+    /// invoking this contact path; backend inspection alone grants no contact.
+    fn produce_runtime_snapshot(
+        &self,
+        _binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _credential: &PlacementCredential,
+        _request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotAdapterRequest,
+        _upload: &lillux::InheritedDescriptorAuthority,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ExternalLifecycleObservation<
+            ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotAdapterResponse,
+        >,
+    > {
+        bail!("external placement backend does not produce runtime snapshots")
+    }
     /// Effective capabilities from the exact installed adapter inspection.
     /// A declaration alone is not permission to invent stronger observations.
     fn lifecycle_capabilities(&self) -> BTreeSet<LifecycleCapability>;
@@ -859,6 +876,31 @@ pub struct ExternalPlacementBackendRegistry {
 }
 
 impl ExternalPlacementBackendRegistry {
+    /// Resolve the exact inspected adapter generation selected by a signed
+    /// producer binding. The caller must have won the durable snapshot-attempt
+    /// claim; this lookup by itself never authorizes provider contact.
+    pub(crate) fn produce_runtime_snapshot(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+        request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotAdapterRequest,
+        upload: &lillux::InheritedDescriptorAuthority,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ExternalLifecycleObservation<
+            ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotAdapterResponse,
+        >,
+    > {
+        let backend = self
+            .backends
+            .get(&(
+                binding.backend().to_owned(),
+                binding.adapter_artifact_hash().to_owned(),
+            ))
+            .context("exact signed snapshot producer adapter generation is not installed")?;
+        backend.produce_runtime_snapshot(binding, credential, request, upload, deadline)
+    }
+
     fn verify_runtime_probe(
         &self,
         contract: &ExternalPlacementBackendContract,

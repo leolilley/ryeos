@@ -14522,6 +14522,57 @@ impl StateStore {
             )
     }
 
+    /// The snapshot producer retains its one-attempt journal independently of
+    /// any later execution placement. No state lock is held across contact.
+    pub(crate) fn reserve_runtime_snapshot(
+        &self,
+        intent: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotIntent,
+    ) -> Result<runtime_db::runtime_snapshot::RuntimeSnapshotRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.reserve_runtime_snapshot(intent)
+    }
+
+    pub(crate) fn claim_runtime_snapshot_attempt(
+        &self,
+        operation_id: &str,
+        intent_digest: &str,
+    ) -> Result<runtime_db::runtime_snapshot::RuntimeSnapshotAttemptClaim> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .claim_runtime_snapshot_attempt(operation_id, intent_digest)
+    }
+
+    pub(crate) fn bind_runtime_snapshot_locator(
+        &self,
+        locator: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator,
+    ) -> Result<runtime_db::runtime_snapshot::RuntimeSnapshotRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .bind_runtime_snapshot_locator(locator)
+    }
+
+    pub(crate) fn quarantine_runtime_snapshot_attempt(
+        &self,
+        operation_id: &str,
+        intent_digest: &str,
+    ) -> Result<runtime_db::runtime_snapshot::RuntimeSnapshotRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .quarantine_runtime_snapshot_attempt(operation_id, intent_digest)
+    }
+
+    pub(crate) fn runtime_snapshot_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<runtime_db::runtime_snapshot::RuntimeSnapshotRecord>> {
+        self.lock()?
+            .runtime_db
+            .runtime_snapshot_operation(operation_id)
+    }
+
     pub(crate) fn cancel_uncontacted_external_allocation(&self, placement: &str) -> Result<()> {
         self.lock()?
             .runtime_db

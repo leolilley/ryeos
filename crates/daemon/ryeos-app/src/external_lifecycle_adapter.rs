@@ -6,6 +6,10 @@ use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution::lifecycle_adapter::{
     LifecycleAdapterInvocation, run_lifecycle_adapter,
 };
+use ryeos_external_execution_contract::runtime_snapshot::{
+    MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotAdapterRequest,
+    RuntimeSnapshotAdapterResponse,
+};
 use ryeos_external_execution_contract::staging_package::GuestStagingExpected;
 use ryeos_external_execution_contract::{
     AllocationReservation, BoundOccurrence, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
@@ -475,6 +479,147 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
 
     fn settings_schema_digest(&self) -> &str {
         &self.declaration.settings_schema_digest
+    }
+
+    fn produce_runtime_snapshot(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+        request: &RuntimeSnapshotAdapterRequest,
+        upload: &lillux::InheritedDescriptorAuthority,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<RuntimeSnapshotAdapterResponse>> {
+        request.validate()?;
+        let spec = self
+            .snapshot_production_spec
+            .as_ref()
+            .context("installed lifecycle adapter has no signed snapshot production profile")?;
+        ensure!(
+            binding.backend() == self.declaration.id
+                && binding.adapter_artifact_hash() == self.adapter_hash
+                && binding.snapshot_spec_sha256() == spec.sha256
+                && self
+                    .inspection
+                    .observed_snapshot_production_spec_sha256
+                    .as_deref()
+                    == Some(spec.sha256.as_str())
+                && request.intent.provider_id == self.declaration.id
+                && request.intent.adapter_artifact_hash == self.adapter_hash
+                && request.provider_spec_digest == spec.sha256
+                && request.intent.production_profile_digest == binding.digest()
+                && request.intent.settings_digest == binding.settings_digest()
+                && credential.backend() == binding.backend()
+                && credential.account() == binding.account()
+                && request.upload_bytes <= binding.maximum_upload_bytes()
+                && request.upload_descriptor
+                    == upload.inherited_descriptor().map_err(anyhow::Error::msg)?,
+            "snapshot attempt differs from its inspected signed producer authority"
+        );
+        let now = lillux::time::timestamp_millis();
+        let remaining_ms = request.intent.attempt_deadline_ms.saturating_sub(now);
+        ensure!(
+            remaining_ms > 0,
+            "snapshot attempt expired before adapter contact"
+        );
+        let deadline = deadline
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(u64::from(binding.contact_timeout_seconds())),
+            ))
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+            ));
+        ensure!(!deadline.has_elapsed(), "snapshot adapter deadline expired");
+        let descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)?;
+        let network_inputs = capture_lifecycle_network_inputs(binding.network_inputs())?;
+        let request_bytes = ryeos_external_execution_contract::canonical_json(request)?;
+        ensure!(
+            request_bytes.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+            "snapshot adapter request exceeds its bound"
+        );
+        let request_handle =
+            lillux::sealed_memfd(c"ryeos-runtime-snapshot-request", &request_bytes)
+                .map_err(anyhow::Error::msg)?;
+        let settings_bytes = lillux::canonical_json(binding.settings())?;
+        ensure!(
+            lillux::sha256_hex(settings_bytes.as_bytes()) == binding.settings_digest(),
+            "snapshot producer settings changed after node admission"
+        );
+        let settings_handle = lillux::sealed_memfd(
+            c"ryeos-runtime-snapshot-settings",
+            settings_bytes.as_bytes(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let credential_handle = lillux::sealed_memfd(
+            c"ryeos-runtime-snapshot-credential",
+            credential.secret().as_bytes(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let fd = |handle: &lillux::InheritedDescriptorAuthority| -> Result<String> {
+            Ok(handle
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?
+                .to_string())
+        };
+        let inherited = vec![
+            spec.authority.clone(),
+            settings_handle.clone(),
+            credential_handle.clone(),
+            network_inputs.resolver.authority().clone(),
+            network_inputs.hosts.authority().clone(),
+            upload.clone(),
+        ];
+        let environment = vec![
+            (LIFECYCLE_PROVIDER_SPEC_FD_ENV.into(), fd(&spec.authority)?),
+            (
+                LIFECYCLE_PROVIDER_SPEC_SHA256_ENV.into(),
+                spec.sha256.clone(),
+            ),
+            (LIFECYCLE_SETTINGS_FD_ENV.into(), fd(&settings_handle)?),
+            (LIFECYCLE_CREDENTIAL_FD_ENV.into(), fd(&credential_handle)?),
+            (
+                LIFECYCLE_RESOLVER_FD_ENV.into(),
+                fd(network_inputs.resolver.authority())?,
+            ),
+            (
+                LIFECYCLE_HOSTS_FD_ENV.into(),
+                fd(network_inputs.hosts.authority())?,
+            ),
+            (
+                LIFECYCLE_RESOLVER_SHA256_ENV.into(),
+                network_inputs.resolver_sha256,
+            ),
+            (
+                LIFECYCLE_HOSTS_SHA256_ENV.into(),
+                network_inputs.hosts_sha256,
+            ),
+            (
+                LIFECYCLE_NETWORK_POLICY_SHA256_ENV.into(),
+                network_inputs.policy_sha256,
+            ),
+            (
+                LIFECYCLE_REMAINING_TIMEOUT_MS_ENV.into(),
+                u64::try_from(deadline.remaining().as_millis())?.to_string(),
+            ),
+        ];
+        drop(descriptors);
+        let output = run_lifecycle_adapter(
+            &self.adapter,
+            LifecycleAdapterInvocation::ProduceSnapshot,
+            &request_handle,
+            inherited,
+            environment,
+            deadline,
+        )?;
+        let value: RuntimeSnapshotAdapterResponse =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+                .map_err(|_| anyhow::anyhow!("invalid runtime snapshot adapter response"))?;
+        value
+            .validate_for(request)
+            .map_err(|_| anyhow::anyhow!("invalid runtime snapshot adapter response"))?;
+        Ok(ExternalLifecycleObservation {
+            value,
+            deadline_exceeded: output.deadline_exceeded,
+        })
     }
 
     fn lifecycle_capabilities(
