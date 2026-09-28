@@ -4,16 +4,127 @@
 //! must first authenticate a current, published product qualification and its
 //! admitted verifier execution, then join these fields to the signed binding.
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use std::io::Cursor;
 
+use ryeos_external_execution_contract::restored_runtime_measurement::{
+    MAX_RESTORED_OWNER_RESULT_BYTES, RestoredOwnerChallenge, RestoredOwnerMeasurement,
+};
 use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator;
+use ryeos_external_execution_contract::runtime_snapshot::{
+    RuntimeSnapshotIntent, RuntimeSnapshotReadinessObservation,
+};
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_PROTOCOL, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
 };
+use ryeos_http_transport::{SseLimits, SseReader};
 
 use crate::{ADAPTER_ID, RenderPlan, Settings};
+
+const MAX_RESTORED_RUN_STREAM_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerifierOutputEvent {
+    stream: String,
+    data: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerifierExitEvent {
+    exit_code: i32,
+}
+
+/// Parsed content from one complete provider run stream. This remains an
+/// untrusted transport observation until the daemon binds the token/run ID,
+/// exact verifier artifact and restored occurrence to its durable allocation.
+pub(crate) struct RestoredVerifierStreamObservation {
+    pub measurement: RestoredOwnerMeasurement,
+    pub response_sha256: String,
+}
+
+pub(crate) fn parse_restored_verifier_stream(
+    body: &[u8],
+    challenge: &RestoredOwnerChallenge,
+    intent: &RuntimeSnapshotIntent,
+    locator: &RuntimeSnapshotLocator,
+    readiness: &RuntimeSnapshotReadinessObservation,
+) -> Result<RestoredVerifierStreamObservation> {
+    ensure!(
+        !body.is_empty() && body.len() <= MAX_RESTORED_RUN_STREAM_BYTES,
+        "restored verifier stream exceeds its bound"
+    );
+    let mut events = SseReader::new(
+        Cursor::new(body),
+        SseLimits {
+            line_bytes: 16 * 1024,
+            event_bytes: 16 * 1024,
+            total_bytes: MAX_RESTORED_RUN_STREAM_BYTES as u64,
+            events: 32,
+        },
+    )?;
+    let mut stdout = String::new();
+    let mut exited = false;
+    while let Some(event) = events.next_event()? {
+        ensure!(
+            event.id.is_none() && event.retry_ms.is_none() && !exited,
+            "restored verifier stream has unexpected event authority"
+        );
+        match event.event.as_deref() {
+            Some("output") => {
+                let output: VerifierOutputEvent =
+                    ryeos_external_execution_contract::from_json_slice_strict(
+                        event.data.as_bytes(),
+                        16 * 1024,
+                    )?;
+                ensure!(
+                    output.stream == "stdout" && !output.data.is_empty(),
+                    "restored verifier emitted non-measurement output"
+                );
+                stdout.push_str(&output.data);
+                ensure!(
+                    stdout.len() <= MAX_RESTORED_OWNER_RESULT_BYTES + 1,
+                    "restored verifier output exceeds its bound"
+                );
+            }
+            Some("exit") => {
+                let exit: VerifierExitEvent =
+                    ryeos_external_execution_contract::from_json_slice_strict(
+                        event.data.as_bytes(),
+                        1024,
+                    )?;
+                ensure!(
+                    exit.exit_code == 0,
+                    "restored verifier did not exit successfully"
+                );
+                exited = true;
+            }
+            _ => anyhow::bail!("restored verifier stream has unsupported event"),
+        }
+    }
+    ensure!(exited, "restored verifier stream has no complete exit");
+    let bytes = stdout
+        .strip_suffix('\n')
+        .context("restored verifier output lacks its single terminator")?
+        .as_bytes();
+    let measurement: RestoredOwnerMeasurement =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            bytes,
+            MAX_RESTORED_OWNER_RESULT_BYTES,
+        )?;
+    ensure!(
+        ryeos_external_execution_contract::canonical_json(&measurement)? == bytes,
+        "restored verifier output is noncanonical"
+    );
+    measurement.validate_content_for_bound_snapshot(challenge, intent, locator, readiness)?;
+    Ok(RestoredVerifierStreamObservation {
+        measurement,
+        response_sha256: lillux::sha256_hex(body),
+    })
+}
 
 pub(crate) fn interpret_authenticated_request(
     request: &LifecycleRuntimeProbeRequest,
@@ -187,6 +298,145 @@ impl RenderSnapshotProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn restored_stream_fixture() -> (
+        RestoredOwnerChallenge,
+        RuntimeSnapshotIntent,
+        RuntimeSnapshotLocator,
+        RuntimeSnapshotReadinessObservation,
+        Vec<u8>,
+    ) {
+        let mut intent = RuntimeSnapshotIntent {
+            schema: 1,
+            operation_id: String::new(),
+            owner_principal: format!("fp:{}", "1".repeat(64)),
+            provider_id: ADAPTER_ID.into(),
+            source_occurrence_id: "sbx-source".into(),
+            provider_group_id: "sbg-exact".into(),
+            production_profile_digest: "2".repeat(64),
+            adapter_artifact_hash: "3".repeat(64),
+            provider_spec_digest: "4".repeat(64),
+            settings_digest: "5".repeat(64),
+            product_witness_hash: "6".repeat(64),
+            guest_runtime_manifest_hash: "7".repeat(64),
+            owner_executable_sha256: "8".repeat(64),
+            controller_public_root: public_root(),
+            upload_sha256: "9".repeat(64),
+            upload_bytes: 1024,
+            attempt_deadline_ms: 42,
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        let locator = RuntimeSnapshotLocator {
+            schema:
+                ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_RESULT_SCHEMA,
+            operation_id: intent.operation_id.clone(),
+            intent_digest: intent.digest().unwrap(),
+            source_occurrence_id: intent.source_occurrence_id.clone(),
+            provider_group_id: intent.provider_group_id.clone(),
+            snapshot_id: "snp-exact".into(),
+            provider_response_sha256: "a".repeat(64),
+            provider_creation_observation: serde_json::json!({"schema": 1}),
+            adapter_observation_sha256: lillux::sha256_hex(br#"{"schema":1}"#),
+        };
+        let readiness = RuntimeSnapshotReadinessObservation {
+            schema: 1,
+            operation_id: intent.operation_id.clone(),
+            intent_digest: intent.digest().unwrap(),
+            snapshot_id: locator.snapshot_id.clone(),
+            source_occurrence_id: intent.source_occurrence_id.clone(),
+            provider_group_id: intent.provider_group_id.clone(),
+            creation_response_sha256: locator.provider_response_sha256.clone(),
+            readiness_response_sha256: "b".repeat(64),
+            captured_at: "2026-09-28T00:01:00Z".into(),
+            size_bytes: 4096,
+        };
+        let challenge = RestoredOwnerChallenge {
+            schema: 1,
+            protocol: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
+            operation_id: intent.operation_id.clone(),
+            snapshot_id: locator.snapshot_id.clone(),
+            restored_occurrence_id: "sbx-restored".into(),
+            nonce_hex: "c".repeat(64),
+        };
+        let measurement = RestoredOwnerMeasurement {
+            schema: 1,
+            protocol: challenge.protocol.clone(),
+            challenge_digest: challenge.digest().unwrap(),
+            manifest_hash: intent.guest_runtime_manifest_hash.clone(),
+            owner_executable_sha256: intent.owner_executable_sha256.clone(),
+            controller_public_root: intent.controller_public_root.clone(),
+        };
+        let output = format!(
+            "{}\n",
+            String::from_utf8(
+                ryeos_external_execution_contract::canonical_json(&measurement).unwrap()
+            )
+            .unwrap()
+        );
+        let event = serde_json::json!({"stream":"stdout","data":output});
+        let stream =
+            format!("event: output\ndata: {event}\n\nevent: exit\ndata: {{\"exit_code\":0}}\n\n")
+                .into_bytes();
+        (challenge, intent, locator, readiness, stream)
+    }
+
+    #[test]
+    fn restored_verifier_stream_requires_exact_content_and_complete_zero_exit() {
+        let (challenge, intent, locator, readiness, stream) = restored_stream_fixture();
+        let observed =
+            parse_restored_verifier_stream(&stream, &challenge, &intent, &locator, &readiness)
+                .unwrap();
+        assert_eq!(
+            observed.measurement.manifest_hash,
+            intent.guest_runtime_manifest_hash
+        );
+        assert_eq!(observed.response_sha256, lillux::sha256_hex(&stream));
+        let no_exit = String::from_utf8(stream.clone()).unwrap();
+        let no_exit = &no_exit[..no_exit.find("event: exit").unwrap()];
+        assert!(
+            parse_restored_verifier_stream(
+                no_exit.as_bytes(),
+                &challenge,
+                &intent,
+                &locator,
+                &readiness
+            )
+            .is_err()
+        );
+        let nonzero = String::from_utf8(stream.clone())
+            .unwrap()
+            .replace("\"exit_code\":0", "\"exit_code\":1");
+        assert!(
+            parse_restored_verifier_stream(
+                nonzero.as_bytes(),
+                &challenge,
+                &intent,
+                &locator,
+                &readiness
+            )
+            .is_err()
+        );
+        let extra = format!(
+            "{}event: output\ndata: {{\"stream\":\"stdout\",\"data\":\"extra\"}}\n\n",
+            String::from_utf8(stream).unwrap()
+        );
+        assert!(
+            parse_restored_verifier_stream(
+                extra.as_bytes(),
+                &challenge,
+                &intent,
+                &locator,
+                &readiness
+            )
+            .is_err()
+        );
+        let mut wrong = challenge;
+        wrong.nonce_hex = "d".repeat(64);
+        let (_, _, _, _, stream) = restored_stream_fixture();
+        assert!(
+            parse_restored_verifier_stream(&stream, &wrong, &intent, &locator, &readiness).is_err()
+        );
+    }
 
     fn public_root() -> String {
         let signing = lillux::crypto::SigningKey::from_bytes(&[3; 32]);

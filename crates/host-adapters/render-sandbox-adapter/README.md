@@ -383,9 +383,9 @@ an exact sealed attempt, digest-bound profile bytes, settings, credential, netwo
 inputs and owner-product tar descriptor; it checks the running denied-network
 source, mints one scoped upload token, uploads the exact plain-tar body, then
 requests a filesystem snapshot. A complete create response yields only an
-operation-bound locator. The daemon has no admitted caller for this invocation
-yet: the profile fixture is not signed into a production authority, and lost
-output must be quarantined under the original journal attempt without a
+operation-bound locator. The daemon has an operator-owned one-shot production
+service and journal, but the profile/definitions have not completed installed
+admission. Lost output must be quarantined under the original attempt without a
 second upload or snapshot-create sequence. The Render adapter parses a
 complete `202` filesystem snapshot response against the exact source Sandbox,
 group and plan, retaining the
@@ -397,10 +397,9 @@ retains a provider-neutral snapshot intent and one-attempt journal. The intent
 binds a signed production profile, not the later placement binding whose
 snapshot ID does not exist yet. An exact
 reservation may start the bounded provider sequence once; an uncertain
-attempt must reconcile, never blindly repeat the sequence. The parser and
-journal are not yet joined by an
-admitted operator action. Neither is evidence of the bytes restored from the
-snapshot.
+attempt must reconcile, never blindly repeat the sequence. The source-side
+parser and journal are joined by that operator action, but neither is evidence
+of the bytes restored from the snapshot.
 This does not export a CAS path, contact Render, publish a snapshot, or attest
 restored guest bytes. Durable provider transfer and independent restore
 observation must consume that exact staged authority before qualification.
@@ -423,13 +422,23 @@ startup capability.
 shape and exact comparison against those expected coordinates. It rejects
 unknown fields, changed snapshot/root/manifest, weak or noncanonical controller
 keys, changed file modes, and missing terminal evidence identities. This is only the
-provider-edge interpretation of probe data: it neither authenticates a
-qualification attestation nor runs an independent verifier, and it is not
-called by placement admission. The signed provider spec therefore still
-refuses activation. The next implementation cut must load the current
-published qualification through RyeOS's existing product witness machinery,
-verify the independently admitted execution, and apply this comparison before
-any new allocation; retained cleanup must remain possible afterward.
+provider-edge interpretation of probe data: placement admission now calls it
+after rechecking the current product witness and independent verifier execution,
+but that execution has not yet run inside a restored Render Sandbox. The
+signed provider spec therefore still refuses activation. The next cut must
+bind the separately authenticated restored-Sandbox verifier run to that
+qualification, and retain cleanup even if later startup qualification is absent.
+
+The separate `ryeos-external-guest-restoration-verifier` now measures the
+restored owner tree under a fresh challenge. This adapter has an offline,
+bounded SSE interpreter for its run output: it requires canonical measurement
+bytes, no stderr or unknown event, a complete zero exit, and the exact joined
+content/readiness coordinates. This parser is not an authenticated Render run.
+A distinct, durable qualification occurrence must first be provisioned from
+the bound snapshot, deliver the admitted verifier, retain the token/run and
+whole-guest settlement evidence, and then submit those facts to the controller
+join. Worker allocation cannot be borrowed for that purpose because it itself
+requires prior runtime qualification.
 
 Binding schema 14 now carries a required-nullable `runtime_qualification`
 object with the exact attestation hash, product-owner principal, policy ref,

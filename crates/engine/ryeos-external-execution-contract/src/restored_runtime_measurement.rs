@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::canonical_json;
-use crate::runtime_snapshot::{RuntimeSnapshotIntent, RuntimeSnapshotLocator};
+use crate::runtime_snapshot::{
+    RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotIntent, RuntimeSnapshotLocator,
+    RuntimeSnapshotReadinessObservation, RuntimeSnapshotReadinessRequest,
+};
 
 pub const RESTORED_OWNER_MEASUREMENT_PROTOCOL: &str = "ryeos.restored-owner-measurement.v1";
 pub const MAX_RESTORED_OWNER_CHALLENGE_BYTES: usize = 4096;
@@ -112,6 +115,28 @@ impl RestoredOwnerMeasurement {
         );
         Ok(())
     }
+
+    /// Join only the content and provider-readiness coordinates. This is not
+    /// qualification: the caller must still prove that the admitted verifier
+    /// executed inside the exact authenticated restored occurrence and that
+    /// its complete output came from that run.
+    pub fn validate_content_for_bound_snapshot(
+        &self,
+        challenge: &RestoredOwnerChallenge,
+        intent: &RuntimeSnapshotIntent,
+        locator: &RuntimeSnapshotLocator,
+        readiness: &RuntimeSnapshotReadinessObservation,
+    ) -> Result<()> {
+        challenge.validate_for(intent, locator)?;
+        let readiness_request = RuntimeSnapshotReadinessRequest {
+            protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
+            intent: intent.clone(),
+            locator: locator.clone(),
+            provider_spec_digest: intent.provider_spec_digest.clone(),
+        };
+        readiness.validate_for(&readiness_request)?;
+        self.validate_for(challenge, intent)
+    }
 }
 
 fn require_hash(value: &str, label: &str) -> Result<()> {
@@ -194,6 +219,56 @@ mod tests {
             controller_public_root: intent.controller_public_root.clone(),
         };
         measured.validate_for(&challenge, &intent).unwrap();
+        let locator = RuntimeSnapshotLocator {
+            schema: crate::runtime_snapshot::RUNTIME_SNAPSHOT_RESULT_SCHEMA,
+            operation_id: intent.operation_id.clone(),
+            intent_digest: intent.digest().unwrap(),
+            source_occurrence_id: intent.source_occurrence_id.clone(),
+            provider_group_id: intent.provider_group_id.clone(),
+            snapshot_id: challenge.snapshot_id.clone(),
+            provider_response_sha256: "c".repeat(64),
+            provider_creation_observation: serde_json::json!({"schema": 1}),
+            adapter_observation_sha256: hex::encode(Sha256::digest(br#"{"schema":1}"#)),
+        };
+        let readiness = RuntimeSnapshotReadinessObservation {
+            schema: 1,
+            operation_id: intent.operation_id.clone(),
+            intent_digest: intent.digest().unwrap(),
+            snapshot_id: locator.snapshot_id.clone(),
+            source_occurrence_id: intent.source_occurrence_id.clone(),
+            provider_group_id: intent.provider_group_id.clone(),
+            creation_response_sha256: locator.provider_response_sha256.clone(),
+            readiness_response_sha256: "d".repeat(64),
+            captured_at: "2026-09-28T00:01:00Z".into(),
+            size_bytes: 4096,
+        };
+        measured
+            .validate_content_for_bound_snapshot(&challenge, &intent, &locator, &readiness)
+            .unwrap();
+        let mut wrong_locator = locator.clone();
+        wrong_locator.snapshot_id = "different".into();
+        assert!(
+            measured
+                .validate_content_for_bound_snapshot(
+                    &challenge,
+                    &intent,
+                    &wrong_locator,
+                    &readiness
+                )
+                .is_err()
+        );
+        let mut wrong_readiness = readiness;
+        wrong_readiness.creation_response_sha256 = "e".repeat(64);
+        assert!(
+            measured
+                .validate_content_for_bound_snapshot(
+                    &challenge,
+                    &intent,
+                    &locator,
+                    &wrong_readiness
+                )
+                .is_err()
+        );
         let mut wrong = measured.clone();
         wrong.owner_executable_sha256 = "b".repeat(64);
         assert!(wrong.validate_for(&challenge, &intent).is_err());
