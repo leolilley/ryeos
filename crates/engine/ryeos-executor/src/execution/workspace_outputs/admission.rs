@@ -324,7 +324,9 @@ mod tests {
         KindComposedView, ResolutionDigestNode, ResolutionOutput, ResolutionStepName,
         ResolvedAncestor, TrustClass,
     };
-    use ryeos_state::external_content::products::admission::AdmittedProductRecipeBinding;
+    use ryeos_state::external_content::products::admission::{
+        AdmittedProductRecipeBinding, PRODUCT_RECIPE_BINDING_SCHEMA,
+    };
     use ryeos_state::external_content::products::composition::ProductRelationships;
     use ryeos_state::external_content::products::{
         PRODUCT_DECLARATIONS_SCHEMA, ProductBounds, ProductDeclaration, ProductDeclarations,

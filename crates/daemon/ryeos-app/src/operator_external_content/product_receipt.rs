@@ -203,6 +203,44 @@ pub fn load_product_source(
     Ok(witness)
 }
 
+/// Fresh source and node-budget admission for a trusted consumer that needs
+/// exact product bytes outside the ordinary composition binding path. The
+/// caller still owns its separate effect and destination authority.
+#[allow(clippy::too_many_arguments)]
+pub fn load_bounded_current_product_source(
+    state: &AppState,
+    authority: &PinnedStateAuthority,
+    guard: &CasMutationGuard,
+    limits: ObjectClosureLimits,
+    owner: &str,
+    witness_hash: &str,
+    source: &ProductWitnessSource,
+    maximum_bytes: u64,
+) -> anyhow::Result<VerifiedProductWitness> {
+    let witness = load_product_source(
+        state,
+        authority,
+        guard,
+        limits,
+        owner,
+        witness_hash,
+        source,
+        ProductSourceVerification::Fresh,
+    )?;
+    let policy = state
+        .node_policy
+        .require::<ExternalContentImportPolicyRecord>()?;
+    super::retained_product::validate_import_bounds(
+        authority,
+        guard,
+        limits,
+        &policy.limits,
+        maximum_bytes,
+        &witness,
+    )?;
+    Ok(witness)
+}
+
 fn require_current_closure_limits(
     state: &AppState,
     limits: ObjectClosureLimits,

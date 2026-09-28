@@ -345,6 +345,13 @@ These are source-production and native-execution observations, not an installed
 Render snapshot or runtime qualification. The product witness must be carried
 through an admitted product-to-provider staging path; the artifact-blob export
 command does not export external-content manifests.
+`ryeos-executor::execution::external_guest_runtime_product` supplies the
+controller-side source half of that path: it authenticates the current witness
+and import bounds, loads the exact ordinary manifest under CAS authority,
+privately stages it, and re-observes the tree against the node public root.
+This does not export a CAS path, contact Render, publish a snapshot, or attest
+restored guest bytes. Durable provider transfer and independent restore
+observation must consume that exact staged authority before qualification.
 
 The provider-installed qualification must then bind, at minimum, the exact
 product witness and manifest, Bundle/source generation, node public root,

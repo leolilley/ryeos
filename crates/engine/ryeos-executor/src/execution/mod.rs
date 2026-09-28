@@ -12,6 +12,7 @@ pub mod effective_program_projection;
 pub(crate) mod execution_realization;
 pub(crate) mod external_content;
 mod external_direct_inputs;
+pub mod external_guest_runtime_product;
 pub(crate) mod external_guest_inputs;
 pub mod launch;
 pub(crate) mod launch_claim;
