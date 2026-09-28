@@ -74,6 +74,7 @@ pub(crate) struct RenderSnapshotProbe {
     pub owner_id: String,
     pub account: String,
     pub snapshot_id: String,
+    pub snapshot_kind: String,
     pub plan: RenderPlan,
     pub region: String,
     pub binding_hash: String,
@@ -153,6 +154,7 @@ impl RenderSnapshotProbe {
                 && self.owner_id == settings.owner_id
                 && self.account == expected.account
                 && self.snapshot_id == settings.snapshot_id
+                && self.snapshot_kind == "filesystem"
                 && self.plan == settings.plan
                 && self.region == settings.region
                 && self.binding_hash == expected.binding_hash
@@ -191,6 +193,7 @@ mod tests {
             owner_id: "owner".into(),
             account: "account".into(),
             snapshot_id: "snp-exact".into(),
+            snapshot_kind: "filesystem".into(),
             plan: RenderPlan::Starter,
             region: "oregon".into(),
             binding_hash: "4".repeat(64),
@@ -227,6 +230,9 @@ mod tests {
         let mut observed = probe();
         observed.validate_for(&settings, &expected).unwrap();
         observed.snapshot_id = "snp-other".into();
+        assert!(observed.validate_for(&settings, &expected).is_err());
+        observed = probe();
+        observed.snapshot_kind = "runtime".into();
         assert!(observed.validate_for(&settings, &expected).is_err());
         observed = probe();
         observed.installed_controller_public_root = "ed25519:other".into();

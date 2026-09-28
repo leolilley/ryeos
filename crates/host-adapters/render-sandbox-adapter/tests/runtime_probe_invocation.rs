@@ -63,6 +63,7 @@ fn invocation(with_credential: bool) -> anyhow::Result<(LifecycleRuntimeProbeReq
             "owner_id": "owner",
             "account": "account",
             "snapshot_id": "snp-exact",
+            "snapshot_kind": "filesystem",
             "plan": "starter",
             "region": "oregon",
             "binding_hash": "4".repeat(64),

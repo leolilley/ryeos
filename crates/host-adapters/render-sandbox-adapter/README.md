@@ -348,7 +348,8 @@ command does not export external-content manifests.
 
 The provider-installed qualification must then bind, at minimum, the exact
 product witness and manifest, Bundle/source generation, node public root,
-Render owner/account, snapshot ID, effective plan and region, and the exact
+Render owner/account, snapshot ID and observed `filesystem` snapshot kind,
+effective plan and region, and the exact
 signed binding generation. Its independently admitted verifier must observe
 the restored tree and root *inside that snapshot*, upload modes, owner
 survival after losing the run stream, authenticated supervisor `Ready`, and
@@ -420,8 +421,8 @@ observation or signed-binding source; copying it from `probe_evidence` into its
 own expectation would have proved nothing.
 RyeOS now re-verifies the retained product witness and its complete content
 closure, then derives the expected owner executable digest and controller-root
-file digest from the exact product manifest under the node's current public
-key. Both ordinary and large-content manifest tiers are supported. The
+file digest from the exact ordinary product manifest under the node's current public
+key. The large-content tier has a different manifest identity and is rejected. The
 credential-free adapter hook receives these source-derived values; the Render
 executable's sealed offline invocation now compares them with the probe. It
 still cannot authorize allocation while the signed provider spec declares
