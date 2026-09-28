@@ -11,12 +11,82 @@ use sha2::{Digest as _, Sha256};
 use crate::canonical_json;
 use crate::runtime_snapshot::{
     RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotIntent, RuntimeSnapshotLocator,
+    RuntimeSnapshotQualificationIntent, RuntimeSnapshotQualificationOccurrence,
     RuntimeSnapshotReadinessObservation, RuntimeSnapshotReadinessRequest,
 };
 
 pub const RESTORED_OWNER_MEASUREMENT_PROTOCOL: &str = "ryeos.restored-owner-measurement.v1";
 pub const MAX_RESTORED_OWNER_CHALLENGE_BYTES: usize = 4096;
 pub const MAX_RESTORED_OWNER_RESULT_BYTES: usize = 4096;
+
+/// One independently owned verifier contact after the restored occurrence is
+/// bound. A new nonce or deadline cannot mint another provider attempt for the
+/// same exact occurrence and admitted verifier. Replay must recover this whole
+/// retained intent, including its original challenge, rather than construct a
+/// replacement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoredVerifierAttemptIntent {
+    pub schema: u32,
+    pub operation_id: String,
+    pub qualification_operation_id: String,
+    pub restored_occurrence_id: String,
+    pub verifier_artifact_hash: String,
+    pub upload_sha256: String,
+    pub upload_bytes: u64,
+    pub challenge: RestoredOwnerChallenge,
+    pub attempt_deadline_ms: i64,
+}
+
+impl RestoredVerifierAttemptIntent {
+    pub fn validate_for(
+        &self,
+        source: &RuntimeSnapshotIntent,
+        locator: &RuntimeSnapshotLocator,
+        qualification: &RuntimeSnapshotQualificationIntent,
+        occurrence: &RuntimeSnapshotQualificationOccurrence,
+    ) -> Result<()> {
+        qualification.validate_for(source, locator)?;
+        occurrence.validate_for(qualification)?;
+        self.challenge.validate_for(source, locator)?;
+        ensure!(
+            self.schema == 1
+                && self.qualification_operation_id == qualification.operation_id
+                && self.restored_occurrence_id == occurrence.occurrence_id
+                && self.challenge.restored_occurrence_id == occurrence.occurrence_id
+                && self.verifier_artifact_hash == qualification.verifier_artifact_hash
+                && !occurrence.contact_deadline_exceeded
+                && self.upload_bytes > 0
+                && self.upload_bytes <= 32 * 1024 * 1024 + 16 * 1024
+                && self.attempt_deadline_ms > 0,
+            "restored verifier attempt differs from timely qualified occurrence"
+        );
+        require_hash(&self.upload_sha256, "upload")?;
+        ensure!(
+            self.operation_id == self.derived_operation_id()?,
+            "restored verifier attempt changed its durable identity"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= MAX_RESTORED_OWNER_CHALLENGE_BYTES + 2048,
+            "restored verifier attempt exceeds its bound"
+        );
+        Ok(())
+    }
+
+    /// The fresh challenge and wall-clock deadline are retained attempt data,
+    /// not coordinates with which a caller may request another contact.
+    pub fn derived_operation_id(&self) -> Result<String> {
+        let coordinates = (
+            "ryeos.restored-verifier-attempt.v1",
+            &self.qualification_operation_id,
+            &self.restored_occurrence_id,
+            &self.verifier_artifact_hash,
+            &self.upload_sha256,
+            self.upload_bytes,
+        );
+        Ok(hex::encode(Sha256::digest(canonical_json(&coordinates)?)))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,6 +224,37 @@ fn require_hash(value: &str, label: &str) -> Result<()> {
 mod tests {
     use super::*;
     use base64::Engine as _;
+
+    #[test]
+    fn verifier_attempt_identity_cannot_be_reminted_by_nonce_or_deadline() {
+        let mut attempt = RestoredVerifierAttemptIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: "1".repeat(64),
+            restored_occurrence_id: "sbx-exact".into(),
+            verifier_artifact_hash: "2".repeat(64),
+            upload_sha256: "3".repeat(64),
+            upload_bytes: 1024,
+            challenge: RestoredOwnerChallenge {
+                schema: 1,
+                protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
+                operation_id: "4".repeat(64),
+                snapshot_id: "snp-exact".into(),
+                restored_occurrence_id: "sbx-exact".into(),
+                nonce_hex: "5".repeat(64),
+            },
+            attempt_deadline_ms: 42,
+        };
+        let identity = attempt.derived_operation_id().unwrap();
+        attempt.challenge.nonce_hex = "6".repeat(64);
+        attempt.attempt_deadline_ms += 1;
+        assert_eq!(attempt.derived_operation_id().unwrap(), identity);
+        attempt.restored_occurrence_id = "sbx-other".into();
+        assert_ne!(attempt.derived_operation_id().unwrap(), identity);
+        attempt.restored_occurrence_id = "sbx-exact".into();
+        attempt.upload_sha256 = "7".repeat(64);
+        assert_ne!(attempt.derived_operation_id().unwrap(), identity);
+    }
 
     #[test]
     fn challenge_cannot_be_reused_for_another_snapshot_or_occurrence() {
