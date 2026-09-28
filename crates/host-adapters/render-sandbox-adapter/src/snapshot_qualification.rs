@@ -279,6 +279,12 @@ mod tests {
         assert!(observed.validate_for(&settings, &expected).is_err());
 
         let mut untrusted = serde_json::to_value(probe()).unwrap();
+        untrusted
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime_snapshot_locator");
+        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
+        untrusted = serde_json::to_value(probe()).unwrap();
         untrusted["qualified"] = serde_json::Value::Bool(true);
         assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
         untrusted = serde_json::to_value(probe()).unwrap();
