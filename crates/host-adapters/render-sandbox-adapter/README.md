@@ -372,6 +372,19 @@ then into an exact retained file realization; the producer never opens the
 installed `.ai/bin` path. The signed production graph reads the current node's
 public identity through `service:identity/public_key` and passes it to the
 producer. No credential or submission authority enters that workspace.
+The separate signed `graph:codex/guest-owner-runtime-production-for-controller`
+requires an explicit target controller public key. It retains the same product
+recipe and captured-execution Tool, so an enforced-isolation authoring node
+can produce bytes for a distinct Render controller without pretending that
+the Render controller itself can run the captured producer. The target
+controller must still import the exact witnessed product and independently
+verify that its own public root is present in the manifest; accepting a
+caller key or graph result alone would not do so. A disposable
+`hosted-workflow` node on 2026-09-28 admitted the seven-bundle set but refused
+the local producer at the correct boundary:
+`captured execution requires enforced isolation before admission`. It made
+no Render or model contact. This is a topology constraint, not a reason to
+weaken the Tool's filesystem authority.
 Independent qualification must still join the resulting owner digest and
 public root to the executable and root actually installed in the Render
 snapshot. Similar names or a successful production graph do not establish
