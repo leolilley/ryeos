@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-28T10:44:06Z:44ba321c417394d57da67aad9ea5f07bb461e2112fa3d926c9e3f5c6276b0238:cE54hthjeyiC7JlH9i9nFnLLGXtU7M20qGXtpcZDZwypigKCcbZ1vOSssWDzcHy1Yl8R7M4c41OVG1PRo/ulCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T11:34:21Z:59bc7f60af57d1d0df549deca32ed3249ee8800ada1bd505371bac2f24851dc9:OnzpmVYl632DKmBY5VRrJRQnBdPpDayLq3CHdrYjTfJbXeWZsiJrOwlPf4pgkzYiCsBQMgn8FpYn3EzxstFTBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -109,6 +109,7 @@ policies:
         - ryeos.register.command.root.system
       hosted-node: []
       local-inference: []
+      render-sandbox: []
       ryeos-ui: []
       standard:
         - ryeos.register.command.dispatch.direct_execute_item_ref

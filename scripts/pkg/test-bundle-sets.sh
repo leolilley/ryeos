@@ -146,6 +146,15 @@ for profile_name in "${node_init_profiles[@]}"; do
       | sort
   )"
   [[ "$actual_exact_bundles" == "$expected_exact_bundles" ]]
+  # Every active source bundle needs an explicit command-registration entry,
+  # including bundles that own no commands. A missing empty entry otherwise
+  # refuses fresh node initialization before any runtime admission check.
+  actual_command_source_bundles="$(
+    sed -n '/^    bundle_source_caps:/,/^  execution:/p' "$node_init_profile" \
+      | sed -nE 's/^      ([A-Za-z0-9_-]+):.*/\1/p' \
+      | sort
+  )"
+  [[ "$actual_command_source_bundles" == "$expected_exact_bundles" ]]
   if [[ "$profile_name" == release-authority ]]; then
     grep -Eq '^  - bundle-release$' "$node_init_profile"
     grep -Eq '^      bundle-release:$' "$node_init_profile"

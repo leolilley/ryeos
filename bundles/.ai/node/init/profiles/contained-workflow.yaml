@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-28T10:44:06Z:94f16e33915e0461c7bca4d4ba2bfa0991547e0a6cf232917b4b87ae14f1b5b3:1oDc3sMepk/GP0TqD+iYzxoR4HTQHrab8c+Aog7+GTqOqJv2vx4DQ0UV0bGXlI95872ON//M3iEfQXBsHs82Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-28T11:34:21Z:7f598f8a63c33abd02f35630f3da9ba48f532e03a2b252d5db02450a90816b8a:51V5Zss9SPl6uF9I3t7JfpgBm1bl5+/Ssn/xwqCbt+5oqRMekn2UWsWTphPU5Y1oE00fsQaNQmoWFk5ngkAvAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -103,6 +103,7 @@ policies:
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
       hosted-node: []
+      render-sandbox: []
       standard:
         - ryeos.register.command.dispatch.direct_execute_item_ref
   execution:
