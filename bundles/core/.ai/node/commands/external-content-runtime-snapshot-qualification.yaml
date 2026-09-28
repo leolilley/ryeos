@@ -1,0 +1,11 @@
+# ryeos:signed:2026-09-28T09:42:59Z:3ff00e6cc137cf9a0d8fb5cee621402d8e6592f84ee3174b9d801d25b8c75385:WCfjGY+7xKi+ejUbmnWao6pF9Bb1fFjb7O76C4C4rSizJG1sSu6mfvs3Ke5fgzaiNyQjhfiN97kV58Pc29RxBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, runtime-snapshot-qualification]
+description: Read one exact retained restored qualification operation
+forms:
+  - slots:
+      - field: operation_id
+help:
+  usage: ryeos external-content runtime-snapshot-qualification <operation-id>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/runtime-snapshot-qualification

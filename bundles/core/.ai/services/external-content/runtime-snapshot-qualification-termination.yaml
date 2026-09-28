@@ -1,0 +1,7 @@
+# ryeos:signed:2026-09-28T09:42:59Z:76096a8431fb334adf2f2f70473fd23bc32bc4093bece968dc161d5fa89d5a32:ulPt4Cv0OYFfY4MRoDU/KVu11S1rHxBod8XfpjybNPvPevFxp6MGWRS4utGZyt4AVHnsWrT4VkTdnRtztg1JCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.runtime-snapshot-qualification-termination
+required_caps: ["ryeos.execute.service.external-content/runtime-snapshot-qualification-termination"]
+schema:
+  operation_id: string
+description: Read one exact operator-owned qualification termination record without provider contact

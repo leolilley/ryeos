@@ -1,0 +1,7 @@
+# ryeos:signed:2026-09-28T09:42:59Z:23e5eef833d5b7ff7252949de1c3c8cd9c7373cfd3dbf0f15ca4cc39e27a8e05:E/NSDRHQ5jMoIDNMqEMde5rxwRfvwanCaOcKJIp9NVIr8KtYv4n1Y+T6HAdegTdI0WuRD+imkcvjvsj2vDHAAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.verify-runtime-snapshot-qualification
+required_caps: ["ryeos.execute.service.external-content/verify-runtime-snapshot-qualification"]
+schema:
+  qualification_operation_id: string
+description: Execute one independently admitted verifier against an exact restored qualification Sandbox; produces an observation, not a qualification claim

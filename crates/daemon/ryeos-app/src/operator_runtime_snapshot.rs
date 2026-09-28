@@ -104,6 +104,36 @@ pub fn get_operation(
     Ok(operation)
 }
 
+pub fn get_qualification_operation(
+    state: &AppState,
+    context: &HandlerContext,
+    operation_id: &str,
+) -> Result<SnapshotQualificationRecord> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    ensure!(lillux::valid_hash(operation_id),
+        "qualification operation ID is not a canonical digest");
+    let record = state.state_store.snapshot_qualification_operation(operation_id)?
+        .context("snapshot qualification operation is absent")?;
+    ensure!(record.intent.owner_principal == context.fingerprint,
+        "snapshot qualification belongs to another operator");
+    Ok(record)
+}
+
+pub fn get_qualification_termination(
+    state: &AppState,
+    context: &HandlerContext,
+    operation_id: &str,
+) -> Result<QualificationTerminationRecord> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    ensure!(lillux::valid_hash(operation_id),
+        "qualification termination ID is not a canonical digest");
+    let record = state.state_store.qualification_termination_operation(operation_id)?
+        .context("qualification termination operation is absent")?;
+    ensure!(record.intent.owner_principal == context.fingerprint,
+        "qualification termination belongs to another operator");
+    Ok(record)
+}
+
 /// Create at most one restored Sandbox for the exact retained snapshot.
 /// This operation stops at an occurrence locator; verifier execution,
 /// whole-guest settlement, and qualification remain separate authorities.

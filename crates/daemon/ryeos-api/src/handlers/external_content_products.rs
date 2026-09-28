@@ -29,6 +29,88 @@ pub struct GetRuntimeSnapshotRequest {
     operation_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRuntimeSnapshotQualificationRequest {
+    qualification_binding_id: String,
+    snapshot_operation_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotQualificationRequest {
+    qualification_operation_id: String,
+}
+
+pub async fn create_runtime_snapshot_qualification(
+    req: CreateRuntimeSnapshotQualificationRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let result = tokio::task::spawn_blocking(move || {
+        ryeos_app::operator_runtime_snapshot::create_qualification_occurrence(
+            &state, &ctx, &req.qualification_binding_id, &req.snapshot_operation_id,
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("qualification creation join failed: {error}"))??;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub async fn verify_runtime_snapshot_qualification(
+    req: RuntimeSnapshotQualificationRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let result = tokio::task::spawn_blocking(move || {
+        ryeos_app::operator_runtime_snapshot::verify_qualification_occurrence(
+            &state, &ctx, &req.qualification_operation_id,
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("qualification verifier join failed: {error}"))??;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub async fn terminate_runtime_snapshot_qualification(
+    req: RuntimeSnapshotQualificationRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let result = tokio::task::spawn_blocking(move || {
+        ryeos_app::operator_runtime_snapshot::terminate_qualification_occurrence(
+            &state, &ctx, &req.qualification_operation_id,
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("qualification termination join failed: {error}"))??;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub async fn get_runtime_snapshot_qualification(
+    req: GetRuntimeSnapshotRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    Ok(serde_json::to_value(
+        ryeos_app::operator_runtime_snapshot::get_qualification_operation(
+            &state, &ctx, &req.operation_id,
+        )?,
+    )?)
+}
+
+pub async fn get_runtime_snapshot_qualification_termination(
+    req: GetRuntimeSnapshotRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    Ok(serde_json::to_value(
+        ryeos_app::operator_runtime_snapshot::get_qualification_termination(
+            &state, &ctx, &req.operation_id,
+        )?,
+    )?)
+}
+
 pub async fn get_runtime_snapshot(
     req: GetRuntimeSnapshotRequest,
     ctx: HandlerContext,
@@ -220,6 +302,76 @@ pub const OBSERVE_RUNTIME_SNAPSHOT_READINESS_DESCRIPTOR: ServiceDescriptor = Ser
     },
 };
 
+pub const CREATE_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/create-runtime-snapshot-qualification",
+    endpoint: "external-content.create-runtime-snapshot-qualification",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/create-runtime-snapshot-qualification"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            create_runtime_snapshot_qualification(
+                crate::handler_error::parse_request(params)?, ctx, state,
+            ).await
+        })
+    },
+};
+
+pub const VERIFY_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/verify-runtime-snapshot-qualification",
+    endpoint: "external-content.verify-runtime-snapshot-qualification",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/verify-runtime-snapshot-qualification"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            verify_runtime_snapshot_qualification(
+                crate::handler_error::parse_request(params)?, ctx, state,
+            ).await
+        })
+    },
+};
+
+pub const TERMINATE_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/terminate-runtime-snapshot-qualification",
+    endpoint: "external-content.terminate-runtime-snapshot-qualification",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/terminate-runtime-snapshot-qualification"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            terminate_runtime_snapshot_qualification(
+                crate::handler_error::parse_request(params)?, ctx, state,
+            ).await
+        })
+    },
+};
+
+pub const GET_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/runtime-snapshot-qualification",
+    endpoint: "external-content.runtime-snapshot-qualification",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/runtime-snapshot-qualification"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            get_runtime_snapshot_qualification(
+                crate::handler_error::parse_request(params)?, ctx, state,
+            ).await
+        })
+    },
+};
+
+pub const GET_RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/runtime-snapshot-qualification-termination",
+    endpoint: "external-content.runtime-snapshot-qualification-termination",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/runtime-snapshot-qualification-termination"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            get_runtime_snapshot_qualification_termination(
+                crate::handler_error::parse_request(params)?, ctx, state,
+            ).await
+        })
+    },
+};
+
 pub const GET_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:external-content/product",
     endpoint: "external-content.product",
@@ -273,6 +425,30 @@ mod tests {
                 serde_json::from_value::<super::ProduceRuntimeSnapshotRequest>(changed).is_err(),
                 "unadmitted field {key} was accepted"
             );
+        }
+    }
+
+    #[test]
+    fn qualification_service_requests_select_only_retained_coordinates() {
+        let create = json!({
+            "qualification_binding_id": "signed-qualification",
+            "snapshot_operation_id": "a".repeat(64),
+        });
+        assert!(serde_json::from_value::<super::CreateRuntimeSnapshotQualificationRequest>(create.clone()).is_ok());
+        let step = json!({"qualification_operation_id": "b".repeat(64)});
+        assert!(serde_json::from_value::<super::RuntimeSnapshotQualificationRequest>(step.clone()).is_ok());
+        for (key, value) in [
+            ("credential", json!("secret")),
+            ("provider_group_id", json!("unselected-group")),
+            ("contact_timeout_seconds", json!(600)),
+            ("occurrence_id", json!("sbx-ambient")),
+        ] {
+            let mut changed_create = create.clone();
+            changed_create[key] = value.clone();
+            assert!(serde_json::from_value::<super::CreateRuntimeSnapshotQualificationRequest>(changed_create).is_err());
+            let mut changed_step = step.clone();
+            changed_step[key] = value;
+            assert!(serde_json::from_value::<super::RuntimeSnapshotQualificationRequest>(changed_step).is_err());
         }
     }
 

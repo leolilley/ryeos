@@ -1,0 +1,11 @@
+# ryeos:signed:2026-09-28T09:42:59Z:2bb50d2d9df5c057c86253684b5b5d6fd6d7d854a33cd358c88ea4803ec96059:KDkvdOUMAQu/FGph4z8alcX5Tm3klx3pKXnOYClgoL8FJp3bXbZmovbdT+a4CsAkUQ6NcQ0gWMwr1L2i1Mn5BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, verify-runtime-snapshot-qualification]
+description: Run the admitted verifier once against an exact restored qualification Sandbox
+forms:
+  - slots:
+      - field: qualification_operation_id
+help:
+  usage: ryeos external-content verify-runtime-snapshot-qualification <qualification-operation-id>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/verify-runtime-snapshot-qualification

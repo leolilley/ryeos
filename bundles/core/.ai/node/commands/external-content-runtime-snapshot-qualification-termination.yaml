@@ -1,0 +1,11 @@
+# ryeos:signed:2026-09-28T09:42:59Z:fdda2af6995de39280678cf88709ab2ef78f310ea7e826466e06d4fb1f6b086f:4J/cnfIa9UcohhqTwD2U7RZPHr4er249Ou91XQJ4f/h1/KJ31u2JV4ruEwSKPmLreYO1XTwsArxgloPBIcKuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, runtime-snapshot-qualification-termination]
+description: Read one exact retained restored qualification termination record
+forms:
+  - slots:
+      - field: operation_id
+help:
+  usage: ryeos external-content runtime-snapshot-qualification-termination <operation-id>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/runtime-snapshot-qualification-termination
