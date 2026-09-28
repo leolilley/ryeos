@@ -137,6 +137,20 @@ impl ExecutableExternalPlacementBackend {
                 digest: artifacts.provider_spec.sha256.clone(),
                 bytes: artifacts.provider_spec.bytes,
             },
+            snapshot_production_spec: artifacts
+                .snapshot_production_spec
+                .as_ref()
+                .map(|spec| -> Result<LifecycleArtifactInspection> {
+                    Ok(LifecycleArtifactInspection {
+                        descriptor: spec
+                            .authority
+                            .inherited_descriptor()
+                            .map_err(anyhow::Error::msg)?,
+                        digest: spec.sha256.clone(),
+                        bytes: spec.bytes,
+                    })
+                })
+                .transpose()?,
             artifacts: BTreeMap::from([
                 (
                     LifecycleArtifactRole::Supervisor,
@@ -173,11 +187,18 @@ impl ExecutableExternalPlacementBackend {
             &artifacts.adapter.handle,
             LifecycleAdapterInvocation::Inspect,
             &request_handle,
-            vec![
-                artifacts.supervisor.handle.clone(),
-                artifacts.launcher.handle.clone(),
-                artifacts.provider_spec.authority.clone(),
-            ],
+            [
+                Some(artifacts.supervisor.handle.clone()),
+                Some(artifacts.launcher.handle.clone()),
+                Some(artifacts.provider_spec.authority.clone()),
+                artifacts
+                    .snapshot_production_spec
+                    .as_ref()
+                    .map(|spec| spec.authority.clone()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
             Vec::new(),
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs_f64(
                 LIFECYCLE_ADAPTER_INSPECTION_TIMEOUT_SECONDS,
@@ -1108,6 +1129,11 @@ mod tests {
                 digest: "e".repeat(64),
                 bytes: 128,
             },
+            snapshot_production_spec: Some(LifecycleArtifactInspection {
+                descriptor: 23,
+                digest: "f".repeat(64),
+                bytes: 256,
+            }),
             artifacts: BTreeMap::from([
                 (LifecycleArtifactRole::Supervisor, LifecycleArtifactInspection { descriptor: 20, digest: "c".repeat(64), bytes: 4096 }),
                 (LifecycleArtifactRole::Launcher, LifecycleArtifactInspection { descriptor: 21, digest: "d".repeat(64), bytes: 4096 }),
@@ -1123,10 +1149,21 @@ mod tests {
             target: request.target.clone(),
             effective_capabilities: request.declared_capabilities.clone(),
             observed_provider_spec_sha256: request.provider_spec.digest.clone(),
+            observed_snapshot_production_spec_sha256: request
+                .snapshot_production_spec
+                .as_ref()
+                .map(|spec| spec.digest.clone()),
             artifacts: request.artifacts.clone(),
         };
         let valid = serde_json::to_value(response).unwrap();
         decode_inspection_response(&serde_json::to_vec(&valid).unwrap(), &request).unwrap();
+        let mut wrong_snapshot = valid.clone();
+        wrong_snapshot["observed_snapshot_production_spec_sha256"] =
+            serde_json::json!("0".repeat(64));
+        require_private_decode_error(
+            decode_inspection_response(&serde_json::to_vec(&wrong_snapshot).unwrap(), &request)
+                .unwrap_err(),
+        );
         for fault in ["variant", "field", "identity"] {
             let mut value = valid.clone();
             match fault {

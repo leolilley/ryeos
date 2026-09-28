@@ -2416,6 +2416,7 @@ fn exact_protocol_boundary_allocates_and_reconciles_one_occurrence() {
             .to_owned(),
         declared_capabilities: capabilities,
         provider_spec: provider_spec_artifact,
+        snapshot_production_spec: None,
         artifacts: BTreeMap::from([
             (LifecycleArtifactRole::Supervisor, supervisor_artifact),
             (LifecycleArtifactRole::Launcher, launcher_artifact),

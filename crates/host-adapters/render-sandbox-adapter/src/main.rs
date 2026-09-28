@@ -353,6 +353,31 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
         &request.provider_spec.digest,
         &schema_digest,
     )?;
+    let observed_snapshot_production_spec_sha256 = request
+        .snapshot_production_spec
+        .as_ref()
+        .map(|inspection| -> Result<String> {
+            // SAFETY: the trusted runner transferred this exact descriptor once
+            // into this single-threaded inspection process.
+            let authority =
+                unsafe { lillux::take_inherited_descriptor_authority(inspection.descriptor) }
+                    .map_err(anyhow::Error::msg)?;
+            let bytes = lillux::read_sealed_inherited_descriptor(
+                authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                snapshot_provider_spec::MAX_SPEC_BYTES,
+            )
+            .map_err(anyhow::Error::msg)?;
+            ensure!(
+                u64::try_from(bytes.len())? == inspection.bytes
+                    && lillux::sha256_hex(&bytes) == inspection.digest,
+                "snapshot production spec differs from its signed inspection identity"
+            );
+            snapshot_provider_spec::SnapshotProductionSpec::parse(&bytes)?;
+            Ok(inspection.digest.clone())
+        })
+        .transpose()?;
     let effective_capabilities = provider_spec.effective_capabilities();
     ensure!(
         !effective_capabilities.is_empty()
@@ -394,6 +419,7 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
         target: request.target.clone(),
         effective_capabilities,
         observed_provider_spec_sha256: provider_spec_sha256,
+        observed_snapshot_production_spec_sha256,
         artifacts,
     };
     response.validate_for(&request)?;

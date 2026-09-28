@@ -401,6 +401,7 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
         target: request.target.clone(),
         effective_capabilities: request.declared_capabilities.clone(),
         observed_provider_spec_sha256: request.provider_spec.digest.clone(),
+        observed_snapshot_production_spec_sha256: None,
         artifacts: request.artifacts.clone(),
     };
     response.validate_for(&request)?;

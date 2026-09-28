@@ -954,6 +954,8 @@ pub struct LifecycleAdapterInspectionRequest {
     pub target: String,
     pub declared_capabilities: BTreeSet<LifecycleCapability>,
     pub provider_spec: LifecycleArtifactInspection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_production_spec: Option<LifecycleArtifactInspection>,
     pub artifacts: BTreeMap<LifecycleArtifactRole, LifecycleArtifactInspection>,
 }
 
@@ -969,6 +971,8 @@ pub struct LifecycleAdapterInspectionResponse {
     pub target: String,
     pub effective_capabilities: BTreeSet<LifecycleCapability>,
     pub observed_provider_spec_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_snapshot_production_spec_sha256: Option<String>,
     pub artifacts: BTreeMap<LifecycleArtifactRole, LifecycleArtifactInspection>,
 }
 
@@ -1195,6 +1199,13 @@ impl LifecycleAdapterInspectionRequest {
             "lifecycle adapter declares no capabilities"
         );
         validate_provider_spec_inspection(&self.provider_spec)?;
+        if let Some(spec) = &self.snapshot_production_spec {
+            validate_provider_spec_inspection(spec)?;
+            ensure!(
+                spec.descriptor != self.provider_spec.descriptor,
+                "snapshot and placement specs share one descriptor"
+            );
+        }
         validate_artifact_inspections(&self.artifacts)?;
         ensure!(
             self.artifacts.len() == 2
@@ -1228,6 +1239,11 @@ impl LifecycleAdapterInspectionResponse {
                 && self.observed_settings_schema_digest == request.settings_schema_digest
                 && self.target == request.target
                 && self.observed_provider_spec_sha256 == request.provider_spec.digest
+                && self.observed_snapshot_production_spec_sha256
+                    == request
+                        .snapshot_production_spec
+                        .as_ref()
+                        .map(|spec| spec.digest.clone())
                 && self
                     .effective_capabilities
                     .is_subset(&request.declared_capabilities)
