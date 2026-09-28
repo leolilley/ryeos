@@ -11,9 +11,7 @@ use anyhow::{Context as _, Result, ensure};
 use base64::Engine as _;
 use lillux::crypto::VerifyingKey;
 use ryeos_state::objects::{
-    EXTERNAL_CONTENT_MANIFEST_KIND, EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
-    ExternalContentManifestEntryKind, ExternalContentManifestObject,
-    ExternalLargeContentManifestObject,
+    EXTERNAL_CONTENT_MANIFEST_KIND, ExternalContentManifestEntryKind, ExternalContentManifestObject,
 };
 use serde_json::Value;
 
@@ -51,40 +49,33 @@ pub fn derive_guest_owner_runtime_manifest_identity(
         "guest runtime controller root is weak"
     );
     let manifest_hash = ryeos_state::objects::canonical_value_digest(value)?;
-    let entries = match value.get("kind").and_then(Value::as_str) {
-        Some(EXTERNAL_CONTENT_MANIFEST_KIND) => {
-            let manifest = ExternalContentManifestObject::from_value(value)?;
-            manifest
-                .entries
-                .iter()
-                .map(|entry| EntryView {
-                    path: entry.path.clone(),
-                    kind: entry.kind,
-                    mode: entry.mode,
-                    sha256: entry.blob_hash.clone(),
-                    size: entry.size,
-                })
-                .collect::<Vec<_>>()
-        }
-        Some(EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
-            let manifest = ExternalLargeContentManifestObject::from_value(value)?;
-            manifest
-                .entries
-                .iter()
-                .map(|entry| EntryView {
-                    path: entry.path.clone(),
-                    kind: entry.kind,
-                    mode: entry.mode,
-                    sha256: entry
-                        .file_sha256
-                        .clone()
-                        .or_else(|| entry.blob_hash.clone()),
-                    size: entry.size,
-                })
-                .collect::<Vec<_>>()
-        }
-        _ => anyhow::bail!("guest runtime product has an unsupported manifest kind"),
-    };
+    ensure!(
+        value.get("kind").and_then(Value::as_str) == Some(EXTERNAL_CONTENT_MANIFEST_KIND),
+        "guest runtime product requires the ordinary tree manifest observed by the guest"
+    );
+    let manifest = ExternalContentManifestObject::from_value(value)?;
+    let entries = manifest
+        .entries
+        .iter()
+        .map(|entry| EntryView {
+            path: entry.path.clone(),
+            kind: entry.kind,
+            mode: entry.mode,
+            sha256: entry.blob_hash.clone(),
+            size: entry.size,
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        entries.len() == 4
+            && entries.iter().any(|entry| {
+                entry.path == "bin"
+                    && entry.kind == ExternalContentManifestEntryKind::Dir
+                    && entry.mode.is_none()
+                    && entry.sha256.is_none()
+                    && entry.size.is_none()
+            }),
+        "guest runtime product contains an unexpected entry or lacks its bin directory"
+    );
     let owner = entries
         .iter()
         .find(|entry| entry.path == "bin/ryeos-external-guest-occurrence-owner")
@@ -129,6 +120,18 @@ pub fn derive_guest_owner_runtime_manifest_identity(
                 .is_some_and(|size| (1..=4 * 1024).contains(&size))
             && profile.sha256.as_deref().is_some_and(lillux::valid_hash),
         "guest runtime product has an invalid owner profile"
+    );
+    ensure!(
+        entries.iter().all(|entry| {
+            matches!(
+                entry.path.as_str(),
+                "bin"
+                    | "bin/ryeos-external-guest-occurrence-owner"
+                    | "controller-root.hex"
+                    | "guest-owner-profile.json"
+            )
+        }),
+        "guest runtime product contains an ambient entry"
     );
     Ok(GuestOwnerRuntimeManifestIdentity {
         manifest_hash,
@@ -375,27 +378,26 @@ mod tests {
             .unwrap();
         owner_entry["blob_hash"] = serde_json::json!("bad");
         assert!(derive_guest_owner_runtime_manifest_identity(&tampered, &key).is_err());
+        let mut ambient = manifest_value.clone();
+        ambient["entries"].as_array_mut().unwrap().insert(
+            0,
+            serde_json::json!({
+                "path": "ambient.txt",
+                "kind": "file",
+                "mode": 420,
+                "blob_hash": "a".repeat(64),
+                "size": 1,
+                "target": null
+            }),
+        );
+        ambient["entry_count"] = serde_json::json!(5);
+        ambient["total_bytes"] = serde_json::json!(manifest.total_bytes + 1);
+        assert!(derive_guest_owner_runtime_manifest_identity(&ambient, &key).is_err());
         let mut large = manifest_value.clone();
-        large["kind"] = serde_json::json!(EXTERNAL_LARGE_CONTENT_MANIFEST_KIND);
+        large["kind"] =
+            serde_json::json!(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND);
         large["schema"] = serde_json::json!(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA);
-        let large_identity = derive_guest_owner_runtime_manifest_identity(&large, &key).unwrap();
-        assert_eq!(large_identity.owner_executable_sha256, digest);
-        // A large-content product can describe the same files, but its
-        // manifest coordinate is not the guest's ordinary tree observation.
-        assert_ne!(large_identity.manifest_hash, product.manifest_hash());
-        let large_owner = large["entries"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|entry| entry["path"] == "bin/ryeos-external-guest-occurrence-owner")
-            .unwrap();
-        large_owner.as_object_mut().unwrap().remove("blob_hash");
-        large_owner["file_sha256"] = serde_json::json!(digest);
-        large_owner["chunk_size"] = serde_json::json!(1024 * 1024);
-        large_owner["chunk_hashes"] = serde_json::json!([digest]);
-        let large_object_identity =
-            derive_guest_owner_runtime_manifest_identity(&large, &key).unwrap();
-        assert_eq!(large_object_identity.owner_executable_sha256, digest);
+        assert!(derive_guest_owner_runtime_manifest_identity(&large, &key).is_err());
         let different_root = SigningKey::from_bytes(&[44; 32]).verifying_key();
         let changed_controller = produce_guest_owner_runtime(
             &parent,
