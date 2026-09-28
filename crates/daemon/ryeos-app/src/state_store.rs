@@ -101,6 +101,93 @@ fn discard_abandoned_external_guest_packages(
     Ok(())
 }
 
+/// The snapshot producer's private CAS realization is disposable. Startup
+/// removes only this dedicated namespace after acquiring the exclusive
+/// runtime-state lock; no retained product or provider journal is touched.
+fn discard_abandoned_runtime_snapshot_staging(
+    runtime_state: &lillux::PinnedDirectory,
+) -> Result<()> {
+    use std::ffi::OsStr;
+
+    let Some(parent) =
+        runtime_state.open_child_directory(OsStr::new("runtime-snapshot-staging"))?
+    else {
+        return Ok(());
+    };
+    parent.require_owner_private_directory()?;
+    for _ in 0..16 {
+        let names = parent.entry_names_bounded(1024)?;
+        if names.is_empty() {
+            return Ok(());
+        }
+        for name in names {
+            let value = name.to_str().context("non-UTF8 runtime snapshot stage")?;
+            let id = value
+                .strip_prefix("snapshot-stage-")
+                .context("unexpected entry in runtime snapshot staging namespace")?;
+            let parsed =
+                uuid::Uuid::parse_str(id).context("invalid runtime snapshot staging generation")?;
+            anyhow::ensure!(
+                parsed.to_string() == id,
+                "non-canonical runtime snapshot stage"
+            );
+            let child = parent
+                .open_child_directory(&name)?
+                .context("runtime snapshot stage is not a directory")?;
+            child.require_owner_private_directory()?;
+            child.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(
+                1024, 4,
+            ))?;
+            anyhow::ensure!(
+                parent.remove_empty_child_if_same(&name, &child)?,
+                "runtime snapshot stage changed during startup recovery"
+            );
+        }
+    }
+    anyhow::ensure!(
+        parent.entry_names_bounded(1)?.is_empty(),
+        "runtime snapshot staging recovery made bounded progress; retry startup"
+    );
+    Ok(())
+}
+
+/// One process-local, private materialization destination. Its product bytes
+/// are retained by CAS, not by this directory. Drop is best-effort; startup
+/// recovery is authoritative for a crash or failed cleanup.
+pub struct RuntimeSnapshotStageLease {
+    parent: lillux::PinnedDirectory,
+    stage: lillux::PinnedDirectory,
+    name: std::ffi::OsString,
+}
+
+impl RuntimeSnapshotStageLease {
+    pub fn root(&self) -> &lillux::PinnedDirectory {
+        &self.stage
+    }
+    pub fn product_name(&self) -> &std::ffi::OsStr {
+        std::ffi::OsStr::new("product")
+    }
+}
+
+impl Drop for RuntimeSnapshotStageLease {
+    fn drop(&mut self) {
+        let cleanup = self
+            .stage
+            .remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1024, 4))
+            .and_then(|_| {
+                self.parent
+                    .remove_empty_child_if_same(&self.name, &self.stage)
+                    .and_then(|removed| {
+                        anyhow::ensure!(removed, "runtime snapshot stage changed before cleanup");
+                        Ok(())
+                    })
+            });
+        if let Err(error) = cleanup {
+            tracing::warn!(error = %error, "runtime snapshot stage requires startup cleanup");
+        }
+    }
+}
+
 fn with_execution_schema_cutover_hint(error: anyhow::Error) -> anyhow::Error {
     if error
         .chain()
@@ -4098,6 +4185,7 @@ struct ThreadRuntimeRemoval {
 
 struct ThreadRuntimeAuthority {
     app_root: lillux::PinnedDirectory,
+    runtime_state: lillux::PinnedDirectory,
     threads_root: Option<lillux::PinnedDirectory>,
 }
 
@@ -4137,6 +4225,7 @@ impl ThreadRuntimeAuthority {
         }
         Ok(Self {
             app_root,
+            runtime_state: runtime_state.try_clone()?,
             threads_root,
         })
     }
@@ -4373,6 +4462,21 @@ fn ensure_current_external_content_bindings(state: &StateDb) -> Result<()> {
 }
 
 impl StateStore {
+    pub fn begin_runtime_snapshot_stage(&self) -> Result<RuntimeSnapshotStageLease> {
+        use std::ffi::OsStr;
+        let runtime = &self.thread_runtime_authority()?.runtime_state;
+        let parent = runtime.open_or_create_child(OsStr::new("runtime-snapshot-staging"), 0o700)?;
+        parent.require_owner_private_directory()?;
+        let name = std::ffi::OsString::from(format!("snapshot-stage-{}", uuid::Uuid::new_v4()));
+        let stage = parent.create_child(&name, 0o700)?;
+        stage.require_owner_private_directory()?;
+        Ok(RuntimeSnapshotStageLease {
+            parent,
+            stage,
+            name,
+        })
+    }
+
     fn thread_runtime_authority(&self) -> Result<&ThreadRuntimeAuthority> {
         self.thread_runtime_authority
             .as_ref()
@@ -4518,6 +4622,8 @@ impl StateStore {
             .context("lock live runtime-state namespace")?;
         discard_abandoned_external_guest_packages(&runtime_state_directory)
             .context("discard abandoned secret-bearing guest packages")?;
+        discard_abandoned_runtime_snapshot_staging(&runtime_state_directory)
+            .context("discard abandoned runtime snapshot stages")?;
         let thread_runtime_authority =
             ThreadRuntimeAuthority::capture(&app_root, &runtime_state_directory, true)?;
         ryeos_state::CasMutationGuard::ensure_anchor(&runtime_state_dir)
@@ -19509,6 +19615,54 @@ mod tests {
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
     use std::io::Write as _;
     use tempfile::tempdir;
+
+    #[test]
+    fn abandoned_runtime_snapshot_stage_is_removed_under_pinned_state_authority() {
+        let temporary = tempdir().unwrap();
+        let state = lillux::PinnedDirectory::open_or_create(temporary.path()).unwrap();
+        let stages = state
+            .create_child(std::ffi::OsStr::new("runtime-snapshot-staging"), 0o700)
+            .unwrap();
+        let name = format!("snapshot-stage-{}", uuid::Uuid::new_v4());
+        let stage = stages
+            .create_child(std::ffi::OsStr::new(&name), 0o700)
+            .unwrap();
+        let product = stage
+            .create_child(std::ffi::OsStr::new("product"), 0o700)
+            .unwrap();
+        let mut payload = product
+            .open_regular_create(std::ffi::OsStr::new("payload"), true, true, 0o600)
+            .unwrap();
+        payload.write_all(b"disposable upload bytes").unwrap();
+        drop(payload);
+        discard_abandoned_runtime_snapshot_staging(&state).unwrap();
+        assert!(
+            stages
+                .open_child_directory(std::ffi::OsStr::new(&name))
+                .unwrap()
+                .is_none()
+        );
+        discard_abandoned_runtime_snapshot_staging(&state).unwrap();
+    }
+
+    #[test]
+    fn runtime_snapshot_stage_sweep_refuses_foreign_entry() {
+        let temporary = tempdir().unwrap();
+        let state = lillux::PinnedDirectory::open_or_create(temporary.path()).unwrap();
+        let stages = state
+            .create_child(std::ffi::OsStr::new("runtime-snapshot-staging"), 0o700)
+            .unwrap();
+        stages
+            .create_child(std::ffi::OsStr::new("unrelated"), 0o700)
+            .unwrap();
+        assert!(discard_abandoned_runtime_snapshot_staging(&state).is_err());
+        assert!(
+            stages
+                .open_child_directory(std::ffi::OsStr::new("unrelated"))
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn abandoned_external_guest_package_is_removed_under_pinned_state_authority() {
