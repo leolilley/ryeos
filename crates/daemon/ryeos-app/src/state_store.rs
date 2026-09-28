@@ -14659,6 +14659,16 @@ impl StateStore {
             .bind_runtime_snapshot_locator(locator)
     }
 
+    pub(crate) fn bind_runtime_snapshot_readiness(
+        &self,
+        observation: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotReadinessObservation,
+    ) -> Result<runtime_db::runtime_snapshot::RuntimeSnapshotRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .bind_runtime_snapshot_readiness(observation)
+    }
+
     pub(crate) fn quarantine_runtime_snapshot_attempt(
         &self,
         operation_id: &str,

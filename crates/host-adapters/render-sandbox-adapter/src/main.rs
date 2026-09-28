@@ -261,6 +261,7 @@ fn run() -> Result<()> {
         Some("verify-runtime-probe") => verify_runtime_probe(&adapter),
         Some("operate") => operate(),
         Some("produce-snapshot") => snapshot_production::operate(&adapter),
+        Some("observe-snapshot-readiness") => snapshot_production::observe_readiness(&adapter),
         _ => anyhow::bail!("unsupported lifecycle invocation"),
     }
 }

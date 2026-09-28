@@ -8,7 +8,8 @@ use anyhow::{Context as _, Result, ensure};
 use chrono::DateTime;
 use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RUNTIME_SNAPSHOT_RESULT_SCHEMA,
-    RuntimeSnapshotAdapterRequest, RuntimeSnapshotAdapterResponse, RuntimeSnapshotLocator,
+    RuntimeSnapshotAdapterRequest, RuntimeSnapshotAdapterResponse, RuntimeSnapshotIntent,
+    RuntimeSnapshotLocator, RuntimeSnapshotReadinessObservation, RuntimeSnapshotReadinessRequest,
 };
 use ryeos_http_transport::{
     Deadlines, Header, HttpClient, HttpRequest, HttpResponse, Limits, RequestBodySource,
@@ -43,9 +44,13 @@ struct SnapshotProductionSettings {
 
 impl SnapshotProductionSettings {
     fn validate_for(&self, request: &RuntimeSnapshotAdapterRequest) -> Result<()> {
+        self.validate_for_intent(&request.intent)
+    }
+
+    fn validate_for_intent(&self, intent: &RuntimeSnapshotIntent) -> Result<()> {
         ensure!(
             self.schema == 1
-                && self.sandbox_group_id == request.intent.provider_group_id
+                && self.sandbox_group_id == intent.provider_group_id
                 && self.owner_id.len() <= 256
                 && !self.owner_id.is_empty()
                 && self
@@ -62,6 +67,79 @@ impl SnapshotProductionSettings {
         );
         validate_tls_roots(&self.tls_roots_der_base64)
     }
+}
+
+/// One bounded, read-only point observation of a bound locator. The original
+/// creation deadline is not reused: it authorized one POST sequence, whereas
+/// this invocation receives a fresh controller-owned observation deadline.
+pub(crate) fn observe_readiness(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
+    let deadline = operation_deadline()?;
+    ensure!(
+        [
+            LIFECYCLE_BOOTSTRAP_FD_ENV,
+            LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+        ]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none()),
+        "snapshot observer received worker activation authority"
+    );
+    let request_bytes = read_sealed_env(
+        LIFECYCLE_REQUEST_FD_ENV,
+        MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+    )?;
+    let request: RuntimeSnapshotReadinessRequest =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &request_bytes,
+            MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+        )?;
+    request.validate()?;
+    ensure!(
+        ryeos_external_execution_contract::canonical_json(&request)? == request_bytes
+            && request.intent.provider_id == ADAPTER_ID,
+        "snapshot readiness request is noncanonical or selects another provider"
+    );
+    verify_artifact(adapter, &request.intent.adapter_artifact_hash, None)?;
+    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)?;
+    let captured_spec_digest = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
+        .context("snapshot observer lacks captured provider spec digest")?;
+    ensure!(
+        captured_spec_digest == request.provider_spec_digest
+            && lillux::sha256_hex(&spec_bytes) == request.provider_spec_digest,
+        "snapshot readiness provider spec changed its signed handoff"
+    );
+    let spec = SnapshotProductionSpec::parse(&spec_bytes)?;
+    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
+    ensure!(
+        lillux::sha256_hex(&settings_bytes) == request.intent.settings_digest,
+        "snapshot readiness settings changed"
+    );
+    let settings: SnapshotProductionSettings =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &settings_bytes,
+            MAX_SETTINGS_BYTES,
+        )?;
+    settings.validate_for_intent(&request.intent)?;
+    let creation = creation_intent_for(&request.intent, &settings);
+    creation.validate()?;
+    retained_snapshot_creation(&request.intent, &creation, &request.locator)?;
+    let url = snapshot_readiness_url(&spec, &request.locator, &settings.owner_id)?;
+    let network = crate::network_context_from_captured_inputs()?;
+    let cancellation = lillux::network::NetworkCancellation::default();
+    let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
+    let credential = crate::read_credential()?;
+    let (status, body) = read_control_json(send_control(
+        &network,
+        &url,
+        "GET",
+        None,
+        &credential,
+        &settings,
+        deadline,
+        &cancellation,
+    )?)?;
+    let observed = observe_snapshot_available_from_locator(&request, &creation, status, &body)?;
+    write_response(&observed)
 }
 
 /// Only this first-claim invocation may contact Render. Reconciliation must
@@ -305,11 +383,11 @@ fn bind_snapshot_locator(
 }
 
 fn retained_snapshot_creation(
-    request: &RuntimeSnapshotAdapterRequest,
+    runtime_intent: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotIntent,
     intent: &SnapshotCreationIntent,
     locator: &RuntimeSnapshotLocator,
 ) -> Result<BoundSnapshotCreation> {
-    locator.validate_for(&request.intent)?;
+    locator.validate_for(runtime_intent)?;
     ensure!(
         locator.schema == RUNTIME_SNAPSHOT_RESULT_SCHEMA
             && locator.operation_id == intent.operation_id
@@ -344,30 +422,51 @@ fn retained_snapshot_creation(
 }
 
 pub(crate) fn observe_snapshot_available_from_locator(
-    request: &RuntimeSnapshotAdapterRequest,
+    request: &RuntimeSnapshotReadinessRequest,
     intent: &SnapshotCreationIntent,
-    locator: &RuntimeSnapshotLocator,
     status: u16,
     body: &[u8],
-) -> Result<AvailableSnapshotObservation> {
-    let creation = retained_snapshot_creation(request, intent, locator)?;
-    observe_snapshot_available(intent, &creation, status, body)
+) -> Result<RuntimeSnapshotReadinessObservation> {
+    request.validate()?;
+    let creation = retained_snapshot_creation(&request.intent, intent, &request.locator)?;
+    let observed = observe_snapshot_available(intent, &creation, status, body)?;
+    let result = RuntimeSnapshotReadinessObservation {
+        schema: observed.schema,
+        operation_id: observed.operation_id,
+        intent_digest: request.intent.digest()?,
+        snapshot_id: observed.snapshot_id,
+        source_occurrence_id: observed.source_sandbox_id,
+        provider_group_id: observed.sandbox_group_id,
+        creation_response_sha256: observed.creation_response_sha256,
+        readiness_response_sha256: observed.availability_response_sha256,
+        captured_at: observed.captured_at,
+        size_bytes: observed.size_bytes,
+    };
+    result.validate_for(request)?;
+    Ok(result)
 }
 
 fn creation_intent(
     request: &RuntimeSnapshotAdapterRequest,
     settings: &SnapshotProductionSettings,
 ) -> SnapshotCreationIntent {
+    creation_intent_for(&request.intent, settings)
+}
+
+fn creation_intent_for(
+    intent: &RuntimeSnapshotIntent,
+    settings: &SnapshotProductionSettings,
+) -> SnapshotCreationIntent {
     SnapshotCreationIntent {
         schema: 1,
-        operation_id: request.intent.operation_id.clone(),
-        product_witness_hash: request.intent.product_witness_hash.clone(),
-        guest_runtime_manifest_hash: request.intent.guest_runtime_manifest_hash.clone(),
-        controller_public_root: request.intent.controller_public_root.clone(),
-        owner_executable_sha256: request.intent.owner_executable_sha256.clone(),
+        operation_id: intent.operation_id.clone(),
+        product_witness_hash: intent.product_witness_hash.clone(),
+        guest_runtime_manifest_hash: intent.guest_runtime_manifest_hash.clone(),
+        controller_public_root: intent.controller_public_root.clone(),
+        owner_executable_sha256: intent.owner_executable_sha256.clone(),
         owner_id: settings.owner_id.clone(),
         sandbox_group_id: settings.sandbox_group_id.clone(),
-        source_sandbox_id: request.intent.source_occurrence_id.clone(),
+        source_sandbox_id: intent.source_occurrence_id.clone(),
         plan: settings.plan,
     }
 }
@@ -889,27 +988,28 @@ mod tests {
         assert_eq!(retained.expires_at, created.expires_at);
         assert_eq!(retained.response_sha256, locator.provider_response_sha256);
         assert_eq!(
-            retained_snapshot_creation(&request, &prepared, &locator)
+            retained_snapshot_creation(&request.intent, &prepared, &locator)
                 .unwrap()
                 .snapshot_id,
             created.snapshot_id
         );
         let mut substituted = locator.clone();
         substituted.snapshot_id = "snp-other".into();
-        assert!(retained_snapshot_creation(&request, &prepared, &substituted).is_err());
+        assert!(retained_snapshot_creation(&request.intent, &prepared, &substituted).is_err());
         let mut available = response();
         available["status"] = serde_json::json!("available");
         available["capturedAt"] = serde_json::json!("2026-09-28T00:01:00Z");
         available["sizeBytes"] = serde_json::json!(4096);
         let availability_body = serde_json::to_vec(&available).unwrap();
-        let observed = observe_snapshot_available_from_locator(
-            &request,
-            &prepared,
-            &locator,
-            200,
-            &availability_body,
-        )
-        .unwrap();
+        let readiness = RuntimeSnapshotReadinessRequest {
+            protocol: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
+            intent: request.intent.clone(),
+            locator: locator.clone(),
+            provider_spec_digest: request.provider_spec_digest.clone(),
+        };
+        let observed =
+            observe_snapshot_available_from_locator(&readiness, &prepared, 200, &availability_body)
+                .unwrap();
         assert_eq!(observed.snapshot_id, locator.snapshot_id);
         let mut mismatched_creation = locator.clone();
         mismatched_creation.provider_creation_observation["requested_at"] =
@@ -922,9 +1022,11 @@ mod tests {
         );
         assert!(
             observe_snapshot_available_from_locator(
-                &request,
+                &RuntimeSnapshotReadinessRequest {
+                    locator: mismatched_creation,
+                    ..readiness
+                },
                 &prepared,
-                &mismatched_creation,
                 200,
                 &availability_body,
             )

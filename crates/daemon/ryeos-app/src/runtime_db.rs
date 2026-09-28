@@ -2622,7 +2622,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 72 retains a separate, one-contact operator effect for external
 // runtime-snapshot production. An older runtime DB cannot represent an
 // uncertain snapshot mutation and must not be decoded as the current owner.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 72;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 73;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2968,6 +2968,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec { name: "intent_digest", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "locator_json", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "readiness_json", col_type: "TEXT", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                 ],

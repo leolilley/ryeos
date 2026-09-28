@@ -359,6 +359,7 @@ mod tests {
             intent,
             phase: RuntimeSnapshotPhase::Bound,
             locator: Some(named.clone()),
+            readiness: None,
             created_at_ms: now,
             updated_at_ms: now,
         };

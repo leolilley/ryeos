@@ -50,8 +50,11 @@ readiness GET can preserve the parser's exact continuity check. No admitted
 verifier yet measures the exact restored owner tree. The adapter constructs the
 readiness GET route solely from the signed snapshot profile and retained
 locator, and checks availability against the retained creation projection.
-This remains local interpretation: no daemon readiness service, journal
-transition, or provider-contacting GET is active.
+The adapter now has a separate sealed `observe-snapshot-readiness` entry that
+can make this one bounded read-only GET. RyeOS has a typed observation and
+durable one-time readiness record, but no daemon service yet invokes this
+entry or publishes that record. It is therefore not an active qualification
+path.
 Therefore the Render activation gate remains closed.
 
 ## Implemented control-plane behavior

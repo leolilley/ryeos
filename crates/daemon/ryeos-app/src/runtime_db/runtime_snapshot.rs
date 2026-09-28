@@ -7,7 +7,8 @@
 use super::*;
 use anyhow::{Context as _, ensure};
 use ryeos_external_execution_contract::runtime_snapshot::{
-    RuntimeSnapshotIntent, RuntimeSnapshotLocator,
+    RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotIntent, RuntimeSnapshotLocator,
+    RuntimeSnapshotReadinessObservation, RuntimeSnapshotReadinessRequest,
 };
 
 pub(super) const JOURNAL_SQL: &str = r#"
@@ -17,10 +18,12 @@ CREATE TABLE runtime_snapshot_operation (
     intent_digest TEXT NOT NULL,
     phase TEXT NOT NULL CHECK (phase IN ('reserved','attempt_pending','quarantined','bound')),
     locator_json TEXT,
+    readiness_json TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     CHECK ((phase='bound' AND locator_json IS NOT NULL)
-        OR (phase!='bound' AND locator_json IS NULL))
+        OR (phase!='bound' AND locator_json IS NULL AND readiness_json IS NULL)),
+    CHECK (readiness_json IS NULL OR phase='bound')
 );
 CREATE TRIGGER runtime_snapshot_operation_immutable_intent
 BEFORE UPDATE ON runtime_snapshot_operation
@@ -30,6 +33,10 @@ BEGIN SELECT RAISE(ABORT, 'runtime snapshot intent is immutable'); END;
 CREATE TRIGGER runtime_snapshot_operation_no_delete
 BEFORE DELETE ON runtime_snapshot_operation
 BEGIN SELECT RAISE(ABORT, 'runtime snapshot operation is retained'); END;
+CREATE TRIGGER runtime_snapshot_readiness_immutable
+BEFORE UPDATE ON runtime_snapshot_operation
+WHEN OLD.readiness_json IS NOT NULL AND NEW.readiness_json!=OLD.readiness_json
+BEGIN SELECT RAISE(ABORT, 'runtime snapshot readiness is immutable'); END;
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -58,6 +65,7 @@ pub struct RuntimeSnapshotRecord {
     pub intent: RuntimeSnapshotIntent,
     pub phase: RuntimeSnapshotPhase,
     pub locator: Option<RuntimeSnapshotLocator>,
+    pub readiness: Option<RuntimeSnapshotReadinessObservation>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -76,9 +84,9 @@ fn canonical<T: Serialize>(value: &T) -> Result<String> {
 }
 
 fn read(conn: &Connection, operation_id: &str) -> Result<Option<RuntimeSnapshotRecord>> {
-    let raw: Option<(String, String, String, Option<String>, i64, i64)> = conn
+    let raw: Option<(String, String, String, Option<String>, Option<String>, i64, i64)> = conn
         .query_row(
-            "SELECT intent_json,intent_digest,phase,locator_json,created_at_ms,updated_at_ms
+            "SELECT intent_json,intent_digest,phase,locator_json,readiness_json,created_at_ms,updated_at_ms
              FROM runtime_snapshot_operation WHERE operation_id=?1",
             [operation_id],
             |row| {
@@ -89,11 +97,14 @@ fn read(conn: &Connection, operation_id: &str) -> Result<Option<RuntimeSnapshotR
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()?;
-    let Some((intent_json, intent_digest, phase, locator_json, created, updated)) = raw else {
+    let Some((intent_json, intent_digest, phase, locator_json, readiness_json, created, updated)) =
+        raw
+    else {
         return Ok(None);
     };
     ensure!(
@@ -123,8 +134,32 @@ fn read(conn: &Connection, operation_id: &str) -> Result<Option<RuntimeSnapshotR
             Ok(locator)
         })
         .transpose()?;
+    let readiness = readiness_json
+        .map(|raw| {
+            ensure!(
+                raw.len() <= 4096,
+                "runtime snapshot readiness exceeds its bound"
+            );
+            let readiness: RuntimeSnapshotReadinessObservation = serde_json::from_str(&raw)?;
+            let request = RuntimeSnapshotReadinessRequest {
+                protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
+                intent: intent.clone(),
+                locator: locator
+                    .clone()
+                    .context("snapshot readiness has no locator")?,
+                provider_spec_digest: intent.provider_spec_digest.clone(),
+            };
+            readiness.validate_for(&request)?;
+            ensure!(
+                canonical(&readiness)? == raw,
+                "runtime snapshot readiness is noncanonical"
+            );
+            Ok(readiness)
+        })
+        .transpose()?;
     ensure!(
         (phase == RuntimeSnapshotPhase::Bound) == locator.is_some()
+            && (readiness.is_none() || phase == RuntimeSnapshotPhase::Bound)
             && created > 0
             && updated >= created,
         "runtime snapshot phase or timestamps contradict retained evidence"
@@ -133,6 +168,7 @@ fn read(conn: &Connection, operation_id: &str) -> Result<Option<RuntimeSnapshotR
         intent,
         phase,
         locator,
+        readiness,
         created_at_ms: created,
         updated_at_ms: updated,
     }))
@@ -180,7 +216,9 @@ impl RuntimeDb {
             "runtime snapshot attempt deadline is outside its admission window"
         );
         tx.execute(
-            "INSERT INTO runtime_snapshot_operation VALUES(?1,?2,?3,'reserved',NULL,?4,?4)",
+            "INSERT INTO runtime_snapshot_operation
+             (operation_id,intent_json,intent_digest,phase,locator_json,readiness_json,created_at_ms,updated_at_ms)
+             VALUES(?1,?2,?3,'reserved',NULL,NULL,?4,?4)",
             params![
                 intent.operation_id,
                 canonical(intent)?,
@@ -276,6 +314,54 @@ impl RuntimeDb {
         );
         let current =
             read(&tx, &locator.operation_id)?.context("runtime snapshot locator vanished")?;
+        tx.commit()?;
+        Ok(current)
+    }
+
+    /// Retain one complete provider-readiness observation for an already
+    /// bound locator. This does not qualify the restored bytes or authorize
+    /// placement. Equivalent repeat observations return the original row.
+    pub fn bind_runtime_snapshot_readiness(
+        &self,
+        observation: &RuntimeSnapshotReadinessObservation,
+    ) -> Result<RuntimeSnapshotRecord> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read(&tx, &observation.operation_id)?
+            .context("runtime snapshot readiness has no retained operation")?;
+        ensure!(
+            record.phase == RuntimeSnapshotPhase::Bound,
+            "runtime snapshot is not bound"
+        );
+        let request = RuntimeSnapshotReadinessRequest {
+            protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
+            intent: record.intent.clone(),
+            locator: record
+                .locator
+                .clone()
+                .context("bound snapshot has no locator")?,
+            provider_spec_digest: record.intent.provider_spec_digest.clone(),
+        };
+        observation.validate_for(&request)?;
+        if let Some(existing) = &record.readiness {
+            ensure!(
+                existing == observation,
+                "runtime snapshot readiness replay changed"
+            );
+            tx.commit()?;
+            return Ok(record);
+        }
+        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        let changed = tx.execute(
+            "UPDATE runtime_snapshot_operation SET readiness_json=?2,updated_at_ms=?3
+             WHERE operation_id=?1 AND phase='bound' AND readiness_json IS NULL",
+            params![observation.operation_id, canonical(observation)?, now],
+        )?;
+        ensure!(
+            changed == 1,
+            "runtime snapshot readiness lost its durable CAS"
+        );
+        let current =
+            read(&tx, &observation.operation_id)?.context("runtime snapshot readiness vanished")?;
         tx.commit()?;
         Ok(current)
     }
@@ -400,6 +486,36 @@ mod tests {
         assert_eq!(
             db.bind_runtime_snapshot_locator(&locator).unwrap().locator,
             Some(locator.clone())
+        );
+        let readiness = RuntimeSnapshotReadinessObservation {
+            schema: 1,
+            operation_id: intent.operation_id.clone(),
+            intent_digest: intent.digest().unwrap(),
+            snapshot_id: locator.snapshot_id.clone(),
+            source_occurrence_id: intent.source_occurrence_id.clone(),
+            provider_group_id: intent.provider_group_id.clone(),
+            creation_response_sha256: locator.provider_response_sha256.clone(),
+            readiness_response_sha256: "b".repeat(64),
+            captured_at: "2026-09-28T00:01:00Z".into(),
+            size_bytes: 4096,
+        };
+        assert_eq!(
+            db.bind_runtime_snapshot_readiness(&readiness)
+                .unwrap()
+                .readiness,
+            Some(readiness.clone())
+        );
+        assert_eq!(
+            db.bind_runtime_snapshot_readiness(&readiness)
+                .unwrap()
+                .readiness,
+            Some(readiness.clone())
+        );
+        let mut changed_readiness = readiness;
+        changed_readiness.size_bytes += 1;
+        assert!(
+            db.bind_runtime_snapshot_readiness(&changed_readiness)
+                .is_err()
         );
         let mut changed_locator = locator;
         changed_locator.snapshot_id = "snp-other".into();

@@ -14,6 +14,7 @@ use crate::canonical_json;
 pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 1;
 pub const RUNTIME_SNAPSHOT_RESULT_SCHEMA: u32 = 2;
 pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v2";
+pub const RUNTIME_SNAPSHOT_READINESS_PROTOCOL: &str = "ryeos.runtime-snapshot-readiness.v1";
 pub const MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES: usize = 24 * 1024;
 pub const MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES: u64 = 64 * 1024 * 1024 + 16 * 1024;
 
@@ -201,6 +202,70 @@ pub struct RuntimeSnapshotLocator {
     /// readiness interpretation. It is not a restored-content claim.
     pub provider_creation_observation: serde_json::Value,
     pub adapter_observation_sha256: String,
+}
+
+/// A read-only observation of a previously bound locator. This grants no
+/// create/retry authority and no claim about restored snapshot contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotReadinessRequest {
+    pub protocol: String,
+    pub intent: RuntimeSnapshotIntent,
+    pub locator: RuntimeSnapshotLocator,
+    pub provider_spec_digest: String,
+}
+
+impl RuntimeSnapshotReadinessRequest {
+    pub fn validate(&self) -> Result<()> {
+        self.locator.validate_for(&self.intent)?;
+        ensure!(
+            self.protocol == RUNTIME_SNAPSHOT_READINESS_PROTOCOL
+                && self.provider_spec_digest == self.intent.provider_spec_digest
+                && canonical_json(self)?.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+            "runtime snapshot readiness request differs from its retained locator"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotReadinessObservation {
+    pub schema: u32,
+    pub operation_id: String,
+    pub intent_digest: String,
+    pub snapshot_id: String,
+    pub source_occurrence_id: String,
+    pub provider_group_id: String,
+    pub creation_response_sha256: String,
+    pub readiness_response_sha256: String,
+    pub captured_at: String,
+    pub size_bytes: i64,
+}
+
+impl RuntimeSnapshotReadinessObservation {
+    pub fn validate_for(&self, request: &RuntimeSnapshotReadinessRequest) -> Result<()> {
+        request.validate()?;
+        ensure!(
+            self.schema == 1
+                && self.operation_id == request.intent.operation_id
+                && self.intent_digest == request.intent.digest()?
+                && self.snapshot_id == request.locator.snapshot_id
+                && self.source_occurrence_id == request.intent.source_occurrence_id
+                && self.provider_group_id == request.intent.provider_group_id
+                && self.creation_response_sha256 == request.locator.provider_response_sha256
+                && self.size_bytes > 0,
+            "runtime snapshot readiness changed its retained locator"
+        );
+        require_hash(&self.readiness_response_sha256, "readiness response")?;
+        ensure!(
+            self.captured_at.len() <= 64
+                && !self.captured_at.is_empty()
+                && self.captured_at.is_ascii(),
+            "runtime snapshot readiness has invalid capture time"
+        );
+        Ok(())
+    }
 }
 
 impl RuntimeSnapshotLocator {
@@ -397,5 +462,47 @@ mod tests {
             *intent_digest = "f".repeat(64);
         }
         assert!(wrong.validate_for(&request).is_err());
+    }
+
+    #[test]
+    fn readiness_is_read_only_and_bound_to_the_exact_locator() {
+        let intent = intent();
+        let locator = RuntimeSnapshotLocator {
+            schema: RUNTIME_SNAPSHOT_RESULT_SCHEMA,
+            operation_id: intent.operation_id.clone(),
+            intent_digest: intent.digest().unwrap(),
+            source_occurrence_id: intent.source_occurrence_id.clone(),
+            provider_group_id: intent.provider_group_id.clone(),
+            snapshot_id: "snp-fixture-1".into(),
+            provider_response_sha256: "a".repeat(64),
+            provider_creation_observation: serde_json::json!({"schema": 1}),
+            adapter_observation_sha256: hex::encode(Sha256::digest(br#"{"schema":1}"#)),
+        };
+        let request = RuntimeSnapshotReadinessRequest {
+            protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
+            provider_spec_digest: intent.provider_spec_digest.clone(),
+            intent,
+            locator,
+        };
+        request.validate().unwrap();
+        let observation = RuntimeSnapshotReadinessObservation {
+            schema: 1,
+            operation_id: request.intent.operation_id.clone(),
+            intent_digest: request.intent.digest().unwrap(),
+            snapshot_id: request.locator.snapshot_id.clone(),
+            source_occurrence_id: request.locator.source_occurrence_id.clone(),
+            provider_group_id: request.locator.provider_group_id.clone(),
+            creation_response_sha256: request.locator.provider_response_sha256.clone(),
+            readiness_response_sha256: "b".repeat(64),
+            captured_at: "2026-09-28T00:01:00Z".into(),
+            size_bytes: 4096,
+        };
+        observation.validate_for(&request).unwrap();
+        let mut substituted = observation.clone();
+        substituted.snapshot_id = "snp-other".into();
+        assert!(substituted.validate_for(&request).is_err());
+        let mut substituted = request;
+        substituted.provider_spec_digest = "c".repeat(64);
+        assert!(substituted.validate().is_err());
     }
 }
