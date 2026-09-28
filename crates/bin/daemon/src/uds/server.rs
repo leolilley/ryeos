@@ -2146,6 +2146,7 @@ mod tests {
             service_descriptors: ryeos_api::handlers::ALL,
             node_config: Arc::new(ryeos_app::node_config::NodeConfigSnapshot {
                 external_execution: Vec::new(),
+                runtime_snapshot_production: Vec::new(),
                 bundles: vec![],
                 routes: vec![],
                 commands: vec![],

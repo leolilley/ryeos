@@ -1963,6 +1963,7 @@ mod tests {
         let expected = core.join(".ai/node/commands/artifact-export.yaml");
         let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
             external_execution: Vec::new(),
+            runtime_snapshot_production: Vec::new(),
             bundles: vec![ryeos_app::node_config::BundleRecord {
                 name: "core".into(),
                 path: core,

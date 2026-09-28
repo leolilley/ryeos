@@ -318,6 +318,7 @@ fn build_app_state(
     let service_descriptors = service_descriptors();
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
         external_execution: Vec::new(),
+        runtime_snapshot_production: Vec::new(),
         bundles: vec![],
         routes: test_ui_routes(),
         commands: vec![],

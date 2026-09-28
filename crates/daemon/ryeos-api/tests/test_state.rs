@@ -216,6 +216,7 @@ fn build_app_state(
 ) -> AppState {
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
         external_execution: Vec::new(),
+        runtime_snapshot_production: Vec::new(),
         bundles: vec![],
         routes: vec![],
         commands: vec![],

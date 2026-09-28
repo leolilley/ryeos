@@ -1083,6 +1083,7 @@ mod tests {
     fn installed_help_reads_command_and_effective_item_metadata() {
         let snapshot = NodeConfigSnapshot {
             external_execution: Vec::new(),
+            runtime_snapshot_production: Vec::new(),
             bundles: vec![],
             routes: vec![],
             commands: vec![ryeos_runtime::CommandDef {

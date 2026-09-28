@@ -108,6 +108,9 @@ pub(crate) struct NodeConfigAdmission {
 
 pub(crate) struct NodeConfigSnapshotBuilder {
     external_execution: Vec<super::sections::external_execution::InstalledExternalExecutionBinding>,
+    runtime_snapshot_production: Vec<
+        super::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+    >,
     bundles: Vec<BundleRecord>,
     routes: Vec<RawRouteSpec>,
     commands: Vec<CommandRecord>,
@@ -121,6 +124,7 @@ impl NodeConfigSnapshotBuilder {
     ) -> Result<Self> {
         Ok(Self {
             external_execution: Vec::new(),
+            runtime_snapshot_production: Vec::new(),
             bundles: validate_prospective_bundle_records(bundles)?,
             routes: Vec::new(),
             commands: Vec::new(),
@@ -171,6 +175,21 @@ impl NodeConfigSnapshotBuilder {
         Ok(())
     }
 
+    pub(crate) fn push_runtime_snapshot_production(
+        &mut self,
+        record: super::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+    ) -> Result<()> {
+        if self
+            .runtime_snapshot_production
+            .iter()
+            .any(|prior| prior.id() == record.id())
+        {
+            bail!("duplicate runtime snapshot production binding identity");
+        }
+        self.runtime_snapshot_production.push(record);
+        Ok(())
+    }
+
     pub(crate) fn push_command(&mut self, record: CommandRecord) {
         self.commands.push(record);
     }
@@ -185,6 +204,7 @@ impl NodeConfigSnapshotBuilder {
 
         Ok(NodeConfigSnapshot {
             external_execution: self.external_execution,
+            runtime_snapshot_production: self.runtime_snapshot_production,
             bundles: self.bundles,
             routes: self.routes,
             commands: self.commands,

@@ -4620,6 +4620,7 @@ pub mod test_support {
         )?;
         state.node_config = Arc::new(crate::node_config::NodeConfigSnapshot {
             external_execution: vec![binding],
+            runtime_snapshot_production: state.node_config.runtime_snapshot_production.clone(),
             bundles: state.node_config.bundles.clone(),
             routes: state.node_config.routes.clone(),
             commands: state.node_config.commands.clone(),
