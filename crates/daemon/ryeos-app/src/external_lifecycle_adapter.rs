@@ -9,7 +9,8 @@ use ryeos_external_execution::lifecycle_adapter::{
 use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotAdapterRequest,
     RuntimeSnapshotAdapterResponse, RuntimeSnapshotReadinessObservation,
-    RuntimeSnapshotReadinessRequest,
+    RuntimeSnapshotReadinessRequest, RuntimeSnapshotQualificationAdapterRequest,
+    RuntimeSnapshotQualificationAdapterResponse,
 };
 use ryeos_external_execution_contract::staging_package::GuestStagingExpected;
 use ryeos_external_execution_contract::{
@@ -464,23 +465,40 @@ impl ExecutableExternalPlacementBackend {
         upload: Option<&lillux::InheritedDescriptorAuthority>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ryeos_external_execution::lifecycle_adapter::LifecycleAdapterOutput> {
+        let spec = self.snapshot_production_spec.as_ref()
+            .context("installed lifecycle adapter has no signed snapshot production profile")?;
+        self.invoke_sealed_snapshot_operation(
+            binding.network_inputs(), spec, binding.settings(), binding.settings_digest(),
+            credential, request_bytes, invocation, upload, deadline,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_sealed_snapshot_operation(
+        &self,
+        network_policy: &ryeos_state::external_execution::transport::ExternalNetworkInputPolicy,
+        spec: &CapturedLifecycleProviderSpec,
+        settings: &serde_json::Value,
+        settings_digest: &str,
+        credential: &PlacementCredential,
+        request_bytes: &[u8],
+        invocation: LifecycleAdapterInvocation,
+        upload: Option<&lillux::InheritedDescriptorAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ryeos_external_execution::lifecycle_adapter::LifecycleAdapterOutput> {
         ensure!(!deadline.has_elapsed(), "snapshot adapter deadline expired");
         ensure!(
             request_bytes.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
             "snapshot adapter request exceeds its bound"
         );
-        let spec = self
-            .snapshot_production_spec
-            .as_ref()
-            .context("installed lifecycle adapter has no signed snapshot production profile")?;
         let descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)?;
-        let network_inputs = capture_lifecycle_network_inputs(binding.network_inputs())?;
+        let network_inputs = capture_lifecycle_network_inputs(network_policy)?;
         let request_handle = lillux::sealed_memfd(c"ryeos-runtime-snapshot-request", request_bytes)
             .map_err(anyhow::Error::msg)?;
-        let settings_bytes = lillux::canonical_json(binding.settings())?;
+        let settings_bytes = lillux::canonical_json(settings)?;
         ensure!(
-            lillux::sha256_hex(settings_bytes.as_bytes()) == binding.settings_digest(),
-            "snapshot producer settings changed after node admission"
+            lillux::sha256_hex(settings_bytes.as_bytes()) == settings_digest,
+            "snapshot operation settings changed after node admission"
         );
         let settings_handle = lillux::sealed_memfd(
             c"ryeos-runtime-snapshot-settings",
@@ -603,6 +621,74 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             "snapshot producer differs from its inspected signed authority"
         );
         Ok(())
+    }
+
+    fn preflight_snapshot_qualification_create(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &PlacementCredential,
+    ) -> Result<()> {
+        ensure!(
+            producer.backend() == self.declaration.id
+                && producer.adapter_artifact_hash() == self.adapter_hash
+                && qualification.production_binding_id() == producer.id()
+                && qualification.production_binding_digest() == producer.digest()
+                && qualification.provider_spec_digest() == self.provider_spec.sha256
+                && self.inspection.observed_provider_spec_sha256 == self.provider_spec.sha256
+                && credential.backend() == producer.backend()
+                && credential.account() == producer.account()
+                && lillux::sha256_hex(lillux::canonical_json(qualification.settings())?.as_bytes())
+                    == qualification.settings_digest(),
+            "snapshot qualification differs from its exact signed producer or provider profile"
+        );
+        Ok(())
+    }
+
+    fn create_snapshot_qualification_occurrence(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &PlacementCredential,
+        request: &RuntimeSnapshotQualificationAdapterRequest,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<RuntimeSnapshotQualificationAdapterResponse>> {
+        self.preflight_snapshot_qualification_create(producer, qualification, credential)?;
+        request.validate()?;
+        ensure!(
+            request.intent.qualification_profile_digest == qualification.digest()
+                && request.intent.snapshot_operation_id == request.source_intent.operation_id
+                && request.intent.provider_id == producer.backend()
+                && request.intent.adapter_artifact_hash == self.adapter_hash
+                && request.intent.provider_spec_digest == self.provider_spec.sha256
+                && request.intent.settings_digest == qualification.settings_digest()
+                && request.intent.verifier_artifact_hash == qualification.verifier_artifact_hash()
+                && request.intent.maximum_lifetime_seconds == qualification.maximum_lifetime_seconds()
+                && request.source_intent.production_profile_digest == producer.digest(),
+            "qualification create differs from inspected signed authority"
+        );
+        let remaining_ms = request.intent.attempt_deadline_ms
+            .saturating_sub(lillux::time::timestamp_millis());
+        ensure!(remaining_ms > 0, "qualification create expired before adapter contact");
+        let deadline = deadline
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(u64::from(qualification.contact_timeout_seconds())),
+            ))
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+            ));
+        let bytes = ryeos_external_execution_contract::canonical_json(request)?;
+        let output = self.invoke_sealed_snapshot_operation(
+            producer.network_inputs(), &self.provider_spec, qualification.settings(),
+            qualification.settings_digest(), credential, &bytes,
+            LifecycleAdapterInvocation::QualifySnapshotCreate, None, deadline,
+        )?;
+        let value: RuntimeSnapshotQualificationAdapterResponse =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+                .map_err(|_| anyhow::anyhow!("invalid qualification create adapter response"))?;
+        value.validate_for(request)
+            .map_err(|_| anyhow::anyhow!("invalid qualification create adapter response"))?;
+        Ok(ExternalLifecycleObservation { value, deadline_exceeded: output.deadline_exceeded })
     }
 
     fn produce_runtime_snapshot(

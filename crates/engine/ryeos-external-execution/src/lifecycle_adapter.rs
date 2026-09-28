@@ -23,6 +23,7 @@ pub enum LifecycleAdapterInvocation {
     Operate,
     ProduceSnapshot,
     ObserveSnapshotReadiness,
+    QualifySnapshotCreate,
 }
 
 /// Complete bounded protocol observation, not permission to continue startup.
@@ -41,6 +42,7 @@ impl LifecycleAdapterInvocation {
             Self::Operate => "operate",
             Self::ProduceSnapshot => "produce-snapshot",
             Self::ObserveSnapshotReadiness => "observe-snapshot-readiness",
+            Self::QualifySnapshotCreate => "qualify-snapshot-create",
         }
     }
 }
@@ -149,6 +151,7 @@ fn lifecycle_adapter_output(
                         LifecycleAdapterInvocation::Operate
                             | LifecycleAdapterInvocation::ProduceSnapshot
                             | LifecycleAdapterInvocation::ObserveSnapshotReadiness
+                            | LifecycleAdapterInvocation::QualifySnapshotCreate
                     ))),
         "external lifecycle adapter failed: {failure} (exit_code={})",
         result.exit_code

@@ -92,6 +92,24 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     >{
         bail!("external placement backend cannot observe runtime snapshot readiness")
     }
+    fn preflight_snapshot_qualification_create(
+        &self,
+        _producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        _credential: &PlacementCredential,
+    ) -> Result<()> {
+        bail!("external placement backend has no inspected qualification create profile")
+    }
+    fn create_snapshot_qualification_occurrence(
+        &self,
+        _producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        _credential: &PlacementCredential,
+        _request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterRequest,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterResponse>> {
+        bail!("external placement backend cannot create a qualification occurrence")
+    }
     /// Effective capabilities from the exact installed adapter inspection.
     /// A declaration alone is not permission to invent stronger observations.
     fn lifecycle_capabilities(&self) -> BTreeSet<LifecycleCapability>;
@@ -896,6 +914,30 @@ pub struct ExternalPlacementBackendRegistry {
 }
 
 impl ExternalPlacementBackendRegistry {
+    pub(crate) fn preflight_snapshot_qualification_create(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &PlacementCredential,
+    ) -> Result<()> {
+        let backend = self.backends.get(&(producer.backend().to_owned(), producer.adapter_artifact_hash().to_owned()))
+            .context("exact signed qualification adapter generation is not installed")?;
+        backend.preflight_snapshot_qualification_create(producer, qualification, credential)
+    }
+
+    pub(crate) fn create_snapshot_qualification_occurrence(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &PlacementCredential,
+        request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterRequest,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterResponse>> {
+        let backend = self.backends.get(&(producer.backend().to_owned(), producer.adapter_artifact_hash().to_owned()))
+            .context("exact signed qualification adapter generation is not installed")?;
+        backend.create_snapshot_qualification_occurrence(producer, qualification, credential, request, deadline)
+    }
+
     pub(crate) fn preflight_runtime_snapshot(
         &self,
         binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
@@ -4733,6 +4775,7 @@ pub mod test_support {
         state.node_config = Arc::new(crate::node_config::NodeConfigSnapshot {
             external_execution: vec![binding],
             runtime_snapshot_production: state.node_config.runtime_snapshot_production.clone(),
+            runtime_snapshot_qualification: state.node_config.runtime_snapshot_qualification.clone(),
             bundles: state.node_config.bundles.clone(),
             routes: state.node_config.routes.clone(),
             commands: state.node_config.commands.clone(),

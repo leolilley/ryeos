@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 
 use ryeos_engine::contracts::SignatureEnvelope;
@@ -111,6 +111,9 @@ pub(crate) struct NodeConfigSnapshotBuilder {
     runtime_snapshot_production: Vec<
         super::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
     >,
+    runtime_snapshot_qualification: Vec<
+        super::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+    >,
     bundles: Vec<BundleRecord>,
     routes: Vec<RawRouteSpec>,
     commands: Vec<CommandRecord>,
@@ -125,6 +128,7 @@ impl NodeConfigSnapshotBuilder {
         Ok(Self {
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
+            runtime_snapshot_qualification: Vec::new(),
             bundles: validate_prospective_bundle_records(bundles)?,
             routes: Vec::new(),
             commands: Vec::new(),
@@ -190,12 +194,32 @@ impl NodeConfigSnapshotBuilder {
         Ok(())
     }
 
+    pub(crate) fn push_runtime_snapshot_qualification(
+        &mut self,
+        record: super::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+    ) -> Result<()> {
+        if self.runtime_snapshot_qualification.iter().any(|prior| prior.id() == record.id()) {
+            bail!("duplicate runtime snapshot qualification binding identity");
+        }
+        self.runtime_snapshot_qualification.push(record);
+        Ok(())
+    }
+
     pub(crate) fn push_command(&mut self, record: CommandRecord) {
         self.commands.push(record);
     }
 
     fn finish(self) -> Result<NodeConfigSnapshot> {
         check_bundle_collisions(&self.bundles)?;
+        for qualification in &self.runtime_snapshot_qualification {
+            ensure!(
+                self.runtime_snapshot_production.iter().any(|producer| {
+                    producer.id() == qualification.production_binding_id()
+                        && producer.digest() == qualification.production_binding_digest()
+                }),
+                "snapshot qualification has no exact current producer binding"
+            );
+        }
         ryeos_runtime::CommandRegistry::from_records(
             &self.commands,
             &self.command_registration_authority.runtime_policy(),
@@ -205,6 +229,7 @@ impl NodeConfigSnapshotBuilder {
         Ok(NodeConfigSnapshot {
             external_execution: self.external_execution,
             runtime_snapshot_production: self.runtime_snapshot_production,
+            runtime_snapshot_qualification: self.runtime_snapshot_qualification,
             bundles: self.bundles,
             routes: self.routes,
             commands: self.commands,
