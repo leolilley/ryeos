@@ -3063,6 +3063,7 @@ dependencies = [
  "ryeos-state",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
 ]
 

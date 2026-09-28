@@ -481,6 +481,33 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         &self.declaration.settings_schema_digest
     }
 
+    fn preflight_runtime_snapshot(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+    ) -> Result<()> {
+        let spec = self
+            .snapshot_production_spec
+            .as_ref()
+            .context("installed lifecycle adapter has no signed snapshot production profile")?;
+        ensure!(
+            binding.backend() == self.declaration.id
+                && binding.adapter_artifact_hash() == self.adapter_hash
+                && binding.snapshot_spec_sha256() == spec.sha256
+                && self
+                    .inspection
+                    .observed_snapshot_production_spec_sha256
+                    .as_deref()
+                    == Some(spec.sha256.as_str())
+                && credential.backend() == binding.backend()
+                && credential.account() == binding.account()
+                && lillux::sha256_hex(lillux::canonical_json(binding.settings())?.as_bytes())
+                    == binding.settings_digest(),
+            "snapshot producer differs from its inspected signed authority"
+        );
+        Ok(())
+    }
+
     fn produce_runtime_snapshot(
         &self,
         binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
@@ -489,6 +516,7 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         upload: &lillux::InheritedDescriptorAuthority,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<RuntimeSnapshotAdapterResponse>> {
+        self.preflight_runtime_snapshot(binding, credential)?;
         request.validate()?;
         let spec = self
             .snapshot_production_spec

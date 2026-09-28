@@ -39,6 +39,7 @@ pub mod external_candidate_import;
 pub mod external_connector;
 pub mod external_content_admission;
 mod external_lifecycle_adapter;
+pub mod operator_runtime_snapshot;
 pub mod external_placement;
 pub mod federated_follow;
 pub mod handler_context;

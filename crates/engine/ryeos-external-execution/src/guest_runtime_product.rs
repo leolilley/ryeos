@@ -20,6 +20,136 @@ use crate::guest_import_authorization::{GuestOwnerRuntimeProfile, ObservedGuestR
 const OWNER_NAME: &str = "ryeos-external-guest-occurrence-owner";
 const MAX_OWNER_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Exact, immutable directory-upload body. A provider locator obtained after
+/// using it remains unqualified until restored bytes are independently read.
+pub struct GuestOwnerSnapshotUpload {
+    descriptor: lillux::InheritedDescriptorAuthority,
+    bytes: u64,
+    sha256: String,
+}
+
+impl GuestOwnerSnapshotUpload {
+    pub fn descriptor(&self) -> &lillux::InheritedDescriptorAuthority {
+        &self.descriptor
+    }
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
+/// Read only the four admitted members through pinned descriptors and produce
+/// a deterministic plain tar. Observation before and after closes the mutable
+/// tree window; the sealed descriptor is the sole upload source thereafter.
+pub fn seal_guest_owner_snapshot_upload(
+    root: &lillux::PinnedDirectory,
+    expected_manifest_hash: &str,
+    maximum_bytes: u64,
+) -> Result<GuestOwnerSnapshotUpload> {
+    ensure!(
+        lillux::valid_hash(expected_manifest_hash)
+            && (1..=64 * 1024 * 1024).contains(&maximum_bytes),
+        "guest runtime snapshot upload has invalid source bounds"
+    );
+    let root_identity = root.identity()?;
+    let observed = ObservedGuestRuntime::observe(root)?;
+    ensure!(
+        observed.manifest_hash() == expected_manifest_hash,
+        "guest runtime upload differs from witnessed manifest"
+    );
+    let mut archive = tar::Builder::new(Vec::new());
+    append_snapshot_directory(&mut archive, "bin/", 0o700)?;
+    let bin = root
+        .open_child_directory(OsStr::new("bin"))?
+        .context("guest runtime upload has no bin directory")?;
+    append_snapshot_regular(
+        &mut archive,
+        &bin,
+        "ryeos-external-guest-occurrence-owner",
+        "bin/ryeos-external-guest-occurrence-owner",
+        0o755,
+        maximum_bytes,
+    )?;
+    append_snapshot_regular(
+        &mut archive,
+        root,
+        "controller-root.hex",
+        "controller-root.hex",
+        0o644,
+        64,
+    )?;
+    append_snapshot_regular(
+        &mut archive,
+        root,
+        "guest-owner-profile.json",
+        "guest-owner-profile.json",
+        0o644,
+        4 * 1024,
+    )?;
+    let bytes = archive.into_inner()?;
+    ensure!(
+        bytes.len() as u64 <= maximum_bytes.saturating_add(16 * 1024)
+            && root.identity()? == root_identity
+            && ObservedGuestRuntime::observe(root)?.manifest_hash() == expected_manifest_hash,
+        "guest runtime upload changed during packaging"
+    );
+    let descriptor =
+        lillux::sealed_memfd(c"ryeos-guest-runtime-upload", &bytes).map_err(anyhow::Error::msg)?;
+    Ok(GuestOwnerSnapshotUpload {
+        descriptor,
+        bytes: bytes.len() as u64,
+        sha256: lillux::sha256_hex(&bytes),
+    })
+}
+
+fn append_snapshot_directory(
+    archive: &mut tar::Builder<Vec<u8>>,
+    path: &str,
+    mode: u32,
+) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Directory);
+    header.set_size(0);
+    header.set_mode(mode);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_cksum();
+    archive.append_data(&mut header, path, std::io::empty())?;
+    Ok(())
+}
+
+fn append_snapshot_regular(
+    archive: &mut tar::Builder<Vec<u8>>,
+    parent: &lillux::PinnedDirectory,
+    name: &str,
+    path: &str,
+    mode: u32,
+    maximum_bytes: u64,
+) -> Result<()> {
+    let file = parent
+        .open_pinned_regular(OsStr::new(name), false)?
+        .with_context(|| format!("guest runtime upload lacks {path}"))?;
+    let observation = file.observation()?;
+    ensure!(
+        observation.portable_mode()? == mode,
+        "guest runtime upload member changed portable mode"
+    );
+    let bytes = file.read_stable_bounded(&observation, maximum_bytes)?;
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_size(bytes.len() as u64);
+    header.set_mode(mode);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_cksum();
+    archive.append_data(&mut header, path, bytes.as_slice())?;
+    Ok(())
+}
+
 /// Source-derived expectations for an independently observed guest snapshot.
 /// The caller must first authenticate the product witness and open its exact
 /// manifest through the retained CAS authority; this parser grants no provider

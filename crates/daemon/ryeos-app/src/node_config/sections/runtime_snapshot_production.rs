@@ -24,6 +24,7 @@ struct ProductionDocument {
     protocol: String,
     backend: String,
     account: String,
+    provider_group_id: String,
     credential_generation: String,
     adapter_artifact_hash: String,
     snapshot_spec_sha256: String,
@@ -53,6 +54,15 @@ impl ProductionDocument {
                 "runtime snapshot production {name} is invalid"
             );
         }
+        ensure!(
+            !self.provider_group_id.is_empty()
+                && self.provider_group_id.len() <= 256
+                && self
+                    .provider_group_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')),
+            "runtime snapshot production provider group is invalid"
+        );
         for (name, value) in [
             ("credential generation", &self.credential_generation),
             ("adapter artifact", &self.adapter_artifact_hash),
@@ -74,7 +84,8 @@ impl ProductionDocument {
         self.network_inputs.validate()?;
         ensure!(
             (1..=300).contains(&self.contact_timeout_seconds)
-                && (1..=MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES).contains(&self.maximum_upload_bytes),
+                && (16 * 1024 + 1..=MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES)
+                    .contains(&self.maximum_upload_bytes),
             "runtime snapshot production contact or upload budget is invalid"
         );
         Ok(())
@@ -102,6 +113,9 @@ impl InstalledRuntimeSnapshotProductionBinding {
     }
     pub(crate) fn account(&self) -> &str {
         &self.document.account
+    }
+    pub(crate) fn provider_group_id(&self) -> &str {
+        &self.document.provider_group_id
     }
     pub(crate) fn adapter_artifact_hash(&self) -> &str {
         &self.document.adapter_artifact_hash
@@ -217,6 +231,7 @@ mod tests {
             protocol: "ryeos.runtime-snapshot-production.v1".into(),
             backend: "render-sandbox-early-access".into(),
             account: "render-test".into(),
+            provider_group_id: "sbg-test".into(),
             credential_generation: "a".repeat(64),
             adapter_artifact_hash: "b".repeat(64),
             snapshot_spec_sha256: "c".repeat(64),
@@ -236,7 +251,7 @@ mod tests {
                 },
             },
             contact_timeout_seconds: 60,
-            maximum_upload_bytes: 1024,
+            maximum_upload_bytes: 1024 * 1024,
         };
         document.validate().unwrap();
         let mut changed = document.clone();

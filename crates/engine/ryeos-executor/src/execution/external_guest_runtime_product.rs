@@ -6,10 +6,12 @@
 
 use std::ffi::OsStr;
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Result, ensure};
 use ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime;
+pub use ryeos_external_execution::guest_runtime_product::GuestOwnerSnapshotUpload;
 use ryeos_external_execution::guest_runtime_product::{
     GuestOwnerRuntimeManifestIdentity, derive_guest_owner_runtime_manifest_identity,
+    seal_guest_owner_snapshot_upload,
 };
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use ryeos_state::external_content::products::{ProductShape, ProductStorage};
@@ -26,28 +28,6 @@ pub struct StagedGuestOwnerRuntimeProduct {
     witness_hash: String,
     identity: GuestOwnerRuntimeManifestIdentity,
     maximum_bytes: u64,
-}
-
-/// Immutable Render directory-upload body. It remains only transport input;
-/// the returned snapshot still requires independent restored-byte testimony.
-pub struct GuestOwnerSnapshotUpload {
-    descriptor: lillux::InheritedDescriptorAuthority,
-    bytes: u64,
-    sha256: String,
-}
-
-impl GuestOwnerSnapshotUpload {
-    pub fn descriptor(&self) -> &lillux::InheritedDescriptorAuthority {
-        &self.descriptor
-    }
-
-    pub fn bytes(&self) -> u64 {
-        self.bytes
-    }
-
-    pub fn sha256(&self) -> &str {
-        &self.sha256
-    }
 }
 
 impl StagedGuestOwnerRuntimeProduct {
@@ -83,92 +63,12 @@ impl StagedGuestOwnerRuntimeProduct {
     /// never through a reconstructed CAS or ambient project path.
     pub fn sealed_snapshot_upload(&self) -> Result<GuestOwnerSnapshotUpload> {
         self.ensure_current()?;
-        let mut archive = tar::Builder::new(Vec::new());
-        append_directory(&mut archive, "bin/", 0o700)?;
-        let bin = self
-            .root
-            .open_child_directory(OsStr::new("bin"))?
-            .context("staged guest runtime has no bin directory")?;
-        append_regular(
-            &mut archive,
-            &bin,
-            "ryeos-external-guest-occurrence-owner",
-            "bin/ryeos-external-guest-occurrence-owner",
-            0o755,
+        seal_guest_owner_snapshot_upload(
+            &self.root,
+            &self.identity.manifest_hash,
             self.maximum_bytes,
-        )?;
-        append_regular(
-            &mut archive,
-            &self.root,
-            "controller-root.hex",
-            "controller-root.hex",
-            0o644,
-            64,
-        )?;
-        append_regular(
-            &mut archive,
-            &self.root,
-            "guest-owner-profile.json",
-            "guest-owner-profile.json",
-            0o644,
-            4 * 1024,
-        )?;
-        let bytes = archive.into_inner()?;
-        ensure!(
-            bytes.len() as u64 <= self.maximum_bytes.saturating_add(16 * 1024),
-            "guest runtime archive exceeds its source bound"
-        );
-        self.ensure_current()?;
-        let descriptor = lillux::sealed_memfd(c"ryeos-guest-runtime-upload", &bytes)
-            .map_err(anyhow::Error::msg)?;
-        Ok(GuestOwnerSnapshotUpload {
-            descriptor,
-            bytes: bytes.len() as u64,
-            sha256: lillux::sha256_hex(&bytes),
-        })
+        )
     }
-}
-
-fn append_directory(archive: &mut tar::Builder<Vec<u8>>, path: &str, mode: u32) -> Result<()> {
-    let mut header = tar::Header::new_gnu();
-    header.set_entry_type(tar::EntryType::Directory);
-    header.set_size(0);
-    header.set_mode(mode);
-    header.set_uid(0);
-    header.set_gid(0);
-    header.set_mtime(0);
-    header.set_cksum();
-    archive.append_data(&mut header, path, std::io::empty())?;
-    Ok(())
-}
-
-fn append_regular(
-    archive: &mut tar::Builder<Vec<u8>>,
-    parent: &lillux::PinnedDirectory,
-    name: &str,
-    path: &str,
-    mode: u32,
-    maximum_bytes: u64,
-) -> Result<()> {
-    let file = parent
-        .open_pinned_regular(OsStr::new(name), false)?
-        .with_context(|| format!("staged guest runtime lacks {path}"))?;
-    let observation = file.observation()?;
-    ensure!(
-        observation.portable_mode()? == mode,
-        "staged guest runtime upload member changed portable mode"
-    );
-    let bytes = file.read_stable_bounded(&observation, maximum_bytes)?;
-    let mut header = tar::Header::new_gnu();
-    header.set_entry_type(tar::EntryType::Regular);
-    header.set_size(bytes.len() as u64);
-    header.set_mode(mode);
-    header.set_uid(0);
-    header.set_gid(0);
-    header.set_mtime(0);
-    header.set_cksum();
-    archive.append_data(&mut header, path, bytes.as_slice())?;
-    Ok(())
 }
 
 /// Resolve a current, operator-owned product and copy its exact ordinary CAS

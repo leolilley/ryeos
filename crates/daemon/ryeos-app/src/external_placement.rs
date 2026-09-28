@@ -55,6 +55,13 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     fn supervisor_artifact(&self) -> (&str, u64);
     fn launcher_artifact(&self) -> (&str, u64);
     fn settings_schema_digest(&self) -> &str;
+    fn preflight_runtime_snapshot(
+        &self,
+        _binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _credential: &PlacementCredential,
+    ) -> Result<()> {
+        bail!("external placement backend has no inspected snapshot producer")
+    }
     /// One already-claimed snapshot attempt. The caller must establish the
     /// current signed producer binding, product witness and durable CAS before
     /// invoking this contact path; backend inspection alone grants no contact.
@@ -876,6 +883,21 @@ pub struct ExternalPlacementBackendRegistry {
 }
 
 impl ExternalPlacementBackendRegistry {
+    pub(crate) fn preflight_runtime_snapshot(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+    ) -> Result<()> {
+        let backend = self
+            .backends
+            .get(&(
+                binding.backend().to_owned(),
+                binding.adapter_artifact_hash().to_owned(),
+            ))
+            .context("exact signed snapshot producer adapter generation is not installed")?;
+        backend.preflight_runtime_snapshot(binding, credential)
+    }
+
     /// Resolve the exact inspected adapter generation selected by a signed
     /// producer binding. The caller must have won the durable snapshot-attempt
     /// claim; this lookup by itself never authorizes provider contact.
