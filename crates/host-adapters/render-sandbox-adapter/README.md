@@ -351,7 +351,11 @@ and import bounds, loads the exact ordinary manifest under CAS authority,
 privately stages it, and re-observes the tree against the node public root.
 The staged authority can emit one bounded, deterministic, sealed plain-tar
 directory-upload body from pinned descriptors; it rechecks the tree after
-packaging. The Render adapter now parses a complete `202` filesystem snapshot
+packaging. A separate closed snapshot-production profile fixture describes the
+reviewed Render upload-token, create and exact-status routes, filesystem kind,
+plain-tar content type and response states. Its parser rejects unsupported
+substitutions; the fixture is not yet a signed or admitted provider authority.
+The Render adapter now parses a complete `202` filesystem snapshot
 response against the exact source Sandbox, group and plan, retaining the
 original product witness/root in a locator observation. A separate bounded
 readiness parser accepts only a complete `200` response that reports the same
