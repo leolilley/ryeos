@@ -47,7 +47,11 @@ response parser exists without a provider-contacting readiness operation. The
 durable locator now retains the bounded, adapter-validated creation projection
 (`requestedAt` and `expiresAt`) under the same operation identity so a later
 readiness GET can preserve the parser's exact continuity check. No admitted
-verifier yet measures the exact restored owner tree.
+verifier yet measures the exact restored owner tree. The adapter constructs the
+readiness GET route solely from the signed snapshot profile and retained
+locator, and checks availability against the retained creation projection.
+This remains local interpretation: no daemon readiness service, journal
+transition, or provider-contacting GET is active.
 Therefore the Render activation gate remains closed.
 
 ## Implemented control-plane behavior

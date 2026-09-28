@@ -343,6 +343,17 @@ fn retained_snapshot_creation(
     Ok(creation)
 }
 
+pub(crate) fn observe_snapshot_available_from_locator(
+    request: &RuntimeSnapshotAdapterRequest,
+    intent: &SnapshotCreationIntent,
+    locator: &RuntimeSnapshotLocator,
+    status: u16,
+    body: &[u8],
+) -> Result<AvailableSnapshotObservation> {
+    let creation = retained_snapshot_creation(request, intent, locator)?;
+    observe_snapshot_available(intent, &creation, status, body)
+}
+
 fn creation_intent(
     request: &RuntimeSnapshotAdapterRequest,
     settings: &SnapshotProductionSettings,
@@ -376,6 +387,23 @@ fn control_url(path: &str, owner_id: &str, upload_path: Option<&str>) -> Result<
     if let Some(upload_path) = upload_path {
         url.query_pairs_mut().append_pair("path", upload_path);
     }
+    Ok(url)
+}
+
+fn snapshot_readiness_url(
+    spec: &SnapshotProductionSpec,
+    locator: &RuntimeSnapshotLocator,
+    owner_id: &str,
+) -> Result<url::Url> {
+    let path = spec.get_path(&locator.provider_group_id, &locator.snapshot_id)?;
+    ensure!(
+        path.starts_with("/v1/sandbox-groups/") && !path.contains(".."),
+        "snapshot readiness route is not admitted"
+    );
+    let mut url = url::Url::parse("https://api.render.com")?;
+    url.set_path(&path);
+    ensure!(url.path() == path, "snapshot readiness route changed");
+    url.query_pairs_mut().append_pair("ownerId", owner_id);
     Ok(url)
 }
 
@@ -849,6 +877,12 @@ mod tests {
         )
         .unwrap();
         let locator = bind_snapshot_locator(&request, &created, &settings).unwrap();
+        let readiness_url = snapshot_readiness_url(&profile, &locator, &settings.owner_id).unwrap();
+        assert_eq!(
+            readiness_url.path(),
+            "/v1/sandbox-groups/sbg-exact/snapshots/snp-exact"
+        );
+        assert_eq!(readiness_url.query_pairs().count(), 1);
         let retained: BoundSnapshotCreation =
             serde_json::from_value(locator.provider_creation_observation.clone()).unwrap();
         assert_eq!(retained.requested_at, created.requested_at);
@@ -863,6 +897,39 @@ mod tests {
         let mut substituted = locator.clone();
         substituted.snapshot_id = "snp-other".into();
         assert!(retained_snapshot_creation(&request, &prepared, &substituted).is_err());
+        let mut available = response();
+        available["status"] = serde_json::json!("available");
+        available["capturedAt"] = serde_json::json!("2026-09-28T00:01:00Z");
+        available["sizeBytes"] = serde_json::json!(4096);
+        let availability_body = serde_json::to_vec(&available).unwrap();
+        let observed = observe_snapshot_available_from_locator(
+            &request,
+            &prepared,
+            &locator,
+            200,
+            &availability_body,
+        )
+        .unwrap();
+        assert_eq!(observed.snapshot_id, locator.snapshot_id);
+        let mut mismatched_creation = locator.clone();
+        mismatched_creation.provider_creation_observation["requested_at"] =
+            serde_json::json!("2026-09-27T00:00:00Z");
+        mismatched_creation.adapter_observation_sha256 = lillux::sha256_hex(
+            &ryeos_external_execution_contract::canonical_json(
+                &mismatched_creation.provider_creation_observation,
+            )
+            .unwrap(),
+        );
+        assert!(
+            observe_snapshot_available_from_locator(
+                &request,
+                &prepared,
+                &mismatched_creation,
+                200,
+                &availability_body,
+            )
+            .is_err()
+        );
         let mut wrong = settings;
         wrong.sandbox_group_id = "sbg-other".into();
         assert!(wrong.validate_for(&request).is_err());
