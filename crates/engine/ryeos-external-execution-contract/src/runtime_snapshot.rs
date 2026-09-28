@@ -15,6 +15,7 @@ pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 1;
 pub const RUNTIME_SNAPSHOT_RESULT_SCHEMA: u32 = 2;
 pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v2";
 pub const RUNTIME_SNAPSHOT_READINESS_PROTOCOL: &str = "ryeos.runtime-snapshot-readiness.v1";
+pub const RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA: u32 = 1;
 pub const MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES: usize = 24 * 1024;
 pub const MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES: u64 = 64 * 1024 * 1024 + 16 * 1024;
 
@@ -202,6 +203,90 @@ pub struct RuntimeSnapshotLocator {
     /// readiness interpretation. It is not a restored-content claim.
     pub provider_creation_observation: serde_json::Value,
     pub adapter_observation_sha256: String,
+}
+
+/// One separately owned restored-Sandbox qualification attempt. This is not
+/// a Worker allocation: it cannot inherit a Worker runtime qualification that
+/// this very attempt is intended to establish. The exact selected snapshot
+/// and provider profile are retained before non-idempotent provider contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotQualificationIntent {
+    pub schema: u32,
+    pub operation_id: String,
+    pub owner_principal: String,
+    pub snapshot_operation_id: String,
+    pub snapshot_intent_digest: String,
+    pub snapshot_id: String,
+    pub provider_id: String,
+    pub provider_group_id: String,
+    pub qualification_profile_digest: String,
+    pub adapter_artifact_hash: String,
+    pub provider_spec_digest: String,
+    pub settings_digest: String,
+    pub verifier_artifact_hash: String,
+    pub maximum_lifetime_seconds: u32,
+    pub attempt_deadline_ms: i64,
+}
+
+impl RuntimeSnapshotQualificationIntent {
+    pub fn validate_for(
+        &self,
+        source: &RuntimeSnapshotIntent,
+        locator: &RuntimeSnapshotLocator,
+    ) -> Result<()> {
+        locator.validate_for(source)?;
+        ensure!(
+            self.schema == RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA
+                && self.owner_principal == source.owner_principal
+                && self.snapshot_operation_id == source.operation_id
+                && self.snapshot_intent_digest == source.digest()?
+                && self.snapshot_id == locator.snapshot_id
+                && self.provider_id == source.provider_id
+                && self.provider_group_id == source.provider_group_id
+                && self.attempt_deadline_ms > 0
+                && (1..=3600).contains(&self.maximum_lifetime_seconds),
+            "snapshot qualification intent differs from retained snapshot authority"
+        );
+        for (label, hash) in [
+            ("qualification profile", &self.qualification_profile_digest),
+            ("qualification adapter", &self.adapter_artifact_hash),
+            ("provider spec", &self.provider_spec_digest),
+            ("settings", &self.settings_digest),
+            ("verifier artifact", &self.verifier_artifact_hash),
+        ] {
+            require_hash(hash, label)?;
+        }
+        ensure!(
+            self.operation_id == self.derived_operation_id()?,
+            "snapshot qualification operation differs from exact selected product"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+            "snapshot qualification intent exceeds its bound"
+        );
+        Ok(())
+    }
+
+    /// Deadline changes cannot mint a fresh non-idempotent create opportunity.
+    pub fn derived_operation_id(&self) -> Result<String> {
+        let coordinates = (
+            "ryeos.runtime-snapshot-qualification.v1",
+            &self.owner_principal,
+            &self.snapshot_operation_id,
+            &self.snapshot_intent_digest,
+            &self.snapshot_id,
+            &self.provider_id,
+            &self.provider_group_id,
+            &self.qualification_profile_digest,
+            &self.adapter_artifact_hash,
+            &self.provider_spec_digest,
+            &self.settings_digest,
+            &self.verifier_artifact_hash,
+            self.maximum_lifetime_seconds,
+        );
+        Ok(hex::encode(Sha256::digest(canonical_json(&coordinates)?)))
+    }
 }
 
 /// A read-only observation of a previously bound locator. This grants no
@@ -504,5 +589,52 @@ mod tests {
         let mut substituted = request;
         substituted.provider_spec_digest = "c".repeat(64);
         assert!(substituted.validate().is_err());
+    }
+
+    #[test]
+    fn qualification_attempt_is_distinct_and_cannot_switch_snapshot() {
+        let source = intent();
+        let locator = RuntimeSnapshotLocator {
+            schema: RUNTIME_SNAPSHOT_RESULT_SCHEMA,
+            operation_id: source.operation_id.clone(),
+            intent_digest: source.digest().unwrap(),
+            source_occurrence_id: source.source_occurrence_id.clone(),
+            provider_group_id: source.provider_group_id.clone(),
+            snapshot_id: "snp-fixture-1".into(),
+            provider_response_sha256: "a".repeat(64),
+            provider_creation_observation: serde_json::json!({"schema": 1}),
+            adapter_observation_sha256: hex::encode(Sha256::digest(br#"{"schema":1}"#)),
+        };
+        let mut qualification = RuntimeSnapshotQualificationIntent {
+            schema: RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
+            operation_id: String::new(),
+            owner_principal: source.owner_principal.clone(),
+            snapshot_operation_id: source.operation_id.clone(),
+            snapshot_intent_digest: source.digest().unwrap(),
+            snapshot_id: locator.snapshot_id.clone(),
+            provider_id: source.provider_id.clone(),
+            provider_group_id: source.provider_group_id.clone(),
+            qualification_profile_digest: "1".repeat(64),
+            adapter_artifact_hash: "2".repeat(64),
+            provider_spec_digest: "3".repeat(64),
+            settings_digest: "4".repeat(64),
+            verifier_artifact_hash: "5".repeat(64),
+            maximum_lifetime_seconds: 900,
+            attempt_deadline_ms: source.attempt_deadline_ms + 1,
+        };
+        qualification.operation_id = qualification.derived_operation_id().unwrap();
+        qualification.validate_for(&source, &locator).unwrap();
+        let mut deadline_changed = qualification.clone();
+        deadline_changed.attempt_deadline_ms += 1;
+        assert_eq!(
+            deadline_changed.derived_operation_id().unwrap(),
+            qualification.operation_id
+        );
+        let mut switched = qualification.clone();
+        switched.snapshot_id = "snp-other".into();
+        assert!(switched.validate_for(&source, &locator).is_err());
+        let mut switched = qualification;
+        switched.verifier_artifact_hash = "6".repeat(64);
+        assert!(switched.validate_for(&source, &locator).is_err());
     }
 }
