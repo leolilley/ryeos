@@ -14751,6 +14751,13 @@ impl StateStore {
             .bootstrap_has_unsettled_snapshot(bootstrap_operation_id)
     }
 
+    pub(crate) fn recoverable_bootstrap_sources(&self, now_ms: i64) -> Result<Vec<String>> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .recoverable_bootstrap_sources(now_ms)
+    }
+
     pub(crate) fn reserve_bootstrap_termination(
         &self,
         intent: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapTerminationIntent,

@@ -2513,6 +2513,12 @@ async fn recover_external_candidates_before_ready(state: &AppState) -> Result<()
             .context("advance startup external candidate cleanup")?,
         "startup",
     );
+    log_bootstrap_source_cleanup_recovery(
+        recover_bootstrap_source_cleanups_async(state.clone())
+            .await
+            .context("advance startup bootstrap source cleanup")?,
+        "startup",
+    );
     Ok(())
 }
 
@@ -2549,6 +2555,12 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
         recover_external_candidate_cleanups_async(state.clone())
             .await
             .context("periodic external candidate cleanup recovery")?,
+        "periodic",
+    );
+    log_bootstrap_source_cleanup_recovery(
+        recover_bootstrap_source_cleanups_async(state.clone())
+            .await
+            .context("periodic bootstrap source cleanup recovery")?,
         "periodic",
     );
     let recovered_activations =
@@ -2673,6 +2685,21 @@ async fn recover_external_candidate_cleanups_async(
         .context("external cleanup recovery owner stopped without a result")?
 }
 
+async fn recover_bootstrap_source_cleanups_async(
+    state: AppState,
+) -> Result<ryeos_app::operator_runtime_snapshot::BootstrapSourceCleanupRecovery> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let task = lillux::task::spawn_host_task("bootstrap-source-cleanup-recovery", move || {
+        let _ = sender
+            .send(ryeos_app::operator_runtime_snapshot::recover_bootstrap_source_cleanups(&state));
+    })
+    .context("start Lillux bootstrap source cleanup recovery owner")?;
+    task.detach();
+    receiver
+        .await
+        .context("bootstrap source cleanup recovery owner stopped without a result")?
+}
+
 async fn wait_for_external_candidate_imports_async(
     imports: Arc<ryeos_app::external_candidate_import::ExternalCandidateImportPool>,
     timeout: lillux::time::Duration,
@@ -2708,6 +2735,30 @@ fn log_external_candidate_cleanup_recovery(
             placement = %placement,
             error = %error,
             "external candidate cleanup remains retained after reconciliation failure"
+        );
+    }
+}
+
+fn log_bootstrap_source_cleanup_recovery(
+    report: ryeos_app::operator_runtime_snapshot::BootstrapSourceCleanupRecovery,
+    pass: &'static str,
+) {
+    if report.discovered != 0 {
+        tracing::info!(
+            pass,
+            discovered = report.discovered,
+            terminal = report.terminal,
+            pending = report.pending,
+            failures = report.failures.len(),
+            "advanced retained bootstrap source cleanup obligations"
+        );
+    }
+    for (operation_id, error) in report.failures {
+        tracing::error!(
+            pass,
+            operation_id = %operation_id,
+            error = %error,
+            "bootstrap source cleanup remains retained after reconciliation failure"
         );
     }
 }

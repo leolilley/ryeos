@@ -432,6 +432,18 @@ pub fn terminate_bootstrap_source(
     bootstrap_operation_id: &str,
 ) -> Result<BootstrapTerminationRecord> {
     let source = get_bootstrap_source(state, context, bootstrap_operation_id)?;
+    terminate_retained_bootstrap_source(state, source)
+}
+
+/// Advance cleanup from the original journal, without asking whether its
+/// operator still has permission to create new work. Only the public wrapper
+/// above accepts a request context; daemon recovery selects exact due sources
+/// from retained state and uses this same one-shot termination state machine.
+fn terminate_retained_bootstrap_source(
+    state: &AppState,
+    source: SnapshotBootstrapRecord,
+) -> Result<BootstrapTerminationRecord> {
+    let bootstrap_operation_id = &source.intent.operation_id;
     let occurrence = source
         .occurrence
         .clone()
@@ -449,7 +461,7 @@ pub fn terminate_bootstrap_source(
         operation_id: String::new(),
         bootstrap_operation_id: source.intent.operation_id.clone(),
         occurrence_id: occurrence.occurrence_id.clone(),
-        owner_principal: context.fingerprint.clone(),
+        owner_principal: source.intent.owner_principal.clone(),
         provider_id: source.intent.provider_id.clone(),
         provider_group_id: source.intent.provider_group_id.clone(),
         provider_spec_digest: source.intent.provider_spec_digest.clone(),
@@ -531,7 +543,10 @@ pub fn terminate_bootstrap_source(
                         .state_store
                         .quarantine_bootstrap_termination_attempt(&request.intent.operation_id)
                 } else {
-                    get_bootstrap_source_termination(state, context, &request.intent.operation_id)
+                    state
+                        .state_store
+                        .bootstrap_termination_operation(&request.intent.operation_id)?
+                        .context("bootstrap termination disappeared during reconciliation")
                 }
             }
         },
@@ -544,6 +559,50 @@ pub fn terminate_bootstrap_source(
             Err(error)
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub struct BootstrapSourceCleanupRecovery {
+    pub discovered: usize,
+    pub terminal: usize,
+    pub pending: usize,
+    pub failures: Vec<(String, String)>,
+}
+
+/// Advance at most one original termination contact or exact reconciliation
+/// for each due source. This runs under daemon recovery ownership: revoked
+/// new-work grants cannot strand a known provider occurrence, and a failed
+/// source does not prevent other retained obligations from advancing.
+pub fn recover_bootstrap_source_cleanups(
+    state: &AppState,
+) -> Result<BootstrapSourceCleanupRecovery> {
+    let now_ms = i64::try_from(lillux::time::timestamp_millis())?;
+    let sources = state.state_store.recoverable_bootstrap_sources(now_ms)?;
+    let mut report = BootstrapSourceCleanupRecovery {
+        discovered: sources.len(),
+        ..Default::default()
+    };
+    for id in sources {
+        let result = (|| {
+            let source = state
+                .state_store
+                .snapshot_bootstrap_operation(&id)?
+                .context("recoverable bootstrap source disappeared")?;
+            ensure!(
+                source.occurrence.is_some(),
+                "recoverable source lost occurrence"
+            );
+            terminate_retained_bootstrap_source(state, source)
+        })();
+        match result {
+            Ok(record) if record.phase == BootstrapTerminationPhase::Terminal => {
+                report.terminal += 1
+            }
+            Ok(_) => report.pending += 1,
+            Err(error) => report.failures.push((id, format!("{error:#}"))),
+        }
+    }
+    Ok(report)
 }
 
 /// Resolve a bounded staging ceiling exclusively from the current signed

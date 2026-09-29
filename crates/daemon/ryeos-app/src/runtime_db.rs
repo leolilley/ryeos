@@ -2649,7 +2649,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 77 retains a complete verifier stream observation separately from its
 // one-shot contact claim. A late observation remains visible but cannot
 // silently qualify a runtime.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 88;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 89;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -3270,6 +3270,29 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "created_at_ms",
                         col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "runtime_snapshot_bootstrap_recovery_cursor",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "singleton",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_operation_id",
+                        col_type: "TEXT",
                         pk: false,
                         not_null: true,
                     },
