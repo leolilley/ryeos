@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T23:32:11Z:b340fa2d68c9f37fda4ae9dc19ad6e7311526d9a6070226e9edd5b25925883a3:UFfUwQtlGmcBFXCusVpw3mo9IcCjYiqz9aKp2bQGTESkpv1RlsaY1FBe4qTdlI3yl1azPyjKqIIPt6AcMsV7CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T23:50:51Z:681f8583a716908a7c0828ca0313e42857dae0f96a16dfdf3df68326e3de0a07:RkbkLziu9q+ee8QLuJMbCGuV7abFov2Om72WhvkYd1za2KEUkB/RHbOEsvv1SUGkQRoNwvh8OfGnO34NCC2mBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.33.8"
+version: "1.33.9"
 ```
 
 # Source-Local Bundle Development
@@ -167,6 +167,16 @@ first missing input bytes on both nodes; the prepared-inputs and GNU runtime
 producer chains still require a clean final source generation, new snapshots
 and their own protected qualification evidence. The activation receipts are
 recorded in the disposable A operational handoff.
+Both nodes also independently verified and materialized the retained Stage0
+archive, then imported its exact 19,551-entry, 1,026,378,565-byte
+`large_content` manifest
+`b74b15f0877a2c4941e8bb5660b9f827091aeeb2b2a50b00311101c903895c00`.
+Each separately imported raw registry bytes and obtained pinned manifest
+`9de036779fbc33f8e33bc5068a286ac27813e80586d1b766ee7db99a1fa7a2e8`.
+The four durable staging coordinates are retained in the A operational
+handoff. Neither import grants pinned-project use, compiler execution,
+product provenance or qualification; bind these exact local stages only after
+the final clean source snapshot is installed and admitted on each node.
 
 The original local command, state-root, signing, and bundle-smoke workflow is
 implemented. The project-bundle and development-realization sections below
