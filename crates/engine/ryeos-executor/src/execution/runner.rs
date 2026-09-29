@@ -3469,18 +3469,19 @@ enum ProcessInputRootSelection {
     CandidateIntegrationPrivate,
 }
 
-/// Physical scratch is launch authority, not a logical project context. Keep
-/// projectless plans projectless while handing their already-owned input root
-/// to isolation. Other launches retain their existing project-root routing.
-fn projectless_isolation_workspace(
+/// Hand the already-admitted physical input root to isolation without changing
+/// the plan's logical project context. A pinned read-only snapshot still needs
+/// its materialized path here; isolation checks that path against the retained
+/// immutable-project proof before mounting it.
+fn process_isolation_workspace(
     project: ProcessProjectClass,
     process_path: &Path,
 ) -> Option<PathBuf> {
     match project {
-        ProcessProjectClass::Projectless => Some(process_path.to_path_buf()),
-        ProcessProjectClass::Live
-        | ProcessProjectClass::PinnedReadOnly
-        | ProcessProjectClass::PinnedCow => None,
+        ProcessProjectClass::Projectless | ProcessProjectClass::PinnedReadOnly => {
+            Some(process_path.to_path_buf())
+        }
+        ProcessProjectClass::Live | ProcessProjectClass::PinnedCow => None,
     }
 }
 
@@ -3694,18 +3695,19 @@ mod process_input_selection_tests {
     }
 
     #[test]
-    fn projectless_spawn_uses_exact_owned_scratch_without_a_logical_project() {
+    fn projectless_and_pinned_read_only_spawns_use_their_admitted_input_roots() {
         let scratch = Path::new("/exact-owned-execution/scratch");
         assert_eq!(
-            projectless_isolation_workspace(ProcessProjectClass::Projectless, scratch),
+            process_isolation_workspace(ProcessProjectClass::Projectless, scratch),
             Some(scratch.to_path_buf())
         );
-        for project in [
-            ProcessProjectClass::Live,
-            ProcessProjectClass::PinnedReadOnly,
-            ProcessProjectClass::PinnedCow,
-        ] {
-            assert_eq!(projectless_isolation_workspace(project, scratch), None);
+        let pinned = Path::new("/exact-materialized-snapshot/input");
+        assert_eq!(
+            process_isolation_workspace(ProcessProjectClass::PinnedReadOnly, pinned),
+            Some(pinned.to_path_buf())
+        );
+        for project in [ProcessProjectClass::Live, ProcessProjectClass::PinnedCow] {
+            assert_eq!(process_isolation_workspace(project, scratch), None);
         }
     }
 
@@ -5235,7 +5237,7 @@ pub async fn run_and_wait(
     };
     let wait_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
     let wait_isolation_workspace =
-        projectless_isolation_workspace(process_project_class(&params.provenance), &effective_path);
+        process_isolation_workspace(process_project_class(&params.provenance), &effective_path);
     let wait_selected_resources = state
         .execution_resources
         .select(prepared_plan.target_requirement())
@@ -6267,7 +6269,7 @@ pub async fn run_detached(
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     let bg_isolation_workspace =
-        projectless_isolation_workspace(process_project_class(&params.provenance), &effective_path);
+        process_isolation_workspace(process_project_class(&params.provenance), &effective_path);
 
     tokio::spawn(dispatch_detached_bg_task(
         bg_state,
@@ -9001,7 +9003,7 @@ async fn run_existing_recovered_thread(
         .map(std::path::Path::to_path_buf);
     let bg_runtime_state_dir = state.config.app_root.clone();
     let bg_isolation_workspace =
-        projectless_isolation_workspace(process_project_class(&params.provenance), &effective_path);
+        process_isolation_workspace(process_project_class(&params.provenance), &effective_path);
     tokio::spawn(dispatch_detached_bg_task(
         bg_state,
         bg_thread_id,
