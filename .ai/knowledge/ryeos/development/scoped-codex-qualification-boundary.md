@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-29T17:11:01Z:c4bf88399b2692b2bd9b435542ec8a4cc3213ad8a871a90f65e642cd11b93bb3:g02mJfctTzi+yp1ashCz0IAGYHz/Vv6HO6QBekJ3RrgLrz1inRT8k1AFz+NoWXsu9udzltKZQc0tNc79pLJaCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T22:10:19Z:42abfa1b76e0b76694a131fe04c2522d42f7de783ddc4706320797877f1d1bdf:dSzupuVnMp7SNF61HoqrwlNUSR7QcOacCT22XdZfkX9Ub26tv92vCNcoYVx6BGODCaEJeJVmwWWgEHTQVpt6Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -85,9 +85,13 @@ Source implementation update, 2026-09-29: the specialized checker is now
 Its protocol interpretation remains specific to Codex app-server. Shared
 qualification admission and evidence joins remain in their existing owners.
 This source migration is not evidence of an installed checker, accepted
-qualification, or Render activation. The direct path continues to refuse
-claims while its evidence gates are incomplete. The old scenario-driver
-binary mode has been retired; scenario-driver recipes remain fixture data.
+qualification, or Render activation. The direct diagnostic now proposes its
+finite claims only after its exact target, scoped observation, scripted
+provider, conversation, guest, and frozen-file checks. RyeOS must still join
+the proposed scoped attempt to the retained daemon observation and verifier
+terminal before qualification; no native accepted run has been recorded. The
+old scenario-driver binary mode has been retired; scenario-driver recipes
+remain fixture data.
 
 The complete parameters retain the operation discriminator
 `scenario: test.independent_routed_runtime.v1`, the existing exact content and
@@ -395,16 +399,21 @@ The fixture's signed producer recipe selects the exact retained
 input budgets, the fixed prepared occurrence/home IDs, and one signed
 loopback ingress. The verifier stages before START, rechecks before release,
 and joins transcript/provider/candidate observations only after the daemon's
-natural-empty scoped observation. It still refuses to issue qualification
-claims. Focused verifier-library, verifier-binary, and signed fixture-authoring
+natural-empty scoped observation. Its successful terminal now proposes the
+finite diagnostic claims with the canonical CAS hash of that exact observation
+as a scoped-attempt coordinate. The signed projector interprets that
+coordinate; the daemon must independently match it to its retired journal and
+retained CAS object. The reserved START/RESUME race mode remains a refusal
+probe. Focused verifier-library, verifier-binary, and signed fixture-authoring
 tests pass. Those are not a joined native direct-target run. The verifier
 binary now rejects the old `--scenario-driver` mode and requires the signed
 direct loopback ingress before callback admission; its parent-owned driver
 function and stop test were removed. The no-ingress launch and scenario
 transcript fallback inside the direct verifier have also been removed. Old
 staging helpers still remain for a later source clean cut. This source change
-passed release-mode all-target compilation, not a
-native qualification run. Native execution must prove that the rendered
-controller executable is reachable as the same read-only realization member
-inside the target namespace and that the daemon's settlement excludes every
-candidate writer. Exact-attempt restart reconciliation remains open.
+passed release-mode all-target compilation and a focused test equating its
+proposed observation coordinate with RyeOS's stored CAS object hash. Neither
+check is a native qualification run. Native execution must prove that the
+rendered controller executable is reachable as the same read-only realization
+member inside the target namespace, and that the daemon's settlement excludes
+every candidate writer. Exact-attempt restart reconciliation remains open.

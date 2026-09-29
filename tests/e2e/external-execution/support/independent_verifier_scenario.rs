@@ -6,7 +6,8 @@
 use anyhow::{Context as _, Result, ensure};
 use lillux::crypto::SigningKey;
 use ryeos_codex_runtime_verifier::{
-    GuestCommandFixture, QualificationExecutionEnvironment, RoutedRuntimeProfile,
+    DIRECT_QUALIFICATION_CLAIMS, GuestCommandFixture, QualificationExecutionEnvironment,
+    RoutedRuntimeProfile,
 };
 use ryeos_external_execution_contract::LifecycleCapability;
 use ryeos_state::external_content::products::producer_recipe::ProductProducerRecipe;
@@ -25,13 +26,7 @@ pub const PRODUCER_SCENARIO_ID: &str = "native_codex";
 pub const DIRECT_PRODUCER_RECIPE_REF: &str = "config:fixtures/codex-runtime/direct-codex";
 pub const VERIFIER_BIN: &str = "codex-runtime-verifier";
 const SCENARIO: &str = "test.independent_routed_runtime.v1";
-pub const CLAIMS: [&str; 5] = [
-    "bounded_candidate_capture",
-    "candidate_only_execution",
-    "controller_credential_exclusion",
-    "native_writer_exclusion",
-    "no_local_execution_fallback",
-];
+pub const CLAIMS: [&str; 5] = DIRECT_QUALIFICATION_CLAIMS;
 
 /// Exact authored fixture tuple, never reconstructed from observed output.
 /// The configurations input contains the canonical admission-compiled profile,

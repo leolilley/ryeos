@@ -1,9 +1,10 @@
-//! Bundle Tool entrypoint for exact daemon-owned direct-target preflight.
-//! The collected evidence does not yet authorize qualification claims.
+//! Bundle Tool entrypoint for the exact daemon-owned direct-target diagnostic.
+//! Its result proposes finite claims; RyeOS must independently join the
+//! scoped attempt and verifier terminal before publishing qualification.
 
 use anyhow::{Context as _, Result, bail, ensure};
 use ryeos_codex_runtime_verifier::{
-    INPUT_LIMIT, Parameters,
+    DIRECT_QUALIFICATION_CLAIMS, INPUT_LIMIT, Parameters,
     guest_observation::{GuestScenario, check_guest_observation},
     native_guest,
     routing_observation::{RoutingScenario, check_notifications},
@@ -18,12 +19,15 @@ use ryeos_state::external_content::products::producer_recipe::{
     ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
     ProducerExecutableSource, ProductProducerRecipe, prepared_directory_mount_destination,
 };
-use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
+use ryeos_state::external_content::products::qualification::{
+    PRODUCT_QUALIFICATION_RESULT_SCHEMA, ProductProducerRecipeSourceIdentity,
+    ProductQualificationResult,
+};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
-    io::Read as _,
+    io::{Read as _, Write as _},
     path::Path,
 };
 
@@ -391,6 +395,10 @@ async fn main() -> Result<()> {
             return Err(anyhow::Error::new(error).context("scoped producer observation refused"));
         }
     };
+    // The daemon stores this exact callback value as a canonical CAS object.
+    // The terminal may only propose its coordinate; the qualification reader
+    // independently loads the object and joins it to the exact attempt.
+    let observation_object_hash = retained_observation_coordinate(&observed)?;
     let observation: ScopedObservationCut = match serde_json::from_value(observed) {
         Ok(observation) => observation,
         Err(error) => {
@@ -655,9 +663,27 @@ async fn main() -> Result<()> {
                 "direct scoped START/RESUME locators, applied environment and frozen candidate joined, but complete qualification evidence remains unproven"
             );
         }
-        bail!(
-            "direct-target launch, applied environment, relay, conversation and frozen candidate joined, but complete qualification evidence remains unproven"
-        );
+        let result = ProductQualificationResult {
+            schema: PRODUCT_QUALIFICATION_RESULT_SCHEMA.to_owned(),
+            subject_manifest_hash: parameters.configuration.subject_manifest_hash.clone(),
+            claims: DIRECT_QUALIFICATION_CLAIMS
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            probe_evidence: serde_json::json!({
+                "scoped_attempt": {
+                    "attempt_id": locator.attempt_id,
+                    "scenario_id": producer_scenario_id,
+                    "observation_object_hash": observation_object_hash,
+                }
+            }),
+        };
+        result.validate()?;
+        let encoded = lillux::canonical_json(&serde_json::to_value(&result)?)?;
+        std::io::stdout()
+            .lock()
+            .write_all(format!("{encoded}\n").as_bytes())?;
+        return Ok(());
     }
     bail!("direct-target conversation evidence was not collected; no qualification claims issued")
 }
@@ -1239,6 +1265,12 @@ struct ScopedObservationCut {
     launcher_refusal: Option<String>,
 }
 
+fn retained_observation_coordinate(value: &serde_json::Value) -> Result<String> {
+    Ok(lillux::sha256_hex(
+        lillux::canonical_json(value)?.as_bytes(),
+    ))
+}
+
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
 ) -> std::result::Result<Option<T>, D::Error>
@@ -1253,6 +1285,22 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn scoped_observation_coordinate_matches_retained_cas_object() {
+        let observed = json!({
+            "schema": "ryeos.scoped_producer_observation.v7",
+            "attempt_id": format!("scoped-{}", "a".repeat(64)),
+            "nested": {"producer_exit_clean": true, "contacts": 4},
+        });
+        let temporary = tempfile::tempdir().unwrap();
+        let cas = lillux::cas::CasStore::new(temporary.path().to_path_buf());
+        let stored = cas.store_object(&observed).unwrap();
+        assert_eq!(retained_observation_coordinate(&observed).unwrap(), stored);
+        let mut changed = observed;
+        changed["nested"]["contacts"] = json!(5);
+        assert_ne!(retained_observation_coordinate(&changed).unwrap(), stored);
+    }
 
     #[test]
     fn signed_direct_environment_and_cwd_match_applied_fields() {

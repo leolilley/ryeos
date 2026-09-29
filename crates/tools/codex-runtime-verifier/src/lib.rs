@@ -35,6 +35,15 @@ use std::{ffi::OsStr, path::Path};
 
 pub const SCENARIO: &str = "test.independent_routed_runtime.v1";
 pub const ROUTED_RUNTIME_PROFILE_SCHEMA: &str = "ryeos.codex_routed_runtime_profile.v2";
+/// Finite claims interpreted by this Codex-specific diagnostic. The signed
+/// qualification policy remains the authority for allowing them.
+pub const DIRECT_QUALIFICATION_CLAIMS: [&str; 5] = [
+    "bounded_candidate_capture",
+    "candidate_only_execution",
+    "controller_credential_exclusion",
+    "native_writer_exclusion",
+    "no_local_execution_fallback",
+];
 
 /// Signed choices within the finite routed-runtime operation. These fields
 /// select admitted behavior; they cannot remove its mandatory checks.
