@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-external-candidate-supervisor"
-version = "0.5.101"
+version = "0.5.102"
 edition = "2024"
 description = "Protected occurrence-bound RyeOS external candidate supervisor"
 license.workspace = true

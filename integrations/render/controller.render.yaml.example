@@ -1,0 +1,21 @@
+# Exact v0.5.102 hosted-workflow image, verified by the release workflow.
+# The controller keeps its operator identity and runtime journal on /data.
+services:
+  - type: web
+    name: ryeos-farm-controller
+    runtime: image
+    image:
+      url: ghcr.io/leolilley/ryeos-hosted-workflow@sha256:76845035deeefd312011f0792adbe85b0d23aac72307524284a5acb7586dd952
+    plan: 1c-2g
+    region: singapore
+    numInstances: 1
+    healthCheckPath: /_ryeos/ready
+    disk:
+      name: ryeos-state
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: RYEOS_SUBSTRATE_IMAGE
+        value: ghcr.io/leolilley/ryeos-hosted-workflow@sha256:76845035deeefd312011f0792adbe85b0d23aac72307524284a5acb7586dd952
+      - key: RYEOS_SUBSTRATE_PROTOCOL
+        value: "1"

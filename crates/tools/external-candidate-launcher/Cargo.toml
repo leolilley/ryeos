@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-external-candidate-launcher"
-version = "0.5.101"
+version = "0.5.102"
 edition = "2024"
 description = "Dedicated descriptor-bootstrapped RyeOS external candidate launcher"
 license.workspace = true

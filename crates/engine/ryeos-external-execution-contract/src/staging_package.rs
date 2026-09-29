@@ -1205,7 +1205,7 @@ mod tests {
             GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
         for payload in payloads {
             assert!(writer.next_file().is_some());
-            writer.copy_next_file(&mut payload.as_ref()).unwrap();
+            writer.copy_next_file(&mut &payload[..]).unwrap();
         }
         assert!(writer.next_file().is_none());
         let stream = writer.finish().unwrap();

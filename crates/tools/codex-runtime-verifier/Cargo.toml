@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-codex-runtime-verifier"
-version = "0.5.101"
+version = "0.5.102"
 edition = "2024"
 description = "Bounded Codex app-server runtime qualification probe"
 license.workspace = true

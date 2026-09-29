@@ -226,11 +226,17 @@ done < <(find "$stage" -print0)
 # same-named profile solely under the official public key embedded in the
 # qualified RyeOS binary.
 verify_app_root="$tmp/verify-app"
+# This is a disposable verification node, not a deployable substrate. Supply
+# one fixed, syntactically valid identity so init reaches the profile gate.
+verification_substrate_digest="sha256:$(printf '0%.0s' {1..64})"
+verification_substrate_protocol=1
 ryeos_term_update "verifying explicit policy requirement" "production init preflight"
 if "$ryeos_bin" init \
     --non-interactive \
     --app-root "$verify_app_root" \
-    --source "$stage" >/dev/null 2>&1; then
+    --source "$stage" \
+    --substrate-image-digest "$verification_substrate_digest" \
+    --substrate-protocol "$verification_substrate_protocol" >/dev/null 2>&1; then
     ryeos_term_fail "fresh production init accepted an absent node init profile"
     exit 2
 fi
@@ -242,6 +248,8 @@ ryeos_term_update "verifying staged node init profile" "$node_init_profile"
     --non-interactive \
     --app-root "$policy_verify_app_root" \
     --source "$stage" \
+    --substrate-image-digest "$verification_substrate_digest" \
+    --substrate-protocol "$verification_substrate_protocol" \
     --node-profile "$node_init_profile" >/dev/null
 
 selected_node_init_profile="$stage/.ai/node/init/profiles/$node_init_profile.yaml"
