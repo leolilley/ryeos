@@ -232,27 +232,47 @@ pub struct SignedBundleManifestIdentity {
     pub uses_kinds: Vec<String>,
 }
 
+/// Exact signed installed Bundle manifest captured for historical source
+/// testimony. The identity alone cannot preserve its signature envelope after
+/// the installed generation is replaced.
+#[derive(Debug, Clone)]
+pub struct CapturedSignedBundleManifest {
+    pub identity: SignedBundleManifestIdentity,
+    pub signed_bytes: Vec<u8>,
+}
+
 pub fn verify_bundle_source_manifest_identity(
     bundle_root: &Path,
     expected_name: &str,
     node_trust_store: &TrustStore,
 ) -> Result<SignedBundleManifestIdentity, EngineError> {
+    Ok(
+        capture_signed_bundle_source_manifest(bundle_root, expected_name, node_trust_store)?
+            .identity,
+    )
+}
+
+/// Capture the same verified source-manifest authority used by normal Bundle
+/// admission, without resolving a diagnostic path after the check.
+pub fn capture_signed_bundle_source_manifest(
+    bundle_root: &Path,
+    expected_name: &str,
+    node_trust_store: &TrustStore,
+) -> Result<CapturedSignedBundleManifest, EngineError> {
     let manifest_path = bundle_root.join(crate::AI_DIR).join("manifest.yaml");
-    let metadata = std::fs::symlink_metadata(&manifest_path).map_err(|error| {
+    let signed_bytes = lillux::read_regular_file_bounded_no_follow(
+        &manifest_path,
+        crate::config_loading::MAX_BUNDLE_MANIFEST_BYTES,
+    )
+    .map_err(|error| {
         EngineError::Internal(format!(
-            "stat runtime source-bundle manifest {}: {error}",
+            "read runtime source-bundle manifest {}: {error}",
             manifest_path.display()
         ))
     })?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return Err(EngineError::Internal(format!(
-            "runtime source-bundle manifest is not a regular file: {}",
-            manifest_path.display()
-        )));
-    }
-    let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
+    let raw = std::str::from_utf8(&signed_bytes).map_err(|error| {
         EngineError::Internal(format!(
-            "read runtime source-bundle manifest {}: {error}",
+            "runtime source-bundle manifest is not UTF-8 at {}: {error}",
             manifest_path.display()
         ))
     })?;
@@ -367,13 +387,16 @@ pub fn verify_bundle_source_manifest_identity(
             )));
         }
     }
-    Ok(SignedBundleManifestIdentity {
-        name: manifest.name,
-        body_digest: lillux::sha256_hex(body.as_bytes()),
-        signer_fingerprint: signature.signer_fingerprint,
-        provides_kinds: manifest.provides_kinds,
-        requires_kinds: manifest.requires_kinds,
-        uses_kinds: manifest.uses_kinds,
+    Ok(CapturedSignedBundleManifest {
+        identity: SignedBundleManifestIdentity {
+            name: manifest.name,
+            body_digest: lillux::sha256_hex(body.as_bytes()),
+            signer_fingerprint: signature.signer_fingerprint,
+            provides_kinds: manifest.provides_kinds,
+            requires_kinds: manifest.requires_kinds,
+            uses_kinds: manifest.uses_kinds,
+        },
+        signed_bytes,
     })
 }
 
@@ -1536,11 +1559,46 @@ mod tests {
         let signed = lillux::signature::sign_content(body, &test_signing_key(), "#", None);
         fs::write(
             bundle_root.join(crate::AI_DIR).join("manifest.yaml"),
-            signed,
+            &signed,
         )
         .unwrap();
 
         verify_bundle_source_manifest_identity(&bundle_root, "runtime-bundle", &test_ts()).unwrap();
+        let captured =
+            capture_signed_bundle_source_manifest(&bundle_root, "runtime-bundle", &test_ts())
+                .unwrap();
+        assert_eq!(captured.identity.name, "runtime-bundle");
+        assert_eq!(
+            captured.identity.body_digest,
+            lillux::sha256_hex(body.as_bytes())
+        );
+        assert_eq!(captured.signed_bytes, signed.as_bytes());
+    }
+
+    #[test]
+    fn runtime_bundle_manifest_capture_refuses_oversize_signed_source() {
+        let parent = tempdir();
+        let bundle_root = parent.join("runtime-bundle");
+        fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
+        let body = format!(
+            "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\ndescription: {}\n",
+            "x".repeat(crate::config_loading::MAX_BUNDLE_MANIFEST_BYTES as usize)
+        );
+        let signed = lillux::signature::sign_content(&body, &test_signing_key(), "#", None);
+        fs::write(
+            bundle_root.join(crate::AI_DIR).join("manifest.yaml"),
+            signed,
+        )
+        .unwrap();
+        let error =
+            capture_signed_bundle_source_manifest(&bundle_root, "runtime-bundle", &test_ts())
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("read runtime source-bundle manifest"),
+            "unexpected oversized-manifest error: {error}"
+        );
     }
 
     #[test]

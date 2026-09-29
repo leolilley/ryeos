@@ -1127,6 +1127,44 @@ impl CheckedEngineGeneration<'_> {
         Ok(captured)
     }
 
+    /// Retain the exact signed source manifest of each Bundle that supplied a
+    /// captured recipe item. These manifests are separate from item envelopes
+    /// and must be linked by the eventual durable source evidence.
+    pub fn capture_verified_source_bundle_manifests(
+        &self,
+        sources: &[CapturedSignedBundleItemSource],
+    ) -> Result<Vec<crate::plan_builder::CapturedSignedBundleManifest>, EngineError> {
+        let mut names = std::collections::BTreeSet::new();
+        for source in sources {
+            let crate::contracts::ItemSourceRoot::Bundle { name } = &source.source_root else {
+                return Err(EngineError::Internal(
+                    "materialization source has no registered Bundle root".into(),
+                ));
+            };
+            names.insert(name.clone());
+        }
+        if names.is_empty() || names.len() > 8 {
+            return Err(EngineError::Internal(
+                "materialization Bundle manifest count is invalid".into(),
+            ));
+        }
+        names
+            .into_iter()
+            .map(|name| {
+                let root = self.engine.registered_bundle_root(&name).ok_or_else(|| {
+                    EngineError::Internal(format!(
+                        "materialization source Bundle {name:?} has no registered root"
+                    ))
+                })?;
+                crate::plan_builder::capture_signed_bundle_source_manifest(
+                    root,
+                    &name,
+                    &self.engine.node_trust_store,
+                )
+            })
+            .collect()
+    }
+
     pub fn effective_item_under_project_authority(
         &self,
         request: EffectiveItemRequest,
@@ -4487,6 +4525,17 @@ formats:
         );
         let dependency_path = bundle_root.join(AI_DIR).join("tools/dependency.py");
         fs::write(&dependency_path, &dependency).unwrap();
+        let bundle_manifest = lillux::signature::sign_content(
+            "name: core\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n",
+            &test_signing_key(),
+            "#",
+            None,
+        );
+        fs::write(
+            bundle_root.join(AI_DIR).join("manifest.yaml"),
+            &bundle_manifest,
+        )
+        .unwrap();
         let engine = Engine::new(
             kinds,
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
@@ -4515,6 +4564,10 @@ formats:
                 assert_eq!(captured[0].signed_bytes, dependency.as_bytes());
                 assert_eq!(captured[1].resolved_ref, "tool:hello");
                 assert_eq!(captured[1].signed_bytes, signed_source.as_bytes());
+                let manifests = generation.capture_verified_source_bundle_manifests(&captured)?;
+                assert_eq!(manifests.len(), 1);
+                assert_eq!(manifests[0].identity.name, "core");
+                assert_eq!(manifests[0].signed_bytes, bundle_manifest.as_bytes());
                 assert_eq!(
                     captured[1].source_content_digest,
                     resolution.root.source_content_digest

@@ -17,7 +17,7 @@ use crate::trust::{
 /// Maximum bytes accepted for one config source, independent of whether it is
 /// observed live or read from an admitted content authority.
 const MAX_CONFIG_SOURCE_BYTES: u64 = 1024 * 1024;
-const MAX_BUNDLE_MANIFEST_BYTES: u64 = 256 * 1024;
+pub(crate) const MAX_BUNDLE_MANIFEST_BYTES: u64 = 256 * 1024;
 
 /// One exact, node-trusted Config from an admitted project generation. It is
 /// deliberately not a merged Config: source-bundle, node, and project overlay
