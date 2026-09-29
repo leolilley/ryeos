@@ -455,14 +455,13 @@ pub fn capture_large_tree_optional(
     policy: &LargeContentCapturePolicy<'_>,
     sink: &mut dyn ExternalLargeContentSink,
 ) -> anyhow::Result<Option<crate::objects::ExternalLargeContentManifestObject>> {
-    let (root_device, _) = root.device_inode()?;
     let mut state = LargeCaptureState {
         observed_entries: 0,
         remaining_namespace_entries: policy.bounds.max_entries,
         total_bytes: 0,
         entries: Vec::new(),
     };
-    capture_large_directory(root, "", 0, root_device, policy, sink, &mut state)?;
+    capture_large_directory(root, "", 0, policy, sink, &mut state)?;
     if state.entries.is_empty() {
         root.ensure_path_binding()?;
         return Ok(None);
@@ -564,7 +563,6 @@ fn capture_large_directory(
     directory: &lillux::PinnedDirectory,
     prefix: &str,
     depth: usize,
-    root_device: u64,
     policy: &LargeContentCapturePolicy<'_>,
     sink: &mut dyn ExternalLargeContentSink,
     state: &mut LargeCaptureState,
@@ -601,9 +599,9 @@ fn capture_large_directory(
         if state.observed_entries > policy.bounds.max_entries {
             anyhow::bail!("large-content capture exceeds its entry bound");
         }
-        if entry.containing_device != root_device {
-            anyhow::bail!("large-content entry {path} crosses the admitted filesystem boundary");
-        }
+        directory
+            .ensure_entry_same_mount(entry)
+            .with_context(|| format!("large-content entry {path} crosses the admitted mount"))?;
         match entry.entry_type {
             lillux::PinnedEntryType::Directory => {
                 state
@@ -622,20 +620,14 @@ fn capture_large_directory(
                 let child = directory
                     .open_child_directory(OsStr::new(&name))?
                     .ok_or_else(|| anyhow::anyhow!("large-content directory {path} vanished"))?;
-                capture_large_directory(
-                    &child,
-                    &path,
-                    depth + 1,
-                    root_device,
-                    policy,
-                    sink,
-                    state,
-                )?;
+                directory.ensure_open_child_same_mount(&child)?;
+                capture_large_directory(&child, &path, depth + 1, policy, sink, state)?;
             }
             lillux::PinnedEntryType::Regular => {
                 let file = directory
                     .open_regular(OsStr::new(&name), false)?
                     .ok_or_else(|| anyhow::anyhow!("large-content file {path} vanished"))?;
+                directory.ensure_open_regular_same_mount(&file)?;
                 let before = lillux::observe_open_regular_file(&file)
                     .with_context(|| format!("inspect large-content file {path}"))?;
                 if !before.matches_directory_entry(&entry) {
@@ -825,7 +817,6 @@ fn capture_tree_selected(
     budget: &mut LaunchCaptureBudget,
     sink: &mut dyn ExternalContentBlobSink,
 ) -> anyhow::Result<ExternalContentManifestObject> {
-    let (root_device, _) = root.device_inode()?;
     let mut entries = Vec::new();
     let mut declaration_entries = 0usize;
     let mut declaration_bytes = 0u64;
@@ -834,7 +825,6 @@ fn capture_tree_selected(
         root,
         "",
         0,
-        root_device,
         selection,
         budget,
         sink,
@@ -872,6 +862,7 @@ pub fn capture_file_at(
     let file = parent
         .open_regular(name, false)?
         .ok_or_else(|| anyhow::anyhow!("external content file {display_path} is unavailable"))?;
+    parent.ensure_open_regular_same_mount(&file)?;
     let before = lillux::observe_open_regular_file(&file)
         .with_context(|| format!("inspect external content file {display_path}"))?;
     if !before.matches_directory_entry(&entry) {
@@ -900,7 +891,6 @@ fn capture_directory(
     directory: &lillux::PinnedDirectory,
     prefix: &str,
     depth: usize,
-    root_device: u64,
     selection: Option<(&[String], &ExternalCapturePolicy<'_>)>,
     budget: &mut LaunchCaptureBudget,
     sink: &mut dyn ExternalContentBlobSink,
@@ -931,11 +921,9 @@ fn capture_directory(
             format!("{prefix}/{name}")
         };
         crate::objects::validate_canonical_project_relative_path(&path)?;
-        if entry.containing_device != root_device {
-            anyhow::bail!(
-                "external content entry {path} is on a different filesystem from its declared root"
-            );
-        }
+        directory
+            .ensure_entry_same_mount(entry)
+            .with_context(|| format!("external content entry {path} crosses the declared mount"))?;
         *declaration_entries = declaration_entries
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("external content entry count overflow"))?;
@@ -956,6 +944,7 @@ fn capture_directory(
                 let child = directory
                     .open_child_directory(OsStr::new(&name))?
                     .ok_or_else(|| anyhow::anyhow!("external content directory {path} vanished"))?;
+                directory.ensure_open_child_same_mount(&child)?;
                 let (child_device, child_inode) = child.device_inode()?;
                 if child_device != entry.containing_device || child_inode != entry.inode {
                     anyhow::bail!("external content directory {path} changed during capture");
@@ -964,7 +953,6 @@ fn capture_directory(
                     &child,
                     &path,
                     depth + 1,
-                    root_device,
                     selection,
                     budget,
                     sink,
@@ -978,6 +966,7 @@ fn capture_directory(
                 let file = directory
                     .open_regular(OsStr::new(&name), false)?
                     .ok_or_else(|| anyhow::anyhow!("external content file {path} vanished"))?;
+                directory.ensure_open_regular_same_mount(&file)?;
                 let before = lillux::observe_open_regular_file(&file)
                     .with_context(|| format!("inspect external content file {path}"))?;
                 if !before.matches_directory_entry(&entry) {
