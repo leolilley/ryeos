@@ -326,6 +326,157 @@ pub fn publish_activation_receipt(
     })
 }
 
+/// Read the current node-authored activation head against the current signed
+/// activation/consumer pair. This establishes only the acquisition record;
+/// the caller must still check each current binding and independently qualify
+/// the runtime before admitting execution.
+pub fn load_current_activation_receipt(
+    state: &crate::state::AppState,
+    activation_ref: &str,
+    acquisition_mode: AcquisitionMode,
+) -> anyhow::Result<(
+    ResolvedManagedExternalContentActivation,
+    String,
+    ryeos_state::objects::ExternalContentActivationReceipt,
+)> {
+    let activation = crate::managed_external_content::resolve_activation(
+        state,
+        activation_ref,
+        acquisition_mode,
+    )?;
+    let activation_id =
+        ryeos_state::objects::ExternalContentActivationReceipt::derive_activation_id(
+            &activation.activation_program_digest,
+            &activation.document.consumer_ref,
+            &activation.publisher_fingerprint,
+        )?;
+    let namespace = ryeos_state::objects::EXTERNAL_CONTENT_ACTIVATION_HEAD_NAMESPACE;
+    let head = state
+        .state_store
+        .with_state_db(|db| db.read_generic_head_ref(namespace, &activation_id))?
+        .ok_or_else(|| anyhow::anyhow!("current managed activation has no completed head"))?;
+    if head.signer != state.identity.fingerprint() {
+        bail!("managed activation head is not signed by the current node");
+    }
+    let authority = state.state_store.pinned_state_authority()?;
+    let cas = authority.cas_store()?;
+    let value = cas
+        .get_object(&head.target_hash)?
+        .ok_or_else(|| anyhow::anyhow!("managed activation head target is absent"))?;
+    let receipt = ryeos_state::objects::ExternalContentActivationReceipt::from_value(&value)?;
+    validate_current_activation_receipt(
+        &activation,
+        &activation_id,
+        state.identity.fingerprint(),
+        &receipt,
+    )?;
+    Ok((activation, head.target_hash, receipt))
+}
+
+/// Join one current managed activation component to its current authorized
+/// binding and exact large-content manifest. The `realization` and mount must
+/// come from an independently admitted consumer definition. This relationship
+/// is deliberately not a runtime-qualification or execution grant.
+pub fn load_current_runtime_content_record(
+    state: &crate::state::AppState,
+    activation_ref: &str,
+    acquisition_mode: AcquisitionMode,
+    realization: &ryeos_state::objects::ExternalContentRealization,
+    expected_mount: &str,
+) -> anyhow::Result<ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin> {
+    let (activation, receipt_hash, receipt) =
+        load_current_activation_receipt(state, activation_ref, acquisition_mode)?;
+    let component = activation
+        .components
+        .iter()
+        .find(|component| component.recipe.id == realization.id)
+        .ok_or_else(|| anyhow::anyhow!("runtime realization has no signed activation component"))?;
+    if component.declaration_kind != ryeos_engine::external_content::ExternalContentKind::Tree
+        || component.recipe.storage
+            != crate::managed_external_content::ManagedComponentStorage::LargeContent
+        || component.expected_manifest_kind
+            != ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND
+    {
+        bail!("runtime activation component is not an exact large-content tree");
+    }
+    let component_receipt = receipt
+        .components
+        .iter()
+        .find(|record| record.id == component.recipe.id)
+        .ok_or_else(|| anyhow::anyhow!("runtime activation component has no retained binding"))?;
+    let consumer = ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
+        activation.document.consumer_ref.clone(),
+        activation.publisher_fingerprint.clone(),
+    )?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let cas = authority.cas_store()?;
+    let (binding_hash, binding) = crate::operator_external_content::active_binding_from_store(
+        &state.state_store,
+        &cas,
+        &component.expected_manifest_hash,
+        &consumer,
+        state.identity.fingerprint(),
+    )?
+    .ok_or_else(|| anyhow::anyhow!("runtime activation component has no current active binding"))?;
+    crate::operator_external_content::require_current_binding_authorizer(state, &binding)?;
+    if binding_hash != component_receipt.binding_hash {
+        bail!("runtime activation receipt does not name the current active binding");
+    }
+    let manifest_value = cas
+        .get_object(&component.expected_manifest_hash)?
+        .ok_or_else(|| anyhow::anyhow!("runtime activation large-content manifest is absent"))?;
+    let manifest =
+        ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&manifest_value)?;
+    ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin::verify(
+        &receipt_hash,
+        &receipt,
+        &binding_hash,
+        &binding,
+        &manifest,
+        realization,
+        &activation.document.consumer_ref,
+        &component.recipe.id,
+        &component.expected_manifest_hash,
+        expected_mount,
+        state.identity.fingerprint(),
+    )
+}
+
+fn validate_current_activation_receipt(
+    activation: &ResolvedManagedExternalContentActivation,
+    activation_id: &str,
+    node_fingerprint: &str,
+    receipt: &ryeos_state::objects::ExternalContentActivationReceipt,
+) -> anyhow::Result<()> {
+    receipt.validate()?;
+    if receipt.activation_id != activation_id
+        || receipt.activation_ref != activation.activation_ref
+        || receipt.activation_program_digest != activation.activation_program_digest
+        || receipt.consumer_ref != activation.document.consumer_ref
+        || receipt.publisher_fingerprint != activation.publisher_fingerprint
+        || receipt.node_fingerprint != node_fingerprint
+    {
+        bail!("managed activation receipt differs from current signed program or node");
+    }
+    let expected: std::collections::BTreeSet<_> = activation
+        .components
+        .iter()
+        .map(|component| component.recipe.id.as_str())
+        .collect();
+    let actual: std::collections::BTreeSet<_> = receipt
+        .components
+        .iter()
+        .map(|component| component.id.as_str())
+        .collect();
+    if expected.len() != activation.components.len()
+        || actual.len() != receipt.components.len()
+        || expected != actual
+    {
+        bail!("managed activation receipt component set differs from current signed program");
+    }
+    Ok(())
+}
+
 fn same_activation_subject(
     retained: &ryeos_state::objects::ExternalContentActivationReceipt,
     expected: &ryeos_state::objects::ExternalContentActivationReceipt,
@@ -386,6 +537,69 @@ fn validate_canonical_ref(label: &str, value: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resolved_receipt_fixture() -> ResolvedManagedExternalContentActivation {
+        use crate::managed_external_content::{
+            ManagedActivationComponent, ManagedActivationComponentBounds,
+            ManagedActivationComponentShape, ManagedComponentStorage,
+            ManagedExternalContentActivation, ResolvedManagedActivationComponent,
+        };
+
+        let recipe = ManagedActivationComponent {
+            id: "runtime".to_owned(),
+            storage: ManagedComponentStorage::LargeContent,
+            shape: ManagedActivationComponentShape::Mapped { members: vec![] },
+        };
+        ResolvedManagedExternalContentActivation {
+            activation_ref: "config:fixture/activation".to_owned(),
+            activation_program_digest: "a".repeat(64),
+            publisher_fingerprint: "b".repeat(64),
+            document: ManagedExternalContentActivation {
+                schema: "fixture".to_owned(),
+                consumer_ref: "worker:fixture/hosted".to_owned(),
+                sources: vec![],
+                components: vec![recipe.clone()],
+            },
+            components: vec![ResolvedManagedActivationComponent {
+                recipe,
+                expected_manifest_hash: "d".repeat(64),
+                expected_manifest_kind: "fixture".to_owned(),
+                declaration_kind: ryeos_engine::external_content::ExternalContentKind::Tree,
+                capture_bounds: ManagedActivationComponentBounds {
+                    maximum_entries: 1,
+                    maximum_depth: 1,
+                    maximum_file_bytes: 1,
+                    maximum_total_bytes: 1,
+                },
+                expected_file_sha256: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn current_receipt_requires_exact_program_node_and_component_set() {
+        let activation = resolved_receipt_fixture();
+        let mut retained = receipt('e', 'f');
+        let id = retained.activation_id.clone();
+        validate_current_activation_receipt(&activation, &id, &"c".repeat(64), &retained).unwrap();
+
+        retained.activation_program_digest = "3".repeat(64);
+        assert!(
+            validate_current_activation_receipt(&activation, &id, &"c".repeat(64), &retained)
+                .is_err()
+        );
+        let mut retained = receipt('e', 'f');
+        retained.components[0].id = "other".to_owned();
+        assert!(
+            validate_current_activation_receipt(&activation, &id, &"c".repeat(64), &retained)
+                .is_err()
+        );
+        let retained = receipt('e', 'f');
+        assert!(
+            validate_current_activation_receipt(&activation, &id, &"4".repeat(64), &retained)
+                .is_err()
+        );
+    }
 
     fn managed_policy() -> ManagedExternalContentActivationPolicy {
         ManagedExternalContentActivationPolicy {

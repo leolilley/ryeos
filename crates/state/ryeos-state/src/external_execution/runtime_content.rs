@@ -39,6 +39,7 @@ impl RuntimeContentRecordJoin {
         realization: &ExternalContentRealization,
         expected_consumer_ref: &str,
         expected_declaration_id: &str,
+        expected_manifest_hash: &str,
         expected_mount: &str,
         expected_node_fingerprint: &str,
     ) -> Result<Self> {
@@ -68,6 +69,7 @@ impl RuntimeContentRecordJoin {
                 && receipt.node_fingerprint == expected_node_fingerprint
                 && binding.target_node_fingerprint == expected_node_fingerprint
                 && binding.state == ExternalContentBindingState::Active
+                && binding.manifest_hash == expected_manifest_hash
                 && receipt
                     .components
                     .iter()
@@ -229,6 +231,7 @@ mod tests {
             &realization,
             CONSUMER,
             DECLARATION,
+            &binding.manifest_hash,
             DECLARATION,
             &receipt.node_fingerprint,
         )
@@ -243,6 +246,7 @@ mod tests {
         let verify = |receipt: &ExternalContentActivationReceipt,
                       realization: &ExternalContentRealization,
                       consumer: &str,
+                      manifest_hash: &str,
                       mount: &str,
                       node: &str| {
             RuntimeContentRecordJoin::verify(
@@ -254,6 +258,7 @@ mod tests {
                 realization,
                 consumer,
                 DECLARATION,
+                manifest_hash,
                 mount,
                 node,
             )
@@ -263,6 +268,7 @@ mod tests {
                 &receipt,
                 &realization,
                 "worker:other/consumer",
+                &binding.manifest_hash,
                 DECLARATION,
                 &receipt.node_fingerprint
             )
@@ -273,6 +279,7 @@ mod tests {
                 &receipt,
                 &realization,
                 CONSUMER,
+                &binding.manifest_hash,
                 DECLARATION,
                 &"9".repeat(64)
             )
@@ -283,6 +290,7 @@ mod tests {
                 &receipt,
                 &realization,
                 CONSUMER,
+                &binding.manifest_hash,
                 "other-runtime",
                 &receipt.node_fingerprint
             )
@@ -295,18 +303,20 @@ mod tests {
                 &receipt,
                 &changed,
                 CONSUMER,
+                &binding.manifest_hash,
                 DECLARATION,
                 &receipt.node_fingerprint
             )
             .is_err()
         );
-        let mut changed = realization;
+        let mut changed = realization.clone();
         changed.kind = ExternalContentKind::File;
         assert!(
             verify(
                 &receipt,
                 &changed,
                 CONSUMER,
+                &binding.manifest_hash,
                 DECLARATION,
                 &receipt.node_fingerprint
             )
@@ -319,6 +329,7 @@ mod tests {
                 &receipt,
                 &changed,
                 CONSUMER,
+                &binding.manifest_hash,
                 DECLARATION,
                 &receipt.node_fingerprint
             )
@@ -331,6 +342,18 @@ mod tests {
                 &receipt,
                 &changed,
                 CONSUMER,
+                &binding.manifest_hash,
+                DECLARATION,
+                &receipt.node_fingerprint
+            )
+            .is_err()
+        );
+        assert!(
+            verify(
+                &receipt,
+                &realization,
+                CONSUMER,
+                &"7".repeat(64),
                 DECLARATION,
                 &receipt.node_fingerprint
             )
