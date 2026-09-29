@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-29T16:40:43Z:ca04d9d898f2a4282b50dba9d5f53d31cdf9f048fb1feea568e588e52c618dd3:6r6Bc5pSa+UtOyRofbM5I34vgiV9rzE0BV415MxEoMRw35U1OwM6MY2apQ2CbifU8LtlCkqTxyUX17XNY1KrAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T17:01:35Z:e87f5d99ac2ce8808c11ae7416f6ec894dbe3b3a422e6c0401fdc607eba75cad:U6kzsjezbDwysTjEKso9Fat55MVaC3oL118vlw6dt7Ige/MoetWaEmzBIvwQCBDD91AtO8b94eV5O78clwUGBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -207,6 +207,19 @@ requirements. Profile changes must never refresh an already admitted running
 root's selection.
 
 ## Current implementation gate
+
+The currently generated direct-Codex fixture is a diagnostic product check.
+Its signed qualification policy has no `consumer_execution_context`, and the
+Codex bundle's `guest-runtime` Worker relationship still has
+`policy_ref: null`. Its five finite behavior claims therefore cannot be used
+as proof that the production Worker received or ran the same runtime in a
+hosted guest. A separate signed consumer policy and relationship must bind
+the admitted Worker, environment, bounded-turn execution, exact product and
+hosted lifecycle before that stronger claim can be selected. The draft v10
+consumer evidence coordinates in the X1 source worktree are structural only;
+the daemon does not issue them, and issuance, claim validation and fresh
+selection remain closed. Do not promote that structure or a direct diagnostic
+run into Worker activation evidence.
 
 Retained-observation source cut, 2026-09-30: the daemon read path now compares
 the post-release applied executable-path, argv, environment and CWD commitments
