@@ -401,7 +401,6 @@ async fn import_filesystem(
             &request,
             &policy.limits,
             &source_root,
-            root_device,
             state.ignore_matcher.as_ref(),
             &guard,
             &cas,
@@ -412,7 +411,6 @@ async fn import_filesystem(
             &request,
             &policy.limits,
             &source_root,
-            root_device,
             state.ignore_matcher.as_ref(),
             &guard,
             &cas,
@@ -514,7 +512,6 @@ pub fn import_managed_activation_component(
     }))?;
     let publication_key =
         ryeos_state::DurableCasPublicationKey::external_content_import(&request_digest)?;
-    let (root_device, _) = source_root.device_inode()?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
@@ -565,7 +562,6 @@ pub fn import_managed_activation_component(
             &request,
             &limits,
             source_root,
-            root_device,
             state.ignore_matcher.as_ref(),
             &guard,
             &cas,
@@ -576,7 +572,6 @@ pub fn import_managed_activation_component(
             &request,
             &limits,
             source_root,
-            root_device,
             state.ignore_matcher.as_ref(),
             &guard,
             &cas,
@@ -1564,7 +1559,6 @@ fn capture_content_import(
     request: &FilesystemImportRequest,
     limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
     source_root: &lillux::PinnedDirectory,
-    root_device: u64,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
     guard: &ryeos_state::CasMutationGuard,
     cas: &lillux::CasStore,
@@ -1585,7 +1579,7 @@ fn capture_content_import(
     let mut sink = DurableContentSink { _guard: guard, cas };
     let manifest = match request.shape {
         ImportShape::Tree => {
-            let target = open_admitted_source_tree(source_root, &request.path, root_device)?;
+            let target = open_admitted_source_tree(source_root, &request.path)?;
             let manifest =
                 ryeos_state::capture_tree(&target, &[], &capture_policy, &mut budget, &mut sink)?;
             target.ensure_path_binding()?;
@@ -1596,9 +1590,7 @@ fn capture_content_import(
             let entry = parent
                 .entry_no_follow(OsStr::new(name))?
                 .ok_or_else(|| anyhow::anyhow!("external-content source file is unavailable"))?;
-            if entry.entry_type != lillux::PinnedEntryType::Regular
-                || entry.containing_device != root_device
-            {
+            if entry.entry_type != lillux::PinnedEntryType::Regular {
                 bail!("external-content source file is not an admitted regular inode");
             }
             let manifest = ryeos_state::capture_file_at(
@@ -1644,7 +1636,6 @@ fn capture_large_import(
     request: &FilesystemImportRequest,
     limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
     source_root: &lillux::PinnedDirectory,
-    root_device: u64,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
     guard: &ryeos_state::CasMutationGuard,
     cas: &lillux::CasStore,
@@ -1673,14 +1664,14 @@ fn capture_large_import(
     };
     let manifest = match request.shape {
         ImportShape::Tree => {
-            let target = open_admitted_source_tree(source_root, &request.path, root_device)?;
+            let target = open_admitted_source_tree(source_root, &request.path)?;
             let manifest = ryeos_state::capture_large_tree(&target, &capture_policy, &mut sink)?;
             target.ensure_path_binding()?;
             manifest
         }
         ImportShape::File => {
             let (parent, file, source_identity) =
-                open_pinned_source_file(source_root, &request.path, root_device)?;
+                open_pinned_source_file(source_root, &request.path)?;
             let manifest = ryeos_state::capture_large_file(
                 file,
                 source_identity,
@@ -1720,7 +1711,6 @@ fn capture_large_import(
 fn open_pinned_source_file(
     source_root: &lillux::PinnedDirectory,
     relative: &str,
-    root_device: u64,
 ) -> anyhow::Result<(
     lillux::PinnedDirectory,
     std::fs::File,
@@ -1730,14 +1720,13 @@ fn open_pinned_source_file(
     let entry = parent
         .entry_no_follow(OsStr::new(name))?
         .ok_or_else(|| anyhow::anyhow!("external-content source file is unavailable"))?;
-    if entry.entry_type != lillux::PinnedEntryType::Regular
-        || entry.containing_device != root_device
-    {
+    if entry.entry_type != lillux::PinnedEntryType::Regular {
         bail!("external-content source file is not an admitted regular inode");
     }
     let file = parent
         .open_regular(OsStr::new(name), false)?
         .ok_or_else(|| anyhow::anyhow!("external-content source file vanished"))?;
+    parent.ensure_open_regular_same_mount(&file)?;
     let observed = lillux::observe_open_regular_file(&file)?;
     if !observed.matches_directory_entry(&entry) {
         bail!("external-content source file changed inode during admission");
@@ -1756,14 +1745,8 @@ fn open_pinned_source_file(
 fn open_admitted_source_tree(
     source_root: &lillux::PinnedDirectory,
     relative: &str,
-    root_device: u64,
 ) -> anyhow::Result<lillux::PinnedDirectory> {
-    let target = open_directory_relative(source_root, relative)?;
-    let (target_device, _) = target.device_inode()?;
-    if target_device != root_device {
-        bail!("external-content source tree crossed the admitted root filesystem");
-    }
-    Ok(target)
+    open_directory_relative(source_root, relative)
 }
 
 struct DurableContentSink<'a> {
@@ -2014,7 +1997,6 @@ mod tests {
                 )
                 .unwrap();
             let root = lillux::PinnedDirectory::open(&source).unwrap().unwrap();
-            let (device, _) = root.device_inode().unwrap();
             let request = FilesystemImportRequest {
                 root: "fixture".into(),
                 path: "tree".into(),
@@ -2051,7 +2033,6 @@ mod tests {
                     &request,
                     &limits,
                     &root,
-                    device,
                     &ignore,
                     &guard,
                     &cas,
@@ -2067,7 +2048,6 @@ mod tests {
                         &request,
                         &limits,
                         &root,
-                        device,
                         &ignore,
                         &guard,
                         &cas,
@@ -2307,20 +2287,24 @@ mod tests {
     }
 
     #[test]
-    fn source_tree_must_remain_on_the_admitted_root_filesystem() {
+    fn source_tree_must_remain_on_the_admitted_mount() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("tree")).unwrap();
         let root = lillux::PinnedDirectory::open(directory.path())
             .unwrap()
             .unwrap();
-        let (device, _) = root.device_inode().unwrap();
-        open_admitted_source_tree(&root, "tree", device).unwrap();
-        assert!(
-            open_admitted_source_tree(&root, "tree", device.saturating_add(1))
-                .unwrap_err()
-                .to_string()
-                .contains("crossed")
-        );
+        open_admitted_source_tree(&root, "tree").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let filesystem = lillux::PinnedDirectory::open(std::path::Path::new("/"))
+                .unwrap()
+                .unwrap();
+            if let Some(proc) = filesystem.open_child_directory(OsStr::new("proc")).unwrap()
+                && filesystem.ensure_open_child_same_mount(&proc).is_err()
+            {
+                assert!(open_admitted_source_tree(&filesystem, "proc").is_err());
+            }
+        }
     }
 
     #[test]
@@ -2451,9 +2435,11 @@ fn open_directory_relative(
 ) -> anyhow::Result<lillux::PinnedDirectory> {
     let mut current = base.try_clone()?;
     for component in relative.split('/') {
-        current = current
+        let child = current
             .open_child_directory(OsStr::new(component))?
             .ok_or_else(|| anyhow::anyhow!("external-content source directory is unavailable"))?;
+        current.ensure_open_child_same_mount(&child)?;
+        current = child;
     }
     Ok(current)
 }

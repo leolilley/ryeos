@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 
 /// Mechanical result of materializing one immutable file into a private
 /// execution root. Policy remains with the caller; Lillux owns only the
@@ -698,10 +698,9 @@ pub struct PinnedDirectoryEntryMetadata {
     pub mode: u32,
     /// Device-node identity (`st_rdev`). Meaningful only for device entries.
     pub device_id: u64,
-    /// Containing-filesystem identity (`st_dev`). A traversal that must stay
-    /// on one filesystem compares this against its pinned root, because a
-    /// bind mount or separate filesystem below the root is neither bounded
-    /// nor reproducible by the root's own declaration.
+    /// `st_dev` identity of this entry. This is an inode identity component,
+    /// not a reliable mount-boundary test: overlayfs can report a different
+    /// device for an ordinary file and its containing directory.
     pub containing_device: u64,
     /// Inode number, for identity comparisons within one filesystem.
     pub inode: u64,
@@ -711,6 +710,29 @@ pub struct PinnedDirectoryEntryMetadata {
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+
+#[cfg(target_os = "linux")]
+fn mount_id_of_open_descriptor(file: &File) -> Result<u64> {
+    let mut observation: libc::statx = unsafe { std::mem::zeroed() };
+    let empty = c"";
+    if unsafe {
+        libc::statx(
+            file.as_raw_fd(),
+            empty.as_ptr(),
+            libc::AT_EMPTY_PATH,
+            libc::STATX_MNT_ID,
+            &mut observation,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error()).context("observe exact mount identity");
+    }
+    ensure!(
+        observation.stx_mask & libc::STATX_MNT_ID != 0,
+        "kernel did not return an exact mount identity"
+    );
+    Ok(observation.stx_mnt_id)
+}
 
 #[cfg(unix)]
 fn open_directory_no_follow(path: &Path) -> Result<Option<File>> {
@@ -2480,7 +2502,9 @@ impl PinnedDirectory {
 
     /// Remove every entry below this exact pinned directory without following
     /// symlinks or crossing a mounted filesystem boundary. The directory
-    /// itself remains open and is not removed.
+    /// itself remains open and is not removed. The caller must exclude
+    /// concurrent namespace writers: identity and mount checks cannot make
+    /// pathname unlink atomic with a prior observation.
     pub fn remove_contents_recursive(&self) -> Result<()> {
         #[cfg(not(unix))]
         {
@@ -2488,9 +2512,7 @@ impl PinnedDirectory {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt as _;
-            let root_device = self.directory.metadata()?.dev();
-            self.remove_contents_on_device(root_device)?;
+            self.remove_contents_same_mount()?;
             self.directory.sync_all()?;
             Ok(())
         }
@@ -2498,7 +2520,8 @@ impl PinnedDirectory {
 
     /// Bounded variant of recursive removal for an untrusted or authored
     /// generation. The raw namespace budget is shared across every level and
-    /// enforced before names are retained.
+    /// enforced before names are retained. The caller must exclude concurrent
+    /// namespace writers for the same reason as `remove_contents_recursive`.
     pub fn remove_contents_recursive_bounded(
         &self,
         budget: DirectoryTraversalBudget,
@@ -2510,30 +2533,21 @@ impl PinnedDirectory {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt as _;
-            let root_device = self.directory.metadata()?.dev();
             let mut remaining = budget.max_entries;
-            self.remove_contents_on_device_bounded(
-                root_device,
-                &mut remaining,
-                budget.max_depth,
-                0,
-            )?;
+            self.remove_contents_same_mount_bounded(&mut remaining, budget.max_depth, 0)?;
             self.directory.sync_all()?;
             Ok(())
         }
     }
 
     #[cfg(unix)]
-    fn remove_contents_on_device_bounded(
+    fn remove_contents_same_mount_bounded(
         &self,
-        root_device: u64,
         remaining: &mut usize,
         max_depth: usize,
         depth: usize,
     ) -> Result<()> {
         use std::os::unix::ffi::OsStrExt as _;
-        use std::os::unix::fs::MetadataExt as _;
 
         if depth > max_depth {
             anyhow::bail!("recursive removal exceeds its directory depth bound");
@@ -2563,9 +2577,12 @@ impl PinnedDirectory {
                         directory: pinned,
                         path_binding_required: self.path_binding_required,
                     };
-                    if child.directory.metadata()?.dev() != root_device {
-                        anyhow::bail!("refusing to cross mounted filesystem during removal");
-                    }
+                    let (device, inode) = child.device_inode()?;
+                    ensure!(
+                        device == entry.containing_device && inode == entry.inode,
+                        "directory changed identity during recursive removal"
+                    );
+                    self.ensure_open_child_same_mount(&child)?;
                     if self.remove_empty_child_if_same(&entry.name, &child)? {
                         continue;
                     }
@@ -2573,23 +2590,20 @@ impl PinnedDirectory {
                 let child = self
                     .open_child_directory(&entry.name)?
                     .ok_or_else(|| anyhow::anyhow!("directory disappeared during removal"))?;
-                if child.directory.metadata()?.dev() != root_device {
-                    anyhow::bail!(
-                        "refusing to cross mounted filesystem while removing {}",
-                        child.path.display()
-                    );
-                }
-                child.remove_contents_on_device_bounded(
-                    root_device,
-                    remaining,
-                    max_depth,
-                    depth + 1,
-                )?;
+                let (device, inode) = child.device_inode()?;
+                ensure!(
+                    device == entry.containing_device && inode == entry.inode,
+                    "directory changed identity during recursive removal"
+                );
+                self.ensure_open_child_same_mount(&child)?;
+                child.remove_contents_same_mount_bounded(remaining, max_depth, depth + 1)?;
                 if !self.remove_empty_child_if_same(&entry.name, &child)? {
                     anyhow::bail!("directory remained non-empty: {}", child.path.display());
                 }
-            } else if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0
-            {
+            } else if {
+                self.ensure_entry_same_mount(&entry)?;
+                (unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) }) != 0
+            } {
                 return Err(std::io::Error::last_os_error()).with_context(|| {
                     format!(
                         "remove pinned entry {}",
@@ -2603,9 +2617,8 @@ impl PinnedDirectory {
     }
 
     #[cfg(unix)]
-    fn remove_contents_on_device(&self, root_device: u64) -> Result<()> {
+    fn remove_contents_same_mount(&self) -> Result<()> {
         use std::os::unix::ffi::OsStrExt as _;
-        use std::os::unix::fs::MetadataExt as _;
 
         for entry in self.entries_no_follow()? {
             let name_c = std::ffi::CString::new(entry.name.as_bytes())?;
@@ -2613,18 +2626,20 @@ impl PinnedDirectory {
                 let child = self
                     .open_child_directory(&entry.name)?
                     .ok_or_else(|| anyhow::anyhow!("directory disappeared during removal"))?;
-                if child.directory.metadata()?.dev() != root_device {
-                    anyhow::bail!(
-                        "refusing to cross mounted filesystem while removing {}",
-                        child.path.display()
-                    );
-                }
-                child.remove_contents_on_device(root_device)?;
+                let (device, inode) = child.device_inode()?;
+                ensure!(
+                    device == entry.containing_device && inode == entry.inode,
+                    "directory changed identity during recursive removal"
+                );
+                self.ensure_open_child_same_mount(&child)?;
+                child.remove_contents_same_mount()?;
                 if !self.remove_empty_child_if_same(&entry.name, &child)? {
                     anyhow::bail!("directory remained non-empty: {}", child.path.display());
                 }
-            } else if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0
-            {
+            } else if {
+                self.ensure_entry_same_mount(&entry)?;
+                (unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) }) != 0
+            } {
                 return Err(std::io::Error::last_os_error()).with_context(|| {
                     format!(
                         "remove pinned entry {}",
@@ -2780,6 +2795,13 @@ impl PinnedDirectory {
                 self.path.display()
             );
         }
+        #[cfg(target_os = "linux")]
+        ensure!(
+            mount_id_of_open_descriptor(&self.directory)?
+                == mount_id_of_open_descriptor(&current.directory)?,
+            "pinned directory path changed mount during the operation: {}",
+            self.path.display()
+        );
         Ok(())
     }
 
@@ -3037,6 +3059,103 @@ impl PinnedDirectory {
         Ok(())
     }
 
+    /// Require this exact no-follow child to remain on the parent's mount.
+    /// On Linux, mount ID rather than `st_dev` is the boundary: overlayfs can
+    /// report different devices for ordinary files and their parent directory
+    /// even though both are on one mount. The held child descriptor is joined
+    /// to the caller's entry observation before and after the mount check.
+    #[cfg(unix)]
+    pub fn ensure_entry_same_mount(&self, expected: &PinnedDirectoryEntryMetadata) -> Result<()> {
+        self.ensure_entry_observation(expected)?;
+        #[cfg(target_os = "linux")]
+        {
+            let name = std::ffi::CString::new(expected.name.as_bytes())?;
+            let descriptor = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("open exact no-follow child for mount observation");
+            }
+            let child = unsafe { File::from_raw_fd(descriptor) };
+            let metadata = child.metadata()?;
+            use std::os::unix::fs::MetadataExt as _;
+            ensure!(
+                metadata.dev() == expected.containing_device
+                    && metadata.ino() == expected.inode
+                    && metadata.mode() == expected.mode,
+                "pinned directory child changed before mount observation"
+            );
+            ensure!(
+                mount_id_of_open_descriptor(&self.directory)?
+                    == mount_id_of_open_descriptor(&child)?,
+                "pinned directory child crosses a mounted filesystem"
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            ensure!(
+                expected.containing_device == self.directory.metadata()?.dev(),
+                "pinned directory child crosses a mounted filesystem"
+            );
+        }
+        self.ensure_entry_observation(expected)
+    }
+
+    /// Check the mount of the actual opened regular file, not a prior path
+    /// observation that could be replaced before the caller consumes it.
+    pub fn ensure_open_regular_same_mount(&self, file: &File) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = file;
+            anyhow::bail!("open regular-file mount admission is unavailable");
+        }
+        #[cfg(target_os = "linux")]
+        ensure!(
+            mount_id_of_open_descriptor(&self.directory)? == mount_id_of_open_descriptor(file)?,
+            "opened regular file crosses a mounted filesystem"
+        );
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            ensure!(
+                self.directory.metadata()?.dev() == file.metadata()?.dev(),
+                "opened regular file crosses a mounted filesystem"
+            );
+        }
+        Ok(())
+    }
+
+    /// Check the mount of the exact child directory descriptor used for
+    /// subsequent traversal.
+    pub fn ensure_open_child_same_mount(&self, child: &PinnedDirectory) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = child;
+            anyhow::bail!("open child-directory mount admission is unavailable");
+        }
+        #[cfg(target_os = "linux")]
+        ensure!(
+            mount_id_of_open_descriptor(&self.directory)?
+                == mount_id_of_open_descriptor(&child.directory)?,
+            "opened child directory crosses a mounted filesystem"
+        );
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            ensure!(
+                self.directory.metadata()?.dev() == child.directory.metadata()?.dev(),
+                "opened child directory crosses a mounted filesystem"
+            );
+        }
+        Ok(())
+    }
+
     /// Reassert owner-only access on this exact open directory. Path-opened
     /// authorities additionally prove that their original path still selects
     /// the same inode; inherited authorities have no ambient pathname to
@@ -3232,7 +3351,6 @@ impl PinnedDirectory {
             #[allow(clippy::too_many_arguments)]
             fn visit(
                 directory: &PinnedDirectory,
-                root_device: u64,
                 remaining_entries: &mut usize,
                 max_depth: usize,
                 depth: usize,
@@ -3250,9 +3368,7 @@ impl PinnedDirectory {
                     .ok_or_else(|| anyhow::anyhow!("owner-private tree entry budget underflow"))?;
 
                 for entry in &initial {
-                    if entry.containing_device != root_device {
-                        anyhow::bail!("owner-private tree crosses a mounted filesystem");
-                    }
+                    directory.ensure_entry_same_mount(entry)?;
                     match entry.entry_type {
                         PinnedEntryType::Symlink => {
                             directory.ensure_entry_observation(entry)?;
@@ -3264,6 +3380,7 @@ impl PinnedDirectory {
                                     .ok_or_else(|| {
                                         anyhow::anyhow!("owner-private tree directory disappeared")
                                     })?;
+                            directory.ensure_open_child_same_mount(&child)?;
                             let identity = child.identity()?;
                             if identity.containing_device != entry.containing_device
                                 || identity.inode != entry.inode
@@ -3299,7 +3416,6 @@ impl PinnedDirectory {
                             }
                             visit(
                                 &child,
-                                root_device,
                                 remaining_entries,
                                 max_depth,
                                 depth + 1,
@@ -3331,6 +3447,7 @@ impl PinnedDirectory {
                                 directory.open_regular(&entry.name, false)?.ok_or_else(|| {
                                     anyhow::anyhow!("owner-private tree file disappeared")
                                 })?;
+                            directory.ensure_open_regular_same_mount(&file)?;
                             let before = observe_open_regular_file(&file)?;
                             if !before.matches_directory_entry(entry) {
                                 anyhow::bail!("owner-private tree file changed identity");
@@ -3403,13 +3520,11 @@ impl PinnedDirectory {
                 }
                 OwnerPrivateTreeAction::Tighten => self.set_mode(0o700)?,
             }
-            let root_device = self.directory.metadata()?.dev();
             let root_owner = self.directory.metadata()?.uid();
             let mut remaining_entries = budget.max_entries;
             let mut regular_bytes = 0;
             visit(
                 self,
-                root_device,
                 &mut remaining_entries,
                 budget.max_depth,
                 0,
@@ -6054,6 +6169,14 @@ impl PinnedDirectory {
                     path.display()
                 );
             }
+            #[cfg(target_os = "linux")]
+            ensure!(
+                mount_id_of_open_descriptor(&self.directory)?
+                    == mount_id_of_open_descriptor(&current)?
+                    && mount_id_of_open_descriptor(&current)?
+                        == mount_id_of_open_descriptor(&expected.directory)?,
+                "secure child directory mount changed before mutation"
+            );
             if unsafe {
                 libc::unlinkat(
                     self.directory.as_raw_fd(),
@@ -8141,11 +8264,60 @@ mod tests {
             .find(|entry| entry.name == OsStr::new("value"))
             .unwrap();
 
-        // A traversal that must stay on one filesystem compares this against
-        // its pinned root; `device_id` (st_rdev) cannot answer that question.
+        // st_dev remains part of the observed inode identity, but mount
+        // admission uses the held child's mount ID on Linux. Overlayfs need
+        // not report the same st_dev for a file and its containing directory.
         assert_eq!(entry.containing_device, root_device);
         assert_ne!(entry.inode, 0);
         assert_eq!(entry.device_id, 0);
+        pinned.ensure_entry_same_mount(entry).unwrap();
+        let opened = pinned
+            .open_regular(OsStr::new("value"), false)
+            .unwrap()
+            .unwrap();
+        pinned.ensure_open_regular_same_mount(&opened).unwrap();
+
+        let mut changed = entry.clone();
+        changed.inode += 1;
+        assert!(pinned.ensure_entry_same_mount(&changed).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_entry_mount_check_rejects_proc_mount() {
+        let root = PinnedDirectory::open(Path::new("/")).unwrap().unwrap();
+        let Some(proc) = root.entry_no_follow(OsStr::new("proc")).unwrap() else {
+            return;
+        };
+        if proc.entry_type != PinnedEntryType::Directory {
+            return;
+        }
+        let Some(open_proc) = root.open_child_directory(OsStr::new("proc")).unwrap() else {
+            return;
+        };
+        if root.ensure_open_child_same_mount(&open_proc).is_err() {
+            assert!(root.ensure_entry_same_mount(&proc).is_err());
+            assert!(root.ensure_open_child_same_mount(&open_proc).is_err());
+        }
+    }
+
+    #[test]
+    fn recursive_removal_of_exact_nested_entries_preserves_root() {
+        for bounded in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root_path = temp.path().join("root");
+            std::fs::create_dir_all(root_path.join("nested")).unwrap();
+            std::fs::write(root_path.join("nested/value"), b"value").unwrap();
+            let root = PinnedDirectory::open(&root_path).unwrap().unwrap();
+            if bounded {
+                root.remove_contents_recursive_bounded(DirectoryTraversalBudget::new(8, 4))
+                    .unwrap();
+            } else {
+                root.remove_contents_recursive().unwrap();
+            }
+            assert!(root_path.is_dir());
+            assert!(root.entries_no_follow().unwrap().is_empty());
+        }
     }
 
     #[test]
