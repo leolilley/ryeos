@@ -289,11 +289,61 @@ impl GuestOwnerRuntimeProduct {
     }
 }
 
-/// Create a fresh runtime child under an admitted private parent. The exact
+/// Create a fresh runtime child under an admitted private parent from the
+/// existing captured-execution producer's owned executable descriptor. The exact
 /// resulting content-manifest digest is computed from the same tree the guest observes.
 /// A failure leaves a non-publishable child for the caller to quarantine;
 /// this function never overwrites an existing product.
 pub fn produce_guest_owner_runtime(
+    parent: &lillux::PinnedDirectory,
+    name: &OsStr,
+    owner_executable: &lillux::InheritedDescriptorAuthority,
+    owner_bytes: u64,
+    owner_sha256: &str,
+    controller_root: &VerifyingKey,
+    profile: &GuestOwnerRuntimeProfile,
+) -> Result<GuestOwnerRuntimeProduct> {
+    owner_executable.require_owned_executable()?;
+    produce_guest_owner_runtime_from_exact_source(
+        parent,
+        name,
+        owner_executable,
+        owner_bytes,
+        owner_sha256,
+        controller_root,
+        profile,
+    )
+}
+
+/// Copy an independently admitted, sealed *nonexecutable* guest payload into
+/// the same exact runtime tree. The caller must verify signed source authority
+/// and the selected guest target before calling this operation.
+pub fn produce_guest_owner_runtime_from_admitted_payload(
+    parent: &lillux::PinnedDirectory,
+    name: &OsStr,
+    payload: &lillux::InheritedDescriptorAuthority,
+    owner_bytes: u64,
+    owner_sha256: &str,
+    controller_root: &VerifyingKey,
+    profile: &GuestOwnerRuntimeProfile,
+) -> Result<GuestOwnerRuntimeProduct> {
+    let source = payload.require_owned_regular()?;
+    ensure!(
+        source.mode() & 0o111 == 0,
+        "guest payload source must be nonexecutable data"
+    );
+    produce_guest_owner_runtime_from_exact_source(
+        parent,
+        name,
+        payload,
+        owner_bytes,
+        owner_sha256,
+        controller_root,
+        profile,
+    )
+}
+
+fn produce_guest_owner_runtime_from_exact_source(
     parent: &lillux::PinnedDirectory,
     name: &OsStr,
     owner_executable: &lillux::InheritedDescriptorAuthority,
@@ -312,7 +362,7 @@ pub fn produce_guest_owner_runtime(
         (1..=MAX_OWNER_EXECUTABLE_BYTES).contains(&owner_bytes) && lillux::valid_hash(owner_sha256),
         "guest runtime owner executable exceeds its exact bound"
     );
-    owner_executable.require_owned_executable()?;
+    owner_executable.require_owned_regular()?;
     let observation = owner_executable.regular_file_observation()?;
     ensure!(
         observation.size() == owner_bytes,
@@ -586,6 +636,45 @@ mod tests {
                 &profile,
             )
             .is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sealed_nonexecutable_payload_produces_the_same_owner_runtime() {
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let parent = lillux::PinnedDirectory::open(parent.path())
+            .unwrap()
+            .unwrap();
+        let bytes = b"signed-owner-payload";
+        let payload = lillux::sealed_memfd(c"owner-payload-fixture", bytes).unwrap();
+        assert!(payload.require_owned_executable().is_err());
+        let key = SigningKey::from_bytes(&[43; 32]).verifying_key();
+        let profile = GuestOwnerRuntimeProfile {
+            schema: 1,
+            private_source_max_bytes: 32 * 1024 * 1024,
+            private_source_max_inodes: 1024,
+            owner_timeout_seconds: 600,
+        };
+        let product = produce_guest_owner_runtime_from_admitted_payload(
+            &parent,
+            OsStr::new("runtime"),
+            &payload,
+            bytes.len() as u64,
+            &lillux::sha256_hex(bytes),
+            &key,
+            &profile,
+        )
+        .unwrap();
+        let observed = ObservedGuestRuntime::observe(product.root()).unwrap();
+        assert_eq!(observed.manifest_hash(), product.manifest_hash());
+        assert_eq!(
+            observed
+                .measure_exact_owner_product()
+                .unwrap()
+                .owner_executable_sha256,
+            lillux::sha256_hex(bytes)
         );
     }
 }

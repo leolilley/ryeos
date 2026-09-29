@@ -521,6 +521,40 @@ impl CasStore {
         Ok(Some(read_verified_entry(file, hash, &path)?))
     }
 
+    /// Read and verify an exact CAS blob without allocating beyond the caller's
+    /// byte ceiling. The limit is enforced while reading the pinned entry, not
+    /// by trusting an earlier pathname or size observation.
+    pub fn get_blob_bounded(&self, hash: &str, maximum_bytes: u64) -> Result<Option<Vec<u8>>> {
+        if !canonical_cas_hash(hash) {
+            return Ok(None);
+        }
+        let Some((file, path)) =
+            open_existing_entry(&self.root, self.pinned_root.as_ref(), "blobs", hash, "")?
+        else {
+            return Ok(None);
+        };
+        let limit = maximum_bytes
+            .checked_add(1)
+            .context("CAS blob byte ceiling overflow")?;
+        let mut bytes = Vec::new();
+        file.take(limit)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("read bounded CAS entry {}", path.display()))?;
+        if bytes.len() as u64 > maximum_bytes {
+            anyhow::bail!("CAS blob {} exceeds {} bytes", hash, maximum_bytes);
+        }
+        let actual_hash = sha256_hex(&bytes);
+        if actual_hash != hash {
+            anyhow::bail!(
+                "CAS corruption: entry at {} hashes to {}, expected {}",
+                path.display(),
+                actual_hash,
+                hash
+            );
+        }
+        Ok(Some(bytes))
+    }
+
     /// Open one descriptor-pinned CAS blob for bounded streaming protocols.
     /// The CAS publication path already verified the content address; callers
     /// must verify the complete digest while consuming the stream before they
