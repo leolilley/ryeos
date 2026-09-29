@@ -461,6 +461,8 @@ async fn qualification_launch_reservation_is_one_shot_when_signed_relationship_r
         witness_source:
             ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
         relationship_name: "missing_qualification_relationship".to_owned(),
+        project_context: None,
+        auxiliary_product_selections: Vec::new(),
     };
     let first = product_qualification_launch::handle(
         request.clone(),

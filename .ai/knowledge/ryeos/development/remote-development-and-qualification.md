@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-18T23:05:06Z:f1c5f146834e34f418605c02524ff33eea6934793b81fe3bd27bc83b94d89d1c:BObArjLrUX6b8AM67bSTGfuwiifn9+Rnp50NI2IzAqlE7odmWUdCYv9gwV+RH7PbRU8YrNSFBZ0GanCRXwvIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T03:29:27Z:845b1b5f3b2c91127161bdf133aa9ec39678233616cc7563056596f1349d7add:yn8C7XadcR+g/xDDYYqBPZySM1qlXPq6RzAZpL9Nwwa89efE6AaIRA8akiE+tAGBCGV3knQXhF6mZatV5uSrCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
 title: "Remote Development and Qualification Runbook"
 description: "Use an operator-controlled stronger host and an ordinary configured RyeOS remote without adding a deployment or scheduling substrate"
 entry_type: implementation_guide
-version: "1.7.0"
+version: "1.10.0"
 ```
 
 # Remote Development and Qualification Runbook
@@ -481,6 +481,161 @@ scopes; the initiating node key separately receives only
 `ryeos.attest.request.forwarded-operator`. The initiating node then co-signs each
 exact operator request. Do not use this mode for `remote execute`, admission
 claim, or arbitrary delegated callers.
+
+## Product qualification policy and settlement
+
+Product qualification uses the existing signed policy Config to select its
+trusted-bundle verifier, subject declaration, allowed claims, static
+`verifier_parameters`, and minimum process-settlement authority. The current
+reader accepts `ryeos.product_qualification_policy.v2` and requires an explicit
+`minimum_verifier_process_settlement`; predecessor v1 or an omitted field is
+refused. A missing settlement decision never acquires a compatibility default.
+
+`trusted_process_group_absent` permits a trusted checker whose direct process
+has been reaped and whose recorded process group is absent. Descendants can
+create other sessions, so this is not evidence that every descendant was
+contained and settled. `scope_empty` requires the stronger owned-scope
+observation. The selected requirement is signed policy and acceptance checks
+the retained execution evidence against it; a profile cannot manufacture the
+observation by declaring the stronger value.
+
+The development-platform, Cargo-vendor, static-link-input, portable-bundle,
+native-bundle, Core-seed, and substrate-receipt policy definitions now use v2
+with explicit `trusted_process_group_absent`, matching GNU Python's existing
+trusted-checker lane. Their fixed claims are unchanged: platform/vendor probe
+behavior, static-link byte checks, and release tree/receipt checks do not claim
+adversarial whole-descendant containment. Signed checker implementations remain
+trusted to interpret observations; subject-executed probes also rely on the
+subject performing those probes faithfully. The stronger Codex qualification
+profile continues to require `scope_empty`.
+
+These are source-definition corrections, not installed qualification results.
+After integration and publication of the changed signed policies, qualification
+evidence must match their new identities; old evidence is not reinterpreted
+under v2. Requalify affected retained products and reassess dependent calibration
+and publication eligibility through their existing owners. Unchanged subject
+bytes do not require reproduction merely because policy identity changed.
+Policy compatibility alone does not establish a live qualified result or
+complete the release calibration/publication path.
+
+The source regression
+[`bundled_qualification_policies.rs`](../../../../crates/state/ryeos-state/tests/bundled_qualification_policies.rs)
+reads the authored Standard and bundle-release Configs through the actual
+`ProductQualificationPolicy` reader and exercises missing-settlement and v1
+refusal. It checks wire compatibility; signatures, installed admission, process
+settlement, and live qualification need their separate existing checks.
+
+### Selected dependencies in a protected qualification launch
+
+`external-content.launch-product-qualification` retains required-nullable
+`project_context`: an exact snapshot selects read-only pinned authority;
+explicit null selects an already authorized projectless fixed-pin verifier.
+The optional `auxiliary_product_selections` array carries ordinary exact Root
+product coordinates for the verifier's other signed slots. Omission means an
+empty array, with no discovery or implicit selection. Projectless launches
+refuse a nonempty array.
+
+The daemon derives the subject from the authenticated outer witness and signed
+policy. An auxiliary cannot replace that subject. Selection count/size bounds,
+canonical order, duplicate refusal and Root-only restrictions are checked
+before dispatch. Normal product composition then requires exact coverage of
+the signed slots and authenticates every witness, relationship, current binding
+and required qualification. A declaration name alone grants no authority.
+
+Cargo-vendor's auxiliary slot is `verifier-platform`; release qualification
+Tools use `python`. Each selector contains `target: {kind: root}` and a
+`selection` with `declaration_id`, `witness_hash`, `witness_source` and required
+nullable `qualification_hash`. Supply the exact qualified dependency already
+selected for that workflow. The subject's inner selector stays unqualified;
+the resulting proof is published against its outer qualified relationship.
+
+The pinned finalizer uses the admitted Engine and snapshot binding, resolves
+all selections through the same composition owner and snapshot resolver, and
+reconstructs verifier identity with that complete set. The sealed request and
+retained selection projection bind auxiliary qualifications as well as the
+subject. Retained matching also compares the receiving witness source; it
+cannot substitute a different transfer acceptance. Current eligibility is
+checked again during proof construction and consumption.
+
+### Signed development checker expectations
+
+The development-platform policy requires
+`ryeos.development_platform_profile.v2`: exact `bootstrap` provenance plus a
+closed `tool_versions` map for Cargo, GCC, collect2, linker and archiver. The
+signed profile selects bounded stable Rust/Zig release numbers and the exact
+other version outputs; the real subprocess probes compare every selected
+expectation. Cargo's release coordinate must agree with Rust. The x86-64 GNU
+ELF/loader layout, executable roles, testimony formats and closure checks remain
+fixed domain semantics. The Tool's public parameter schema admits the required
+profile before execution; the checker enforces its cross-field rules as well.
+
+The static-link policy requires `ryeos.static_link_input_profile.v2`: the GNU
+`target` and a nonempty bounded `files` map of exact `bytes` and `sha256` values.
+The signed policy owns the member set, including versioned archive names. Paths
+stay inside the supported flat `usr/lib/x86_64-linux-gnu/` archive/object
+namespace and `usr/share/doc/libc6/copyright`; modes, link refusal and aggregate
+bounds remain enforced. See the signed Config definitions under
+`bundles/standard/.ai/config/ryeos/environments/qualification/` for full examples.
+
+This migration replaces `development_platform_abi_v1` with
+`development_platform_profile_v2`; the fixed
+`development_platform_target_x86_64_linux_gnu_v1` claim remains. Static byte
+conformance uses `static_link_inputs_profile_x86_64_linux_gnu_v2`. That claim
+measures the exact admitted profile's closure; it does not establish linker
+usability or independently measure the architecture of archive contents. Old
+profile schemas refuse, and the new checkers do not emit the replaced fixed
+claims. Development and release consumer relationships require the new claims.
+GNU Python's fixed zlib 1.3.2 proposition is unchanged.
+
+Supported version/provenance/member/byte changes preserve checker code and
+change policy and admitted-parameter identity. Consumers still require the
+exact current policy; the claim name alone cannot admit another profile's
+evidence. Publish coherent checker/policy/consumer definitions and requalify
+affected products; retained old attestations are not reinterpreted. Synthetic
+compiler subprocesses and direct static-tree tests establish interpretation,
+not a live qualified toolchain or a successful downstream release build.
+
+Platform, Cargo-vendor and static-link Tools pin their bootstrap interpreter
+through signed `external_content`. Their checkers consume the daemon-sealed
+realization identity instead of maintaining a second hardcoded interpreter
+digest. This relies on admitted execution; a direct host invocation with a
+caller-written environment cannot establish a RyeOS qualification.
+
+Rollout requires signing changed definitions, installing the compatible
+checker/daemon generation, and requalifying affected retained products.
+Profile-only edits after that need signing and requalification, without a Rust
+rebuild. Direct checker tests and source admission tests establish their stated
+boundaries; the operational owner separately records installation, execution,
+qualification and downstream publication/activation.
+
+### Development producer expectations
+
+Cargo-vendor finalization selects its lock intent through the existing
+`strict_signed_project_bundle` resolver. The Tool has an empty caller schema;
+the resolver supplies `resolved_config` from
+`bundles/standard/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml`
+inside the admitted project snapshot. It verifies that Config and the source
+Standard manifest against the node-trusted installed publisher. Installed
+Standard anchors publisher authority; its installed Config is not a fallback
+for project selection. The resolved value enters the sealed execution plan.
+
+The finalizer compares a stable bounded read of project `Cargo.lock` with the
+independently signed expected digest, retains those exact bytes in the fixed
+vendor output and refuses an existing/racing output. Authoring another lock
+intent changes signed data rather than a Python digest constant. The vendor
+checker separately compares the retained lock with its admitted project.
+Local CLI fixtures cannot authenticate their own supplied Config projection;
+Engine admission and later consumer acceptance retain those responsibilities.
+
+Static-link assembly uses the same resolver with
+`bundles/standard/.ai/config/development/ryeos/static-link-contract-intent.yaml`.
+Its independently signed digest selects the body of the project's existing
+static-link input contract. The producer reads that contract once through a
+bounded, stable, no-follow read, checks the digest and parses those same bytes.
+The signed Tool separately pins its source realization, and the qualification
+policy separately selects the expected output members. Updating one of these
+authorities does not implicitly update the others. A different input product
+still requires a coherent signed Tool pin and matching qualification policy.
 
 ## Project and workload qualification
 

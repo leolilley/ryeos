@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-23T04:29:38Z:bfa95fee7b39297fee9e08d6468dbeb80e269342812df1e5572064b577b4d3b1:teRAkJhBEuChhkBcyHKHE38CDsGLiWkfKH1MtJwyEJSPL02ADLAKKK2TD3FWrQIzzQv49d2p8+7/ziHLAAHyBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-version: "1.0.0"
+# ryeos:signed:2026-09-29T01:29:18Z:5ccf807280dae497e3005976f2cec9bbcc26943fe1c2611bcb1490527bf4454d:A9F8SbpjO8Li8eWjTV4L+ghAOr7B1FGR4Bc5bqAw0CLHOz6v4mX7+W8aEAjZpFJDvOVQMSlXXL/wmx0rC9TYAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.1.0"
 category: ryeos/bundle-release
 description: Establish the first measured Core, substrate release, bundle set, and remote catalog head.
 effects: live
@@ -10,6 +10,7 @@ requires:
       - ryeos.execute.config.bundle-release/core-seed-capture-products
       - ryeos.execute.config.bundle-release/execution-environment-products
       - ryeos.execute.config.bundle-release/substrate-build-products
+      - ryeos.execute.service.external-content/launch-product-qualification
       - ryeos.execute.service.bundle-release/catalog-remote-publish
       - ryeos.execute.service.bundle-release/catalog-request-publication
       - ryeos.execute.service.bundle-release/core-seed-build

@@ -7,7 +7,8 @@
 
 use anyhow::{Context as _, Result, bail};
 use ryeos_state::external_content::products::composition::{
-    ProductRelationship, ProductSelectionInputs,
+    ProductRelationship, ProductSelectionInputs, ProductSelectionTarget,
+    canonicalize_product_selection_inputs, validate_product_selection_inputs,
 };
 use ryeos_state::external_content::products::qualification::ProductQualificationConsumerContentIdentity;
 use ryeos_state::external_content::products::qualification::ProductQualificationPolicySource;
@@ -35,6 +36,11 @@ pub struct ProductQualificationLaunchRequest {
     /// verifier lane; no path or authority is caller-authored.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub project_context: Option<ProductQualificationProjectContext>,
+    /// Exact coordinates for the verifier's other signed Root slots. Empty
+    /// preserves single-subject callers; it never discovers dependencies.
+    /// The signed policy alone selects the subject and checker parameters.
+    #[serde(default)]
+    pub auxiliary_product_selections: ProductSelectionInputs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +65,17 @@ impl ProductQualificationLaunchRequest {
         require_canonical_hash("product witness", &self.witness_hash)?;
         self.witness_source.validate()?;
         require_bounded_name("product relationship", &self.relationship_name)?;
+        validate_product_selection_inputs(&self.auxiliary_product_selections)?;
+        if self
+            .auxiliary_product_selections
+            .iter()
+            .any(|input| !matches!(input.target, ProductSelectionTarget::Root {}))
+        {
+            bail!("qualification auxiliary selections must target signed Root slots");
+        }
+        if self.project_context.is_none() && !self.auxiliary_product_selections.is_empty() {
+            bail!("projectless fixed-pin qualification does not accept product selections");
+        }
         if let Some(project) = &self.project_context
             && (!lillux::valid_hash(&project.snapshot_hash)
                 || project
@@ -137,6 +154,34 @@ fn selected_root_product_selection(
             qualification_hash: None,
         },
     }
+}
+
+/// Join caller coordinates to the daemon-authored subject. Normal product
+/// composition subsequently authenticates exact coverage and each slot's
+/// signed relationship, binding and required qualification.
+fn selected_root_product_inputs(
+    declaration_id: &str,
+    witness_hash: &str,
+    witness_source: &ProductWitnessSource,
+    auxiliary: &ProductSelectionInputs,
+) -> Result<ProductSelectionInputs> {
+    validate_product_selection_inputs(auxiliary)?;
+    if auxiliary.iter().any(|input| {
+        !matches!(input.target, ProductSelectionTarget::Root {})
+            || input.selection.declaration_id == declaration_id
+    }) {
+        bail!(
+            "qualification auxiliary selections cannot override the signed subject or target dependencies"
+        );
+    }
+    let mut inputs = auxiliary.clone();
+    inputs.push(selected_root_product_selection(
+        declaration_id,
+        witness_hash,
+        witness_source,
+    ));
+    // Apply the existing aggregate bounds including the daemon-owned subject.
+    canonicalize_product_selection_inputs(inputs)
 }
 
 /// Recheck the exact current signed Bundle policy just before dispatch. A
@@ -249,12 +294,13 @@ pub fn prepare_after_reservation(
         // finalized below; do not resolve it projectlessly here.
         // The signed policy selects the verifier's inner subject slot; it is
         // distinct from the outer relationship's qualified-product consumer.
-        let selection = selected_root_product_selection(
+        let selections = selected_root_product_inputs(
             &policy_source.policy.subject_declaration_id,
             &product.attestation_hash,
             &request.witness_source,
-        );
-        (None, None, vec![selection])
+            &request.auxiliary_product_selections,
+        )?;
+        (None, None, selections)
     } else {
         let current_verifier = super::resolve_current_bundle_verifier_identity_against_admitted(
             state,
@@ -318,6 +364,87 @@ mod tests {
     use super::*;
     use ryeos_state::external_content::products::composition::ProductSelectionTarget;
     use serde_json::json;
+
+    #[test]
+    fn auxiliary_coordinates_preserve_exact_proof_and_cannot_replace_subject() {
+        let source = ProductWitnessSource::LocalCapture {};
+        let mut auxiliary = selected_root_product_selection("python", &"b".repeat(64), &source);
+        auxiliary.selection.qualification_hash = Some("c".repeat(64));
+        let inputs = selected_root_product_inputs(
+            "subject",
+            &"a".repeat(64),
+            &source,
+            &vec![auxiliary.clone()],
+        )
+        .unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0], auxiliary);
+        assert_eq!(
+            inputs[1],
+            selected_root_product_selection("subject", &"a".repeat(64), &source)
+        );
+        assert!(
+            selected_root_product_inputs(
+                "python",
+                &"a".repeat(64),
+                &source,
+                &vec![auxiliary.clone()]
+            )
+            .is_err()
+        );
+        assert!(
+            selected_root_product_inputs(
+                "subject",
+                &"a".repeat(64),
+                &source,
+                &vec![auxiliary.clone(), auxiliary.clone()]
+            )
+            .is_err()
+        );
+        auxiliary.target = ProductSelectionTarget::ContentDependency {
+            binding: "python".into(),
+        };
+        assert!(
+            selected_root_product_inputs("subject", &"a".repeat(64), &source, &vec![auxiliary])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn auxiliary_request_requires_pinned_context_and_aggregate_selection_bounds() {
+        let auxiliary = selected_root_product_selection(
+            "python",
+            &"b".repeat(64),
+            &ProductWitnessSource::LocalCapture {},
+        );
+        let mut value = json!({
+            "launch_id":"L-0123456789abcdef0123456789abcdef",
+            "witness_hash":"a".repeat(64),
+            "witness_source":{"kind":"local_capture"},
+            "relationship_name":"runtime_to_verifier",
+            "project_context":null,
+            "auxiliary_product_selections":[auxiliary]
+        });
+        let request: ProductQualificationLaunchRequest =
+            serde_json::from_value(value.clone()).unwrap();
+        assert!(request.validate().is_err());
+        value["project_context"] = json!({"snapshot_hash":"d".repeat(64)});
+        let request: ProductQualificationLaunchRequest = serde_json::from_value(value).unwrap();
+        request.validate().unwrap();
+        let source = ProductWitnessSource::LocalCapture {};
+        let full: ProductSelectionInputs = (0
+            ..ryeos_state::external_content::products::composition::MAX_PRODUCT_SELECTIONS)
+            .map(|index| {
+                selected_root_product_selection(
+                    &format!("slot_{index:02}"),
+                    &"b".repeat(64),
+                    &source,
+                )
+            })
+            .collect();
+        validate_product_selection_inputs(&full).unwrap();
+        assert!(selected_root_product_inputs("subject", &"a".repeat(64), &source, &full).is_err());
+    }
 
     #[test]
     fn caller_cannot_choose_verifier_policy_parameters_or_claims() {

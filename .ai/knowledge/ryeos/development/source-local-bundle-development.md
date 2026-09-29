@@ -1,16 +1,54 @@
-<!-- ryeos:signed:2026-09-28T09:12:30Z:1a80828bfab65e7c61a4308df08259d1360f93bbb6d6ebb588310586ce2d4f0a:1SxtOaEVdu8RM6mnrWs0pWOlVQsV/w3pAjRbVXFnoYOYihucyTw/o5doZAjRzVskI1oyTTMK5osl6POnaCoxCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T01:49:27Z:00d29c5f79fe649a0cf1865f6c700aa617410a7b370eb50e38dc097bb7ed3fbe:14DCIP81SqgsV5M78f8thh3A3r1LHfdybHURVFNYZcPdIHI3nC+LzCtasPWisKFqyTKmZLe3Nflf4tCyiCPvAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.31.0"
+version: "1.32.0"
 ```
 
 # Source-Local Bundle Development
 
 ## Status
+
+The dated checkpoints below preserve observations at their stated dates.
+References to temporary ledgers identify historical working notes, which may
+have been removed; they are not required inputs or current execution authority.
+For later integration, re-read retained node evidence and follow the durable
+contracts here, in [operation ownership](development-operation-ownership.md),
+and in [the release process](release-process.md).
+
+### Data-driven qualification source migration — 2026-09-29
+
+The source qualification path now accepts a complete selected verifier input
+set. The policy-derived subject is joined to exact auxiliary Root selections;
+Cargo-vendor uses `verifier-platform`, and release checkers use `python`.
+Normal composition authenticates every slot under the exact snapshot and its
+current signed relationship. The pinned finalizer carries the existing
+snapshot resolver through dependency qualification revalidation. The historical
+single-subject description below records the earlier implementation.
+
+Portable/native calibration and Core/substrate/native qualification stages use
+the dedicated protected launch instead of ordinary COW qualifier execution.
+They capture the publisher-authorized recipe overlay, verify its exact recipe
+digest, compose the full verifier inputs, then require the protected owner's
+checker and prepared selections to match. Build/capture still produce through
+their ordinary COW Graphs. A successful ordinary Tool execution remains
+insufficient to publish qualification evidence.
+
+Platform provenance and static-link file expectations now have closed signed
+policy profiles. Complete examples remain in the authored Standard policy
+Configs, with checker/consumer rules in
+[remote development and qualification](remote-development-and-qualification.md).
+Supported data changes require new signed identities and affected
+requalification; they preserve the checker artifact after the initial migration.
+
+This records source support for later integration. The dated live evidence
+below retains its original scope; it does not prove this source generation
+installed, qualified, calibrated or activated. Requalify changed checker/policy
+identities against retained subjects and reassess dependent release closure
+eligibility. Unchanged subject bytes alone do not require a rebuild.
 
 The original local command, state-root, signing, and bundle-smoke workflow is
 implemented. The project-bundle and development-realization sections below
@@ -49,7 +87,7 @@ The updated signed `release-authority` source profile has not yet been
 installed; the next step is its scoped install with explicit policy-generation
 replacement, then verify strict preflight, daemon readiness, host supervision,
 and exact executable hashes. Preserve the full consumer and bundle-source
-nodes. Implementation details and current candidate hashes are tracked in
+nodes. Implementation details and candidate hashes at that checkpoint were recorded in
 `.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
 
 The first install then stopped at prospective source admission because the
@@ -111,7 +149,7 @@ remote-development Docker containers restarting with exit 70; preserve them
 and inspect non-secret state before deciding whether they are relevant to
 bundle publication. Neither is established as the bundle-source service.
 
-The controlling execution state is section 0 of
+Additional historical execution notes were recorded in section 0 of
 `.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
 Current local release-authority candidates are `ryeosd` SHA-256
 `8092dec603a7edb3210bc5e18a6969dad8935cdd6bde6004eb671522216ee102`, CLI
@@ -332,7 +370,7 @@ subject products; do not weaken this check or rebuild/import/rebind them.
 Re-run only their four independent signed qualification Tools against those
 same exact subjects and publish fresh attestations from the exact verifier
 thread roots. Then revalidate all four pairs before a single calibration
-retry. Exact failure root/child and the full audited continuation are recorded
+retry. Exact failure root/child and the historical audited continuation were recorded
 in section 0 of
 `.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
 
@@ -381,16 +419,16 @@ checks. The source-level correction is to retain the exact sealed pinned
 snapshot through verifier re-admission using the RyeOS snapshot lease; this
 candidate is not yet installed or live-verified. Publish qualification only
 through policy-bearing `runtime_to_qualified_runtime` after verifier
-consistency checks pass. Precise live receipts and schema-install status are
-recorded in section 0 of
+consistency checks pass. Receipts and schema-install status at that checkpoint
+were recorded in section 0 of
 `.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
 
 For **every** unforeseen failure, stop at the first failed boundary. Retain
 the exact terminal/snapshot/install/product identities, state the assumption
 that failed and why the earlier check missed it, audit sibling/direct/recovery
 paths, evaluate correction options against RyeOS ownership, and update the
-single controlling next action before editing or repeating a launch. The full
-failure analysis and finite resume gates are
+single controlling next action before editing or repeating a launch. Historical
+failure analysis and resume notes were recorded in
 `.tmp/bundle-release-unexpected-boundary-review-20260924.md` and section 0
 of `.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
 The next action is a scoped install of the already-populated release-authority
@@ -440,8 +478,7 @@ The next gate is a scoped install with explicit policy-generation reset, then
 a fresh exact snapshot and live calibration. Source checks and population do
 not prove calibration or publication.
 
-The controlling next sequence is section 0 of
-`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`:
+The next sequence recorded at that checkpoint was:
 install only the release-authority node, capture a clean exact source snapshot, then
 calibrate and measure both lanes before catalog bootstrap and real data-only
 then binary-bearing consumer updates. Clear only demonstrably obsolete
@@ -680,8 +717,6 @@ host-image build/publication. The development-toolchain campaign supplies the
 release authority's prerequisite evidence; it is not itself the bundle-transfer
 proof and must not become work repeated for every bundle update.
 
-The controlling implementation continuation is section 0 of
-`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
 This knowledge checkpoint owns durable evidence and operating boundaries.
 The current stage is release-authority calibration after prerequisite qualification. The finish
 line requires both a data-only and a binary-bearing non-Core bundle successor
@@ -702,7 +737,7 @@ the affected run was portable: its normalized candidate was incorrectly
 compared byte-for-byte with the checked generated manifest by a shared Core
 guard. Portable/native lanes instead require typed equality with current
 source-derived materialization; only Core additionally requires exact generated
-body equality. The controlling `.tmp` plan records the trace, superseded
+body equality. The historical `.tmp` plan recorded the trace, superseded
 diagnosis, corrections, and next install/snapshot requirements. Neither a
 failed run nor focused tests authorize catalog policy.
 The full development-worker proof, Stage1 reproduction, self-hosted CI cutover
@@ -2072,5 +2107,5 @@ projectless fallback or alter the outer policy-bearing
 check and focused daemon release build pass; the live install and fresh
 qualification attempt remain pending. The last 2026-09-28 implementation
 checkpoint in `.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`
-records exact candidate hashes and install status; do not treat the earlier
+recorded candidate hashes and install status at that date; do not treat the earlier
 ordinary verifier result as qualification evidence.

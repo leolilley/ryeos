@@ -3,8 +3,8 @@
 //! the driver only records raw evidence for its enclosing verifier authority.
 
 use anyhow::{Context as _, Result, bail, ensure};
-use ryeos_independent_runtime_verifier::{
-    INPUT_LIMIT, PRODUCER_SCENARIO_ID, Parameters,
+use ryeos_codex_runtime_verifier::{
+    INPUT_LIMIT, Parameters,
     app_server::{AppServerObservation, AppServerStopOutcome},
     guest_observation::{GuestScenario, check_guest_observation},
     native_guest,
@@ -60,6 +60,7 @@ async fn main() -> Result<()> {
     let thread_id = std::env::var("RYEOS_THREAD_ID")
         .context("admitted verifier root thread identity absent")?;
     let client = UdsRuntimeClient::from_env()?;
+    let producer_scenario_id = &parameters.configuration.profile.producer_scenario_id;
     if project
         .open_child_directory(OsStr::new("prepared"))?
         .is_some()
@@ -91,6 +92,8 @@ async fn main() -> Result<()> {
         &parameters.configuration.responses_origin,
         challenge.directory(),
         lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(180)),
+        parameters.configuration.profile.command_fixture,
+        parameters.configuration.profile.candidate.clone(),
         commands.forbidden_local_write,
         commands.guest_read,
         challenge.value().to_owned(),
@@ -99,7 +102,7 @@ async fn main() -> Result<()> {
     let provider = provider.start()?;
     let expected_source: ProductProducerRecipeSourceIdentity = serde_json::from_value(
         client
-            .scoped_child_expected_source(&thread_id, PRODUCER_SCENARIO_ID)
+            .scoped_child_expected_source(&thread_id, producer_scenario_id)
             .await
             .context("admitted producer source point read refused")?,
     )?;
@@ -130,6 +133,7 @@ async fn main() -> Result<()> {
     {
         direct_stage.recheck_preflight(&parameters)?;
         let relay_thread = thread_id.clone();
+        let relay_scenario_id = producer_scenario_id.to_string();
         let relay_source = expected_source.clone();
         let relay_ingress = ingress.clone();
         let relay_origin = parameters.configuration.responses_origin.clone();
@@ -142,7 +146,7 @@ async fn main() -> Result<()> {
         let receiver = tokio::task::spawn_blocking(move || {
             scoped_relay::receive_and_ack(
                 &relay_thread,
-                PRODUCER_SCENARIO_ID,
+                &relay_scenario_id,
                 &relay_source,
                 &relay_ingress,
                 &relay_origin,
@@ -160,7 +164,7 @@ async fn main() -> Result<()> {
             None
         };
         let (started, resumed, relay) = tokio::join!(
-            client.start_scoped_child(&thread_id, PRODUCER_SCENARIO_ID),
+            client.start_scoped_child(&thread_id, producer_scenario_id),
             async {
                 match resume_client {
                     Some(client) => Some(client.resume_scoped_child(&thread_id).await),
@@ -213,7 +217,7 @@ async fn main() -> Result<()> {
     } else {
         (
             client
-                .start_scoped_child(&thread_id, PRODUCER_SCENARIO_ID)
+                .start_scoped_child(&thread_id, producer_scenario_id)
                 .await,
             None,
         )
@@ -320,13 +324,13 @@ async fn main() -> Result<()> {
     }
     let direct_conversation = if running_relay.is_some() {
         let transport =
-            ryeos_independent_runtime_verifier::scoped_app_server::ScopedAppServerTransport::new(
+            ryeos_codex_runtime_verifier::scoped_app_server::ScopedAppServerTransport::new(
                 &client,
                 &thread_id,
                 &locator.attempt_id,
             );
         let mut conversation =
-            ryeos_independent_runtime_verifier::scoped_app_server::ScopedAppServerConversation::new(
+            ryeos_codex_runtime_verifier::scoped_app_server::ScopedAppServerConversation::new(
                 transport,
             );
         let result = async {
@@ -473,7 +477,7 @@ async fn main() -> Result<()> {
         (Some(ingress), Some(handoff)) => {
             handoff.validate_for_verifier(
                 &thread_id,
-                PRODUCER_SCENARIO_ID,
+                producer_scenario_id,
                 &expected_source,
                 ingress,
             )?;
@@ -583,28 +587,29 @@ async fn main() -> Result<()> {
         let expected_canary = format!("{}\n", challenge.value());
         scripted_provider::check_requests(
             &requests,
+            &parameters.configuration.profile.candidate,
             expected_canary.as_bytes(),
             expected_canary.as_bytes(),
             staging::CONTROLLER_CANARY_DENIAL,
         )?;
         let commands = challenge.scripted_canary_commands()?;
-        let guest_command = scripted_provider::GUEST_COMMAND_SCRIPT;
+        let guest_command = parameters.configuration.profile.command_script();
         let routing = RoutingScenario {
             thread_id: codex_thread,
             turn_id: codex_turn,
             guest_cwd: "/workspace".into(),
             local_refusal_command: commands.forbidden_local_write,
-            guest_command_script: guest_command.into(),
+            guest_command_script: guest_command.clone(),
             secret_read_script: commands.guest_read.clone(),
-            patch_input: scripted_provider::PATCH_INPUT.into(),
+            patch_input: parameters.configuration.profile.candidate.patch_input(),
             guest_command: format!("{} -c '{guest_command}'", scripted_provider::GUEST_SHELL),
             secret_read_command: format!(
                 "{} -c '{}'",
                 scripted_provider::GUEST_SHELL,
                 commands.guest_read
             ),
-            candidate_path: scripted_provider::CANDIDATE_PATH.into(),
-            candidate_added_content: scripted_provider::CANDIDATE_CONTENT.into(),
+            candidate_path: parameters.configuration.profile.candidate.path(),
+            candidate_added_content: parameters.configuration.profile.candidate.content.clone(),
             expected_command_output: parameters.configuration.expected_command_output.clone(),
             secret_read_denial: staging::CONTROLLER_CANARY_DENIAL.into(),
             controller_canary_value: challenge.value().to_owned(),
@@ -619,7 +624,14 @@ async fn main() -> Result<()> {
             frozen.environment_configuration_sha256
                 == direct_stage.environment_configuration_sha256()
                 && frozen.candidate_sha256
-                    == lillux::sha256_hex(scripted_provider::CANDIDATE_CONTENT.as_bytes()),
+                    == lillux::sha256_hex(
+                        parameters
+                            .configuration
+                            .profile
+                            .candidate
+                            .content
+                            .as_bytes()
+                    ),
             "direct frozen configuration or candidate differs from prepared expectation"
         );
         native_guest::check_applied_receipt_against_signed_request(
@@ -630,14 +642,19 @@ async fn main() -> Result<()> {
             request_sha256: &expected_request_sha256,
             shell: scripted_provider::GUEST_SHELL,
             guest_cwd_uri: "file:///workspace",
-            guest_command: scripted_provider::GUEST_COMMAND_SCRIPT,
+            guest_command: parameters.configuration.profile.command_script(),
             secret_read_command: &routing.secret_read_script,
             expected_command_output: &routing.expected_command_output,
             controller_canary_value: challenge.value(),
             secret_read_denial: staging::CONTROLLER_CANARY_DENIAL,
-            candidate_uri: scripted_provider::CANDIDATE_URI,
-            candidate_relative_path: scripted_provider::CANDIDATE_RELATIVE_PATH,
-            candidate_content: scripted_provider::CANDIDATE_CONTENT.as_bytes(),
+            candidate_uri: parameters.configuration.profile.candidate.uri(),
+            candidate_relative_path: &parameters.configuration.profile.candidate.relative_path,
+            candidate_content: parameters
+                .configuration
+                .profile
+                .candidate
+                .content
+                .as_bytes(),
         };
         check_guest_observation(&frozen.guest_observation, &guest)?;
         if race_probe {
@@ -663,6 +680,7 @@ async fn main() -> Result<()> {
     let expected_canary = format!("{}\n", challenge.value());
     scripted_provider::check_requests(
         &requests,
+        &parameters.configuration.profile.candidate,
         expected_canary.as_bytes(),
         expected_canary.as_bytes(),
         staging::CONTROLLER_CANARY_DENIAL,
@@ -681,7 +699,14 @@ async fn main() -> Result<()> {
             && transcript["environment_configuration_sha256"]
                 == frozen.environment_configuration_sha256
             && frozen.candidate_sha256
-                == lillux::sha256_hex(scripted_provider::CANDIDATE_CONTENT.as_bytes()),
+                == lillux::sha256_hex(
+                    parameters
+                        .configuration
+                        .profile
+                        .candidate
+                        .content
+                        .as_bytes()
+                ),
         "scoped transcript and frozen candidate disagree with pinned post-scope files"
     );
     native_guest::check_applied_receipt_against_signed_request(
@@ -700,23 +725,23 @@ async fn main() -> Result<()> {
         .as_str()
         .context("scoped transcript omitted Codex turn")?;
     let canary_commands = challenge.scripted_canary_commands()?;
-    let guest_command = scripted_provider::GUEST_COMMAND_SCRIPT;
+    let guest_command = parameters.configuration.profile.command_script();
     let routing = RoutingScenario {
         thread_id: thread_id.to_owned(),
         turn_id: turn_id.to_owned(),
         guest_cwd: "/workspace".into(),
         local_refusal_command: canary_commands.forbidden_local_write,
-        guest_command_script: guest_command.into(),
+        guest_command_script: guest_command.clone(),
         secret_read_script: canary_commands.guest_read.clone(),
-        patch_input: scripted_provider::PATCH_INPUT.into(),
+        patch_input: parameters.configuration.profile.candidate.patch_input(),
         guest_command: format!("{} -c '{guest_command}'", scripted_provider::GUEST_SHELL),
         secret_read_command: format!(
             "{} -c '{}'",
             scripted_provider::GUEST_SHELL,
             canary_commands.guest_read
         ),
-        candidate_path: scripted_provider::CANDIDATE_PATH.into(),
-        candidate_added_content: scripted_provider::CANDIDATE_CONTENT.into(),
+        candidate_path: parameters.configuration.profile.candidate.path(),
+        candidate_added_content: parameters.configuration.profile.candidate.content.clone(),
         expected_command_output: parameters.configuration.expected_command_output.clone(),
         secret_read_denial: staging::CONTROLLER_CANARY_DENIAL.into(),
         controller_canary_value: challenge.value().to_owned(),
@@ -733,14 +758,19 @@ async fn main() -> Result<()> {
         request_sha256: &expected_request_sha256,
         shell: scripted_provider::GUEST_SHELL,
         guest_cwd_uri: "file:///workspace",
-        guest_command: scripted_provider::GUEST_COMMAND_SCRIPT,
+        guest_command: parameters.configuration.profile.command_script(),
         secret_read_command: &routing.secret_read_script,
         expected_command_output: &routing.expected_command_output,
         controller_canary_value: challenge.value(),
         secret_read_denial: staging::CONTROLLER_CANARY_DENIAL,
-        candidate_uri: scripted_provider::CANDIDATE_URI,
-        candidate_relative_path: scripted_provider::CANDIDATE_RELATIVE_PATH,
-        candidate_content: scripted_provider::CANDIDATE_CONTENT.as_bytes(),
+        candidate_uri: parameters.configuration.profile.candidate.uri(),
+        candidate_relative_path: &parameters.configuration.profile.candidate.relative_path,
+        candidate_content: parameters
+            .configuration
+            .profile
+            .candidate
+            .content
+            .as_bytes(),
     };
     check_guest_observation(&frozen.guest_observation, &guest)?;
     bail!(
@@ -1833,7 +1863,7 @@ mod tests {
         );
         let source = ProductProducerRecipeSourceIdentity {
             bundle_generation_identity: "signed-generation-one".into(),
-            canonical_ref: "config:fixtures/independent-runtime/scenario-driver".into(),
+            canonical_ref: "config:fixtures/codex-runtime/scenario-driver".into(),
             raw_content_digest: "a".repeat(64),
             effective_definition_digest: "b".repeat(64),
             publisher_fingerprint: "c".repeat(64),
@@ -1886,7 +1916,7 @@ mod tests {
         assert!(
             check_admitted_producer_source(
                 &source,
-                "config:fixtures/independent-runtime/scenario-driver",
+                "config:fixtures/codex-runtime/scenario-driver",
                 &expected,
             )
             .is_ok()

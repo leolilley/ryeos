@@ -10,12 +10,12 @@ pub struct GuestScenario<'a> {
     pub request_sha256: &'a str,
     pub shell: &'a str,
     pub guest_cwd_uri: &'a str,
-    pub guest_command: &'a str,
+    pub guest_command: String,
     pub secret_read_command: &'a str,
     pub expected_command_output: &'a str,
     pub controller_canary_value: &'a str,
     pub secret_read_denial: &'a str,
-    pub candidate_uri: &'a str,
+    pub candidate_uri: String,
     pub candidate_relative_path: &'a str,
     pub candidate_content: &'a [u8],
 }
@@ -363,12 +363,12 @@ mod tests {
             request_sha256: &request_hash,
             shell: "/tools/zsh",
             guest_cwd_uri: "file:///workspace",
-            guest_command: "probe",
+            guest_command: "probe".into(),
             secret_read_command: "secret",
             expected_command_output: "expected",
             controller_canary_value: "private-canary",
             secret_read_denial: "denied",
-            candidate_uri: "file:///workspace/result",
+            candidate_uri: "file:///workspace/result".into(),
             candidate_relative_path: "result",
             candidate_content: b"candidate",
         };
@@ -455,7 +455,7 @@ mod tests {
         changed["forwarded_output_bytes"] = json!(unknown.len());
         assert!(check_guest_observation(&changed, &scenario).is_err());
         let mut wrong_uri = scenario;
-        wrong_uri.candidate_uri = "file:///workspace/another";
+        wrong_uri.candidate_uri = "file:///workspace/another".into();
         assert!(check_guest_observation(&observation, &wrong_uri).is_err());
     }
     #[test]
@@ -478,12 +478,12 @@ mod tests {
             request_sha256: &request_hash,
             shell: "/tools/zsh",
             guest_cwd_uri: "file:///workspace",
-            guest_command: "probe",
+            guest_command: "probe".into(),
             secret_read_command: "secret",
             expected_command_output: "expected",
             controller_canary_value: "private-canary-value",
             secret_read_denial: "denied",
-            candidate_uri: "file:///workspace/result",
+            candidate_uri: "file:///workspace/result".into(),
             candidate_relative_path: "result",
             candidate_content: b"candidate",
         };

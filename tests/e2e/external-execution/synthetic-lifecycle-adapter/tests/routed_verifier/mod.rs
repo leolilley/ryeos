@@ -7,7 +7,7 @@ use super::*;
 use anyhow::{Context as _, Result, ensure};
 use lillux::subordinate_process::{SubordinateProcess, SubordinateProcessRequest};
 use lillux::time::MonotonicDeadline;
-use ryeos_independent_runtime_verifier::app_server::AppServerObservation;
+use ryeos_codex_runtime_verifier::app_server::AppServerObservation;
 use ryeos_synthetic_external_lifecycle_adapter::routing_observation::{
     MAX_EVENT_BYTES, MAX_TOTAL_BYTES, RoutingScenario, check_notifications,
 };
@@ -313,12 +313,12 @@ fn actual_codex_notifications_and_native_guest_agree() -> Result<()> {
                 request_sha256: &lillux::sha256_hex(&request),
                 shell: SHELL,
                 guest_cwd_uri: "file:///workspace",
-                guest_command: "pwd; rg --version",
+                guest_command: "pwd; rg --version".into(),
                 secret_read_command: &secret_command,
                 expected_command_output: &expected_output,
                 controller_canary_value: std::str::from_utf8(CONTROLLER_CANARY)?.trim_end(),
                 secret_read_denial: CONTROLLER_CANARY_DENIAL,
-                candidate_uri: "file:///workspace/candidate-strategy.txt",
+                candidate_uri: "file:///workspace/candidate-strategy.txt".into(),
                 candidate_relative_path: "candidate-strategy.txt",
                 candidate_content: CONTENT,
             },

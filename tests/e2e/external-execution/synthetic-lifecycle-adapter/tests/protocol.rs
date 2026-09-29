@@ -1828,7 +1828,7 @@ fn https_json_response(status: &str, body: &[u8]) -> Vec<u8> {
 }
 
 const SCRIPTED_MODEL_REQUESTS: usize =
-    ryeos_independent_runtime_verifier::scripted_provider::REQUEST_COUNT;
+    ryeos_codex_runtime_verifier::scripted_provider::REQUEST_COUNT;
 const CONTROLLER_CANARY: &[u8] = b"synthetic controller canary unchanged\n";
 const CONTROLLER_CANARY_DENIAL: &str = "controller-canary-read-denied";
 
@@ -1854,12 +1854,20 @@ fn scripted_canary_read_command(path: &Path) -> String {
 // app-server notification transcript or runtime-qualification evidence. The
 // independent routed verifier must also apply routing_observation to its own
 // exact Codex notification stream and check guest/candidate evidence.
+fn scripted_candidate_fixture() -> ryeos_codex_runtime_verifier::CandidateFixture {
+    ryeos_codex_runtime_verifier::CandidateFixture {
+        relative_path: "candidate-strategy.txt".into(),
+        content: "composed external candidate C\n".into(),
+    }
+}
+
 fn verify_scripted_routing_results(
     requests: &[serde_json::Value],
     canary_bytes: &[u8],
 ) -> anyhow::Result<()> {
-    ryeos_independent_runtime_verifier::scripted_provider::check_requests(
+    ryeos_codex_runtime_verifier::scripted_provider::check_requests(
         requests,
+        &scripted_candidate_fixture(),
         CONTROLLER_CANARY,
         canary_bytes,
         CONTROLLER_CANARY_DENIAL,
@@ -1957,13 +1965,14 @@ fn start_scripted_responses_fixture(
             assert!(!headers.to_ascii_lowercase().contains("authorization:"));
             let model_request: serde_json::Value = serde_json::from_slice(body).unwrap();
             requests.push(model_request);
-            let response_body =
-                ryeos_independent_runtime_verifier::scripted_provider::response_sse(
-                    number,
-                    &forbidden_command,
-                    &secret_read_command,
-                )
-                .unwrap();
+            let response_body = ryeos_codex_runtime_verifier::scripted_provider::response_sse(
+                number,
+                ryeos_codex_runtime_verifier::GuestCommandFixture::WorkspaceRgVersion,
+                &scripted_candidate_fixture(),
+                &forbidden_command,
+                &secret_read_command,
+            )
+            .unwrap();
             let mut response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 response_body.len(),
@@ -3341,6 +3350,8 @@ async fn run_production_tls_candidate(
                         witness_hash: launch_witness,
                         witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                         relationship_name: "auxiliary_to_verifier".into(),
+                        project_context: None,
+                        auxiliary_product_selections: Vec::new(),
                     },
                     launch_context,
                     launch_state,

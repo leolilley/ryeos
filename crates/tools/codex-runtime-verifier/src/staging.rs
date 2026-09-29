@@ -276,32 +276,35 @@ impl StagedNativeProbe {
     /// Inspect the authoring mount only after the enclosing process scope has
     /// proved that every possible writer has settled. A matching digest alone
     /// is not a freeze witness while a descendant can still mutate the file.
-    pub fn check_frozen_candidate_after_scope_empty(&self) -> Result<String> {
+    pub fn check_frozen_candidate_after_scope_empty(
+        &self,
+        parameters: &Parameters,
+    ) -> Result<String> {
         let candidate = self
             .guest
             .open_child_directory(OsStr::new("candidate"))?
             .context("staged candidate directory disappeared")?;
-        check_exact_candidate(&candidate)
+        check_exact_candidate(&candidate, &parameters.configuration.profile.candidate)
     }
 }
 
-fn check_exact_candidate(candidate: &PinnedDirectory) -> Result<String> {
+fn check_exact_candidate(
+    candidate: &PinnedDirectory,
+    fixture: &crate::CandidateFixture,
+) -> Result<String> {
+    fixture.validate()?;
     let entries = candidate.entries_no_follow_bounded(2)?;
     ensure!(
         entries.len() == 1
-            && entries[0].name.as_os_str()
-                == OsStr::new(crate::scripted_provider::CANDIDATE_RELATIVE_PATH)
+            && entries[0].name.as_os_str() == OsStr::new(&fixture.relative_path)
             && entries[0].entry_type == PinnedEntryType::Regular,
         "frozen candidate has missing or extra entries"
     );
     let file = candidate
-        .open_pinned_regular(
-            OsStr::new(crate::scripted_provider::CANDIDATE_RELATIVE_PATH),
-            false,
-        )?
+        .open_pinned_regular(OsStr::new(&fixture.relative_path), false)?
         .context("frozen candidate file absent")?;
     let observation = file.observation()?;
-    let expected = crate::scripted_provider::CANDIDATE_CONTENT.as_bytes();
+    let expected = fixture.content.as_bytes();
     ensure!(
         observation.size() == expected.len() as u64 && file.permission_mode()? == 0o644,
         "frozen candidate size or mode changed"
@@ -408,19 +411,19 @@ impl StagedNativeProbe {
         self.recheck_preflight(parameters)?;
         let canary = self.scripted_canary_commands()?;
         let shell = crate::scripted_provider::GUEST_SHELL;
-        let guest_command_script = crate::scripted_provider::GUEST_COMMAND_SCRIPT;
+        let guest_command_script = parameters.configuration.profile.command_script();
         Ok(crate::routing_observation::RoutingScenario {
             thread_id,
             turn_id,
             guest_cwd: "/workspace".into(),
             local_refusal_command: canary.forbidden_local_write,
-            guest_command_script: guest_command_script.into(),
+            guest_command_script: guest_command_script.clone(),
             secret_read_script: canary.guest_read.clone(),
-            patch_input: crate::scripted_provider::PATCH_INPUT.into(),
+            patch_input: parameters.configuration.profile.candidate.patch_input(),
             guest_command: format!("{shell} -c '{guest_command_script}'"),
             secret_read_command: format!("{shell} -c '{}'", canary.guest_read),
-            candidate_path: crate::scripted_provider::CANDIDATE_PATH.into(),
-            candidate_added_content: crate::scripted_provider::CANDIDATE_CONTENT.into(),
+            candidate_path: parameters.configuration.profile.candidate.path(),
+            candidate_added_content: parameters.configuration.profile.candidate.content.clone(),
             expected_command_output: parameters.configuration.expected_command_output.clone(),
             secret_read_denial: CONTROLLER_CANARY_DENIAL.into(),
             controller_canary_value: self.controller_canary_value.clone(),
@@ -432,7 +435,7 @@ impl StagedNativeProbe {
     /// expectation after observing the native transcript.
     pub fn guest_scenario<'a>(
         &'a self,
-        parameters: &Parameters,
+        parameters: &'a Parameters,
         routing: &'a crate::routing_observation::RoutingScenario,
     ) -> Result<crate::guest_observation::GuestScenario<'a>> {
         let expected = self.routing_scenario(
@@ -445,14 +448,19 @@ impl StagedNativeProbe {
             request_sha256: &self.request_sha256,
             shell: crate::scripted_provider::GUEST_SHELL,
             guest_cwd_uri: "file:///workspace",
-            guest_command: crate::scripted_provider::GUEST_COMMAND_SCRIPT,
+            guest_command: parameters.configuration.profile.command_script(),
             secret_read_command: &routing.secret_read_script,
             expected_command_output: &routing.expected_command_output,
             controller_canary_value: &self.controller_canary_value,
             secret_read_denial: CONTROLLER_CANARY_DENIAL,
-            candidate_uri: crate::scripted_provider::CANDIDATE_URI,
-            candidate_relative_path: crate::scripted_provider::CANDIDATE_RELATIVE_PATH,
-            candidate_content: crate::scripted_provider::CANDIDATE_CONTENT.as_bytes(),
+            candidate_uri: parameters.configuration.profile.candidate.uri(),
+            candidate_relative_path: &parameters.configuration.profile.candidate.relative_path,
+            candidate_content: parameters
+                .configuration
+                .profile
+                .candidate
+                .content
+                .as_bytes(),
         })
     }
 
@@ -852,7 +860,8 @@ pub fn inspect_frozen_scoped_occurrence(
     let candidate = guest
         .open_child_directory(OsStr::new("candidate"))?
         .context("scoped verifier candidate disappeared")?;
-    let candidate_sha256 = check_exact_candidate(&candidate)?;
+    let candidate_sha256 =
+        check_exact_candidate(&candidate, &parameters.configuration.profile.candidate)?;
     let guest_file = guest
         .open_pinned_regular(OsStr::new("guest-observation.json"), false)?
         .context("scoped guest observation disappeared")?;
@@ -1043,7 +1052,8 @@ impl StagedDirectTargetProbe {
         parameters: &Parameters,
     ) -> Result<FrozenScopedOccurrence> {
         self.recheck_sealed_inputs(parameters)?;
-        let candidate_sha256 = check_exact_candidate(&self.candidate)?;
+        let candidate_sha256 =
+            check_exact_candidate(&self.candidate, &parameters.configuration.profile.candidate)?;
         let guest_file = self
             .guest
             .open_pinned_regular(OsStr::new("guest-observation.json"), false)?
@@ -1327,7 +1337,9 @@ mod tests {
     fn frozen_candidate_requires_exact_single_regular_file_and_bytes() {
         let temp = tempfile::tempdir().unwrap();
         let candidate = PinnedDirectory::open(temp.path()).unwrap().unwrap();
-        assert!(check_exact_candidate(&candidate).is_err());
+        assert!(
+            check_exact_candidate(&candidate, &crate::CandidateFixture::test_fixture()).is_err()
+        );
         candidate
             .atomic_create_pinned_regular(
                 OsStr::new(crate::scripted_provider::CANDIDATE_RELATIVE_PATH),
@@ -1336,13 +1348,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            check_exact_candidate(&candidate).unwrap(),
+            check_exact_candidate(&candidate, &crate::CandidateFixture::test_fixture()).unwrap(),
             lillux::sha256_hex(crate::scripted_provider::CANDIDATE_CONTENT.as_bytes())
         );
         candidate
             .atomic_create_pinned_regular(OsStr::new("extra"), b"x", 0o644)
             .unwrap();
-        assert!(check_exact_candidate(&candidate).is_err());
+        assert!(
+            check_exact_candidate(&candidate, &crate::CandidateFixture::test_fixture()).is_err()
+        );
+    }
+
+    #[test]
+    fn frozen_candidate_uses_authored_filename_and_bytes_and_refuses_swaps() {
+        let fixtures = [
+            crate::CandidateFixture::test_fixture(),
+            crate::CandidateFixture {
+                relative_path: "alternative.txt".into(),
+                content: "independently signed content\nsecond line\n".into(),
+            },
+        ];
+        for (index, fixture) in fixtures.iter().enumerate() {
+            let temp = tempfile::tempdir().unwrap();
+            let candidate = PinnedDirectory::open(temp.path()).unwrap().unwrap();
+            candidate
+                .atomic_create_pinned_regular(
+                    OsStr::new(&fixture.relative_path),
+                    fixture.content.as_bytes(),
+                    0o644,
+                )
+                .unwrap();
+            assert_eq!(
+                check_exact_candidate(&candidate, fixture).unwrap(),
+                lillux::sha256_hex(fixture.content.as_bytes())
+            );
+            assert!(check_exact_candidate(&candidate, &fixtures[1 - index]).is_err());
+            let changed_content = crate::CandidateFixture {
+                content: "substituted\n".into(),
+                relative_path: fixture.relative_path.clone(),
+            };
+            assert!(check_exact_candidate(&candidate, &changed_content).is_err());
+        }
     }
 
     #[test]
@@ -1363,7 +1409,10 @@ mod tests {
                     mode,
                 )
                 .unwrap();
-            assert!(check_exact_candidate(&candidate).is_err());
+            assert!(
+                check_exact_candidate(&candidate, &crate::CandidateFixture::test_fixture())
+                    .is_err()
+            );
         }
     }
 
@@ -1377,15 +1426,17 @@ mod tests {
         candidate
             .atomic_create_pinned_regular(leaf, content, 0o644)
             .unwrap();
-        check_exact_candidate(&candidate).unwrap();
+        check_exact_candidate(&candidate, &crate::CandidateFixture::test_fixture()).unwrap();
 
         std::fs::rename(root.path().join("candidate"), root.path().join("displaced")).unwrap();
         let replacement = root.create_child(OsStr::new("candidate"), 0o700).unwrap();
         replacement
             .atomic_create_pinned_regular(leaf, content, 0o644)
             .unwrap();
-        check_exact_candidate(&replacement).unwrap();
-        assert!(check_exact_candidate(&candidate).is_err());
+        check_exact_candidate(&replacement, &crate::CandidateFixture::test_fixture()).unwrap();
+        assert!(
+            check_exact_candidate(&candidate, &crate::CandidateFixture::test_fixture()).is_err()
+        );
     }
 
     #[test]

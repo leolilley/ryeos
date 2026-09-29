@@ -1,13 +1,13 @@
 [package]
-name = "ryeos-independent-runtime-verifier"
+name = "ryeos-codex-runtime-verifier"
 version = "0.5.101"
 edition = "2024"
-description = "Bounded independent runtime qualification probe"
+description = "Bounded Codex app-server runtime qualification probe"
 license.workspace = true
 repository = "https://github.com/leolilley/ryeos"
 
 [[bin]]
-name = "independent-runtime-verifier"
+name = "codex-runtime-verifier"
 path = "src/main.rs"
 
 [dependencies]

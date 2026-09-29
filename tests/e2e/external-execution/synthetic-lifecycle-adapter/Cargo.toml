@@ -13,7 +13,7 @@ ryeos-external-candidate-supervisor = { path = "../../../../crates/tools/externa
 ryeos-external-candidate-launcher = { path = "../../../../crates/tools/external-candidate-launcher" }
 ryeos-external-execution = { workspace = true }
 ryeos-external-execution-contract = { workspace = true }
-ryeos-independent-runtime-verifier = { path = "../../../../crates/tools/independent-runtime-verifier" }
+ryeos-codex-runtime-verifier = { path = "../../../../crates/tools/codex-runtime-verifier" }
 ryeos-project-capture = { workspace = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }

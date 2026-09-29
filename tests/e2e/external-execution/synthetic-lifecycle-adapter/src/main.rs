@@ -388,6 +388,7 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
             match role {
                 LifecycleArtifactRole::Supervisor => "supervisor",
                 LifecycleArtifactRole::Launcher => "launcher",
+                LifecycleArtifactRole::RestorationVerifier => "restoration_verifier",
             },
         )?;
     }

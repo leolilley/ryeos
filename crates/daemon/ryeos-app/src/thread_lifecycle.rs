@@ -2122,6 +2122,42 @@ fn validate_admitted_runtime_route_identity(
     Ok(())
 }
 
+/// Both fresh admission and retained replay preserve the daemon-derived
+/// unqualified subject. Additional Root inputs are supported only in the
+/// pinned lane; their exact declared coverage and proofs are checked by normal
+/// product composition before finalization and bound into the sealed program.
+fn validate_qualification_root_selections(
+    purpose: &ProductQualificationLaunchPurpose,
+    selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    pinned_lane: bool,
+) -> Result<()> {
+    use ryeos_state::external_content::products::composition::{
+        ProductSelectionTarget, validate_product_selection_inputs,
+    };
+    validate_product_selection_inputs(selections)?;
+    if selections.is_empty() && !pinned_lane {
+        return Ok(()); // Existing projectless fixed-pin lane.
+    }
+    if (!pinned_lane && selections.len() != 1)
+        || selections
+            .iter()
+            .any(|input| !matches!(input.target, ProductSelectionTarget::Root {}))
+    {
+        bail!("qualification purpose has unsupported Root product selections");
+    }
+    let subject = selections
+        .iter()
+        .find(|input| input.selection.declaration_id == purpose.subject_declaration_id)
+        .context("qualification purpose omits its exact unqualified subject selection")?;
+    if subject.selection.witness_hash != purpose.product_witness_hash
+        || subject.selection.witness_source != purpose.witness_source
+        || subject.selection.qualification_hash.is_some()
+    {
+        bail!("qualification purpose differs from admitted unqualified subject selection");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct RootExecutionAdmission {
     verified_subject: VerifiedItem,
@@ -2765,18 +2801,31 @@ impl RootExecutionAdmission {
         )?;
         if let Some(purpose) = &self.product_qualification {
             purpose.validate()?;
-            if self.candidate_evaluation.is_some()
-                || self.plan_context.scheduled_fire.is_some()
-                || self.plan_context.project_context != ProjectContext::None
-                || !matches!(
+            let projectless_lane = self.plan_context.project_context == ProjectContext::None
+                && matches!(
                     self.project_authority(),
                     ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
-                )
+                );
+            let pinned_lane = matches!(
+                (&self.plan_context.project_context, self.project_authority()),
+                (
+                    ProjectContext::SnapshotHash { hash },
+                    ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                        snapshot_hash,
+                        realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                        workspace_outputs: None,
+                        ..
+                    },
+                ) if hash == snapshot_hash
+            );
+            if self.candidate_evaluation.is_some()
+                || self.plan_context.scheduled_fire.is_some()
+                || !(projectless_lane || pinned_lane)
                 || !self.ref_bindings.is_empty()
                 || self.usage_subject.is_some()
                 || self.usage_subject_asserted_by.is_some()
             {
-                bail!("qualification verifier is not a fresh projectless root");
+                bail!("qualification verifier is not a fresh projectless or read-only pinned root");
             }
             let verified = &self.verified_subject;
             if verified.resolved.source_space != ItemSpace::Bundle
@@ -2793,18 +2842,7 @@ impl RootExecutionAdmission {
             {
                 bail!("qualification purpose differs from admitted trusted verifier root");
             }
-            match self.product_selections.as_slice() {
-                [] => {}, // Signed fixed pin is checked against the exact subject realization.
-                [selected]
-                    if matches!(
-                        selected.target,
-                        ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
-                    ) && selected.selection.declaration_id == purpose.subject_declaration_id
-                        && selected.selection.witness_hash == purpose.product_witness_hash
-                        && selected.selection.witness_source == purpose.witness_source
-                        && selected.selection.qualification_hash.is_none() => {}
-                _ => bail!("qualification purpose differs from admitted unqualified subject selection"),
-            }
+            validate_qualification_root_selections(purpose, &self.product_selections, pinned_lane)?;
         }
         if !self.product_selections.is_empty() {
             if self.plan_context.scheduled_fire.is_some() {

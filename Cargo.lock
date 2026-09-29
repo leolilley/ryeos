@@ -3103,6 +3103,7 @@ dependencies = [
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3201,7 +3202,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryeos-independent-runtime-verifier"
+name = "ryeos-codex-runtime-verifier"
 version = "0.5.101"
 dependencies = [
  "anyhow",
@@ -3454,7 +3455,7 @@ dependencies = [
  "ryeos-external-candidate-supervisor",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
- "ryeos-independent-runtime-verifier",
+ "ryeos-codex-runtime-verifier",
  "ryeos-isolation-protocol",
  "ryeos-project-capture",
  "ryeos-state",
@@ -3595,7 +3596,7 @@ dependencies = [
  "ryeos-executor",
  "ryeos-external-candidate-supervisor",
  "ryeos-external-execution-contract",
- "ryeos-independent-runtime-verifier",
+ "ryeos-codex-runtime-verifier",
  "ryeos-isolation-protocol",
  "ryeos-node",
  "ryeos-provider-contract",

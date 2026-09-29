@@ -46,7 +46,7 @@ members = [
     "crates/tools/external-guest-restoration-verifier",
     "crates/tools/codex-external-configuration",
     "crates/tools/codex-guest-runtime-producer",
-    "crates/tools/independent-runtime-verifier",
+    "crates/tools/codex-runtime-verifier",
     "tests/e2e/external-execution/synthetic-lifecycle-adapter",
     "crates/host-adapters/lillux-oci-hook",
     "crates/host-adapters/render-sandbox-adapter",

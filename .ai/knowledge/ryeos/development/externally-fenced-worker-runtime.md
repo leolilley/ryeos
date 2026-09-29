@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-17T03:41:16Z:4f3a67ebf116c154b067574a1185b41f5c72207076ea3c35aa8742902ff256bf:hy6HqzRs1baZLsFUoWFX5qpWYKZ3nXj6lnpQgkYeMmILjdccTm63mOK2uEcvTsRmTUwTvo74uyYS4r6ZN2QyBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T03:29:27Z:62ed11508eeed218fbce70a951a8a97bd8dee44755942f63b92cb5abb72f15e6:TF+gEIyigzThfKaGaMio1+XMZWf6cP5FeQcmR5PiGuSKh2TvUBtVDFNyHLWR1BHGc9xAjGruXa89DtYusqD5CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: externally-fenced-worker-runtime
 title: Externally fenced worker runtime
 description: Generic authority and qualification boundary for single-tenant externally supervised worker sites
 entry_type: implementation_guide
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # Externally fenced worker runtime
@@ -165,6 +165,56 @@ External cleanup is only a cleanup fallback. Admission also requires exact
 filesystem realization, a closed model-tool inventory, supervisor and
 credential separation, and writer-exclusion qualification. A lifecycle grant
 cannot waive any of those gates.
+
+## Restored guest product measurement
+
+The snapshot-backed external guest route has a separate content-measurement
+contract. It does not turn the ordinary configured-node lifecycle described
+above into proof that a snapshot contains an admitted runtime. The controller
+derives expected content from the authenticated retained product witness and
+its exact CAS manifest. Provider snapshot identifiers and readiness responses
+identify provider observations; they do not supply expected content hashes.
+
+The current guest owner product uses a fixed four-entry ABI rooted at
+`/ryeos/guest-runtime`: `bin`,
+`bin/ryeos-external-guest-occurrence-owner`, `controller-root.hex`, and
+`guest-owner-profile.json`. Product production, upload and measurement share
+the layout observer
+`ryeos-external-execution::guest_import_authorization::ObservedGuestRuntime`.
+Owner bytes, controller root and bounded profile may vary within that ABI;
+their exact content changes the product identity. A different layout requires
+a coordinated product-format change rather than a caller-selected path.
+
+`ryeos-external-guest-restoration-verifier` is delivered separately from the
+snapshot as an independently admitted executable. It receives only a bounded
+controller challenge, measures the exact installed tree through pinned
+filesystem handles, and returns the challenge digest, manifest hash, owner
+executable hash and observed controller root. It does not receive expected
+hashes that it can merely echo. The controller compares that result with its
+independent retained expectations.
+
+The result becomes usable evidence only through the authenticated adapter run
+for the exact restored occurrence, exact checker/upload identities, complete
+bounded output and successful exit. The daemon retains the observation and
+rejoins it to the snapshot/product/owner coordinates when consuming the
+qualification. Snapshot creation, restored allocation, checker execution and
+termination retain distinct durable operation records; uncertain contact does
+not authorize another attempt. Changing a nonce or deadline cannot remint
+checker contact authority.
+
+These are implemented source contracts, not a statement that a particular
+provider generation has passed live qualification. The local
+`cli_profiles` integration test executes one built checker over two disposable
+owner products at the fixed root, checks canonical output and challenge/content
+identities, and rejects crossed product expectations. It covers the executable
+boundary beyond the shared measurement function; it does not allocate a
+provider or establish network containment. A point measurement does
+not prove lasting immutability or writer exclusion. Provider terminal status
+does not prove whole-scope settlement or containment. The authenticated
+provider transport and admitted adapter remain part of the trust assumption;
+the observation is not hardware attestation. Each stronger claim requires its
+own accepted evidence, and an ordinary successful checker run is insufficient
+for activation or publication.
 
 ## Credential and command boundary
 

@@ -1,14 +1,34 @@
-# ryeos:signed:2026-09-22T04:12:14Z:8494d26898e58c0dfa664e6731ed38b3f09f75a4c742379f3fc10826c73d8468:cRxxD9OQcf7ERVBydvpnxpjXO/r5Mz4kwrC3km4XDvr+FUnSpa699ahRWW50JmJPY2dxCz87XvOVIVIqyeoHBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T03:29:28Z:5cee12bede4556d4fecb56cd859e9d748de8a5675c14df3fc94d653aba9d4503:2N8auRPbcZPIDQV8FHRlH7WbxWU/LIL04kuKk5eZkfbPMEAFGbcNPcPaXvSR5V9ub6z74XQ6CfHwPeVCa0xQCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/environments/qualification
-#   version: "1.0.0"
-#   description: Independently verify the exact supplementary static-link input closure
+#   version: "2.0.0"
+#   description: Verify supplementary GNU static-link bytes against the admitted member profile
 #   executor_id: "@subprocess"
 #   execution_protocol: protocol:ryeos/core/opaque
 #   effects: live
 #   filesystem_authority: captured_execution
 #   network_authority: isolated
-#   config_schema: {type: object, properties: {}, additionalProperties: false}
+#   config_schema:
+#     type: object
+#     additionalProperties: false
+#     required: [schema, target, files]
+#     properties:
+#       schema: {const: ryeos.static_link_input_profile.v2}
+#       target: {const: x86_64-unknown-linux-gnu}
+#       files:
+#         type: object
+#         minProperties: 1
+#         maxProperties: 64
+#         propertyNames:
+#           maxLength: 256
+#           pattern: '^(usr/lib/x86_64-linux-gnu/[A-Za-z0-9][A-Za-z0-9_.+-]*\.(a|o)|usr/share/doc/libc6/copyright)$'
+#         additionalProperties:
+#           type: object
+#           additionalProperties: false
+#           required: [bytes, sha256]
+#           properties:
+#             bytes: {type: integer, minimum: 1, maximum: 8388608}
+#             sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
 #   external_content:
 #     - id: producer-python
 #       kind: tree
@@ -39,27 +59,43 @@ import re
 import stat
 
 ROOT = Path("/ryeos/realizations/static-link-inputs")
-PRODUCER = "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf"
 HASH = re.compile(r"[0-9a-f]{64}")
-EMPTY_ARCHIVE = "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5"
-# Independent verifier pins: do not load these from the producer or subject.
-FILES = {
-    "usr/lib/x86_64-linux-gnu/libc.a": (5669090, "421b7c3395b35301a4626593b35842849ae1ba43582320383ffbc9790d918515"),
-    "usr/lib/x86_64-linux-gnu/libm.a": (132, "aef85c72b98fbeb021f6bdd3abb137e62643d7970bd59f84dc1a7c43fa6b9f14"),
-    "usr/lib/x86_64-linux-gnu/libm-2.41.a": (2502842, "0d748002785b531c0aa84679682deee556828ab21f9912569edd6bfae484ed0e"),
-    "usr/lib/x86_64-linux-gnu/libmvec.a": (1762900, "60f1a89b047a78bbd64843d1e388b8b7ee6f4d6b9faf425f0f21f1617a8dbd4f"),
-    "usr/lib/x86_64-linux-gnu/libpthread.a": (8, EMPTY_ARCHIVE),
-    "usr/lib/x86_64-linux-gnu/libdl.a": (8, EMPTY_ARCHIVE),
-    "usr/lib/x86_64-linux-gnu/librt.a": (8, EMPTY_ARCHIVE),
-    "usr/lib/x86_64-linux-gnu/libutil.a": (8, EMPTY_ARCHIVE),
-    "usr/lib/x86_64-linux-gnu/rcrt1.o": (1640, "4ca31259aee8415b60fe566c00cecfa5858f1103296b8043f175ccf2489f00ec"),
-    "usr/lib/x86_64-linux-gnu/crt1.o": (1776, "8cd1a50edd44a4ded5856bf2254dc106401b37c285dcc55a594475438cd6ec1a"),
-    "usr/share/doc/libc6/copyright": (51200, "f5788886720a2605a946e81d571e6c8162b09f58d2e2ceb8d36e5768fccd850d"),
-}
-DIRECTORIES = {str(parent) for name in FILES for parent in Path(name).parents if str(parent) != "."}
+# These namespaces are the fixed GNU realization layout used by release Cargo.
+# Exact members belong to the independent signed policy, including versioned
+# archive names. This claim measures that closure; it does not prove linkage.
+LIBRARY_MEMBER = re.compile(r"usr/lib/x86_64-linux-gnu/[A-Za-z0-9][A-Za-z0-9_.+-]*\.(?:a|o)")
+LICENSE_MEMBER = "usr/share/doc/libc6/copyright"
 
 
-def realizations():
+def expected_files(params):
+    # The trusted policy owns expected bytes. A subject or producer testimony
+    # can never replace this independently admitted input.
+    if not isinstance(params, dict) or set(params) != {"schema", "target", "files"} or \
+            params["schema"] != "ryeos.static_link_input_profile.v2" or \
+            params["target"] != "x86_64-unknown-linux-gnu":
+        raise ValueError("unsupported static-link input profile")
+    entries = params["files"]
+    if not isinstance(entries, dict) or not 1 <= len(entries) <= 64:
+        raise ValueError("static-link input profile has an unsupported member set")
+    files = {}
+    total = 0
+    for name, entry in entries.items():
+        if not isinstance(name, str) or len(name) > 256 or (
+                name != LICENSE_MEMBER and not LIBRARY_MEMBER.fullmatch(name)):
+            raise ValueError("static-link input profile has an unsupported member path")
+        if not isinstance(entry, dict) or set(entry) != {"bytes", "sha256"} or \
+                type(entry["bytes"]) is not int or not 1 <= entry["bytes"] <= 8388608 or \
+                not isinstance(entry["sha256"], str) or not HASH.fullmatch(entry["sha256"]):
+            raise ValueError("static-link input profile has an invalid file expectation")
+        files[name] = (entry["bytes"], entry["sha256"])
+        total += entry["bytes"]
+    directories = {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
+    if total > 16777216 or len(files) + len(directories) > 64:
+        raise ValueError("static-link input profile exceeds product bounds")
+    return files
+
+
+def realizations(files):
     value = json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS", "null"))
     keys = {"id", "kind", "mode", "manifest_hash", "entry_count", "total_bytes", "mount_root", "mount"}
     if not isinstance(value, list) or len(value) != 2:
@@ -76,12 +112,15 @@ def realizations():
     if set(by_id) != {"producer-python", "subject"}:
         raise ValueError("unexpected realization identity")
     python, subject = by_id["producer-python"], by_id["subject"]
-    if python["manifest_hash"] != PRODUCER or python["mount"] != "producer-python":
+    # The Tool's signed external_content declaration pins this runtime. The
+    # sealed set is daemon-authored; the subject cannot select its verifier.
+    if python["mount"] != "producer-python":
         raise ValueError("verifier runtime changed")
-    if subject["manifest_hash"] == PRODUCER or subject["mount"] != "static-link-inputs":
+    if subject["manifest_hash"] == python["manifest_hash"] or subject["mount"] != "static-link-inputs":
         raise ValueError("subject identity changed")
-    if (subject["entry_count"] != len(FILES) + len(DIRECTORIES) or
-            subject["total_bytes"] != sum(size for size, _ in FILES.values())):
+    directories = {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
+    if (subject["entry_count"] != len(files) + len(directories) or
+            subject["total_bytes"] != sum(size for size, _ in files.values())):
         raise ValueError("subject exceeds exact closure bounds")
     return subject
 
@@ -110,44 +149,44 @@ def verify_file(path, size, digest):
         os.close(descriptor)
 
 
-def inventory(root):
+def inventory(root, files):
     if not stat.S_ISDIR(root.lstat().st_mode):
         raise ValueError("subject root is not a directory")
+    directories_expected = {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
     found_files, found_directories = set(), set()
-    for directory, directories, files in os.walk(root, followlinks=False):
+    for directory, directories, members in os.walk(root, followlinks=False):
         for name in directories:
             path = Path(directory, name)
             relative = path.relative_to(root).as_posix()
             metadata = path.lstat()
-            if relative not in DIRECTORIES or not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o755:
+            if relative not in directories_expected or not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o755:
                 raise ValueError(f"unexpected static input directory: {relative}")
             found_directories.add(relative)
-        for name in files:
+        for name in members:
             path = Path(directory, name)
             relative = path.relative_to(root).as_posix()
-            if relative not in FILES:
+            if relative not in files:
                 raise ValueError(f"unexpected static input file: {relative}")
-            verify_file(path, *FILES[relative])
+            verify_file(path, *files[relative])
             found_files.add(relative)
-    if found_files != set(FILES) or found_directories != DIRECTORIES:
+    if found_files != set(files) or found_directories != directories_expected:
         raise ValueError("static input closure is incomplete")
 
 
 def execute(params):
-    if params != {}:
-        raise ValueError("qualification accepts no parameters")
-    subject = realizations()
-    inventory(ROOT)
+    files = expected_files(params)
+    subject = realizations(files)
+    inventory(ROOT, files)
     return {"schema": "ryeos.product_qualification_result.v1",
             "subject_manifest_hash": subject["manifest_hash"],
-            "claims": ["static_link_inputs_x86_64_linux_gnu_v1"],
+            "claims": ["static_link_inputs_profile_x86_64_linux_gnu_v2"],
             "probe_evidence": {
-                "schema": "ryeos.static_link_input_closure_evidence.v1",
+                "schema": "ryeos.static_link_input_closure_evidence.v2",
                 "target": "x86_64-unknown-linux-gnu",
                 "entry_count": subject["entry_count"], "total_bytes": subject["total_bytes"],
-                "file_count": len(FILES), "network_contacted": False,
+                "file_count": len(files), "network_contacted": False,
                 "compiler_execution_proven": False,
-                "closure_digest": hashlib.sha256(json.dumps(FILES, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}}
+                "closure_digest": hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}}
 
 
 if __name__ == "__main__":

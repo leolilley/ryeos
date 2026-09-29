@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-27T04:46:06Z:59cec2541315fd912e24f49c2824425a562f4af4ee5c3b4a010fa807f0556088:cnbF+x6XWsSEEY1og7+YF+Is8i20+CSHk7ChvRNggR3i4yn0764DquO+/C6nHoBu6QNhfovj5LDVr1lpuh2zDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T03:29:27Z:7bb47aa79cbe19d13efc1f730687ff504cfd479229cefac37d1c56b0141ede3f:b1cdKXBNZyuC6V4owvExHzeZlnXpSifJz6aR8webzhspnfSQv6bCCG1BUHq4JRyK+0MjFEGHzwVtny5p1H03AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -77,6 +77,135 @@ still join at the terminal fence. A point-in-time peer-liveness peek is not a
 lease: observation and publication must fail closed if the verifier disappears
 or the enclosing root terminates before the evidence join is committed.
 
+## Signed Codex routed-runtime profiles
+
+Source implementation update, 2026-09-29: the specialized checker is now
+`crates/tools/codex-runtime-verifier/`, Cargo package
+`ryeos-codex-runtime-verifier`, installed binary `codex-runtime-verifier`.
+Its protocol interpretation remains specific to Codex app-server. Shared
+qualification admission and evidence joins remain in their existing owners.
+This source migration is not evidence of an installed checker, accepted
+qualification, or Render activation. Direct and scenario-driver paths continue
+to refuse claims while their evidence gates are incomplete.
+
+The complete parameters retain the operation discriminator
+`scenario: test.independent_routed_runtime.v1`, the existing exact content and
+launch expectations, and `external_candidate_qualification_context`. Their
+`configuration` requires a v2 profile:
+
+```yaml
+profile:
+  schema: ryeos.codex_routed_runtime_profile.v2
+  producer_scenario_id: native_codex_empty_candidate
+  command_fixture: workspace_rg_version_require_absent_candidate
+  candidate:
+    relative_path: candidate-alternative.txt
+    content: |
+      signed alternative candidate
+      second independently authored line
+expected_producer_recipe_ref: config:fixtures/codex-runtime/direct-codex-empty-candidate
+# Existing expected_producer_recipe and remaining configuration fields required.
+```
+
+The profile and candidate object are closed. Unsupported schema/fixture values,
+extra fields, missing candidate data and predecessor profiles refuse. Scenario
+IDs use the existing qualification policy name grammar (1–64 lowercase ASCII
+letters, digits, `_` or `-`). The recipe reference is a canonical unsuffixed
+Config ref. The daemon must admit the selected scenario and exact recipe under
+the signed policy; the verifier compares the returned source ref and recipe
+digest with its signed expectation and retains recipe-generation, locator and
+relay joins.
+
+Candidate filename and content are authored data. The filename is one ASCII
+leaf of 1–64 bytes, starts with an alphanumeric character and otherwise allows
+only alphanumerics, dot, underscore and hyphen. Content is 1–1024 UTF-8 bytes,
+LF terminated, with no control characters except LF. The checker renders one
+Add File patch, prefixing every content line with `+`, including blank lines
+and text resembling patch delimiters. Candidate absolute path and URI derive
+from the fixed `/workspace` coordinate and this validated leaf. No parameter
+accepts a shell program or arbitrary patch operation.
+
+The source-owned generator remains
+`tests/e2e/external-execution/support/independent_verifier_scenario.rs`.
+It authors the Tool, policy and recipe from independently admitted inputs,
+under `fixtures/codex-runtime`. Generated Tool/policy versions are `3.0.0`.
+The fixture bundle is `codex-runtime-fixture`; its diagnostic binary selection
+uses `RYEOS_TEST_CODEX_RUNTIME_VERIFIER_BIN`.
+
+| Selection | Baseline | Fresh candidate precondition |
+| --- | --- | --- |
+| Scenario key | `native_codex` | `native_codex_empty_candidate` |
+| Recipe Config name under `fixtures/codex-runtime` | `direct-codex` | `direct-codex-empty-candidate` |
+| Command fixture | `workspace_rg_version` | `workspace_rg_version_require_absent_candidate` |
+| Candidate leaf | `candidate-strategy.txt` | `candidate-alternative.txt` |
+| Candidate content | One authored line | Two independently authored lines |
+| Exact expected output | Authored `/workspace` and selected tools product's ripgrep version output | Same exact bytes followed by `candidate-absent\n` |
+
+The baseline command is `pwd; rg --version`. The second operation renders the
+following command from the selected safe filename:
+
+```sh
+pwd; rg --version; if test -e candidate-alternative.txt || test -L candidate-alternative.txt; then exit 74; else printf "%s\n" candidate-absent; fi
+```
+
+It refuses an existing candidate, including a dangling symlink. Both profiles
+retain the five mandatory responses: local-command refusal, routed command,
+candidate patch, controller-canary read denial and terminal message. Framing,
+correlation, exit meanings and containment/settlement checks remain compiled
+Codex semantics. The command enum selects supported finite behavior; exact
+output and candidate content are pre-authored signed expectations, never
+learned from the subject. Source tests also hold the command enum and recipe
+fixed while changing the signed filename and multiline content, so fixture
+data variation does not depend on choosing another compiled command case.
+
+The existing policy parameter digest covers all profile expectations. The
+scripted peer, Codex observation checker, guest transcript/capture checker and
+post-settlement frozen-file inspection consume the same authored candidate.
+They require exact commands, paths and content, while the scripted-peer output
+marker remains secondary evidence. Swapped filename/content must fail signed
+parameter validation and the applicable observation or frozen-file checks.
+This source migration enables no claims and preserves all five claim meanings.
+
+Production runtime membership belongs to independently admitted Worker,
+environment and product realization sets. The closure validator compares their
+complete union, exact search/process environment and bound context digest;
+requires pinned runtime mounts and existing safe-path validation; and checks
+unique provider File, command-tools Tree and runtime-product Tree roles against
+their bound manifest identities and proper admitted owners. Helper names and
+mounts are no longer a compiled seven-member inventory. A changed supplied
+closure still refuses unless it equals those independently admitted sets.
+Provider realization selection follows the bound manifest and the exact
+admitted profile's workload ID. The fixed four checker inputs, subject and
+relay entrypoints, guest `/runtime` and `/workspace`, and authoring-tools shell
+mount remain the current versioned probe ABI.
+
+The production closure helper currently has test-only callers. Its source tests
+exercise admitted renamed/expanded inventories and substitution refusals;
+they do not establish operational wiring of the consumer-context evidence
+join. That remains an external source dependency of the ongoing Codex baseline
+work, alongside the checker's outstanding collector/provenance joins. Both
+owners must retain their current claim refusals until those checks exist.
+
+This is a coherent checker/definition migration with no defaults or old-name
+alias. New checker and generated Tool/policy definitions must be admitted as
+one generation; retained predecessor evidence keeps its original identities
+and cannot be reinterpreted. The generic qualification policy schema remains
+v2; its existing parameter object carries the change. The complete definition
+still must satisfy the 8 KiB checker-input and 16 KiB policy ceilings.
+
+| Change | Required work |
+| --- | --- |
+| Change supported candidate filename/content, exact expectation or scenario/recipe selection | Sign new definitions, admit exact identities and requalify affected evidence; the checker binary and unchanged subject bytes need no rebuild |
+| Change admitted Worker helper membership | Update and admit the owning definitions; require exact closure/role validation and affected qualification evidence |
+| Add another finite command/protocol operation or change the fixed probe ABI | Review and rebuild the checker and affected producers/consumers, update signed definitions and qualifications |
+| Change execution or evidence authority | Review its existing owner, compatibility and qualification requirements; profile data cannot grant authority |
+
+Local source, signed-fixture, synthetic observation and pinned-file checks
+establish only their stated boundaries. Actual checker runs with the same
+artifact and complete joined strong qualification remain separate acceptance
+requirements. Profile changes must never refresh an already admitted running
+root's selection.
+
 ## Current implementation gate
 
 The signed fixture now selects the exact retained Codex executable as its
@@ -117,7 +246,14 @@ qualification after cancellation. Their final interrupting Drop joins remain
 potentially unbounded, so this is not a bounded terminal proof. Merely dropping
 a local handle or repeating START is not recovery evidence.
 
-## Direct-target launch-profile cut
+## Historical direct-target implementation sequence
+
+The following records the staged launch-profile work that led to the current
+source boundary above. Earlier refusals and intermediate recipe versions are
+historical checkpoints, not claims that those intermediate limitations still
+apply to the latest source. Their successful component checks do not establish
+installed qualification.
+
 
 The existing resolver can promote `subject/bin/codex` as an exact
 realization-member executable: the signed recipe must name the sealed subject

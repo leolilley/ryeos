@@ -1,4 +1,4 @@
-//! Exact selected-input preflight for independent runtime qualification.
+//! Codex app-server-specific selected-input preflight and protocol interpretation.
 //!
 //! No product claim follows from these checks alone. The installed verifier
 //! still needs to own the native guest and real app-server observations.
@@ -34,15 +34,137 @@ use std::collections::BTreeMap;
 use std::{ffi::OsStr, path::Path};
 
 pub const SCENARIO: &str = "test.independent_routed_runtime.v1";
-/// Signed policy selector for the one daemon-owned direct Codex producer.
-pub const PRODUCER_SCENARIO_ID: &str = "native_codex";
-pub const DIRECT_PRODUCER_RECIPE_REF: &str = "config:fixtures/independent-runtime/direct-codex";
+pub const ROUTED_RUNTIME_PROFILE_SCHEMA: &str = "ryeos.codex_routed_runtime_profile.v2";
+
+/// Signed choices within the finite routed-runtime operation. These fields
+/// select admitted behavior; they cannot remove its mandatory checks.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutedRuntimeProfile {
+    pub schema: String,
+    pub producer_scenario_id: String,
+    pub command_fixture: GuestCommandFixture,
+    pub candidate: CandidateFixture,
+}
+
+impl RoutedRuntimeProfile {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == ROUTED_RUNTIME_PROFILE_SCHEMA,
+            "unsupported routed runtime profile"
+        );
+        ryeos_state::external_content::products::validate_name(&self.producer_scenario_id)?;
+        self.candidate.validate()?;
+        Ok(())
+    }
+
+    pub fn command_script(&self) -> String {
+        self.command_fixture.render_command(&self.candidate)
+    }
+}
+
+/// Signed input to the mandatory add-file operation. This is bounded data,
+/// never a patch program or shell command supplied by the caller.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateFixture {
+    pub relative_path: String,
+    pub content: String,
+}
+
+impl CandidateFixture {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=64).contains(&self.relative_path.len())
+                && self.relative_path.as_bytes()[0].is_ascii_alphanumeric()
+                && self
+                    .relative_path
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')),
+            "candidate fixture must be a safe single leaf"
+        );
+        ensure!(
+            (1..=1024).contains(&self.content.len())
+                && self.content.ends_with('\n')
+                && self.content.chars().all(|c| c == '\n' || !c.is_control()),
+            "candidate fixture must contain bounded newline-terminated text"
+        );
+        Ok(())
+    }
+
+    pub fn path(&self) -> String {
+        format!("/workspace/{}", self.relative_path)
+    }
+
+    pub fn uri(&self) -> String {
+        format!("file://{}", self.path())
+    }
+
+    pub fn patch_input(&self) -> String {
+        let mut patch = format!("*** Begin Patch\n*** Add File: {}\n", self.relative_path);
+        // Prefix every content line, including blank lines and lines that look
+        // like patch delimiters. The fixture cannot add another patch operation.
+        for line in self
+            .content
+            .strip_suffix('\n')
+            .unwrap_or(&self.content)
+            .split('\n')
+        {
+            patch.push('+');
+            patch.push_str(line);
+            patch.push('\n');
+        }
+        patch.push_str("*** End Patch");
+        patch
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture() -> Self {
+        Self {
+            relative_path: "candidate-strategy.txt".into(),
+            content: "composed external candidate C\n".into(),
+        }
+    }
+}
+
+/// Finite commands with the same required routed execution and patch checks.
+/// Neither a caller nor a model may supply command text through this selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestCommandFixture {
+    WorkspaceRgVersion,
+    WorkspaceRgVersionRequireAbsentCandidate,
+}
+
+impl GuestCommandFixture {
+    pub(crate) fn render_command(self, candidate: &CandidateFixture) -> String {
+        match self {
+            Self::WorkspaceRgVersion => "pwd; rg --version".into(),
+            Self::WorkspaceRgVersionRequireAbsentCandidate => format!(
+                r#"pwd; rg --version; if test -e {leaf} || test -L {leaf}; then exit 74; else printf "%s\n" candidate-absent; fi"#,
+                leaf = candidate.relative_path
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn command_script(self) -> &'static str {
+        match self {
+            Self::WorkspaceRgVersion => scripted_provider::GUEST_COMMAND_SCRIPT,
+            Self::WorkspaceRgVersionRequireAbsentCandidate => {
+                scripted_provider::GUEST_ABSENT_CANDIDATE_SCRIPT
+            }
+        }
+    }
+}
+
 pub const INPUT_LIMIT: usize = 8 * 1024;
 pub const REALIZATIONS_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExactScenario {
+    pub profile: RoutedRuntimeProfile,
     pub subject_manifest_hash: String,
     pub controller_manifest_hash: String,
     pub tools_manifest_hash: String,
@@ -75,6 +197,26 @@ pub struct QualificationExecutionEnvironment {
 }
 
 impl QualificationExecutionEnvironment {
+    fn unique_realization(
+        &self,
+        manifest_hash: &str,
+        kind: ExternalContentKind,
+    ) -> Result<&ryeos_state::objects::ExternalContentRealization> {
+        self.realizations.validate()?;
+        let mut members = self
+            .realizations
+            .iter()
+            .filter(|member| member.manifest_hash == manifest_hash && member.kind == kind);
+        let member = members.next().context("bound runtime role absent")?;
+        ensure!(members.next().is_none(), "bound runtime role is ambiguous");
+        ensure!(
+            member.mode == ryeos_state::objects::ExternalContentMode::Pinned
+                && member.mount_root == ExternalContentMountRoot::ExecutionRuntime,
+            "bound runtime role is not pinned runtime content"
+        );
+        Ok(member)
+    }
+
     /// Production-only closure-shape preflight. The caller must supply
     /// independently admitted worker/environment/product realization sets;
     /// this equality check does not authenticate their source by itself.
@@ -104,97 +246,62 @@ impl QualificationExecutionEnvironment {
                 && self.process_environment == *admitted_process_environment,
             "production guest environment differs from admitted definition"
         );
-        let worker_ids = [
-            "codex",
-            "codex-bwrap",
-            "codex-code-mode-host",
-            "codex-rg",
-            "codex-zsh",
-        ];
-        let expected = [
-            (
-                "authoring-tools",
-                ExternalContentKind::Tree,
-                "authoring-tools",
-            ),
-            ("codex", ExternalContentKind::File, "codex"),
-            (
-                "codex-bwrap",
-                ExternalContentKind::File,
-                "codex-resources/bwrap",
-            ),
-            (
-                "codex-code-mode-host",
-                ExternalContentKind::File,
-                "codex-code-mode-host",
-            ),
-            ("codex-rg", ExternalContentKind::File, "codex-path/rg"),
-            (
-                "codex-zsh",
-                ExternalContentKind::File,
-                "codex-resources/zsh/bin/zsh",
-            ),
-            ("guest-runtime", ExternalContentKind::Tree, "guest-runtime"),
-        ];
-        ensure!(
-            worker.iter().map(|r| r.id.as_str()).eq(worker_ids)
-                && environment
-                    .iter()
-                    .map(|r| r.id.as_str())
-                    .eq(["authoring-tools"])
-                && product.iter().map(|r| r.id.as_str()).eq(["guest-runtime"])
-                && self
-                    .realizations
-                    .iter()
-                    .map(|r| r.id.as_str())
-                    .eq(expected.iter().map(|e| e.0)),
-            "production Codex closure has missing or extra realizations"
-        );
-        for ((actual, (id, kind, mount)), signed) in self.realizations.iter().zip(expected).zip([
-            environment.iter().next().unwrap(),
-            worker.iter().find(|r| r.id == "codex").unwrap(),
-            worker.iter().find(|r| r.id == "codex-bwrap").unwrap(),
+        // Membership belongs to independently admitted definitions. In particular,
+        // helpers may change names or be added by a new Worker generation without
+        // adding a second inventory to this Codex protocol checker.
+        let admitted = ExternalContentRealizationSet::new(
             worker
                 .iter()
-                .find(|r| r.id == "codex-code-mode-host")
-                .unwrap(),
-            worker.iter().find(|r| r.id == "codex-rg").unwrap(),
-            worker.iter().find(|r| r.id == "codex-zsh").unwrap(),
-            product.iter().next().unwrap(),
-        ]) {
+                .chain(environment.iter())
+                .chain(product.iter())
+                .cloned()
+                .collect(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        ensure!(
+            self.realizations == admitted,
+            "production Codex closure differs from the complete admitted closure"
+        );
+        for actual in self.realizations.iter() {
             ensure!(
-                actual.id == id
-                    && actual.kind == kind
-                    && actual.mode == ryeos_state::objects::ExternalContentMode::Pinned
-                    && actual.mount_root == ExternalContentMountRoot::ExecutionRuntime
-                    && actual.mount == mount
-                    && actual == signed,
-                "production Codex realization {id} differs from signed closure"
+                actual.mode == ryeos_state::objects::ExternalContentMode::Pinned
+                    && actual.mount_root == ExternalContentMountRoot::ExecutionRuntime,
+                "production Codex realization {} is not pinned runtime content",
+                actual.id
             );
         }
-        ensure!(
-            self.realizations
-                .iter()
-                .find(|r| r.id == "codex")
-                .unwrap()
-                .manifest_hash
-                == context.provider_executable_manifest_hash
-                && self
-                    .realizations
+        // The three roles come from separate admitted owners and identities, not
+        // caller-authored IDs. Exactly one member must satisfy each role. All
+        // other members still participate in the exact complete-union equality.
+        let role = |owner: &ExternalContentRealizationSet, hash: &str, kind, name| -> Result<()> {
+            ensure!(
+                owner
                     .iter()
-                    .find(|r| r.id == "authoring-tools")
-                    .unwrap()
-                    .manifest_hash
-                    == tools_manifest_hash
-                && self
-                    .realizations
-                    .iter()
-                    .find(|r| r.id == "guest-runtime")
-                    .unwrap()
-                    .manifest_hash
-                    == product_manifest_hash,
-            "production Codex provider, tools, or product hash differs from bound context"
-        );
+                    .filter(|r| r.manifest_hash == hash && r.kind == kind)
+                    .count()
+                    == 1,
+                "production Codex closure lacks a unique admitted {name} role"
+            );
+            Ok(())
+        };
+        role(
+            worker,
+            &context.provider_executable_manifest_hash,
+            ExternalContentKind::File,
+            "provider executable",
+        )?;
+        role(
+            environment,
+            tools_manifest_hash,
+            ExternalContentKind::Tree,
+            "command tools",
+        )?;
+        role(
+            product,
+            product_manifest_hash,
+            ExternalContentKind::Tree,
+            "guest runtime product",
+        )?;
         Ok(())
     }
 
@@ -544,7 +651,18 @@ impl SelectedInput {
                 && profile
                     .get("workload_realization_id")
                     .and_then(serde_json::Value::as_str)
-                    == Some("codex"),
+                    == Some(
+                        scenario
+                            .execution_environment
+                            .unique_realization(
+                                &parameters
+                                    .external_candidate_qualification_context
+                                    .provider_executable_manifest_hash,
+                                ExternalContentKind::File,
+                            )?
+                            .id
+                            .as_str()
+                    ),
             "admitted profile does not select the exact routed Codex requirement"
         );
         let mut configuration_members = Vec::new();
@@ -711,6 +829,17 @@ impl Parameters {
 
     pub fn validate(&self) -> Result<()> {
         ensure!(self.scenario == SCENARIO, "unsupported verifier scenario");
+        self.configuration.profile.validate()?;
+        ryeos_state::external_content::products::validate_canonical_unsuffixed_ref(
+            "expected producer recipe",
+            &self.configuration.expected_producer_recipe_ref,
+        )?;
+        ensure!(
+            self.configuration
+                .expected_producer_recipe_ref
+                .starts_with("config:"),
+            "expected producer recipe is not a Config ref"
+        );
         for hash in [
             &self.configuration.subject_manifest_hash,
             &self.configuration.controller_manifest_hash,
@@ -737,6 +866,16 @@ impl Parameters {
                 && !self.configuration.expected_command_output.contains('\0'),
             "invalid authored command output"
         );
+        if self.configuration.profile.command_fixture
+            == GuestCommandFixture::WorkspaceRgVersionRequireAbsentCandidate
+        {
+            ensure!(
+                self.configuration
+                    .expected_command_output
+                    .ends_with("\ncandidate-absent\n"),
+                "absent-candidate fixture lacks its authored result"
+            );
+        }
         let origin = self
             .configuration
             .responses_origin
@@ -800,14 +939,13 @@ impl Parameters {
             .strip_prefix("http://")
             .context("direct producer origin is not HTTP")?;
         ensure!(
-            self.configuration.expected_producer_recipe_ref == DIRECT_PRODUCER_RECIPE_REF
-                && direct.executable_source
-                    == ProducerExecutableSource::AdmittedRealizationMember {
-                        realization_id: "subject".into(),
-                        manifest_hash: self.configuration.subject_manifest_hash.clone(),
-                        relative_path: "bin/codex".into(),
-                        executable_sha256: self.configuration.codex_sha256.clone(),
-                    }
+            direct.executable_source
+                == ProducerExecutableSource::AdmittedRealizationMember {
+                    realization_id: "subject".into(),
+                    manifest_hash: self.configuration.subject_manifest_hash.clone(),
+                    relative_path: "bin/codex".into(),
+                    executable_sha256: self.configuration.codex_sha256.clone(),
+                }
                 && direct.argv
                     == [
                         "--strict-config",
@@ -835,19 +973,12 @@ impl Parameters {
             "expected producer recipe differs from the finite direct Codex target"
         );
         ensure!(
-            self.configuration.requirement.provider_declaration_id == "codex-hosted"
-                && self
-                    .configuration
-                    .requirement
-                    .runtime_product_declaration_id
-                    == "guest-runtime"
-                && self
-                    .configuration
-                    .requirement
-                    .required_lifecycle_capabilities
-                    == [LifecycleCapability::ExactTerminalObservation]
-                        .into_iter()
-                        .collect(),
+            self.configuration
+                .requirement
+                .required_lifecycle_capabilities
+                == [LifecycleCapability::ExactTerminalObservation]
+                    .into_iter()
+                    .collect(),
             "scenario does not select the signed Codex guest-runtime lifecycle requirement"
         );
         let recipe = &self.configuration.requirement.runtime_recipe;
@@ -885,38 +1016,24 @@ impl Parameters {
                 == self.configuration.execution_environment.digest()?,
             "qualification use context differs from typed execution environment"
         );
-        let provider = self
-            .configuration
+        self.configuration
             .execution_environment
-            .realizations
-            .iter()
-            .find(|entry| entry.id == "codex")
-            .context("typed execution environment has no controller Codex realization")?;
-        ensure!(
-            provider.mode == ryeos_state::objects::ExternalContentMode::Pinned
-                && provider.kind == ExternalContentKind::File
-                && provider.mount_root == ExternalContentMountRoot::ExecutionRuntime
-                && provider.mount == "codex"
-                && provider.manifest_hash
-                    == self
-                        .external_candidate_qualification_context
-                        .provider_executable_manifest_hash,
-            "qualification use provider executable differs from typed realization"
-        );
+            .unique_realization(
+                &self
+                    .external_candidate_qualification_context
+                    .provider_executable_manifest_hash,
+                ExternalContentKind::File,
+            )?;
         let tools = self
             .configuration
             .execution_environment
-            .realizations
-            .iter()
-            .find(|entry| entry.id == "authoring-tools")
-            .context("typed execution environment has no authoring-tools realization")?;
+            .unique_realization(
+                &self.configuration.tools_manifest_hash,
+                ExternalContentKind::Tree,
+            )?;
         ensure!(
-            tools.mode == ryeos_state::objects::ExternalContentMode::Pinned
-                && tools.kind == ExternalContentKind::Tree
-                && tools.mount_root == ExternalContentMountRoot::ExecutionRuntime
-                && tools.mount == "authoring-tools"
-                && tools.manifest_hash == self.configuration.tools_manifest_hash,
-            "typed authoring tools differ from selected verifier tools"
+            tools.mount == "authoring-tools",
+            "typed authoring tools differ from the fixed guest shell ABI"
         );
         let subject = self
             .configuration
@@ -935,7 +1052,6 @@ impl Parameters {
             subject.mode == ryeos_state::objects::ExternalContentMode::Pinned
                 && subject.kind == ExternalContentKind::Tree
                 && subject.mount_root == ExternalContentMountRoot::ExecutionRuntime
-                && subject.mount == "guest-runtime"
                 && subject.manifest_hash == self.configuration.subject_manifest_hash,
             "typed guest runtime differs from selected qualification subject"
         );
@@ -1122,6 +1238,75 @@ mod tests {
             )
         };
         check(&base, &context).unwrap();
+        // A new admitted Worker may rename its provider and helper inventory or
+        // add another required helper. The checker must consume that exact
+        // inventory, without retaining a second compiled list of member IDs.
+        let mut revised_worker = worker.iter().cloned().collect::<Vec<_>>();
+        for member in &mut revised_worker {
+            member.id = format!("updated-{}", member.id);
+            member.mount = format!("updated/{}", member.mount);
+        }
+        revised_worker.push(make(
+            "new-admitted-helper",
+            ExternalContentKind::File,
+            "updated/helper",
+            &"0".repeat(64),
+        ));
+        let revised_worker = ExternalContentRealizationSet::new(revised_worker).unwrap();
+        let revised = build(
+            revised_worker
+                .iter()
+                .chain(environment.iter())
+                .chain(product.iter())
+                .cloned()
+                .collect(),
+        );
+        let mut revised_context = context.clone();
+        revised_context.execution_environment_digest = revised.digest().unwrap();
+        revised
+            .validate_production_codex_closure(
+                &revised_worker,
+                &environment,
+                &product,
+                &admitted_search,
+                &admitted_process_environment,
+                &revised_context,
+                &"6".repeat(64),
+                &"7".repeat(64),
+            )
+            .unwrap();
+        assert!(check(&revised, &revised_context).is_err());
+        let missing_provider = ExternalContentRealizationSet::new(
+            revised_worker
+                .iter()
+                .filter(|r| r.manifest_hash != "1".repeat(64))
+                .cloned()
+                .collect(),
+        )
+        .unwrap();
+        let no_provider = build(
+            missing_provider
+                .iter()
+                .chain(environment.iter())
+                .chain(product.iter())
+                .cloned()
+                .collect(),
+        );
+        revised_context.execution_environment_digest = no_provider.digest().unwrap();
+        assert!(
+            no_provider
+                .validate_production_codex_closure(
+                    &missing_provider,
+                    &environment,
+                    &product,
+                    &admitted_search,
+                    &admitted_process_environment,
+                    &revised_context,
+                    &"6".repeat(64),
+                    &"7".repeat(64),
+                )
+                .is_err()
+        );
         let mut entries = all();
         entries.retain(|r| r.id != "codex-rg");
         let missing = build(entries);
@@ -1282,6 +1467,12 @@ mod tests {
             .required_lifecycle_capabilities
             .insert(LifecycleCapability::ExactTerminalObservation);
         ExactScenario {
+            profile: RoutedRuntimeProfile {
+                schema: ROUTED_RUNTIME_PROFILE_SCHEMA.into(),
+                producer_scenario_id: "native_codex".into(),
+                command_fixture: GuestCommandFixture::WorkspaceRgVersion,
+                candidate: CandidateFixture::test_fixture(),
+            },
             subject_manifest_hash: "a".repeat(64),
             controller_manifest_hash: "b".repeat(64),
             tools_manifest_hash: "c".repeat(64),
@@ -1330,7 +1521,7 @@ mod tests {
                 executable_search: Vec::new(),
                 process_environment: BTreeMap::new(),
             },
-            expected_producer_recipe_ref: DIRECT_PRODUCER_RECIPE_REF.into(),
+            expected_producer_recipe_ref: "config:fixtures/codex-runtime/direct-codex".into(),
             expected_producer_recipe: ProductProducerRecipe::from_value(serde_json::json!({
                 "schema":"ryeos.product_producer_recipe.v5",
                 "executable_source":{"kind":"admitted_realization_member",
@@ -1360,6 +1551,99 @@ mod tests {
             }))
             .unwrap(),
             capture_limit_bytes: 4096,
+        }
+    }
+
+    #[test]
+    fn signed_routing_profile_is_closed_and_selects_a_finite_command() {
+        let configuration = scenario();
+        let mut parameters = Parameters {
+            scenario: SCENARIO.into(),
+            external_candidate_qualification_context: ExternalCandidateQualificationUse {
+                schema: ryeos_state::external_execution::admission::QUALIFICATION_CONTEXT_SCHEMA
+                    .into(),
+                requirement_digest: configuration
+                    .requirement
+                    .qualification_requirement_digest()
+                    .unwrap(),
+                profile_hash: "4".repeat(64),
+                source_binding_hash: "5".repeat(64),
+                source_content_manifest_hash: "6".repeat(64),
+                provider_executable_manifest_hash: "e".repeat(64),
+                execution_environment_digest: configuration.execution_environment.digest().unwrap(),
+            },
+            configuration,
+        };
+        let a = serde_json::to_value(&parameters).unwrap();
+        let parsed = Parameters::parse(&serde_json::to_vec(&a).unwrap()).unwrap();
+        assert_eq!(
+            parsed.configuration.profile,
+            parameters.configuration.profile
+        );
+        for mut change in [
+            json!({"schema":ROUTED_RUNTIME_PROFILE_SCHEMA,"producer_scenario_id":"native_codex","command_fixture":"arbitrary_shell"}),
+            json!({"schema":"unknown","producer_scenario_id":"native_codex","command_fixture":"workspace_rg_version"}),
+            json!({"schema":ROUTED_RUNTIME_PROFILE_SCHEMA,"producer_scenario_id":"../other","command_fixture":"workspace_rg_version"}),
+            json!({"schema":ROUTED_RUNTIME_PROFILE_SCHEMA,"producer_scenario_id":"native_codex","command_fixture":"workspace_rg_version","disable_canary":true}),
+            serde_json::Value::Null,
+        ] {
+            if let Some(object) = change.as_object_mut() {
+                object.insert(
+                    "candidate".into(),
+                    a["configuration"]["profile"]["candidate"].clone(),
+                );
+            }
+            let mut wire = a.clone();
+            wire["configuration"]["profile"] = change;
+            assert!(Parameters::parse(&serde_json::to_vec(&wire).unwrap()).is_err());
+        }
+        let mut missing = a.clone();
+        missing["configuration"]
+            .as_object_mut()
+            .unwrap()
+            .remove("profile");
+        assert!(Parameters::parse(&serde_json::to_vec(&missing).unwrap()).is_err());
+        let mut missing_candidate = a.clone();
+        missing_candidate["configuration"]["profile"]
+            .as_object_mut()
+            .unwrap()
+            .remove("candidate");
+        assert!(Parameters::parse(&serde_json::to_vec(&missing_candidate).unwrap()).is_err());
+        let mut predecessor = a.clone();
+        predecessor["configuration"]["profile"]["schema"] =
+            json!("ryeos.independent_routed_runtime_profile.v1");
+        assert!(Parameters::parse(&serde_json::to_vec(&predecessor).unwrap()).is_err());
+
+        parameters.configuration.profile.producer_scenario_id =
+            "native_codex_empty_candidate".into();
+        parameters.configuration.profile.command_fixture =
+            GuestCommandFixture::WorkspaceRgVersionRequireAbsentCandidate;
+        parameters.configuration.expected_producer_recipe_ref =
+            "config:fixtures/codex-runtime/direct-codex-empty-candidate".into();
+        assert!(parameters.validate().is_err());
+        parameters
+            .configuration
+            .expected_command_output
+            .push_str("candidate-absent\n");
+        parameters.validate().unwrap();
+        let b = serde_json::to_value(&parameters).unwrap();
+        let parsed = Parameters::parse(&serde_json::to_vec(&b).unwrap()).unwrap();
+        assert_eq!(
+            parsed.configuration.profile,
+            parameters.configuration.profile
+        );
+        assert_ne!(
+            ryeos_state::objects::canonical_value_digest(&a).unwrap(),
+            ryeos_state::objects::canonical_value_digest(&b).unwrap()
+        );
+        for invalid_ref in [
+            "tool:fixtures/direct",
+            "config:fixtures/direct@v1",
+            "config:../direct",
+            "config:",
+        ] {
+            parameters.configuration.expected_producer_recipe_ref = invalid_ref.into();
+            assert!(parameters.validate().is_err());
         }
     }
 
@@ -1554,7 +1838,6 @@ mod tests {
             ("kind", json!("tree")),
             ("mode", json!("captured")),
             ("mount_root", json!("project")),
-            ("mount", json!("different")),
         ] {
             let mut changed = original.clone();
             let mut realizations = changed
@@ -1575,6 +1858,53 @@ mod tests {
                 .unwrap();
             assert!(changed.validate().is_err(), "{field}");
         }
+
+        // A provider mount is an admitted definition choice, not a Codex wire
+        // invariant. The same context must reject a change. Reauthoring its
+        // exact bound environment permits a safe new mount at this preflight;
+        // production closure admission separately requires equality with the
+        // independently admitted owner sets, exercised above.
+        let mut changed = original.clone();
+        let mut realizations = changed
+            .configuration
+            .execution_environment
+            .realizations
+            .to_value()
+            .unwrap();
+        realizations[1]["mount"] = json!("different");
+        changed.configuration.execution_environment.realizations =
+            ExternalContentRealizationSet::from_value(&realizations).unwrap();
+        assert!(changed.validate().is_err());
+        changed
+            .external_candidate_qualification_context
+            .execution_environment_digest = changed
+            .configuration
+            .execution_environment
+            .digest()
+            .unwrap();
+        changed.validate().unwrap();
+        realizations[1]["mount"] = json!("../escape");
+        assert!(ExternalContentRealizationSet::from_value(&realizations).is_err());
+
+        // The command-tools mount still supplies the fixed guest shell ABI.
+        let mut changed = original.clone();
+        let mut realizations = changed
+            .configuration
+            .execution_environment
+            .realizations
+            .to_value()
+            .unwrap();
+        realizations[0]["mount"] = json!("different-tools");
+        changed.configuration.execution_environment.realizations =
+            ExternalContentRealizationSet::from_value(&realizations).unwrap();
+        changed
+            .external_candidate_qualification_context
+            .execution_environment_digest = changed
+            .configuration
+            .execution_environment
+            .digest()
+            .unwrap();
+        assert!(changed.validate().is_err());
 
         let mut changed = original.clone();
         changed

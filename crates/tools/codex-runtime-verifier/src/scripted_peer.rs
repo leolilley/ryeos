@@ -5,6 +5,7 @@
 //! that the connected process was the selected Codex executable.
 
 use crate::scripted_provider::{REQUEST_COUNT, response_sse};
+use crate::{CandidateFixture, GuestCommandFixture};
 use anyhow::{Context as _, Result, ensure};
 use lillux::loopback::{BoundedLoopbackStream, ExactLoopbackListener, LoopbackInterrupt};
 use lillux::task::{HostTask, spawn_host_task};
@@ -145,6 +146,8 @@ pub struct ScriptedPeer {
     listener: PeerListener,
     address: SocketAddr,
     deadline: MonotonicDeadline,
+    fixture: GuestCommandFixture,
+    candidate: CandidateFixture,
     forbidden_local_command: String,
     secret_read_command: String,
     controller_canary: String,
@@ -225,6 +228,8 @@ impl ScriptedPeer {
     pub fn bind_exact(
         origin: &str,
         deadline: MonotonicDeadline,
+        fixture: GuestCommandFixture,
+        candidate: CandidateFixture,
         forbidden_local_command: String,
         secret_read_command: String,
         controller_canary: String,
@@ -232,6 +237,8 @@ impl ScriptedPeer {
         let mut peer = Self::bind_exact_configuration(
             origin,
             deadline,
+            fixture,
+            candidate,
             forbidden_local_command,
             secret_read_command,
             controller_canary,
@@ -248,6 +255,8 @@ impl ScriptedPeer {
         origin: &str,
         directory: &PinnedDirectory,
         deadline: MonotonicDeadline,
+        fixture: GuestCommandFixture,
+        candidate: CandidateFixture,
         forbidden_local_command: String,
         secret_read_command: String,
         controller_canary: String,
@@ -255,6 +264,8 @@ impl ScriptedPeer {
         let mut peer = Self::bind_exact_configuration(
             origin,
             deadline,
+            fixture,
+            candidate,
             forbidden_local_command,
             secret_read_command,
             controller_canary,
@@ -268,10 +279,13 @@ impl ScriptedPeer {
     fn bind_exact_configuration(
         origin: &str,
         deadline: MonotonicDeadline,
+        fixture: GuestCommandFixture,
+        candidate: CandidateFixture,
         forbidden_local_command: String,
         secret_read_command: String,
         controller_canary: String,
     ) -> Result<Self> {
+        candidate.validate()?;
         let address: SocketAddr = origin
             .strip_prefix("http://")
             .context("scripted origin is not HTTP")?
@@ -299,6 +313,8 @@ impl ScriptedPeer {
             listener: PeerListener::Unbound,
             address,
             deadline,
+            fixture,
+            candidate,
             forbidden_local_command,
             secret_read_command,
             controller_canary,
@@ -358,6 +374,8 @@ impl ScriptedPeer {
             requests.push(request);
             let body = response_sse(
                 number,
+                self.fixture,
+                &self.candidate,
                 &self.forbidden_local_command,
                 &self.secret_read_command,
             )?;
@@ -544,6 +562,8 @@ mod tests {
                 ScriptedPeer::bind_exact(
                     origin,
                     deadline,
+                    crate::GuestCommandFixture::WorkspaceRgVersion,
+                    crate::CandidateFixture::test_fixture(),
                     "local".into(),
                     "secret".into(),
                     "private-controller-canary".into(),
@@ -599,6 +619,8 @@ mod tests {
             &format!("http://{address}"),
             &directory,
             deadline,
+            crate::GuestCommandFixture::WorkspaceRgVersion,
+            crate::CandidateFixture::test_fixture(),
             "forbidden-local".into(),
             "secret-read".into(),
             "private-controller-canary".into(),
@@ -637,6 +659,8 @@ mod tests {
             &format!("http://{address}"),
             &directory,
             deadline,
+            crate::GuestCommandFixture::WorkspaceRgVersion,
+            crate::CandidateFixture::test_fixture(),
             "forbidden-local".into(),
             "secret-read".into(),
             "private-controller-canary".into(),
@@ -677,6 +701,8 @@ mod tests {
         let peer = ScriptedPeer::bind_exact(
             &format!("http://{address}"),
             deadline,
+            crate::GuestCommandFixture::WorkspaceRgVersion,
+            crate::CandidateFixture::test_fixture(),
             "forbidden-local".into(),
             "secret-read".into(),
             "private-controller-canary".into(),
@@ -729,6 +755,8 @@ mod tests {
         let peer = ScriptedPeer::bind_exact(
             &format!("http://{address}"),
             deadline,
+            crate::GuestCommandFixture::WorkspaceRgVersion,
+            crate::CandidateFixture::test_fixture(),
             "forbidden-local".into(),
             "secret-read".into(),
             "private-controller-canary".into(),
@@ -780,6 +808,8 @@ mod tests {
         let peer = ScriptedPeer::bind_exact(
             &format!("http://{address}"),
             MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            crate::GuestCommandFixture::WorkspaceRgVersion,
+            crate::CandidateFixture::test_fixture(),
             "forbidden-local".into(),
             "secret-read".into(),
             "private-controller-canary".into(),
@@ -814,6 +844,8 @@ mod tests {
         let peer = ScriptedPeer::bind_exact(
             &format!("http://{address}"),
             deadline,
+            crate::GuestCommandFixture::WorkspaceRgVersion,
+            crate::CandidateFixture::test_fixture(),
             "forbidden-local".into(),
             "secret-read".into(),
             "private-controller-canary".into(),
@@ -853,6 +885,8 @@ mod tests {
         let peer = ScriptedPeer::bind_exact(
             &format!("http://{address}"),
             MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            crate::GuestCommandFixture::WorkspaceRgVersion,
+            crate::CandidateFixture::test_fixture(),
             "forbidden-local".into(),
             "secret-read".into(),
             "private-controller-canary".into(),

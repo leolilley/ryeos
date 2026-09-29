@@ -5,6 +5,9 @@
 //! modes, invokers, per-endpoint service handlers, the daemon-side
 //! `ServiceRegistry` builder, and the remote-daemon client.
 
+#[cfg(test)]
+extern crate self as ryeos_api;
+
 pub mod api_state;
 pub mod auth;
 pub mod handler_context;

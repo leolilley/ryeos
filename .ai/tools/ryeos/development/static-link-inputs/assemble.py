@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-22T04:12:04Z:ebd91bb29b15b95c3393b55fe67d1dcab48fe1695df1b9c5ea5e2b78f1af8a8b:pJsiQxOPfYTM+IHw1KvlZZ6cAwIDcEovdUJB/zvszvI5cIg85KK7HO9Q9AG1+cyAEx8beAvmqxc6dbbLNuqMBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T03:29:27Z:3114340d1bee9361c4694e8017300c80fbbb57fb315c3e81f4c069aad0cee83f:qyLIraVV8wuAEeqS/JXkAakRsQtk+evH8OrXXu46Re5/cwr4JENJlrDX/KycirN8bcg6fiv0eK2Y1uulR8ZFBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/static-link-inputs
-#   version: "1.0.0"
+#   version: "2.0.0"
 #   description: Reproduce exact admitted supplementary static-link inputs as a retained product
 #   executor_id: tool:ryeos/development/authoring-environment-production/runtime
 #   execution_protocol: protocol:ryeos/core/opaque
@@ -13,6 +13,10 @@
 #     type: object
 #     properties: {}
 #     additionalProperties: false
+#   config_resolve:
+#     type: strict_signed_project_bundle
+#     bundle_name: standard
+#     config_path: bundles/standard/.ai/config/development/ryeos/static-link-contract-intent.yaml
 #   external_content:
 #     - id: producer-python
 #       kind: tree
@@ -31,13 +35,79 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import re
+import stat
 import sys
 
 SOURCE = Path("/ryeos/realizations/static-link-inputs")
 OUTPUT = Path("products/static-link-inputs")
 CONTRACT = Path(".ai/config/development/ryeos/static-link-inputs.yaml")
-CONTRACT_BODY_SHA256 = "83e22140d7e6e7cf696816d8a150c5f4b2714d8c7898a5c54653d78f23f5d681"
+INTENT_CONFIG = "bundles/standard/.ai/config/development/ryeos/static-link-contract-intent.yaml"
+HASH = re.compile(r"[0-9a-f]{64}")
+MAX_CONTRACT_BYTES = 65536
+
+
+def admitted_contract_expectation(request):
+    # The empty caller schema is checked before the strict resolver injects
+    # this projection from admitted project source. Installed Standard anchors
+    # its publisher; installed configuration is never the selected contract.
+    if not isinstance(request, dict) or set(request) != {"resolved_config"}:
+        raise ValueError("static-input production requires the admitted contract intent")
+    resolved = request["resolved_config"]
+    if not isinstance(resolved, dict) or set(resolved) != {"value", "source"}:
+        raise ValueError("static-input intent requires the strict Config projection")
+    source = resolved["source"]
+    if (not isinstance(source, dict) or set(source) != {
+            "bundle_name", "config_path", "signer_fingerprint"} or
+            source["bundle_name"] != "standard" or source["config_path"] != INTENT_CONFIG or
+            not isinstance(source["signer_fingerprint"], str) or
+            not HASH.fullmatch(source["signer_fingerprint"])):
+        raise ValueError("static-input intent came from an unexpected source")
+    intent = resolved["value"]
+    if (not isinstance(intent, dict) or set(intent) != {
+            "category", "name", "version", "schema", "expected_contract_body_sha256"} or
+            intent["category"] != "development/ryeos" or
+            intent["name"] != "static-link-contract-intent" or
+            intent["schema"] != "ryeos.static_link_contract_intent.v1" or
+            not isinstance(intent["version"], str) or not intent["version"] or
+            not isinstance(intent["expected_contract_body_sha256"], str) or
+            not HASH.fullmatch(intent["expected_contract_body_sha256"])):
+        raise ValueError("unsupported or incomplete static-input contract intent")
+    return intent["expected_contract_body_sha256"]
+
+
+def stable_contract(project):
+    # No live overlay, symlink ancestor, or second read may replace the bytes
+    # compared with the independent intent. The runtime owns immutable source.
+    parent = project
+    for part in CONTRACT.parts[:-1]:
+        parent = parent / part
+        if not stat.S_ISDIR(parent.lstat().st_mode):
+            raise ValueError("unsafe static-input contract parent")
+    descriptor = os.open(project / CONTRACT, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or not 1 <= before.st_size <= MAX_CONTRACT_BYTES:
+            raise ValueError("unsafe or oversized static-input contract")
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(descriptor, min(65536, MAX_CONTRACT_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_CONTRACT_BYTES:
+                raise ValueError("static-input contract exceeds its finite bound")
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_size,
+                              value.st_mtime_ns, value.st_ctime_ns)
+    if identity(before) != identity(after):
+        raise ValueError("static-input contract changed while read")
+    return b"".join(chunks)
 
 
 def helper(name):
@@ -53,20 +123,14 @@ def assemble(project, request):
     project = Path(project)
     if not project.is_absolute() or project.is_symlink() or not project.is_dir():
         raise ValueError("missing absolute admitted project context")
-    if not isinstance(request, dict) or request.get("resolved_config") not in ({}, None):
-        raise ValueError("static-input production accepts no resolved configuration")
-    path = project / CONTRACT
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
-        raise ValueError("unsafe static-input contract")
-    if not path.resolve().is_relative_to(project.resolve()):
-        raise ValueError("static-input contract escaped admitted project")
-    envelope, body = path.read_bytes().split(b"\n", 1)
-    # Project admission supplies signature authority. Pin the exact signed body
-    # here, rather than accepting arbitrary project bytes or caller configuration.
+    expected = admitted_contract_expectation(request)
+    envelope, body = stable_contract(project).split(b"\n", 1)
+    # The independently signed intent selects the exact body; the source file
+    # cannot authenticate its own observation or supply a replacement pin.
     if (not envelope.startswith(b"# ryeos:signed:")
-            or hashlib.sha256(body).hexdigest() != CONTRACT_BODY_SHA256):
+            or hashlib.sha256(body).hexdigest() != expected):
         raise ValueError("static-input contract differs from exact admitted recipe")
-    contract = helper("inputs").read_contract(path)
+    contract = helper("inputs").parse_contract(body.decode("utf-8", "strict"))
     destination = project / OUTPUT
     parent = destination.parent
     if parent.is_symlink() or (parent.exists() and not parent.is_dir()):

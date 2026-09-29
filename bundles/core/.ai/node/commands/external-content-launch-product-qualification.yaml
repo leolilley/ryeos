@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-28T07:15:22Z:3a33cc04760905c1f3997a16278a556e4aa80f6bc9222b7b7c6db7336eb7a610:Q8OsX9mP5F1eZd8Win2ucMnBLZ4gUTzjZwsSpUyVYJ5IDowcnInqwYCBsBUFZa1DQjf+8I/k9cSzYMuXOmpbCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T01:35:17Z:05d90543a1741758a2c391306cf05f8fd6a2af682c468aaaf0740a15ee6c8f93:FOnURTDzTFaUfa9khBiMRCXh55yEA+2TZ5dtjbDWWT89ExMoVdKML20+IdxH+CWEoKhDxt36oXBXicmi8DtvDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, launch-product-qualification]
-description: Launch the signed verifier for one exact product qualification relationship
+description: Launch the signed verifier for one exact product qualification relationship, with exact auxiliary Root selections when its signed slots require qualified dependencies
 parameter_binding:
   mode: tail_object
   input_flag: input

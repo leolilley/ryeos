@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T00:19:36Z:99afe406240f9eb1711ebce3dd314f2c555a484a3c606ac896dddd420f21f954:bbS2YFXUzBxF3M4jcjSBIBnrj1Kp4CZfAjHKLm3ylGY3MGfuONbx1Q+QKkDTxxf74n9zoqxuc0U/igr7HUnGAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T03:29:27Z:9e844bbb06700c203a7ab713cb42743f229215485e2cc4934415ba7ed90feec1:y96gf3eo1WJyDnw0rj+ghL28kF2W/6EC8XIwqZJJigwC7gQ9wA6cPZh+WHuTBPwcPF8T6JR7MV45dyQVLl12Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: data-driven-provider-lifecycle
 title: Data-Driven Provider Lifecycle Operations
 description: Future separation of provider lifecycle profiles, shared bounded interpretation, and native host mechanisms
 entry_type: design
-version: "0.1.0"
+version: "0.2.0"
 ```
 
 # Data-Driven Provider Lifecycle Operations
@@ -17,15 +17,17 @@ generalization of the Render lifecycle adapter. It does not change the active
 Render Codex worker implementation, authorize provider contact, or claim that
 Render activation or snapshot qualification has passed.
 
-The order matters:
+Source implementation and operational integration have separate ordering:
 
 1. Finish and qualify the current Render Codex worker path, including launch,
    authenticated readiness, settlement, recovery, and frozen result return.
-2. Generalize runtime verification from its current concrete Codex verifier
-   only after that path works and a second real scenario establishes what is
-   shared. Follow [Data-Driven Runtime Verification](data-driven-runtime-verification.md).
+2. The authorized source migration of concrete runtime profiles proceeds
+   independently while that proof continues, with affected live integration
+   afterward. A universal protocol interpreter still requires a second real
+   consumer. Follow [Data-Driven Runtime Verification](data-driven-runtime-verification.md).
 3. Generalize provider lifecycle operations, including snapshot production,
-   from repeated provider profiles and operation evidence.
+   from repeated provider profiles and operation evidence, after the accepted
+   baseline and a real second operational use case.
 
 Do not combine the verifier and lifecycle adapter into one universal plugin
 system. They interpret different protocols and produce different evidence.

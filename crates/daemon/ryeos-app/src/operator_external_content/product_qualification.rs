@@ -6,6 +6,9 @@
 //! completed admitted verifier, and can publish that immutable testimony.
 
 #[cfg(test)]
+#[path = "product_qualification/auxiliary_admission_tests.rs"]
+mod auxiliary_admission_tests;
+#[cfg(test)]
 #[path = "product_qualification/consumer_definition_tests.rs"]
 mod consumer_definition_tests;
 pub mod launch;
@@ -136,6 +139,7 @@ pub fn finalize_pinned_qualification_launch(
     project_binding: &crate::thread_lifecycle::AdmittedProjectBinding,
     project_root: &Path,
     project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    project_context_resolver: &dyn QualificationProjectContextResolver,
 ) -> anyhow::Result<()> {
     use ryeos_state::objects::{ExecutionProjectAuthority, PinnedProjectRealization};
 
@@ -181,10 +185,16 @@ pub fn finalize_pinned_qualification_launch(
     {
         bail!("qualification root admission differs from its exact read-only snapshot request");
     }
-    if prepared.product_selections.len() != 1 {
-        bail!("pinned qualification requires exactly one daemon-derived Root product selection");
-    }
-    let selected_input = &prepared.product_selections[0];
+    ryeos_state::external_content::products::composition::validate_product_selection_inputs(
+        &prepared.product_selections,
+    )?;
+    let selected_input = prepared
+        .product_selections
+        .iter()
+        .find(|input| {
+            input.selection.declaration_id == prepared.policy_source.policy.subject_declaration_id
+        })
+        .context("pinned qualification lost its daemon-derived subject selector")?;
     if !matches!(selected_input.target, ProductSelectionTarget::Root {})
         || selected_input.selection.declaration_id
             != prepared.policy_source.policy.subject_declaration_id
@@ -221,9 +231,9 @@ pub fn finalize_pinned_qualification_launch(
             subject_authority,
             &mut selected_resolution,
             &selectors,
-            None,
+            Some(project_context_resolver),
         )?;
-    if retained.len() != 1 {
+    if retained.len() != prepared.product_selections.len() {
         bail!("pinned qualification admission resolved an unexpected Root selection count");
     }
     let selected = retained
@@ -256,10 +266,15 @@ pub fn finalize_pinned_qualification_launch(
         &prepared.policy_source.policy.verifier_parameters,
         CurrentVerifierContext {
             content: CurrentVerifierContent::Root(Some(&retained)),
-            logical_project_root: Some(project_root),
+            // Compilation uses the same logical root sealed by direct
+            // execution. The pinned context below retains the physical path
+            // and snapshot authority for source and product resolution.
+            logical_project_root: Some(std::path::Path::new(
+                ryeos_state::objects::ADMITTED_DIRECT_PROJECT_ROOT,
+            )),
             binding_subject_authority: Some(&plan_context.subject_resolution_authority),
             sealed_request: None,
-            project_context_resolver: None,
+            project_context_resolver: Some(project_context_resolver),
             pinned_admission: Some(&QualificationPinnedAdmissionContext {
                 plan_context,
                 request_engine,
@@ -853,6 +868,7 @@ fn match_retained_verifier_root_selections(
                     .get(&selector.declaration_id)
                     .context("qualification verifier lost a sealed root selection")?;
                 if selected.witness_hash != selector.witness_hash
+                    || selected.witness_source != selector.witness_source
                     || selected
                         .qualification
                         .as_ref()
@@ -3628,6 +3644,15 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(recovered, Some(retained.clone()));
+
+        let mut mismatched = inputs.clone();
+        mismatched[1].selection.witness_source = ProductWitnessSource::Received {
+            acceptance_hash: "c".repeat(64),
+        };
+        assert!(
+            match_retained_verifier_root_selections(&mismatched, Some(retained.clone()), "subject")
+                .is_err()
+        );
 
         let mut mismatched = inputs;
         mismatched[1].selection.witness_hash = "c".repeat(64);

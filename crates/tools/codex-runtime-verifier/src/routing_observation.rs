@@ -624,21 +624,32 @@ mod tests {
     use serde_json::json;
 
     fn fixture() -> (RoutingScenario, Vec<Value>) {
+        fixture_for_command(crate::GuestCommandFixture::WorkspaceRgVersion)
+    }
+
+    fn fixture_for_command(command: crate::GuestCommandFixture) -> (RoutingScenario, Vec<Value>) {
         let s = RoutingScenario {
             thread_id: "thread-1".into(),
             turn_id: "turn-1".into(),
             guest_cwd: "/workspace".into(),
             local_refusal_command: "printf forbidden > /controller/canary".into(),
-            guest_command_script: "pwd; rg --version".into(),
+            guest_command_script: command.command_script().into(),
             secret_read_script: "read < /controller/canary".into(),
             patch_input:
                 "*** Begin Patch\n*** Add File: candidate-strategy.txt\n+candidate\n*** End Patch"
                     .into(),
-            guest_command: "zsh -c 'pwd; rg --version'".into(),
+            guest_command: format!("zsh -c '{}'", command.command_script()),
             secret_read_command: "zsh -c 'read < /controller/canary'".into(),
             candidate_path: "/workspace/candidate-strategy.txt".into(),
             candidate_added_content: "candidate\n".into(),
-            expected_command_output: "/workspace\nripgrep fixture\n".into(),
+            expected_command_output: match command {
+                crate::GuestCommandFixture::WorkspaceRgVersion => {
+                    "/workspace\nripgrep fixture\n".into()
+                }
+                crate::GuestCommandFixture::WorkspaceRgVersionRequireAbsentCandidate => {
+                    "/workspace\nripgrep fixture\ncandidate-absent\n".into()
+                }
+            },
             secret_read_denial: "no such file or directory: /controller/canary".into(),
             controller_canary_value: "synthetic-controller-secret-never-exposed".into(),
         };
@@ -748,6 +759,36 @@ mod tests {
         let checked = check_notifications(&s, &events).unwrap();
         assert_eq!(checked.notification_count, 12);
         assert_eq!(checked.thread_id, s.thread_id);
+    }
+
+    #[test]
+    fn selected_command_refuses_another_profile_and_failed_absence_check() {
+        let (a, a_events) = fixture();
+        let (b, b_events) = fixture_for_command(
+            crate::GuestCommandFixture::WorkspaceRgVersionRequireAbsentCandidate,
+        );
+        check_notifications(&b, &b_events).unwrap();
+        assert!(check_notifications(&a, &b_events).is_err());
+        assert!(check_notifications(&b, &a_events).is_err());
+        let mut failed = b_events.clone();
+        for event in &mut failed {
+            let item = &mut event["params"]["item"];
+            if item["type"] == "commandExecution" && item["id"] == COMMAND_CALL {
+                item["exitCode"] = json!(74);
+                item["status"] = json!("failed");
+            }
+        }
+        // A pre-existing candidate entry must not pass even if an echoed
+        // marker remains in the terminal output.
+        assert!(check_notifications(&b, &failed).is_err());
+        let mut wrong_output = b_events;
+        for event in &mut wrong_output {
+            let item = &mut event["params"]["item"];
+            if item["type"] == "commandExecution" && item["id"] == COMMAND_CALL {
+                item["aggregatedOutput"] = json!(a.expected_command_output);
+            }
+        }
+        assert!(check_notifications(&b, &wrong_output).is_err());
     }
 
     #[test]

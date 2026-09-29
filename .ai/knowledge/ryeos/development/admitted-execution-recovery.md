@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-28T23:56:24Z:3ec6e5497656cb3f1953584c48154eda3c4da00dd907d3ec50ee5101dffc14dd:oLZOMxQc25rvMbZ+ufkg3BrzZLsgsO3BYUiSwg6GguDx4UtamLLVVkiXlE5ALp53RNXhjLssp47Vs33Oga+RAQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-29T01:55:16Z:c94f6c783c8aabbaa63d98a64b3f4fe22fb3b81717c9356598c5cd58ec8798e1:hqtUOFESgZb7+xVn/rDGdv1CwL5KLJaW8c4QkzTdJxP1zkrOU/ZcG6Mv88dE/DmdrozAaPX5ntx9RRMU1OYHCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.0.2"
+version: "1.1.0"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -61,6 +61,31 @@ at admission (including the managed runtime ref/hash/signer/served kind, or the
 exact direct route). A discriminant or executor string alone is insufficient:
 recovery must be able to validate the route without consulting today's runtime
 registry.
+
+## Product qualification admission and consumption
+
+Product qualification retains its daemon-derived purpose and the complete
+canonical Root product selection batch. Fresh admission and sealed-request
+validation apply the same subject rule: the exact policy subject is unqualified
+and cannot be replaced by an auxiliary. Read-only pinned qualification may carry
+additional inputs authenticated through normal product composition. It requires
+the exact snapshot authority and no workspace outputs. The existing projectless
+fixed-pin lane remains supported; it cannot acquire auxiliary inputs implicitly.
+
+Direct verifier compilation uses `ADMITTED_DIRECT_PROJECT_ROOT` for logical
+paths. The physical materialization and its lifetime proof remain in the exact
+pinned admission context; a temporary checkout path is not a portable program
+identity. The same snapshot resolver is used when a dependency's qualification
+requires reopening its own retained pinned context.
+
+Consuming a qualification additionally reconstructs the checker under current
+trusted policy and compares its exact identity with the retained evidence. This
+eligibility check does not change a recovering invocation's sealed program or
+authorize execution with newly selected inputs. See
+[remote development and qualification](remote-development-and-qualification.md)
+for the supported signed profiles and input contract. Source coverage of these
+boundaries is separate from an installed verifier's execution and settlement
+evidence.
 
 ## What recovery must NOT do
 

@@ -817,7 +817,7 @@ fn install_signed_independent_verifier_fixture(
     use anyhow::{Context as _, ensure};
 
     ensure!(!verifier_bytes.is_empty(), "verifier executable is empty");
-    let bundle_name = "independent-runtime-fixture";
+    let bundle_name = "codex-runtime-fixture";
     let bundle = state.join(bundle_name);
     ensure!(
         !bundle.exists(),
@@ -830,7 +830,7 @@ fn install_signed_independent_verifier_fixture(
         &keys.publisher,
     )?;
     ensure!(
-        binary.ends_with("/independent-runtime-verifier"),
+        binary.ends_with("/codex-runtime-verifier"),
         "installed verifier binary changed coordinate"
     );
     let signed_sources = if reserved_resume_race {
@@ -846,7 +846,7 @@ fn install_signed_independent_verifier_fixture(
         std::fs::create_dir_all(target.parent().context("signed source has no parent")?)?;
         std::fs::write(target, signed)?;
     }
-    let manifest = "name: independent-runtime-fixture\nversion: 1.0.0\ndescription: Exact signed independent verifier fixture\nprovides_kinds: []\nrequires_kinds: [tool, config]\nuses_kinds: []\n";
+    let manifest = "name: codex-runtime-fixture\nversion: 1.0.0\ndescription: Exact signed Codex app-server verifier fixture\nprovides_kinds: []\nrequires_kinds: [tool, config]\nuses_kinds: []\n";
     std::fs::write(
         bundle.join(".ai/manifest.yaml"),
         lillux::signature::sign_content_at(
@@ -1022,7 +1022,7 @@ async fn bind_independent_verifier_tree(
 }
 
 fn stage_independent_verifier_inputs(
-    configuration: &ryeos_independent_runtime_verifier::ExactScenario,
+    configuration: &ryeos_codex_runtime_verifier::ExactScenario,
 ) -> anyhow::Result<(
     tempfile::TempDir,
     admitted_worker_evidence::AdmittedWorkerEvidence,
@@ -1131,11 +1131,13 @@ fn stage_independent_verifier_inputs(
 /// Credential-free local diagnostic only. The realization tuple from the
 /// sample fixture is not a production Worker closure, so this cannot issue
 /// qualification claims even if the scoped Codex conversation succeeds.
-fn native_unsigned_direct_configuration()
--> anyhow::Result<ryeos_independent_runtime_verifier::ExactScenario> {
+fn native_unsigned_direct_configuration(
+    fixture: ryeos_codex_runtime_verifier::GuestCommandFixture,
+) -> anyhow::Result<ryeos_codex_runtime_verifier::ExactScenario> {
     use anyhow::Context as _;
+    use ryeos_codex_runtime_verifier::GuestCommandFixture;
 
-    let seed = independent_verifier_scenario::tests::scenario();
+    let seed = independent_verifier_scenario::tests::scenario_for_fixture(fixture);
     let mut value = serde_json::to_value(seed)?;
     value
         .as_object_mut()
@@ -1180,31 +1182,47 @@ fn native_unsigned_direct_configuration()
         "simd(runtime):+SSE2,+SSSE3,+AVX2\n\n",
         "PCRE2 10.45 is available (JIT is available)\n"
     ));
+    if fixture == GuestCommandFixture::WorkspaceRgVersionRequireAbsentCandidate {
+        let output = value["expected_command_output"].as_str().unwrap();
+        value["expected_command_output"] = json!(format!("{output}candidate-absent\n"));
+    }
     Ok(serde_json::from_value(value)?)
 }
 
 #[test]
 fn native_direct_configuration_is_unbound_and_credential_free() -> anyhow::Result<()> {
-    let configuration = native_unsigned_direct_configuration()?;
-    let value = serde_json::to_value(&configuration)?;
-    anyhow::ensure!(
-        configuration.subject_manifest_hash == "0".repeat(64)
-            && configuration.controller_manifest_hash == "0".repeat(64)
-            && configuration.tools_manifest_hash == "0".repeat(64)
-            && configuration.configurations_manifest_hash == "0".repeat(64)
-            && value["expected_producer_recipe"]["executable_source"]["manifest_hash"]
-                == "0".repeat(64)
-            && value["expected_producer_recipe"]["executable_source"]["executable_sha256"]
-                == configuration.codex_sha256
-            && configuration.responses_origin == "http://127.0.0.1:18765"
-            && !serde_json::to_string(&value)?.contains("api_key"),
-        "native diagnostic configuration unexpectedly carries authority or a bound import"
-    );
+    use ryeos_codex_runtime_verifier::GuestCommandFixture;
+
+    for fixture in [
+        GuestCommandFixture::WorkspaceRgVersion,
+        GuestCommandFixture::WorkspaceRgVersionRequireAbsentCandidate,
+    ] {
+        let configuration = native_unsigned_direct_configuration(fixture)?;
+        let value = serde_json::to_value(&configuration)?;
+        anyhow::ensure!(
+            configuration.subject_manifest_hash == "0".repeat(64)
+                && configuration.controller_manifest_hash == "0".repeat(64)
+                && configuration.tools_manifest_hash == "0".repeat(64)
+                && configuration.configurations_manifest_hash == "0".repeat(64)
+                && value["expected_producer_recipe"]["executable_source"]["manifest_hash"]
+                    == "0".repeat(64)
+                && value["expected_producer_recipe"]["executable_source"]["executable_sha256"]
+                    == configuration.codex_sha256
+                && configuration.responses_origin == "http://127.0.0.1:18765"
+                && configuration.profile.command_fixture == fixture
+                && configuration
+                    .expected_command_output
+                    .ends_with("candidate-absent\n")
+                    == (fixture == GuestCommandFixture::WorkspaceRgVersionRequireAbsentCandidate)
+                && !serde_json::to_string(&value)?.contains("api_key"),
+            "native diagnostic configuration unexpectedly carries authority or a bound import"
+        );
+    }
     Ok(())
 }
 
 fn author_independent_verifier_scenario(
-    mut configuration: ryeos_independent_runtime_verifier::ExactScenario,
+    mut configuration: ryeos_codex_runtime_verifier::ExactScenario,
     imports: &[Value; 4],
     admitted: &admitted_worker_evidence::AdmittedWorkerEvidence,
 ) -> anyhow::Result<independent_verifier_scenario::IndependentVerifierScenario> {
@@ -1298,7 +1316,7 @@ fn author_independent_verifier_scenario(
 
 async fn author_independent_verifier_scenario_from_public_import(
     input_root: &Path,
-    configuration: ryeos_independent_runtime_verifier::ExactScenario,
+    configuration: ryeos_codex_runtime_verifier::ExactScenario,
     admitted: &admitted_worker_evidence::AdmittedWorkerEvidence,
 ) -> anyhow::Result<independent_verifier_scenario::IndependentVerifierScenario> {
     let (mut authoring_node, _) = DaemonHarness::start_fast_with(
@@ -1458,6 +1476,7 @@ async fn capture_codex_subject_for_verifier(
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 async fn prepare_signed_direct_qualification_fixture(
+    fixture: ryeos_codex_runtime_verifier::GuestCommandFixture,
     reserved_resume_race: bool,
     gate_child: Option<lillux::InheritedDuplexChannelChildAuthority>,
 ) -> anyhow::Result<(
@@ -1468,10 +1487,10 @@ async fn prepare_signed_direct_qualification_fixture(
     use anyhow::{Context as _, ensure};
 
     let verifier_path = PathBuf::from(
-        std::env::var_os("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN")
-            .context("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN is required")?,
+        std::env::var_os("RYEOS_TEST_CODEX_RUNTIME_VERIFIER_BIN")
+            .context("RYEOS_TEST_CODEX_RUNTIME_VERIFIER_BIN is required")?,
     );
-    let configuration = native_unsigned_direct_configuration()?;
+    let configuration = native_unsigned_direct_configuration(fixture)?;
     let (input_root, admitted) = stage_independent_verifier_inputs(&configuration)?;
     let verifier_bytes =
         lillux::secure_fs::read_regular_file_bounded_no_follow(&verifier_path, 64 * 1024 * 1024)?;
@@ -1752,8 +1771,12 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
 -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
 
-    let (harness, scenario, captured_subject) =
-        prepare_signed_direct_qualification_fixture(false, None).await?;
+    let (harness, scenario, captured_subject) = prepare_signed_direct_qualification_fixture(
+        ryeos_codex_runtime_verifier::GuestCommandFixture::WorkspaceRgVersion,
+        false,
+        None,
+    )
+    .await?;
     let launch_id = "L-771adc873ac744bd89f1cac896098f51";
     let accepted = production_service(
         &harness,
@@ -1845,8 +1868,12 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
     use anyhow::{Context as _, ensure};
 
     let (mut gate, child) = common::ScopedReservedAttemptGate::pair()?;
-    let (harness, scenario, captured_subject) =
-        prepare_signed_direct_qualification_fixture(true, Some(child)).await?;
+    let (harness, scenario, captured_subject) = prepare_signed_direct_qualification_fixture(
+        ryeos_codex_runtime_verifier::GuestCommandFixture::WorkspaceRgVersion,
+        true,
+        Some(child),
+    )
+    .await?;
     let launch_id = "L-45e7fd8950c6f85790be5301dcd066cb";
     let accepted = production_service(
         &harness,

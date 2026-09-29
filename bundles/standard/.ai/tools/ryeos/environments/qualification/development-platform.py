@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-22T06:07:55Z:a7503d6c1a584ff945ef0e0afdb1bdcf5181f23a56a505f6bdf0b5bed659888b:SnniYM7+cnTokNtAP4W20GnAhzZ2ifQLXZUVtcLex47WEWyKuduyK7cMH09wqraxZtMCrWlJM+MGA7125pXmBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T03:29:28Z:e0042fb83a61634130924a45a0b867919575dce1b17a6559f1304d16e6a3bb98:+gj0J+mLMWvz9f0akHspR9DYkf8gfl+tPS7esETytggnmP3Yv7o938QAWkEciO18jjwEE8CNGZtxJIkJLNeWAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/environments/qualification
-#   version: "1.0.10"
-#   description: Independently qualify a retained RyeOS development platform
+#   version: "2.0.0"
+#   description: Qualify a retained x86-64 GNU platform against its admitted version profile
 #   executor_id: "@subprocess"
 #   execution_protocol: protocol:ryeos/core/opaque
 #   effects: live
@@ -10,8 +10,37 @@
 #   network_authority: isolated
 #   config_schema:
 #     type: object
-#     properties: {}
 #     additionalProperties: false
+#     required: [schema, bootstrap, tool_versions]
+#     properties:
+#       schema: {const: ryeos.development_platform_profile.v2}
+#       bootstrap:
+#         type: object
+#         additionalProperties: false
+#         required: [schema, artifact_class, execution_gate, target, rust_version, rust_host, zig_version, source_date_epoch, publisher_image, input_contract_body_sha256, producer_sha256, runtime_helper_sha256]
+#         properties:
+#           schema: {const: ryeos.development-toolchain-bootstrap.v2}
+#           artifact_class: {const: runtime_closed_platform_candidate}
+#           execution_gate: {const: target_local_binding_and_isolated_acceptance_required}
+#           target: {const: x86_64-unknown-linux-gnu}
+#           rust_version: {type: string, minLength: 5, maxLength: 14, pattern: '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'}
+#           rust_host: {const: x86_64-unknown-linux-gnu}
+#           zig_version: {type: string, minLength: 5, maxLength: 14, pattern: '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'}
+#           source_date_epoch: {type: string, minLength: 1, maxLength: 256, pattern: '^[0-9]+$'}
+#           publisher_image: {type: string, pattern: '^docker\.io/library/rust@sha256:[0-9a-f]{64}$'}
+#           input_contract_body_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+#           producer_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+#           runtime_helper_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+#       tool_versions:
+#         type: object
+#         required: [cargo, gcc, collect2, linker, archiver]
+#         additionalProperties: false
+#         properties:
+#           cargo: {type: string, minLength: 1, maxLength: 512, pattern: '^[ -~]+$'}
+#           gcc: {type: string, minLength: 1, maxLength: 512, pattern: '^[ -~]+$'}
+#           collect2: {type: string, minLength: 1, maxLength: 512, pattern: '^[ -~]+$'}
+#           linker: {type: string, minLength: 1, maxLength: 512, pattern: '^[ -~]+$'}
+#           archiver: {type: string, minLength: 1, maxLength: 512, pattern: '^[ -~]+$'}
 #   external_content:
 #     - id: producer-python
 #       kind: tree
@@ -50,12 +79,12 @@ import tempfile
 
 
 ROOT = Path("/ryeos/realizations/platform")
-PRODUCER = "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf"
 HASH = re.compile(r"[0-9a-f]{64}")
+RELEASE = re.compile(r"(?:0|[1-9][0-9]{0,3})\.(?:0|[1-9][0-9]{0,3})\.(?:0|[1-9][0-9]{0,3})")
 MAX_OUTPUT = 64 * 1024
 PROBE_ENVIRONMENT = {"LANG": "C", "LC_ALL": "C", "PATH": ""}
 QUALIFICATION_CLAIMS = (
-    "development_platform_abi_v1",
+    "development_platform_profile_v2",
     "development_platform_target_x86_64_linux_gnu_v1",
 )
 REQUIRED_EXECUTABLES = (
@@ -72,20 +101,49 @@ EXPECTED_TOP_LEVEL = {
     "RYEOS-RUNTIME-DEPENDENCIES", "RYEOS-RUNTIME-SOURCES", "RYEOS-TREE-SHA256",
     "UPSTREAM-RUST-MANIFEST.toml", "lib", "native", "rust", "share", "sysroot", "zig",
 }
-EXPECTED_BOOTSTRAP = {
-    "schema": "ryeos.development-toolchain-bootstrap.v2",
-    "artifact_class": "runtime_closed_platform_candidate",
-    "execution_gate": "target_local_binding_and_isolated_acceptance_required",
-    "target": "x86_64-unknown-linux-gnu",
-    "rust_version": "1.95.0",
-    "rust_host": "x86_64-unknown-linux-gnu",
-    "zig_version": "0.15.2",
-    "source_date_epoch": "1776297600",
-    "publisher_image": "docker.io/library/rust@sha256:443dd9a3260cf23c22fc05051dd5661dd7b4028d3d25dbaffab6563b63c3539c",
-    "input_contract_body_sha256": "f45aeeedd561db476cc61fd8261e916aed98ebab971885779d7f98aeea6ab243",
-    "producer_sha256": "1cb9cd66e11cc322e9f6bd77e8ae0fd8f4aa8bfab1c7b67698e5eb052ec9019b",
-    "runtime_helper_sha256": "de788af40f4fa79241cd43b703cebd1e28fb54d3c81eb18a118f4724121e4dc3",
-}
+BOOTSTRAP_FIELDS = frozenset({
+    "schema", "artifact_class", "execution_gate", "target", "rust_version",
+    "rust_host", "zig_version", "source_date_epoch", "publisher_image",
+    "input_contract_body_sha256", "producer_sha256", "runtime_helper_sha256",
+})
+TOOL_VERSION_FIELDS = frozenset({"cargo", "gcc", "collect2", "linker", "archiver"})
+
+
+def expected_bootstrap(params):
+    if not isinstance(params, dict) or set(params) != {"schema", "bootstrap", "tool_versions"} or \
+            params["schema"] != "ryeos.development_platform_profile.v2":
+        raise ValueError("unsupported development platform profile")
+    bootstrap = params["bootstrap"]
+    if not isinstance(bootstrap, dict) or set(bootstrap) != BOOTSTRAP_FIELDS or \
+            any(not isinstance(value, str) or not value or len(value) > 256
+                for value in bootstrap.values()):
+        raise ValueError("development platform bootstrap expectation is malformed")
+    if (bootstrap["schema"] != "ryeos.development-toolchain-bootstrap.v2" or
+            bootstrap["artifact_class"] != "runtime_closed_platform_candidate" or
+            bootstrap["execution_gate"] != "target_local_binding_and_isolated_acceptance_required" or
+            bootstrap["target"] != "x86_64-unknown-linux-gnu" or
+            bootstrap["rust_host"] != bootstrap["target"] or
+            not RELEASE.fullmatch(bootstrap["rust_version"]) or
+            not RELEASE.fullmatch(bootstrap["zig_version"]) or
+            not bootstrap["source_date_epoch"].isdigit() or
+            not bootstrap["publisher_image"].startswith("docker.io/library/rust@sha256:") or
+            not HASH.fullmatch(bootstrap["publisher_image"].removeprefix("docker.io/library/rust@sha256:")) or
+            any(not HASH.fullmatch(bootstrap[name]) for name in (
+                "input_contract_body_sha256", "producer_sha256", "runtime_helper_sha256"))):
+        raise ValueError("development platform bootstrap expectation is unsupported")
+    versions = params["tool_versions"]
+    if not isinstance(versions, dict) or set(versions) != TOOL_VERSION_FIELDS or any(
+            not isinstance(value, str) or not 1 <= len(value) <= 512 or
+            value != value.strip() or any(ord(character) < 32 or ord(character) > 126
+                                          for character in value)
+            for value in versions.values()):
+        raise ValueError("development platform tool version expectations are malformed")
+    # Cargo is shipped with the selected Rust distribution. Keep the release
+    # coordinate consistent, while the full build identity remains signed data.
+    cargo = versions["cargo"].split(" ")
+    if len(cargo) < 2 or cargo[0] != "cargo" or cargo[1] != bootstrap["rust_version"]:
+        raise ValueError("development platform Cargo release contradicts its Rust profile")
+    return bootstrap
 
 
 def realizations():
@@ -100,14 +158,20 @@ def realizations():
     if any(set(item) != keys or not isinstance(item["entry_count"], int) or
            not isinstance(item["total_bytes"], int) for item in value):
         raise ValueError("platform qualification realization identity is not canonical")
-    if python.get("manifest_hash") != PRODUCER or python.get("mount") != "producer-python":
+    # Signed Tool external_content pins the exact bootstrap runtime. The
+    # daemon-authored sealed set supplies its selected identity here.
+    if (python.get("kind") != "tree" or python.get("mode") != "pinned" or
+            python.get("mount_root") != "execution_runtime" or
+            python.get("mount") != "producer-python" or
+            not isinstance(python.get("manifest_hash"), str) or
+            not HASH.fullmatch(python["manifest_hash"])):
         raise ValueError("platform verifier runtime changed")
     if (subject.get("kind") != "tree" or subject.get("mode") != "pinned" or
             subject.get("mount_root") != "execution_runtime" or
             subject.get("mount") != "platform" or
             not HASH.fullmatch(subject.get("manifest_hash", ""))):
         raise ValueError("platform subject identity changed")
-    if subject["manifest_hash"] == PRODUCER:
+    if subject["manifest_hash"] == python["manifest_hash"]:
         raise ValueError("platform may not qualify itself")
     return subject
 
@@ -210,11 +274,11 @@ def cargo_identity():
                            environment=environment, cwd=scratch).strip()
 
 
-def gcc_identity():
+def gcc_identity(expected):
     # GCC reports its invoked basename. The retained executable is native/bin/gcc,
     # not the publisher image's x86_64-linux-gnu-gcc-14 path.
     version = run_program(ROOT / "native/bin/gcc", "--version").splitlines()[0]
-    if version != "gcc (Debian 14.2.0-19) 14.2.0":
+    if version != expected:
         raise ValueError("platform native compiler identity changed")
     return version
 
@@ -277,12 +341,12 @@ def inventory(root, subject):
     return entries
 
 
-def validate_bootstrap_testimony():
+def validate_bootstrap_testimony(expected):
     lines = regular(ROOT / "RYEOS-BOOTSTRAP", 16384).decode("utf-8", "strict").splitlines()
     if any(line.count("=") != 1 for line in lines):
         raise ValueError("platform bootstrap testimony is malformed")
     testimony = dict(line.split("=", 1) for line in lines)
-    if testimony != EXPECTED_BOOTSTRAP:
+    if testimony != expected:
         raise ValueError("platform bootstrap testimony changed")
 
 
@@ -419,10 +483,42 @@ def validate_dynamic_closure(root, relative, contract, runtime_directories):
             raise ValueError(f"platform ELF dependency is absent or ambiguous: {relative}: {member}")
 
 
-def execute(_params):
+def probe_compilers(bootstrap, expected_versions):
+    """Measure every supported tool identity and compare with signed expectations."""
+    rustc = ROOT / "rust/bin/rustc"
+    version = run_program(rustc, "-vV")
+    fields = dict(line.split(": ", 1) for line in version.splitlines() if ": " in line)
+    if fields.get("release") != bootstrap["rust_version"] or fields.get("host") != bootstrap["rust_host"]:
+        raise ValueError("platform compiler target or release changed")
+    cargo_version = cargo_identity()
+    gcc_version = gcc_identity(expected_versions["gcc"])
+    collect2_version = collect2_identity()
+    linker_version = run_program(ROOT / "native/bin/ld.lld", "--version").strip()
+    archiver_version = run_program(ROOT / "native/bin/ar", "--version").splitlines()[0]
+    zig_version = run_static_program(ROOT / "zig/zig", "version").strip()
+    if cargo_version != expected_versions["cargo"]:
+        raise ValueError("platform Cargo identity changed")
+    if collect2_version != expected_versions["collect2"]:
+        raise ValueError("platform native compiler driver identity changed")
+    if linker_version != expected_versions["linker"]:
+        raise ValueError("platform linker identity changed")
+    if archiver_version != expected_versions["archiver"]:
+        raise ValueError("platform archiver identity changed")
+    if zig_version != bootstrap["zig_version"]:
+        raise ValueError("platform Zig identity changed")
+    return fields, {
+        "implementation": "rustc", "release": fields["release"],
+        "commit_hash": fields.get("commit-hash"), "cargo": cargo_version,
+        "gcc": gcc_version, "collect2": collect2_version,
+        "linker": linker_version, "archiver": archiver_version, "zig": zig_version,
+    }
+
+
+def execute(params):
+    bootstrap = expected_bootstrap(params)
     subject = realizations()
     entries = inventory(ROOT, subject)
-    validate_bootstrap_testimony()
+    validate_bootstrap_testimony(bootstrap)
     validate_tree_testimony(entries)
     by_path = {entry["path"]: entry for entry in entries if entry["kind"] == "file"}
     for relative in REQUIRED_EXECUTABLES:
@@ -444,53 +540,21 @@ def execute(_params):
         validate_dynamic_closure(ROOT, relative, contract, runtime_directories)
         elf_contracts.append(contract)
     validate_runtime_testimony(entries, elf_contracts)
-    rustc = ROOT / "rust/bin/rustc"
-    loader = ROOT / "lib/ld-linux-x86-64.so.2"
-    libc = ROOT / "lib/libc.so.6"
-    identity = elf_identity(rustc)
-    version = run_program(rustc, "-vV")
-    fields = dict(line.split(": ", 1) for line in version.splitlines() if ": " in line)
-    if fields.get("release") != "1.95.0" or fields.get("host") != "x86_64-unknown-linux-gnu":
-        raise ValueError("platform compiler target or release changed")
-    cargo_version = cargo_identity()
-    gcc_version = gcc_identity()
-    collect2_version = collect2_identity()
-    linker_version = run_program(ROOT / "native/bin/ld.lld", "--version").strip()
-    archiver_version = run_program(ROOT / "native/bin/ar", "--version").splitlines()[0]
-    zig_version = run_static_program(ROOT / "zig/zig", "version").strip()
-    if cargo_version != "cargo 1.95.0 (f2d3ce0bd 2026-03-21)":
-        raise ValueError("platform Cargo identity changed")
-    if collect2_version != "collect2 version 14.2.0":
-        raise ValueError("platform native compiler driver identity changed")
-    if linker_version != "LLD 22.1.2 (/checkout/src/llvm-project/llvm 1cb4e3833c1919c2e6fb579a23ac0e2b22587b7e) (compatible with GNU linkers)":
-        raise ValueError("platform linker identity changed")
-    if archiver_version != "GNU ar (GNU Binutils for Debian) 2.44":
-        raise ValueError("platform archiver identity changed")
-    if zig_version != "0.15.2":
-        raise ValueError("platform Zig identity changed")
+    identity = elf_identity(ROOT / "rust/bin/rustc")
+    fields, compiler = probe_compilers(bootstrap, params["tool_versions"])
     rustlib = ROOT / "rust/lib/rustlib/x86_64-unknown-linux-gnu"
     if not rustlib.is_dir():
         raise ValueError("platform target standard library is absent")
     evidence = {
-        "schema": "ryeos.development_platform_evidence.v1",
+        "schema": "ryeos.development_platform_evidence.v2",
         "target": {"triple": fields["host"], "architecture": "x86_64", "operating_system": "linux", "abi": "gnu"},
-        "compiler": {
-            "implementation": "rustc",
-            "release": fields["release"],
-            "commit_hash": fields.get("commit-hash"),
-            "cargo": cargo_version,
-            "gcc": gcc_version,
-            "collect2": collect2_version,
-            "linker": linker_version,
-            "archiver": archiver_version,
-            "zig": zig_version,
-        },
+        "compiler": compiler,
         "executable": identity,
         "abi_members": {
-            "loader_sha256": hashlib.sha256(regular(loader, 4 * 1024 * 1024)).hexdigest(),
-            "libc_sha256": hashlib.sha256(regular(libc, 4 * 1024 * 1024)).hexdigest(),
+            "loader_sha256": hashlib.sha256(regular(ROOT / "lib/ld-linux-x86-64.so.2", 4 * 1024 * 1024)).hexdigest(),
+            "libc_sha256": hashlib.sha256(regular(ROOT / "lib/libc.so.6", 4 * 1024 * 1024)).hexdigest(),
         },
-        "schema_version": 1,
+        "schema_version": 2,
         "runtime_inventory_digest": hashlib.sha256(
             json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         "runtime_entry_count": len(entries),

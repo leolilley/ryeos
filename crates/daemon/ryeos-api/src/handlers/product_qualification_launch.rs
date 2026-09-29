@@ -144,6 +144,21 @@ pub async fn handle(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
+    handle_expected_verifier(req, ctx, state, None, None).await
+}
+
+/// A release stage may assert the checker it intends to use. This assertion
+/// only narrows the signed policy's selection; it cannot choose a different
+/// verifier, parameters, purpose or execution route.
+pub(super) async fn handle_expected_verifier(
+    req: Request,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+    expected_verifier_ref: Option<&str>,
+    expected_product_selections: Option<
+        &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    >,
+) -> Result<Value, HandlerError> {
     req.validate()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)
@@ -175,6 +190,19 @@ pub async fn handle(
     if prepared.launch_id != req.launch_id || prepared.owner_fingerprint != ctx.fingerprint {
         return Err(HandlerError::Internal(
             "prepared verifier differs from the reserved launch owner".to_string(),
+        ));
+    }
+    if expected_verifier_ref.is_some_and(|expected| expected != prepared.verifier_ref) {
+        return Err(HandlerError::BadRequest(
+            "signed qualification policy selects a different verifier than the release stage"
+                .into(),
+        ));
+    }
+    if expected_product_selections.is_some_and(|expected| expected != &prepared.product_selections)
+    {
+        return Err(HandlerError::BadRequest(
+            "signed qualification inputs differ from the release stage's composed selections"
+                .into(),
         ));
     }
 
@@ -373,6 +401,7 @@ pub async fn handle(
             &project_binding,
             &project.effective_path,
             provenance.project_authority(),
+            super::qualification_project_context::resolver(state.as_ref()).as_ref(),
         )
         .map_err(|error| HandlerError::BadRequest(format!("pinned verifier identity refused: {error:#}")))?;
         prepared
