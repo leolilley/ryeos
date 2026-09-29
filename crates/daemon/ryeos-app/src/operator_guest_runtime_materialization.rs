@@ -22,7 +22,7 @@ use ryeos_external_execution::guest_runtime_product::{
 use ryeos_state::objects::{
     GUEST_RUNTIME_MATERIALIZATION_SCHEMA, GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
     GuestRuntimeMaterializationSourceEvidence, MaterializationExecutorSource,
-    MaterializationSignedBundleManifest, MaterializationSignedItem,
+    MaterializationSignedBundleManifest, MaterializationSignedItem, MaterializationSignerKey,
 };
 use serde::{Deserialize, Serialize};
 
@@ -192,6 +192,7 @@ pub struct PreparedGuestOwnerMaterialization {
     source: GuestOwnerMaterializationSource,
     signed_recipe_sources: Vec<CapturedSignedBundleItemSource>,
     signed_bundle_manifests: Vec<CapturedSignedBundleManifest>,
+    signer_keys: Vec<MaterializationSignerKey>,
     executor_source_proof: BundlePayloadSourceProof,
 }
 
@@ -267,6 +268,7 @@ fn build_source_evidence(
     source: &GuestOwnerMaterializationSource,
     recipe_sources: &[CapturedSignedBundleItemSource],
     bundle_manifests: &[CapturedSignedBundleManifest],
+    signer_keys: &[MaterializationSignerKey],
     executor: &BundlePayloadSourceProof,
 ) -> Result<GuestRuntimeMaterializationSourceEvidence> {
     source.coordinate_digest()?;
@@ -352,6 +354,7 @@ fn build_source_evidence(
         kind: GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND.to_owned(),
         signed_recipe_items,
         signed_bundle_manifests,
+        signer_keys: signer_keys.to_vec(),
         executor: MaterializationExecutorSource {
             bundle_name: source.bundle_name.clone(),
             item_ref: executor.selected_item_ref.clone(),
@@ -401,6 +404,7 @@ impl PreparedGuestOwnerMaterialization {
             &self.source,
             &self.signed_recipe_sources,
             &self.signed_bundle_manifests,
+            &self.signer_keys,
             &self.executor_source_proof,
         )
     }
@@ -487,6 +491,39 @@ pub fn prepare_current_guest_owner_runtime(
             .signer_fingerprint
             .as_deref()
             .context("guest owner recipe has no admitted publisher")?;
+        let mut signer_fingerprints = signed_recipe_sources
+            .iter()
+            .map(|item| item.signer_fingerprint.clone())
+            .chain(
+                signed_bundle_manifests
+                    .iter()
+                    .map(|item| item.identity.signer_fingerprint.clone()),
+            )
+            .collect::<std::collections::BTreeSet<_>>();
+        signer_fingerprints.insert(publisher.to_owned());
+        let signer_keys = signer_fingerprints
+            .into_iter()
+            .map(|fingerprint| {
+                let key = state
+                    .engine
+                    .node_trust_store
+                    .get(&fingerprint)
+                    .context("checked materialization signer has no retained verifier")?;
+                ensure!(
+                    key.fingerprint == fingerprint
+                        && lillux::crypto::fingerprint(&key.verifying_key) == fingerprint,
+                    "checked materialization signer verifier differs from fingerprint"
+                );
+                Ok(MaterializationSignerKey {
+                    signer_fingerprint: fingerprint,
+                    verifying_key: format!(
+                        "ed25519:{}",
+                        base64::engine::general_purpose::STANDARD
+                            .encode(key.verifying_key.to_bytes())
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let recipe: GuestOwnerMaterializationRecipe = serde_json::from_value(
             resolution
                 .composed
@@ -576,6 +613,7 @@ pub fn prepare_current_guest_owner_runtime(
             source,
             signed_recipe_sources,
             signed_bundle_manifests,
+            signer_keys,
             executor_source_proof: payload.source_proof,
         })
     })
@@ -666,6 +704,15 @@ mod tests {
     #[test]
     fn source_evidence_joins_selected_executor_and_root_recipe() {
         let mut source = fixture_source();
+        let verifier = SigningKey::from_bytes(&[11u8; 32]).verifying_key();
+        source.recipe_publisher_fingerprint = lillux::crypto::fingerprint(&verifier);
+        let signer_keys = vec![MaterializationSignerKey {
+            signer_fingerprint: source.recipe_publisher_fingerprint.clone(),
+            verifying_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(verifier.to_bytes())
+            ),
+        }];
         let recipe = CapturedSignedBundleItemSource {
             resolved_ref: source.recipe_ref.clone(),
             source_root: ItemSourceRoot::Bundle {
@@ -721,6 +768,7 @@ mod tests {
             &source,
             std::slice::from_ref(&recipe),
             std::slice::from_ref(&bundle),
+            &signer_keys,
             &proof,
         )
         .unwrap();
@@ -736,11 +784,20 @@ mod tests {
         let mut changed = source.clone();
         changed.executor_sidecar_signed_digest = hash('8');
         assert!(
-            build_source_evidence(&changed, &[recipe.clone()], &[bundle.clone()], &proof).is_err()
+            build_source_evidence(
+                &changed,
+                &[recipe.clone()],
+                &[bundle.clone()],
+                &signer_keys,
+                &proof
+            )
+            .is_err()
         );
         changed = source.clone();
         changed.recipe_content_digest = hash('8');
-        assert!(build_source_evidence(&changed, &[recipe], &[bundle], &proof).is_err());
+        assert!(
+            build_source_evidence(&changed, &[recipe], &[bundle], &signer_keys, &proof).is_err()
+        );
     }
 
     #[test]

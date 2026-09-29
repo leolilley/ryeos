@@ -139,7 +139,7 @@ pub use guest_runtime_materialization::{
     GUEST_RUNTIME_MATERIALIZATION_SCHEMA, GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
     GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND, GuestRuntimeMaterializationSourceEvidence,
     GuestRuntimeMaterializationSubject, MaterializationExecutorSource,
-    MaterializationSignedBundleManifest, MaterializationSignedItem,
+    MaterializationSignedBundleManifest, MaterializationSignedItem, MaterializationSignerKey,
 };
 pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};

@@ -1354,6 +1354,7 @@ fn is_canonical_hash(hash: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use serde_json::json;
 
     fn h(byte: &str) -> String {
@@ -1788,6 +1789,8 @@ mod tests {
 
     #[test]
     fn guest_runtime_materialization_closure_is_narrow_and_typed() {
+        let key = lillux::crypto::SigningKey::from_bytes(&[17u8; 32]).verifying_key();
+        let signer = lillux::crypto::fingerprint(&key);
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         let signed_item = write_blob(&cas_root, b"signed recipe");
@@ -1814,21 +1817,25 @@ mod tests {
             "signed_recipe_items": [{
                 "resolved_ref": "config:codex/guest-owner-materialization",
                 "bundle_name": "codex",
-                "signer_fingerprint": h("aa"),
+                "signer_fingerprint": signer,
                 "signed_blob_hash": signed_item,
                 "raw_content_digest": h("bb")
             }],
             "signed_bundle_manifests": [{
                 "bundle_name": "codex",
-                "signer_fingerprint": h("cc"),
+                "signer_fingerprint": signer,
                 "signed_blob_hash": signed_bundle,
                 "body_digest": h("dd")
+            }],
+            "signer_keys": [{
+                "signer_fingerprint": signer,
+                "verifying_key": format!("ed25519:{}", base64::engine::general_purpose::STANDARD.encode(key.to_bytes()))
             }],
             "executor": {
                 "bundle_name": "codex",
                 "item_ref": item_ref,
                 "target_triple": "x86_64-unknown-linux-gnu",
-                "signer_fingerprint": h("ee"),
+                "signer_fingerprint": signer,
                 "signed_manifest_ref_blob_hash": signed_ref,
                 "manifest_object_blob_hash": manifest_bytes,
                 "item_source_object_hash": item_source,

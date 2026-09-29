@@ -4,6 +4,7 @@
 //! testimony. The node-signed attestation separately joins their hashes to an
 //! authenticated operator, checked source generation and materializer policy.
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -53,11 +54,21 @@ pub struct MaterializationExecutorSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct MaterializationSignerKey {
+    pub signer_fingerprint: String,
+    /// Exact historical Ed25519 verifier. This is verification data, never
+    /// authority for fresh admission after publisher revocation.
+    pub verifying_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuestRuntimeMaterializationSourceEvidence {
     pub schema: u32,
     pub kind: String,
     pub signed_recipe_items: Vec<MaterializationSignedItem>,
     pub signed_bundle_manifests: Vec<MaterializationSignedBundleManifest>,
+    pub signer_keys: Vec<MaterializationSignerKey>,
     pub executor: MaterializationExecutorSource,
 }
 
@@ -88,6 +99,34 @@ impl GuestRuntimeMaterializationSourceEvidence {
         }
         if self.signed_bundle_manifests.is_empty() || self.signed_bundle_manifests.len() > 8 {
             anyhow::bail!("guest-runtime materialization Bundle manifest count is invalid");
+        }
+        if self.signer_keys.is_empty() || self.signer_keys.len() > 16 {
+            anyhow::bail!("guest-runtime materialization signer key count is invalid");
+        }
+        let mut previous_signer: Option<&str> = None;
+        for signer in &self.signer_keys {
+            require_hash("source signer", &signer.signer_fingerprint)?;
+            if previous_signer
+                .is_some_and(|previous| previous >= signer.signer_fingerprint.as_str())
+            {
+                anyhow::bail!("guest-runtime materialization signer keys are not strictly ordered");
+            }
+            previous_signer = Some(&signer.signer_fingerprint);
+            let encoded = signer
+                .verifying_key
+                .strip_prefix("ed25519:")
+                .ok_or_else(|| anyhow::anyhow!("materialization signer key is not Ed25519"))?;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+            let key_bytes: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("materialization signer key has wrong length"))?;
+            let key = lillux::crypto::VerifyingKey::from_bytes(&key_bytes)?;
+            if key.is_weak()
+                || base64::engine::general_purpose::STANDARD.encode(key_bytes) != encoded
+                || lillux::crypto::fingerprint(&key) != signer.signer_fingerprint
+            {
+                anyhow::bail!("materialization signer key differs from fingerprint");
+            }
         }
         let mut previous_item: Option<(&str, &str)> = None;
         for item in &self.signed_recipe_items {
@@ -183,6 +222,28 @@ impl GuestRuntimeMaterializationSourceEvidence {
             ("executor payload blob", &executor.payload_blob_hash),
         ] {
             require_hash(label, hash)?;
+        }
+        let mut referenced_signers = self
+            .signed_recipe_items
+            .iter()
+            .map(|item| item.signer_fingerprint.as_str())
+            .chain(
+                self.signed_bundle_manifests
+                    .iter()
+                    .map(|bundle| bundle.signer_fingerprint.as_str()),
+            )
+            .chain(std::iter::once(executor.signer_fingerprint.as_str()))
+            .collect::<Vec<_>>();
+        referenced_signers.sort_unstable();
+        referenced_signers.dedup();
+        if referenced_signers
+            != self
+                .signer_keys
+                .iter()
+                .map(|key| key.signer_fingerprint.as_str())
+                .collect::<Vec<_>>()
+        {
+            anyhow::bail!("materialization signer keys differ from signed-source signers");
         }
         Ok(())
     }
@@ -294,27 +355,36 @@ mod tests {
     }
 
     fn source() -> GuestRuntimeMaterializationSourceEvidence {
+        let key = lillux::crypto::SigningKey::from_bytes(&[17u8; 32]).verifying_key();
+        let fingerprint = lillux::crypto::fingerprint(&key);
         GuestRuntimeMaterializationSourceEvidence {
             schema: GUEST_RUNTIME_MATERIALIZATION_SCHEMA,
             kind: GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND.to_owned(),
             signed_recipe_items: vec![MaterializationSignedItem {
                 resolved_ref: "config:codex/guest-owner-materialization".to_owned(),
                 bundle_name: "codex".to_owned(),
-                signer_fingerprint: hash('a'),
+                signer_fingerprint: fingerprint.clone(),
                 signed_blob_hash: hash('b'),
                 raw_content_digest: hash('c'),
             }],
             signed_bundle_manifests: vec![MaterializationSignedBundleManifest {
                 bundle_name: "codex".to_owned(),
-                signer_fingerprint: hash('d'),
+                signer_fingerprint: fingerprint.clone(),
                 signed_blob_hash: hash('e'),
                 body_digest: hash('f'),
+            }],
+            signer_keys: vec![MaterializationSignerKey {
+                signer_fingerprint: fingerprint.clone(),
+                verifying_key: format!(
+                    "ed25519:{}",
+                    base64::engine::general_purpose::STANDARD.encode(key.to_bytes())
+                ),
             }],
             executor: MaterializationExecutorSource {
                 bundle_name: "codex".to_owned(),
                 item_ref: "bin/x86_64-unknown-linux-gnu/owner".to_owned(),
                 target_triple: "x86_64-unknown-linux-gnu".to_owned(),
-                signer_fingerprint: hash('1'),
+                signer_fingerprint: fingerprint,
                 signed_manifest_ref_blob_hash: hash('2'),
                 manifest_object_blob_hash: hash('3'),
                 item_source_object_hash: hash('4'),
@@ -392,5 +462,35 @@ mod tests {
                 ..contradictory.signed_recipe_items[0].clone()
             });
         assert!(contradictory.validate().is_err());
+    }
+
+    #[test]
+    fn source_refuses_unbound_or_mismatched_historical_verifiers() {
+        let mut missing = source();
+        missing.signer_keys.clear();
+        assert!(missing.validate().is_err());
+        let mut substituted = source();
+        substituted.signer_keys[0].verifying_key = format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD.encode(
+                lillux::crypto::SigningKey::from_bytes(&[18u8; 32])
+                    .verifying_key()
+                    .to_bytes()
+            )
+        );
+        assert!(substituted.validate().is_err());
+        let mut unrelated = source();
+        let key = lillux::crypto::SigningKey::from_bytes(&[19u8; 32]).verifying_key();
+        unrelated.signer_keys.push(MaterializationSignerKey {
+            signer_fingerprint: lillux::crypto::fingerprint(&key),
+            verifying_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(key.to_bytes())
+            ),
+        });
+        unrelated
+            .signer_keys
+            .sort_by(|left, right| left.signer_fingerprint.cmp(&right.signer_fingerprint));
+        assert!(unrelated.validate().is_err());
     }
 }
