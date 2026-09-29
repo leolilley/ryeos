@@ -136,11 +136,13 @@ impl ScopedProducerProcessRegistry {
     pub fn interactive_io_exact(
         &self,
         record: &ScopedChildAttemptRecord,
-    ) -> Result<Option<(
-        Arc<ScopedProducerInteractiveIo>,
-        ProductProducerRecipe,
-        lillux::time::MonotonicDeadline,
-    )>> {
+    ) -> Result<
+        Option<(
+            Arc<ScopedProducerInteractiveIo>,
+            ProductProducerRecipe,
+            lillux::time::MonotonicDeadline,
+        )>,
+    > {
         let key = ScopedProducerProcessKey::new(
             record.initial.attempt_id.clone(),
             record.initial.owner.clone(),
@@ -167,14 +169,13 @@ impl ScopedProducerProcessRegistry {
         {
             return Ok(None);
         }
-        Ok(child
-            .interactive_io
-            .as_ref()
-            .map(|io| (
+        Ok(child.interactive_io.as_ref().map(|io| {
+            (
                 Arc::clone(io),
                 child.producer_recipe.clone(),
                 child.natural_wait_deadline,
-            )))
+            )
+        }))
     }
 
     /// Read-only lost-ACK lookup. A retained journal row by itself is not a
@@ -535,11 +536,9 @@ mod tests {
             unpredictable_nonce: "nonce".into(),
             daemon_generation_id: crate::runtime_db::daemon_generation_id().into(),
         };
-        let key = ScopedProducerProcessKey::new(
-            format!("scoped-{}", "a".repeat(64)),
-            owner.clone(),
-        )
-        .unwrap();
+        let key =
+            ScopedProducerProcessKey::new(format!("scoped-{}", "a".repeat(64)), owner.clone())
+                .unwrap();
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
             "version": 4, "control_timeout": {"secs": 1, "nanos": 0},
             "configuration": {"version": 3, "backend": {
@@ -563,11 +562,8 @@ mod tests {
             });
         }
         assert!(registry.is_observing_exact(&key).unwrap());
-        let wrong = ScopedProducerProcessKey::new(
-            format!("scoped-{}", "b".repeat(64)),
-            owner,
-        )
-        .unwrap();
+        let wrong =
+            ScopedProducerProcessKey::new(format!("scoped-{}", "b".repeat(64)), owner).unwrap();
         assert!(!registry.is_observing_exact(&wrong).unwrap());
         registry.state.lock().unwrap().slots[0].state = SlotState::Uncertain;
         assert!(!registry.is_observing_exact(&key).unwrap());

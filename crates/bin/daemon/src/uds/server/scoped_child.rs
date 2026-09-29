@@ -522,11 +522,15 @@ fn scoped_attempt_locator(
         .scoped_producer_processes
         .live_applied_evidence_exact(record)?
         .ok_or_else(|| anyhow::anyhow!("scoped locator has no exact live prelaunch target"))?;
-    let held_mounts = record.mount_preparation_evidence.as_ref()
+    let held_mounts = record
+        .mount_preparation_evidence
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("scoped locator has no retained held mount preparation"))?;
     anyhow::ensure!(
         held_mounts.plan_digest == isolation_plan_digest
-            && held_mounts.observed.matches_commitments(&held_mounts.expected)
+            && held_mounts
+                .observed
+                .matches_commitments(&held_mounts.expected)
             && applied.matches_post_release_mounts(&held_mounts.expected),
         "scoped locator held mount preparation differs from compiled plan"
     );

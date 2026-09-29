@@ -198,7 +198,11 @@ impl NodeConfigSnapshotBuilder {
         &mut self,
         record: super::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
     ) -> Result<()> {
-        if self.runtime_snapshot_qualification.iter().any(|prior| prior.id() == record.id()) {
+        if self
+            .runtime_snapshot_qualification
+            .iter()
+            .any(|prior| prior.id() == record.id())
+        {
             bail!("duplicate runtime snapshot qualification binding identity");
         }
         self.runtime_snapshot_qualification.push(record);

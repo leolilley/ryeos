@@ -283,9 +283,9 @@ pub fn observe_scoped_producer(
             return replay_observation(state, &record);
         }
         if state.scoped_producer_processes.is_observing_exact(key)? {
-            state.scoped_producer_processes.wait_for_change(
-                callback_deadline.remaining().min(Duration::from_secs(1)),
-            )?;
+            state
+                .scoped_producer_processes
+                .wait_for_change(callback_deadline.remaining().min(Duration::from_secs(1)))?;
             continue;
         }
         ensure!(
@@ -309,9 +309,9 @@ pub fn observe_scoped_producer(
         let child = match state.scoped_producer_processes.take_for_observation(key) {
             Ok(child) => child,
             Err(_error) if state.scoped_producer_processes.is_observing_exact(key)? => {
-                state.scoped_producer_processes.wait_for_change(
-                    callback_deadline.remaining().min(Duration::from_secs(1)),
-                )?;
+                state
+                    .scoped_producer_processes
+                    .wait_for_change(callback_deadline.remaining().min(Duration::from_secs(1)))?;
                 continue;
             }
             Err(error) => {

@@ -199,23 +199,23 @@ impl IsolationAdmittedCommand {
     /// and a realization member's pinned tree placement. A code digest alone
     /// cannot establish that two commands have the same execution authority.
     pub fn same_binding_as(&self, other: &Self) -> anyhow::Result<bool> {
-        let same_descriptor = |left: &IsolationDescriptorBoundCommand,
-                               right: &IsolationDescriptorBoundCommand| {
-            Ok::<bool, anyhow::Error>(
-                left.identity() == right.identity()
-                    && left.file_identity() == right.file_identity()
-                    && left.executable().same_file_identity(right.executable())?,
-            )
-        };
+        let same_descriptor =
+            |left: &IsolationDescriptorBoundCommand, right: &IsolationDescriptorBoundCommand| {
+                Ok::<bool, anyhow::Error>(
+                    left.identity() == right.identity()
+                        && left.file_identity() == right.file_identity()
+                        && left.executable().same_file_identity(right.executable())?,
+                )
+            };
         match (self, other) {
             (Self::DescriptorBound(left), Self::DescriptorBound(right)) => {
                 same_descriptor(left, right)
             }
-            (Self::RealizationMember(left), Self::RealizationMember(right)) => Ok(
-                left.realization_root() == right.realization_root()
+            (Self::RealizationMember(left), Self::RealizationMember(right)) => {
+                Ok(left.realization_root() == right.realization_root()
                     && left.realization_destination() == right.realization_destination()
-                    && same_descriptor(left.command(), right.command())?,
-            ),
+                    && same_descriptor(left.command(), right.command())?)
+            }
             _ => Ok(false),
         }
     }
@@ -795,8 +795,12 @@ mod tests {
     fn admitted_command_binding_includes_descriptor_variant_and_realization_tree() {
         let first_root = tempfile::tempdir().unwrap();
         let second_root = tempfile::tempdir().unwrap();
-        let first_root = lillux::PinnedDirectory::open(first_root.path()).unwrap().unwrap();
-        let second_root = lillux::PinnedDirectory::open(second_root.path()).unwrap().unwrap();
+        let first_root = lillux::PinnedDirectory::open(first_root.path())
+            .unwrap()
+            .unwrap();
+        let second_root = lillux::PinnedDirectory::open(second_root.path())
+            .unwrap()
+            .unwrap();
         let descriptor = lillux::sealed_memfd(c"admitted-command", b"exact-code").unwrap();
         let identity = IsolationVerifiedCode {
             source_path: "/runtime/bin/verifier".into(),
@@ -814,35 +818,40 @@ mod tests {
             file_type: 0,
         };
         let command = IsolationDescriptorBoundCommand::new(
-            identity.clone(), descriptor.clone(), file_identity,
+            identity.clone(),
+            descriptor.clone(),
+            file_identity,
         );
         let standalone = IsolationAdmittedCommand::DescriptorBound(command.clone());
-        let member = IsolationAdmittedCommand::RealizationMember(
-            IsolationRealizationMemberCommand::new(
-                command.clone(), first_root.identity().unwrap(), "/runtime".into(),
-            ),
-        );
+        let member =
+            IsolationAdmittedCommand::RealizationMember(IsolationRealizationMemberCommand::new(
+                command.clone(),
+                first_root.identity().unwrap(),
+                "/runtime".into(),
+            ));
         assert!(standalone.same_binding_as(&standalone.clone()).unwrap());
         assert!(member.same_binding_as(&member.clone()).unwrap());
         assert!(!standalone.same_binding_as(&member).unwrap());
-        let other_descriptor = IsolationAdmittedCommand::DescriptorBound(
-            IsolationDescriptorBoundCommand::new(
-                identity, lillux::sealed_memfd(c"other-command", b"exact-code").unwrap(),
+        let other_descriptor =
+            IsolationAdmittedCommand::DescriptorBound(IsolationDescriptorBoundCommand::new(
+                identity,
+                lillux::sealed_memfd(c"other-command", b"exact-code").unwrap(),
                 file_identity,
-            ),
-        );
+            ));
         assert!(!standalone.same_binding_as(&other_descriptor).unwrap());
-        let other_root = IsolationAdmittedCommand::RealizationMember(
-            IsolationRealizationMemberCommand::new(
-                command.clone(), second_root.identity().unwrap(), "/runtime".into(),
-            ),
-        );
+        let other_root =
+            IsolationAdmittedCommand::RealizationMember(IsolationRealizationMemberCommand::new(
+                command.clone(),
+                second_root.identity().unwrap(),
+                "/runtime".into(),
+            ));
         assert!(!member.same_binding_as(&other_root).unwrap());
-        let other_destination = IsolationAdmittedCommand::RealizationMember(
-            IsolationRealizationMemberCommand::new(
-                command, first_root.identity().unwrap(), "/other".into(),
-            ),
-        );
+        let other_destination =
+            IsolationAdmittedCommand::RealizationMember(IsolationRealizationMemberCommand::new(
+                command,
+                first_root.identity().unwrap(),
+                "/other".into(),
+            ));
         assert!(!member.same_binding_as(&other_destination).unwrap());
     }
 
@@ -943,18 +952,22 @@ mod tests {
             valid.destination(),
             Path::new("/ryeos/producer-prepared/codex-home")
         );
-        assert!(IsolationProducerPreparedDirectoryAuthority::new(
-            "../escape".into(),
-            "prepared/codex-home".into(),
-            source.inherited_descriptor_authority().unwrap(),
-        )
-        .is_err());
-        assert!(IsolationProducerPreparedDirectoryAuthority::new(
-            "codex-home".into(),
-            "prepared/../escape".into(),
-            source.inherited_descriptor_authority().unwrap(),
-        )
-        .is_err());
+        assert!(
+            IsolationProducerPreparedDirectoryAuthority::new(
+                "../escape".into(),
+                "prepared/codex-home".into(),
+                source.inherited_descriptor_authority().unwrap(),
+            )
+            .is_err()
+        );
+        assert!(
+            IsolationProducerPreparedDirectoryAuthority::new(
+                "codex-home".into(),
+                "prepared/../escape".into(),
+                source.inherited_descriptor_authority().unwrap(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

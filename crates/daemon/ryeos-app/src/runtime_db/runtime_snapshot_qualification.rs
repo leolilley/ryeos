@@ -78,7 +78,10 @@ fn canonical<T: Serialize>(value: &T) -> Result<String> {
     )?)
 }
 
-pub(super) fn read(conn: &Connection, operation_id: &str) -> Result<Option<SnapshotQualificationRecord>> {
+pub(super) fn read(
+    conn: &Connection,
+    operation_id: &str,
+) -> Result<Option<SnapshotQualificationRecord>> {
     let row: Option<(String, String, String, Option<String>, i64, i64)> = conn
         .query_row(
             "SELECT snapshot_operation_id,intent_json,phase,occurrence_json,created_at_ms,updated_at_ms
@@ -315,14 +318,13 @@ impl RuntimeDb {
 mod tests {
     use super::*;
     use ryeos_external_execution_contract::restored_runtime_measurement::{
-        RESTORED_OWNER_MEASUREMENT_PROTOCOL, RestoredOwnerChallenge,
-        RestoredOwnerMeasurement, RestoredVerifierAdapterObservation, RestoredVerifierAttemptIntent,
+        RESTORED_OWNER_MEASUREMENT_PROTOCOL, RestoredOwnerChallenge, RestoredOwnerMeasurement,
+        RestoredVerifierAdapterObservation, RestoredVerifierAttemptIntent,
     };
     use ryeos_external_execution_contract::runtime_snapshot::{
         RUNTIME_SNAPSHOT_INTENT_SCHEMA, RUNTIME_SNAPSHOT_RESULT_SCHEMA, RuntimeSnapshotIntent,
-        RuntimeSnapshotLocator, RuntimeSnapshotReadinessObservation,
-        RuntimeSnapshotQualificationTerminalObservation,
-        RuntimeSnapshotQualificationTerminationIntent,
+        RuntimeSnapshotLocator, RuntimeSnapshotQualificationTerminalObservation,
+        RuntimeSnapshotQualificationTerminationIntent, RuntimeSnapshotReadinessObservation,
     };
 
     #[test]
@@ -450,11 +452,18 @@ mod tests {
             db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
             super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::Reconcile(_)
         ));
-        db.quarantine_qualification_termination_attempt(&termination.operation_id).unwrap();
+        db.quarantine_qualification_termination_attempt(&termination.operation_id)
+            .unwrap();
         let mut changed_deadline = termination.clone();
         changed_deadline.attempt_deadline_ms += 1;
-        assert_eq!(changed_deadline.derived_operation_id().unwrap(), termination.operation_id);
-        assert!(db.reserve_qualification_termination(&changed_deadline).is_err());
+        assert_eq!(
+            changed_deadline.derived_operation_id().unwrap(),
+            termination.operation_id
+        );
+        assert!(
+            db.reserve_qualification_termination(&changed_deadline)
+                .is_err()
+        );
         let terminal = RuntimeSnapshotQualificationTerminalObservation {
             schema: 1,
             operation_id: termination.operation_id.clone(),
@@ -463,14 +472,18 @@ mod tests {
             terminated_at: "2026-09-28T00:02:00Z".into(),
             contact_deadline_exceeded: false,
         };
-        db.bind_qualification_terminal_observation(&terminal).unwrap();
+        db.bind_qualification_terminal_observation(&terminal)
+            .unwrap();
         assert!(matches!(
             db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
             super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::Terminal(_)
         ));
         let mut changed_terminal = terminal;
         changed_terminal.provider_response_sha256 = "b".repeat(64);
-        assert!(db.bind_qualification_terminal_observation(&changed_terminal).is_err());
+        assert!(
+            db.bind_qualification_terminal_observation(&changed_terminal)
+                .is_err()
+        );
         assert!(db.conn.execute(
             "UPDATE runtime_snapshot_qualification_termination SET phase='attempt_pending',observation_json=NULL WHERE operation_id=?1",
             [&termination.operation_id],
@@ -518,7 +531,10 @@ mod tests {
         ));
         let mut reminted = verifier.clone();
         reminted.challenge.nonce_hex = "6".repeat(64);
-        assert_eq!(reminted.derived_operation_id().unwrap(), verifier.operation_id);
+        assert_eq!(
+            reminted.derived_operation_id().unwrap(),
+            verifier.operation_id
+        );
         assert!(db.reserve_restored_verifier_attempt(&reminted).is_err());
         let observation = RestoredVerifierAdapterObservation {
             schema: 1,
@@ -540,12 +556,16 @@ mod tests {
         };
         db.bind_restored_verifier_observation(&observation).unwrap();
         assert!(matches!(
-            db.claim_restored_verifier_attempt(&verifier.operation_id).unwrap(),
+            db.claim_restored_verifier_attempt(&verifier.operation_id)
+                .unwrap(),
             super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::Observed(_)
         ));
         let mut changed_observation = observation;
         changed_observation.run_stream_sha256 = "9".repeat(64);
-        assert!(db.bind_restored_verifier_observation(&changed_observation).is_err());
+        assert!(
+            db.bind_restored_verifier_observation(&changed_observation)
+                .is_err()
+        );
         assert!(
             db.conn.execute(
                 "UPDATE restored_verifier_attempt SET phase='attempt_pending',observation_json=NULL WHERE operation_id=?1",

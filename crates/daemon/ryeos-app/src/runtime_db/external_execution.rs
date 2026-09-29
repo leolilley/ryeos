@@ -1652,6 +1652,8 @@ impl RuntimeDb {
 
     /// Idempotent reservation; no allocator may be contacted here. Unknown
     /// prior calls and quarantined occurrences retain capacity across restart.
+    /// Fixture entry; production uses StateStore's verified-owner path.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn reserve_external_allocation(
         &self,
         reservation: &ExternalAllocationReservation,
@@ -1744,6 +1746,8 @@ impl RuntimeDb {
     /// Only the winner of this durable CAS may contact the allocator.  The
     /// returned record is read in the same transaction, so a losing caller
     /// never reconciles from the stale phase it observed before the claim.
+    /// Unit-test entry; production uses StateStore's verified-owner path.
+    #[cfg(test)]
     pub(crate) fn claim_external_allocation_contact(
         &self,
         placement: &str,
@@ -3110,15 +3114,16 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(session.state, "outcome_unknown");
-        assert!(db
-            .fail_dedicated_session_start(
+        assert!(
+            db.fail_dedicated_session_start(
                 &reserved.placement_thread_id,
                 "worker-failed-start",
                 1,
                 "incorrect local-only cleanup claim",
                 true,
             )
-            .is_err());
+            .is_err()
+        );
         assert_eq!(
             db.dedicated_session(&reserved.placement_thread_id)
                 .unwrap()

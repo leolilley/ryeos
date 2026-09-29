@@ -67,7 +67,9 @@ pub struct PreparedThreadProcessScope {
 
 impl PreparedThreadProcessScope {
     pub fn take_scope(&mut self) -> anyhow::Result<lillux::ProcessScope> {
-        self.scope.take().context("prepared thread scope was already consumed")
+        self.scope
+            .take()
+            .context("prepared thread scope was already consumed")
     }
 
     pub fn reservation(&self) -> &crate::runtime_db::ThreadProcessScopeReservationRecord {
@@ -82,13 +84,17 @@ pub fn prepare_thread_scope_only(
     thread_id: &str,
     launch_owner: &str,
 ) -> anyhow::Result<PreparedThreadProcessScope> {
-    let allocation_name = format!("thread-{}", &lillux::sha256_hex(
-        lillux::canonical_json(&serde_json::json!({
-            "thread_id": thread_id,
-            "launch_owner": launch_owner,
-            "daemon_generation_id": crate::runtime_db::daemon_generation_id(),
-        }))?.as_bytes(),
-    )[..32]);
+    let allocation_name = format!(
+        "thread-{}",
+        &lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::json!({
+                "thread_id": thread_id,
+                "launch_owner": launch_owner,
+                "daemon_generation_id": crate::runtime_db::daemon_generation_id(),
+            }))?
+            .as_bytes(),
+        )[..32]
+    );
     let timeout = state.isolation.process_scope_control_timeout()?;
     let allocation = state.isolation.plan_process_scope(&allocation_name)?;
     let mut reservation = crate::runtime_db::ThreadProcessScopeReservationRecord {
@@ -98,32 +104,55 @@ pub fn prepare_thread_scope_only(
         scope_allocation: allocation.clone(),
         scope_recovery: None,
     };
-    state.state_store.reserve_thread_process_scope(&reservation)?;
+    state
+        .state_store
+        .reserve_thread_process_scope(&reservation)?;
     let scope = match state.isolation.allocate_process_scope(&allocation) {
         Ok(scope) => scope,
         Err(error) => {
             let error = anyhow::Error::from(error);
             return Err(match allocation.discard_unlaunched() {
-                Ok(()) => match state.state_store.clear_thread_process_scope_reservation(&reservation) {
+                Ok(()) => match state
+                    .state_store
+                    .clear_thread_process_scope_reservation(&reservation)
+                {
                     Ok(()) => error,
-                    Err(clear) => error.context(format!("discarded unlaunched scope but journal cleanup failed: {clear:#}")),
+                    Err(clear) => error.context(format!(
+                        "discarded unlaunched scope but journal cleanup failed: {clear:#}"
+                    )),
                 },
-                Err(cleanup) => error.context(format!("unlaunched thread scope cleanup remains unproved: {cleanup}")),
+                Err(cleanup) => error.context(format!(
+                    "unlaunched thread scope cleanup remains unproved: {cleanup}"
+                )),
             });
         }
     };
     let recovery = scope.recovery().clone();
-    if let Err(error) = state.state_store.bind_thread_process_scope(thread_id, launch_owner, &recovery) {
+    if let Err(error) =
+        state
+            .state_store
+            .bind_thread_process_scope(thread_id, launch_owner, &recovery)
+    {
         return Err(match scope.retire_unlaunched(timeout) {
-            Ok(()) => match state.state_store.clear_thread_process_scope_reservation(&reservation) {
+            Ok(()) => match state
+                .state_store
+                .clear_thread_process_scope_reservation(&reservation)
+            {
                 Ok(()) => error,
-                Err(clear) => error.context(format!("retired unlaunched scope but journal cleanup failed: {clear:#}")),
+                Err(clear) => error.context(format!(
+                    "retired unlaunched scope but journal cleanup failed: {clear:#}"
+                )),
             },
-            Err(cleanup) => error.context(format!("bound thread scope cleanup remains unproved: {cleanup}")),
+            Err(cleanup) => error.context(format!(
+                "bound thread scope cleanup remains unproved: {cleanup}"
+            )),
         });
     }
     reservation.scope_recovery = Some(recovery);
-    Ok(PreparedThreadProcessScope { reservation, scope: Some(scope) })
+    Ok(PreparedThreadProcessScope {
+        reservation,
+        scope: Some(scope),
+    })
 }
 
 pub fn cleanup_thread_scope_only(
@@ -131,12 +160,18 @@ pub fn cleanup_thread_scope_only(
     reservation: &crate::runtime_db::ThreadProcessScopeReservationRecord,
 ) -> anyhow::Result<()> {
     if let Some(recovery) = reservation.scope_recovery.as_ref() {
-        recovery.terminate_and_wait(state.isolation.process_scope_control_timeout()?)
+        recovery
+            .terminate_and_wait(state.isolation.process_scope_control_timeout()?)
             .map_err(anyhow::Error::msg)?;
     } else {
-        reservation.scope_allocation.discard_unlaunched().map_err(anyhow::Error::msg)?;
+        reservation
+            .scope_allocation
+            .discard_unlaunched()
+            .map_err(anyhow::Error::msg)?;
     }
-    state.state_store.clear_thread_process_scope_reservation(reservation)
+    state
+        .state_store
+        .clear_thread_process_scope_reservation(reservation)
 }
 
 impl PreparedProcessResourceScope {

@@ -1105,11 +1105,17 @@ fn reconcile_predecessor_scoped_children(state: &AppState) -> Result<usize> {
         }
         match record.phase {
             ScopedChildPhase::Reserved => {
-                state.state_store.claim_unbound_scoped_child_discard(attempt_id)?;
-                state.state_store.complete_unbound_scoped_child_discard(attempt_id)?;
+                state
+                    .state_store
+                    .claim_unbound_scoped_child_discard(attempt_id)?;
+                state
+                    .state_store
+                    .complete_unbound_scoped_child_discard(attempt_id)?;
             }
             ScopedChildPhase::UnboundDiscardPending => {
-                state.state_store.complete_unbound_scoped_child_discard(attempt_id)?;
+                state
+                    .state_store
+                    .complete_unbound_scoped_child_discard(attempt_id)?;
             }
             ScopedChildPhase::ScopeBound
             | ScopedChildPhase::ProcessAttached
@@ -1121,25 +1127,39 @@ fn reconcile_predecessor_scoped_children(state: &AppState) -> Result<usize> {
                 state
                     .state_store
                     .claim_bound_scoped_child_retirement(attempt_id, recovery)?;
-                state.state_store.prove_bound_scoped_child_death(attempt_id, recovery)?;
-                state.state_store.complete_bound_scoped_child_retirement(attempt_id)?;
+                state
+                    .state_store
+                    .prove_bound_scoped_child_death(attempt_id, recovery)?;
+                state
+                    .state_store
+                    .complete_bound_scoped_child_retirement(attempt_id)?;
             }
             ScopedChildPhase::BoundRetirementPending => {
                 let recovery = record.scope_recovery.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("pending scoped child death proof lacks exact scope")
                 })?;
-                state.state_store.prove_bound_scoped_child_death(attempt_id, recovery)?;
-                state.state_store.complete_bound_scoped_child_retirement(attempt_id)?;
+                state
+                    .state_store
+                    .prove_bound_scoped_child_death(attempt_id, recovery)?;
+                state
+                    .state_store
+                    .complete_bound_scoped_child_retirement(attempt_id)?;
             }
             ScopedChildPhase::BoundDeathProven => {
-                state.state_store.complete_bound_scoped_child_retirement(attempt_id)?;
+                state
+                    .state_store
+                    .complete_bound_scoped_child_retirement(attempt_id)?;
             }
             ScopedChildPhase::Retired => {
                 anyhow::bail!("retired scoped child appeared in unsettled recovery enumeration");
             }
         }
     }
-    if !state.state_store.unsettled_scoped_child_attempt_ids()?.is_empty() {
+    if !state
+        .state_store
+        .unsettled_scoped_child_attempt_ids()?
+        .is_empty()
+    {
         anyhow::bail!("startup scoped child recovery left unsettled attempts");
     }
     Ok(ids.len())
@@ -2292,10 +2312,19 @@ pub fn reconcile_process_resource_reservations(state: &AppState) -> Result<()> {
         // An allocated scope may have admitted a held process before the
         // predecessor died. Tombstone the root before retiring the scope so
         // later `created` recovery cannot mistake it for never-contacted work.
-        state.state_store.fence_thread_scope_recovery(&reservation)
-            .with_context(|| format!("fence uncertain scoped launch `{}`", reservation.thread_id))?;
+        state
+            .state_store
+            .fence_thread_scope_recovery(&reservation)
+            .with_context(|| {
+                format!("fence uncertain scoped launch `{}`", reservation.thread_id)
+            })?;
         ryeos_app::execution_resources::cleanup_thread_scope_only(state, &reservation)
-            .with_context(|| format!("retire retained scope-only thread `{}`", reservation.thread_id))?;
+            .with_context(|| {
+                format!(
+                    "retire retained scope-only thread `{}`",
+                    reservation.thread_id
+                )
+            })?;
     }
     for reservation in state.state_store.process_resource_reservations()? {
         ryeos_app::execution_resources::cleanup_process_resource_reservation(state, &reservation)

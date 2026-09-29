@@ -51,9 +51,11 @@ pub(crate) struct ExternalLifecycleObservation<T> {
 pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     fn backend_id(&self) -> &str;
     fn artifact_hash(&self) -> &str;
+    #[cfg(any(test, feature = "test-support"))]
     fn artifact_bytes(&self) -> u64;
     fn supervisor_artifact(&self) -> (&str, u64);
     fn launcher_artifact(&self) -> (&str, u64);
+    #[cfg(any(test, feature = "test-support"))]
     fn settings_schema_digest(&self) -> &str;
     fn preflight_runtime_snapshot(
         &self,
@@ -107,7 +109,7 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         _credential: &PlacementCredential,
         _request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterRequest,
         _deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterResponse>> {
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterResponse>>{
         bail!("external placement backend cannot create a qualification occurrence")
     }
     /// The caller owns the one-shot journal claim. `first_contact=false` is
@@ -120,14 +122,16 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         _request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterRequest,
         _first_contact: bool,
         _deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>> {
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>>{
         bail!("external placement backend cannot terminate a qualification occurrence")
     }
     fn seal_restoration_verifier_upload(
         &self,
         _producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
         _qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
-    ) -> Result<ryeos_external_execution::restoration_verifier_delivery::SealedRestorationVerifierUpload> {
+    ) -> Result<
+        ryeos_external_execution::restoration_verifier_delivery::SealedRestorationVerifierUpload,
+    > {
         bail!("external placement backend has no admitted restoration verifier")
     }
     fn verify_restored_snapshot_once(
@@ -138,7 +142,7 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         _request: &ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAdapterRequest,
         _upload: &lillux::InheritedDescriptorAuthority,
         _deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAdapterResponse>> {
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAdapterResponse>>{
         bail!("external placement backend cannot verify restored snapshot")
     }
     /// Effective capabilities from the exact installed adapter inspection.
@@ -949,8 +953,15 @@ impl ExternalPlacementBackendRegistry {
         &self,
         producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
         qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
-    ) -> Result<ryeos_external_execution::restoration_verifier_delivery::SealedRestorationVerifierUpload> {
-        let backend = self.backends.get(&(producer.backend().to_owned(), producer.adapter_artifact_hash().to_owned()))
+    ) -> Result<
+        ryeos_external_execution::restoration_verifier_delivery::SealedRestorationVerifierUpload,
+    > {
+        let backend = self
+            .backends
+            .get(&(
+                producer.backend().to_owned(),
+                producer.adapter_artifact_hash().to_owned(),
+            ))
             .context("exact signed restoration verifier adapter generation is not installed")?;
         backend.seal_restoration_verifier_upload(producer, qualification)
     }
@@ -963,10 +974,22 @@ impl ExternalPlacementBackendRegistry {
         request: &ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAdapterRequest,
         upload: &lillux::InheritedDescriptorAuthority,
         deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAdapterResponse>> {
-        let backend = self.backends.get(&(producer.backend().to_owned(), producer.adapter_artifact_hash().to_owned()))
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAdapterResponse>>{
+        let backend = self
+            .backends
+            .get(&(
+                producer.backend().to_owned(),
+                producer.adapter_artifact_hash().to_owned(),
+            ))
             .context("exact signed restoration verifier adapter generation is not installed")?;
-        backend.verify_restored_snapshot_once(producer, qualification, credential, request, upload, deadline)
+        backend.verify_restored_snapshot_once(
+            producer,
+            qualification,
+            credential,
+            request,
+            upload,
+            deadline,
+        )
     }
 
     pub(crate) fn preflight_snapshot_qualification_create(
@@ -975,7 +998,12 @@ impl ExternalPlacementBackendRegistry {
         qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
         credential: &PlacementCredential,
     ) -> Result<()> {
-        let backend = self.backends.get(&(producer.backend().to_owned(), producer.adapter_artifact_hash().to_owned()))
+        let backend = self
+            .backends
+            .get(&(
+                producer.backend().to_owned(),
+                producer.adapter_artifact_hash().to_owned(),
+            ))
             .context("exact signed qualification adapter generation is not installed")?;
         backend.preflight_snapshot_qualification_create(producer, qualification, credential)
     }
@@ -987,10 +1015,21 @@ impl ExternalPlacementBackendRegistry {
         credential: &PlacementCredential,
         request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterRequest,
         deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterResponse>> {
-        let backend = self.backends.get(&(producer.backend().to_owned(), producer.adapter_artifact_hash().to_owned()))
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterResponse>>{
+        let backend = self
+            .backends
+            .get(&(
+                producer.backend().to_owned(),
+                producer.adapter_artifact_hash().to_owned(),
+            ))
             .context("exact signed qualification adapter generation is not installed")?;
-        backend.create_snapshot_qualification_occurrence(producer, qualification, credential, request, deadline)
+        backend.create_snapshot_qualification_occurrence(
+            producer,
+            qualification,
+            credential,
+            request,
+            deadline,
+        )
     }
 
     pub(crate) fn terminate_snapshot_qualification_occurrence(
@@ -1001,11 +1040,23 @@ impl ExternalPlacementBackendRegistry {
         request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterRequest,
         first_contact: bool,
         deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>> {
-        let backend = self.backends.get(&(producer.backend().to_owned(), producer.adapter_artifact_hash().to_owned()))
-            .context("exact signed qualification termination adapter generation is not installed")?;
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>>{
+        let backend = self
+            .backends
+            .get(&(
+                producer.backend().to_owned(),
+                producer.adapter_artifact_hash().to_owned(),
+            ))
+            .context(
+                "exact signed qualification termination adapter generation is not installed",
+            )?;
         backend.terminate_snapshot_qualification_occurrence(
-            producer, qualification, credential, request, first_contact, deadline,
+            producer,
+            qualification,
+            credential,
+            request,
+            first_contact,
+            deadline,
         )
     }
 
@@ -4846,7 +4897,10 @@ pub mod test_support {
         state.node_config = Arc::new(crate::node_config::NodeConfigSnapshot {
             external_execution: vec![binding],
             runtime_snapshot_production: state.node_config.runtime_snapshot_production.clone(),
-            runtime_snapshot_qualification: state.node_config.runtime_snapshot_qualification.clone(),
+            runtime_snapshot_qualification: state
+                .node_config
+                .runtime_snapshot_qualification
+                .clone(),
             bundles: state.node_config.bundles.clone(),
             routes: state.node_config.routes.clone(),
             commands: state.node_config.commands.clone(),

@@ -35,7 +35,9 @@ impl ScopedProducerInteractiveIo {
         channel: lillux::exec::InheritedDuplexChannel,
         stdout: lillux::exec::ProcessStdoutReader,
     ) -> Result<Self> {
-        let interrupt = channel.try_clone().context("retain scoped input interrupt")?;
+        let interrupt = channel
+            .try_clone()
+            .context("retain scoped input interrupt")?;
         Ok(Self {
             input: Mutex::new(InputState {
                 channel,
@@ -60,7 +62,10 @@ impl ScopedProducerInteractiveIo {
             .input
             .lock()
             .map_err(|_| anyhow::anyhow!("scoped input lock poisoned"))?;
-        ensure!(!input.closed && !input.poisoned, "scoped input is closed or uncertain");
+        ensure!(
+            !input.closed && !input.poisoned,
+            "scoped input is closed or uncertain"
+        );
         if let Err(error) = input.channel.with_deadline(deadline).write_all(bytes) {
             input.poisoned = true;
             let _ = input.channel.shutdown();
@@ -76,7 +81,10 @@ impl ScopedProducerInteractiveIo {
             .input
             .lock()
             .map_err(|_| anyhow::anyhow!("scoped input lock poisoned"))?;
-        ensure!(!input.closed && !input.poisoned, "scoped input is closed or uncertain");
+        ensure!(
+            !input.closed && !input.poisoned,
+            "scoped input is closed or uncertain"
+        );
         if let Err(error) = input.channel.shutdown_write() {
             input.poisoned = true;
             let _ = input.channel.shutdown();

@@ -83,7 +83,9 @@ impl ExternalCandidateGuestEnvironment {
                 "external guest realization destination is invalid"
             );
             ensure!(
-                destinations.insert(entry.id.clone(), value.to_owned()).is_none(),
+                destinations
+                    .insert(entry.id.clone(), value.to_owned())
+                    .is_none(),
                 "external guest realization identity is duplicated"
             );
         }
@@ -110,10 +112,7 @@ impl ExternalCandidateGuestEnvironment {
             let root = destinations.get(realization_id).with_context(|| {
                 format!("external guest environment lost realization `{realization_id}`")
             })?;
-            require_absolute_normalized(
-                Path::new(root),
-                "external guest realization destination",
-            )?;
+            require_absolute_normalized(Path::new(root), "external guest realization destination")?;
             let mut path = PathBuf::from(root);
             if relative != "." {
                 path.push(relative);
@@ -2029,7 +2028,11 @@ mod tests {
         let error = requirement
             .resolve_for_use(Some(&selections), &changed)
             .unwrap_err();
-        assert!(error.to_string().contains("different admitted use: profile"));
+        assert!(
+            error
+                .to_string()
+                .contains("different admitted use: profile")
+        );
 
         for field in ["binding_hash", "content_manifest_hash"] {
             let mut changed_source = source.clone();

@@ -146,11 +146,19 @@ fn launch(request_fd: u32) -> ! {
         Err(error) => emit_refusal(status_fd, error),
     };
     let mount_preparation = process.mount_preparation_receipt().unwrap_or_else(|error| {
-        emit_refusal(status_fd, format!("final-root mount preparation missing: {error}"))
+        emit_refusal(
+            status_fd,
+            format!("final-root mount preparation missing: {error}"),
+        )
     });
-    let expected_mounts = mount_preparation.matches_request(&native).unwrap_or_else(|error| {
-        emit_refusal(status_fd, format!("compare final-root mount preparation: {error}"))
-    });
+    let expected_mounts = mount_preparation
+        .matches_request(&native)
+        .unwrap_or_else(|error| {
+            emit_refusal(
+                status_fd,
+                format!("compare final-root mount preparation: {error}"),
+            )
+        });
     if mount_preparation.owned_child_pid != process.child_pid() || !expected_mounts {
         emit_refusal(
             status_fd,
@@ -205,7 +213,8 @@ fn launch(request_fd: u32) -> ! {
     ) {
         emit_refusal(
             status_fd,
-            "applied-launch receipt or post-release mounts differ from translated signed plan".into(),
+            "applied-launch receipt or post-release mounts differ from translated signed plan"
+                .into(),
         );
     }
     let mut receipt_line = match serde_json::to_vec(&serde_json::json!({

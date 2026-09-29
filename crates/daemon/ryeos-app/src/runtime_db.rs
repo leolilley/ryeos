@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod external_execution;
+pub mod restored_verifier_attempt;
 pub mod runtime_snapshot;
 pub mod runtime_snapshot_qualification;
 pub mod runtime_snapshot_qualification_termination;
-pub mod restored_verifier_attempt;
 pub mod scoped_child_attempt;
 
 use crate::launch_metadata::{LAUNCH_METADATA_SCHEMA_VERSION, RuntimeLaunchMetadata};
@@ -178,10 +178,14 @@ impl ThreadProcessScopeReservationRecord {
         if self.daemon_generation_id.is_empty() {
             bail!("scope reservation lacks daemon generation");
         }
-        self.scope_allocation.validate().map_err(anyhow::Error::msg)?;
-        if self.scope_recovery.as_ref().is_some_and(|recovery| {
-            !recovery.matches_allocation(&self.scope_allocation)
-        }) {
+        self.scope_allocation
+            .validate()
+            .map_err(anyhow::Error::msg)?;
+        if self
+            .scope_recovery
+            .as_ref()
+            .is_some_and(|recovery| !recovery.matches_allocation(&self.scope_allocation))
+        {
             bail!("scope reservation recovery contradicts allocation");
         }
         Ok(())
@@ -444,7 +448,9 @@ fn consume_thread_process_scope_reservation(
         [thread_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional()?;
-    let Some((launch_owner, encoded)) = encoded else { return Ok(false) };
+    let Some((launch_owner, encoded)) = encoded else {
+        return Ok(false);
+    };
     let reservation: ThreadProcessScopeReservationRecord = serde_json::from_str(&encoded)?;
     reservation.validate()?;
     if reservation.thread_id != thread_id
@@ -456,9 +462,13 @@ fn consume_thread_process_scope_reservation(
     {
         bail!("held process differs from exact thread scope reservation");
     }
-    let claim_owner: Option<String> = conn.query_row(
-        "SELECT claimed_by FROM thread_launch_claim WHERE thread_id=?1", [thread_id], |row| row.get(0),
-    ).optional()?;
+    let claim_owner: Option<String> = conn
+        .query_row(
+            "SELECT claimed_by FROM thread_launch_claim WHERE thread_id=?1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .optional()?;
     if claim_owner.as_deref() != Some(launch_owner.as_str()) {
         bail!("thread scope reservation lost its exact launch owner");
     }
@@ -466,7 +476,9 @@ fn consume_thread_process_scope_reservation(
         "DELETE FROM thread_process_scope_reservation WHERE thread_id=?1 AND launch_owner=?2 AND reservation=?3",
         params![thread_id, launch_owner, encoded],
     )?;
-    if deleted != 1 { bail!("thread scope reservation was not consumed exactly once") }
+    if deleted != 1 {
+        bail!("thread scope reservation was not consumed exactly once")
+    }
     Ok(true)
 }
 
@@ -2647,36 +2659,161 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::TableSpec {
                 name: "scoped_child_attempt",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "attempt_id", col_type: "TEXT", pk: true, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "owner_thread_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "launch_owner", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "recipe_digest", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "recipe_generation", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "scenario_digest", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "scope_allocation", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "scope_recovery", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "process_identity", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "mount_preparation_evidence", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "natural_empty_receipt_digest", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "observation_object_hash", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "recovery_death_evidence_digest", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "retirement_evidence_digest", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "attempt_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "launch_owner",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "recipe_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "recipe_generation",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "scenario_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "scope_allocation",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "scope_recovery",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_identity",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "mount_preparation_evidence",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "natural_empty_receipt_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "observation_object_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "recovery_death_evidence_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "retirement_evidence_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
                 name: "scoped_child_input_operation",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "attempt_id", col_type: "TEXT", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "sequence", col_type: "INTEGER", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "kind", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "payload_digest", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "byte_count", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "attempt_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "sequence",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "kind",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "payload_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "byte_count",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
@@ -2972,50 +3109,195 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_operation",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "operation_id", col_type: "TEXT", pk: true, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "intent_json", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "intent_digest", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "locator_json", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "readiness_json", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "intent_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "intent_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "locator_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "readiness_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_qualification",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "operation_id", col_type: "TEXT", pk: true, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "snapshot_operation_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "intent_json", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "occurrence_json", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "snapshot_operation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "intent_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "occurrence_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_qualification_termination",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "operation_id", col_type: "TEXT", pk: true, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "qualification_operation_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "intent_json", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "observation_json", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "qualification_operation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "intent_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "observation_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
                 name: "restored_verifier_attempt",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "operation_id", col_type: "TEXT", pk: true, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "qualification_operation_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "intent_json", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "observation_json", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "qualification_operation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "intent_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "observation_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
@@ -3416,11 +3698,36 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::TableSpec {
                 name: "thread_process_scope_reservation",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "launch_owner", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "reservation", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "launch_owner",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reservation",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
@@ -13551,7 +13858,8 @@ impl RuntimeDb {
 
         let conn = self.conn.unchecked_transaction()?;
         let report = RuntimeThreadHistoryDiscardReport {
-            scoped_child_input_operations: conn.execute("DELETE FROM scoped_child_input_operation", [])?,
+            scoped_child_input_operations: conn
+                .execute("DELETE FROM scoped_child_input_operation", [])?,
             scoped_child_attempts: conn.execute("DELETE FROM scoped_child_attempt", [])?,
             in_process_handler_reservations: conn
                 .execute("DELETE FROM in_process_handler_reservation", [])?,
@@ -16605,7 +16913,8 @@ impl RuntimeDb {
             .then_some(ProcessReleaseFenceState::Pending.as_str());
 
         let tx = self.conn.unchecked_transaction()?;
-        let scope_only = consume_thread_process_scope_reservation(&tx, thread_id, process_identity)?;
+        let scope_only =
+            consume_thread_process_scope_reservation(&tx, thread_id, process_identity)?;
         if process_identity.process_scope.is_some()
             && process_identity.resource_selections.is_empty()
             && !scope_only
@@ -16719,10 +17028,15 @@ impl RuntimeDb {
         reservation: &ThreadProcessScopeReservationRecord,
     ) -> Result<()> {
         reservation.validate()?;
-        if reservation.scope_recovery.is_some() || reservation.daemon_generation_id != daemon_generation_id() {
+        if reservation.scope_recovery.is_some()
+            || reservation.daemon_generation_id != daemon_generation_id()
+        {
             bail!("thread scope intent must be unbound and current");
         }
-        let lifetime = reservation.scope_allocation.host_lifetime().map_err(anyhow::Error::msg)?;
+        let lifetime = reservation
+            .scope_allocation
+            .host_lifetime()
+            .map_err(anyhow::Error::msg)?;
         let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
         let encoded = lillux::canonical_json(&serde_json::to_value(reservation)?)?;
         let tx = self.conn.unchecked_transaction()?;
@@ -16737,8 +17051,13 @@ impl RuntimeDb {
                 AND t.pid IS NULL AND t.process_identity IS NULL",
             params![reservation.thread_id, reservation.launch_owner], |row| row.get(0),
         )?;
-        if eligible != 1 { bail!("thread scope intent lost exact launch owner or uncontacted thread") }
-        tx.execute("UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1", [&encoded_lifetime])?;
+        if eligible != 1 {
+            bail!("thread scope intent lost exact launch owner or uncontacted thread")
+        }
+        tx.execute(
+            "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
+            [&encoded_lifetime],
+        )?;
         tx.execute(
             "INSERT INTO thread_process_scope_reservation (thread_id, launch_owner, reservation, created_at_ms, updated_at_ms)
               VALUES (?1, ?2, ?3, ?4, ?4)",
@@ -16748,37 +17067,61 @@ impl RuntimeDb {
     }
 
     pub fn thread_process_scope_reservation(
-        &self, thread_id: &str,
+        &self,
+        thread_id: &str,
     ) -> Result<Option<ThreadProcessScopeReservationRecord>> {
-        let encoded: Option<String> = self.conn.query_row(
-            "SELECT reservation FROM thread_process_scope_reservation WHERE thread_id=?1",
-            [thread_id], |row| row.get(0),
-        ).optional()?;
-        encoded.map(|encoded| {
-            let reservation: ThreadProcessScopeReservationRecord = serde_json::from_str(&encoded)?;
-            reservation.validate()?;
-            if reservation.thread_id != thread_id || lillux::canonical_json(&serde_json::to_value(&reservation)?)? != encoded {
-                bail!("thread scope intent is not exact canonical authority");
-            }
-            Ok(reservation)
-        }).transpose()
+        let encoded: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT reservation FROM thread_process_scope_reservation WHERE thread_id=?1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        encoded
+            .map(|encoded| {
+                let reservation: ThreadProcessScopeReservationRecord =
+                    serde_json::from_str(&encoded)?;
+                reservation.validate()?;
+                if reservation.thread_id != thread_id
+                    || lillux::canonical_json(&serde_json::to_value(&reservation)?)? != encoded
+                {
+                    bail!("thread scope intent is not exact canonical authority");
+                }
+                Ok(reservation)
+            })
+            .transpose()
     }
 
-    pub fn thread_process_scope_reservations(&self) -> Result<Vec<ThreadProcessScopeReservationRecord>> {
+    pub fn thread_process_scope_reservations(
+        &self,
+    ) -> Result<Vec<ThreadProcessScopeReservationRecord>> {
         let mut statement = self.conn.prepare(
             "SELECT thread_id, launch_owner, reservation FROM thread_process_scope_reservation ORDER BY thread_id"
         )?;
-        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter().map(|(thread_id, launch_owner, encoded)| {
-            let reservation: ThreadProcessScopeReservationRecord = serde_json::from_str(&encoded)?;
-            reservation.validate()?;
-            if reservation.thread_id != thread_id || reservation.launch_owner != launch_owner
-                || lillux::canonical_json(&serde_json::to_value(&reservation)?)? != encoded {
-                bail!("retained thread scope reservation is not exact canonical authority");
-            }
-            Ok(reservation)
-        }).collect()
+        rows.into_iter()
+            .map(|(thread_id, launch_owner, encoded)| {
+                let reservation: ThreadProcessScopeReservationRecord =
+                    serde_json::from_str(&encoded)?;
+                reservation.validate()?;
+                if reservation.thread_id != thread_id
+                    || reservation.launch_owner != launch_owner
+                    || lillux::canonical_json(&serde_json::to_value(&reservation)?)? != encoded
+                {
+                    bail!("retained thread scope reservation is not exact canonical authority");
+                }
+                Ok(reservation)
+            })
+            .collect()
     }
 
     /// Startup recovery's no-relaunch cut. A pre-attach scope may already
@@ -16786,7 +17129,8 @@ impl RuntimeDb {
     /// before Lillux retirement is attempted. A proof failure leaves both
     /// tombstone and exact scope row in place.
     pub fn fence_thread_process_scope_recovery(
-        &self, reservation: &ThreadProcessScopeReservationRecord,
+        &self,
+        reservation: &ThreadProcessScopeReservationRecord,
     ) -> Result<()> {
         reservation.validate()?;
         let encoded = lillux::canonical_json(&serde_json::to_value(reservation)?)?;
@@ -16797,21 +17141,33 @@ impl RuntimeDb {
               WHERE thread_id=?1 AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
                 AND EXISTS(SELECT 1 FROM thread_process_scope_reservation
                     WHERE thread_id=?1 AND launch_owner=?2 AND reservation=?3)",
-            params![reservation.thread_id, reservation.launch_owner, encoded,
-                i64::try_from(lillux::time::timestamp_millis())?],
+            params![
+                reservation.thread_id,
+                reservation.launch_owner,
+                encoded,
+                i64::try_from(lillux::time::timestamp_millis())?
+            ],
         )?;
-        if changed != 1 { bail!("scope-only recovery lost exact unattached intent") }
+        if changed != 1 {
+            bail!("scope-only recovery lost exact unattached intent")
+        }
         tx.commit().context("fence uncertain scope-only launch")
     }
 
     pub fn bind_thread_process_scope(
-        &self, thread_id: &str, launch_owner: &str, recovery: &lillux::ProcessScopeRecovery,
+        &self,
+        thread_id: &str,
+        launch_owner: &str,
+        recovery: &lillux::ProcessScopeRecovery,
     ) -> Result<()> {
-        let mut reservation = self.thread_process_scope_reservation(thread_id)?
+        let mut reservation = self
+            .thread_process_scope_reservation(thread_id)?
             .ok_or_else(|| anyhow!("thread scope binding has no intent"))?;
-        if reservation.launch_owner != launch_owner || reservation.scope_recovery.is_some()
+        if reservation.launch_owner != launch_owner
+            || reservation.scope_recovery.is_some()
             || reservation.daemon_generation_id != daemon_generation_id()
-            || !recovery.matches_allocation(&reservation.scope_allocation) {
+            || !recovery.matches_allocation(&reservation.scope_allocation)
+        {
             bail!("thread scope binding contradicts exact allocation or launch owner");
         }
         let expected = lillux::canonical_json(&serde_json::to_value(&reservation)?)?;
@@ -16824,12 +17180,15 @@ impl RuntimeDb {
                 AND EXISTS(SELECT 1 FROM thread_runtime WHERE thread_id=?1 AND stop_requested_at_ms IS NULL AND process_identity IS NULL)",
             params![thread_id, launch_owner, expected, bound, i64::try_from(lillux::time::timestamp_millis())?],
         )?;
-        if changed != 1 { bail!("thread scope binding was not committed exactly once") }
+        if changed != 1 {
+            bail!("thread scope binding was not committed exactly once")
+        }
         Ok(())
     }
 
     pub fn clear_thread_process_scope_reservation(
-        &self, reservation: &ThreadProcessScopeReservationRecord,
+        &self,
+        reservation: &ThreadProcessScopeReservationRecord,
     ) -> Result<()> {
         reservation.validate()?;
         let encoded = lillux::canonical_json(&serde_json::to_value(reservation)?)?;
@@ -16838,7 +17197,9 @@ impl RuntimeDb {
             "DELETE FROM thread_process_scope_reservation WHERE thread_id=?1 AND launch_owner=?2 AND reservation=?3",
             params![reservation.thread_id, reservation.launch_owner, encoded],
         )?;
-        if changed != 1 { bail!("exact thread scope reservation is absent or contradictory") }
+        if changed != 1 {
+            bail!("exact thread scope reservation is absent or contradictory")
+        }
         clear_scope_lifetime_fence_if_settled(&tx)?;
         tx.commit().context("clear thread scope reservation")
     }
@@ -26343,9 +26704,11 @@ mod tests {
     fn scope_only_thread_intent_is_owner_fenced_and_consumed_at_held_attach() {
         let (tmp, db) = fresh_db();
         db.insert_thread_runtime("scope-t", "scope-c").unwrap();
-        db.claim_thread_launch("scope-t", "scope-claim", daemon_generation_id()).unwrap();
+        db.claim_thread_launch("scope-t", "scope-claim", daemon_generation_id())
+            .unwrap();
         let owner = db.get_launch_claim("scope-t").unwrap().unwrap().claimed_by;
-        let host = serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
+        let host =
+            serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
         let planned = serde_json::json!({
             "version": 2,
             "control_timeout": {"secs": 1, "nanos": 0},
@@ -26357,11 +26720,14 @@ mod tests {
                 "parent": {"containing_device": 1, "inode": 2},
                 "name": "scope-only-test"}
         });
-        let allocation: lillux::ProcessScopeAllocation = serde_json::from_value(planned.clone()).unwrap();
+        let allocation: lillux::ProcessScopeAllocation =
+            serde_json::from_value(planned.clone()).unwrap();
         let reservation = ThreadProcessScopeReservationRecord {
-            thread_id: "scope-t".into(), launch_owner: owner.clone(),
+            thread_id: "scope-t".into(),
+            launch_owner: owner.clone(),
             daemon_generation_id: daemon_generation_id().into(),
-            scope_allocation: allocation, scope_recovery: None,
+            scope_allocation: allocation,
+            scope_recovery: None,
         };
         db.reserve_thread_process_scope(&reservation).unwrap();
         assert!(db.reserve_thread_process_scope(&reservation).is_err());
@@ -26369,65 +26735,149 @@ mod tests {
         bound["version"] = 4.into();
         bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 101});
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
-        assert!(db.bind_thread_process_scope("scope-t", "wrong-owner", &recovery).is_err());
-        db.bind_thread_process_scope("scope-t", &owner, &recovery).unwrap();
-        assert!(db.bind_thread_process_scope("scope-t", &owner, &recovery).is_err());
+        assert!(
+            db.bind_thread_process_scope("scope-t", "wrong-owner", &recovery)
+                .is_err()
+        );
+        db.bind_thread_process_scope("scope-t", &owner, &recovery)
+            .unwrap();
+        assert!(
+            db.bind_thread_process_scope("scope-t", &owner, &recovery)
+                .is_err()
+        );
         let mut wrong = fake_process_identity(101, 101);
         wrong.boot_id = host["backend"]["boot_id"].as_str().unwrap().into();
-        assert!(db.attach_new_process("scope-t", 101, 101, &wrong, &RuntimeLaunchMetadata::default()).is_err());
+        assert!(
+            db.attach_new_process(
+                "scope-t",
+                101,
+                101,
+                &wrong,
+                &RuntimeLaunchMetadata::default()
+            )
+            .is_err()
+        );
         let mut exact = wrong;
         exact.process_scope = Some(recovery);
-        db.attach_new_process("scope-t", 101, 101, &exact, &RuntimeLaunchMetadata::default()).unwrap();
-        assert!(db.thread_process_scope_reservation("scope-t").unwrap().is_none());
-        assert_eq!(db.get_runtime_info("scope-t").unwrap().unwrap().process_release_fence, Some(ProcessReleaseFenceState::Pending));
+        db.attach_new_process(
+            "scope-t",
+            101,
+            101,
+            &exact,
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
+        assert!(
+            db.thread_process_scope_reservation("scope-t")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            db.get_runtime_info("scope-t")
+                .unwrap()
+                .unwrap()
+                .process_release_fence,
+            Some(ProcessReleaseFenceState::Pending)
+        );
         let path = tmp.path().join("runtime.db");
         drop(db);
         let reopened = RuntimeDb::open(&path).unwrap();
-        assert!(reopened.thread_process_scope_reservations().unwrap().is_empty());
-        assert_eq!(reopened.get_runtime_info("scope-t").unwrap().unwrap().process_identity, Some(exact.clone()));
-        reopened.consume_process_release_fence("scope-t", &exact).unwrap();
-        assert!(reopened.consume_process_release_fence("scope-t", &exact).is_err());
-        assert!(reopened.clear_process_if_matches("scope-t", &exact).unwrap());
+        assert!(
+            reopened
+                .thread_process_scope_reservations()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .get_runtime_info("scope-t")
+                .unwrap()
+                .unwrap()
+                .process_identity,
+            Some(exact.clone())
+        );
+        reopened
+            .consume_process_release_fence("scope-t", &exact)
+            .unwrap();
+        assert!(
+            reopened
+                .consume_process_release_fence("scope-t", &exact)
+                .is_err()
+        );
+        assert!(
+            reopened
+                .clear_process_if_matches("scope-t", &exact)
+                .unwrap()
+        );
     }
 
     #[test]
     fn scope_only_cold_recovery_tombstones_before_unproved_cleanup() {
         let (_tmp, db) = fresh_db();
-        db.insert_thread_runtime("scope-recovery", "scope-chain").unwrap();
-        db.claim_thread_launch("scope-recovery", "crashed-owner", daemon_generation_id()).unwrap();
-        let owner = db.get_launch_claim("scope-recovery").unwrap().unwrap().claimed_by;
-        let host = serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
-        let allocation: lillux::ProcessScopeAllocation = serde_json::from_value(serde_json::json!({
-            "version": 2,
-            "control_timeout": {"secs": 1, "nanos": 0},
-            "configuration": {"version": 3, "backend": {
-                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
-            }},
-            "backend": {"implementation": "linux_cgroup_v2",
-                "boot_id": host["backend"]["boot_id"],
-                "parent": {"containing_device": 1, "inode": 2},
-                "name": "scope-recovery-test"}
-        })).unwrap();
+        db.insert_thread_runtime("scope-recovery", "scope-chain")
+            .unwrap();
+        db.claim_thread_launch("scope-recovery", "crashed-owner", daemon_generation_id())
+            .unwrap();
+        let owner = db
+            .get_launch_claim("scope-recovery")
+            .unwrap()
+            .unwrap()
+            .claimed_by;
+        let host =
+            serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
+        let allocation: lillux::ProcessScopeAllocation =
+            serde_json::from_value(serde_json::json!({
+                "version": 2,
+                "control_timeout": {"secs": 1, "nanos": 0},
+                "configuration": {"version": 3, "backend": {
+                    "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+                }},
+                "backend": {"implementation": "linux_cgroup_v2",
+                    "boot_id": host["backend"]["boot_id"],
+                    "parent": {"containing_device": 1, "inode": 2},
+                    "name": "scope-recovery-test"}
+            }))
+            .unwrap();
         let reservation = ThreadProcessScopeReservationRecord {
-            thread_id: "scope-recovery".into(), launch_owner: owner,
+            thread_id: "scope-recovery".into(),
+            launch_owner: owner,
             daemon_generation_id: daemon_generation_id().into(),
-            scope_allocation: allocation, scope_recovery: None,
+            scope_allocation: allocation,
+            scope_recovery: None,
         };
         db.reserve_thread_process_scope(&reservation).unwrap();
         assert!(db.unsettled_process_scope_count(None).unwrap() > 0);
-        db.fence_thread_process_scope_recovery(&reservation).unwrap();
+        db.fence_thread_process_scope_recovery(&reservation)
+            .unwrap();
         let runtime = db.get_runtime_info("scope-recovery").unwrap().unwrap();
         assert_eq!(runtime.stop_intent, Some(StopIntent::Kill));
         assert!(runtime.stop_requested_at_ms.is_some());
-        assert!(db.thread_process_scope_reservation("scope-recovery").unwrap().is_some());
-        assert!(db.attach_new_process(
-            "scope-recovery", 101, 101, &fake_process_identity(101, 101),
-            &RuntimeLaunchMetadata::default(),
-        ).is_err());
+        assert!(
+            db.thread_process_scope_reservation("scope-recovery")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.attach_new_process(
+                "scope-recovery",
+                101,
+                101,
+                &fake_process_identity(101, 101),
+                &RuntimeLaunchMetadata::default(),
+            )
+            .is_err()
+        );
         let mut contradictory = reservation.clone();
         contradictory.launch_owner = "other-owner".into();
-        assert!(db.fence_thread_process_scope_recovery(&contradictory).is_err());
-        assert!(db.thread_process_scope_reservation("scope-recovery").unwrap().is_some());
+        assert!(
+            db.fence_thread_process_scope_recovery(&contradictory)
+                .is_err()
+        );
+        assert!(
+            db.thread_process_scope_reservation("scope-recovery")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

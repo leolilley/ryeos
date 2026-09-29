@@ -13,9 +13,10 @@ use ryeos_external_execution_contract::restored_runtime_measurement::{
 use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotAdapterRequest,
     RuntimeSnapshotAdapterResponse, RuntimeSnapshotQualificationAdapterRequest,
-    RuntimeSnapshotQualificationAdapterResponse, RuntimeSnapshotReadinessObservation,
-    RuntimeSnapshotReadinessRequest, RuntimeSnapshotQualificationTerminationAdapterRequest,
-    RuntimeSnapshotQualificationTerminationAdapterResponse,
+    RuntimeSnapshotQualificationAdapterResponse,
+    RuntimeSnapshotQualificationTerminationAdapterRequest,
+    RuntimeSnapshotQualificationTerminationAdapterResponse, RuntimeSnapshotReadinessObservation,
+    RuntimeSnapshotReadinessRequest,
 };
 use ryeos_external_execution_contract::staging_package::GuestStagingExpected;
 use ryeos_external_execution_contract::{
@@ -630,6 +631,7 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         &self.adapter_hash
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn artifact_bytes(&self) -> u64 {
         self.adapter_bytes
     }
@@ -642,6 +644,7 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         (&self.launcher_hash, self.launcher_bytes)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn settings_schema_digest(&self) -> &str {
         &self.declaration.settings_schema_digest
     }
@@ -777,7 +780,8 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         request: &RuntimeSnapshotQualificationTerminationAdapterRequest,
         first_contact: bool,
         deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<ExternalLifecycleObservation<RuntimeSnapshotQualificationTerminationAdapterResponse>> {
+    ) -> Result<ExternalLifecycleObservation<RuntimeSnapshotQualificationTerminationAdapterResponse>>
+    {
         self.preflight_snapshot_qualification_create(producer, qualification, credential)?;
         request.validate()?;
         ensure!(
@@ -786,8 +790,10 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
                 && request.qualification_intent.adapter_artifact_hash == self.adapter_hash
                 && request.qualification_intent.provider_spec_digest == self.provider_spec.sha256
                 && request.qualification_intent.settings_digest == qualification.settings_digest()
-                && request.qualification_intent.verifier_artifact_hash == qualification.verifier_artifact_hash()
-                && request.qualification_intent.maximum_lifetime_seconds == qualification.maximum_lifetime_seconds()
+                && request.qualification_intent.verifier_artifact_hash
+                    == qualification.verifier_artifact_hash()
+                && request.qualification_intent.maximum_lifetime_seconds
+                    == qualification.maximum_lifetime_seconds()
                 && request.provider_spec_digest == self.provider_spec.sha256,
             "qualification termination differs from inspected signed authority"
         );
@@ -795,9 +801,14 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             lillux::time::Duration::from_secs(u64::from(qualification.contact_timeout_seconds())),
         ));
         let deadline = if first_contact {
-            let remaining_ms = request.intent.attempt_deadline_ms
+            let remaining_ms = request
+                .intent
+                .attempt_deadline_ms
                 .saturating_sub(lillux::time::timestamp_millis());
-            ensure!(remaining_ms > 0, "qualification termination expired before first contact");
+            ensure!(
+                remaining_ms > 0,
+                "qualification termination expired before first contact"
+            );
             deadline.min(lillux::time::MonotonicDeadline::after(
                 lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
             ))
@@ -822,11 +833,15 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             deadline,
         )?;
         let value: RuntimeSnapshotQualificationTerminationAdapterResponse =
-            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
-                .map_err(|_| anyhow::anyhow!("invalid qualification termination adapter response"))?;
-        value.validate_for(request)
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES).map_err(|_| {
+                anyhow::anyhow!("invalid qualification termination adapter response")
+            })?;
+        value
+            .validate_for(request)
             .map_err(|_| anyhow::anyhow!("invalid qualification termination adapter response"))?;
-        if let RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal { observation } = &value {
+        if let RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal { observation } =
+            &value
+        {
             ensure!(
                 !observation.contact_deadline_exceeded,
                 "qualification adapter claimed daemon-only deadline evidence"

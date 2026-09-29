@@ -190,13 +190,25 @@ fn explicit_stdout_offset_replays_lost_ack_without_advancing_reader() {
     assert!(process.wait().success);
     let mut bytes = [0; 3];
     let deadline = || MonotonicDeadline::after(Duration::from_secs(1));
-    assert_eq!(reader.read_from_until(0, &mut bytes, deadline()).unwrap(), 3);
+    assert_eq!(
+        reader.read_from_until(0, &mut bytes, deadline()).unwrap(),
+        3
+    );
     assert_eq!(&bytes, b"abc");
-    assert_eq!(reader.read_from_until(0, &mut bytes, deadline()).unwrap(), 3);
+    assert_eq!(
+        reader.read_from_until(0, &mut bytes, deadline()).unwrap(),
+        3
+    );
     assert_eq!(&bytes, b"abc");
-    assert_eq!(reader.read_from_until(3, &mut bytes, deadline()).unwrap(), 3);
+    assert_eq!(
+        reader.read_from_until(3, &mut bytes, deadline()).unwrap(),
+        3
+    );
     assert_eq!(&bytes, b"def");
-    assert_eq!(reader.read_from_until(6, &mut bytes, deadline()).unwrap(), 0);
+    assert_eq!(
+        reader.read_from_until(6, &mut bytes, deadline()).unwrap(),
+        0
+    );
     assert_eq!(
         reader
             .read_from_until(7, &mut bytes, deadline())

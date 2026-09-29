@@ -8,11 +8,11 @@
 use std::ffi::OsStr;
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::guest_supervisor_descriptors::rebind_opened_guest_descriptors;
 use ryeos_external_execution_contract::{
     ExternalGuestInputProjection, GuestMountContentAuthority, GuestMountKind,
     GuestProductManifestKind,
 };
-use ryeos_external_execution_contract::guest_supervisor_descriptors::rebind_opened_guest_descriptors;
 
 use crate::guest_staging::StagedGuestPackage;
 
@@ -84,14 +84,17 @@ impl VerifiedGuestContentHandles {
             .zip(&retained.inputs)
             .enumerate()
         {
-            if matches!(input.content_authority, GuestMountContentAuthority::PrivateScratch { .. }) {
+            if matches!(
+                input.content_authority,
+                GuestMountContentAuthority::PrivateScratch { .. }
+            ) {
                 ensure!(slot.is_none(), "private guest scratch has a staged source");
                 let authority = scratch
                     .remove(&index)
                     .context("private guest scratch slot is absent")?;
-                let directory = authority.try_clone_pinned_directory(
-                    std::path::PathBuf::from("<mounted-guest-scratch>"),
-                )?;
+                let directory = authority.try_clone_pinned_directory(std::path::PathBuf::from(
+                    "<mounted-guest-scratch>",
+                ))?;
                 directory.require_owner_private_directory()?;
                 ensure!(
                     directory.entries_no_follow_bounded(0)?.is_empty(),
@@ -99,7 +102,10 @@ impl VerifiedGuestContentHandles {
                 );
                 *slot = Some(authority);
             } else {
-                ensure!(slot.is_some(), "immutable guest input has no mounted source");
+                ensure!(
+                    slot.is_some(),
+                    "immutable guest input has no mounted source"
+                );
             }
         }
         ensure!(scratch.is_empty(), "unexpected private guest scratch slot");
@@ -178,7 +184,10 @@ pub fn open_verified_mounted_guest_content(
     let mut content_records = Vec::with_capacity(retained.record_descriptors().count());
     let mut record_index = 0usize;
     for (index, input) in retained.inputs.iter().enumerate() {
-        if matches!(input.content_authority, GuestMountContentAuthority::PrivateScratch { .. }) {
+        if matches!(
+            input.content_authority,
+            GuestMountContentAuthority::PrivateScratch { .. }
+        ) {
             runtime_mounts.push(None);
             continue;
         }
@@ -454,8 +463,12 @@ fn validate_workspace_output_bytes(
     let authority: ryeos_state::objects::WorkspaceOutputAuthority = serde_json::from_value(value)?;
     authority.validate()?;
     ensure!(
-        authority.partition.roots.iter().all(|root| root.storage
-            == ryeos_state::external_content::products::ProductStorage::Content),
+        authority
+            .partition
+            .roots
+            .iter()
+            .all(|root| root.storage
+                == ryeos_state::external_content::products::ProductStorage::Content),
         "staged workspace outputs require the transferable content tier"
     );
     let shadows: Vec<_> = retained

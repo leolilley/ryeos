@@ -86,11 +86,7 @@ pub fn install_signed_test_bundle(
     let provider_spec_path = bundle.join("lifecycle/provider.json");
     std::fs::create_dir_all(provider_spec_path.parent().unwrap()).unwrap();
     std::fs::write(&provider_spec_path, provider_spec_bytes).unwrap();
-    std::fs::set_permissions(
-        &provider_spec_path,
-        std::fs::Permissions::from_mode(0o644),
-    )
-    .unwrap();
+    std::fs::set_permissions(&provider_spec_path, std::fs::Permissions::from_mode(0o644)).unwrap();
     let provider_spec_sha256 = lillux::sha256_hex(provider_spec_bytes);
     let executor_manifest = serde_json::json!({
         "item_source_hashes": item_source_hashes,

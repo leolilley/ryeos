@@ -452,7 +452,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         profiles.sort();
-        assert_eq!(profiles.len(), 10, "update init-profile policy expectations");
+        assert_eq!(
+            profiles.len(),
+            10,
+            "update init-profile policy expectations"
+        );
 
         for profile in profiles {
             let path = repository.join(format!("bundles/.ai/node/init/profiles/{profile}.yaml"));

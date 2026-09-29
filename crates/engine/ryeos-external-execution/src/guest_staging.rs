@@ -2578,9 +2578,12 @@ mod tests {
             mounted_request.mounts[2].destination,
             std::path::PathBuf::from("/etc/hosts")
         );
-        assert!(mounted_request.mounts.iter().all(|mount| {
-            mount.access == lillux::LinuxSandboxMountAccess::ReadOnly
-        }));
+        assert!(
+            mounted_request
+                .mounts
+                .iter()
+                .all(|mount| { mount.access == lillux::LinuxSandboxMountAccess::ReadOnly })
+        );
         assert_eq!(
             mounted_request
                 .target_channels

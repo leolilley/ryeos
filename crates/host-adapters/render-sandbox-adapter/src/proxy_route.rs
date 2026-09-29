@@ -134,8 +134,7 @@ pub(crate) fn bind_connect_response(
         .context("Render connect token expiry is invalid")?
         .timestamp_millis();
     ensure!(
-        expires_at_ms > now_ms
-            && expires_at_ms <= now_ms.saturating_add(24 * 60 * 60 * 1000),
+        expires_at_ms > now_ms && expires_at_ms <= now_ms.saturating_add(24 * 60 * 60 * 1000),
         "Render connect token expiry is outside its bound"
     );
     ensure!(
@@ -277,7 +276,10 @@ mod tests {
         .unwrap();
         assert_eq!(bound.execution_id, "exe-abc123");
         assert_eq!(bound.method, "POST");
-        assert_eq!(bound.route.as_str(), "https://sbx-abc123.oregon.sandbox.onrender.com/runs/stream");
+        assert_eq!(
+            bound.route.as_str(),
+            "https://sbx-abc123.oregon.sandbox.onrender.com/runs/stream"
+        );
         assert_eq!(bound.bearer.as_str(), "short-lived-token");
     }
 
@@ -342,32 +344,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bound.route.as_str(), uri);
-        assert!(bind_connect_response(
-            &bytes,
-            OCCURRENCE,
-            REGION,
-            ProxyOperation::DownloadFile {
-                remote_path: "/ryeos/activation/other.json"
-            },
-            1_790_380_800_000,
-        )
-        .is_err());
-        assert!(bind_connect_response(
-            &bytes,
-            "sbx-other",
-            REGION,
-            ProxyOperation::DownloadFile { remote_path: path },
-            1_790_380_800_000,
-        )
-        .is_err());
-        assert!(bind_connect_response(
-            &bytes,
-            OCCURRENCE,
-            REGION,
-            ProxyOperation::UploadFile { remote_path: path },
-            1_790_380_800_000,
-        )
-        .is_err());
+        assert!(
+            bind_connect_response(
+                &bytes,
+                OCCURRENCE,
+                REGION,
+                ProxyOperation::DownloadFile {
+                    remote_path: "/ryeos/activation/other.json"
+                },
+                1_790_380_800_000,
+            )
+            .is_err()
+        );
+        assert!(
+            bind_connect_response(
+                &bytes,
+                "sbx-other",
+                REGION,
+                ProxyOperation::DownloadFile { remote_path: path },
+                1_790_380_800_000,
+            )
+            .is_err()
+        );
+        assert!(
+            bind_connect_response(
+                &bytes,
+                OCCURRENCE,
+                REGION,
+                ProxyOperation::UploadFile { remote_path: path },
+                1_790_380_800_000,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -377,11 +385,19 @@ mod tests {
         for (uri, method, token, now) in [
             (route, "POST", "short-lived-token", now_ms + 16 * 60 * 1000),
             (route, "POST", "with\r\nheader", now_ms),
-            ("https://sbx-other.oregon.sandbox.onrender.com/runs/stream", "POST", "token", now_ms),
+            (
+                "https://sbx-other.oregon.sandbox.onrender.com/runs/stream",
+                "POST",
+                "token",
+                now_ms,
+            ),
             (route, "PUT", "token", now_ms),
         ] {
             let bytes = connect_response(uri, method, token);
-            assert!(bind_connect_response(&bytes, OCCURRENCE, REGION, ProxyOperation::RunStream, now).is_err());
+            assert!(
+                bind_connect_response(&bytes, OCCURRENCE, REGION, ProxyOperation::RunStream, now)
+                    .is_err()
+            );
         }
     }
 

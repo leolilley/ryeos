@@ -4,19 +4,19 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
-use ryeos_external_execution::guest_installation::{
-    MAX_GUEST_SUPERVISOR_LAUNCH_RECORD_BYTES, decode_mounted_supervisor_handoff,
-};
 use ryeos_external_execution::guest_content::{
     BoundGuestMountedContent, open_verified_mounted_guest_content,
 };
-use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
-use ryeos_external_execution_contract::guest_supervisor_descriptors::{
-    SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_LAUNCHER_FD,
-    SUPERVISOR_LAUNCH_INTENT_FD, SUPERVISOR_PRIVATE_PARENT_FD,
-    SUPERVISOR_STAGE_MOUNT_DESTINATION, SUPERVISOR_STATE_ROOT_FD,
-    SUPERVISOR_WORKSPACE_OUTPUT_FD, fixed_guest_supervisor_descriptor_plan,
+use ryeos_external_execution::guest_installation::{
+    MAX_GUEST_SUPERVISOR_LAUNCH_RECORD_BYTES, decode_mounted_supervisor_handoff,
 };
+use ryeos_external_execution_contract::guest_supervisor_descriptors::{
+    SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_LAUNCH_INTENT_FD,
+    SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_STAGE_MOUNT_DESTINATION,
+    SUPERVISOR_STATE_ROOT_FD, SUPERVISOR_WORKSPACE_OUTPUT_FD,
+    fixed_guest_supervisor_descriptor_plan,
+};
+use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
 use ryeos_state::external_execution::transport::{
     ExternalSupervisorBootstrap, MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
 };
@@ -37,7 +37,10 @@ pub fn adopt_mounted_supervisor_content(
     private_parent: &lillux::PinnedDirectory,
     retained: &ExternalGuestInputProjection,
     expected_launcher_sha256: &str,
-) -> Result<(lillux::InheritedDescriptorAuthority, BoundGuestMountedContent)> {
+) -> Result<(
+    lillux::InheritedDescriptorAuthority,
+    BoundGuestMountedContent,
+)> {
     retained.validate()?;
     staged_root.require_owner_private_directory()?;
     ensure!(
@@ -58,7 +61,10 @@ pub fn adopt_mounted_supervisor_content(
     let opened = open_verified_mounted_guest_content(staged_root, retained)?;
     let mut scratch = Vec::new();
     for (index, input) in retained.inputs.iter().enumerate() {
-        if matches!(input.content_authority, GuestMountContentAuthority::PrivateScratch { .. }) {
+        if matches!(
+            input.content_authority,
+            GuestMountContentAuthority::PrivateScratch { .. }
+        ) {
             let name = format!("guest-scratch-{index:02}");
             let directory = private_parent
                 .open_child_directory(OsStr::new(&name))?
@@ -151,10 +157,9 @@ pub fn run_from_mounted_inherited() -> Result<ExternalCandidateSupervisorOutcome
             SUPERVISOR_PRIVATE_PARENT_FD,
         )
     }?;
-    let staged_root = lillux::PinnedDirectory::open(std::path::Path::new(
-        SUPERVISOR_STAGE_MOUNT_DESTINATION,
-    ))?
-    .context("mounted guest stage is absent")?;
+    let staged_root =
+        lillux::PinnedDirectory::open(std::path::Path::new(SUPERVISOR_STAGE_MOUNT_DESTINATION))?
+            .context("mounted guest stage is absent")?;
     let inputs = adopt_mounted_supervisor_inputs(
         bootstrap,
         &launch_record,
@@ -267,7 +272,9 @@ mod tests {
     #[test]
     fn mounted_content_adoption_binds_launcher_config_and_indexed_scratch() {
         let staged_dir = tempfile::tempdir().unwrap();
-        let staged = lillux::PinnedDirectory::open(staged_dir.path()).unwrap().unwrap();
+        let staged = lillux::PinnedDirectory::open(staged_dir.path())
+            .unwrap()
+            .unwrap();
         staged.tighten_owner_private_directory().unwrap();
         let launcher_bytes = b"exact launcher fixture";
         let mut launcher = staged
@@ -284,7 +291,9 @@ mod tests {
         config.sync_all().unwrap();
         drop(config);
         let private_dir = tempfile::tempdir().unwrap();
-        let private = lillux::PinnedDirectory::open(private_dir.path()).unwrap().unwrap();
+        let private = lillux::PinnedDirectory::open(private_dir.path())
+            .unwrap()
+            .unwrap();
         private.tighten_owner_private_directory().unwrap();
         let scratch = private
             .create_child(OsStr::new("guest-scratch-01"), 0o700)
@@ -344,62 +353,82 @@ mod tests {
         .unwrap();
         assert_eq!(
             opened_launcher
-                .digest_regular_file_stable_exact(&opened_launcher.regular_file_observation().unwrap())
+                .digest_regular_file_stable_exact(
+                    &opened_launcher.regular_file_observation().unwrap()
+                )
                 .unwrap(),
             launcher_hash
         );
         let (rebound, outputs, mounts, records) = bound.into_parts();
-        assert_eq!(rebound.identity_digest().unwrap(), inputs.identity_digest().unwrap());
+        assert_eq!(
+            rebound.identity_digest().unwrap(),
+            inputs.identity_digest().unwrap()
+        );
         assert!(outputs.is_none() && records.is_empty());
         assert_eq!(mounts.len(), 2);
-        assert_eq!(mounts[1].directory_identity().unwrap(), scratch.identity().unwrap());
+        assert_eq!(
+            mounts[1].directory_identity().unwrap(),
+            scratch.identity().unwrap()
+        );
         for (mount, input) in mounts.iter().zip(&rebound.inputs) {
             assert_eq!(mount.inherited_descriptor().unwrap(), input.descriptor);
         }
-        assert!(adopt_mounted_supervisor_content(
-            &staged,
-            &stage_identity,
-            &private,
-            &inputs,
-            &"0".repeat(64),
-        )
-        .is_err());
+        assert!(
+            adopt_mounted_supervisor_content(
+                &staged,
+                &stage_identity,
+                &private,
+                &inputs,
+                &"0".repeat(64),
+            )
+            .is_err()
+        );
         let other_stage_dir = tempfile::tempdir().unwrap();
         let other_stage = lillux::PinnedDirectory::open(other_stage_dir.path())
             .unwrap()
             .unwrap();
         other_stage.tighten_owner_private_directory().unwrap();
-        assert!(adopt_mounted_supervisor_content(
-            &staged,
-            &other_stage.identity().unwrap(),
-            &private,
-            &inputs,
-            &launcher_hash,
-        )
-        .is_err());
+        assert!(
+            adopt_mounted_supervisor_content(
+                &staged,
+                &other_stage.identity().unwrap(),
+                &private,
+                &inputs,
+                &launcher_hash,
+            )
+            .is_err()
+        );
         let missing_private_dir = tempfile::tempdir().unwrap();
         let missing_private = lillux::PinnedDirectory::open(missing_private_dir.path())
             .unwrap()
             .unwrap();
         missing_private.tighten_owner_private_directory().unwrap();
-        assert!(adopt_mounted_supervisor_content(
-            &staged,
-            &stage_identity,
-            &missing_private,
-            &inputs,
-            &launcher_hash,
-        )
-        .is_err());
+        assert!(
+            adopt_mounted_supervisor_content(
+                &staged,
+                &stage_identity,
+                &missing_private,
+                &inputs,
+                &launcher_hash,
+            )
+            .is_err()
+        );
         let ambient = scratch.create_child(OsStr::new("ambient"), 0o700).unwrap();
-        assert!(adopt_mounted_supervisor_content(
-            &staged,
-            &stage_identity,
-            &private,
-            &inputs,
-            &launcher_hash,
-        )
-        .is_err());
-        assert!(scratch.remove_empty_child_if_same(OsStr::new("ambient"), &ambient).unwrap());
+        assert!(
+            adopt_mounted_supervisor_content(
+                &staged,
+                &stage_identity,
+                &private,
+                &inputs,
+                &launcher_hash,
+            )
+            .is_err()
+        );
+        assert!(
+            scratch
+                .remove_empty_child_if_same(OsStr::new("ambient"), &ambient)
+                .unwrap()
+        );
     }
 
     #[test]

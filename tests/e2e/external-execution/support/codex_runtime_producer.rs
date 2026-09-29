@@ -150,13 +150,12 @@ pub fn prepare(
         "tools/codex/guest-runtime/produce.yaml",
         "config/codex/guest-runtime-products.yaml",
     ] {
-        let body = if qualification.is_some()
-            && relative == "config/codex/guest-runtime-products.yaml"
-        {
-            serde_yaml::to_string(&recipe)?
-        } else {
-            read_source(relative)?
-        };
+        let body =
+            if qualification.is_some() && relative == "config/codex/guest-runtime-products.yaml" {
+                serde_yaml::to_string(&recipe)?
+            } else {
+                read_source(relative)?
+            };
         let destination = bundle.join(".ai").join(relative);
         std::fs::create_dir_all(destination.parent().context("fixture source parent")?)?;
         std::fs::write(

@@ -115,7 +115,10 @@ fn direct_child_input_eof_preserves_final_stdout_capture() {
     drop(child);
     let running = spawn(request).unwrap();
     let deadline = lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(2));
-    parent.with_deadline(deadline).write_all(b"final output\n").unwrap();
+    parent
+        .with_deadline(deadline)
+        .write_all(b"final output\n")
+        .unwrap();
     parent.shutdown_write().unwrap();
     let result = running.wait();
     assert!(result.success, "{}", result.stderr);

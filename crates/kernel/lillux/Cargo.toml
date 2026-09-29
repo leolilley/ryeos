@@ -1,6 +1,6 @@
 [package]
 name = "lillux"
-version = "0.5.100"
+version = "0.5.101"
 edition = "2024"
 description = "Lillux microkernel — Execute, Memory, Identity, Time"
 license.workspace = true

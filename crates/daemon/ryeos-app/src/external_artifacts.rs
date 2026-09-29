@@ -165,10 +165,7 @@ pub fn resolve_external_execution_artifacts(
                         )
                     })
                     .transpose()?,
-                provider_spec: capture_declared_provider_spec(
-                    root,
-                    &declaration.provider_spec,
-                )?,
+                provider_spec: capture_declared_provider_spec(root, &declaration.provider_spec)?,
                 snapshot_production_spec: declaration
                     .snapshot_production_spec
                     .as_ref()
@@ -216,7 +213,8 @@ fn capture_declared_provider_spec(
         pinned.permission_mode()? & 0o111 == 0,
         "signed lifecycle provider spec must not be executable"
     );
-    let captured = pinned.capture_sealed_bounded(&observation, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?;
+    let captured =
+        pinned.capture_sealed_bounded(&observation, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?;
     ensure!(
         captured.digest() == identity.sha256,
         "signed lifecycle provider spec digest does not match its declaration"

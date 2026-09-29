@@ -488,8 +488,8 @@ mod tests {
     fn transferred_relay_withholds_provider_contact_until_permitted() {
         let temporary = tempfile::tempdir().unwrap();
         let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
-        let provider = lillux::OwnerPrivateLocalDuplexListener::bind_pinned(&directory, "provider")
-            .unwrap();
+        let provider =
+            lillux::OwnerPrivateLocalDuplexListener::bind_pinned(&directory, "provider").unwrap();
         let provider_name = provider.endpoint_name().to_os_string();
         let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reserved.local_addr().unwrap();
@@ -514,7 +514,10 @@ mod tests {
             .unwrap();
         let buffered = MonotonicDeadline::after(Duration::from_secs(2));
         while !relay.request_buffered.load(Ordering::Acquire) {
-            assert!(!buffered.has_elapsed(), "relay did not buffer bounded request");
+            assert!(
+                !buffered.has_elapsed(),
+                "relay did not buffer bounded request"
+            );
             lillux::time::sleep(Duration::from_millis(1));
         }
         assert!(

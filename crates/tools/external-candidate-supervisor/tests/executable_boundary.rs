@@ -133,14 +133,19 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
         schema: 7,
         controller: ExternalControllerTransportContract {
             schema: 2,
-            network_inputs: ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
-                resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                    source: "/etc/resolv.conf".into(), max_bytes: 64 * 1024,
+            network_inputs:
+                ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
+                    resolver:
+                        ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                            source: "/etc/resolv.conf".into(),
+                            max_bytes: 64 * 1024,
+                        },
+                    hosts:
+                        ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                            source: "/etc/hosts".into(),
+                            max_bytes: 64 * 1024,
+                        },
                 },
-                hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                    source: "/etc/hosts".into(), max_bytes: 64 * 1024,
-                },
-            },
             https_origin: "https://controller.invalid".into(),
             route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
             tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
@@ -165,9 +170,10 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
             runtime_witness_hash: "1".repeat(64),
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "3".repeat(64),
-       runtime_recipe_digest,
-        }.into(),
-       guest_input_identity,
+            runtime_recipe_digest,
+        }
+        .into(),
+        guest_input_identity,
         guest_inputs,
         owner_public_key: encode_channel_public_key(
             &lillux::crypto::SigningKey::from_bytes(&[51; 32]).verifying_key(),
@@ -247,7 +253,9 @@ fn canonical_bootstrap_without_sealed_launch_record_fails_closed() {
     assert!(!result.success);
     assert_eq!(result.exit_code, 126, "{}", result.stderr);
     assert!(
-        result.stderr.contains("sealed input descriptor is not a live inherited descriptor"),
+        result
+            .stderr
+            .contains("sealed input descriptor is not a live inherited descriptor"),
         "expected missing sealed mounted launch record: {}",
         result.stderr
     );
@@ -438,5 +446,8 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
         result.stderr
     );
     assert!(result.stdout.trim().is_empty());
-    assert!(!marker.exists(), "refused launch contacted the candidate launcher");
+    assert!(
+        !marker.exists(),
+        "refused launch contacted the candidate launcher"
+    );
 }

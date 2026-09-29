@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-external-guest-restoration-verifier"
-version = "0.5.100"
+version = "0.5.101"
 edition = "2024"
 description = "Independent exact owner-product measurement inside a restored guest"
 license.workspace = true

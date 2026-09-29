@@ -2697,7 +2697,10 @@ strict_fields: warn
             Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("populated core bundle must pass exact signature and contract preflight");
-        assert!(report.is_clean(), "core bundle has contract warnings: {report:?}");
+        assert!(
+            report.is_clean(),
+            "core bundle has contract warnings: {report:?}"
+        );
     }
 
     // NOTE: Real preflight wiring tests (calling
