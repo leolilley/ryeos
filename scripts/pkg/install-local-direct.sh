@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-09-24T03:37:52Z:f4086ab24717a7913715c10a176bfaeb8b7367202978391459526182de766c8b:qTKyWPKM2h+4ixeQNKwOIm6QRlixJGeDKheuwHbyhlMhSs+ifdtQ0p/L7mbgqAZm4K5Gm3qnksX0+ISJxWOYCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T04:22:20Z:aeb65d531de8d3eeee4ccff44546893372c2dd5986aa1e4e2f02c4d8ae0564aa:hz3VsLqKI1htcdNA53qV7r00ZM1R1Gb7jzYFc9RHGk3PJRYsncJjVH7zSlI1p8QeePcODU4QrjbWWhCHm0OkBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Fast local packaged-layout install from this checkout.
 #
 # This intentionally skips yay/makepkg but installs the same runtime layout
@@ -993,6 +993,12 @@ for name in "${bundle_names[@]}"; do
     sudo rm -rf "$share_dir/$name"
     sudo mkdir -p "$share_dir/$name"
     sudo cp -a "$bundle_dir/.ai" "$share_dir/$name/.ai"
+    # Signed bundle manifests may pin runtime data outside .ai (for example,
+    # lifecycle provider specifications). Keep that exact source tree with the
+    # installed bundle instead of leaving a manifest that names absent files.
+    if [[ -d "$bundle_dir/specs" && ! -L "$bundle_dir/specs" ]]; then
+        sudo cp -a "$bundle_dir/specs" "$share_dir/$name/specs"
+    fi
     if [[ -f "$bundle_dir/PUBLISHER_TRUST.toml" ]]; then
         sudo install -Dm644 "$bundle_dir/PUBLISHER_TRUST.toml" \
             "$share_dir/$name/PUBLISHER_TRUST.toml"

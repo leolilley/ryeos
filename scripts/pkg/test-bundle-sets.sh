@@ -83,6 +83,13 @@ for profile in provider-spec.json snapshot-production-spec.json settings.schema.
   profile_hash="$(sha256sum "$render_specs/$profile" | cut -d' ' -f1)"
   grep -Fq -- "$profile_hash" "$ROOT/bundles/render-sandbox/.ai/manifest.source.yaml"
 done
+# Both package layouts must retain bundle-owned runtime specifications, not
+# just .ai metadata. Otherwise init can succeed but the daemon cannot open the
+# exact provider spec named by the installed signed manifest.
+grep -Fq 'sudo cp -a "$bundle_dir/specs" "$share_dir/$name/specs"' \
+  "$ROOT/scripts/pkg/install-local-direct.sh"
+grep -Fq 'cp -a "$bundle_dir/specs" "$pkgdir/usr/share/ryeos/$name/specs"' \
+  "$ROOT/deploy/aur/ryeos/PKGBUILD"
 for ordinary_set in full central-host standard local-inference hosted-node hosted-workflow bundle-source; do
   mapfile -t ordinary_members < <(ryeos_bundle_set_names "$ordinary_set")
   ! contains bundle-release "${ordinary_members[@]}"
