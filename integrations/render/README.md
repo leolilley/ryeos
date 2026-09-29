@@ -16,6 +16,19 @@ requires the Render Dashboard or an authorized Render API operation. Record
 the resulting service and disk IDs before proceeding. Deployment readiness at
 `/_ryeos/ready` proves only controller admission readiness.
 
+The first Blueprint sync on 2026-09-29 created service
+`srv-datiea7avr4c73dm14fg` and 10 GB `/data` disk
+`dsk-datiea7avr4c73dm14og` in Singapore. Deploy
+`dep-datieb7avr4c73dm199g` finished `live` using the digest pinned above.
+The image's amd64 manifest was
+`sha256:918e198cee8386d57dacf68811179d893d939539f7cc1691ae13b67a91ae583e`.
+First boot installed seven bundles and retained operator fingerprint
+`73d6f82da3e34f061ee1f9a50aed461d5fe9f5aee0f89d7bff9fa3baf90c6a73`
+and node fingerprint
+`685322487706f6744d6f9d8aaac2aeb002519d8513aa9d7cd2741fc96f351822`.
+The daemon logged startup ready and the public readiness endpoint returned
+HTTP 200. No Codex turn or Render guest was launched by this deployment.
+
 ## Current qualification boundary
 
 The signed `render-sandbox` provider specification still declares
