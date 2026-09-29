@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T16:52:49Z:730d2ce7b0cc0fc5d89b0cdb32e6119a95ea0c6b58a585c82f092e96e81a9bb7:OKe0Ipgx5pagz5RLO2N6d/ChGdhhscqu7w7KE/RfJw6I2Kav/Y2lZ+HZVEJyqdaZ0/xxC0W4AnLIaQBAKFHCCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T23:05:17Z:10258760b351c58a7dd2fe57f71b80ef2ac9d0640f208155ef54fd8c5cfac20b:uJ/5scdrxMz+lvlop1WBO3CdIEjJ2VJarGfRhU9y49du+AQt8GpaaQME5+KNSuYIi9cEhSYN0dO8We4q+EJ/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.33.5"
+version: "1.33.6"
 ```
 
 # Source-Local Bundle Development
@@ -135,6 +135,18 @@ static inputs change from a v1 claim to the current profile v2 claim. Those
 four old capsules are not a current four-slot release input set. Re-admit and
 requalify affected exact retained products under current signed authority;
 unchanged product bytes alone are not a reason to rebuild them.
+
+A later read-only inventory confirmed the predecessor Python, platform and
+Cargo-vendor witnesses and their referenced CAS objects remain present. They
+are not a transfer shortcut for the disposable A/B proof. Product receipt
+requires the same operator identity at origin and receiver; release authority,
+A and B have different operators, and no surveyed app root shares the release
+operator. The platform product also has five large-content sidecars that the
+current product-transfer path rejects. Raw byte import would make local inputs,
+not local product testimony. A/B must produce and qualify their own product
+closures under their operators unless an explicit cross-operator and
+large-content migration contract is implemented. The retained origin objects
+remain preservation evidence for release-authority recovery.
 
 The original local command, state-root, signing, and bundle-smoke workflow is
 implemented. The project-bundle and development-realization sections below

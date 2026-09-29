@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-29T22:51:33Z:573fc3e5c958b6aec90c7979c8955b5c32386c1566f8d9a83733d532e2dfd393:9AySs31HOuhiNEt7IvTBkstafJTGI+gIOUwYN74oCB4dKIWku/Hv+qDn9x1R8vuYTLOdOeOCJvUQCk3EHcYdAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T23:03:59Z:aaaf0d52f24eb6125966bd1ddd6481523de1e30613889c524d0fd584994dc8a0:usx+fpdaQyQbghRBYTfvq/8KgrkMa1dfFOFloNBzJlKYnIqYuH4QnA34QCaG0SOlp5FZ/xdeW2yiTRs5v4RnCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -249,10 +249,15 @@ joins that coordinate to its retired attempt before publication; standalone
 evidence validation also requires the result coordinate to equal the daemon
 proof. Focused component checks and a real signed product capture pass, but
 the accepted direct qualification root refused before process launch: the
-local fixture node lacks qualified Lillux process-scope authority. Thus no
-joined native direct-target positive, malicious negative, or daemon-restart
-run has passed. The updated native test now requires a completed root and
-published qualification capsule, but has not been run. Observation parsing
+local fixture node lacks qualified Lillux process-scope authority. The ignored
+native test currently starts that node through `DaemonHarness::start_fast_with`,
+which supplies no protected host-runtime binding; the test cannot reach its
+positive assertions through that harness. It needs a disposable node launched
+through the administrator-owned host association, with the exact signed
+fixture and verifier admitted there. Thus no joined native direct-target
+positive, malicious negative, or daemon-restart run has passed. The updated
+native test names the required completed root and published qualification
+capsule, but is not yet an executable acceptance path. Observation parsing
 and synthetic receipts are not external-runtime qualification. Acceptance
 still requires exact pre-release ACK, target-namespace realization visibility,
 app-server conversation, provider contact accounting, whole-scope/writer

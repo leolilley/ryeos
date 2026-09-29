@@ -1511,6 +1511,9 @@ async fn prepare_signed_direct_qualification_fixture(
     )
     .await?;
     let mut producer_inputs = None;
+    // This direct fast fixture has no protected host-runtime association.
+    // Keep the exact signed setup and preflight, but a native positive run
+    // needs a disposable host-backed harness before this test can pass.
     let (mut harness, keys) = DaemonHarness::start_fast_with(
         |state, _, fixture| {
             common::fast_fixture::register_standard_bundle(state, fixture)?;
@@ -1766,7 +1769,7 @@ fn direct_scripted_turn_rejects_duplicate_error_and_foreign_completion() {
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires exact Codex, static producer, verifier binaries, and a qualified protected process scope; local scripted provider only"]
+#[ignore = "requires a host-backed disposable harness plus exact Codex/producer/verifier binaries; current fast fixture refuses scope preflight"]
 async fn signed_independent_verifier_qualifies_direct_codex_diagnostic() -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
 
@@ -1918,7 +1921,7 @@ async fn signed_independent_verifier_qualifies_direct_codex_diagnostic() -> anyh
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires exact Codex/producer/verifier binaries and a qualified protected process scope; local scripted provider only"]
+#[ignore = "requires a host-backed disposable harness plus exact Codex/producer/verifier binaries; current fast fixture refuses scope preflight"]
 async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_closed()
 -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
