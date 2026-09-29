@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result, ensure};
 use base64::Engine as _;
 use ryeos_engine::binary_resolver::capture_bundle_payload_for_target;
 use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace, SubjectResolutionAuthority};
-use ryeos_engine::engine::EffectiveItemRequest;
+use ryeos_engine::engine::{CapturedSignedBundleItemSource, EffectiveItemRequest};
 use ryeos_engine::resolution::TrustClass;
 use ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime;
 use ryeos_external_execution::guest_runtime_product::{
@@ -34,6 +34,7 @@ pub struct GuestOwnerMaterializationSource {
     pub recipe_ref: String,
     pub recipe_content_digest: String,
     pub recipe_effective_digest: String,
+    pub signed_recipe_source_set_digest: String,
     pub bundle_name: String,
     pub bundle_generation: String,
     pub publisher_fingerprint: String,
@@ -88,6 +89,10 @@ impl GuestOwnerMaterializationSource {
             ("binding digest", &self.materialization_binding_digest),
             ("recipe content", &self.recipe_content_digest),
             ("recipe definition", &self.recipe_effective_digest),
+            (
+                "signed recipe source set",
+                &self.signed_recipe_source_set_digest,
+            ),
             ("bundle generation", &self.bundle_generation),
             ("publisher", &self.publisher_fingerprint),
             ("executor manifest", &self.executor_manifest_hash),
@@ -138,6 +143,7 @@ impl GuestOwnerMaterializationSource {
             "recipe_ref": self.recipe_ref,
             "recipe_content_digest": self.recipe_content_digest,
             "recipe_effective_digest": self.recipe_effective_digest,
+            "signed_recipe_source_set_digest": self.signed_recipe_source_set_digest,
             "bundle_name": self.bundle_name,
             "bundle_generation": self.bundle_generation,
             "publisher_fingerprint": self.publisher_fingerprint,
@@ -160,6 +166,48 @@ pub struct PreparedGuestOwnerMaterialization {
     root: lillux::PinnedDirectory,
     identity: GuestOwnerRuntimeManifestIdentity,
     source: GuestOwnerMaterializationSource,
+    signed_recipe_sources: Vec<CapturedSignedBundleItemSource>,
+}
+
+fn signed_recipe_source_set_digest(sources: &[CapturedSignedBundleItemSource]) -> Result<String> {
+    ensure!(
+        !sources.is_empty() && sources.len() <= 64,
+        "materialization signed recipe source count is invalid"
+    );
+    let mut entries = Vec::with_capacity(sources.len());
+    for source in sources {
+        ensure!(
+            lillux::sha256_hex(&source.signed_bytes) == source.source_content_digest,
+            "materialization signed recipe source bytes differ from verified identity"
+        );
+        let ItemSourceRoot::Bundle { name: bundle_name } = &source.source_root else {
+            anyhow::bail!("materialization signed recipe source is not Bundle content");
+        };
+        entries.push((
+            source.resolved_ref.clone(),
+            bundle_name.clone(),
+            source.source_content_digest.clone(),
+            serde_json::json!({
+            "resolved_ref": source.resolved_ref,
+            "source_root": source.source_root,
+            "signer_fingerprint": source.signer_fingerprint,
+            "source_content_digest": source.source_content_digest,
+            "raw_content_digest": source.raw_content_digest,
+            }),
+        ));
+    }
+    entries.sort_by(|left, right| (&left.0, &left.1, &left.2).cmp(&(&right.0, &right.1, &right.2)));
+    ensure!(
+        entries.windows(2).all(
+            |pair| (&pair[0].0, &pair[0].1, &pair[0].2) != (&pair[1].0, &pair[1].1, &pair[1].2)
+        ),
+        "materialization signed recipe source set has duplicate identities"
+    );
+    let entries: Vec<_> = entries.into_iter().map(|(_, _, _, entry)| entry).collect();
+    ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "domain": "ryeos.guest-owner-signed-recipe-source-set.v1",
+        "entries": entries,
+    }))
 }
 
 impl PreparedGuestOwnerMaterialization {
@@ -173,6 +221,13 @@ impl PreparedGuestOwnerMaterialization {
 
     pub fn source(&self) -> &GuestOwnerMaterializationSource {
         &self.source
+    }
+
+    /// Exact verified signed envelopes for the recipe's effective Bundle
+    /// definition. The durable publisher must retain these bytes in its CAS
+    /// closure; the source digests alone do not preserve historical authority.
+    pub fn signed_recipe_sources(&self) -> &[CapturedSignedBundleItemSource] {
+        &self.signed_recipe_sources
     }
 
     pub fn ensure_current(&self) -> Result<()> {
@@ -246,6 +301,9 @@ pub fn prepare_current_guest_owner_runtime(
             &root.raw_content_digest,
             resolution.effective_definition_digest()?.as_str(),
         )?;
+        let signed_recipe_sources =
+            generation.capture_verified_signed_bundle_sources(&resolution)?;
+        let source_set_digest = signed_recipe_source_set_digest(&signed_recipe_sources)?;
         let publisher = root
             .signer_fingerprint
             .as_deref()
@@ -310,6 +368,7 @@ pub fn prepare_current_guest_owner_runtime(
                 .effective_definition_digest()?
                 .as_str()
                 .to_owned(),
+            signed_recipe_source_set_digest: source_set_digest,
             bundle_name: bundle_name.to_owned(),
             bundle_generation: generation.request_engine_generation_identity().to_owned(),
             publisher_fingerprint: publisher.to_owned(),
@@ -329,6 +388,7 @@ pub fn prepare_current_guest_owner_runtime(
             root: product.root().try_clone()?,
             identity,
             source,
+            signed_recipe_sources,
         })
     })
 }
@@ -343,6 +403,36 @@ mod tests {
     }
 
     #[test]
+    fn signed_recipe_source_set_is_order_independent_and_byte_bound() {
+        let source = |resolved_ref: &str, bytes: &[u8]| CapturedSignedBundleItemSource {
+            resolved_ref: resolved_ref.to_owned(),
+            source_root: ItemSourceRoot::Bundle {
+                name: "codex".to_owned(),
+            },
+            signer_fingerprint: hash('a'),
+            source_content_digest: lillux::sha256_hex(bytes),
+            raw_content_digest: hash('b'),
+            signed_bytes: bytes.to_vec(),
+        };
+        let first = source("config:codex/first", b"signed first");
+        let second = source("config:codex/second", b"signed second");
+        let expected = signed_recipe_source_set_digest(&[first.clone(), second.clone()]).unwrap();
+        assert_eq!(
+            signed_recipe_source_set_digest(&[second.clone(), first.clone()]).unwrap(),
+            expected
+        );
+        assert!(signed_recipe_source_set_digest(&[first.clone(), first.clone()]).is_err());
+        let replaced = source("config:codex/first", b"different signed first");
+        assert_ne!(
+            signed_recipe_source_set_digest(&[replaced, second.clone()]).unwrap(),
+            expected
+        );
+        let mut changed = first;
+        changed.signed_bytes.push(b'!');
+        assert!(signed_recipe_source_set_digest(&[changed, second]).is_err());
+    }
+
+    #[test]
     fn materialization_coordinate_distinguishes_source_not_result_bytes() {
         let source = GuestOwnerMaterializationSource {
             schema: 1,
@@ -352,6 +442,7 @@ mod tests {
             recipe_ref: "config:codex/guest-owner-materialization".into(),
             recipe_content_digest: hash('b'),
             recipe_effective_digest: hash('c'),
+            signed_recipe_source_set_digest: hash('0'),
             bundle_name: "codex".into(),
             bundle_generation: hash('d'),
             publisher_fingerprint: hash('e'),
@@ -385,6 +476,9 @@ mod tests {
         assert_eq!(changed.coordinate_digest().unwrap(), coordinate);
         changed = source.clone();
         changed.recipe_effective_digest = hash('8');
+        assert_ne!(changed.coordinate_digest().unwrap(), coordinate);
+        changed = source.clone();
+        changed.signed_recipe_source_set_digest = hash('8');
         assert_ne!(changed.coordinate_digest().unwrap(), coordinate);
         changed = source;
         changed.operator_authority.grant_digest = hash('9');
