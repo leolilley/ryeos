@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T16:30:34Z:f088358a6292b352ef0a55a35908206de7ba261f0d6faf17ba9d71e4c12c0fdb:zD8fZq/oL51ZgyfeM8S9HITd89hxQhqxvqpXAFyRrdPlCyYgpl1jSevHGvT/u55+S7/9NMF530AW1D8bmhCKAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T16:45:53Z:087e4ded4a2553da0b828fb1f39694e10c16996caad7c27b74002fb631772185:RyvlzwMlGvraYfc+vtnYNNLiYeDJGEamtIDQe7r5XXoduDZtEQZD3XBYShC2ZJd50FNuG8kuKXqahP1KFFvbDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.33.3"
+version: "1.33.4"
 ```
 
 # Source-Local Bundle Development
@@ -100,9 +100,16 @@ disposable A node refused composition of only the qualified static-input
 selection for `native-build`: its signed Graph requires all four slots, and
 no consumer binding or build resulted. An epoch-71 recovery daemon probe from
 clean source `5cc0b240a` was interrupted during Thin LTO at the shared disk
-floor; it produced no binary. The real node's runtime database was copied
-byte-for-byte for offline recovery inspection, but no recovery or reset has
-occurred.
+floor; it produced no binary. A later inventory found a pre-existing release
+daemon binary at revision `3228a87c3477`, whose source declares runtime epoch
+71. Its measured SHA-256 is
+`0ab9dde9e911ab07caae0ad20fee48e6c21a7013b2ebb5a6bdc9a398d95acc54`;
+an exact hardlink is retained in the isolated rehearsal worktree. Its
+read-only policy preflight against the real node passed. This is a candidate
+for preserving predecessor execution history, not evidence that it can reopen
+the entire retained node under the currently installed bundles. The real
+node's runtime database was copied byte-for-byte for offline recovery
+inspection, but no recovery or reset has occurred.
 The real release-authority node remains stopped on runtime schema epoch
 71-to-78 incompatibility. The read-only exact-epoch reset preview identified
 12 thread-chain heads and 36 chain artifacts for retirement while preserving
