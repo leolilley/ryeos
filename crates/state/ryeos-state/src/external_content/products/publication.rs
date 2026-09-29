@@ -175,12 +175,11 @@ pub fn publish_product_witness(
     guard: &CasMutationGuard,
 ) -> anyhow::Result<ProductWitnessPublication> {
     coordinate.validate()?;
-    let (witness, reused_existing) = publish_immutable_product_attestation(
+    let (witness, reused_existing) = crate::immutable_testimony::publish_immutable_attestation(
         authority,
         PRODUCT_CAPTURE_HEAD_NAMESPACE,
         &coordinate.coordinate_id()?,
         attestation,
-        limits,
         signer,
         guard,
         |attestation| {
@@ -192,104 +191,24 @@ pub fn publish_product_witness(
                 limits,
             )
         },
+        |hash| {
+            let value = load_product_attestation_value(authority, hash, limits, guard)?
+                .context("product testimony head target is missing")?;
+            let retained = Attestation::from_value(&value)?;
+            let verified = verify_attestation(
+                authority,
+                coordinate,
+                &retained,
+                &signer.verifying_key(),
+                limits,
+            )?;
+            Ok((retained, verified))
+        },
     )?;
     Ok(ProductWitnessPublication {
         witness,
         reused_existing,
     })
-}
-
-/// Shared storage transaction for immutable product testimony. Typed owners
-/// supply their exact signature, coordinate and subject verification; this
-/// helper owns only bounded CAS reads and the per-coordinate signed head.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn publish_immutable_product_attestation<T>(
-    authority: &PinnedStateAuthority,
-    namespace: &str,
-    coordinate_id: &str,
-    attestation: &Attestation,
-    limits: ObjectClosureLimits,
-    signer: &dyn Signer,
-    guard: &CasMutationGuard,
-    verify: impl Fn(&Attestation) -> anyhow::Result<T>,
-) -> anyhow::Result<(T, bool)> {
-    authority.ensure_guard(guard)?;
-    crate::signer::ensure_signer_trusted(signer, authority.trust_store())?;
-    let candidate = verify(attestation)?;
-    if attestation.issuer_fingerprint()? != signer.fingerprint() {
-        bail!("product testimony was not signed by the publishing node");
-    }
-    let candidate_hash =
-        lillux::sha256_hex(lillux::canonical_json(&attestation.to_value())?.as_bytes());
-    let load = |hash: &str| -> anyhow::Result<(Attestation, T)> {
-        let value = load_product_attestation_value(authority, hash, limits, guard)?
-            .context("product testimony head target is missing")?;
-        let retained = Attestation::from_value(&value)?;
-        let verified = verify(&retained)?;
-        Ok((retained, verified))
-    };
-    // Verify an incumbent before taking its per-coordinate writer lock. Heads
-    // are immutable in this namespace, so the target comparison below makes
-    // the normal retry path a short locked re-read rather than a closure walk.
-    let observed_existing = match crate::refs::read_verified_generic_head_ref_in_directory(
-        authority.refs_directory(),
-        namespace,
-        coordinate_id,
-        authority.trust_store(),
-    )? {
-        Some(head) => {
-            if head.signer != signer.fingerprint() {
-                bail!("product capture head is signed by a different node");
-            }
-            Some((head.target_hash.clone(), load(&head.target_hash)?))
-        }
-        None => None,
-    };
-    let head_lock = crate::refs::GenericHeadLock::acquire_in_refs_directory(
-        authority.refs_directory(),
-        namespace,
-        coordinate_id,
-    )?;
-    if let Some(head) = crate::refs::read_verified_generic_head_ref_in_directory(
-        authority.refs_directory(),
-        namespace,
-        coordinate_id,
-        authority.trust_store(),
-    )? {
-        if head.signer != signer.fingerprint() {
-            bail!("product capture head is signed by a different node");
-        }
-        let (existing_attestation, existing) = match observed_existing {
-            Some((observed_hash, existing)) if observed_hash == head.target_hash => existing,
-            _ => load(&head.target_hash)?,
-        };
-        if !same_testimony_ignoring_issue_time(&existing_attestation, attestation) {
-            bail!(
-                "existing product testimony {} contradicts the requested signed evidence",
-                head.target_hash
-            );
-        }
-        return Ok((existing, true));
-    }
-
-    let cas = authority.cas_store()?;
-    let value = attestation.to_value();
-    let stored = cas
-        .put_object(&value)
-        .context("store product capture attestation")?;
-    if stored.hash != candidate_hash {
-        bail!("product capture attestation CAS digest changed during publication");
-    }
-    crate::refs::write_verified_generic_head_ref_in_directory(
-        authority.refs_directory(),
-        namespace,
-        coordinate_id,
-        &stored.hash,
-        signer,
-        authority.trust_store(),
-        &head_lock,
-    )?;
-    Ok((candidate, false))
 }
 
 /// Exact lookup which acquires its own shared mutation guard.
@@ -648,17 +567,6 @@ fn ensure_manifest_metrics<'a>(
         }
     }
     Ok(())
-}
-
-fn same_testimony_ignoring_issue_time(left: &Attestation, right: &Attestation) -> bool {
-    left.schema == right.schema
-        && left.kind == right.kind
-        && left.subject_hash == right.subject_hash
-        && left.claim == right.claim
-        && left.policy == right.policy
-        && left.issuer == right.issuer
-        && left.expires_at == right.expires_at
-        && left.evidence == right.evidence
 }
 
 #[cfg(test)]

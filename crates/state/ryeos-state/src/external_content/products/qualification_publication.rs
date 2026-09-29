@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::publication::{
     ProductWitnessLookup, load_product_attestation_value, lookup_product_witness_guarded,
-    product_attestation_byte_limit, publish_immutable_product_attestation,
+    product_attestation_byte_limit,
 };
 use super::qualification::ProductQualificationEvidence;
 use crate::object_closure::ObjectClosureLimits;
@@ -128,12 +128,11 @@ pub fn publish_qualification_witness(
     guard: &CasMutationGuard,
 ) -> anyhow::Result<QualificationWitnessPublication> {
     coordinate.validate()?;
-    let (witness, reused_existing) = publish_immutable_product_attestation(
+    let (witness, reused_existing) = crate::immutable_testimony::publish_immutable_attestation(
         authority,
         PRODUCT_QUALIFICATION_HEAD_NAMESPACE,
         &coordinate.coordinate_id()?,
         attestation,
-        limits,
         signer,
         guard,
         |attestation| {
@@ -145,6 +144,20 @@ pub fn publish_qualification_witness(
                 limits,
                 guard,
             )
+        },
+        |hash| {
+            let value = load_product_attestation_value(authority, hash, limits, guard)?
+                .context("product qualification head target is missing")?;
+            let retained = Attestation::from_value(&value)?;
+            let verified = verify_attestation(
+                authority,
+                coordinate,
+                &retained,
+                &signer.verifying_key(),
+                limits,
+                guard,
+            )?;
+            Ok((retained, verified))
         },
     )?;
     Ok(QualificationWitnessPublication {

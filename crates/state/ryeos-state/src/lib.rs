@@ -19,6 +19,7 @@ pub mod external_execution;
 pub mod gc;
 pub mod head_cache;
 pub mod ignore;
+pub mod immutable_testimony;
 pub mod large_object_store;
 pub mod locators;
 pub mod object_closure;
