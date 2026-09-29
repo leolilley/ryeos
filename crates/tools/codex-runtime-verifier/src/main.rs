@@ -213,12 +213,7 @@ async fn main() -> Result<()> {
         };
         (started, Some(relay))
     } else {
-        (
-            client
-                .start_scoped_child(&thread_id, producer_scenario_id)
-                .await,
-            None,
-        )
+        bail!("direct Codex verifier requires signed loopback ingress")
     };
     // A transport error after release is ambiguous. Resume is an exact
     // owner-bound point read, never a second launch or a new scenario choice.
@@ -664,116 +659,7 @@ async fn main() -> Result<()> {
             "direct-target launch, applied environment, relay, conversation and frozen candidate joined, but complete qualification evidence remains unproven"
         );
     }
-    let transcript: serde_json::Value = serde_json::from_str(&observation.stdout)
-        .context("scoped producer stdout is not a bounded scenario transcript")?;
-    ensure!(
-        transcript["schema"] == "test.independent_routed_scenario_driver.v1"
-            && transcript["request_sha256"] == expected_request_sha256
-            && transcript["relay_contacts"] == scripted_provider::REQUEST_COUNT,
-        "scoped producer returned a different scenario transcript"
-    );
-    let requests = finish_scripted_provider(provider)?;
-    challenge.recheck()?;
-    provider_endpoint.recheck()?;
-    let expected_canary = format!("{}\n", challenge.value());
-    scripted_provider::check_requests(
-        &requests,
-        &parameters.configuration.profile.candidate,
-        expected_canary.as_bytes(),
-        expected_canary.as_bytes(),
-        staging::CONTROLLER_CANARY_DENIAL,
-    )?;
-    let reported_occurrence = transcript["occurrence"]
-        .as_str()
-        .context("scoped transcript has no occurrence locator")?;
-    let frozen = staging::inspect_frozen_scoped_occurrence(
-        &selected,
-        &project,
-        &parameters,
-        reported_occurrence,
-    )?;
-    ensure!(
-        transcript["guest_observation"] == frozen.guest_observation
-            && transcript["environment_configuration_sha256"]
-                == frozen.environment_configuration_sha256
-            && frozen.candidate_sha256
-                == lillux::sha256_hex(
-                    parameters
-                        .configuration
-                        .profile
-                        .candidate
-                        .content
-                        .as_bytes()
-                ),
-        "scoped transcript and frozen candidate disagree with pinned post-scope files"
-    );
-    native_guest::check_applied_receipt_against_signed_request(
-        &frozen.guest_observation,
-        &expected_request,
-    )?;
-    ensure!(
-        transcript["direct_child_exit"]["success"] == true
-            && transcript["direct_child_exit"]["code"] == 0,
-        "direct Codex child did not exit cleanly"
-    );
-    let thread_id = transcript["thread_id"]
-        .as_str()
-        .context("scoped transcript omitted Codex thread")?;
-    let turn_id = transcript["turn_id"]
-        .as_str()
-        .context("scoped transcript omitted Codex turn")?;
-    let canary_commands = challenge.scripted_canary_commands()?;
-    let guest_command = parameters.configuration.profile.command_script();
-    let routing = RoutingScenario {
-        thread_id: thread_id.to_owned(),
-        turn_id: turn_id.to_owned(),
-        guest_cwd: "/workspace".into(),
-        local_refusal_command: canary_commands.forbidden_local_write,
-        guest_command_script: guest_command.clone(),
-        secret_read_script: canary_commands.guest_read.clone(),
-        patch_input: parameters.configuration.profile.candidate.patch_input(),
-        guest_command: format!("{} -c '{guest_command}'", scripted_provider::GUEST_SHELL),
-        secret_read_command: format!(
-            "{} -c '{}'",
-            scripted_provider::GUEST_SHELL,
-            canary_commands.guest_read
-        ),
-        candidate_path: parameters.configuration.profile.candidate.path(),
-        candidate_added_content: parameters.configuration.profile.candidate.content.clone(),
-        expected_command_output: parameters.configuration.expected_command_output.clone(),
-        secret_read_denial: staging::CONTROLLER_CANARY_DENIAL.into(),
-        controller_canary_value: challenge.value().to_owned(),
-    };
-    // The exact signed scenario driver owns the live app-server and native
-    // guest pipes. These checks reject malformed child reports, but claims
-    // also require proof that the daemon launched that collector under the
-    // selected recipe and kept model-controlled writes inside the guest.
-    let notifications = transcript["notifications"]
-        .as_array()
-        .context("scoped transcript omitted Codex notifications")?;
-    check_notifications(&routing, notifications)?;
-    let guest = GuestScenario {
-        request_sha256: &expected_request_sha256,
-        shell: scripted_provider::GUEST_SHELL,
-        guest_cwd_uri: "file:///workspace",
-        guest_command: parameters.configuration.profile.command_script(),
-        secret_read_command: &routing.secret_read_script,
-        expected_command_output: &routing.expected_command_output,
-        controller_canary_value: challenge.value(),
-        secret_read_denial: staging::CONTROLLER_CANARY_DENIAL,
-        candidate_uri: parameters.configuration.profile.candidate.uri(),
-        candidate_relative_path: &parameters.configuration.profile.candidate.relative_path,
-        candidate_content: parameters
-            .configuration
-            .profile
-            .candidate
-            .content
-            .as_bytes(),
-    };
-    check_guest_observation(&frozen.guest_observation, &guest)?;
-    bail!(
-        "scoped producer and frozen files settled; Codex and guest records are internally checked, but collector identity, isolation, terminal and runtime provenance is incomplete; no qualification claims issued"
-    )
+    bail!("direct-target conversation evidence was not collected; no qualification claims issued")
 }
 
 async fn abort_exact_scoped_child(
