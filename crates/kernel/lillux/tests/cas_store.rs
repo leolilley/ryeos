@@ -122,6 +122,26 @@ fn store_blob_round_trip_and_membership() {
 }
 
 #[test]
+fn bounded_blob_read_refuses_oversize_and_corruption() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let bytes = b"exact payload";
+    let hash = store.store_blob(bytes).expect("store");
+    assert_eq!(
+        store.get_blob_bounded(&hash, bytes.len() as u64).unwrap(),
+        Some(bytes.to_vec())
+    );
+    assert!(
+        store
+            .get_blob_bounded(&hash, bytes.len() as u64 - 1)
+            .is_err()
+    );
+    let path = shard_path(store.root(), "blobs", &hash, "");
+    fs::write(&path, b"wrong payload").expect("inject corruption");
+    assert!(store.get_blob_bounded(&hash, 1024).is_err());
+}
+
+#[test]
 fn store_blob_is_idempotent() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = CasStore::new(tmp.path().to_path_buf());

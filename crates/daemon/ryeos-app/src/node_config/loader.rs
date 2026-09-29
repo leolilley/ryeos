@@ -111,6 +111,9 @@ pub(crate) struct NodeConfigSnapshotBuilder {
     runtime_snapshot_production: Vec<
         super::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
     >,
+    guest_runtime_materialization: Vec<
+        super::sections::guest_runtime_materialization::InstalledGuestRuntimeMaterializationBinding,
+    >,
     runtime_snapshot_qualification: Vec<
         super::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
     >,
@@ -128,6 +131,7 @@ impl NodeConfigSnapshotBuilder {
         Ok(Self {
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
+            guest_runtime_materialization: Vec::new(),
             runtime_snapshot_qualification: Vec::new(),
             bundles: validate_prospective_bundle_records(bundles)?,
             routes: Vec::new(),
@@ -194,6 +198,21 @@ impl NodeConfigSnapshotBuilder {
         Ok(())
     }
 
+    pub(crate) fn push_guest_runtime_materialization(
+        &mut self,
+        record: super::sections::guest_runtime_materialization::InstalledGuestRuntimeMaterializationBinding,
+    ) -> Result<()> {
+        if self
+            .guest_runtime_materialization
+            .iter()
+            .any(|prior| prior.id() == record.id())
+        {
+            bail!("duplicate guest runtime materialization binding identity");
+        }
+        self.guest_runtime_materialization.push(record);
+        Ok(())
+    }
+
     pub(crate) fn push_runtime_snapshot_qualification(
         &mut self,
         record: super::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
@@ -233,6 +252,7 @@ impl NodeConfigSnapshotBuilder {
         Ok(NodeConfigSnapshot {
             external_execution: self.external_execution,
             runtime_snapshot_production: self.runtime_snapshot_production,
+            guest_runtime_materialization: self.guest_runtime_materialization,
             runtime_snapshot_qualification: self.runtime_snapshot_qualification,
             bundles: self.bundles,
             routes: self.routes,

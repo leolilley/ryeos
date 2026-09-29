@@ -45,13 +45,40 @@ pub struct ResolvedBinary {
     /// Raw SHA-256 of the exact verified executable bytes.
     pub content_hash: String,
     pub manifest_hash: String,
+    pub item_source_hash: String,
     pub signer_fingerprint: String,
+    pub target_triple: String,
 }
 
 #[derive(Debug)]
 pub struct CapturedExecutable {
     pub identity: ResolvedBinary,
     pub handle: lillux::InheritedDescriptorAuthority,
+}
+
+/// Signed bundle bytes selected for a guest target. The captured descriptor is
+/// sealed as non-executable data; selecting a guest payload never makes it a
+/// locally dispatchable command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundlePayloadIdentity {
+    pub content_hash: String,
+    pub manifest_hash: String,
+    pub item_source_hash: String,
+    pub signer_fingerprint: String,
+    pub target_triple: String,
+}
+
+#[derive(Debug)]
+pub struct CapturedBundlePayload {
+    pub identity: BundlePayloadIdentity,
+    handle: lillux::InheritedDescriptorAuthority,
+    pub bytes: u64,
+}
+
+impl CapturedBundlePayload {
+    pub fn authority(&self) -> &lillux::InheritedDescriptorAuthority {
+        &self.handle
+    }
 }
 
 /// Signed identity of one bundle's complete native-executor authorization
@@ -129,6 +156,82 @@ pub fn capture_bundle_binary_ref(
             ))
         })?;
     Ok(CapturedExecutable { identity, handle })
+}
+
+/// Capture one signed executable *as data* for an explicitly selected guest
+/// target. The bound includes the sealed copy and prevents an installed bundle
+/// from forcing an unbounded daemon allocation during preparation.
+pub fn capture_bundle_payload_for_target(
+    binary_ref: &str,
+    target_triple: &str,
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+    maximum_bytes: u64,
+) -> Result<CapturedBundlePayload, EngineError> {
+    if maximum_bytes == 0 || maximum_bytes > 64 * 1024 * 1024 {
+        return Err(EngineError::Internal(
+            "guest bundle payload bound is outside the supported range".into(),
+        ));
+    }
+    let identity = resolve_bundle_binary_ref_for_target(
+        binary_ref,
+        target_triple,
+        bundle_root,
+        |fingerprint| {
+            node_trust_store
+                .get(fingerprint)
+                .map(|signer| signer.verifying_key)
+        },
+        TrustClass::TrustedBundle,
+        Some(maximum_bytes),
+    )?;
+    let bin_dir = identity.absolute_path.parent().ok_or_else(|| {
+        EngineError::Internal("verified guest payload has no parent directory".into())
+    })?;
+    let name = identity
+        .absolute_path
+        .file_name()
+        .ok_or_else(|| EngineError::Internal("verified guest payload has no file name".into()))?;
+    let parent = lillux::PinnedDirectory::open(bin_dir)
+        .map_err(|error| EngineError::Internal(format!("pin guest payload directory: {error}")))?
+        .ok_or_else(|| EngineError::BinNotFound {
+            bin: binary_ref.to_owned(),
+            searched: bin_dir.display().to_string(),
+        })?;
+    let file = parent
+        .open_pinned_regular(name, false)
+        .map_err(|error| EngineError::Internal(format!("pin guest payload: {error}")))?
+        .ok_or_else(|| EngineError::BinNotFound {
+            bin: binary_ref.to_owned(),
+            searched: identity.absolute_path.display().to_string(),
+        })?;
+    let observation = file
+        .observation()
+        .map_err(|error| EngineError::Internal(format!("observe guest payload: {error}")))?;
+    let bytes = file
+        .read_stable_bounded(&observation, maximum_bytes)
+        .map_err(|error| EngineError::Internal(format!("read guest payload: {error}")))?;
+    let observed = lillux::sha256_hex(&bytes);
+    if observed != identity.content_hash {
+        return Err(EngineError::BinHashMismatch {
+            bin: binary_ref.to_owned(),
+            declared: identity.content_hash,
+            computed: observed,
+        });
+    }
+    let handle = lillux::sealed_memfd(c"ryeos-bundle-guest-payload", &bytes)
+        .map_err(|error| EngineError::Internal(format!("seal guest payload: {error}")))?;
+    Ok(CapturedBundlePayload {
+        identity: BundlePayloadIdentity {
+            content_hash: identity.content_hash,
+            manifest_hash: identity.manifest_hash,
+            item_source_hash: identity.item_source_hash,
+            signer_fingerprint: identity.signer_fingerprint,
+            target_triple: identity.target_triple,
+        },
+        handle,
+        bytes: bytes.len() as u64,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -319,7 +422,30 @@ pub fn resolve_bundle_binary_ref(
     trusted_verifying_key: impl Fn(&str) -> Option<VerifyingKey>,
     root_trust_class: TrustClass,
 ) -> Result<ResolvedBinary, EngineError> {
-    let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+    resolve_bundle_binary_ref_for_target(
+        binary_ref,
+        env!("RYEOS_ENGINE_HOST_TRIPLE"),
+        bundle_root,
+        trusted_verifying_key,
+        root_trust_class,
+        None,
+    )
+}
+
+fn resolve_bundle_binary_ref_for_target(
+    binary_ref: &str,
+    triple: &str,
+    bundle_root: &Path,
+    trusted_verifying_key: impl Fn(&str) -> Option<VerifyingKey>,
+    root_trust_class: TrustClass,
+    maximum_bytes: Option<u64>,
+) -> Result<ResolvedBinary, EngineError> {
+    if !is_safe_executor_path_segment(triple) {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: binary_ref.to_owned(),
+            detail: "guest target triple is not a safe executor segment".into(),
+        });
+    }
 
     // Determine the binary name and item_ref based on ref shape.
     let (bin_name, item_ref, bin_path) = if let Some(name) = binary_ref.strip_prefix("bin:") {
@@ -441,6 +567,11 @@ pub fn resolve_bundle_binary_ref(
             bin: bin_name.clone(),
         });
     }
+    if maximum_bytes.is_some_and(|limit| metadata.len() > limit) {
+        return Err(EngineError::Internal(format!(
+            "guest bundle payload `{bin_name}` exceeds its admitted byte ceiling"
+        )));
+    }
 
     let manifest_ref_path = bundle_root
         .join(crate::AI_DIR)
@@ -537,16 +668,18 @@ pub fn resolve_bundle_binary_ref(
     })?;
     verify_installed_mode(&bin_name, &bin_path, signed_mode)?;
 
-    let blob_bytes = cas
-        .get_blob(&content_blob_hash)
-        .map_err(|error| EngineError::BinManifestInvalid {
-            bin: bin_name.clone(),
-            reason: format!("read content blob {content_blob_hash}: {error}"),
-        })?
-        .ok_or_else(|| EngineError::BinManifestInvalid {
-            bin: bin_name.clone(),
-            reason: format!("content blob {content_blob_hash} is missing from bundle CAS"),
-        })?;
+    let blob_bytes = match maximum_bytes {
+        Some(limit) => cas.get_blob_bounded(&content_blob_hash, limit),
+        None => cas.get_blob(&content_blob_hash),
+    }
+    .map_err(|error| EngineError::BinManifestInvalid {
+        bin: bin_name.clone(),
+        reason: format!("read content blob {content_blob_hash}: {error}"),
+    })?
+    .ok_or_else(|| EngineError::BinManifestInvalid {
+        bin: bin_name.clone(),
+        reason: format!("content blob {content_blob_hash} is missing from bundle CAS"),
+    })?;
     let computed_blob_hash = lillux::sha256_hex(&blob_bytes);
     if computed_blob_hash != content_blob_hash {
         return Err(EngineError::BinHashMismatch {
@@ -556,7 +689,11 @@ pub fn resolve_bundle_binary_ref(
         });
     }
 
-    let bin_bytes = std::fs::read(&bin_path).map_err(|e| {
+    let bin_bytes = match maximum_bytes {
+        Some(limit) => lillux::secure_fs::read_regular_file_bounded_no_follow(&bin_path, limit),
+        None => std::fs::read(&bin_path).map_err(anyhow::Error::from),
+    }
+    .map_err(|e| {
         EngineError::Internal(format!("failed to read binary {}: {e}", bin_path.display()))
     })?;
     let mut hasher = Sha256::new();
@@ -592,7 +729,9 @@ pub fn resolve_bundle_binary_ref(
         absolute_path: bin_path,
         content_hash: computed_hash,
         manifest_hash,
+        item_source_hash: item_source_hash.clone(),
         signer_fingerprint,
+        target_triple: triple.to_owned(),
     })
 }
 
@@ -1679,6 +1818,63 @@ mod tests {
             libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
         assert_eq!(seals & required, required);
         assert_ne!(retained.file_identity().unwrap().mode() & 0o111, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn signed_foreign_guest_payload_is_captured_as_nonexecutable_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let host = env!("RYEOS_ENGINE_HOST_TRIPLE");
+        let guest = if host == "aarch64-unknown-linux-musl" {
+            "x86_64-unknown-linux-musl"
+        } else {
+            "aarch64-unknown-linux-musl"
+        };
+        let (fingerprint, key) = write_resolver_fixture_for_triple(&bundle, "owner", guest);
+        let trust = trust_store_for(&fingerprint, &key);
+        assert!(
+            resolve_bundle_binary_ref(
+                &format!("bin/{guest}/owner"),
+                &bundle,
+                trusted_key_for(&fingerprint, &key),
+                TrustClass::TrustedBundle
+            )
+            .is_err()
+        );
+
+        let payload = capture_bundle_payload_for_target("bin:owner", guest, &bundle, &trust, 1024)
+            .expect("signed guest target must be readable as data");
+        assert_eq!(payload.identity.target_triple, guest);
+        assert!(lillux::valid_hash(&payload.identity.item_source_hash));
+        assert_eq!(payload.bytes, b"placeholder-binary\n".len() as u64);
+        assert!(payload.authority().require_owned_executable().is_err());
+        assert_eq!(
+            payload
+                .authority()
+                .read_regular_file_stable_bounded(1024)
+                .unwrap()
+                .0,
+            b"placeholder-binary\n"
+        );
+        assert!(capture_bundle_payload_for_target("bin:owner", guest, &bundle, &trust, 1).is_err());
+        let installed = bundle
+            .join(crate::AI_DIR)
+            .join("bin")
+            .join(guest)
+            .join("owner");
+        std::fs::write(&installed, b"mutated bundle bytes\n").unwrap();
+        assert_eq!(
+            payload
+                .authority()
+                .read_regular_file_stable_bounded(1024)
+                .unwrap()
+                .0,
+            b"placeholder-binary\n"
+        );
+        assert!(
+            capture_bundle_payload_for_target("bin:owner", guest, &bundle, &trust, 1024,).is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]
