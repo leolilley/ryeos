@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-29T03:29:27Z:7bb47aa79cbe19d13efc1f730687ff504cfd479229cefac37d1c56b0141ede3f:b1cdKXBNZyuC6V4owvExHzeZlnXpSifJz6aR8webzhspnfSQv6bCCG1BUHq4JRyK+0MjFEGHzwVtny5p1H03AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T16:40:43Z:ca04d9d898f2a4282b50dba9d5f53d31cdf9f048fb1feea568e588e52c618dd3:6r6Bc5pSa+UtOyRofbM5I34vgiV9rzE0BV415MxEoMRw35U1OwM6MY2apQ2CbifU8LtlCkqTxyUX17XNY1KrAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -207,6 +207,17 @@ requirements. Profile changes must never refresh an already admitted running
 root's selection.
 
 ## Current implementation gate
+
+Retained-observation source cut, 2026-09-30: the daemon read path now compares
+the post-release applied executable-path, argv, environment and CWD commitments
+with the pre-release target digest in the exact relay handoff. A qualification
+scoped-attempt proof also requires that handoff's scenario, signed recipe
+source and loopback ingress to match the admitted direct producer recipe.
+`ryeos-app` release-mode library and test-source checks pass for this cut; the
+new mutation test has been type checked but not executed. This closes two
+retained-evidence consistency gaps, not the consumer runtime claim: issuance,
+claim validation and fresh selection still refuse consumer-context evidence
+until the complete applied runtime and lifecycle joins are authenticated.
 
 The signed fixture now selects the exact retained Codex executable as its
 direct scoped target. The daemon-side listener transfer, READY wait, prepared
