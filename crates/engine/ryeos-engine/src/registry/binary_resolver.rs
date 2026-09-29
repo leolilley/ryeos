@@ -71,8 +71,26 @@ pub struct BundlePayloadIdentity {
 #[derive(Debug)]
 pub struct CapturedBundlePayload {
     pub identity: BundlePayloadIdentity,
+    pub source_proof: BundlePayloadSourceProof,
     handle: lillux::InheritedDescriptorAuthority,
     pub bytes: u64,
+}
+
+/// Exact already-verified source documents for one selected guest payload.
+/// The canonical objects are retained as values here so their CAS byte form
+/// can be produced by the durable publisher without reopening installed paths.
+#[derive(Debug)]
+pub struct BundlePayloadSourceProof {
+    pub selected_item_ref: String,
+    pub signed_manifest_ref: Vec<u8>,
+    pub manifest_object: serde_json::Value,
+    pub item_source_object: serde_json::Value,
+    pub signed_sidecar: Vec<u8>,
+}
+
+struct VerifiedBundleBinary {
+    identity: ResolvedBinary,
+    source_proof: BundlePayloadSourceProof,
 }
 
 impl CapturedBundlePayload {
@@ -173,7 +191,7 @@ pub fn capture_bundle_payload_for_target(
             "guest bundle payload bound is outside the supported range".into(),
         ));
     }
-    let identity = resolve_bundle_binary_ref_for_target(
+    let verified = resolve_bundle_binary_ref_for_target(
         binary_ref,
         target_triple,
         bundle_root,
@@ -185,6 +203,7 @@ pub fn capture_bundle_payload_for_target(
         TrustClass::TrustedBundle,
         Some(maximum_bytes),
     )?;
+    let identity = verified.identity;
     let bin_dir = identity.absolute_path.parent().ok_or_else(|| {
         EngineError::Internal("verified guest payload has no parent directory".into())
     })?;
@@ -229,6 +248,7 @@ pub fn capture_bundle_payload_for_target(
             signer_fingerprint: identity.signer_fingerprint,
             target_triple: identity.target_triple,
         },
+        source_proof: verified.source_proof,
         handle,
         bytes: bytes.len() as u64,
     })
@@ -430,6 +450,7 @@ pub fn resolve_bundle_binary_ref(
         root_trust_class,
         None,
     )
+    .map(|verified| verified.identity)
 }
 
 fn resolve_bundle_binary_ref_for_target(
@@ -439,7 +460,7 @@ fn resolve_bundle_binary_ref_for_target(
     trusted_verifying_key: impl Fn(&str) -> Option<VerifyingKey>,
     root_trust_class: TrustClass,
     maximum_bytes: Option<u64>,
-) -> Result<ResolvedBinary, EngineError> {
+) -> Result<VerifiedBundleBinary, EngineError> {
     if !is_safe_executor_path_segment(triple) {
         return Err(EngineError::InvalidBinPrefix {
             raw: binary_ref.to_owned(),
@@ -649,7 +670,7 @@ fn resolve_bundle_binary_ref_for_target(
             ))
         })?;
 
-    let signed_sidecar_fingerprint = verify_item_source_sidecar(
+    let (signed_sidecar_fingerprint, signed_sidecar) = verify_item_source_sidecar(
         &bin_name,
         &bin_path,
         &item_ref,
@@ -725,13 +746,22 @@ fn resolve_bundle_binary_ref_for_target(
         });
     }
 
-    Ok(ResolvedBinary {
-        absolute_path: bin_path,
-        content_hash: computed_hash,
-        manifest_hash,
-        item_source_hash: item_source_hash.clone(),
-        signer_fingerprint,
-        target_triple: triple.to_owned(),
+    Ok(VerifiedBundleBinary {
+        identity: ResolvedBinary {
+            absolute_path: bin_path,
+            content_hash: computed_hash,
+            manifest_hash,
+            item_source_hash: item_source_hash.clone(),
+            signer_fingerprint,
+            target_triple: triple.to_owned(),
+        },
+        source_proof: BundlePayloadSourceProof {
+            selected_item_ref: item_ref,
+            signed_manifest_ref: signed_manifest_ref.into_bytes(),
+            manifest_object: manifest_value,
+            item_source_object: item_source,
+            signed_sidecar,
+        },
     })
 }
 
@@ -1011,7 +1041,7 @@ fn verify_bundle_executor_manifest_items(
                     format!("ItemSource {item_source_hash} for {item_ref} is missing from CAS"),
                 )
             })?;
-        let sidecar_signer = verify_item_source_sidecar(
+        let (sidecar_signer, _) = verify_item_source_sidecar(
             bin_name,
             &bin_path,
             item_ref,
@@ -1474,7 +1504,7 @@ fn verify_item_source_sidecar(
     expected_item_ref: &str,
     item_source: &serde_json::Value,
     trusted_verifying_key: &impl Fn(&str) -> Option<VerifyingKey>,
-) -> Result<String, EngineError> {
+) -> Result<(String, Vec<u8>), EngineError> {
     let sidecar_path = bin_path.with_file_name(format!("{bin_name}.item_source.json"));
     let sidecar_metadata =
         std::fs::symlink_metadata(&sidecar_path).map_err(|e| EngineError::BinSidecarInvalid {
@@ -1487,10 +1517,15 @@ fn verify_item_source_sidecar(
             reason: format!("{} must be a regular file", sidecar_path.display()),
         });
     }
-    let signed =
-        std::fs::read_to_string(&sidecar_path).map_err(|e| EngineError::BinSidecarInvalid {
+    let signed_bytes = lillux::read_regular_file_bounded_no_follow(&sidecar_path, 1024 * 1024)
+        .map_err(|error| EngineError::BinSidecarInvalid {
             bin: bin_name.to_string(),
-            reason: format!("read {}: {e}", sidecar_path.display()),
+            reason: format!("read {}: {error}", sidecar_path.display()),
+        })?;
+    let signed =
+        std::str::from_utf8(&signed_bytes).map_err(|error| EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: format!("{} is not UTF-8: {error}", sidecar_path.display()),
         })?;
 
     let (signature_line, body) =
@@ -1599,7 +1634,7 @@ fn verify_item_source_sidecar(
         });
     }
 
-    Ok(actual_fingerprint)
+    Ok((actual_fingerprint, signed_bytes))
 }
 
 /// Validate a binary name for both `bin:<name>` and `bin/<triple>/<name>`.
@@ -1847,6 +1882,56 @@ mod tests {
             .expect("signed guest target must be readable as data");
         assert_eq!(payload.identity.target_triple, guest);
         assert!(lillux::valid_hash(&payload.identity.item_source_hash));
+        assert_eq!(
+            payload.source_proof.selected_item_ref,
+            format!("bin/{guest}/owner")
+        );
+        assert_eq!(
+            lillux::sha256_hex(
+                lillux::canonical_json(&payload.source_proof.manifest_object)
+                    .unwrap()
+                    .as_bytes()
+            ),
+            payload.identity.manifest_hash
+        );
+        assert_eq!(
+            lillux::sha256_hex(
+                lillux::canonical_json(&payload.source_proof.item_source_object)
+                    .unwrap()
+                    .as_bytes()
+            ),
+            payload.identity.item_source_hash
+        );
+        assert!(
+            payload
+                .source_proof
+                .signed_manifest_ref
+                .starts_with(b"# ryeos:signed:")
+        );
+        assert!(
+            payload
+                .source_proof
+                .signed_sidecar
+                .starts_with(b"# ryeos:signed:")
+        );
+        let captured_ref = payload.source_proof.signed_manifest_ref.clone();
+        let captured_sidecar = payload.source_proof.signed_sidecar.clone();
+        std::fs::write(
+            bundle.join(crate::AI_DIR).join("refs/bundles/manifest"),
+            b"changed-after-capture",
+        )
+        .unwrap();
+        std::fs::write(
+            bundle
+                .join(crate::AI_DIR)
+                .join("bin")
+                .join(guest)
+                .join("owner.item_source.json"),
+            b"changed-after-capture",
+        )
+        .unwrap();
+        assert_eq!(payload.source_proof.signed_manifest_ref, captured_ref);
+        assert_eq!(payload.source_proof.signed_sidecar, captured_sidecar);
         assert_eq!(payload.bytes, b"placeholder-binary\n".len() as u64);
         assert!(payload.authority().require_owned_executable().is_err());
         assert_eq!(
@@ -1874,6 +1959,28 @@ mod tests {
         );
         assert!(
             capture_bundle_payload_for_target("bin:owner", guest, &bundle, &trust, 1024,).is_err()
+        );
+    }
+
+    #[test]
+    fn resolver_rejects_oversized_signed_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
+        let sidecar = bundle
+            .join(crate::AI_DIR)
+            .join("bin")
+            .join(env!("RYEOS_ENGINE_HOST_TRIPLE"))
+            .join("demo.item_source.json");
+        std::fs::write(sidecar, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        assert!(
+            resolve_bundle_binary_ref(
+                "bin:demo",
+                &bundle,
+                trusted_key_for(&fingerprint, &key),
+                TrustClass::TrustedBundle,
+            )
+            .is_err()
         );
     }
 

@@ -8,7 +8,7 @@ use std::ffi::OsStr;
 
 use anyhow::{Context as _, Result, ensure};
 use base64::Engine as _;
-use ryeos_engine::binary_resolver::capture_bundle_payload_for_target;
+use ryeos_engine::binary_resolver::{BundlePayloadSourceProof, capture_bundle_payload_for_target};
 use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace, SubjectResolutionAuthority};
 use ryeos_engine::engine::{CapturedSignedBundleItemSource, EffectiveItemRequest};
 use ryeos_engine::plan_builder::CapturedSignedBundleManifest;
@@ -41,7 +41,9 @@ pub struct GuestOwnerMaterializationSource {
     pub bundle_generation: String,
     pub recipe_publisher_fingerprint: String,
     pub executor_manifest_hash: String,
+    pub executor_manifest_ref_signed_digest: String,
     pub executor_item_source_hash: String,
+    pub executor_sidecar_signed_digest: String,
     pub owner_executable_sha256: String,
     pub guest_target_triple: String,
     pub maximum_owner_bytes: u64,
@@ -102,7 +104,15 @@ impl GuestOwnerMaterializationSource {
             ("bundle generation", &self.bundle_generation),
             ("recipe publisher", &self.recipe_publisher_fingerprint),
             ("executor manifest", &self.executor_manifest_hash),
+            (
+                "signed executor manifest ref",
+                &self.executor_manifest_ref_signed_digest,
+            ),
             ("executor item source", &self.executor_item_source_hash),
+            (
+                "signed executor sidecar",
+                &self.executor_sidecar_signed_digest,
+            ),
             ("owner executable", &self.owner_executable_sha256),
             ("profile", &self.profile_digest),
             ("output manifest", &self.runtime_manifest_hash),
@@ -155,7 +165,9 @@ impl GuestOwnerMaterializationSource {
             "bundle_generation": self.bundle_generation,
             "recipe_publisher_fingerprint": self.recipe_publisher_fingerprint,
             "executor_manifest_hash": self.executor_manifest_hash,
+            "executor_manifest_ref_signed_digest": self.executor_manifest_ref_signed_digest,
             "executor_item_source_hash": self.executor_item_source_hash,
+            "executor_sidecar_signed_digest": self.executor_sidecar_signed_digest,
             "owner_executable_sha256": self.owner_executable_sha256,
             "guest_target_triple": self.guest_target_triple,
             "maximum_owner_bytes": self.maximum_owner_bytes,
@@ -175,6 +187,7 @@ pub struct PreparedGuestOwnerMaterialization {
     source: GuestOwnerMaterializationSource,
     signed_recipe_sources: Vec<CapturedSignedBundleItemSource>,
     signed_bundle_manifests: Vec<CapturedSignedBundleManifest>,
+    executor_source_proof: BundlePayloadSourceProof,
 }
 
 fn signed_bundle_manifest_set_digest(manifests: &[CapturedSignedBundleManifest]) -> Result<String> {
@@ -267,6 +280,10 @@ impl PreparedGuestOwnerMaterialization {
 
     pub fn signed_bundle_manifests(&self) -> &[CapturedSignedBundleManifest] {
         &self.signed_bundle_manifests
+    }
+
+    pub fn executor_source_proof(&self) -> &BundlePayloadSourceProof {
+        &self.executor_source_proof
     }
 
     pub fn ensure_current(&self) -> Result<()> {
@@ -417,7 +434,13 @@ pub fn prepare_current_guest_owner_runtime(
             bundle_generation: generation.request_engine_generation_identity().to_owned(),
             recipe_publisher_fingerprint: publisher.to_owned(),
             executor_manifest_hash: payload.identity.manifest_hash,
+            executor_manifest_ref_signed_digest: lillux::sha256_hex(
+                &payload.source_proof.signed_manifest_ref,
+            ),
             executor_item_source_hash: payload.identity.item_source_hash,
+            executor_sidecar_signed_digest: lillux::sha256_hex(
+                &payload.source_proof.signed_sidecar,
+            ),
             owner_executable_sha256: payload.identity.content_hash,
             guest_target_triple: recipe.guest_target_triple,
             maximum_owner_bytes: recipe.maximum_owner_bytes,
@@ -434,6 +457,7 @@ pub fn prepare_current_guest_owner_runtime(
             source,
             signed_recipe_sources,
             signed_bundle_manifests,
+            executor_source_proof: payload.source_proof,
         })
     })
 }
@@ -494,7 +518,9 @@ mod tests {
             bundle_generation: hash('d'),
             recipe_publisher_fingerprint: hash('e'),
             executor_manifest_hash: hash('f'),
+            executor_manifest_ref_signed_digest: hash('a'),
             executor_item_source_hash: hash('1'),
+            executor_sidecar_signed_digest: hash('b'),
             owner_executable_sha256: hash('2'),
             guest_target_triple: "x86_64-unknown-linux-gnu".into(),
             maximum_owner_bytes: 32 * 1024 * 1024,
@@ -529,6 +555,12 @@ mod tests {
         assert_ne!(changed.coordinate_digest().unwrap(), coordinate);
         changed = source.clone();
         changed.signed_bundle_manifest_set_digest = hash('8');
+        assert_ne!(changed.coordinate_digest().unwrap(), coordinate);
+        changed = source.clone();
+        changed.executor_manifest_ref_signed_digest = hash('8');
+        assert_ne!(changed.coordinate_digest().unwrap(), coordinate);
+        changed = source.clone();
+        changed.executor_sidecar_signed_digest = hash('8');
         assert_ne!(changed.coordinate_digest().unwrap(), coordinate);
         changed = source;
         changed.operator_authority.grant_digest = hash('9');
