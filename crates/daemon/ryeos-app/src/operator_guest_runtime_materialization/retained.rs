@@ -102,6 +102,10 @@ pub(super) fn verify_testimony(
     attestation: &Attestation,
     node_key: &lillux::crypto::VerifyingKey,
 ) -> Result<VerifiedMaterializationTestimony> {
+    ensure!(
+        lillux::canonical_json(&attestation.to_value())?.len() as u64 <= 64 * 1024,
+        "materialization node testimony exceeds its bounded wire contract"
+    );
     attestation.verify_with_key(node_key)?;
     ensure!(
         attestation.claim == CLAIM
@@ -389,7 +393,7 @@ fn load_blob_bounded(cas: &lillux::CasStore, hash: &str, maximum_bytes: u64) -> 
         .with_context(|| format!("retained materialization CAS blob {hash} is missing"))
 }
 
-fn load_object_bounded(
+pub(super) fn load_object_bounded(
     cas: &lillux::CasStore,
     hash: &str,
     maximum_bytes: u64,
