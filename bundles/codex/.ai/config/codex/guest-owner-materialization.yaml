@@ -1,4 +1,3 @@
-# ryeos:signed:2026-09-29T06:24:09Z:95345eadc9caebf0e56f2e9daf31d4b27aff43ffb9d49cca3ed8693e7a929d69:iCexTem3/imS/vFpgoxqkmprO0/ggWQU5Y8ZDubmAshKNHvCiljhPczAos8QK58ROY1m2GHzV2gQQM5wNO6LBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 description: Exact signed input for controller-local guest owner materialization
@@ -7,7 +6,11 @@ guest_owner_materialization:
   guest_target_triple: x86_64-unknown-linux-gnu
   maximum_owner_bytes: 33554432
   profile:
-    schema: 1
+    schema: 2
+    account:
+      implementation: unix
+      uid: 65534
+      gid: 65534
     private_source_max_bytes: 33554432
     private_source_max_inodes: 1024
     owner_timeout_seconds: 600

@@ -1,0 +1,12 @@
+tokens: [external-content, bootstrap-runtime-source]
+description: Create one bounded source sandbox for a current admitted runtime materialization
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content bootstrap-runtime-source '{\"binding_id\":\"<signed-producer>\",\"materialization_binding_id\":\"<signed-materializer>\",\"coordinate_digest\":\"<exact-coordinate>\",\"attestation_hash\":\"<exact-attestation>\",\"maximum_lifetime_seconds\":600}'"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/bootstrap-runtime-source

@@ -106,6 +106,11 @@ pub struct SubprocessLimits {
     pub max_cpu_seconds: Option<u64>,
     /// Maximum processes/threads available to the subprocess OS account.
     pub max_processes: Option<u64>,
+    /// Deny all process and thread creation in this exact child after exec.
+    /// Linux installs an inherited seccomp filter before any target code runs;
+    /// unsupported hosts or filter installation failure refuse the launch.
+    /// This fences local descendants, not asynchronous remote provider work.
+    pub deny_process_creation: bool,
     /// Maximum stdout bytes retained by the node. Lillux continues draining
     /// the pipe after this threshold, but terminates the supervised workload
     /// and reports an explicit output-limit outcome.
@@ -400,12 +405,81 @@ pub fn sealed_executable_memfd(
     )
 }
 
+/// Stream an exact content-addressed executable into an immutable executable
+/// descriptor. The source may be a pinned CAS file; no executable-sized heap
+/// allocation or pathname re-open is required. The digest is checked before
+/// the sealed descriptor becomes authority.
+#[cfg(target_os = "linux")]
+pub fn sealed_executable_memfd_from_reader(
+    name: &std::ffi::CStr,
+    reader: &mut impl std::io::Read,
+    expected_bytes: u64,
+    expected_sha256: &str,
+    maximum_bytes: u64,
+) -> Result<InheritedDescriptorAuthority, String> {
+    use sha2::Digest as _;
+    if expected_bytes == 0 || expected_bytes > maximum_bytes || !crate::valid_hash(expected_sha256)
+    {
+        return Err("sealed executable stream has an invalid size or digest".to_owned());
+    }
+    const MFD_EXEC: libc::c_uint = 0x0010;
+    sealed_memfd_with_flags_and_write(
+        name,
+        libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING | MFD_EXEC,
+        Some(0o500),
+        |file| {
+            let mut digest = sha2::Sha256::new();
+            let mut remaining = expected_bytes;
+            let mut buffer = [0_u8; 128 * 1024];
+            while remaining != 0 {
+                let take = usize::try_from(remaining.min(buffer.len() as u64))
+                    .map_err(|error| error.to_string())?;
+                let read = reader
+                    .read(&mut buffer[..take])
+                    .map_err(|error| format!("read sealed executable source: {error}"))?;
+                if read == 0 {
+                    return Err("sealed executable source ended before exact byte count".to_owned());
+                }
+                file.write_all(&buffer[..read])
+                    .map_err(|error| format!("write sealed executable: {error}"))?;
+                digest.update(&buffer[..read]);
+                remaining -= read as u64;
+            }
+            let mut extra = [0_u8; 1];
+            if reader
+                .read(&mut extra)
+                .map_err(|error| format!("check sealed executable source end: {error}"))?
+                != 0
+            {
+                return Err("sealed executable source exceeds exact byte count".to_owned());
+            }
+            if format!("{:x}", digest.finalize()) != expected_sha256 {
+                return Err("sealed executable source differs from content address".to_owned());
+            }
+            Ok(())
+        },
+    )
+}
+
 #[cfg(target_os = "linux")]
 fn sealed_memfd_with_flags(
     name: &std::ffi::CStr,
     bytes: &[u8],
     flags: libc::c_uint,
     mode: Option<libc::mode_t>,
+) -> Result<InheritedDescriptorAuthority, String> {
+    sealed_memfd_with_flags_and_write(name, flags, mode, |file| {
+        file.write_all(bytes)
+            .map_err(|error| format!("write sealed memfd: {error}"))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn sealed_memfd_with_flags_and_write(
+    name: &std::ffi::CStr,
+    flags: libc::c_uint,
+    mode: Option<libc::mode_t>,
+    write: impl FnOnce(&mut std::fs::File) -> Result<(), String>,
 ) -> Result<InheritedDescriptorAuthority, String> {
     use std::io::Seek as _;
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
@@ -442,8 +516,7 @@ fn sealed_memfd_with_flags(
             std::io::Error::last_os_error()
         ));
     }
-    file.write_all(bytes)
-        .map_err(|error| format!("write sealed memfd: {error}"))?;
+    write(&mut file)?;
     file.seek(std::io::SeekFrom::Start(0))
         .map_err(|error| format!("rewind sealed memfd: {error}"))?;
 
@@ -482,6 +555,17 @@ pub fn sealed_executable_memfd(
     _bytes: &[u8],
 ) -> Result<InheritedDescriptorAuthority, String> {
     Err("sealed executable memfd is supported only on Linux".to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn sealed_executable_memfd_from_reader(
+    _name: &std::ffi::CStr,
+    _reader: &mut impl std::io::Read,
+    _expected_bytes: u64,
+    _expected_sha256: &str,
+    _maximum_bytes: u64,
+) -> Result<InheritedDescriptorAuthority, String> {
+    Err("sealed executable stream is supported only on Linux".to_owned())
 }
 
 /// Result of a synchronous subprocess execution.
@@ -8127,6 +8211,7 @@ fn spawn_failure_with_launcher_refusal(start: Instant, diagnostic: String) -> Su
 /// process's hard limit. It does not install any limit.
 pub fn validate_subprocess_limits(limits: Option<&SubprocessLimits>) -> Result<(), String> {
     validate_output_retention_limits(limits)?;
+    validate_no_process_creation_limit(limits)?;
     #[cfg(unix)]
     {
         validated_rlimits(limits).map(|_| ())
@@ -8155,6 +8240,7 @@ pub fn configure_subprocess_limits(
     limits: Option<&SubprocessLimits>,
 ) -> Result<(), String> {
     validate_output_retention_limits(limits)?;
+    validate_no_process_creation_limit(limits)?;
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -8189,6 +8275,9 @@ pub fn configure_subprocess_limits(
         let _ = command;
         validate_subprocess_limits(limits)?;
     }
+    if limits.is_some_and(|limits| limits.deny_process_creation) {
+        configure_no_process_creation(command)?;
+    }
     Ok(())
 }
 
@@ -8206,6 +8295,196 @@ fn validate_output_retention_limits(limits: Option<&SubprocessLimits>) -> Result
         }
     }
     Ok(())
+}
+
+fn validate_no_process_creation_limit(limits: Option<&SubprocessLimits>) -> Result<(), String> {
+    if !limits.is_some_and(|limits| limits.deny_process_creation) {
+        return Ok(());
+    }
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        Ok(())
+    }
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    {
+        Err("no-process-creation limit is unsupported on this host".to_string())
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn configure_no_process_creation(command: &mut process::Command) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+
+    // This hook runs after trusted descriptor, resource, and account setup,
+    // before the target exec. Seccomp survives exec, and Command::spawn
+    // reports any installation failure without running target code.
+    unsafe {
+        command.pre_exec(install_no_process_creation_filter);
+    }
+    Ok(())
+}
+
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
+fn configure_no_process_creation(_command: &mut process::Command) -> Result<(), String> {
+    Err("no-process-creation limit is unsupported on this host".to_string())
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn install_no_process_creation_filter() -> std::io::Result<()> {
+    const LD_W_ABS: u16 = 0x20;
+    const JEQ_K: u16 = 0x15;
+    const JSET_K: u16 = 0x45;
+    const RET_K: u16 = 0x06;
+    const KILL_PROCESS: u32 = 0x8000_0000;
+    const ERRNO: u32 = 0x0005_0000;
+    const ALLOW: u32 = 0x7fff_0000;
+    #[cfg(target_arch = "x86_64")]
+    const AUDIT_ARCH: u32 = 0xc000_003e;
+    #[cfg(target_arch = "aarch64")]
+    const AUDIT_ARCH: u32 = 0xc000_00b7;
+
+    const fn filter(code: u16, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
+        libc::sock_filter { code, jt, jf, k }
+    }
+    // The architecture check also rejects foreign syscall-number tables.
+    // x86_64 explicitly refuses the x32 ABI before comparing syscall IDs.
+    #[cfg(target_arch = "x86_64")]
+    const FILTER: [libc::sock_filter; 14] = [
+        filter(LD_W_ABS, 0, 0, 4),
+        filter(JEQ_K, 1, 0, AUDIT_ARCH),
+        filter(RET_K, 0, 0, KILL_PROCESS),
+        filter(LD_W_ABS, 0, 0, 0),
+        filter(JSET_K, 0, 1, 0x4000_0000),
+        filter(RET_K, 0, 0, ERRNO | libc::ENOSYS as u32),
+        filter(JEQ_K, 0, 1, libc::SYS_clone as u32),
+        filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
+        filter(JEQ_K, 0, 1, libc::SYS_clone3 as u32),
+        filter(RET_K, 0, 0, ERRNO | libc::ENOSYS as u32),
+        filter(JEQ_K, 0, 1, libc::SYS_fork as u32),
+        filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
+        filter(JEQ_K, 0, 1, libc::SYS_vfork as u32),
+        filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
+    ];
+    #[cfg(target_arch = "aarch64")]
+    const FILTER: [libc::sock_filter; 8] = [
+        filter(LD_W_ABS, 0, 0, 4),
+        filter(JEQ_K, 1, 0, AUDIT_ARCH),
+        filter(RET_K, 0, 0, KILL_PROCESS),
+        filter(LD_W_ABS, 0, 0, 0),
+        filter(JEQ_K, 0, 1, libc::SYS_clone as u32),
+        filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
+        filter(JEQ_K, 0, 1, libc::SYS_clone3 as u32),
+        filter(RET_K, 0, 0, ERRNO | libc::ENOSYS as u32),
+    ];
+
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut instructions = [filter(RET_K, 0, 0, ALLOW); FILTER.len() + 1];
+    instructions[..FILTER.len()].copy_from_slice(&FILTER);
+    let mut program = libc::sock_fprog {
+        len: u16::try_from(instructions.len()).expect("fixed seccomp filter fits u16"),
+        filter: instructions.as_mut_ptr(),
+    };
+    if unsafe {
+        libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &mut program as *mut libc::sock_fprog,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod no_process_creation_tests {
+    use super::*;
+
+    fn request(script: &str, deny_process_creation: bool) -> SubprocessRequest {
+        SubprocessRequest {
+            cmd: "/bin/sh".into(),
+            argv0: None,
+            args: vec!["-c".into(), script.into()],
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: Some(SubprocessLimits {
+                deny_process_creation,
+                ..SubprocessLimits::default()
+            }),
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        }
+    }
+
+    #[test]
+    fn no_process_creation_filter_denies_shell_child_but_preserves_exec() {
+        // The shell must fork to execute a foreground command in an `if`.
+        // A normal launch therefore exits 41, while the filtered shell
+        // cannot reach that success branch after child creation is refused.
+        let script = "if /bin/true 2>/dev/null; then exit 41; else exit 0; fi";
+        let ordinary = lib_run(request(script, false));
+        assert_eq!(ordinary.exit_code, 41, "{}", ordinary.stderr);
+        let denied = lib_run(request(script, true));
+        assert!(!denied.success, "{}", denied.stderr);
+        assert_ne!(denied.exit_code, 41, "{}", denied.stderr);
+        let replaced = lib_run(request("exec /bin/true", true));
+        assert!(replaced.success, "{}", replaced.stderr);
+    }
+
+    #[test]
+    fn public_command_limit_installs_the_same_filter() {
+        let mut command = process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "if /bin/true 2>/dev/null; then exit 41; else exit 0; fi",
+        ]);
+        let limits = SubprocessLimits {
+            deny_process_creation: true,
+            ..SubprocessLimits::default()
+        };
+        configure_subprocess_limits(&mut command, Some(&limits)).unwrap();
+        let output = command.output().unwrap();
+        assert_ne!(output.status.code(), Some(41));
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn no_process_creation_limit_preserves_timeout_settlement() {
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_millis(80));
+        let result = match lib_spawn_until(request("exec /bin/sleep 5", true), deadline) {
+            Ok(process) => process.wait(),
+            Err(result) => result,
+        };
+        assert!(result.timed_out, "{}", result.stderr);
+        if result.pid != 0 {
+            assert!(!is_alive(result.pid));
+        }
+    }
 }
 
 #[cfg(unix)]

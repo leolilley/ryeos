@@ -16,19 +16,28 @@ CREATE TABLE runtime_snapshot_operation (
     operation_id TEXT PRIMARY KEY,
     intent_json TEXT NOT NULL,
     intent_digest TEXT NOT NULL,
-    phase TEXT NOT NULL CHECK (phase IN ('reserved','attempt_pending','quarantined','bound')),
+    source_bootstrap_operation_id TEXT UNIQUE REFERENCES runtime_snapshot_bootstrap(operation_id),
+    phase TEXT NOT NULL CHECK (phase IN ('reserved','attempt_pending','quarantined','late_observed','bound')),
     locator_json TEXT,
     readiness_json TEXT,
+    completion_at_ms INTEGER,
+    runner_deadline_exceeded INTEGER CHECK (runner_deadline_exceeded IN (0,1)),
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    CHECK ((phase='bound' AND locator_json IS NOT NULL)
-        OR (phase!='bound' AND locator_json IS NULL AND readiness_json IS NULL)),
+    CHECK ((phase IN ('bound','late_observed') AND locator_json IS NOT NULL
+            AND completion_at_ms IS NOT NULL AND runner_deadline_exceeded IS NOT NULL)
+        OR (phase NOT IN ('bound','late_observed') AND locator_json IS NULL
+            AND readiness_json IS NULL AND completion_at_ms IS NULL
+            AND runner_deadline_exceeded IS NULL)),
     CHECK (readiness_json IS NULL OR phase='bound')
 );
 CREATE TRIGGER runtime_snapshot_operation_immutable_intent
 BEFORE UPDATE ON runtime_snapshot_operation
 WHEN NEW.operation_id!=OLD.operation_id OR NEW.intent_json!=OLD.intent_json
     OR NEW.intent_digest!=OLD.intent_digest OR NEW.created_at_ms!=OLD.created_at_ms
+    OR NEW.source_bootstrap_operation_id IS NOT OLD.source_bootstrap_operation_id
+    OR (OLD.completion_at_ms IS NOT NULL AND NEW.completion_at_ms IS NOT OLD.completion_at_ms)
+    OR (OLD.runner_deadline_exceeded IS NOT NULL AND NEW.runner_deadline_exceeded IS NOT OLD.runner_deadline_exceeded)
 BEGIN SELECT RAISE(ABORT, 'runtime snapshot intent is immutable'); END;
 CREATE TRIGGER runtime_snapshot_operation_no_delete
 BEFORE DELETE ON runtime_snapshot_operation
@@ -45,6 +54,7 @@ pub enum RuntimeSnapshotPhase {
     Reserved,
     AttemptPending,
     Quarantined,
+    LateObserved,
     Bound,
 }
 
@@ -54,6 +64,7 @@ impl RuntimeSnapshotPhase {
             "reserved" => Self::Reserved,
             "attempt_pending" => Self::AttemptPending,
             "quarantined" => Self::Quarantined,
+            "late_observed" => Self::LateObserved,
             "bound" => Self::Bound,
             _ => anyhow::bail!("runtime snapshot has an invalid phase"),
         })
@@ -66,6 +77,8 @@ pub struct RuntimeSnapshotRecord {
     pub phase: RuntimeSnapshotPhase,
     pub locator: Option<RuntimeSnapshotLocator>,
     pub readiness: Option<RuntimeSnapshotReadinessObservation>,
+    pub completion_at_ms: Option<i64>,
+    pub runner_deadline_exceeded: Option<bool>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -83,10 +96,54 @@ fn canonical<T: Serialize>(value: &T) -> Result<String> {
     )?)
 }
 
+fn verify_retained_bootstrap_source(
+    conn: &Connection,
+    intent: &RuntimeSnapshotIntent,
+) -> Result<()> {
+    let Some(operation_id) = &intent.source_bootstrap_operation_id else {
+        return Ok(());
+    };
+    let bootstrap = super::runtime_snapshot_bootstrap::read(conn, operation_id)?
+        .context("materialized snapshot lost retained bootstrap source")?;
+    ensure!(
+        bootstrap.phase
+            == super::runtime_snapshot_bootstrap::SnapshotBootstrapPhase::OccurrenceBound
+            && bootstrap.readiness.is_some()
+            && bootstrap
+                .occurrence
+                .as_ref()
+                .map(|value| value.occurrence_id.as_str())
+                == Some(intent.source_occurrence_id.as_str())
+            && bootstrap
+                .occurrence
+                .as_ref()
+                .and_then(|value| value.provider_creation_observation["created_at"].as_str())
+                == intent.source_created_at.as_deref()
+            && bootstrap
+                .occurrence
+                .as_ref()
+                .and_then(|value| value.provider_creation_observation["timeout_seconds"].as_u64())
+                == intent.source_timeout_seconds.map(u64::from)
+            && bootstrap.intent.owner_principal == intent.owner_principal
+            && bootstrap.intent.provider_id == intent.provider_id
+            && bootstrap.intent.provider_group_id == intent.provider_group_id
+            && bootstrap.intent.production_binding_digest == intent.production_profile_digest
+            && bootstrap.intent.adapter_artifact_hash == intent.adapter_artifact_hash
+            && bootstrap.intent.settings_digest == intent.settings_digest
+            && bootstrap.intent.source == intent.source
+            && intent
+                .source_timeout_seconds
+                .is_some_and(|seconds| { seconds <= bootstrap.intent.maximum_lifetime_seconds })
+            && bootstrap.intent.guest_runtime_manifest_hash == intent.guest_runtime_manifest_hash,
+        "materialized snapshot differs from exact retained bootstrap source"
+    );
+    Ok(())
+}
+
 pub(super) fn read(conn: &Connection, operation_id: &str) -> Result<Option<RuntimeSnapshotRecord>> {
-    let raw: Option<(String, String, String, Option<String>, Option<String>, i64, i64)> = conn
+    let raw: Option<(String, String, Option<String>, String, Option<String>, Option<String>, Option<i64>, Option<i64>, i64, i64)> = conn
         .query_row(
-            "SELECT intent_json,intent_digest,phase,locator_json,readiness_json,created_at_ms,updated_at_ms
+            "SELECT intent_json,intent_digest,source_bootstrap_operation_id,phase,locator_json,readiness_json,completion_at_ms,runner_deadline_exceeded,created_at_ms,updated_at_ms
              FROM runtime_snapshot_operation WHERE operation_id=?1",
             [operation_id],
             |row| {
@@ -98,12 +155,25 @@ pub(super) fn read(conn: &Connection, operation_id: &str) -> Result<Option<Runti
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
                 ))
             },
         )
         .optional()?;
-    let Some((intent_json, intent_digest, phase, locator_json, readiness_json, created, updated)) =
-        raw
+    let Some((
+        intent_json,
+        intent_digest,
+        source_bootstrap_operation_id,
+        phase,
+        locator_json,
+        readiness_json,
+        completion_at_ms,
+        runner_deadline_exceeded,
+        created,
+        updated,
+    )) = raw
     else {
         return Ok(None);
     };
@@ -115,9 +185,11 @@ pub(super) fn read(conn: &Connection, operation_id: &str) -> Result<Option<Runti
     ensure!(
         intent.operation_id == operation_id
             && intent.digest()? == intent_digest
+            && intent.source_bootstrap_operation_id == source_bootstrap_operation_id
             && canonical(&intent)? == intent_json,
         "runtime snapshot retained intent changed identity"
     );
+    verify_retained_bootstrap_source(conn, &intent)?;
     let phase = RuntimeSnapshotPhase::parse(&phase)?;
     let locator = locator_json
         .map(|raw| {
@@ -158,8 +230,24 @@ pub(super) fn read(conn: &Connection, operation_id: &str) -> Result<Option<Runti
         })
         .transpose()?;
     ensure!(
-        (phase == RuntimeSnapshotPhase::Bound) == locator.is_some()
+        matches!(
+            phase,
+            RuntimeSnapshotPhase::Bound | RuntimeSnapshotPhase::LateObserved
+        ) == locator.is_some()
             && (readiness.is_none() || phase == RuntimeSnapshotPhase::Bound)
+            && matches!(runner_deadline_exceeded, None | Some(0) | Some(1))
+            && (completion_at_ms.is_some() == runner_deadline_exceeded.is_some())
+            && (completion_at_ms.is_some() == locator.is_some())
+            && completion_at_ms
+                .is_none_or(|completed| completed >= created && completed <= updated)
+            && (phase != RuntimeSnapshotPhase::Bound
+                || (runner_deadline_exceeded == Some(0)
+                    && completion_at_ms
+                        .is_some_and(|completed| completed < intent.attempt_deadline_ms)))
+            && (phase != RuntimeSnapshotPhase::LateObserved
+                || (runner_deadline_exceeded == Some(1)
+                    || completion_at_ms
+                        .is_some_and(|completed| completed >= intent.attempt_deadline_ms)))
             && created > 0
             && updated >= created,
         "runtime snapshot phase or timestamps contradict retained evidence"
@@ -169,6 +257,8 @@ pub(super) fn read(conn: &Connection, operation_id: &str) -> Result<Option<Runti
         phase,
         locator,
         readiness,
+        completion_at_ms,
+        runner_deadline_exceeded: runner_deadline_exceeded.map(|value| value != 0),
         created_at_ms: created,
         updated_at_ms: updated,
     }))
@@ -209,20 +299,59 @@ impl RuntimeDb {
             tx.commit()?;
             return Ok(existing);
         }
+        let maximum_window_ms = if let Some(bootstrap_operation_id) =
+            &intent.source_bootstrap_operation_id
+        {
+            verify_retained_bootstrap_source(&tx, intent)?;
+            let bootstrap = super::runtime_snapshot_bootstrap::read(&tx, bootstrap_operation_id)?
+                .context("materialized snapshot lost retained bootstrap")?;
+            let termination_count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM runtime_snapshot_bootstrap_termination WHERE bootstrap_operation_id=?1",
+                [bootstrap_operation_id], |row| row.get(0),
+            )?;
+            ensure!(
+                termination_count == 0,
+                "bootstrap source cleanup already reserved"
+            );
+            let created_ms = chrono::DateTime::parse_from_rfc3339(
+                intent
+                    .source_created_at
+                    .as_deref()
+                    .context("snapshot source has no creation time")?,
+            )?
+            .timestamp_millis();
+            let source_expiry_ms = created_ms
+                .checked_add(
+                    i64::from(
+                        intent
+                            .source_timeout_seconds
+                            .context("snapshot source has no timeout")?,
+                    ) * 1_000,
+                )
+                .context("snapshot source expiry overflow")?;
+            ensure!(
+                intent.attempt_deadline_ms <= source_expiry_ms,
+                "snapshot deadline outlives its retained source"
+            );
+            i64::from(bootstrap.intent.maximum_lifetime_seconds) * 1_000
+        } else {
+            300_000
+        };
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         ensure!(
             intent.attempt_deadline_ms > now
-                && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
+                && intent.attempt_deadline_ms.saturating_sub(now) <= maximum_window_ms,
             "runtime snapshot attempt deadline is outside its admission window"
         );
         tx.execute(
             "INSERT INTO runtime_snapshot_operation
-             (operation_id,intent_json,intent_digest,phase,locator_json,readiness_json,created_at_ms,updated_at_ms)
-             VALUES(?1,?2,?3,'reserved',NULL,NULL,?4,?4)",
+             (operation_id,intent_json,intent_digest,source_bootstrap_operation_id,phase,locator_json,readiness_json,completion_at_ms,runner_deadline_exceeded,created_at_ms,updated_at_ms)
+             VALUES(?1,?2,?3,?4,'reserved',NULL,NULL,NULL,NULL,?5,?5)",
             params![
                 intent.operation_id,
                 canonical(intent)?,
                 intent.digest()?,
+                intent.source_bootstrap_operation_id,
                 now
             ],
         )?;
@@ -251,12 +380,23 @@ impl RuntimeDb {
                 tx.commit()?;
                 return Ok(RuntimeSnapshotAttemptClaim::Bound(record));
             }
-            RuntimeSnapshotPhase::AttemptPending | RuntimeSnapshotPhase::Quarantined => {
+            RuntimeSnapshotPhase::AttemptPending
+            | RuntimeSnapshotPhase::Quarantined
+            | RuntimeSnapshotPhase::LateObserved => {
                 tx.commit()?;
                 return Ok(RuntimeSnapshotAttemptClaim::Reconcile(record));
             }
             RuntimeSnapshotPhase::Reserved => {}
         }
+        let staged_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM runtime_snapshot_stage WHERE parent_operation_id=?1",
+            [operation_id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            staged_count == 0,
+            "runtime snapshot has a separately retained mutation stage"
+        );
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         ensure!(
             now < record.intent.attempt_deadline_ms,
@@ -277,17 +417,33 @@ impl RuntimeDb {
         Ok(RuntimeSnapshotAttemptClaim::StartAttempt(current))
     }
 
-    /// A complete adapter observation may bind one opaque snapshot locator.
-    /// It never establishes that the provider restored the expected bytes.
+    /// A complete adapter observation retains one opaque snapshot locator.
+    /// The runner's deadline classification is authoritative, and a delayed
+    /// database bind conservatively remains late even when the adapter itself
+    /// finished in time. Neither state establishes restored runtime bytes.
     pub fn bind_runtime_snapshot_locator(
         &self,
         locator: &RuntimeSnapshotLocator,
+        deadline_exceeded: bool,
+    ) -> Result<RuntimeSnapshotRecord> {
+        let observed_at_ms = i64::try_from(lillux::time::timestamp_millis())?;
+        self.bind_runtime_snapshot_locator_at(locator, deadline_exceeded, observed_at_ms)
+    }
+
+    fn bind_runtime_snapshot_locator_at(
+        &self,
+        locator: &RuntimeSnapshotLocator,
+        deadline_exceeded: bool,
+        observed_at_ms: i64,
     ) -> Result<RuntimeSnapshotRecord> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record =
             read(&tx, &locator.operation_id)?.context("runtime snapshot has no attempt claim")?;
         locator.validate_for(&record.intent)?;
-        if record.phase == RuntimeSnapshotPhase::Bound {
+        if matches!(
+            record.phase,
+            RuntimeSnapshotPhase::Bound | RuntimeSnapshotPhase::LateObserved
+        ) {
             ensure!(
                 record.locator.as_ref() == Some(locator),
                 "runtime snapshot result replay changed"
@@ -296,17 +452,33 @@ impl RuntimeDb {
             return Ok(record);
         }
         ensure!(
+            observed_at_ms >= record.updated_at_ms,
+            "runtime snapshot completion predates its retained attempt"
+        );
+        let late = deadline_exceeded || observed_at_ms >= record.intent.attempt_deadline_ms;
+        ensure!(
             matches!(
                 record.phase,
                 RuntimeSnapshotPhase::AttemptPending | RuntimeSnapshotPhase::Quarantined
             ),
             "runtime snapshot locator did not follow its one attempt claim"
         );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        ensure!(
+            late || record.phase == RuntimeSnapshotPhase::AttemptPending,
+            "quarantined runtime snapshot cannot become a timely bound locator"
+        );
+        let target_phase = if late { "late_observed" } else { "bound" };
         let changed = tx.execute(
-            "UPDATE runtime_snapshot_operation SET phase='bound',locator_json=?2,updated_at_ms=?3
+            "UPDATE runtime_snapshot_operation SET phase=?2,locator_json=?3,
+             completion_at_ms=?4,runner_deadline_exceeded=?5,updated_at_ms=?4
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
-            params![locator.operation_id, canonical(locator)?, now],
+            params![
+                locator.operation_id,
+                target_phase,
+                canonical(locator)?,
+                observed_at_ms,
+                i64::from(deadline_exceeded)
+            ],
         )?;
         ensure!(
             changed == 1,
@@ -412,6 +584,9 @@ mod tests {
             owner_principal: format!("fp:{}", "2".repeat(64)),
             provider_id: "render-sandbox-early-access".into(),
             source_occurrence_id: "sbx-source".into(),
+            source_bootstrap_operation_id: None,
+            source_created_at: None,
+            source_timeout_seconds: None,
             provider_group_id: "sbg-group".into(),
             production_profile_digest: "3".repeat(64),
             adapter_artifact_hash: "4".repeat(64),
@@ -477,16 +652,34 @@ mod tests {
         ));
         let locator = locator(&intent);
         assert_eq!(
-            db.bind_runtime_snapshot_locator(&locator).unwrap().phase,
+            db.bind_runtime_snapshot_locator(&locator, false)
+                .unwrap()
+                .phase,
             RuntimeSnapshotPhase::Bound
         );
+        let bound = db
+            .runtime_snapshot_operation(&intent.operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bound.runner_deadline_exceeded, Some(false));
+        assert!(
+            bound
+                .completion_at_ms
+                .is_some_and(|at| at < intent.attempt_deadline_ms)
+        );
+        let replay = db
+            .bind_runtime_snapshot_locator_at(&locator, true, intent.attempt_deadline_ms + 1)
+            .unwrap();
+        assert_eq!(replay, bound);
         assert!(matches!(
             db.claim_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .unwrap(),
             RuntimeSnapshotAttemptClaim::Bound(_)
         ));
         assert_eq!(
-            db.bind_runtime_snapshot_locator(&locator).unwrap().locator,
+            db.bind_runtime_snapshot_locator(&locator, false)
+                .unwrap()
+                .locator,
             Some(locator.clone())
         );
         let readiness = RuntimeSnapshotReadinessObservation {
@@ -521,7 +714,10 @@ mod tests {
         );
         let mut changed_locator = locator;
         changed_locator.snapshot_id = "snp-other".into();
-        assert!(db.bind_runtime_snapshot_locator(&changed_locator).is_err());
+        assert!(
+            db.bind_runtime_snapshot_locator(&changed_locator, false)
+                .is_err()
+        );
         validate_current(&db.conn).unwrap();
     }
 
@@ -544,12 +740,85 @@ mod tests {
                 .unwrap(),
             RuntimeSnapshotAttemptClaim::Reconcile(_)
         ));
-        let late = db.bind_runtime_snapshot_locator(&locator(&intent)).unwrap();
-        assert_eq!(late.phase, RuntimeSnapshotPhase::Bound);
+        let observed = locator(&intent);
+        assert!(db.bind_runtime_snapshot_locator(&observed, false).is_err());
+        let late = db.bind_runtime_snapshot_locator(&observed, true).unwrap();
+        assert_eq!(late.phase, RuntimeSnapshotPhase::LateObserved);
+        assert_eq!(late.locator, Some(observed.clone()));
+        assert_eq!(late.runner_deadline_exceeded, Some(true));
         assert!(matches!(
             db.claim_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .unwrap(),
-            RuntimeSnapshotAttemptClaim::Bound(_)
+            RuntimeSnapshotAttemptClaim::Reconcile(_)
         ));
+        assert_eq!(
+            db.bind_runtime_snapshot_locator(&observed, false).unwrap(),
+            late
+        );
+        assert_eq!(
+            db.bind_runtime_snapshot_locator(&observed, true)
+                .unwrap()
+                .phase,
+            RuntimeSnapshotPhase::LateObserved
+        );
+        let mut changed = observed.clone();
+        changed.snapshot_id = "snp-other".into();
+        assert!(db.bind_runtime_snapshot_locator(&changed, true).is_err());
+        let readiness = RuntimeSnapshotReadinessObservation {
+            schema: 1,
+            operation_id: intent.operation_id.clone(),
+            intent_digest: digest,
+            snapshot_id: observed.snapshot_id,
+            source_occurrence_id: intent.source_occurrence_id.clone(),
+            provider_group_id: intent.provider_group_id.clone(),
+            creation_response_sha256: observed.provider_response_sha256,
+            readiness_response_sha256: "b".repeat(64),
+            captured_at: "2026-09-28T00:01:00Z".into(),
+            size_bytes: 4096,
+        };
+        assert!(db.bind_runtime_snapshot_readiness(&readiness).is_err());
+        validate_current(&db.conn).unwrap();
+    }
+
+    #[test]
+    fn complete_response_after_deadline_retains_locator_without_promotion() {
+        let db = RuntimeDb::new_in_memory().unwrap();
+        let intent = intent();
+        db.reserve_runtime_snapshot(&intent).unwrap();
+        let digest = intent.digest().unwrap();
+        db.claim_runtime_snapshot_attempt(&intent.operation_id, &digest)
+            .unwrap();
+        let locator = locator(&intent);
+        let late = db.bind_runtime_snapshot_locator(&locator, true).unwrap();
+        assert_eq!(late.phase, RuntimeSnapshotPhase::LateObserved);
+        assert_eq!(late.locator, Some(locator.clone()));
+        assert_eq!(
+            db.bind_runtime_snapshot_locator(&locator, false).unwrap(),
+            late
+        );
+        assert!(
+            db.quarantine_runtime_snapshot_attempt(&intent.operation_id, &digest)
+                .is_err()
+        );
+        validate_current(&db.conn).unwrap();
+    }
+
+    #[test]
+    fn delayed_bind_is_late_even_if_runner_reported_timely_exit() {
+        let db = RuntimeDb::new_in_memory().unwrap();
+        let intent = intent();
+        db.reserve_runtime_snapshot(&intent).unwrap();
+        let digest = intent.digest().unwrap();
+        db.claim_runtime_snapshot_attempt(&intent.operation_id, &digest)
+            .unwrap();
+        let locator = locator(&intent);
+        let record = db
+            .bind_runtime_snapshot_locator_at(&locator, false, intent.attempt_deadline_ms)
+            .unwrap();
+        assert_eq!(record.phase, RuntimeSnapshotPhase::LateObserved);
+        assert_eq!(record.locator, Some(locator));
+        assert_eq!(record.runner_deadline_exceeded, Some(false));
+        assert_eq!(record.completion_at_ms, Some(intent.attempt_deadline_ms));
+        validate_current(&db.conn).unwrap();
     }
 }

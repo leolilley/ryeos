@@ -35,8 +35,9 @@ mod publication;
 mod retained;
 
 pub use publication::{
-    CurrentGuestOwnerMaterialization, PublishedGuestOwnerMaterialization,
-    load_current_guest_owner_materialization, publish_prepared_guest_owner_runtime,
+    PublishedGuestOwnerMaterialization, VerifiedGuestOwnerMaterialization,
+    load_current_guest_owner_materialization, load_retained_guest_owner_materialization,
+    publish_prepared_guest_owner_runtime,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

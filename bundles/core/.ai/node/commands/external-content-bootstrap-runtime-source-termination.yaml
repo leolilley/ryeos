@@ -1,0 +1,12 @@
+tokens: [external-content, bootstrap-runtime-source-termination]
+description: Read one exact retained source-sandbox termination
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content bootstrap-runtime-source-termination '{\"operation_id\":\"<termination-operation>\"}'"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/bootstrap-runtime-source-termination

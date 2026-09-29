@@ -1,0 +1,12 @@
+tokens: [external-content, continue-runtime-snapshot-create]
+description: Continue one accepted runtime snapshot upload through its retained create stage
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content continue-runtime-snapshot-create '{\"operation_id\":\"<exact-snapshot-operation>\"}'"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/continue-runtime-snapshot-create

@@ -1,0 +1,12 @@
+tokens: [external-content, observe-bootstrap-runtime-source]
+description: Observe readiness of the exact retained runtime-source bootstrap
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content observe-bootstrap-runtime-source '{\"operation_id\":\"<exact-operation>\"}'"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/observe-bootstrap-runtime-source

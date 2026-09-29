@@ -242,6 +242,15 @@ pub enum DurableCasPublicationKey {
         binding_digest: String,
         source_coordinate_digest: String,
     },
+    /// Exact signed lifecycle adapter generation held for historical cleanup.
+    /// Publication does not admit this generation for fresh placement work.
+    RetainedLifecycleArtifacts {
+        bundle_manifest_digest: String,
+        /// Digest of the complete captured declaration: every executable,
+        /// signed executor proof, and provider/snapshot spec. One member's
+        /// digest cannot stand in for the historical cleanup generation.
+        artifact_set_digest: String,
+    },
     /// One bundle-catalog upload/admission decision. This is deliberately
     /// distinct from project publication: a catalog never fabricates a project
     /// path and stale policy authority cannot be replayed after reconfiguration.
@@ -297,6 +306,18 @@ impl DurableCasPublicationKey {
         Ok(key)
     }
 
+    pub fn retained_lifecycle_artifacts(
+        bundle_manifest_digest: &str,
+        artifact_set_digest: &str,
+    ) -> Result<Self> {
+        let key = Self::RetainedLifecycleArtifacts {
+            bundle_manifest_digest: bundle_manifest_digest.to_owned(),
+            artifact_set_digest: artifact_set_digest.to_owned(),
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
     pub fn bundle_catalog(
         publisher_fingerprint: &str,
         catalog_namespace: &str,
@@ -345,6 +366,16 @@ impl DurableCasPublicationKey {
                 validate_hash(
                     "guest-runtime materialization source coordinate digest",
                     source_coordinate_digest,
+                )
+            }
+            Self::RetainedLifecycleArtifacts {
+                bundle_manifest_digest,
+                artifact_set_digest,
+            } => {
+                validate_hash("retained lifecycle bundle manifest", bundle_manifest_digest)?;
+                validate_hash(
+                    "retained lifecycle complete artifact set",
+                    artifact_set_digest,
                 )
             }
             Self::BundleCatalog {
@@ -3116,6 +3147,23 @@ mod tests {
         );
         assert!(
             DurableCasPublicationKey::guest_runtime_materialization(&hash("a"), "pending").is_err()
+        );
+    }
+
+    #[test]
+    fn retained_lifecycle_artifacts_have_a_cleanup_only_exact_key() {
+        let key =
+            DurableCasPublicationKey::retained_lifecycle_artifacts(&hash("a"), &hash("b")).unwrap();
+        assert_eq!(
+            serde_json::to_value(&key).unwrap(),
+            serde_json::json!({
+                "kind": "retained_lifecycle_artifacts",
+                "bundle_manifest_digest": hash("a"),
+                "artifact_set_digest": hash("b"),
+            })
+        );
+        assert!(
+            DurableCasPublicationKey::retained_lifecycle_artifacts(&hash("a"), "pending").is_err()
         );
     }
 

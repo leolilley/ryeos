@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_engine::binary_resolver::BundlePayloadSourceProof;
 use ryeos_external_execution::lifecycle_adapter::{
     LifecycleAdapterInvocation, run_lifecycle_adapter,
 };
@@ -12,11 +13,20 @@ use ryeos_external_execution_contract::restored_runtime_measurement::{
 };
 use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotAdapterRequest,
-    RuntimeSnapshotAdapterResponse, RuntimeSnapshotQualificationAdapterRequest,
+    RuntimeSnapshotAdapterResponse, RuntimeSnapshotCreateAdapterRequest,
+    RuntimeSnapshotCreateResult, RuntimeSnapshotQualificationAdapterRequest,
     RuntimeSnapshotQualificationAdapterResponse,
     RuntimeSnapshotQualificationTerminationAdapterRequest,
     RuntimeSnapshotQualificationTerminationAdapterResponse, RuntimeSnapshotReadinessObservation,
-    RuntimeSnapshotReadinessRequest,
+    RuntimeSnapshotReadinessRequest, RuntimeSnapshotUploadAdapterRequest,
+    RuntimeSnapshotUploadReceipt,
+};
+use ryeos_external_execution_contract::runtime_snapshot_bootstrap::{
+    MAX_BOOTSTRAP_ADAPTER_REQUEST_BYTES, RuntimeSnapshotBootstrapAdapterRequest,
+    RuntimeSnapshotBootstrapAdapterResponse, RuntimeSnapshotBootstrapIntent,
+    RuntimeSnapshotBootstrapReadinessAdapterResponse, RuntimeSnapshotBootstrapReadinessRequest,
+    RuntimeSnapshotBootstrapTerminationAdapterRequest,
+    RuntimeSnapshotBootstrapTerminationAdapterResponse,
 };
 use ryeos_external_execution_contract::staging_package::GuestStagingExpected;
 use ryeos_external_execution_contract::{
@@ -33,14 +43,16 @@ use ryeos_external_execution_contract::{
     LifecycleRuntimeProbeSource, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
     SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
 };
+use ryeos_state::objects::RetainedLifecycleExecutableRole;
 
 use crate::external_artifacts::{
-    CapturedLifecycleProviderSpec, ResolvedExternalLifecycleArtifacts,
+    CapturedLifecycleProviderSpec, LifecycleEscrowCapture, LifecycleEscrowExecutable,
+    ResolvedExternalLifecycleArtifacts,
 };
 use crate::external_placement::{
     ExternalAllocationResolution, ExternalLifecycleObservation, ExternalPlacementBackend,
     ExternalSupervisorActivation, ExternalSupervisorActivationResolution,
-    ExternalTerminationResolution, SupervisorGuestPackage,
+    ExternalTerminationResolution, RuntimeProbeInput, SupervisorGuestPackage,
 };
 use crate::node_config::sections::external_execution::ExternalPlacementBackendContract;
 use crate::runtime_db::external_execution::{
@@ -64,6 +76,20 @@ struct CapturedLifecycleNetworkInputs {
     resolver_sha256: String,
     hosts_sha256: String,
     policy_sha256: String,
+}
+
+/// In-memory exact source for a future protected CAS escrow. This is
+/// historical verification data, not permission to reuse the backend for
+/// fresh allocation after its installed Bundle generation is replaced.
+#[derive(Debug)]
+pub(crate) struct CapturedLifecycleSourceEvidence {
+    pub bundle_name: String,
+    pub signed_bundle_manifest: Vec<u8>,
+    pub bundle_verifying_key: [u8; 32],
+    pub adapter: BundlePayloadSourceProof,
+    pub supervisor: BundlePayloadSourceProof,
+    pub launcher: BundlePayloadSourceProof,
+    pub restoration_verifier: Option<BundlePayloadSourceProof>,
 }
 
 fn capture_lifecycle_network_inputs(
@@ -107,8 +133,8 @@ fn capture_lifecycle_network_inputs(
 #[derive(Debug)]
 pub(crate) struct ExecutableExternalPlacementBackend {
     declaration: ryeos_external_execution_contract::ExternalLifecycleAdapterDeclaration,
-    _bundle_manifest_digest: String,
-    _signer_fingerprint: String,
+    bundle_manifest_digest: String,
+    signer_fingerprint: String,
     adapter_hash: String,
     adapter_bytes: u64,
     adapter: lillux::InheritedDescriptorAuthority,
@@ -123,6 +149,7 @@ pub(crate) struct ExecutableExternalPlacementBackend {
     provider_spec: CapturedLifecycleProviderSpec,
     snapshot_production_spec: Option<CapturedLifecycleProviderSpec>,
     inspection: LifecycleAdapterInspectionResponse,
+    source_evidence: CapturedLifecycleSourceEvidence,
 }
 
 impl ExecutableExternalPlacementBackend {
@@ -246,8 +273,8 @@ impl ExecutableExternalPlacementBackend {
 
         Ok(Self {
             declaration: artifacts.declaration,
-            _bundle_manifest_digest: artifacts.bundle_manifest_digest,
-            _signer_fingerprint: artifacts.signer_fingerprint,
+            bundle_manifest_digest: artifacts.bundle_manifest_digest,
+            signer_fingerprint: artifacts.signer_fingerprint,
             adapter_hash: artifacts.adapter.identity.content_hash,
             adapter_bytes,
             adapter: artifacts.adapter.handle,
@@ -261,10 +288,22 @@ impl ExecutableExternalPlacementBackend {
                 .restoration_verifier
                 .as_ref()
                 .map(|item| item.identity.content_hash.clone()),
-            restoration_verifier: artifacts.restoration_verifier.map(|item| item.handle),
+            restoration_verifier: artifacts
+                .restoration_verifier
+                .as_ref()
+                .map(|item| item.handle.clone()),
             provider_spec: artifacts.provider_spec,
             snapshot_production_spec: artifacts.snapshot_production_spec,
             inspection,
+            source_evidence: CapturedLifecycleSourceEvidence {
+                bundle_name: artifacts.bundle_name,
+                signed_bundle_manifest: artifacts.signed_bundle_manifest,
+                bundle_verifying_key: artifacts.bundle_verifying_key,
+                adapter: artifacts.adapter.source_proof,
+                supervisor: artifacts.supervisor.source_proof,
+                launcher: artifacts.launcher.source_proof,
+                restoration_verifier: artifacts.restoration_verifier.map(|item| item.source_proof),
+            },
         })
     }
 
@@ -623,6 +662,65 @@ impl ExecutableExternalPlacementBackend {
 }
 
 impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
+    fn lifecycle_escrow_capture(&self) -> Result<Option<LifecycleEscrowCapture<'_>>> {
+        let mut executables = vec![
+            LifecycleEscrowExecutable {
+                role: RetainedLifecycleExecutableRole::Adapter,
+                hash: &self.adapter_hash,
+                bytes: self.adapter_bytes,
+                handle: &self.adapter,
+                proof: &self.source_evidence.adapter,
+            },
+            LifecycleEscrowExecutable {
+                role: RetainedLifecycleExecutableRole::Supervisor,
+                hash: &self.supervisor_hash,
+                bytes: self.supervisor_bytes,
+                handle: &self.supervisor,
+                proof: &self.source_evidence.supervisor,
+            },
+            LifecycleEscrowExecutable {
+                role: RetainedLifecycleExecutableRole::Launcher,
+                hash: &self.launcher_hash,
+                bytes: self.launcher_bytes,
+                handle: &self.launcher,
+                proof: &self.source_evidence.launcher,
+            },
+        ];
+        match (
+            &self.restoration_verifier,
+            &self.restoration_verifier_hash,
+            &self.source_evidence.restoration_verifier,
+        ) {
+            (Some(handle), Some(hash), Some(proof)) => {
+                executables.push(LifecycleEscrowExecutable {
+                    role: RetainedLifecycleExecutableRole::RestorationVerifier,
+                    hash,
+                    bytes: handle.regular_file_observation()?.size(),
+                    handle,
+                    proof,
+                })
+            }
+            (None, None, None) => {}
+            _ => anyhow::bail!("captured restoration verifier authority is incomplete"),
+        }
+        Ok(Some(LifecycleEscrowCapture {
+            declaration: &self.declaration,
+            bundle_name: &self.source_evidence.bundle_name,
+            bundle_manifest_digest: &self.bundle_manifest_digest,
+            signer_fingerprint: &self.signer_fingerprint,
+            signed_bundle_manifest: &self.source_evidence.signed_bundle_manifest,
+            bundle_verifying_key: self.source_evidence.bundle_verifying_key,
+            executables,
+            provider_spec: &self.provider_spec,
+            snapshot_production_spec: self.snapshot_production_spec.as_ref(),
+        }))
+    }
+    fn bootstrap_profile_digest(&self) -> Option<&str> {
+        self.inspection.observed_bootstrap_profile_digest.as_deref()
+    }
+    fn bootstrap_provider_spec_digest(&self) -> Option<&str> {
+        Some(&self.inspection.observed_provider_spec_sha256)
+    }
     fn backend_id(&self) -> &str {
         &self.declaration.id
     }
@@ -676,6 +774,37 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         Ok(())
     }
 
+    fn preflight_bootstrap_recovery(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+        intent: &RuntimeSnapshotBootstrapIntent,
+    ) -> Result<()> {
+        intent.validate()?;
+        ensure!(
+            intent.production_binding_digest == binding.digest()
+                && intent.provider_id == self.declaration.id
+                && intent.provider_id == binding.backend()
+                && intent.provider_group_id == binding.provider_group_id()
+                && intent.adapter_artifact_hash == self.adapter_hash
+                && intent.bootstrap_profile_digest
+                    == self
+                        .inspection
+                        .observed_bootstrap_profile_digest
+                        .as_deref()
+                        .unwrap_or_default()
+                && intent.provider_spec_digest == self.provider_spec.sha256
+                && self.inspection.observed_provider_spec_sha256 == self.provider_spec.sha256
+                && intent.settings_digest == binding.settings_digest()
+                && credential.backend() == binding.backend()
+                && credential.account() == binding.account()
+                && lillux::sha256_hex(lillux::canonical_json(binding.settings())?.as_bytes())
+                    == binding.settings_digest(),
+            "bootstrap recovery differs from its retained signed adapter and provider authority"
+        );
+        Ok(())
+    }
+
     fn preflight_snapshot_qualification_create(
         &self,
         producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
@@ -699,6 +828,212 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             "snapshot qualification differs from its exact signed producer or provider profile"
         );
         Ok(())
+    }
+
+    fn create_snapshot_bootstrap_source(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+        request: &RuntimeSnapshotBootstrapAdapterRequest,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<RuntimeSnapshotBootstrapAdapterResponse>> {
+        self.preflight_runtime_snapshot(binding, credential)?;
+        request.validate()?;
+        ensure!(
+            request.intent.production_binding_digest == binding.digest()
+                && request.intent.bootstrap_profile_digest
+                    == self
+                        .inspection
+                        .observed_bootstrap_profile_digest
+                        .as_deref()
+                        .unwrap_or_default()
+                && request.intent.provider_id == binding.backend()
+                && request.intent.provider_group_id == binding.provider_group_id()
+                && request.intent.adapter_artifact_hash == self.adapter_hash
+                && request.intent.provider_spec_digest == self.provider_spec.sha256
+                && request.intent.settings_digest == binding.settings_digest(),
+            "bootstrap create differs from inspected signed production authority"
+        );
+        let remaining_ms = request
+            .intent
+            .attempt_deadline_ms
+            .saturating_sub(lillux::time::timestamp_millis());
+        ensure!(
+            remaining_ms > 0,
+            "bootstrap create expired before adapter contact"
+        );
+        let deadline = deadline
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(u64::from(binding.contact_timeout_seconds())),
+            ))
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+            ));
+        let bytes = ryeos_external_execution_contract::canonical_json(request)?;
+        ensure!(
+            bytes.len() <= MAX_BOOTSTRAP_ADAPTER_REQUEST_BYTES,
+            "bootstrap adapter request exceeds sealed bound"
+        );
+        let output = self.invoke_sealed_snapshot_operation(
+            binding.network_inputs(),
+            &self.provider_spec,
+            binding.settings(),
+            binding.settings_digest(),
+            credential,
+            &bytes,
+            LifecycleAdapterInvocation::BootstrapSourceCreate,
+            None,
+            deadline,
+        )?;
+        let value: RuntimeSnapshotBootstrapAdapterResponse =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+                .map_err(|_| anyhow::anyhow!("invalid bootstrap create adapter response"))?;
+        value
+            .validate_for(request)
+            .map_err(|_| anyhow::anyhow!("invalid bootstrap create adapter response"))?;
+        if let RuntimeSnapshotBootstrapAdapterResponse::OccurrenceBound { occurrence } = &value {
+            ensure!(
+                !occurrence.contact_deadline_exceeded,
+                "bootstrap adapter claimed daemon-only deadline evidence"
+            );
+        }
+        Ok(ExternalLifecycleObservation {
+            value,
+            deadline_exceeded: output.deadline_exceeded,
+        })
+    }
+
+    fn observe_snapshot_bootstrap_source(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+        request: &RuntimeSnapshotBootstrapReadinessRequest,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<RuntimeSnapshotBootstrapReadinessAdapterResponse>>
+    {
+        self.preflight_bootstrap_recovery(binding, credential, &request.intent)?;
+        request.validate()?;
+        ensure!(
+            request.intent.production_binding_digest == binding.digest()
+                && request.intent.bootstrap_profile_digest
+                    == self
+                        .inspection
+                        .observed_bootstrap_profile_digest
+                        .as_deref()
+                        .unwrap_or_default()
+                && request.intent.provider_id == binding.backend()
+                && request.intent.provider_group_id == binding.provider_group_id()
+                && request.intent.adapter_artifact_hash == self.adapter_hash
+                && request.intent.provider_spec_digest == self.provider_spec.sha256
+                && request.intent.settings_digest == binding.settings_digest(),
+            "bootstrap readiness differs from inspected signed production authority"
+        );
+        let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
+            lillux::time::Duration::from_secs(u64::from(binding.contact_timeout_seconds())),
+        ));
+        let bytes = ryeos_external_execution_contract::canonical_json(request)?;
+        ensure!(
+            bytes.len() <= MAX_BOOTSTRAP_ADAPTER_REQUEST_BYTES,
+            "bootstrap readiness request exceeds sealed bound"
+        );
+        let output = self.invoke_sealed_snapshot_operation(
+            binding.network_inputs(),
+            &self.provider_spec,
+            binding.settings(),
+            binding.settings_digest(),
+            credential,
+            &bytes,
+            LifecycleAdapterInvocation::BootstrapSourceReadiness,
+            None,
+            deadline,
+        )?;
+        let value: RuntimeSnapshotBootstrapReadinessAdapterResponse =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+                .map_err(|_| anyhow::anyhow!("invalid bootstrap readiness adapter response"))?;
+        value.validate_for(request)?;
+        Ok(ExternalLifecycleObservation {
+            value,
+            deadline_exceeded: output.deadline_exceeded,
+        })
+    }
+
+    fn terminate_snapshot_bootstrap_source(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+        request: &RuntimeSnapshotBootstrapTerminationAdapterRequest,
+        first_contact: bool,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<RuntimeSnapshotBootstrapTerminationAdapterResponse>>
+    {
+        self.preflight_bootstrap_recovery(binding, credential, &request.bootstrap_intent)?;
+        request.validate()?;
+        ensure!(
+            request.bootstrap_intent.production_binding_digest == binding.digest()
+                && request.bootstrap_intent.bootstrap_profile_digest
+                    == self
+                        .inspection
+                        .observed_bootstrap_profile_digest
+                        .as_deref()
+                        .unwrap_or_default()
+                && request.bootstrap_intent.provider_id == binding.backend()
+                && request.bootstrap_intent.provider_group_id == binding.provider_group_id()
+                && request.bootstrap_intent.adapter_artifact_hash == self.adapter_hash
+                && request.provider_spec_digest == self.provider_spec.sha256
+                && request.bootstrap_intent.settings_digest == binding.settings_digest(),
+            "bootstrap termination differs from inspected signed production authority"
+        );
+        let mut deadline = deadline.min(lillux::time::MonotonicDeadline::after(
+            lillux::time::Duration::from_secs(u64::from(binding.contact_timeout_seconds())),
+        ));
+        if first_contact {
+            let remaining_ms = request
+                .intent
+                .attempt_deadline_ms
+                .saturating_sub(lillux::time::timestamp_millis());
+            ensure!(
+                remaining_ms > 0,
+                "bootstrap termination expired before first contact"
+            );
+            deadline = deadline.min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+            ));
+        }
+        let bytes = ryeos_external_execution_contract::canonical_json(request)?;
+        ensure!(
+            bytes.len() <= MAX_BOOTSTRAP_ADAPTER_REQUEST_BYTES,
+            "bootstrap termination request exceeds sealed bound"
+        );
+        let output = self.invoke_sealed_snapshot_operation(
+            binding.network_inputs(),
+            &self.provider_spec,
+            binding.settings(),
+            binding.settings_digest(),
+            credential,
+            &bytes,
+            if first_contact {
+                LifecycleAdapterInvocation::BootstrapSourceTerminate
+            } else {
+                LifecycleAdapterInvocation::BootstrapSourceObserveTermination
+            },
+            None,
+            deadline,
+        )?;
+        let value: RuntimeSnapshotBootstrapTerminationAdapterResponse =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+                .map_err(|_| anyhow::anyhow!("invalid bootstrap termination adapter response"))?;
+        value.validate_for(request)?;
+        if let RuntimeSnapshotBootstrapTerminationAdapterResponse::Terminal { observation } = &value
+        {
+            ensure!(
+                !observation.contact_deadline_exceeded,
+                "bootstrap adapter claimed daemon-only deadline evidence"
+            );
+        }
+        Ok(ExternalLifecycleObservation {
+            value,
+            deadline_exceeded: output.deadline_exceeded,
+        })
     }
 
     fn create_snapshot_qualification_occurrence(
@@ -1027,6 +1362,110 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         })
     }
 
+    fn upload_runtime_snapshot(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+        request: &RuntimeSnapshotUploadAdapterRequest,
+        upload: &lillux::InheritedDescriptorAuthority,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<RuntimeSnapshotUploadReceipt>> {
+        self.preflight_runtime_snapshot(binding, credential)?;
+        request.validate()?;
+        ensure!(
+            request.intent.provider_id == self.declaration.id
+                && request.intent.adapter_artifact_hash == self.adapter_hash
+                && request.provider_spec_digest == binding.snapshot_spec_sha256()
+                && request.intent.production_profile_digest == binding.digest()
+                && request.intent.settings_digest == binding.settings_digest()
+                && request.upload_bytes <= binding.maximum_upload_bytes()
+                && request.upload_descriptor
+                    == upload.inherited_descriptor().map_err(anyhow::Error::msg)?,
+            "snapshot upload differs from its inspected signed producer authority"
+        );
+        let remaining_ms = request
+            .stage
+            .attempt_deadline_ms
+            .saturating_sub(lillux::time::timestamp_millis());
+        ensure!(
+            remaining_ms > 0,
+            "snapshot upload expired before adapter contact"
+        );
+        let deadline = deadline
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(u64::from(binding.contact_timeout_seconds())),
+            ))
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+            ));
+        let output = self.invoke_snapshot_adapter(
+            binding,
+            credential,
+            &ryeos_external_execution_contract::canonical_json(request)?,
+            LifecycleAdapterInvocation::ProduceSnapshotUpload,
+            Some(upload),
+            deadline,
+        )?;
+        let value: RuntimeSnapshotUploadReceipt =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+                .map_err(|_| anyhow::anyhow!("invalid snapshot upload adapter receipt"))?;
+        value.validate_observation_for_stage(&request.intent, &request.stage)?;
+        Ok(ExternalLifecycleObservation {
+            value,
+            deadline_exceeded: output.deadline_exceeded,
+        })
+    }
+
+    fn create_runtime_snapshot(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+        request: &RuntimeSnapshotCreateAdapterRequest,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<RuntimeSnapshotCreateResult>> {
+        self.preflight_runtime_snapshot(binding, credential)?;
+        request.validate()?;
+        ensure!(
+            request.intent.provider_id == self.declaration.id
+                && request.intent.adapter_artifact_hash == self.adapter_hash
+                && request.provider_spec_digest == binding.snapshot_spec_sha256()
+                && request.intent.production_profile_digest == binding.digest()
+                && request.intent.settings_digest == binding.settings_digest(),
+            "snapshot create differs from its inspected signed producer authority"
+        );
+        let remaining_ms = request
+            .create_stage
+            .attempt_deadline_ms
+            .saturating_sub(lillux::time::timestamp_millis());
+        ensure!(
+            remaining_ms > 0,
+            "snapshot create expired before adapter contact"
+        );
+        let deadline = deadline
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(u64::from(binding.contact_timeout_seconds())),
+            ))
+            .min(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+            ));
+        let output = self.invoke_snapshot_adapter(
+            binding,
+            credential,
+            &ryeos_external_execution_contract::canonical_json(request)?,
+            LifecycleAdapterInvocation::ProduceSnapshotCreate,
+            None,
+            deadline,
+        )?;
+        let value: RuntimeSnapshotCreateResult =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+                .map_err(|_| anyhow::anyhow!("invalid snapshot create adapter result"))?;
+        value.validate_for(request)?;
+        Ok(ExternalLifecycleObservation {
+            value,
+            deadline_exceeded: output.deadline_exceeded,
+        })
+    }
+
     fn observe_runtime_snapshot_readiness(
         &self,
         binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
@@ -1099,7 +1538,7 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
     fn verify_runtime_probe(
         &self,
         contract: &ExternalPlacementBackendContract,
-        proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+        proof: &RuntimeProbeInput,
         source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
         binding_hash: &str,
     ) -> Result<()> {
@@ -1109,8 +1548,8 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
                 && contract.backend_artifact_bytes == self.adapter_bytes
                 && contract.settings_schema_digest == self.declaration.settings_schema_digest
                 && source.manifest_hash == contract.guest_runtime_manifest_hash
-                && source.manifest_hash == proof.evidence.result.subject_manifest_hash,
-            "runtime probe changed its signed adapter or authenticated product"
+                && source.manifest_hash == proof.subject_manifest_hash,
+            "runtime probe changed its signed adapter or authenticated source"
         );
         let settings_bytes = ryeos_external_execution_contract::canonical_json(&contract.settings)?;
         ensure!(
@@ -1118,14 +1557,14 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             "runtime probe settings changed their signed digest"
         );
         let request = LifecycleRuntimeProbeRequest {
-            schema: 1,
+            schema: 2,
             protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
             adapter_id: self.declaration.id.clone(),
             adapter_artifact_hash: self.adapter_hash.clone(),
             settings_digest: contract.settings_digest.clone(),
             binding_hash: binding_hash.to_owned(),
-            qualification_attestation_hash: proof.attestation_hash.clone(),
-            product_witness_hash: proof.evidence.product_witness_hash.clone(),
+            qualification_attestation_hash: proof.qualification_attestation_hash.clone(),
+            runtime_source: proof.runtime_source.clone(),
             account: contract.account.clone(),
             source: LifecycleRuntimeProbeSource {
                 manifest_hash: source.manifest_hash.clone(),
@@ -1133,7 +1572,7 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
                 controller_root_blob_sha256: source.controller_root_blob_sha256.clone(),
                 controller_public_root: source.controller_public_root.clone(),
             },
-            probe_evidence: proof.evidence.result.probe_evidence.clone(),
+            probe_evidence: proof.probe_evidence.clone(),
         };
         let request_handle = lillux::sealed_memfd(
             c"ryeos-lifecycle-runtime-probe-request",
@@ -1748,6 +2187,7 @@ mod tests {
                 .snapshot_production_spec
                 .as_ref()
                 .map(|spec| spec.digest.clone()),
+            observed_bootstrap_profile_digest: None,
             artifacts: request.artifacts.clone(),
         };
         let valid = serde_json::to_value(response).unwrap();

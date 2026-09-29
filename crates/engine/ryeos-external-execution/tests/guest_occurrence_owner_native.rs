@@ -38,6 +38,8 @@ fn supervisor_bootstrap(
     inputs: &ExternalGuestInputProjection,
     launcher_hash: &str,
     occurrence_id: &str,
+    resolver_source: &str,
+    hosts_source: &str,
 ) -> Result<Vec<u8>> {
     use ryeos_state::external_execution::admission::{
         AdmittedExternalCandidateProgram, ExternalCandidateExecutionRoute,
@@ -82,11 +84,11 @@ fn supervisor_bootstrap(
         )?;
     let network_inputs = ExternalNetworkInputPolicy {
         resolver: ExternalNetworkInputSelection {
-            source: "/etc/resolv.conf".into(),
+            source: resolver_source.into(),
             max_bytes: 65_536,
         },
         hosts: ExternalNetworkInputSelection {
-            source: "/etc/hosts".into(),
+            source: hosts_source.into(),
             max_bytes: 65_536,
         },
     };
@@ -305,8 +307,22 @@ fn run(
         executable_search: Vec::new(),
         environment: BTreeMap::new(),
     };
-    let bootstrap =
-        supervisor_bootstrap(&inputs, &lillux::sha256_hex(launcher), "occ-native-test")?;
+    // The native fixture owns its exact network-input bytes. Render Sandboxes
+    // need not expose /etc/hosts, and this probe tests native installation,
+    // not a host's ambient network configuration.
+    let resolver_source = fixture_path.join("network-resolver");
+    let hosts_source = fixture_path.join("network-hosts");
+    std::fs::write(&resolver_source, b"nameserver 127.0.0.1\n")?;
+    std::fs::write(&hosts_source, b"127.0.0.1 localhost\n")?;
+    let bootstrap = supervisor_bootstrap(
+        &inputs,
+        &lillux::sha256_hex(launcher),
+        "occ-native-test",
+        resolver_source
+            .to_str()
+            .context("non-UTF8 resolver fixture")?,
+        hosts_source.to_str().context("non-UTF8 hosts fixture")?,
+    )?;
     for (path, mode, bytes) in [
         ("bootstrap", 0o600, bootstrap.as_slice()),
         ("input-00", 0o644, configuration.as_slice()),
@@ -414,7 +430,11 @@ fn run(
         guest_runtime_path.join("guest-owner-profile.json"),
         ryeos_external_execution_contract::canonical_json(
             &ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile {
-                schema: 1,
+                schema: 2,
+                account: lillux::GuestRuntimeAccount::Unix {
+                    uid: 65534,
+                    gid: 65534,
+                },
                 private_source_max_bytes: 32 * 1024 * 1024,
                 private_source_max_inodes: 1024,
                 owner_timeout_seconds: 10,

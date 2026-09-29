@@ -14,8 +14,8 @@ use std::io::{Read as _, Write as _};
 use lillux::{
     CooperativeChildTermination, OutputLimitExceeded, SubprocessLimits, SubprocessRequest,
     configure_subprocess_limits, is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd,
-    sealed_memfd, spawn, spawn_detached, spawn_detached_from_executable,
-    supervised_launcher_status_pipe, validate_subprocess_limits,
+    sealed_executable_memfd_from_reader, sealed_memfd, spawn, spawn_detached,
+    spawn_detached_from_executable, supervised_launcher_status_pipe, validate_subprocess_limits,
 };
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
@@ -574,6 +574,63 @@ fn sealed_executable_memfd_is_owner_executable_and_not_permission_writable() {
     let file =
         sealed_executable_memfd(c"lillux-executable-test", b"executable bytes").expect("memfd");
     assert_eq!(file.file_identity().unwrap().mode() & 0o777, 0o500);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn streamed_executable_memfd_requires_exact_digest_size_and_seals() {
+    let bytes = b"exact retained executable";
+    let hash = lillux::sha256_hex(bytes);
+    let mut source = bytes.as_slice();
+    let handle = sealed_executable_memfd_from_reader(
+        c"lillux-streamed-executable",
+        &mut source,
+        bytes.len() as u64,
+        &hash,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(handle.file_identity().unwrap().mode() & 0o777, 0o500);
+    let observation = handle.regular_file_observation().unwrap();
+    assert_eq!(
+        handle
+            .digest_regular_file_stable_exact(&observation)
+            .unwrap(),
+        hash
+    );
+    let mut truncated = &bytes[..bytes.len() - 1];
+    assert!(
+        sealed_executable_memfd_from_reader(
+            c"lillux-streamed-truncated",
+            &mut truncated,
+            bytes.len() as u64,
+            &hash,
+            1024
+        )
+        .is_err()
+    );
+    let mut extra = b"exact retained executable!".as_slice();
+    assert!(
+        sealed_executable_memfd_from_reader(
+            c"lillux-streamed-extra",
+            &mut extra,
+            bytes.len() as u64,
+            &hash,
+            1024
+        )
+        .is_err()
+    );
+    let mut wrong = bytes.as_slice();
+    assert!(
+        sealed_executable_memfd_from_reader(
+            c"lillux-streamed-wrong",
+            &mut wrong,
+            bytes.len() as u64,
+            &"0".repeat(64),
+            1024
+        )
+        .is_err()
+    );
 }
 
 #[test]

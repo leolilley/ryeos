@@ -6,6 +6,7 @@ mod activation_contact;
 mod provider_spec;
 mod proxy_route;
 mod restored_verifier_contact;
+mod snapshot_bootstrap;
 mod snapshot_production;
 mod snapshot_provider_spec;
 mod snapshot_qualification;
@@ -91,6 +92,20 @@ struct Settings {
     tls_roots_der_base64: Vec<String>,
 }
 
+trait RenderApiSettings {
+    fn owner_id(&self) -> &str;
+    fn tls_roots_der_base64(&self) -> &[String];
+}
+
+impl RenderApiSettings for Settings {
+    fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+    fn tls_roots_der_base64(&self) -> &[String] {
+        &self.tls_roots_der_base64
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum RenderPlan {
@@ -110,8 +125,8 @@ struct CreateSandboxBody {
     timeout_seconds: u32,
     #[serde(rename = "networkPolicy")]
     network_policy: NetworkPolicy,
-    #[serde(rename = "snapshotId")]
-    snapshot_id: String,
+    #[serde(rename = "snapshotId", skip_serializing_if = "Option::is_none")]
+    snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -262,6 +277,18 @@ fn run() -> Result<()> {
         Some("verify-runtime-probe") => verify_runtime_probe(&adapter),
         Some("operate") => operate(),
         Some("produce-snapshot") => snapshot_production::operate(&adapter),
+        Some("produce-snapshot-upload") => snapshot_production::operate_upload(&adapter),
+        Some("produce-snapshot-create") => snapshot_production::operate_create(&adapter),
+        Some("bootstrap-source-create") => snapshot_bootstrap::create_source_sandbox(&adapter),
+        Some("bootstrap-source-readiness") => {
+            snapshot_bootstrap::observe_source_readiness(&adapter)
+        }
+        Some("bootstrap-source-terminate") => {
+            snapshot_bootstrap::terminate_source_sandbox(&adapter, true)
+        }
+        Some("bootstrap-source-observe-termination") => {
+            snapshot_bootstrap::terminate_source_sandbox(&adapter, false)
+        }
         Some("observe-snapshot-readiness") => snapshot_production::observe_readiness(&adapter),
         Some("qualify-snapshot-create") => {
             snapshot_qualification::create_restored_sandbox(&adapter)
@@ -432,6 +459,7 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
         effective_capabilities,
         observed_provider_spec_sha256: provider_spec_sha256,
         observed_snapshot_production_spec_sha256,
+        observed_bootstrap_profile_digest: Some(provider_spec.bootstrap_profile_digest().into()),
         artifacts,
     };
     response.validate_for(&request)?;
@@ -840,7 +868,7 @@ fn allocate(
                 provider_spec::NetworkPolicyDefault::DenyAll => RenderNetworkPolicyDefault::DenyAll,
             },
         },
-        snapshot_id: projection.snapshot_id.clone(),
+        snapshot_id: Some(projection.snapshot_id.clone()),
     };
     let Ok(body) = canonical_json(&body) else {
         return pending();
@@ -1273,29 +1301,36 @@ fn network_context_from_captured_inputs() -> Result<NetworkContext> {
 
 fn validate_settings(settings: &Settings) -> Result<()> {
     ensure!(settings.schema == 2, "unsupported settings schema");
+    validate_common_settings(
+        &settings.owner_id,
+        &settings.region,
+        &settings.tls_roots_der_base64,
+    )?;
     ensure!(
-        !settings.owner_id.is_empty()
-            && settings.owner_id.len() <= 256
-            && settings
-                .owner_id
+        valid_snapshot_id(&settings.snapshot_id),
+        "invalid immutable Render snapshot id"
+    );
+    Ok(())
+}
+
+fn validate_common_settings(owner_id: &str, region: &str, roots: &[String]) -> Result<()> {
+    ensure!(
+        !owner_id.is_empty()
+            && owner_id.len() <= 256
+            && owner_id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)),
         "invalid Render owner id"
     );
     ensure!(
-        !settings.region.is_empty()
-            && settings.region.len() <= 128
-            && settings
-                .region
+        !region.is_empty()
+            && region.len() <= 128
+            && region
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte)),
         "invalid Render region"
     );
-    ensure!(
-        valid_snapshot_id(&settings.snapshot_id),
-        "invalid immutable Render snapshot id"
-    );
-    validate_tls_roots(&settings.tls_roots_der_base64)
+    validate_tls_roots(roots)
 }
 
 fn validate_tls_roots(roots: &[String]) -> Result<()> {
@@ -1335,10 +1370,6 @@ fn validate_tls_roots(roots: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn tls_roots(settings: &Settings) -> Result<Vec<Vec<u8>>> {
-    tls_roots_from_base64(&settings.tls_roots_der_base64)
-}
-
 fn tls_roots_from_base64(roots: &[String]) -> Result<Vec<Vec<u8>>> {
     roots
         .iter()
@@ -1348,6 +1379,10 @@ fn tls_roots_from_base64(roots: &[String]) -> Result<Vec<Vec<u8>>> {
                 .context("invalid TLS root encoding")
         })
         .collect()
+}
+
+fn tls_roots(settings: &Settings) -> Result<Vec<Vec<u8>>> {
+    tls_roots_from_base64(&settings.tls_roots_der_base64)
 }
 
 fn read_credential() -> Result<Zeroizing<String>> {
@@ -1363,14 +1398,14 @@ fn read_credential() -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(credential.to_owned()))
 }
 
-fn send_api_request(
+fn send_api_request<S: RenderApiSettings>(
     network: &NetworkContext,
     url: &url::Url,
     method: &str,
     body: Option<Vec<u8>>,
     credential: &Zeroizing<String>,
     absolute_deadline: MonotonicDeadline,
-    settings: &Settings,
+    settings: &S,
     cancellation: &NetworkCancellation,
 ) -> Result<HttpResponse> {
     ensure!(
@@ -1403,7 +1438,7 @@ fn send_api_request(
         url: url.clone(),
         headers,
         body,
-        tls_roots_der: tls_roots(settings)?,
+        tls_roots_der: tls_roots_from_base64(settings.tls_roots_der_base64())?,
         limits,
         deadlines: Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, absolute_deadline),
         cancellation: cancellation.clone(),
@@ -1429,15 +1464,15 @@ fn read_response(response: HttpResponse) -> std::result::Result<(u16, Vec<u8>), 
     Ok((response.status, body))
 }
 
-fn api_url(
+fn api_url<S: RenderApiSettings>(
     provider_spec: &ProviderSpec,
     route: RouteName,
     occurrence_id: Option<&str>,
-    settings: &Settings,
+    settings: &S,
     upload_path: Option<&str>,
 ) -> Result<(url::Url, RouteTarget)> {
     let route_target =
-        provider_spec.route_target(route, occurrence_id, &settings.owner_id, upload_path)?;
+        provider_spec.route_target(route, occurrence_id, settings.owner_id(), upload_path)?;
     let mut url = url::Url::parse(provider_spec.api_base())?;
     {
         let mut segments = url
@@ -1930,6 +1965,24 @@ mod offline_fixture_tests {
             network_policy_default: provider_spec::NetworkPolicyDefault::DenyAll,
             snapshot_id: "snp-fixture-001".into(),
         }
+    }
+
+    #[test]
+    fn unsnapshotted_bootstrap_body_omits_snapshot_id_entirely() {
+        let body = CreateSandboxBody {
+            owner_id: "owner-fixture".into(),
+            plan: RenderPlan::Starter,
+            region: "oregon".into(),
+            timeout_seconds: 900,
+            network_policy: NetworkPolicy {
+                default: RenderNetworkPolicyDefault::DenyAll,
+            },
+            snapshot_id: None,
+        };
+        let encoded = canonical_json(&body).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("snapshotId"));
+        assert_eq!(value["networkPolicy"]["default"], "deny-all");
     }
 
     #[test]

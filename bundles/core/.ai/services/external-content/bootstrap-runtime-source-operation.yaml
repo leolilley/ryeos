@@ -1,0 +1,6 @@
+kind: service
+endpoint: external-content.bootstrap-runtime-source-operation
+required_caps: ["ryeos.execute.service.external-content/bootstrap-runtime-source-operation"]
+schema:
+  operation_id: string
+description: Read the exact retained one-shot bootstrap source operation without issuing provider contact

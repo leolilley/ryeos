@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
 use ryeos_engine::trust::TrustStore;
 use serde::{Deserialize, Serialize};
@@ -391,6 +391,47 @@ pub struct VerifiedBundleManifest {
     pub signer_fingerprint: String,
 }
 
+/// Verify one historically admitted signed Bundle manifest from retained
+/// bytes. The supplied public key verifies old evidence only; this function
+/// does not consult or recreate a current trusted-publisher grant.
+pub fn verify_retained_manifest_bytes(
+    signed_bytes: &[u8],
+    expected_name: &str,
+    expected_signer: &str,
+    verifier: &lillux::crypto::VerifyingKey,
+) -> Result<VerifiedBundleManifest> {
+    let identity = ryeos_engine::plan_builder::verify_retained_signed_bundle_manifest_bytes(
+        signed_bytes,
+        expected_name,
+        expected_signer,
+        verifier,
+    )?;
+    let signed = std::str::from_utf8(signed_bytes)
+        .context("retained signed Bundle manifest is not UTF-8")?;
+    let (body, _) =
+        lillux::signature::strip_canonical_signature_with_envelope(signed, "#", None, false)?;
+    let manifest = parse_current_manifest_body(&body, Path::new("retained Bundle CAS"))?;
+    manifest
+        .runtime_authority
+        .validate()
+        .map_err(anyhow::Error::msg)?;
+    validate_isolation_backends(&manifest.isolation_backends).map_err(anyhow::Error::msg)?;
+    validate_external_execution_declarations(
+        &manifest.external_providers,
+        &manifest.external_lifecycle_adapters,
+    )
+    .map_err(anyhow::Error::msg)?;
+    ensure!(
+        manifest.name == identity.name && expected_name == identity.name,
+        "retained Bundle manifest name differs from signed identity"
+    );
+    Ok(VerifiedBundleManifest {
+        manifest,
+        body_digest: identity.body_digest,
+        signer_fingerprint: identity.signer_fingerprint,
+    })
+}
+
 pub fn load_verified_manifest(
     ai_dir: &Path,
     expected_name: &str,
@@ -760,6 +801,46 @@ mod tests {
         ExternalLifecycleAdapterDeclaration, ExternalProviderDeclaration,
         LIFECYCLE_ADAPTER_PROTOCOL, LifecycleCapability, PROVIDER_CONFIGURATION_PROTOCOL,
     };
+
+    #[test]
+    fn retained_manifest_verifies_historical_signature_without_live_bundle() {
+        let signer = lillux::crypto::SigningKey::from_bytes(&[29u8; 32]);
+        let fingerprint = lillux::crypto::fingerprint(&signer.verifying_key());
+        let signed = lillux::signature::sign_content_at(
+            "name: example\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n",
+            &signer,
+            "#",
+            None,
+            "2026-09-30T00:00:00Z",
+        );
+        let verified = verify_retained_manifest_bytes(
+            signed.as_bytes(),
+            "example",
+            &fingerprint,
+            &signer.verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(verified.manifest.name, "example");
+        assert!(
+            verify_retained_manifest_bytes(
+                signed.as_bytes(),
+                "other",
+                &fingerprint,
+                &signer.verifying_key(),
+            )
+            .is_err()
+        );
+        let changed = signed.replace("version: 1.0.0", "version: 1.0.1");
+        assert!(
+            verify_retained_manifest_bytes(
+                changed.as_bytes(),
+                "example",
+                &fingerprint,
+                &signer.verifying_key(),
+            )
+            .is_err()
+        );
+    }
 
     fn workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

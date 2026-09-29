@@ -76,6 +76,7 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "project_snapshot",
     "project_snapshot_policy",
     "project_tree",
+    "retained_lifecycle_artifacts",
     "ryeos.effective_source_binding",
     "ryeos.source_closure_manifest",
     "source_manifest",
@@ -208,6 +209,11 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         links: links_project_tree,
     },
     ObjectContract {
+        kind: crate::objects::RETAINED_LIFECYCLE_ARTIFACTS_KIND,
+        validate: validate_retained_lifecycle_artifacts,
+        links: links_retained_lifecycle_artifacts,
+    },
+    ObjectContract {
         kind: crate::objects::EFFECTIVE_SOURCE_BINDING_KIND,
         validate: validate_effective_source_binding,
         links: links_effective_source_binding,
@@ -322,6 +328,10 @@ fn validate_guest_runtime_materialization_source(value: &Value) -> anyhow::Resul
 
 fn validate_guest_runtime_materialization_subject(value: &Value) -> anyhow::Result<()> {
     crate::objects::GuestRuntimeMaterializationSubject::from_value(value).map(|_| ())
+}
+
+fn validate_retained_lifecycle_artifacts(value: &Value) -> anyhow::Result<()> {
+    crate::objects::RetainedLifecycleArtifacts::from_value(value).map(|_| ())
 }
 
 fn validate_external_content_activation(value: &Value) -> anyhow::Result<()> {
@@ -1277,6 +1287,35 @@ fn links_guest_runtime_materialization_subject(value: &Value) -> Result<Contract
         None,
         &mut links.object_edges,
     )?;
+    Ok(links)
+}
+
+fn links_retained_lifecycle_artifacts(value: &Value) -> Result<ContractLinks, String> {
+    let source = crate::objects::RetainedLifecycleArtifacts::from_value(value)
+        .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    links
+        .blob_hashes
+        .push(source.signed_bundle_manifest_blob_hash);
+    for executable in source.executables {
+        links.blob_hashes.extend([
+            executable.payload_blob_hash,
+            executable.signed_manifest_ref_blob_hash,
+            executable.manifest_object_blob_hash,
+            executable.signed_sidecar_blob_hash,
+        ]);
+        super::push_typed_hash(
+            &executable.item_source_object_hash,
+            ExpectedObject::ItemSource {
+                item_ref: executable.item_ref,
+            },
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    links
+        .blob_hashes
+        .extend(source.specs.into_iter().map(|spec| spec.blob_hash));
     Ok(links)
 }
 

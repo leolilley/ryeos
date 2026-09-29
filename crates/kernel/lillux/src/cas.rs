@@ -575,6 +575,41 @@ impl CasStore {
         Ok(Some((file, metadata.len())))
     }
 
+    /// Verify a potentially large retained blob by streaming its exact
+    /// descriptor-pinned bytes. This supplies historical CAS readers with a
+    /// bounded digest check without allocating an executable-sized buffer.
+    pub fn verify_blob_bounded(&self, hash: &str, maximum_bytes: u64) -> Result<Option<u64>> {
+        let Some((mut file, size)) = self.open_blob(hash)? else {
+            return Ok(None);
+        };
+        if size > maximum_bytes {
+            anyhow::bail!("CAS blob {hash} exceeds {maximum_bytes} bytes");
+        }
+        let mut digest = Sha256::new();
+        let mut observed = 0_u64;
+        let mut buffer = [0_u8; 128 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            observed = observed
+                .checked_add(u64::try_from(read)?)
+                .context("CAS blob length overflow")?;
+            if observed > maximum_bytes {
+                anyhow::bail!("CAS blob {hash} exceeds {maximum_bytes} bytes during read");
+            }
+            digest.update(&buffer[..read]);
+        }
+        let actual = format!("{:x}", digest.finalize());
+        if observed != size || actual != hash {
+            anyhow::bail!(
+                "CAS blob {hash} changed while streaming: observed {observed} bytes, digest {actual}"
+            );
+        }
+        Ok(Some(observed))
+    }
+
     /// Open one descriptor-pinned CAS object without allocating its body.
     ///
     /// This is the bounded-transport counterpart to [`Self::get_object`]. The
@@ -599,6 +634,29 @@ impl CasStore {
             anyhow::bail!("CAS object {hash} is not a regular file");
         }
         Ok(Some((file, metadata.len())))
+    }
+
+    /// Read one canonical CAS object under an exact byte ceiling, checking
+    /// both its content address and canonical JSON encoding before returning
+    /// a value to a historical authority reader.
+    pub fn get_object_bounded(
+        &self,
+        hash: &str,
+        maximum_bytes: u64,
+    ) -> Result<Option<serde_json::Value>> {
+        let Some((file, size)) = self.open_object(hash)? else {
+            return Ok(None);
+        };
+        let bytes =
+            crate::secure_fs::read_open_regular_file_exact_bounded(file, size, maximum_bytes)?;
+        if sha256_hex(&bytes) != hash {
+            anyhow::bail!("CAS object {hash} changed from its content address");
+        }
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if canonical_json(&value)?.as_bytes() != bytes {
+            anyhow::bail!("CAS object {hash} is not canonical JSON");
+        }
+        Ok(Some(value))
     }
 
     pub fn get_object(&self, hash: &str) -> Result<Option<serde_json::Value>> {

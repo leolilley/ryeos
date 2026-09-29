@@ -104,7 +104,10 @@ pub fn seal_guest_owner_snapshot_upload(
         "guest runtime upload differs from witnessed manifest"
     );
     let mut archive = tar::Builder::new(Vec::new());
-    append_snapshot_directory(&mut archive, "bin/", 0o700)?;
+    // The immutable runtime stays root-owned. The fixed non-root guest owner
+    // may traverse and execute it, but cannot rewrite its public trust root or
+    // executable after the snapshot is restored.
+    append_snapshot_directory(&mut archive, "bin/", 0o755)?;
     let bin = root
         .open_child_directory(OsStr::new("bin"))?
         .context("guest runtime upload has no bin directory")?;
@@ -476,7 +479,11 @@ mod tests {
             guest_target_triple: "x86_64-unknown-linux-musl".into(),
             maximum_owner_bytes: 32 * 1024 * 1024,
             profile: GuestOwnerRuntimeProfile {
-                schema: 1,
+                schema: 2,
+                account: lillux::GuestRuntimeAccount::Unix {
+                    uid: 65534,
+                    gid: 65534,
+                },
                 private_source_max_bytes: 32 * 1024 * 1024,
                 private_source_max_inodes: 1024,
                 owner_timeout_seconds: 600,
@@ -519,7 +526,11 @@ mod tests {
             .unwrap();
         let key = SigningKey::from_bytes(&[43; 32]).verifying_key();
         let profile = GuestOwnerRuntimeProfile {
-            schema: 1,
+            schema: 2,
+            account: lillux::GuestRuntimeAccount::Unix {
+                uid: 65534,
+                gid: 65534,
+            },
             private_source_max_bytes: 32 * 1024 * 1024,
             private_source_max_inodes: 1024,
             owner_timeout_seconds: 600,
@@ -724,7 +735,11 @@ mod tests {
         assert!(payload.require_owned_executable().is_err());
         let key = SigningKey::from_bytes(&[43; 32]).verifying_key();
         let profile = GuestOwnerRuntimeProfile {
-            schema: 1,
+            schema: 2,
+            account: lillux::GuestRuntimeAccount::Unix {
+                uid: 65534,
+                gid: 65534,
+            },
             private_source_max_bytes: 32 * 1024 * 1024,
             private_source_max_inodes: 1024,
             owner_timeout_seconds: 600,

@@ -48,8 +48,46 @@ pub(crate) struct ExternalLifecycleObservation<T> {
     pub deadline_exceeded: bool,
 }
 
+/// Adapter interpretation input, not a qualification publication or grant.
+/// The caller must independently authenticate the exact source, attestation,
+/// retained journal and policy before constructing this value.
+pub(crate) struct RuntimeProbeInput {
+    pub qualification_attestation_hash: String,
+    pub runtime_source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource,
+    pub subject_manifest_hash: String,
+    pub probe_evidence: serde_json::Value,
+}
+
+impl RuntimeProbeInput {
+    fn from_product(
+        proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+    ) -> Self {
+        Self {
+            qualification_attestation_hash: proof.attestation_hash.clone(),
+            runtime_source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: proof.evidence.product_witness_hash.clone(),
+            },
+            subject_manifest_hash: proof.evidence.result.subject_manifest_hash.clone(),
+            probe_evidence: proof.evidence.result.probe_evidence.clone(),
+        }
+    }
+}
+
 pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     fn backend_id(&self) -> &str;
+    /// Already-captured signed source for cleanup-only retention. This does
+    /// not grant a new allocation or provider operation.
+    fn lifecycle_escrow_capture(
+        &self,
+    ) -> Result<Option<crate::external_artifacts::LifecycleEscrowCapture<'_>>> {
+        Ok(None)
+    }
+    fn bootstrap_profile_digest(&self) -> Option<&str> {
+        None
+    }
+    fn bootstrap_provider_spec_digest(&self) -> Option<&str> {
+        None
+    }
     fn artifact_hash(&self) -> &str;
     #[cfg(any(test, feature = "test-support"))]
     fn artifact_bytes(&self) -> u64;
@@ -63,6 +101,42 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         _credential: &PlacementCredential,
     ) -> Result<()> {
         bail!("external placement backend has no inspected snapshot producer")
+    }
+    fn preflight_bootstrap_recovery(
+        &self,
+        _binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _credential: &PlacementCredential,
+        _intent: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapIntent,
+    ) -> Result<()> {
+        bail!("external placement backend has no inspected bootstrap recovery authority")
+    }
+    fn create_snapshot_bootstrap_source(
+        &self,
+        _binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _credential: &PlacementCredential,
+        _request: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapAdapterRequest,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapAdapterResponse>>{
+        bail!("external placement backend has no inspected snapshot bootstrap profile")
+    }
+    fn observe_snapshot_bootstrap_source(
+        &self,
+        _binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _credential: &PlacementCredential,
+        _request: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapReadinessRequest,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapReadinessAdapterResponse>>{
+        bail!("external placement backend has no inspected bootstrap observer")
+    }
+    fn terminate_snapshot_bootstrap_source(
+        &self,
+        _binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _credential: &PlacementCredential,
+        _request: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapTerminationAdapterRequest,
+        _first_contact: bool,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapTerminationAdapterResponse>>{
+        bail!("external placement backend has no inspected bootstrap terminator")
     }
     /// One already-claimed snapshot attempt. The caller must establish the
     /// current signed producer binding, product witness and durable CAS before
@@ -80,6 +154,33 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         >,
     > {
         bail!("external placement backend does not produce runtime snapshots")
+    }
+    fn upload_runtime_snapshot(
+        &self,
+        _binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _credential: &PlacementCredential,
+        _request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotUploadAdapterRequest,
+        _upload: &lillux::InheritedDescriptorAuthority,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ExternalLifecycleObservation<
+            ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotUploadReceipt,
+        >,
+    > {
+        bail!("external placement backend does not support staged snapshot upload")
+    }
+    fn create_runtime_snapshot(
+        &self,
+        _binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _credential: &PlacementCredential,
+        _request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotCreateAdapterRequest,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ExternalLifecycleObservation<
+            ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotCreateResult,
+        >,
+    > {
+        bail!("external placement backend does not support staged snapshot creation")
     }
     fn observe_runtime_snapshot_readiness(
         &self,
@@ -154,14 +255,14 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         credential: &PlacementCredential,
     ) -> Result<()>;
 
-    /// Interpret an already-authenticated, CAS-owned runtime product probe
+    /// Interpret an already-authenticated, CAS-owned runtime probe
     /// against this exact signed placement contract. This operation must be
     /// credential-free and provider-contact-free. It cannot authenticate the
-    /// product attestation, grant lifecycle capability, or permit allocation.
+    /// qualification attestation, grant lifecycle capability, or permit allocation.
     fn verify_runtime_probe(
         &self,
         _contract: &ExternalPlacementBackendContract,
-        _proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+        _proof: &RuntimeProbeInput,
         _source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
         _binding_hash: &str,
     ) -> Result<()> {
@@ -1075,6 +1176,62 @@ impl ExternalPlacementBackendRegistry {
         backend.preflight_runtime_snapshot(binding, credential)
     }
 
+    pub(crate) fn bootstrap_source_profile(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+    ) -> Result<(String, String)> {
+        let backend = self
+            .backends
+            .get(&(
+                binding.backend().to_owned(),
+                binding.adapter_artifact_hash().to_owned(),
+            ))
+            .context("exact signed bootstrap adapter generation is not installed")?;
+        Ok((
+            backend
+                .bootstrap_profile_digest()
+                .context("signed adapter has no inspected bootstrap profile")?
+                .to_owned(),
+            backend
+                .bootstrap_provider_spec_digest()
+                .context("signed adapter has no inspected bootstrap provider spec")?
+                .to_owned(),
+        ))
+    }
+
+    pub(crate) fn lifecycle_escrow_capture(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+    ) -> Result<crate::external_artifacts::LifecycleEscrowCapture<'_>> {
+        let backend = self
+            .backends
+            .get(&(
+                binding.backend().to_owned(),
+                binding.adapter_artifact_hash().to_owned(),
+            ))
+            .context("exact signed lifecycle generation is not installed")?;
+        backend
+            .lifecycle_escrow_capture()?
+            .context("installed backend has no captured signed lifecycle source")
+    }
+
+    pub(crate) fn create_snapshot_bootstrap_source(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        credential: &PlacementCredential,
+        request: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapAdapterRequest,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapAdapterResponse>>{
+        let backend = self
+            .backends
+            .get(&(
+                binding.backend().to_owned(),
+                binding.adapter_artifact_hash().to_owned(),
+            ))
+            .context("exact signed bootstrap adapter generation is not installed")?;
+        backend.create_snapshot_bootstrap_source(binding, credential, request, deadline)
+    }
+
     /// Resolve the exact inspected adapter generation selected by a signed
     /// producer binding. The caller must have won the durable snapshot-attempt
     /// claim; this lookup by itself never authorizes provider contact.
@@ -1124,7 +1281,7 @@ impl ExternalPlacementBackendRegistry {
     fn verify_runtime_probe(
         &self,
         contract: &ExternalPlacementBackendContract,
-        proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+        proof: &RuntimeProbeInput,
         source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
         binding_hash: &str,
     ) -> Result<()> {
@@ -1376,7 +1533,7 @@ fn admit_current_runtime_qualification(
     )?;
     state.external_placement_backends.verify_runtime_probe(
         contract,
-        &retained.proof,
+        &RuntimeProbeInput::from_product(&retained.proof),
         &source,
         binding_hash,
     )?;
@@ -1410,7 +1567,7 @@ fn require_retained_session_runtime_qualification(
     )?;
     state.external_placement_backends.verify_runtime_probe(
         &contract,
-        &retained.proof,
+        &RuntimeProbeInput::from_product(&retained.proof),
         &source,
         binding.digest(),
     )
@@ -6991,6 +7148,19 @@ mod tests {
             .qualification
             .as_ref()
             .unwrap();
+        let input = RuntimeProbeInput::from_product(proof);
+        assert_eq!(
+            input.runtime_source,
+            ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: proof.evidence.product_witness_hash.clone(),
+            }
+        );
+        assert_eq!(input.qualification_attestation_hash, proof.attestation_hash);
+        assert_eq!(
+            input.subject_manifest_hash,
+            proof.evidence.result.subject_manifest_hash
+        );
+        assert_eq!(input.probe_evidence, proof.evidence.result.probe_evidence);
         let source =
             ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity {
                 manifest_hash: contract.guest_runtime_manifest_hash.clone(),
@@ -7000,7 +7170,7 @@ mod tests {
             };
         assert!(
             ExternalPlacementBackendRegistry::default()
-                .verify_runtime_probe(&contract, proof, &source, binding.digest())
+                .verify_runtime_probe(&contract, &input, &source, binding.digest(),)
                 .is_err()
         );
         let registry =
@@ -7010,7 +7180,7 @@ mod tests {
             .unwrap();
         assert!(
             registry
-                .verify_runtime_probe(&contract, proof, &source, binding.digest())
+                .verify_runtime_probe(&contract, &input, &source, binding.digest(),)
                 .is_err()
         );
     }

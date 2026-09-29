@@ -1,9 +1,10 @@
 //! Render-specific interpretation of an independently produced snapshot probe.
 //!
 //! Parsing and matching this shape grants no lifecycle capability. The daemon
-//! must first authenticate a current, published product qualification and its
-//! admitted verifier execution, then join these fields to the signed binding.
-//! Schema 5 contains only snapshot-content and retained-operation coordinates:
+//! must first authenticate the source-appropriate published qualification and
+//! its admitted verifier execution, then join these fields to the signed
+//! binding. The current caller still admits captured products only.
+//! Schema 6 contains only snapshot-content and retained-operation coordinates:
 //! supervisor Ready, lost-stream survival, and writer exclusion require their
 //! own witnessed operations and cannot be asserted as probe hashes.
 
@@ -18,13 +19,15 @@ use ryeos_external_execution_contract::restored_runtime_measurement::{
     RestoredOwnerChallenge, RestoredOwnerMeasurement, RestoredVerifierAdapterRequest,
     RestoredVerifierAdapterResponse,
 };
-use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator;
 use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotIntent,
     RuntimeSnapshotQualificationAdapterRequest, RuntimeSnapshotQualificationAdapterResponse,
     RuntimeSnapshotQualificationOccurrence, RuntimeSnapshotQualificationTerminalObservation,
     RuntimeSnapshotQualificationTerminationAdapterRequest,
     RuntimeSnapshotQualificationTerminationAdapterResponse, RuntimeSnapshotReadinessObservation,
+};
+use ryeos_external_execution_contract::runtime_snapshot::{
+    RuntimeSnapshotLocator, RuntimeSnapshotSource,
 };
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_PROTOCOL, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
@@ -171,7 +174,7 @@ pub(crate) fn create_restored_sandbox(
         network_policy: crate::NetworkPolicy {
             default: crate::RenderNetworkPolicyDefault::DenyAll,
         },
-        snapshot_id: projection.snapshot_id.clone(),
+        snapshot_id: Some(projection.snapshot_id.clone()),
     };
     let body = ryeos_external_execution_contract::canonical_json(&body)?;
     let network = crate::network_context_from_captured_inputs()?;
@@ -663,7 +666,7 @@ pub(crate) fn interpret_authenticated_request(
     probe.validate_for(
         settings,
         &SnapshotExpectation {
-            product_witness_hash: &request.product_witness_hash,
+            runtime_source: &request.runtime_source,
             guest_runtime_manifest_hash: &request.source.manifest_hash,
             controller_public_root: &request.source.controller_public_root,
             account: &request.account,
@@ -683,7 +686,7 @@ pub(crate) fn interpret_authenticated_request(
 #[serde(deny_unknown_fields)]
 pub(crate) struct RenderSnapshotProbe {
     pub schema: u32,
-    pub product_witness_hash: String,
+    pub runtime_source: RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: String,
     pub controller_public_root: String,
     pub owner_id: String,
@@ -712,7 +715,7 @@ pub(crate) struct RenderSnapshotProbe {
 }
 
 pub(crate) struct SnapshotExpectation<'a> {
-    pub product_witness_hash: &'a str,
+    pub runtime_source: &'a RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: &'a str,
     pub controller_public_root: &'a str,
     pub account: &'a str,
@@ -736,9 +739,8 @@ impl RenderSnapshotProbe {
         settings: &Settings,
         expected: &SnapshotExpectation<'_>,
     ) -> Result<()> {
-        ensure!(self.schema == 5, "unsupported Render snapshot probe schema");
+        ensure!(self.schema == 6, "unsupported Render snapshot probe schema");
         for hash in [
-            &self.product_witness_hash,
             &self.guest_runtime_manifest_hash,
             &self.binding_hash,
             &self.restored_tree_manifest_hash,
@@ -753,6 +755,7 @@ impl RenderSnapshotProbe {
                 "Render snapshot probe has an invalid content identity"
             );
         }
+        self.runtime_source.validate()?;
         let root = self
             .controller_public_root
             .strip_prefix("ed25519:")
@@ -770,7 +773,7 @@ impl RenderSnapshotProbe {
             "Render snapshot controller root is weak or noncanonical"
         );
         ensure!(
-            self.product_witness_hash == expected.product_witness_hash
+            self.runtime_source == *expected.runtime_source
                 && self.guest_runtime_manifest_hash == expected.guest_runtime_manifest_hash
                 && self.controller_public_root == expected.controller_public_root
                 && self.owner_id == settings.owner_id
@@ -819,6 +822,9 @@ mod tests {
             owner_principal: format!("fp:{}", "1".repeat(64)),
             provider_id: ADAPTER_ID.into(),
             source_occurrence_id: "sbx-source".into(),
+            source_bootstrap_operation_id: None,
+            source_created_at: None,
+            source_timeout_seconds: None,
             provider_group_id: "sbg-exact".into(),
             production_profile_digest: "2".repeat(64),
             adapter_artifact_hash: "3".repeat(64),
@@ -1067,8 +1073,10 @@ mod tests {
 
     fn probe() -> RenderSnapshotProbe {
         RenderSnapshotProbe {
-            schema: 5,
-            product_witness_hash: "1".repeat(64),
+            schema: 6,
+            runtime_source: RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "1".repeat(64),
+            },
             guest_runtime_manifest_hash: "2".repeat(64),
             controller_public_root: public_root(),
             owner_id: "owner".into(),
@@ -1111,8 +1119,11 @@ mod tests {
             snapshot_id: "snp-exact".into(),
             tls_roots_der_base64: Vec::new(),
         };
+        let expected_source = RuntimeSnapshotSource::CapturedProduct {
+            product_witness_hash: "1".repeat(64),
+        };
         let expected = SnapshotExpectation {
-            product_witness_hash: &"1".repeat(64),
+            runtime_source: &expected_source,
             guest_runtime_manifest_hash: &"2".repeat(64),
             controller_public_root: &public_root(),
             account: "account",
@@ -1121,6 +1132,13 @@ mod tests {
         };
         let mut observed = probe();
         observed.validate_for(&settings, &expected).unwrap();
+        observed.runtime_source = RuntimeSnapshotSource::BundleMaterialization {
+            materialization_attestation_hash: "1".repeat(64),
+            source_coordinate_digest: "a".repeat(64),
+            materialization_binding_digest: "b".repeat(64),
+        };
+        assert!(observed.validate_for(&settings, &expected).is_err());
+        observed = probe();
         observed.snapshot_id = "snp-other".into();
         assert!(observed.validate_for(&settings, &expected).is_err());
         observed = probe();
@@ -1209,14 +1227,16 @@ mod tests {
             tls_roots_der_base64: Vec::new(),
         };
         let request = LifecycleRuntimeProbeRequest {
-            schema: 1,
+            schema: 2,
             protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
             adapter_id: ADAPTER_ID.into(),
             adapter_artifact_hash: "a".repeat(64),
             settings_digest: "b".repeat(64),
             binding_hash: "4".repeat(64),
             qualification_attestation_hash: "c".repeat(64),
-            product_witness_hash: "1".repeat(64),
+            runtime_source: RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "1".repeat(64),
+            },
             account: "account".into(),
             source: ryeos_external_execution_contract::LifecycleRuntimeProbeSource {
                 manifest_hash: "2".repeat(64),

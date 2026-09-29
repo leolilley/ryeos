@@ -5,7 +5,8 @@
 use super::*;
 use anyhow::{Context as _, ensure};
 use ryeos_external_execution_contract::runtime_snapshot_bootstrap::{
-    RuntimeSnapshotBootstrapTerminalObservation, RuntimeSnapshotBootstrapTerminationIntent,
+    BootstrapCleanupMode, RuntimeSnapshotBootstrapTerminalObservation,
+    RuntimeSnapshotBootstrapTerminationIntent,
 };
 
 pub(super) const JOURNAL_SQL: &str = r#"
@@ -174,6 +175,15 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
 }
 
 impl RuntimeDb {
+    pub fn bootstrap_has_unsettled_snapshot(&self, bootstrap_operation_id: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM runtime_snapshot_operation WHERE source_bootstrap_operation_id=?1 AND phase!='bound'",
+            [bootstrap_operation_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn bootstrap_termination_operation(
         &self,
         operation_id: &str,
@@ -226,7 +236,35 @@ impl RuntimeDb {
             .as_ref()
             .context("bootstrap termination source has no occurrence")?;
         intent.validate_for(&bootstrap.intent, occurrence)?;
+        let unsettled_snapshots: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM runtime_snapshot_operation WHERE source_bootstrap_operation_id=?1 AND phase!='bound'",
+            [&intent.bootstrap_operation_id],
+            |row| row.get(0),
+        )?;
         let now = i64::try_from(lillux::time::timestamp_millis())?;
+        match intent.mode {
+            BootstrapCleanupMode::TerminateOnce => ensure!(
+                unsettled_snapshots == 0,
+                "bootstrap source has an unsettled snapshot upload"
+            ),
+            BootstrapCleanupMode::ObserveOnly => {
+                let created_at = occurrence.provider_creation_observation["created_at"]
+                    .as_str()
+                    .context("read-only cleanup has no exact creation timestamp")?;
+                let created = chrono::DateTime::parse_from_rfc3339(created_at)?.timestamp_millis();
+                let timeout_seconds = occurrence.provider_creation_observation["timeout_seconds"]
+                    .as_u64()
+                    .context("read-only cleanup has no exact lifetime")?;
+                let lifetime_ms = i64::try_from(timeout_seconds)?
+                    .checked_mul(1_000)
+                    .context("bootstrap lifetime overflow")?;
+                ensure!(
+                    occurrence.creation_attributes_verified
+                        && now >= created.saturating_add(lifetime_ms),
+                    "read-only cleanup requires the exact source lifetime to elapse"
+                );
+            }
+        }
         ensure!(
             intent.attempt_deadline_ms > now
                 && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
@@ -360,6 +398,17 @@ mod tests {
         RuntimeSnapshotBootstrapIntent,
         RuntimeSnapshotBootstrapOccurrence,
     ) {
+        source_with_created_at(db, late, &chrono::Utc::now().to_rfc3339())
+    }
+
+    fn source_with_created_at(
+        db: &RuntimeDb,
+        late: bool,
+        created_at: &str,
+    ) -> (
+        RuntimeSnapshotBootstrapIntent,
+        RuntimeSnapshotBootstrapOccurrence,
+    ) {
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let mut intent = RuntimeSnapshotBootstrapIntent {
             schema: BOOTSTRAP_INTENT_SCHEMA,
@@ -394,7 +443,8 @@ mod tests {
             operation_id: intent.operation_id.clone(),
             occurrence_id: "sbx-exact".into(),
             provider_response_sha256: "b".repeat(64),
-            provider_creation_observation: serde_json::json!({"status":"creating"}),
+            provider_creation_observation: serde_json::json!({"status":"creating","created_at":created_at,"timeout_seconds":900}),
+            creation_attributes_verified: true,
             contact_deadline_exceeded: false,
         };
         db.bind_snapshot_bootstrap_occurrence(&occurrence).unwrap();
@@ -406,7 +456,8 @@ mod tests {
         occurrence: &RuntimeSnapshotBootstrapOccurrence,
     ) -> RuntimeSnapshotBootstrapTerminationIntent {
         let mut intent = RuntimeSnapshotBootstrapTerminationIntent {
-            schema: 1,
+            schema: 2,
+            mode: BootstrapCleanupMode::TerminateOnce,
             operation_id: String::new(),
             bootstrap_operation_id: source.operation_id.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),
@@ -418,6 +469,175 @@ mod tests {
         };
         intent.operation_id = intent.derived_operation_id().unwrap();
         intent
+    }
+
+    fn ready_snapshot(
+        db: &RuntimeDb,
+        source: &RuntimeSnapshotBootstrapIntent,
+        occurrence: &RuntimeSnapshotBootstrapOccurrence,
+    ) -> ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotIntent {
+        let created_at = occurrence.provider_creation_observation["created_at"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let observed = ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapReadinessObservation {
+            schema: 1,
+            operation_id: source.operation_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            provider_response_sha256: "c".repeat(64),
+            observed_created_at: created_at.clone(),
+            observed_at_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap(),
+        };
+        db.bind_snapshot_bootstrap_readiness(&observed).unwrap();
+        let mut snapshot = ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotIntent {
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_INTENT_SCHEMA,
+            operation_id: String::new(),
+            owner_principal: source.owner_principal.clone(),
+            provider_id: source.provider_id.clone(),
+            source_occurrence_id: occurrence.occurrence_id.clone(),
+            source_bootstrap_operation_id: Some(source.operation_id.clone()),
+            source_created_at: Some(created_at),
+            source_timeout_seconds: Some(source.maximum_lifetime_seconds),
+            provider_group_id: source.provider_group_id.clone(),
+            production_profile_digest: source.production_binding_digest.clone(),
+            adapter_artifact_hash: source.adapter_artifact_hash.clone(),
+            provider_spec_digest: source.provider_spec_digest.clone(),
+            settings_digest: source.settings_digest.clone(),
+            source: source.source.clone(),
+            guest_runtime_manifest_hash: source.guest_runtime_manifest_hash.clone(),
+            owner_executable_sha256: "b".repeat(64),
+            controller_public_root: format!("ed25519:{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [3u8; 32])),
+            upload_sha256: "d".repeat(64),
+            upload_bytes: 1024,
+            attempt_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
+        };
+        snapshot.operation_id = snapshot.derived_operation_id().unwrap();
+        snapshot
+    }
+
+    #[test]
+    fn snapshot_upload_and_source_termination_exclude_each_other() {
+        let db = RuntimeDb::new_in_memory().unwrap();
+        let (first_source, first_occurrence) = source(&db, false);
+        let snapshot = ready_snapshot(&db, &first_source, &first_occurrence);
+        db.reserve_runtime_snapshot(&snapshot).unwrap();
+        assert!(
+            db.reserve_bootstrap_termination(&termination(&first_source, &first_occurrence))
+                .is_err()
+        );
+
+        let other = RuntimeDb::new_in_memory().unwrap();
+        let (source, occurrence) = source(&other, false);
+        let snapshot = ready_snapshot(&other, &source, &occurrence);
+        other
+            .reserve_bootstrap_termination(&termination(&source, &occurrence))
+            .unwrap();
+        assert!(other.reserve_runtime_snapshot(&snapshot).is_err());
+    }
+
+    #[test]
+    fn materialized_parent_window_is_bounded_by_retained_source_expiry() {
+        let db = RuntimeDb::new_in_memory().unwrap();
+        let (source, occurrence) = source(&db, false);
+        let mut snapshot = ready_snapshot(&db, &source, &occurrence);
+        let created =
+            chrono::DateTime::parse_from_rfc3339(snapshot.source_created_at.as_deref().unwrap())
+                .unwrap()
+                .timestamp_millis();
+        let mut beyond_source = snapshot.clone();
+        beyond_source.attempt_deadline_ms = created + 901_000;
+        beyond_source.operation_id = beyond_source.derived_operation_id().unwrap();
+        assert!(db.reserve_runtime_snapshot(&beyond_source).is_err());
+
+        snapshot.attempt_deadline_ms = created + 600_000;
+        snapshot.operation_id = snapshot.derived_operation_id().unwrap();
+        db.reserve_runtime_snapshot(&snapshot).unwrap();
+    }
+
+    #[test]
+    fn uncertain_upload_allows_only_read_only_cleanup_after_exact_lifetime() {
+        let db = RuntimeDb::new_in_memory().unwrap();
+        let created_at = (chrono::Utc::now() - chrono::Duration::seconds(898)).to_rfc3339();
+        let (source, occurrence) = source_with_created_at(&db, false, &created_at);
+        let mut snapshot = ready_snapshot(&db, &source, &occurrence);
+        snapshot.attempt_deadline_ms = chrono::DateTime::parse_from_rfc3339(&created_at)
+            .unwrap()
+            .timestamp_millis()
+            + 900_000;
+        snapshot.operation_id = snapshot.derived_operation_id().unwrap();
+        db.reserve_runtime_snapshot(&snapshot).unwrap();
+        db.claim_runtime_snapshot_attempt(&snapshot.operation_id, &snapshot.digest().unwrap())
+            .unwrap();
+        db.quarantine_runtime_snapshot_attempt(&snapshot.operation_id, &snapshot.digest().unwrap())
+            .unwrap();
+        let locator = ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator {
+            schema:
+                ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_RESULT_SCHEMA,
+            operation_id: snapshot.operation_id.clone(),
+            intent_digest: snapshot.digest().unwrap(),
+            source_occurrence_id: snapshot.source_occurrence_id.clone(),
+            provider_group_id: snapshot.provider_group_id.clone(),
+            snapshot_id: "snp-late".into(),
+            provider_response_sha256: "a".repeat(64),
+            provider_creation_observation: serde_json::json!({"schema":1}),
+            adapter_observation_sha256: lillux::sha256_hex(br#"{"schema":1}"#),
+        };
+        assert_eq!(
+            db.bind_runtime_snapshot_locator(&locator, true)
+                .unwrap()
+                .phase,
+            super::runtime_snapshot::RuntimeSnapshotPhase::LateObserved
+        );
+        assert!(
+            db.bootstrap_has_unsettled_snapshot(&source.operation_id)
+                .unwrap()
+        );
+
+        let mut cleanup = termination(&source, &occurrence);
+        assert!(db.reserve_bootstrap_termination(&cleanup).is_err());
+        lillux::time::sleep(lillux::time::Duration::from_secs(3));
+        cleanup.mode = BootstrapCleanupMode::ObserveOnly;
+        let reserved = db.reserve_bootstrap_termination(&cleanup).unwrap();
+        assert_eq!(reserved.intent.mode, BootstrapCleanupMode::ObserveOnly);
+        let claim = db
+            .claim_bootstrap_termination_attempt(&cleanup.operation_id)
+            .unwrap();
+        assert!(matches!(claim, BootstrapTerminationClaim::StartAttempt(_)));
+        let mut mutation = cleanup.clone();
+        mutation.mode = BootstrapCleanupMode::TerminateOnce;
+        assert!(db.reserve_bootstrap_termination(&mutation).is_err());
+
+        let other = RuntimeDb::new_in_memory().unwrap();
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let (source, occurrence) = source_with_created_at(&other, false, &created_at);
+        let mut early = termination(&source, &occurrence);
+        early.mode = BootstrapCleanupMode::ObserveOnly;
+        assert!(other.reserve_bootstrap_termination(&early).is_err());
+    }
+
+    #[test]
+    fn snapshot_reopen_rejoins_the_exact_bootstrap_creation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let snapshot = {
+            let db = RuntimeDb::open(&path).unwrap();
+            let (source, occurrence) = source(&db, false);
+            let snapshot = ready_snapshot(&db, &source, &occurrence);
+            db.reserve_runtime_snapshot(&snapshot).unwrap();
+            snapshot
+        };
+        let db = RuntimeDb::open(&path).unwrap();
+        assert_eq!(
+            db.runtime_snapshot_operation(&snapshot.operation_id)
+                .unwrap()
+                .unwrap()
+                .intent,
+            snapshot
+        );
+        assert!(db.conn.execute(
+            "UPDATE runtime_snapshot_operation SET source_bootstrap_operation_id=?2 WHERE operation_id=?1",
+            params![snapshot.operation_id, "0".repeat(64)],
+        ).is_err());
     }
 
     #[test]

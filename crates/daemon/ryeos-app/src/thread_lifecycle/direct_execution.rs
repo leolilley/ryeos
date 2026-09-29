@@ -1878,6 +1878,7 @@ impl PreparedItemPlan {
                 max_address_space_bytes: Some(lifecycle.max_address_space_bytes),
                 max_cpu_seconds: Some(lifecycle.max_cpu_seconds),
                 max_processes: Some(lifecycle.real_uid_process_limit),
+                deny_process_creation: false,
                 max_stdout_bytes: None,
                 max_stderr_bytes: None,
             }),

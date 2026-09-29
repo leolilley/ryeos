@@ -151,7 +151,11 @@ mod tests {
 
     fn profile() -> GuestOwnerRuntimeProfile {
         GuestOwnerRuntimeProfile {
-            schema: 1,
+            schema: 2,
+            account: lillux::GuestRuntimeAccount::Unix {
+                uid: 65534,
+                gid: 65534,
+            },
             private_source_max_bytes: 32 * 1024 * 1024,
             private_source_max_inodes: 1024,
             owner_timeout_seconds: 600,

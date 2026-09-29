@@ -1,0 +1,6 @@
+kind: service
+endpoint: external-content.observe-bootstrap-runtime-source
+required_caps: ["ryeos.execute.service.external-content/observe-bootstrap-runtime-source"]
+schema:
+  operation_id: string
+description: Observe the exact created source sandbox through a bounded authenticated read-only request

@@ -13,7 +13,8 @@ use crate::runtime_snapshot::RuntimeSnapshotSource;
 
 pub const BOOTSTRAP_INTENT_SCHEMA: u32 = 1;
 pub const BOOTSTRAP_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-bootstrap-adapter.v1";
-pub const BOOTSTRAP_TERMINATION_PROTOCOL: &str = "ryeos.runtime-snapshot-bootstrap-termination.v1";
+pub const BOOTSTRAP_TERMINATION_PROTOCOL: &str = "ryeos.runtime-snapshot-bootstrap-termination.v2";
+pub const BOOTSTRAP_READINESS_PROTOCOL: &str = "ryeos.runtime-snapshot-bootstrap-readiness.v1";
 pub const MAX_BOOTSTRAP_ADAPTER_REQUEST_BYTES: usize = 24 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,10 +148,15 @@ pub struct RuntimeSnapshotBootstrapOccurrence {
     pub occurrence_id: String,
     pub provider_response_sha256: String,
     /// Bounded provider create-response evidence. The Render adapter must
-    /// independently check account, group, plan, region, lifetime, and
-    /// deny-all network policy before the occurrence can authorize use.
-    /// This object alone neither proves those checks nor proves readiness.
+    /// independently check the fields the response actually exposes (ID,
+    /// plan, region, lifetime, network policy, creation time), with account
+    /// scoped by its authenticated request. Render does not return group
+    /// membership here; snapshot creation must prove the intended group.
+    /// This object alone proves neither readiness nor snapshot suitability.
     pub provider_creation_observation: serde_json::Value,
+    /// False retains a real provider ID solely for exact cleanup when its
+    /// observed create attributes differ from the signed request.
+    pub creation_attributes_verified: bool,
     pub contact_deadline_exceeded: bool,
 }
 
@@ -179,6 +185,94 @@ impl RuntimeSnapshotBootstrapOccurrence {
     }
 }
 
+/// A read-only observation of an already-bound source occurrence. This
+/// carries no new create opportunity and is not a snapshot/upload grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotBootstrapReadinessRequest {
+    pub protocol: String,
+    pub intent: RuntimeSnapshotBootstrapIntent,
+    pub occurrence: RuntimeSnapshotBootstrapOccurrence,
+    pub provider_spec_digest: String,
+}
+
+impl RuntimeSnapshotBootstrapReadinessRequest {
+    pub fn validate(&self) -> Result<()> {
+        self.occurrence.validate_for(&self.intent)?;
+        ensure!(
+            self.protocol == BOOTSTRAP_READINESS_PROTOCOL
+                && self.provider_spec_digest == self.intent.provider_spec_digest
+                && self.occurrence.creation_attributes_verified
+                && !self.occurrence.contact_deadline_exceeded
+                && canonical_json(self)?.len() <= MAX_BOOTSTRAP_ADAPTER_REQUEST_BYTES,
+            "bootstrap readiness differs from a timely verified source"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotBootstrapReadinessObservation {
+    pub schema: u32,
+    pub operation_id: String,
+    pub occurrence_id: String,
+    pub provider_response_sha256: String,
+    pub observed_created_at: String,
+    pub observed_at_ms: i64,
+}
+
+impl RuntimeSnapshotBootstrapReadinessObservation {
+    pub fn validate_for(&self, request: &RuntimeSnapshotBootstrapReadinessRequest) -> Result<()> {
+        request.validate()?;
+        ensure!(
+            self.schema == 1
+                && self.operation_id == request.intent.operation_id
+                && self.occurrence_id == request.occurrence.occurrence_id
+                && valid_hash(&self.provider_response_sha256)
+                && !self.observed_created_at.is_empty()
+                && self.observed_created_at.len() <= 64
+                && self.observed_created_at.is_ascii()
+                && self.observed_at_ms > 0
+                && canonical_json(self)?.len() <= 1024,
+            "bootstrap readiness changed the exact source"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeSnapshotBootstrapReadinessAdapterResponse {
+    Running {
+        observation: RuntimeSnapshotBootstrapReadinessObservation,
+    },
+    NotReady {
+        operation_id: String,
+        occurrence_id: String,
+    },
+}
+
+impl RuntimeSnapshotBootstrapReadinessAdapterResponse {
+    pub fn validate_for(&self, request: &RuntimeSnapshotBootstrapReadinessRequest) -> Result<()> {
+        request.validate()?;
+        match self {
+            Self::Running { observation } => observation.validate_for(request),
+            Self::NotReady {
+                operation_id,
+                occurrence_id,
+            } => {
+                ensure!(
+                    operation_id == &request.intent.operation_id
+                        && occurrence_id == &request.occurrence.occurrence_id,
+                    "not-ready bootstrap response changed source"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeSnapshotBootstrapAdapterResponse {
@@ -191,12 +285,20 @@ pub enum RuntimeSnapshotBootstrapAdapterResponse {
     },
 }
 
-/// The source Sandbox has one termination opportunity, whether its create
-/// result was timely or cleanup-only. Deadline changes cannot remint it.
+/// The source Sandbox has one cleanup operation, whether its create result
+/// was timely or cleanup-only. Deadline changes cannot remint it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapCleanupMode {
+    TerminateOnce,
+    ObserveOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSnapshotBootstrapTerminationIntent {
     pub schema: u32,
+    pub mode: BootstrapCleanupMode,
     pub operation_id: String,
     pub bootstrap_operation_id: String,
     pub occurrence_id: String,
@@ -223,7 +325,7 @@ impl RuntimeSnapshotBootstrapTerminationIntent {
     ) -> Result<()> {
         occurrence.validate_for(bootstrap)?;
         ensure!(
-            self.schema == 1
+            self.schema == 2
                 && self.operation_id == self.derived_operation_id()?
                 && self.bootstrap_operation_id == bootstrap.operation_id
                 && self.occurrence_id == occurrence.occurrence_id
@@ -410,6 +512,7 @@ mod tests {
             occurrence_id: "sbx-exact".into(),
             provider_response_sha256: "a".repeat(64),
             provider_creation_observation: serde_json::json!({"status": "creating"}),
+            creation_attributes_verified: true,
             contact_deadline_exceeded: false,
         };
         RuntimeSnapshotBootstrapAdapterResponse::OccurrenceBound {
@@ -439,10 +542,12 @@ mod tests {
             occurrence_id: "sbx-exact".into(),
             provider_response_sha256: "a".repeat(64),
             provider_creation_observation: serde_json::json!({"status":"creating"}),
+            creation_attributes_verified: true,
             contact_deadline_exceeded: true,
         };
         let mut termination = RuntimeSnapshotBootstrapTerminationIntent {
-            schema: 1,
+            schema: 2,
+            mode: BootstrapCleanupMode::TerminateOnce,
             operation_id: String::new(),
             bootstrap_operation_id: source.operation_id.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),

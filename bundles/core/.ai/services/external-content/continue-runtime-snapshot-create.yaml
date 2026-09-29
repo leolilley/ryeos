@@ -1,0 +1,6 @@
+kind: service
+endpoint: external-content.continue-runtime-snapshot-create
+required_caps: ["ryeos.execute.service.external-content/continue-runtime-snapshot-create"]
+schema:
+  operation_id: string
+description: Continue only the one unclaimed create stage of an exact accepted upload using its retained signed producer and adapter closure; no new upload is permitted

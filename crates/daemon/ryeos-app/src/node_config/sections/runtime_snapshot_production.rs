@@ -7,6 +7,7 @@ use ryeos_external_execution_contract::runtime_snapshot::MAX_RUNTIME_SNAPSHOT_UP
 use ryeos_state::external_execution::transport::ExternalNetworkInputPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::node_config::{
     CompiledNodeConfigItem, NodeConfigSection, NodeConfigSourceScope, NodeItemContext,
@@ -32,6 +33,7 @@ struct ProductionDocument {
     settings: Value,
     network_inputs: ExternalNetworkInputPolicy,
     contact_timeout_seconds: u32,
+    maximum_bootstrap_lifetime_seconds: u32,
     maximum_upload_bytes: u64,
 }
 
@@ -40,7 +42,7 @@ impl ProductionDocument {
         ensure!(
             self.kind == "node"
                 && self.schema == 1
-                && self.protocol == "ryeos.runtime-snapshot-production.v1",
+                && self.protocol == "ryeos.runtime-snapshot-production.v2",
             "unsupported runtime snapshot production binding"
         );
         for (name, value) in [("backend", &self.backend), ("account", &self.account)] {
@@ -84,6 +86,7 @@ impl ProductionDocument {
         self.network_inputs.validate()?;
         ensure!(
             (1..=300).contains(&self.contact_timeout_seconds)
+                && (1..=3600).contains(&self.maximum_bootstrap_lifetime_seconds)
                 && (16 * 1024 + 1..=MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES)
                     .contains(&self.maximum_upload_bytes),
             "runtime snapshot production contact or upload budget is invalid"
@@ -98,10 +101,196 @@ pub struct InstalledRuntimeSnapshotProductionBinding {
     id: String,
     document: ProductionDocument,
     signer: String,
+    signer_verifying_key: [u8; 32],
+    signed_source: Arc<str>,
     digest: String,
 }
 
+/// Cleanup-only recovery authority retained before a source create POST.
+/// It carries no credential plaintext and cannot select a new source. The
+/// caller must still own an exact journaled occurrence and one-shot claim.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainedRuntimeSnapshotProductionBinding {
+    schema: u32,
+    id: String,
+    document: ProductionDocument,
+    signed_source: String,
+    signer: String,
+    signer_verifying_key: [u8; 32],
+    digest: String,
+}
+
+impl RetainedRuntimeSnapshotProductionBinding {
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == 1 && !self.id.is_empty() && self.id.len() <= 128,
+            "retained snapshot producer identity is invalid"
+        );
+        self.document.validate()?;
+        let key = lillux::crypto::VerifyingKey::from_bytes(&self.signer_verifying_key)
+            .context("retained snapshot producer key is invalid")?;
+        ensure!(
+            lillux::signature::compute_fingerprint(&key) == self.signer,
+            "retained snapshot producer signer changed"
+        );
+        ensure!(
+            !self.signed_source.is_empty()
+                && self.signed_source.len() <= crate::node_document::MAX_ITEM_BYTES as usize,
+            "retained snapshot producer signed source exceeds bound"
+        );
+        let (body, _) = lillux::signature::strip_canonical_signature_with_envelope(
+            &self.signed_source,
+            "#",
+            None,
+            false,
+        )?;
+        let envelope = ryeos_engine::contracts::SignatureEnvelope {
+            prefix: "#".into(),
+            suffix: None,
+            after_shebang: false,
+        };
+        let header =
+            ryeos_engine::item_resolution::parse_signature_header(&self.signed_source, &envelope)
+                .context("retained snapshot producer has no canonical signature")?;
+        ensure!(
+            header.signer_fingerprint == self.signer,
+            "retained snapshot producer header changed signer"
+        );
+        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: self.signer.clone(),
+                verifying_key: key,
+                label: None,
+            },
+        ]);
+        let (class, _) = ryeos_engine::trust::verify_item_signature(
+            &self.signed_source,
+            &header,
+            &envelope,
+            &trust,
+        )?;
+        ensure!(
+            class == ryeos_engine::contracts::TrustClass::Trusted,
+            "retained snapshot producer signature is invalid"
+        );
+        let decoded: ProductionDocument = serde_yaml::from_str(&body)?;
+        ensure!(
+            decoded == self.document,
+            "retained snapshot producer document differs from signed source"
+        );
+        let digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+            "domain": "ryeos.runtime-snapshot-production-binding.v1",
+            "id": self.id,
+            "signer": self.signer,
+            "signed_source": lillux::sha256_hex(self.signed_source.as_bytes()),
+        }))?;
+        ensure!(
+            digest == self.digest,
+            "retained snapshot producer digest changed"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Reconstructs the original signed binding. This is historical identity,
+    /// not permission to make a new provider mutation: only a separate exact
+    /// one-shot journal claim can authorize an unfinished stage continuation.
+    /// New source and upload creation still select current node_config.
+    pub(crate) fn recovered_binding(&self) -> Result<InstalledRuntimeSnapshotProductionBinding> {
+        self.validate()?;
+        Ok(InstalledRuntimeSnapshotProductionBinding {
+            id: self.id.clone(),
+            document: self.document.clone(),
+            signer: self.signer.clone(),
+            signer_verifying_key: self.signer_verifying_key,
+            signed_source: self.signed_source.clone().into(),
+            digest: self.digest.clone(),
+        })
+    }
+}
+
 impl InstalledRuntimeSnapshotProductionBinding {
+    #[cfg(test)]
+    pub(crate) fn test_fixture() -> Self {
+        let settings = serde_json::json!({
+            "schema": 1,
+            "owner_id": "owner-fixture",
+            "plan": "standard",
+            "region": "oregon",
+            "sandbox_group_id": "sbg-exact",
+            "tls_roots_der_base64": ["fixture"],
+        });
+        let document = ProductionDocument {
+            kind: "node".into(),
+            schema: 1,
+            protocol: "ryeos.runtime-snapshot-production.v2".into(),
+            backend: "render-sandbox-early-access".into(),
+            account: "render-test".into(),
+            provider_group_id: "sbg-exact".into(),
+            credential_generation: "a".repeat(64),
+            adapter_artifact_hash: "b".repeat(64),
+            snapshot_spec_sha256: "c".repeat(64),
+            settings_digest: lillux::sha256_hex(
+                lillux::canonical_json(&settings).unwrap().as_bytes(),
+            ),
+            settings,
+            network_inputs: ExternalNetworkInputPolicy {
+                resolver:
+                    ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                        source: "/etc/resolv.conf".into(),
+                        max_bytes: 4096,
+                    },
+                hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                    source: "/etc/hosts".into(),
+                    max_bytes: 4096,
+                },
+            },
+            contact_timeout_seconds: 60,
+            maximum_bootstrap_lifetime_seconds: 900,
+            maximum_upload_bytes: 1024 * 1024,
+        };
+        let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
+        let signer = lillux::signature::compute_fingerprint(&key.verifying_key());
+        let signed_source = lillux::signature::sign_content_at(
+            &serde_yaml::to_string(&document).unwrap(),
+            &key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
+        let id = "snapshot-producer".to_owned();
+        let digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+            "domain": "ryeos.runtime-snapshot-production-binding.v1",
+            "id": id, "signer": signer,
+            "signed_source": lillux::sha256_hex(signed_source.as_bytes()),
+        }))
+        .unwrap();
+        Self {
+            id,
+            document,
+            signed_source: signed_source.into(),
+            signer,
+            signer_verifying_key: key.verifying_key().to_bytes(),
+            digest,
+        }
+    }
+    pub(crate) fn retained_generation(&self) -> Result<RetainedRuntimeSnapshotProductionBinding> {
+        let retained = RetainedRuntimeSnapshotProductionBinding {
+            schema: 1,
+            id: self.id.clone(),
+            document: self.document.clone(),
+            signed_source: self.signed_source.to_string(),
+            signer: self.signer.clone(),
+            signer_verifying_key: self.signer_verifying_key,
+            digest: self.digest.clone(),
+        };
+        retained.validate()?;
+        Ok(retained)
+    }
     pub(crate) fn id(&self) -> &str {
         &self.id
     }
@@ -134,6 +323,9 @@ impl InstalledRuntimeSnapshotProductionBinding {
     }
     pub(crate) fn contact_timeout_seconds(&self) -> u32 {
         self.document.contact_timeout_seconds
+    }
+    pub(crate) fn maximum_bootstrap_lifetime_seconds(&self) -> u32 {
+        self.document.maximum_bootstrap_lifetime_seconds
     }
     pub(crate) fn maximum_upload_bytes(&self) -> u64 {
         self.document.maximum_upload_bytes
@@ -183,6 +375,8 @@ impl CompiledNodeConfigItem for ParsedBinding {
             id: self.id,
             document: self.document,
             signer: admission.signer_fingerprint.clone(),
+            signer_verifying_key: admission.signer_verifying_key,
+            signed_source: admission.signed_source.clone(),
             digest,
         })
     }
@@ -228,7 +422,7 @@ mod tests {
         let document = ProductionDocument {
             kind: "node".into(),
             schema: 1,
-            protocol: "ryeos.runtime-snapshot-production.v1".into(),
+            protocol: "ryeos.runtime-snapshot-production.v2".into(),
             backend: "render-sandbox-early-access".into(),
             account: "render-test".into(),
             provider_group_id: "sbg-test".into(),
@@ -251,6 +445,7 @@ mod tests {
                 },
             },
             contact_timeout_seconds: 60,
+            maximum_bootstrap_lifetime_seconds: 900,
             maximum_upload_bytes: 1024 * 1024,
         };
         document.validate().unwrap();
@@ -260,6 +455,46 @@ mod tests {
         let mut changed = document.clone();
         changed.snapshot_spec_sha256 = "not-a-hash".into();
         assert!(changed.validate().is_err());
+        let mut changed = document.clone();
+        changed.maximum_bootstrap_lifetime_seconds = 3601;
+        assert!(changed.validate().is_err());
+        let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
+        let signer = lillux::signature::compute_fingerprint(&key.verifying_key());
+        let signed_source = lillux::signature::sign_content_at(
+            &serde_yaml::to_string(&document).unwrap(),
+            &key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
+        let id = "snapshot-producer".to_owned();
+        let digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+            "domain": "ryeos.runtime-snapshot-production-binding.v1",
+            "id": id,
+            "signer": signer,
+            "signed_source": lillux::sha256_hex(signed_source.as_bytes()),
+        }))
+        .unwrap();
+        let installed = InstalledRuntimeSnapshotProductionBinding {
+            id,
+            document: document.clone(),
+            signed_source: signed_source.into(),
+            signer,
+            signer_verifying_key: key.verifying_key().to_bytes(),
+            digest,
+        };
+        let retained = installed.retained_generation().unwrap();
+        let reopened: RetainedRuntimeSnapshotProductionBinding = serde_json::from_slice(
+            &ryeos_external_execution_contract::canonical_json(&retained).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.recovered_binding().unwrap().digest(),
+            installed.digest()
+        );
+        let mut tampered = reopened;
+        tampered.document.provider_group_id = "sbg-other".into();
+        assert!(tampered.validate().is_err());
         let mut changed = document;
         changed.contact_timeout_seconds = 301;
         assert!(changed.validate().is_err());

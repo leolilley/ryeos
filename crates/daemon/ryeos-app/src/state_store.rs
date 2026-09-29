@@ -14640,9 +14640,55 @@ impl StateStore {
     pub(crate) fn reserve_snapshot_bootstrap(
         &self,
         intent: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapIntent,
+        binding: &crate::node_config::sections::runtime_snapshot_production::RetainedRuntimeSnapshotProductionBinding,
     ) -> Result<runtime_db::runtime_snapshot_bootstrap::SnapshotBootstrapRecord> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?.runtime_db.reserve_snapshot_bootstrap(intent)
+        self.lock()?
+            .runtime_db
+            .reserve_snapshot_bootstrap_with_binding(intent, binding)
+    }
+
+    /// Link a completed protected lifecycle escrow before the one-shot
+    /// provider claim. This is not a publication path: its caller must have
+    /// finished the durable CAS upload for this exact root first.
+    pub(crate) fn attach_snapshot_bootstrap_artifacts(
+        &self,
+        operation_id: &str,
+        published: &crate::external_artifacts::PublishedLifecycleArtifacts,
+    ) -> Result<runtime_db::runtime_snapshot_bootstrap::SnapshotBootstrapRecord> {
+        let root_hash = published.root_hash();
+        let _permit = self.acquire_write_permit()?;
+        let authority = self.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let cas = authority.cas_store()?;
+        let source = crate::external_artifacts::verify_retained_lifecycle_closure(&cas, root_hash)?;
+        authority.ensure_guard(&guard)?;
+        let g = self.lock()?;
+        let record = g
+            .runtime_db
+            .snapshot_bootstrap_operation(operation_id)?
+            .context("bootstrap artifact link has no reserved operation")?;
+        anyhow::ensure!(
+            source.declaration_id == record.intent.provider_id
+                && source.executables[0].payload_blob_hash == record.intent.adapter_artifact_hash
+                && source.specs[0].blob_hash == record.intent.provider_spec_digest,
+            "retained lifecycle closure differs from reserved bootstrap identity"
+        );
+        g.runtime_db
+            .retained_snapshot_bootstrap_binding(operation_id)?
+            .context("bootstrap artifact link lost retained signed producer binding")?;
+        authority.ensure_guard(&guard)?;
+        g.runtime_db
+            .attach_snapshot_bootstrap_artifacts(operation_id, root_hash)
+    }
+
+    pub(crate) fn retained_snapshot_bootstrap_binding(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<crate::node_config::sections::runtime_snapshot_production::RetainedRuntimeSnapshotProductionBinding>>{
+        self.lock()?
+            .runtime_db
+            .retained_snapshot_bootstrap_binding(operation_id)
     }
 
     pub(crate) fn claim_snapshot_bootstrap_attempt(
@@ -14665,6 +14711,16 @@ impl StateStore {
             .bind_snapshot_bootstrap_occurrence(occurrence)
     }
 
+    pub(crate) fn bind_snapshot_bootstrap_readiness(
+        &self,
+        observation: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapReadinessObservation,
+    ) -> Result<runtime_db::runtime_snapshot_bootstrap::SnapshotBootstrapRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .bind_snapshot_bootstrap_readiness(observation)
+    }
+
     pub(crate) fn quarantine_snapshot_bootstrap_attempt(
         &self,
         operation_id: &str,
@@ -14684,6 +14740,15 @@ impl StateStore {
         self.lock()?
             .runtime_db
             .bootstrap_termination_operation(operation_id)
+    }
+
+    pub(crate) fn bootstrap_has_unsettled_snapshot(
+        &self,
+        bootstrap_operation_id: &str,
+    ) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .bootstrap_has_unsettled_snapshot(bootstrap_operation_id)
     }
 
     pub(crate) fn reserve_bootstrap_termination(
@@ -14750,14 +14815,108 @@ impl StateStore {
             .claim_runtime_snapshot_attempt(operation_id, intent_digest)
     }
 
+    pub(crate) fn runtime_snapshot_stage(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<runtime_db::runtime_snapshot_stage::RuntimeSnapshotStageRecord>> {
+        self.lock()?.runtime_db.runtime_snapshot_stage(operation_id)
+    }
+
+    pub(crate) fn reserve_runtime_snapshot_upload_stage(
+        &self,
+        intent: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotStageIntent,
+    ) -> Result<runtime_db::runtime_snapshot_stage::RuntimeSnapshotStageRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .reserve_runtime_snapshot_upload_stage(intent)
+    }
+
+    pub(crate) fn claim_runtime_snapshot_upload_stage(
+        &self,
+        operation_id: &str,
+        intent_digest: &str,
+    ) -> Result<runtime_db::runtime_snapshot_stage::RuntimeSnapshotStageClaim> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .claim_runtime_snapshot_upload_stage(operation_id, intent_digest)
+    }
+
+    pub(crate) fn bind_runtime_snapshot_upload_receipt(
+        &self,
+        receipt: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotUploadReceipt,
+        deadline_exceeded: bool,
+    ) -> Result<runtime_db::runtime_snapshot_stage::RuntimeSnapshotStageRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .bind_runtime_snapshot_upload_receipt(receipt, deadline_exceeded)
+    }
+
+    pub(crate) fn quarantine_runtime_snapshot_upload_stage(
+        &self,
+        operation_id: &str,
+        intent_digest: &str,
+    ) -> Result<runtime_db::runtime_snapshot_stage::RuntimeSnapshotStageRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .quarantine_runtime_snapshot_upload_stage(operation_id, intent_digest)
+    }
+
+    pub(crate) fn reserve_runtime_snapshot_create_stage(
+        &self,
+        intent: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotStageIntent,
+    ) -> Result<runtime_db::runtime_snapshot_stage::RuntimeSnapshotStageRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .reserve_runtime_snapshot_create_stage(intent)
+    }
+
+    pub(crate) fn claim_runtime_snapshot_create_stage(
+        &self,
+        operation_id: &str,
+        intent_digest: &str,
+    ) -> Result<runtime_db::runtime_snapshot_stage::RuntimeSnapshotStageClaim> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .claim_runtime_snapshot_create_stage(operation_id, intent_digest)
+    }
+
+    pub(crate) fn bind_runtime_snapshot_create_locator(
+        &self,
+        result: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotCreateResult,
+        deadline_exceeded: bool,
+    ) -> Result<runtime_db::runtime_snapshot_stage::RuntimeSnapshotStageRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .bind_runtime_snapshot_create_locator(result, deadline_exceeded)
+    }
+
+    pub(crate) fn quarantine_runtime_snapshot_create_stage(
+        &self,
+        operation_id: &str,
+        intent_digest: &str,
+    ) -> Result<runtime_db::runtime_snapshot_stage::RuntimeSnapshotStageRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .quarantine_runtime_snapshot_create_stage(operation_id, intent_digest)
+    }
+
     pub(crate) fn bind_runtime_snapshot_locator(
         &self,
         locator: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator,
+        deadline_exceeded: bool,
     ) -> Result<runtime_db::runtime_snapshot::RuntimeSnapshotRecord> {
         let _permit = self.acquire_write_permit()?;
         self.lock()?
             .runtime_db
-            .bind_runtime_snapshot_locator(locator)
+            .bind_runtime_snapshot_locator(locator, deadline_exceeded)
     }
 
     pub(crate) fn bind_runtime_snapshot_readiness(
@@ -15827,6 +15986,7 @@ impl StateStore {
         roots.extend(g.runtime_db.runtime_child_cas_object_roots()?);
         roots.extend(g.runtime_db.external_execution_cas_roots()?);
         roots.extend(g.runtime_db.scoped_child_observation_cas_roots()?);
+        roots.extend(g.runtime_db.snapshot_bootstrap_lifecycle_roots()?);
         Ok(roots.into_iter().collect())
     }
 

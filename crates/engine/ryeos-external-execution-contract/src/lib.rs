@@ -988,10 +988,12 @@ pub struct LifecycleAdapterInspectionResponse {
     pub observed_provider_spec_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_snapshot_production_spec_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_bootstrap_profile_digest: Option<String>,
     pub artifacts: BTreeMap<LifecycleArtifactRole, LifecycleArtifactInspection>,
 }
 
-/// Credential-free interpretation input for a product witness already
+/// Credential-free interpretation input for an exact runtime source already
 /// authenticated by the controller. No provider request is authorized here.
 /// The exact settings are supplied by a separate sealed descriptor and must
 /// hash to `settings_digest` before the adapter interprets the probe.
@@ -1005,13 +1007,13 @@ pub struct LifecycleRuntimeProbeRequest {
     pub settings_digest: String,
     pub binding_hash: String,
     pub qualification_attestation_hash: String,
-    pub product_witness_hash: String,
+    pub runtime_source: runtime_snapshot::RuntimeSnapshotSource,
     pub account: String,
     pub source: LifecycleRuntimeProbeSource,
     pub probe_evidence: Value,
 }
 
-/// These values come from the authenticated product manifest and controller
+/// These values come from the authenticated runtime manifest and controller
 /// public key, never from the provider's probe JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1248,6 +1250,9 @@ impl LifecycleAdapterInspectionResponse {
             &self.target,
         )?;
         bounded_identifier(&self.adapter_build, 256, "lifecycle adapter build")?;
+        if let Some(profile) = &self.observed_bootstrap_profile_digest {
+            digest(profile, "source bootstrap profile")?;
+        }
         ensure!(
             self.adapter_id == request.adapter_id
                 && self.observed_adapter_artifact_hash == request.adapter_artifact_hash
@@ -1272,7 +1277,7 @@ impl LifecycleAdapterInspectionResponse {
 impl LifecycleRuntimeProbeSource {
     pub fn validate(&self) -> Result<()> {
         for (label, value) in [
-            ("runtime probe product manifest", &self.manifest_hash),
+            ("runtime probe source manifest", &self.manifest_hash),
             (
                 "runtime probe owner executable",
                 &self.owner_executable_sha256,
@@ -1296,7 +1301,7 @@ impl LifecycleRuntimeProbeSource {
 impl LifecycleRuntimeProbeRequest {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 1 && self.protocol == LIFECYCLE_ADAPTER_PROTOCOL,
+            self.schema == 2 && self.protocol == LIFECYCLE_ADAPTER_PROTOCOL,
             "unsupported lifecycle runtime probe protocol"
         );
         bounded_identifier(&self.adapter_id, 128, "runtime probe adapter")?;
@@ -1312,10 +1317,10 @@ impl LifecycleRuntimeProbeRequest {
                 "runtime probe qualification",
                 &self.qualification_attestation_hash,
             ),
-            ("runtime probe product witness", &self.product_witness_hash),
         ] {
             digest(value, label)?;
         }
+        self.runtime_source.validate()?;
         self.source.validate()?;
         ensure!(
             self.probe_evidence.is_object()
@@ -1919,14 +1924,16 @@ mod tests {
     #[test]
     fn runtime_probe_reply_is_bound_to_one_credential_free_request() {
         let request = LifecycleRuntimeProbeRequest {
-            schema: 1,
+            schema: 2,
             protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
             adapter_id: "render-sandbox-early-access".into(),
             adapter_artifact_hash: "a".repeat(64),
             settings_digest: "b".repeat(64),
             binding_hash: "c".repeat(64),
             qualification_attestation_hash: "d".repeat(64),
-            product_witness_hash: "e".repeat(64),
+            runtime_source: runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "e".repeat(64),
+            },
             account: "render-account".into(),
             source: LifecycleRuntimeProbeSource {
                 manifest_hash: "f".repeat(64),
@@ -1957,6 +1964,13 @@ mod tests {
         assert!(response.validate_for(&changed).is_err());
         changed = request.clone();
         changed.probe_evidence = serde_json::json!({"schema": 2});
+        assert!(response.validate_for(&changed).is_err());
+        changed = request.clone();
+        changed.runtime_source = runtime_snapshot::RuntimeSnapshotSource::BundleMaterialization {
+            materialization_attestation_hash: "e".repeat(64),
+            source_coordinate_digest: "3".repeat(64),
+            materialization_binding_digest: "4".repeat(64),
+        };
         assert!(response.validate_for(&changed).is_err());
         let mut malformed = serde_json::to_value(&request).unwrap();
         malformed["credential"] = serde_json::json!("ambient");

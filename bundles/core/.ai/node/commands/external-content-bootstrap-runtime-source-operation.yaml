@@ -1,0 +1,12 @@
+tokens: [external-content, bootstrap-runtime-source-operation]
+description: Read one exact retained runtime-source bootstrap operation
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content bootstrap-runtime-source-operation '{\"operation_id\":\"<exact-operation>\"}'"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/bootstrap-runtime-source-operation

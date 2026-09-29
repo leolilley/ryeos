@@ -1,0 +1,6 @@
+kind: service
+endpoint: external-content.terminate-bootstrap-runtime-source
+required_caps: ["ryeos.execute.service.external-content/terminate-bootstrap-runtime-source"]
+schema:
+  operation_id: string
+description: Terminate the exact retained source sandbox with a durable one-shot claim and read-only recovery

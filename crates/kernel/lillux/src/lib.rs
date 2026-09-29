@@ -3,6 +3,7 @@ pub mod cas;
 pub mod character_device;
 pub mod crypto;
 pub mod exec;
+pub mod guest_account;
 pub mod host_service;
 pub mod identity;
 pub mod inherited_pipes;
@@ -39,9 +40,9 @@ pub use exec::{
     configure_command_argv0, configure_inherited_descriptor_authorities, configure_inherited_fds,
     configure_owner_private_creation_mask, configure_subprocess_limits, disable_process_core_dumps,
     inherited_descriptor_coordinate, inherited_descriptor_path_for, inherited_duplex_channel_pair,
-    protect_descriptor_from_exec, replace_current_process, sealed_executable_memfd, sealed_memfd,
-    supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
-    validate_subprocess_limits,
+    protect_descriptor_from_exec, replace_current_process, sealed_executable_memfd,
+    sealed_executable_memfd_from_reader, sealed_memfd, supervised_launcher_attachment_status_pipe,
+    supervised_launcher_status_pipe, validate_subprocess_limits,
 };
 pub use exec::{
     inherited_executable_path, take_inherited_descriptor_authority,
@@ -61,6 +62,7 @@ pub use cas::{
     CanonicalJsonError, CasPutOutcome, CasStore, StreamedBlobOutcome, atomic_write_batch,
     atomic_write_batch_in_pinned_root, canonical_json, sha256_hex, shard_path, valid_hash,
 };
+pub use guest_account::GuestRuntimeAccount;
 pub use host_service::{
     HostServiceController, HostServiceInstallation, HostServiceLaunch, discover_host_service,
     exec_install_transaction, provision_host_service, run_as_administrator,

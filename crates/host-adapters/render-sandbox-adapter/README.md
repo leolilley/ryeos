@@ -71,7 +71,7 @@ service and command definitions are signed; their presence does not prove
 admission on the installed controller generation. Installed admission and the
 restored-content qualification still need verification before this path can
 authorize worker activation.
-The schema-5 snapshot probe carries only the retained snapshot locator,
+The schema-6 snapshot probe carries a tagged source provenance and only the retained snapshot locator,
 restored-verifier observation, provider terminal observation, and exact
 product/placement coordinates. It rejects the older unjoined hashes for
 lost-stream survival, authenticated Ready, and writer exclusion. Those are
@@ -558,9 +558,12 @@ The Render adapter interprets the bounded `probe_evidence` against the same
 binding's owner/account/snapshot/plan/region, controller public root, owner
 executable and runtime manifest. Neither a caller-provided JSON probe nor a
 synthetic `HandlerContext` may stand in for RyeOS's authenticated witness.
-The exact product-witness hash is the source-lineage join: its authenticated
-capture evidence already retains the producer and root-producer admissions,
-including effective definition, project snapshot and launch authority. The
+For the captured-product source, the exact product-witness hash is the
+source-lineage join: its authenticated capture evidence retains the producer
+and root-producer admissions, including effective definition, project snapshot
+and launch authority. A materialized-artifacts source instead requires its
+distinct materialization witness and qualification path; it cannot reuse a
+capture witness. The
 removed `bundle_generation_hash` probe field had no independent installed
 observation or signed-binding source; copying it from `probe_evidence` into its
 own expectation would have proved nothing.
