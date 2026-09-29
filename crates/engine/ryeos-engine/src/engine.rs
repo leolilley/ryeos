@@ -931,6 +931,19 @@ pub struct CheckedEngineGeneration<'a> {
     request_engine_generation_identity: String,
 }
 
+/// Signed Bundle item bytes captured only for controller-owned source
+/// retention. These verified envelopes are never placed in a launch envelope
+/// or reconstructed from a diagnostic `source_path`.
+#[derive(Debug, Clone)]
+pub struct CapturedSignedBundleItemSource {
+    pub resolved_ref: String,
+    pub source_root: crate::contracts::ItemSourceRoot,
+    pub signer_fingerprint: String,
+    pub source_content_digest: String,
+    pub raw_content_digest: String,
+    pub signed_bytes: Vec<u8>,
+}
+
 fn parallel_map_ordered<T, U>(items: &[T], operation: impl Fn(&T) -> U + Sync) -> Vec<U>
 where
     T: Sync,
@@ -993,6 +1006,163 @@ impl CheckedEngineGeneration<'_> {
         request: EffectiveItemRequest,
     ) -> Result<crate::resolution::ResolutionOutput, EngineError> {
         self.engine.effective_resolution_output_current(&request)
+    }
+
+    /// Re-resolve a verified Bundle definition's root, ancestors and
+    /// references under this exact checked generation, then capture each
+    /// whole signed envelope. Every re-resolved authority and byte digest must
+    /// agree with the already-admitted effective resolution. This deliberately
+    /// never opens `ResolvedAncestor::source_path`, which is diagnostic only.
+    pub fn capture_verified_signed_bundle_sources(
+        &self,
+        resolution: &crate::resolution::ResolutionOutput,
+    ) -> Result<Vec<CapturedSignedBundleItemSource>, EngineError> {
+        const MAX_SOURCE_FILES: usize = 64;
+        const MAX_SOURCE_FILE_BYTES: usize = 256 * 1024;
+        const MAX_SOURCE_TOTAL_BYTES: usize = 1024 * 1024;
+
+        let roots = self.engine.resolution_roots(None);
+        let mut captured = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut total = 0usize;
+        for ancestor in std::iter::once(&resolution.root)
+            .chain(resolution.ancestors.iter())
+            .chain(resolution.referenced_items.iter())
+        {
+            let crate::contracts::ItemSourceRoot::Bundle { name: bundle_name } =
+                &ancestor.source_root
+            else {
+                return Err(EngineError::Internal(
+                    "materialization source includes a non-Bundle item".into(),
+                ));
+            };
+            if ancestor.source_space != crate::contracts::ItemSpace::Bundle
+                || ancestor.trust_class != crate::resolution::TrustClass::TrustedBundle
+            {
+                return Err(EngineError::Internal(
+                    "materialization source is not trusted Bundle content".into(),
+                ));
+            }
+            let signer = ancestor.signer_fingerprint.as_deref().ok_or_else(|| {
+                EngineError::Internal("materialization source has no verified signer".into())
+            })?;
+            if ancestor.raw_content.len() > MAX_SOURCE_FILE_BYTES {
+                return Err(EngineError::Internal(
+                    "materialization source exceeds its per-item byte bound".into(),
+                ));
+            }
+            let key = (
+                ancestor.resolved_ref.clone(),
+                ancestor.source_content_digest.clone(),
+                bundle_name.clone(),
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            if captured.len() >= MAX_SOURCE_FILES {
+                return Err(EngineError::Internal(
+                    "materialization source exceeds its item-count bound".into(),
+                ));
+            }
+            let canonical = crate::canonical_ref::CanonicalRef::parse(&ancestor.resolved_ref)?;
+            if canonical.to_string() != ancestor.resolved_ref || canonical.suffix.is_some() {
+                return Err(EngineError::Internal(
+                    "materialization source ref is not canonical and unsuffixed".into(),
+                ));
+            }
+            let raw = crate::resolution::context::load_item_raw(
+                &self.engine.kinds,
+                &roots,
+                &self.engine.node_trust_store,
+                &canonical,
+                &ancestor.resolved_ref,
+                crate::resolution::ResolutionStepName::PipelineInit,
+                None,
+            )
+            .map_err(|error| {
+                EngineError::Internal(format!("recapture signed materialization source: {error}"))
+            })?;
+            if raw.source_space != ancestor.source_space
+                || raw.source_root != ancestor.source_root
+                || raw.trust_class != ancestor.trust_class
+                || raw.signer_fingerprint.as_deref() != Some(signer)
+                || raw.source_content_digest != ancestor.source_content_digest
+                || raw.raw_content_digest != ancestor.raw_content_digest
+                || raw.raw_content != ancestor.raw_content
+            {
+                return Err(EngineError::Internal(
+                    "signed materialization source changed under checked generation".into(),
+                ));
+            }
+            let bytes = raw.content.into_bytes();
+            total = total.checked_add(bytes.len()).ok_or_else(|| {
+                EngineError::Internal("materialization source byte count overflow".into())
+            })?;
+            if bytes.len() > MAX_SOURCE_FILE_BYTES || total > MAX_SOURCE_TOTAL_BYTES {
+                return Err(EngineError::Internal(
+                    "materialization signed-source closure exceeds its byte bound".into(),
+                ));
+            }
+            captured.push(CapturedSignedBundleItemSource {
+                resolved_ref: ancestor.resolved_ref.clone(),
+                source_root: ancestor.source_root.clone(),
+                signer_fingerprint: signer.to_owned(),
+                source_content_digest: ancestor.source_content_digest.clone(),
+                raw_content_digest: ancestor.raw_content_digest.clone(),
+                signed_bytes: bytes,
+            });
+        }
+        captured.sort_by(|left, right| {
+            left.resolved_ref
+                .cmp(&right.resolved_ref)
+                .then(left.source_content_digest.cmp(&right.source_content_digest))
+                .then_with(|| match (&left.source_root, &right.source_root) {
+                    (
+                        crate::contracts::ItemSourceRoot::Bundle { name: left },
+                        crate::contracts::ItemSourceRoot::Bundle { name: right },
+                    ) => left.cmp(right),
+                    _ => std::cmp::Ordering::Equal,
+                })
+        });
+        Ok(captured)
+    }
+
+    /// Retain the exact signed source manifest of each Bundle that supplied a
+    /// captured recipe item. These manifests are separate from item envelopes
+    /// and must be linked by the eventual durable source evidence.
+    pub fn capture_verified_source_bundle_manifests(
+        &self,
+        sources: &[CapturedSignedBundleItemSource],
+    ) -> Result<Vec<crate::plan_builder::CapturedSignedBundleManifest>, EngineError> {
+        let mut names = std::collections::BTreeSet::new();
+        for source in sources {
+            let crate::contracts::ItemSourceRoot::Bundle { name } = &source.source_root else {
+                return Err(EngineError::Internal(
+                    "materialization source has no registered Bundle root".into(),
+                ));
+            };
+            names.insert(name.clone());
+        }
+        if names.is_empty() || names.len() > 8 {
+            return Err(EngineError::Internal(
+                "materialization Bundle manifest count is invalid".into(),
+            ));
+        }
+        names
+            .into_iter()
+            .map(|name| {
+                let root = self.engine.registered_bundle_root(&name).ok_or_else(|| {
+                    EngineError::Internal(format!(
+                        "materialization source Bundle {name:?} has no registered root"
+                    ))
+                })?;
+                crate::plan_builder::capture_signed_bundle_source_manifest(
+                    root,
+                    &name,
+                    &self.engine.node_trust_store,
+                )
+            })
+            .collect()
     }
 
     pub fn effective_item_under_project_authority(
@@ -4322,6 +4492,108 @@ formats:
                 .contains("admitted exact trusted Bundle source"),
             "unexpected captured-source mismatch: {mismatch}"
         );
+    }
+
+    #[test]
+    fn checked_generation_captures_signed_bundle_closure_and_refuses_dependency_drift() {
+        let bundle_root = tempdir();
+        let kinds_dir = tempdir();
+        let trust_store = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
+        let schema = format!(
+            "{TOOL_SCHEMA_YAML}resolution:\n  - step: resolve_references\n    field: refs\n    max_depth: 2\n"
+        );
+        fs::write(
+            kinds_dir.join("tool/tool.kind-schema.yaml"),
+            sign_schema_yaml(&schema),
+        )
+        .unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).unwrap();
+        let handlers = crate::test_support::load_live_handler_registry();
+        let composers = ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
+
+        let source = "# ryeos-tool:\n#   note: retained signed source\n#   refs:\n#     - tool:dependency\nprint('verified')\n";
+        let signed_source = lillux::signature::sign_content(source, &test_signing_key(), "#", None);
+        let source_path = bundle_root.join(AI_DIR).join("tools/hello.py");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(&source_path, &signed_source).unwrap();
+        let dependency = lillux::signature::sign_content(
+            "# ryeos-tool:\n#   note: dependency\nprint('dependency')\n",
+            &test_signing_key(),
+            "#",
+            None,
+        );
+        let dependency_path = bundle_root.join(AI_DIR).join("tools/dependency.py");
+        fs::write(&dependency_path, &dependency).unwrap();
+        let bundle_manifest = lillux::signature::sign_content(
+            "name: core\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n",
+            &test_signing_key(),
+            "#",
+            None,
+        );
+        fs::write(
+            bundle_root.join(AI_DIR).join("manifest.yaml"),
+            &bundle_manifest,
+        )
+        .unwrap();
+        let engine = Engine::new(
+            kinds,
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
+            vec![],
+        )
+        .with_trust_store(trust_store)
+        .with_node_trust_store(test_trust_store())
+        .with_composers(composers)
+        .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
+            name: "core".to_owned(),
+            canonical_root: bundle_root,
+        }]);
+
+        engine
+            .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
+                let resolution = generation.effective_resolution_output(EffectiveItemRequest {
+                    item_ref: CanonicalRef::parse("tool:hello")?,
+                    expected_kind: Some("tool".to_owned()),
+                    project_root: None,
+                    subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+                })?;
+                let captured = generation.capture_verified_signed_bundle_sources(&resolution)?;
+                assert_eq!(resolution.referenced_items.len(), 1);
+                assert_eq!(captured.len(), 2);
+                assert_eq!(captured[0].resolved_ref, "tool:dependency");
+                assert_eq!(captured[0].signed_bytes, dependency.as_bytes());
+                assert_eq!(captured[1].resolved_ref, "tool:hello");
+                assert_eq!(captured[1].signed_bytes, signed_source.as_bytes());
+                let manifests = generation.capture_verified_source_bundle_manifests(&captured)?;
+                assert_eq!(manifests.len(), 1);
+                assert_eq!(manifests[0].identity.name, "core");
+                assert_eq!(manifests[0].signed_bytes, bundle_manifest.as_bytes());
+                assert_eq!(
+                    captured[1].source_content_digest,
+                    resolution.root.source_content_digest
+                );
+
+                // The referenced item's diagnostic path is not authority to
+                // capture later bytes. A validly signed replacement refuses.
+                let replacement = lillux::signature::sign_content(
+                    "# ryeos-tool:\n#   note: changed\nprint('changed')\n",
+                    &test_signing_key(),
+                    "#",
+                    None,
+                );
+                fs::write(&dependency_path, replacement).unwrap();
+                let error = generation
+                    .capture_verified_signed_bundle_sources(&resolution)
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("changed under checked generation"),
+                    "unexpected recapture error: {error}"
+                );
+                Ok(())
+            })
+            .unwrap();
     }
 
     fn immutable_request_fixture() -> Arc<EffectiveRequestSnapshot> {

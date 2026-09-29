@@ -64,6 +64,8 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "external_content_binding",
     "external_content_manifest",
     "external_large_content_manifest",
+    "guest_runtime_materialization_source",
+    "guest_runtime_materialization_subject",
     "item_source",
     "observed_execution_realization",
     "persistent_session_capsule",
@@ -143,6 +145,16 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         kind: crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
         validate: validate_external_large_content_manifest,
         links: links_external_large_content_manifest,
+    },
+    ObjectContract {
+        kind: crate::objects::GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
+        validate: validate_guest_runtime_materialization_source,
+        links: links_guest_runtime_materialization_source,
+    },
+    ObjectContract {
+        kind: crate::objects::GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND,
+        validate: validate_guest_runtime_materialization_subject,
+        links: links_guest_runtime_materialization_subject,
     },
     ObjectContract {
         kind: "item_source",
@@ -302,6 +314,14 @@ fn validate_execution_identity(value: &Value) -> anyhow::Result<()> {
 
 fn validate_external_content_manifest(value: &Value) -> anyhow::Result<()> {
     crate::objects::ExternalContentManifestObject::from_value(value).map(|_| ())
+}
+
+fn validate_guest_runtime_materialization_source(value: &Value) -> anyhow::Result<()> {
+    crate::objects::GuestRuntimeMaterializationSourceEvidence::from_value(value).map(|_| ())
+}
+
+fn validate_guest_runtime_materialization_subject(value: &Value) -> anyhow::Result<()> {
+    crate::objects::GuestRuntimeMaterializationSubject::from_value(value).map(|_| ())
 }
 
 fn validate_external_content_activation(value: &Value) -> anyhow::Result<()> {
@@ -1210,6 +1230,53 @@ fn links_external_content_manifest(value: &Value) -> Result<ContractLinks, Strin
     for entry in entries {
         super::push_optional_hash(entry, "blob_hash", &mut links.blob_hashes)?;
     }
+    Ok(links)
+}
+
+fn links_guest_runtime_materialization_source(value: &Value) -> Result<ContractLinks, String> {
+    let source = crate::objects::GuestRuntimeMaterializationSourceEvidence::from_value(value)
+        .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    for item in &source.signed_recipe_items {
+        links.blob_hashes.push(item.signed_blob_hash.clone());
+    }
+    for bundle in &source.signed_bundle_manifests {
+        links.blob_hashes.push(bundle.signed_blob_hash.clone());
+    }
+    let executor = &source.executor;
+    links.blob_hashes.extend([
+        executor.signed_manifest_ref_blob_hash.clone(),
+        executor.manifest_object_blob_hash.clone(),
+        executor.signed_sidecar_blob_hash.clone(),
+        executor.payload_blob_hash.clone(),
+    ]);
+    super::push_typed_hash(
+        &executor.item_source_object_hash,
+        ExpectedObject::ItemSource {
+            item_ref: executor.item_ref.clone(),
+        },
+        None,
+        &mut links.object_edges,
+    )?;
+    Ok(links)
+}
+
+fn links_guest_runtime_materialization_subject(value: &Value) -> Result<ContractLinks, String> {
+    let subject = crate::objects::GuestRuntimeMaterializationSubject::from_value(value)
+        .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    super::push_typed_hash(
+        &subject.runtime_manifest_hash,
+        ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
+    super::push_typed_hash(
+        &subject.source_evidence_hash,
+        ExpectedObject::Kind(crate::objects::GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
     Ok(links)
 }
 
