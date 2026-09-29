@@ -4457,20 +4457,36 @@ formats:
     }
 
     #[test]
-    fn checked_generation_captures_only_the_exact_verified_signed_bundle_source() {
+    fn checked_generation_captures_signed_bundle_closure_and_refuses_dependency_drift() {
         let bundle_root = tempdir();
         let kinds_dir = tempdir();
         let trust_store = test_trust_store();
         write_signed_tool_schema(&kinds_dir);
+        let schema = format!(
+            "{TOOL_SCHEMA_YAML}resolution:\n  - step: resolve_references\n    field: refs\n    max_depth: 2\n"
+        );
+        fs::write(
+            kinds_dir.join("tool/tool.kind-schema.yaml"),
+            sign_schema_yaml(&schema),
+        )
+        .unwrap();
         let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).unwrap();
         let handlers = crate::test_support::load_live_handler_registry();
         let composers = ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
 
-        let source = "# ryeos-tool:\n#   note: retained signed source\nprint('verified')\n";
+        let source = "# ryeos-tool:\n#   note: retained signed source\n#   refs:\n#     - tool:dependency\nprint('verified')\n";
         let signed_source = lillux::signature::sign_content(source, &test_signing_key(), "#", None);
         let source_path = bundle_root.join(AI_DIR).join("tools/hello.py");
         fs::create_dir_all(source_path.parent().unwrap()).unwrap();
         fs::write(&source_path, &signed_source).unwrap();
+        let dependency = lillux::signature::sign_content(
+            "# ryeos-tool:\n#   note: dependency\nprint('dependency')\n",
+            &test_signing_key(),
+            "#",
+            None,
+        );
+        let dependency_path = bundle_root.join(AI_DIR).join("tools/dependency.py");
+        fs::write(&dependency_path, &dependency).unwrap();
         let engine = Engine::new(
             kinds,
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
@@ -4493,23 +4509,26 @@ formats:
                     subject_resolution_authority: SubjectResolutionAuthority::Projectless,
                 })?;
                 let captured = generation.capture_verified_signed_bundle_sources(&resolution)?;
-                assert_eq!(captured.len(), 1);
-                assert_eq!(captured[0].resolved_ref, "tool:hello");
-                assert_eq!(captured[0].signed_bytes, signed_source.as_bytes());
+                assert_eq!(resolution.referenced_items.len(), 1);
+                assert_eq!(captured.len(), 2);
+                assert_eq!(captured[0].resolved_ref, "tool:dependency");
+                assert_eq!(captured[0].signed_bytes, dependency.as_bytes());
+                assert_eq!(captured[1].resolved_ref, "tool:hello");
+                assert_eq!(captured[1].signed_bytes, signed_source.as_bytes());
                 assert_eq!(
-                    captured[0].source_content_digest,
+                    captured[1].source_content_digest,
                     resolution.root.source_content_digest
                 );
 
-                // A path left in the resolution is not authority to capture
-                // later bytes. Even a validly signed replacement must refuse.
+                // The referenced item's diagnostic path is not authority to
+                // capture later bytes. A validly signed replacement refuses.
                 let replacement = lillux::signature::sign_content(
                     "# ryeos-tool:\n#   note: changed\nprint('changed')\n",
                     &test_signing_key(),
                     "#",
                     None,
                 );
-                fs::write(&source_path, replacement).unwrap();
+                fs::write(&dependency_path, replacement).unwrap();
                 let error = generation
                     .capture_verified_signed_bundle_sources(&resolution)
                     .unwrap_err();
