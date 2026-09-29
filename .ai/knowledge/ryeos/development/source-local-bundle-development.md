@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T23:05:17Z:10258760b351c58a7dd2fe57f71b80ef2ac9d0640f208155ef54fd8c5cfac20b:uJ/5scdrxMz+lvlop1WBO3CdIEjJ2VJarGfRhU9y49du+AQt8GpaaQME5+KNSuYIi9cEhSYN0dO8We4q+EJ/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T23:15:35Z:b16a9f4182170b2cc0446c1e7c92c723edb7d7b7363fa5baada38c7e7de912db:HcyE6vgM9jEXbqyWLTkJDArzqW8CwjMfnYWKmdrtFVkq3woLMRqsN1F8ay+vVxZaU+VhM4bC0UEVcXkDQmqlDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.33.6"
+version: "1.33.7"
 ```
 
 # Source-Local Bundle Development
@@ -124,6 +124,15 @@ The real release-authority node remains stopped on runtime schema epoch
 project HEADs; authorization to retire that live history is pending. No real
 release qualification, publication, transfer, activation or recovery claim
 follows from these disposable proofs.
+Read-only inspection of the preserved epoch-71 runtime database found 12
+thread rows with no live PID or workspace, two finished failed launch plans,
+two launch epochs, and settled singleton guards; its live and preserved
+database hashes still match. That narrows the runtime-row uncertainty, not the
+signed chain or scheduler history loss. The `71 -> 78` reset preview belongs
+only to the currently installed binary: the qualification source declares
+epoch 80 and committed `next` declares epoch 89. Repreview against the exact
+final installed binary and its epoch before any reviewed reset; do not perform
+an intermediate reset merely to reach epoch 78.
 
 A read-only audit of that node's retained build-input capsules found that its
 installed GNU Python qualification policy is byte-identical to current source,
