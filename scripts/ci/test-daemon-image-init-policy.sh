@@ -128,6 +128,17 @@ done
 
 required_entrypoint='ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]'
 required_healthcheck='HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('\''http://127.0.0.1:'\''+os.environ.get('\''PORT'\'','\''8000'\'')+'\''/_ryeos/ready'\'',timeout=3).read()"]'
+for image in Dockerfile.hosted-workflow Dockerfile.release; do
+    if [[ "$image" == Dockerfile.release ]]; then
+        instructions="$(dockerfile_stage_instructions "$root/$image" ryeos-hosted-workflow)"
+    else
+        instructions="$(dockerfile_instructions "$root/$image")"
+    fi
+    if ! grep -Fq 'usermod -p x root && install -d -m 0700 /root/.ssh' <<<"$instructions"; then
+        echo "$image does not retain authenticated operator maintenance access" >&2
+        exit 1
+    fi
+done
 for image in "${daemon_images[@]}"; do
     path="$root/$image"
     instructions="$(dockerfile_instructions "$path")"

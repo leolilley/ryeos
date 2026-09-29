@@ -58,6 +58,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
 RUN test -x /usr/bin/python3
+# Keep the container's root account available for authenticated operator
+# maintenance. Debian's locked root account prevents managed shell access even
+# after the outer platform has accepted an operator's public key. "x" is not a
+# usable password hash; this does not enable password authentication.
+RUN usermod -p x root && install -d -m 0700 /root/.ssh
 
 WORKDIR /app
 

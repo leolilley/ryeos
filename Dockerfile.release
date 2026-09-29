@@ -308,6 +308,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 FROM hosted-runtime AS ryeos-hosted-workflow
+RUN usermod -p x root && install -d -m 0700 /root/.ssh
 COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
 COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
 COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
