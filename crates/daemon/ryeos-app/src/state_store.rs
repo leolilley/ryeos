@@ -14675,6 +14675,60 @@ impl StateStore {
             .quarantine_snapshot_bootstrap_attempt(operation_id)
     }
 
+    pub(crate) fn bootstrap_termination_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<
+        Option<runtime_db::runtime_snapshot_bootstrap_termination::BootstrapTerminationRecord>,
+    > {
+        self.lock()?
+            .runtime_db
+            .bootstrap_termination_operation(operation_id)
+    }
+
+    pub(crate) fn reserve_bootstrap_termination(
+        &self,
+        intent: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapTerminationIntent,
+    ) -> Result<runtime_db::runtime_snapshot_bootstrap_termination::BootstrapTerminationRecord>
+    {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .reserve_bootstrap_termination(intent)
+    }
+
+    pub(crate) fn claim_bootstrap_termination_attempt(
+        &self,
+        operation_id: &str,
+    ) -> Result<runtime_db::runtime_snapshot_bootstrap_termination::BootstrapTerminationClaim> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .claim_bootstrap_termination_attempt(operation_id)
+    }
+
+    pub(crate) fn quarantine_bootstrap_termination_attempt(
+        &self,
+        operation_id: &str,
+    ) -> Result<runtime_db::runtime_snapshot_bootstrap_termination::BootstrapTerminationRecord>
+    {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .quarantine_bootstrap_termination_attempt(operation_id)
+    }
+
+    pub(crate) fn bind_bootstrap_terminal_observation(
+        &self,
+        observation: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapTerminalObservation,
+    ) -> Result<runtime_db::runtime_snapshot_bootstrap_termination::BootstrapTerminationRecord>
+    {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .bind_bootstrap_terminal_observation(observation)
+    }
+
     /// The snapshot producer retains its one-attempt journal independently of
     /// any later execution placement. No state lock is held across contact.
     pub(crate) fn reserve_runtime_snapshot(
