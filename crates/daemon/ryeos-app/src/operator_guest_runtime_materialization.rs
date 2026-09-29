@@ -34,7 +34,10 @@ use crate::state::AppState;
 mod publication;
 mod retained;
 
-pub use publication::{PublishedGuestOwnerMaterialization, publish_prepared_guest_owner_runtime};
+pub use publication::{
+    CurrentGuestOwnerMaterialization, PublishedGuestOwnerMaterialization,
+    load_current_guest_owner_materialization, publish_prepared_guest_owner_runtime,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -30,6 +30,109 @@ pub struct PublishedGuestOwnerMaterialization {
     pub reused_existing: bool,
 }
 
+/// A current, node-authenticated materialization source. The caller must keep
+/// the CAS guard while copying its exact manifest into a private staging root.
+pub struct CurrentGuestOwnerMaterialization {
+    pub attestation_hash: String,
+    pub source: GuestOwnerMaterializationSource,
+    pub identity:
+        ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
+}
+
+/// Resolve a named immutable head for a *new* operation. Historical recovery
+/// instead resolves its already-retained attestation hash and does not pretend
+/// that a revoked grant or replaced Bundle authorizes fresh provider contact.
+pub fn load_current_guest_owner_materialization(
+    state: &AppState,
+    context: &HandlerContext,
+    binding_id: &str,
+    coordinate_digest: &str,
+    attestation_hash: &str,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+) -> Result<CurrentGuestOwnerMaterialization> {
+    authority.ensure_guard(guard)?;
+    ensure!(
+        lillux::valid_hash(coordinate_digest) && lillux::valid_hash(attestation_hash),
+        "materialization lookup identities are invalid"
+    );
+    let head = ryeos_state::immutable_testimony::read_immutable_attestation_head(
+        authority,
+        HEAD_NAMESPACE,
+        coordinate_digest,
+        guard,
+    )?
+    .context("materialization coordinate has no signed head")?;
+    ensure!(
+        head.signer == state.identity.fingerprint() && head.target_hash == attestation_hash,
+        "materialization requested attestation differs from current node head"
+    );
+    let cas = authority.cas_store()?;
+    let value = retained::load_object_bounded(&cas, attestation_hash, MAX_ATTESTATION_BYTES)?;
+    let attestation = Attestation::from_value(&value)?;
+    let verified = retained::verify_testimony(&cas, &attestation, state.identity.verifying_key())?;
+    ensure!(
+        verified.source.coordinate_digest()? == coordinate_digest
+            && verified.source.materialization_binding_id == binding_id,
+        "materialization head differs from requested coordinate or binding"
+    );
+    let source = verified.source;
+    require_matching_operator(state, context, &source)?;
+    let binding = state
+        .node_config
+        .guest_runtime_materialization
+        .iter()
+        .find(|binding| binding.id() == binding_id)
+        .context("materialization binding is no longer installed")?;
+    ensure!(
+        binding.digest() == source.materialization_binding_digest,
+        "materialization binding changed after publication"
+    );
+    state.engine.with_checked_bundle_generation(|generation| {
+        ensure!(
+            generation.request_engine_generation_identity() == source.bundle_generation,
+            "materialization source Bundle generation is no longer current"
+        );
+        Ok(())
+    })?;
+    for signer in &verified.signer_keys {
+        let current = state
+            .engine
+            .node_trust_store
+            .get(&signer.signer_fingerprint)
+            .context("materialization source publisher is no longer trusted")?;
+        ensure!(
+            current.fingerprint == signer.signer_fingerprint
+                && format!(
+                    "ed25519:{}",
+                    base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        current.verifying_key.to_bytes()
+                    )
+                ) == signer.verifying_key,
+            "materialization source publisher key differs from current trust"
+        );
+    }
+    let limits = state
+        .node_policy
+        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+        &cas,
+        [attestation_hash.to_owned()],
+        limits,
+    )?;
+    ensure!(
+        closure.is_complete(),
+        "current materialization attestation CAS closure is incomplete"
+    );
+    Ok(CurrentGuestOwnerMaterialization {
+        attestation_hash: attestation_hash.to_owned(),
+        source,
+        identity: verified.output,
+    })
+}
+
 pub fn publish_prepared_guest_owner_runtime(
     state: &AppState,
     context: &HandlerContext,

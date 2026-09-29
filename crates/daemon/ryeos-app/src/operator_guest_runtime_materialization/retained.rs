@@ -92,6 +92,7 @@ pub(super) struct VerifiedMaterializationTestimony {
     pub subject: GuestRuntimeMaterializationSubject,
     pub source: GuestOwnerMaterializationSource,
     pub output: GuestOwnerRuntimeManifestIdentity,
+    pub signer_keys: Vec<MaterializationSignerKey>,
 }
 
 /// Authenticate the node's historical checked-generation claim *before*
@@ -151,6 +152,7 @@ pub(super) fn verify_testimony(
         subject,
         source,
         output,
+        signer_keys: verified_source.evidence.signer_keys,
     })
 }
 
