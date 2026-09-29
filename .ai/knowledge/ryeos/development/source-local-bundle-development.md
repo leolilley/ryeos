@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T16:45:53Z:087e4ded4a2553da0b828fb1f39694e10c16996caad7c27b74002fb631772185:RyvlzwMlGvraYfc+vtnYNNLiYeDJGEamtIDQe7r5XXoduDZtEQZD3XBYShC2ZJd50FNuG8kuKXqahP1KFFvbDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T16:52:49Z:730d2ce7b0cc0fc5d89b0cdb32e6119a95ea0c6b58a585c82f092e96e81a9bb7:OKe0Ipgx5pagz5RLO2N6d/ChGdhhscqu7w7KE/RfJw6I2Kav/Y2lZ+HZVEJyqdaZ0/xxC0W4AnLIaQBAKFHCCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.33.4"
+version: "1.33.5"
 ```
 
 # Source-Local Bundle Development
@@ -110,6 +110,14 @@ for preserving predecessor execution history, not evidence that it can reopen
 the entire retained node under the currently installed bundles. The real
 node's runtime database was copied byte-for-byte for offline recovery
 inspection, but no recovery or reset has occurred.
+An ephemeral copy-on-write overlay probe then confirmed the direct limitation:
+the epoch-71 daemon refuses the newer installed `render-sandbox` manifest
+before opening the runtime database. Hiding that bundle and its node
+declaration only inside the overlay fails the signed init completion record's
+bundle-set check. This is not a valid rollback. A coherent predecessor source
+generation or a separately reviewed offline extraction would be required to
+use the old binary for history preservation; neither has been established.
+The real bundle files and runtime database remained unchanged after the probe.
 The real release-authority node remains stopped on runtime schema epoch
 71-to-78 incompatibility. The read-only exact-epoch reset preview identified
 12 thread-chain heads and 36 chain artifacts for retirement while preserving
