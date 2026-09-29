@@ -1509,6 +1509,9 @@ pub fn active_binding_from_store(
     else {
         return Ok(None);
     };
+    if head.signer != target_node_fingerprint {
+        bail!("external-content binding head is not signed by the target node");
+    }
     let value = cas
         .get_object(&head.target_hash)?
         .ok_or_else(|| anyhow::anyhow!("external-content binding head target is absent"))?;

@@ -261,6 +261,9 @@ pub fn publish_activation_receipt(
         .state_store
         .with_state_db(|db| db.read_generic_head_ref(namespace, &operation.activation_id))?;
     if let Some(current) = current.as_ref() {
+        if current.signer != state.identity.fingerprint() {
+            bail!("managed activation head is not signed by the current node");
+        }
         let value = cas
             .get_object(&current.target_hash)?
             .ok_or_else(|| anyhow::anyhow!("managed activation head target is absent"))?;
