@@ -1034,6 +1034,14 @@ impl ProductQualificationEvidence {
             if scenario.recipe_ref != scoped.producer_source.canonical_ref {
                 bail!("qualification scoped attempt recipe differs from signed scenario");
             }
+            let expected_coordinate = serde_json::json!({
+                "attempt_id": scoped.attempt_id,
+                "scenario_id": scoped.scenario_id,
+                "observation_object_hash": scoped.observation_object_hash,
+            });
+            if self.result.probe_evidence.get("scoped_attempt") != Some(&expected_coordinate) {
+                bail!("qualification result scoped attempt differs from daemon execution proof");
+            }
         }
         for verifier in self.execution_verifiers() {
             if let Some(actual) = verifier.process_settlement_authority

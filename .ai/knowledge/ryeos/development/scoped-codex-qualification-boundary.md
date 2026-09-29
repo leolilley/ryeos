@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-29T22:10:19Z:42abfa1b76e0b76694a131fe04c2522d42f7de783ddc4706320797877f1d1bdf:dSzupuVnMp7SNF61HoqrwlNUSR7QcOacCT22XdZfkX9Ub26tv92vCNcoYVx6BGODCaEJeJVmwWWgEHTQVpt6Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T22:51:33Z:573fc3e5c958b6aec90c7979c8955b5c32386c1566f8d9a83733d532e2dfd393:9AySs31HOuhiNEt7IvTBkstafJTGI+gIOUwYN74oCB4dKIWku/Hv+qDn9x1R8vuYTLOdOeOCJvUQCk3EHcYdAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -243,14 +243,18 @@ home/CWD and immutable configuration mounts are implemented; retained START
 and terminal observations carry their exact identities. The verifier derives
 the signed effective environment and CWD independently and compares the
 applied launch, then checks the app-server conversation, scripted provider
-contacts and frozen candidate. It still deliberately refuses to issue a
-qualification claim. Focused component tests and a real signed product
-capture pass, but the accepted direct qualification root refused before
-process launch: the local fixture node lacks qualified Lillux process-scope
-authority. Thus no joined native direct-target positive, malicious negative,
-or daemon-restart run has passed. Observation parsing and synthetic receipts
-are not external-runtime qualification. Do not enable a claim until a joined
-test proves exact pre-release ACK, target-namespace realization visibility,
+contacts and frozen candidate. Its successful terminal proposes five finite
+diagnostic claims and the retained scoped-observation coordinate. The daemon
+joins that coordinate to its retired attempt before publication; standalone
+evidence validation also requires the result coordinate to equal the daemon
+proof. Focused component checks and a real signed product capture pass, but
+the accepted direct qualification root refused before process launch: the
+local fixture node lacks qualified Lillux process-scope authority. Thus no
+joined native direct-target positive, malicious negative, or daemon-restart
+run has passed. The updated native test now requires a completed root and
+published qualification capsule, but has not been run. Observation parsing
+and synthetic receipts are not external-runtime qualification. Acceptance
+still requires exact pre-release ACK, target-namespace realization visibility,
 app-server conversation, provider contact accounting, whole-scope/writer
 settlement, frozen candidate, and the negative cuts for wrong/lost ACK,
 verifier death, cancellation, restart, and replay.

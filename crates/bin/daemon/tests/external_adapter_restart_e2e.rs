@@ -1766,9 +1766,8 @@ fn direct_scripted_turn_rejects_duplicate_error_and_foreign_completion() {
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires exact Codex, static producer, and verifier binaries; local scripted provider only"]
-async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_claims()
--> anyhow::Result<()> {
+#[ignore = "requires exact Codex, static producer, verifier binaries, and a qualified protected process scope; local scripted provider only"]
+async fn signed_independent_verifier_qualifies_direct_codex_diagnostic() -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
 
     let (harness, scenario, captured_subject) = prepare_signed_direct_qualification_fixture(
@@ -1821,15 +1820,24 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
     .await
     .context("accepted qualification observation timed out; do not relaunch")??;
     ensure!(
-        terminal.pointer("/thread/status") == Some(&json!("failed")),
-        "incomplete direct qualification incorrectly succeeded"
+        terminal.pointer("/thread/status") == Some(&json!("completed"))
+            && terminal.pointer("/result/outcome_code") == Some(&json!("exit:0"))
+            && terminal.pointer("/result/error") == Some(&Value::Null),
+        "direct verifier did not complete successfully: {terminal}"
     );
-    let error = terminal
-        .pointer("/result/error/stderr")
-        .with_context(|| format!("failed direct verifier has no tool stderr: {terminal}"))?;
+    let result = ryeos_state::external_content::products::qualification::ProductQualificationResult::from_value(
+        terminal
+            .pointer("/result/result")
+            .with_context(|| format!("direct verifier has no qualification result: {terminal}"))?,
+    )?;
     ensure!(
-        serde_json::to_string(error)?.contains("complete qualification evidence remains unproven"),
-        "direct run failed before its explicit no-claims boundary: {error}"
+        result.claims
+            == independent_verifier_scenario::CLAIMS
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+            && result.subject_manifest_hash == scenario.subject_manifest_hash,
+        "direct verifier did not propose the exact signed diagnostic claims"
     );
     let scoped = exact_scoped_producer_observation(&harness.state_path, &root)?;
     let recipe_digest = scenario.expected_producer_recipe.digest()?;
@@ -1847,14 +1855,62 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
         .as_str()
         .context("direct Codex target has no daemon-retained app-server output")?;
     require_exact_direct_scripted_turn(output)?;
+    let observation_object_hash = lillux::sha256_hex(lillux::canonical_json(&scoped)?.as_bytes());
+    ensure!(
+        result.probe_evidence["scoped_attempt"]
+            == json!({
+                "attempt_id":scoped["attempt_id"],
+                "scenario_id":scenario.profile.producer_scenario_id,
+                "observation_object_hash":observation_object_hash,
+            }),
+        "verifier result did not name the exact daemon-retained scoped observation"
+    );
+    let published = production_service(
+        &harness,
+        "service:external-content/qualify-product",
+        json!({
+            "witness_hash":captured_subject["witness_hash"],
+            "witness_source":{"kind":"local_capture"},
+            "relationship_name":"runtime_to_external_authoring_worker",
+            "verifier_chain_root_id":root,
+            "verifier_thread_id":root,
+        }),
+    )
+    .await?;
+    let qualification_hash = published["qualification_hash"]
+        .as_str()
+        .filter(|hash| lillux::valid_hash(hash))
+        .context("direct diagnostic qualification was not published")?;
+    let cas = lillux::CasStore::new(harness.state_path.join(".ai/state/objects"));
+    let attestation: ryeos_state::objects::Attestation = serde_json::from_value(
+        cas.get_object(qualification_hash)?
+            .context("published direct diagnostic attestation is missing from CAS")?,
+    )?;
+    let evidence = ryeos_state::external_content::products::qualification::ProductQualificationEvidence::from_attestation(&attestation)?;
+    let proof = evidence
+        .execution_proof
+        .scoped_attempt
+        .as_ref()
+        .context("published direct diagnostic lacks daemon scoped-attempt proof")?;
+    ensure!(
+        evidence.product_witness_hash == captured_subject["witness_hash"]
+            && evidence.verifier.chain_root_id == root
+            && evidence.verifier.thread_id == root
+            && evidence.result == result
+            && proof.attempt_id == scoped["attempt_id"]
+            && proof.scenario_id == scenario.profile.producer_scenario_id
+            && proof.observation_object_hash == observation_object_hash,
+        "published direct diagnostic differs from the completed verifier and daemon observation"
+    );
     eprintln!(
-        "signed direct verifier fail-closed evidence: {}",
+        "signed direct verifier diagnostic evidence: {}",
         json!({
             "launch_id":launch_id,"root":root,"terminal":terminal,
             "scoped_attempt":scoped["attempt_id"],
             "scoped_receipt":scoped["natural_empty_receipt_digest"],
             "provider_contact_kind":"credential-free scripted local peer",
-            "qualification_claims_issued":false,
+            "qualification_hash":qualification_hash,
+            "qualification_claims_issued":true,
         })
     );
     Ok(())
@@ -1952,7 +2008,7 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
         .with_context(|| format!("failed race verifier has no tool stderr: {terminal}"))?;
     ensure!(
         serde_json::to_string(error)?.contains(
-            "direct scoped START/RESUME exact locators matched and frozen candidate settled"
+            "direct scoped START/RESUME locators, applied environment and frozen candidate joined"
         ),
         "verifier failed for a reason other than its explicit no-claims gate"
     );

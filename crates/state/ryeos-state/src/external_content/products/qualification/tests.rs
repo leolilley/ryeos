@@ -578,8 +578,47 @@ fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
         retirement_evidence_digest: "2".repeat(64),
         callback_method_surface_digest: "3".repeat(64),
     };
+    evidence.result.probe_evidence["scoped_attempt"] = json!({
+        "attempt_id": scoped.attempt_id,
+        "scenario_id": scoped.scenario_id,
+        "observation_object_hash": scoped.observation_object_hash,
+    });
+    evidence.verifier.result_digest = evidence.result.digest().unwrap();
     evidence.execution_proof.scoped_attempt = Some(scoped);
     evidence.validate().unwrap();
+
+    for field in ["attempt_id", "scenario_id", "observation_object_hash"] {
+        let mut changed = evidence.clone();
+        changed.result.probe_evidence["scoped_attempt"][field] = match field {
+            "attempt_id" => json!(format!("scoped-{}", "b".repeat(64))),
+            "scenario_id" => json!("other"),
+            _ => json!("4".repeat(64)),
+        };
+        changed.verifier.result_digest = changed.result.digest().unwrap();
+        assert!(
+            changed
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("result scoped attempt differs from daemon execution proof"),
+            "changed result {field} must be rejected by the coordinate join"
+        );
+    }
+    let mut omitted = evidence.clone();
+    omitted
+        .result
+        .probe_evidence
+        .as_object_mut()
+        .unwrap()
+        .remove("scoped_attempt");
+    omitted.verifier.result_digest = omitted.result.digest().unwrap();
+    assert!(
+        omitted
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("result scoped attempt differs from daemon execution proof")
+    );
 
     let mut wrong_scenario = evidence.clone();
     wrong_scenario
