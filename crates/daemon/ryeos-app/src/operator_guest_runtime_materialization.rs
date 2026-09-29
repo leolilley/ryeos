@@ -7,6 +7,7 @@
 use std::ffi::OsStr;
 
 use anyhow::{Context as _, Result, ensure};
+use base64::Engine as _;
 use ryeos_engine::binary_resolver::capture_bundle_payload_for_target;
 use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace, SubjectResolutionAuthority};
 use ryeos_engine::engine::EffectiveItemRequest;
@@ -46,6 +47,111 @@ pub struct GuestOwnerMaterializationSource {
     pub node_site_id: String,
     pub controller_public_root: String,
     pub runtime_manifest_hash: String,
+}
+
+impl GuestOwnerMaterializationSource {
+    /// Immutable request coordinate, excluding the output manifest. Two
+    /// different admitted sources may produce identical bytes without being
+    /// forced into one publication head. A changed output for the same exact
+    /// request is a contradiction to resolve, never an overwrite.
+    pub fn coordinate_digest(&self) -> Result<String> {
+        ensure!(
+            self.schema == 1
+                && self.materializer_protocol == "ryeos.guest-owner-materialization.v1",
+            "unsupported guest owner materialization source"
+        );
+        self.operator_authority.validate()?;
+        crate::identity::validate_canonical_site_id(&self.node_site_id)?;
+        if self.operator_authority.principal_class
+            == crate::identity::AuthorizedKeyPrincipalClass::LocalClient
+        {
+            ensure!(
+                self.operator_authority.origin_site_id == self.node_site_id,
+                "local materialization owner has a foreign origin"
+            );
+        }
+        let encoded_root = self
+            .controller_public_root
+            .strip_prefix("ed25519:")
+            .context("materialization controller root is not Ed25519")?;
+        let decoded_root = base64::engine::general_purpose::STANDARD.decode(encoded_root)?;
+        let root_bytes: [u8; 32] = decoded_root
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("materialization controller root changed length"))?;
+        let verifying_key = lillux::crypto::VerifyingKey::from_bytes(&root_bytes)?;
+        ensure!(
+            !verifying_key.is_weak()
+                && base64::engine::general_purpose::STANDARD.encode(root_bytes) == encoded_root,
+            "materialization controller root is not canonical or strong"
+        );
+        for (label, value) in [
+            ("binding digest", &self.materialization_binding_digest),
+            ("recipe content", &self.recipe_content_digest),
+            ("recipe definition", &self.recipe_effective_digest),
+            ("bundle generation", &self.bundle_generation),
+            ("publisher", &self.publisher_fingerprint),
+            ("executor manifest", &self.executor_manifest_hash),
+            ("executor item source", &self.executor_item_source_hash),
+            ("owner executable", &self.owner_executable_sha256),
+            ("profile", &self.profile_digest),
+            ("output manifest", &self.runtime_manifest_hash),
+        ] {
+            ensure!(
+                lillux::valid_hash(value),
+                "materialization {label} is invalid"
+            );
+        }
+        ensure!(
+            !self.materialization_binding_id.is_empty()
+                && self.materialization_binding_id.len() <= 128
+                && self
+                    .materialization_binding_id
+                    .bytes()
+                    .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') })
+                && !self.guest_target_triple.is_empty()
+                && !self.guest_target_triple.starts_with('.')
+                && !self.guest_target_triple.contains("..")
+                && self.guest_target_triple.len() <= 96
+                && self.guest_target_triple.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                })
+                && !self.bundle_name.is_empty()
+                && self.bundle_name.len() <= 64
+                && self.bundle_name.bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                })
+                && (1..=32 * 1024 * 1024).contains(&self.maximum_owner_bytes),
+            "materialization binding, bundle, target or byte bound is invalid"
+        );
+        let recipe_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.recipe_ref)?;
+        ensure!(
+            recipe_ref.kind == "config"
+                && recipe_ref.suffix.is_none()
+                && recipe_ref.to_string() == self.recipe_ref,
+            "materialization recipe is not a canonical Config ref"
+        );
+        ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+            "domain": "ryeos.guest-owner-materialization-coordinate.v1",
+            "materializer_protocol": self.materializer_protocol,
+            "materialization_binding_id": self.materialization_binding_id,
+            "materialization_binding_digest": self.materialization_binding_digest,
+            "recipe_ref": self.recipe_ref,
+            "recipe_content_digest": self.recipe_content_digest,
+            "recipe_effective_digest": self.recipe_effective_digest,
+            "bundle_name": self.bundle_name,
+            "bundle_generation": self.bundle_generation,
+            "publisher_fingerprint": self.publisher_fingerprint,
+            "executor_manifest_hash": self.executor_manifest_hash,
+            "executor_item_source_hash": self.executor_item_source_hash,
+            "owner_executable_sha256": self.owner_executable_sha256,
+            "guest_target_triple": self.guest_target_triple,
+            "maximum_owner_bytes": self.maximum_owner_bytes,
+            "profile_digest": self.profile_digest,
+            "operator_authority": self.operator_authority,
+            "node_site_id": self.node_site_id,
+            "controller_public_root": self.controller_public_root,
+        }))
+    }
 }
 
 /// A live private stage. Its source statement is *not* a durable witness;
@@ -218,10 +324,70 @@ pub fn prepare_current_guest_owner_runtime(
             controller_public_root: identity.controller_public_root.clone(),
             runtime_manifest_hash: identity.manifest_hash.clone(),
         };
+        source.coordinate_digest()?;
         Ok(PreparedGuestOwnerMaterialization {
             root: product.root().try_clone()?,
             identity,
             source,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lillux::crypto::SigningKey;
+
+    fn hash(byte: char) -> String {
+        byte.to_string().repeat(64)
+    }
+
+    #[test]
+    fn materialization_coordinate_distinguishes_source_not_result_bytes() {
+        let source = GuestOwnerMaterializationSource {
+            schema: 1,
+            materializer_protocol: "ryeos.guest-owner-materialization.v1".into(),
+            materialization_binding_id: "owner".into(),
+            materialization_binding_digest: hash('a'),
+            recipe_ref: "config:codex/guest-owner-materialization".into(),
+            recipe_content_digest: hash('b'),
+            recipe_effective_digest: hash('c'),
+            bundle_name: "codex".into(),
+            bundle_generation: hash('d'),
+            publisher_fingerprint: hash('e'),
+            executor_manifest_hash: hash('f'),
+            executor_item_source_hash: hash('1'),
+            owner_executable_sha256: hash('2'),
+            guest_target_triple: "x86_64-unknown-linux-gnu".into(),
+            maximum_owner_bytes: 32 * 1024 * 1024,
+            profile_digest: hash('3'),
+            operator_authority: AdmittedOperatorAuthority {
+                owner_principal: format!("fp:{}", hash('4')),
+                origin_site_id: "site:controller".into(),
+                principal_class: crate::identity::AuthorizedKeyPrincipalClass::LocalClient,
+                grant_digest: hash('5'),
+                scopes: vec!["ryeos.execute.service.guest-runtime/materialize".into()],
+            },
+            node_site_id: "site:controller".into(),
+            controller_public_root: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(
+                    SigningKey::from_bytes(&[7u8; 32])
+                        .verifying_key()
+                        .to_bytes()
+                )
+            ),
+            runtime_manifest_hash: hash('6'),
+        };
+        let coordinate = source.coordinate_digest().unwrap();
+        let mut changed = source.clone();
+        changed.runtime_manifest_hash = hash('7');
+        assert_eq!(changed.coordinate_digest().unwrap(), coordinate);
+        changed = source.clone();
+        changed.recipe_effective_digest = hash('8');
+        assert_ne!(changed.coordinate_digest().unwrap(), coordinate);
+        changed = source;
+        changed.operator_authority.grant_digest = hash('9');
+        assert_ne!(changed.coordinate_digest().unwrap(), coordinate);
+    }
 }
