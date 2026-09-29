@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T23:15:35Z:b16a9f4182170b2cc0446c1e7c92c723edb7d7b7363fa5baada38c7e7de912db:HcyE6vgM9jEXbqyWLTkJDArzqW8CwjMfnYWKmdrtFVkq3woLMRqsN1F8ay+vVxZaU+VhM4bC0UEVcXkDQmqlDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T23:32:11Z:b340fa2d68c9f37fda4ae9dc19ad6e7311526d9a6070226e9edd5b25925883a3:UFfUwQtlGmcBFXCusVpw3mo9IcCjYiqz9aKp2bQGTESkpv1RlsaY1FBe4qTdlI3yl1azPyjKqIIPt6AcMsV7CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.33.7"
+version: "1.33.8"
 ```
 
 # Source-Local Bundle Development
@@ -156,6 +156,17 @@ not local product testimony. A/B must produce and qualify their own product
 closures under their operators unless an explicit cross-operator and
 large-content migration contract is implemented. The retained origin objects
 remain preservation evidence for release-authority recovery.
+
+Disposable A and B now each retain completed signed Standard activations and
+node-local installed-bundle bindings for the exact raw authoring-source
+manifest `c66ac1c984e0793416106cd2fefa1a45d1b00c17b5865ff751e41594a3d39857`
+and GNU archive manifest
+`ec7d4a2a749b0b709dabca0a7919c3a897a9b671be56332b67a659b6bd82cac6`.
+Both nodes were stopped cleanly after receipt verification. This resolves the
+first missing input bytes on both nodes; the prepared-inputs and GNU runtime
+producer chains still require a clean final source generation, new snapshots
+and their own protected qualification evidence. The activation receipts are
+recorded in the disposable A operational handoff.
 
 The original local command, state-root, signing, and bundle-smoke workflow is
 implemented. The project-bundle and development-realization sections below
