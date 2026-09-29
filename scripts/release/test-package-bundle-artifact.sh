@@ -57,16 +57,22 @@ shift
 app_root=""
 source_dir=""
 node_profile=""
+substrate_digest=""
+substrate_protocol=""
 while (( $# > 0 )); do
     case "$1" in
         --non-interactive) shift ;;
         --app-root) app_root="${2:-}"; shift 2 ;;
         --source) source_dir="${2:-}"; shift 2 ;;
         --node-profile) node_profile="${2:-}"; shift 2 ;;
+        --substrate-image-digest) substrate_digest="${2:-}"; shift 2 ;;
+        --substrate-protocol) substrate_protocol="${2:-}"; shift 2 ;;
         *) echo "unexpected init argument: $1" >&2; exit 2 ;;
     esac
 done
 [[ -n "$app_root" && -n "$source_dir" && -d "$source_dir/.ai" ]]
+[[ "$substrate_digest" == "sha256:$(printf '0%.0s' {1..64})" ]]
+[[ "$substrate_protocol" == 1 ]]
 mkdir -p "$app_root"
 printf '%s\n' "${node_profile:-none}" >> "${FAKE_RYEOS_CALLS:?}"
 [[ -n "$node_profile" ]] || exit 2

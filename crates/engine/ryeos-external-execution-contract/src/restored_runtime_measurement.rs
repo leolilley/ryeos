@@ -160,7 +160,7 @@ impl RestoredVerifierAdapterObservation {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RestoredVerifierAdapterResponse {
     Observed {
-        observation: RestoredVerifierAdapterObservation,
+        observation: Box<RestoredVerifierAdapterObservation>,
     },
     Uncertain {
         operation_id: String,

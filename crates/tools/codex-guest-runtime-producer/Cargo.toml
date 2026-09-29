@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-codex-guest-runtime-producer"
-version = "0.5.101"
+version = "0.5.102"
 edition = "2024"
 description = "Exact Codex guest runtime product producer"
 license.workspace = true
