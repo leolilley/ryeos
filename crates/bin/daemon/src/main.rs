@@ -304,9 +304,10 @@ fn main() -> Result<()> {
     if let Some(config::DaemonCommand::InitPolicyPreflight {
         app_root,
         schema_cut,
+        active_bundles,
     }) = &cli.command
     {
-        ryeos_node::preflight_existing_policy_generation(app_root, *schema_cut)?;
+        ryeos_node::preflight_existing_policy_generation(app_root, *schema_cut, active_bundles)?;
         return Ok(());
     }
     if let Some(config::DaemonCommand::HostProvision {
