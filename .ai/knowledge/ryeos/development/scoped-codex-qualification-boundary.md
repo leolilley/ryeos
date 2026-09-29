@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-29T17:01:35Z:e87f5d99ac2ce8808c11ae7416f6ec894dbe3b3a422e6c0401fdc607eba75cad:U6kzsjezbDwysTjEKso9Fat55MVaC3oL118vlw6dt7Ige/MoetWaEmzBIvwQCBDD91AtO8b94eV5O78clwUGBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T17:06:12Z:1fe632cd0c2bdca6490229e665ce3e4cfb3bfd01e23387023c27f846514a3974:xMXbGIW+LaDud8aay8S69y7UsRpOZdVutZND6BdAUoRuZvUXWBK43QGjmDccY6laHqg24ju3M/pP9tgYcD+1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -396,10 +396,13 @@ loopback ingress. The verifier stages before START, rechecks before release,
 and joins transcript/provider/candidate observations only after the daemon's
 natural-empty scoped observation. It still refuses to issue qualification
 claims. Focused verifier-library, verifier-binary, and signed fixture-authoring
-tests pass. Those are not a joined native direct-target run. The old
-scenario-driver diagnostic branch and tests remain in source and must be
-removed as part of the direct-target clean cut; they are no longer selected
-by the signed fixture. Native execution must prove that the rendered
+tests pass. Those are not a joined native direct-target run. The verifier
+binary now rejects the old `--scenario-driver` mode and requires the signed
+direct loopback ingress before callback admission; its parent-owned driver
+function and stop test were removed. The old transcript fallback inside the
+direct verifier and staging helpers still remain for a later source clean
+cut. This source change passed release-mode all-target compilation, not a
+native qualification run. Native execution must prove that the rendered
 controller executable is reachable as the same read-only realization member
 inside the target namespace and that the daemon's settlement excludes every
 candidate writer. Exact-attempt restart reconciliation remains open.

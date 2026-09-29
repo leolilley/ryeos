@@ -1,17 +1,15 @@
-//! Bundle Tool entrypoint for exact selected-runtime preflight and a separate
-//! bounded scenario-driver mode. Neither mode returns qualification claims;
-//! the driver only records raw evidence for its enclosing verifier authority.
+//! Bundle Tool entrypoint for exact daemon-owned direct-target preflight.
+//! The collected evidence does not yet authorize qualification claims.
 
 use anyhow::{Context as _, Result, bail, ensure};
 use ryeos_codex_runtime_verifier::{
     INPUT_LIMIT, Parameters,
-    app_server::{AppServerObservation, AppServerStopOutcome},
     guest_observation::{GuestScenario, check_guest_observation},
     native_guest,
     routing_observation::{RoutingScenario, check_notifications},
     scoped_relay,
     scripted_peer::{RunningScriptedPeer, ScriptedPeer},
-    scripted_provider, scripted_relay, staging,
+    scripted_provider, staging,
 };
 use ryeos_runtime::callback::CallbackError;
 use ryeos_runtime::callback_uds::UdsRuntimeClient;
@@ -22,7 +20,6 @@ use ryeos_state::external_content::products::producer_recipe::{
 };
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
 use serde::Deserialize;
-use serde_json::json;
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
@@ -36,9 +33,7 @@ async fn main() -> Result<()> {
     let mode = args.next();
     ensure!(args.next().is_none(), "unexpected verifier arguments");
     ensure!(
-        mode.is_none()
-            || mode.as_deref() == Some(OsStr::new("--scenario-driver"))
-            || mode.as_deref() == Some(OsStr::new("--scoped-resume-race-probe")),
+        mode.is_none() || mode.as_deref() == Some(OsStr::new("--scoped-resume-race-probe")),
         "unsupported verifier mode"
     );
     let mut input = Vec::new();
@@ -47,16 +42,19 @@ async fn main() -> Result<()> {
         .read_to_end(&mut input)?;
     ensure!(input.len() <= INPUT_LIMIT, "verifier input exceeds bound");
     let parameters = Parameters::parse(&input)?;
+    ensure!(
+        parameters
+            .configuration
+            .expected_producer_recipe
+            .loopback_ingress
+            .is_some(),
+        "direct Codex verifier requires signed loopback ingress"
+    );
     let realizations = std::env::var("RYEOS_EXTERNAL_REALIZATIONS")
         .context("daemon-protected realization set absent")?;
     let selected = parameters.select(&realizations)?;
     let project = lillux::PinnedDirectory::open(Path::new("."))?
         .context("admitted verifier project root absent")?;
-    if mode.as_deref() == Some(OsStr::new("--scenario-driver")) {
-        let staged = staging::stage_scoped_driver_probe(&selected, &project, &parameters)?;
-        staged.recheck_preflight(&parameters)?;
-        return run_scenario_driver(&parameters, &staged);
-    }
     let thread_id = std::env::var("RYEOS_THREAD_ID")
         .context("admitted verifier root thread identity absent")?;
     let client = UdsRuntimeClient::from_env()?;
@@ -1365,110 +1363,10 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-/// Evidence collection only. The enclosing daemon scope and verifier parent
-/// retain authority over descendants, the provider peer, and frozen outputs.
-fn run_scenario_driver(parameters: &Parameters, staged: &staging::StagedNativeProbe) -> Result<()> {
-    // The app-server is a direct subordinate of this scoped producer and
-    // shares its isolated network namespace. Its separately sandboxed guest
-    // command is not the process that sends Responses HTTP requests.
-    let relay = scripted_relay::start(
-        &parameters.configuration.responses_origin,
-        staged.provider_directory()?,
-        staged.provider_endpoint_name()?.into(),
-        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(130)),
-    )?;
-    let request = staged.prepare_codex_launch(parameters)?;
-    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(120));
-    let mut app = match AppServerObservation::launch(request, deadline) {
-        Ok(app) => app,
-        Err(failure) => {
-            return Err(failure
-                .settle(deadline)
-                .map_err(|_| anyhow::anyhow!("app-server launch settlement uncertain"))?);
-        }
-    };
-    let turn = (|| -> Result<(String, String)> {
-        app.initialize_scripted()?;
-        let thread = app.start_scripted_thread()?;
-        let turn_id = app.start_scripted_turn(&thread)?;
-        app.await_scripted_turn_completed(&thread, &turn_id)?;
-        Ok((thread.thread_id, turn_id))
-    })();
-    let notifications = app.notifications().to_vec();
-    let stop = app.stop();
-    let (thread_id, turn_id, exit) = require_clean_driver_stop(turn, stop)?;
-    let relay_contacts = relay
-        .finish_after_codex_stop(lillux::time::MonotonicDeadline::after(
-            lillux::time::Duration::from_secs(5),
-        ))
-        .map_err(|_| anyhow::anyhow!("scripted relay did not settle after Codex stop"))??;
-    let guest_file = staged
-        .guest
-        .open_pinned_regular(OsStr::new("guest-observation.json"), false)?
-        .context("guest observation absent after direct-child stop")?;
-    let observed = guest_file.observation()?;
-    ensure!(
-        observed.size() <= 4 * 1024 * 1024,
-        "guest observation exceeds bound"
-    );
-    let guest_bytes = guest_file.read_stable_bounded(&observed, 4 * 1024 * 1024)?;
-    let guest: serde_json::Value = serde_json::from_slice(&guest_bytes)?;
-    let transcript = json!({
-        "schema": "test.independent_routed_scenario_driver.v1",
-        "occurrence": staged.occurrence.path(),
-        "request_sha256": staged.request_sha256(),
-        "environment_configuration_sha256": staged.environment_configuration_sha256(),
-        "thread_id": thread_id,
-        "turn_id": turn_id,
-        "notifications": notifications,
-        "guest_observation": guest,
-        "direct_child_exit": {"success": exit.success, "code": exit.code},
-        "relay_contacts": relay_contacts,
-    });
-    let bytes = serde_json::to_vec(&transcript)?;
-    ensure!(
-        bytes.len() <= 5 * 1024 * 1024,
-        "driver transcript exceeds bound"
-    );
-    std::io::Write::write_all(&mut std::io::stdout().lock(), &bytes)?;
-    std::io::Write::write_all(&mut std::io::stdout().lock(), b"\n")?;
-    Ok(())
-}
-
-fn require_clean_driver_stop(
-    turn: Result<(String, String)>,
-    stop: Result<AppServerStopOutcome>,
-) -> Result<(
-    String,
-    String,
-    lillux::subordinate_process::SubordinateProcessExit,
-)> {
-    match (turn, stop) {
-        (Ok((thread_id, turn_id)), Ok(AppServerStopOutcome::Exited(exit))) if exit.success => {
-            Ok((thread_id, turn_id, exit))
-        }
-        (Err(turn_error), Err(stop_error)) => {
-            return Err(turn_error.context(format!(
-                "direct Codex child or diagnostic reader also unsettled: {stop_error:#}"
-            )));
-        }
-        (Err(turn_error), _) => return Err(turn_error),
-        (_, Err(stop_error)) => {
-            return Err(stop_error).context("direct Codex child or diagnostic reader not settled");
-        }
-        (_, Ok(AppServerStopOutcome::Forced(_))) => {
-            bail!("forced Codex child stop cannot produce a scenario transcript");
-        }
-        (_, Ok(AppServerStopOutcome::Exited(_))) => {
-            bail!("Codex child did not exit successfully");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::subordinate_process::SubordinateProcessExit;
+    use serde_json::json;
 
     #[test]
     fn signed_direct_environment_and_cwd_match_applied_fields() {
@@ -2331,41 +2229,6 @@ mod tests {
         assert!(
             require_direct_prepared_observation_join(&pinned, &substituted_observation, &pinned,)
                 .is_err()
-        );
-    }
-
-    #[test]
-    fn driver_never_emits_success_after_forced_or_failed_child_stop() {
-        let turn = || Ok(("thread".to_owned(), "turn".to_owned()));
-        assert!(
-            require_clean_driver_stop(
-                turn(),
-                Ok(AppServerStopOutcome::Forced(SubordinateProcessExit {
-                    success: true,
-                    code: Some(0),
-                })),
-            )
-            .is_err()
-        );
-        assert!(
-            require_clean_driver_stop(
-                turn(),
-                Ok(AppServerStopOutcome::Exited(SubordinateProcessExit {
-                    success: false,
-                    code: Some(1),
-                })),
-            )
-            .is_err()
-        );
-        assert!(
-            require_clean_driver_stop(
-                turn(),
-                Ok(AppServerStopOutcome::Exited(SubordinateProcessExit {
-                    success: true,
-                    code: Some(0),
-                })),
-            )
-            .is_ok()
         );
     }
 }
