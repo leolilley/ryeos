@@ -808,6 +808,27 @@ pub fn prepare_current_guest_owner_runtime(
 mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
+    use ryeos_state::Signer as _;
+
+    struct FixtureNodeSigner {
+        key: SigningKey,
+        fingerprint: String,
+    }
+
+    impl ryeos_state::Signer for FixtureNodeSigner {
+        fn sign(&self, data: &[u8]) -> Vec<u8> {
+            use lillux::crypto::Signer as _;
+            self.key.sign(data).to_bytes().to_vec()
+        }
+
+        fn fingerprint(&self) -> &str {
+            &self.fingerprint
+        }
+
+        fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+            self.key.verifying_key()
+        }
+    }
 
     fn hash(byte: char) -> String {
         byte.to_string().repeat(64)
@@ -900,6 +921,14 @@ mod tests {
     #[test]
     fn source_evidence_joins_selected_executor_and_root_recipe() {
         let mut source = fixture_source();
+        let node_signer = FixtureNodeSigner {
+            key: SigningKey::from_bytes(&[7u8; 32]),
+            fingerprint: lillux::crypto::fingerprint(
+                &SigningKey::from_bytes(&[7u8; 32]).verifying_key(),
+            ),
+        };
+        source.node_site_id = format!("site:{}", node_signer.fingerprint);
+        source.operator_authority.origin_site_id = source.node_site_id.clone();
         let signing_key = SigningKey::from_bytes(&[11u8; 32]);
         let verifier = signing_key.verifying_key();
         let payload = b"exact owner bytes";
@@ -1124,6 +1153,45 @@ mod tests {
         );
         let output_identity = retained::verify_output_closure(&cas, &source, &verified).unwrap();
         assert_eq!(output_identity.manifest_hash, source.runtime_manifest_hash);
+        let subject = ryeos_state::objects::GuestRuntimeMaterializationSubject {
+            schema: ryeos_state::objects::GUEST_RUNTIME_MATERIALIZATION_SCHEMA,
+            kind: ryeos_state::objects::GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND.to_owned(),
+            coordinate_digest: source.coordinate_digest().unwrap(),
+            runtime_manifest_hash: source.runtime_manifest_hash.clone(),
+            source_evidence_hash: evidence_hash.clone(),
+        };
+        let subject_hash = cas.store_object(&subject.to_value().unwrap()).unwrap();
+        let claim =
+            retained::MaterializationClaimEvidence::from_checked_source(&source, &signer_keys)
+                .unwrap();
+        let attestation = ryeos_state::objects::Attestation::unsigned(
+            subject_hash,
+            retained::CLAIM.to_owned(),
+            retained::POLICY.to_owned(),
+            "2026-09-29T00:00:00Z".to_owned(),
+            None,
+            serde_json::to_value(claim).unwrap(),
+        )
+        .sign(&node_signer)
+        .unwrap();
+        let testimony =
+            retained::verify_testimony(&cas, &attestation, &node_signer.verifying_key()).unwrap();
+        assert_eq!(testimony.subject, subject);
+        assert_eq!(testimony.source, source);
+        assert_eq!(testimony.output, output_identity);
+        assert!(
+            retained::verify_testimony(
+                &cas,
+                &attestation,
+                &SigningKey::from_bytes(&[9u8; 32]).verifying_key(),
+            )
+            .is_err()
+        );
+        let mut wrong_claim = attestation.clone();
+        wrong_claim.claim = "execution_captured".to_owned();
+        assert!(
+            retained::verify_testimony(&cas, &wrong_claim, &node_signer.verifying_key()).is_err()
+        );
         let mut wrong_profile = source.clone();
         wrong_profile.profile_digest = hash('8');
         assert!(retained::verify_output_closure(&cas, &wrong_profile, &verified).is_err());

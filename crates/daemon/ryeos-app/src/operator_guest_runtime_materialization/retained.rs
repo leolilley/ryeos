@@ -11,6 +11,10 @@ use ryeos_external_execution::guest_runtime_product::{
 };
 use ryeos_state::objects::GuestRuntimeMaterializationSourceEvidence;
 use ryeos_state::objects::external_content_manifest::ExternalContentManifestObject;
+use ryeos_state::objects::{
+    Attestation, GuestRuntimeMaterializationSubject, MaterializationSignerKey,
+};
+use serde::{Deserialize, Serialize};
 
 use super::{
     GuestOwnerMaterializationSource, ItemSourceRoot, OWNER_NAME, verify_retained_executor_source,
@@ -25,6 +29,126 @@ const MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES: u64 = 64 * 1024;
 const MAX_EXECUTOR_SIDECAR_BYTES: u64 = 1024 * 1024;
 const MAX_OUTPUT_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_PROFILE_BYTES: u64 = 4 * 1024;
+const MAX_SUBJECT_OBJECT_BYTES: u64 = 16 * 1024;
+pub(super) const CLAIM: &str = "guest_owner_runtime_materialized";
+pub(super) const POLICY: &str = "ryeos.guest-owner-materialization.checked-bundle-generation.v1";
+
+/// The node's checked-generation decision, not a grant created by retained
+/// historical keys. The publishing path must construct this only after its
+/// checked Bundle-generation and operator-admission checks succeed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MaterializationClaimEvidence {
+    pub schema: u32,
+    pub kind: String,
+    pub source: GuestOwnerMaterializationSource,
+    pub checked_trusted_publishers: Vec<String>,
+}
+
+impl MaterializationClaimEvidence {
+    pub fn from_checked_source(
+        source: &GuestOwnerMaterializationSource,
+        signer_keys: &[MaterializationSignerKey],
+    ) -> Result<Self> {
+        source.coordinate_digest()?;
+        let evidence = Self {
+            schema: 1,
+            kind: "guest_runtime_materialization_claim".to_owned(),
+            source: source.clone(),
+            checked_trusted_publishers: signer_keys
+                .iter()
+                .map(|key| key.signer_fingerprint.clone())
+                .collect(),
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == 1 && self.kind == "guest_runtime_materialization_claim",
+            "materialization claim schema/kind is not current"
+        );
+        self.source.coordinate_digest()?;
+        ensure!(
+            !self.checked_trusted_publishers.is_empty()
+                && self.checked_trusted_publishers.len() <= 16,
+            "materialization checked publisher set is invalid"
+        );
+        let mut previous: Option<&str> = None;
+        for signer in &self.checked_trusted_publishers {
+            ensure!(
+                lillux::valid_hash(signer)
+                    && !previous.is_some_and(|value| value >= signer.as_str()),
+                "materialization checked publishers are not canonical and sorted"
+            );
+            previous = Some(signer);
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct VerifiedMaterializationTestimony {
+    pub subject: GuestRuntimeMaterializationSubject,
+    pub source: GuestOwnerMaterializationSource,
+    pub output: GuestOwnerRuntimeManifestIdentity,
+}
+
+/// Authenticate the node's historical checked-generation claim *before*
+/// deriving the source coordinate and walking either retained CAS closure.
+/// Current policy/admission must be checked separately for fresh operations.
+pub(super) fn verify_testimony(
+    cas: &lillux::CasStore,
+    attestation: &Attestation,
+    node_key: &lillux::crypto::VerifyingKey,
+) -> Result<VerifiedMaterializationTestimony> {
+    attestation.verify_with_key(node_key)?;
+    ensure!(
+        attestation.claim == CLAIM
+            && attestation.policy == POLICY
+            && attestation.expires_at.is_none(),
+        "materialization node testimony has wrong claim or policy"
+    );
+    let evidence: MaterializationClaimEvidence =
+        serde_json::from_value(attestation.evidence.clone())?;
+    evidence.validate()?;
+    let source = evidence.source;
+    let node_fingerprint = lillux::crypto::fingerprint(node_key);
+    ensure!(
+        source.node_site_id == format!("site:{node_fingerprint}")
+            && source.controller_public_root
+                == format!(
+                    "ed25519:{}",
+                    base64::engine::general_purpose::STANDARD.encode(node_key.to_bytes())
+                ),
+        "materialization node testimony differs from controller identity"
+    );
+    let subject_value =
+        load_object_bounded(cas, &attestation.subject_hash, MAX_SUBJECT_OBJECT_BYTES)?;
+    let subject = GuestRuntimeMaterializationSubject::from_value(&subject_value)?;
+    ensure!(
+        subject.coordinate_digest == source.coordinate_digest()?
+            && subject.runtime_manifest_hash == source.runtime_manifest_hash,
+        "materialization subject differs from node-signed source"
+    );
+    let verified_source = verify_source_closure(cas, &source, &subject.source_evidence_hash)?;
+    ensure!(
+        evidence.checked_trusted_publishers
+            == verified_source
+                .evidence
+                .signer_keys
+                .iter()
+                .map(|key| key.signer_fingerprint.clone())
+                .collect::<Vec<_>>(),
+        "materialization checked publishers differ from retained signed sources"
+    );
+    let output = verify_output_closure(cas, &source, &verified_source)?;
+    Ok(VerifiedMaterializationTestimony {
+        subject,
+        source,
+        output,
+    })
+}
 
 pub(super) struct VerifiedGuestOwnerSourceClosure {
     pub evidence: GuestRuntimeMaterializationSourceEvidence,
