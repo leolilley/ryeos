@@ -37,9 +37,10 @@ pub use authority::{
     IsolationDescriptorBoundCommand, IsolationDescriptorFileIdentity,
     IsolationFilesystemAuthorityCeiling, IsolationLaunchContext, IsolationLiveAccessAuthority,
     IsolationNetworkAuthorityCeiling, IsolationProducerPreparedDirectoryAuthority,
-    IsolationProducerPreparedImmutableFileAuthority,
-    IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
-    IsolationTargetChannelAuthority, IsolationVerifiedCode, IsolationWritableRuntimeViewMountAuthority,
+    IsolationProducerPreparedImmutableFileAuthority, IsolationProjectAuthority,
+    IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
+    IsolationTargetChannelAuthority, IsolationVerifiedCode,
+    IsolationWritableRuntimeViewMountAuthority,
 };
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{
@@ -2468,9 +2469,9 @@ impl IsolationRuntime {
             expected_applied_launch: applied
                 .expected_applied_launch
                 .ok_or_else(|| refused("compiled applied launch commitments are absent".into()))?,
-            expected_mount_preparation: applied
-                .expected_mount_preparation
-                .ok_or_else(|| refused("compiled mount preparation commitments are absent".into()))?,
+            expected_mount_preparation: applied.expected_mount_preparation.ok_or_else(|| {
+                refused("compiled mount preparation commitments are absent".into())
+            })?,
         })
     }
 
@@ -2619,8 +2620,7 @@ impl IsolationRuntime {
         if self.state == IsolationRuntimeState::Disabled {
             if !context.producer_prepared_mounts.is_empty() {
                 return Err(refused(
-                    "scoped producer prepared directories require enforced isolation"
-                        .to_string(),
+                    "scoped producer prepared directories require enforced isolation".to_string(),
                 ));
             }
             if context.filesystem_authority_ceiling
@@ -3100,9 +3100,13 @@ impl IsolationRuntime {
                 refused("prepared directories lack retained workspace authority".to_string())
             })?;
             for mount in context.producer_prepared_mounts {
-                mount.verify_retained_descendant(workspace).map_err(|error| {
-                    refused(format!("prepared directory is not the retained descendant: {error}"))
-                })?;
+                mount
+                    .verify_retained_descendant(workspace)
+                    .map_err(|error| {
+                        refused(format!(
+                            "prepared directory is not the retained descendant: {error}"
+                        ))
+                    })?;
             }
         }
         let mount_namespace = MountNamespace {
@@ -3985,30 +3989,48 @@ impl IsolationRuntime {
         {
             return Err(refused("prepared producer directory count exceeds its bound".to_string()));
         }
-        let mut producer_prepared_mounts = context.producer_prepared_mounts.iter().collect::<Vec<_>>();
+        let mut producer_prepared_mounts =
+            context.producer_prepared_mounts.iter().collect::<Vec<_>>();
         producer_prepared_mounts.sort_by(|left, right| left.id().cmp(right.id()));
-        let mut prepared_destinations: Vec<PathBuf> = Vec::with_capacity(producer_prepared_mounts.len());
+        let mut prepared_destinations: Vec<PathBuf> =
+            Vec::with_capacity(producer_prepared_mounts.len());
         let mut prepared_immutable_files = Vec::new();
         let mut immutable_destinations = BTreeSet::new();
         let mut prepared_ids = BTreeSet::new();
         for mount in &producer_prepared_mounts {
             let destination = mount.destination();
             if !prepared_ids.insert(mount.id()) {
-                return Err(refused("prepared producer directory ID is duplicated".to_string()));
+                return Err(refused(
+                    "prepared producer directory ID is duplicated".to_string(),
+                ));
             }
             let expected = ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(mount.id())
                 .map_err(|error| refused(format!("invalid prepared producer directory: {error}")))?;
             if destination != expected {
-                return Err(refused("prepared producer destination differs from signed ID".to_string()));
+                return Err(refused(
+                    "prepared producer destination differs from signed ID".to_string(),
+                ));
             }
             validate_namespace_destination("prepared producer directory", destination)?;
             if paths_overlap(destination, &project_destination)
-                || writable_mounts.iter().any(|other| paths_overlap(destination, &other.destination))
-                || readable_mounts.iter().any(|other| paths_overlap(destination, &other.destination))
-                || runtime_view_destinations.iter().any(|other| paths_overlap(destination, other))
-                || prepared_destinations.iter().any(|other| paths_overlap(destination, other))
-                || context.state_root.is_some_and(|path| paths_overlap(destination, path))
-                || context.checkpoint_dir.is_some_and(|path| paths_overlap(destination, path))
+                || writable_mounts
+                    .iter()
+                    .any(|other| paths_overlap(destination, &other.destination))
+                || readable_mounts
+                    .iter()
+                    .any(|other| paths_overlap(destination, &other.destination))
+                || runtime_view_destinations
+                    .iter()
+                    .any(|other| paths_overlap(destination, other))
+                || prepared_destinations
+                    .iter()
+                    .any(|other| paths_overlap(destination, other))
+                || context
+                    .state_root
+                    .is_some_and(|path| paths_overlap(destination, path))
+                || context
+                    .checkpoint_dir
+                    .is_some_and(|path| paths_overlap(destination, path))
             {
                 return Err(refused(format!(
                     "prepared producer directory {} overlaps another launch authority",
@@ -4026,7 +4048,9 @@ impl IsolationRuntime {
                 }
                 validate_namespace_destination("prepared immutable file", file.destination())?;
                 file.verify_sealed_content().map_err(|error| {
-                    refused(format!("prepared immutable file is not sealed exact content: {error}"))
+                    refused(format!(
+                        "prepared immutable file is not sealed exact content: {error}"
+                    ))
                 })?;
                 prepared_immutable_files.push(file);
             }
@@ -6742,9 +6766,9 @@ fn expected_mount_preparation_commitments(
         .mounts
         .iter()
         .map(|mount| {
-            let source_fd = *by_id
-                .get(&mount.source)
-                .ok_or_else(|| refused("compiled mount source has no admitted descriptor".into()))?;
+            let source_fd = *by_id.get(&mount.source).ok_or_else(|| {
+                refused("compiled mount source has no admitted descriptor".into())
+            })?;
             Ok(lillux::LinuxSandboxMount {
                 source_fd,
                 destination: PathBuf::from(mount.destination.as_str()),
@@ -6767,11 +6791,8 @@ fn expected_mount_preparation_commitments(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    lillux::LinuxSandboxMountPreparationCommitments::from_admitted_mounts(
-        &mounts,
-        &descendants,
-    )
-    .map_err(|error| refused(format!("compile final-root mount commitments: {error}")))
+    lillux::LinuxSandboxMountPreparationCommitments::from_admitted_mounts(&mounts, &descendants)
+        .map_err(|error| refused(format!("compile final-root mount commitments: {error}")))
 }
 
 fn refused(reason: String) -> EngineError {
@@ -8816,7 +8837,11 @@ mod tests {
             .create_child(std::ffi::OsStr::new("codex-home"), 0o700)
             .unwrap();
         prepared_home
-            .atomic_create_regular(std::ffi::OsStr::new("config.toml"), b"model = 'fixture'\n", 0o600)
+            .atomic_create_regular(
+                std::ffi::OsStr::new("config.toml"),
+                b"model = 'fixture'\n",
+                0o600,
+            )
             .unwrap()
             .unwrap();
         let prepared_config = prepared_home
@@ -8873,7 +8898,10 @@ mod tests {
             .read_regular_file_stable_bounded(ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64)
             .unwrap();
         let adapter_request: AdapterLaunchRequest = serde_json::from_slice(&request_bytes).unwrap();
-        assert_eq!(adapter_request.plan.target.cwd.as_str(), prepared_destination);
+        assert_eq!(
+            adapter_request.plan.target.cwd.as_str(),
+            prepared_destination
+        );
         assert_eq!(
             adapter_request.plan.environment.values.get("CODEX_HOME"),
             Some(&prepared_destination)
@@ -8897,7 +8925,9 @@ mod tests {
             .plan
             .mounts
             .iter()
-            .find(|mount| mount.destination.as_str() == format!("{prepared_destination}/config.toml"))
+            .find(|mount| {
+                mount.destination.as_str() == format!("{prepared_destination}/config.toml")
+            })
             .unwrap();
         assert_eq!(immutable_mount.access, IsolationMountAccess::ReadOnly);
         assert_eq!(immutable_mount.layer, 20);
@@ -8906,15 +8936,17 @@ mod tests {
                 && authority.purpose == IsolationAuthorityPurpose::ReadOnlyMount
         }));
         let duplicates = [prepared.clone(), prepared];
-        assert!(runtime
-            .apply_with_provenance(
-                prepared_request(),
-                IsolationLaunchContext {
-                    producer_prepared_mounts: &duplicates,
-                    ..prepared_context
-                },
-            )
-            .is_err());
+        assert!(
+            runtime
+                .apply_with_provenance(
+                    prepared_request(),
+                    IsolationLaunchContext {
+                        producer_prepared_mounts: &duplicates,
+                        ..prepared_context
+                    },
+                )
+                .is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -9722,7 +9754,9 @@ mod tests {
             fixed_parent_views: Vec::new(),
             project_workspace: None,
             target_channels: Vec::new(),
-            environment: IsolationEnvironment { values: BTreeMap::new() },
+            environment: IsolationEnvironment {
+                values: BTreeMap::new(),
+            },
             network: IsolationNetwork::Isolated,
             loopback_ingress: None,
             devices: IsolationDeviceSurface::Minimal,
@@ -9738,11 +9772,17 @@ mod tests {
         assert_eq!(expected.mount_count, 1);
         plan.mounts[0].access = IsolationMountAccess::Writable;
         let writable = expected_mount_preparation_commitments(&plan, &[authority.clone()]).unwrap();
-        assert_ne!(writable.destination_access_sha256, expected.destination_access_sha256);
+        assert_ne!(
+            writable.destination_access_sha256,
+            expected.destination_access_sha256
+        );
         plan.mounts[0].access = IsolationMountAccess::ReadOnly;
         plan.mounts[0].destination = IsolationPath::new("/run/ryeos/verified-code/other").unwrap();
         let moved = expected_mount_preparation_commitments(&plan, &[authority]).unwrap();
-        assert_ne!(moved.destination_access_sha256, expected.destination_access_sha256);
+        assert_ne!(
+            moved.destination_access_sha256,
+            expected.destination_access_sha256
+        );
     }
 
     #[test]

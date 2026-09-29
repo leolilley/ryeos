@@ -977,8 +977,14 @@ mod tests {
             controller: ExternalControllerTransportContract {
                 schema: 2,
                 network_inputs: super::super::transport::ExternalNetworkInputPolicy {
-                    resolver: super::super::transport::ExternalNetworkInputSelection { source: "/etc/resolv.conf".into(), max_bytes: 65536 },
-                    hosts: super::super::transport::ExternalNetworkInputSelection { source: "/etc/hosts".into(), max_bytes: 65536 },
+                    resolver: super::super::transport::ExternalNetworkInputSelection {
+                        source: "/etc/resolv.conf".into(),
+                        max_bytes: 65536,
+                    },
+                    hosts: super::super::transport::ExternalNetworkInputSelection {
+                        source: "/etc/hosts".into(),
+                        max_bytes: 65536,
+                    },
                 },
                 https_origin: "https://controller.example".into(),
                 route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
@@ -1004,9 +1010,10 @@ mod tests {
                 runtime_witness_hash: "1".repeat(64),
                 qualification_attestation_hash: "2".repeat(64),
                 selection_identity_digest: "3".repeat(64),
-           runtime_recipe_digest: recipe_digest,
-            }.into(),
-           guest_input_identity,
+                runtime_recipe_digest: recipe_digest,
+            }
+            .into(),
+            guest_input_identity,
             guest_inputs,
             owner_public_key: encode_channel_public_key(
                 &lillux::crypto::SigningKey::from_bytes(&[11; 32]).verifying_key(),

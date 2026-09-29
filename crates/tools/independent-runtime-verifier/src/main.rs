@@ -17,14 +17,18 @@ use ryeos_runtime::callback::CallbackError;
 use ryeos_runtime::callback_uds::UdsRuntimeClient;
 use ryeos_runtime::scoped_relay_handoff::ScopedRelayHandoff;
 use ryeos_state::external_content::products::producer_recipe::{
-    ProductProducerRecipe, ProducerCwdSource, ProducerEnvironmentBinding,
-    ProducerEnvironmentSource, ProducerExecutableSource,
-    prepared_directory_mount_destination,
+    ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
+    ProducerExecutableSource, ProductProducerRecipe, prepared_directory_mount_destination,
 };
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
 use serde::Deserialize;
 use serde_json::json;
-use std::{collections::BTreeMap, ffi::{OsStr, OsString}, io::Read as _, path::Path};
+use std::{
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    io::Read as _,
+    path::Path,
+};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -56,7 +60,10 @@ async fn main() -> Result<()> {
     let thread_id = std::env::var("RYEOS_THREAD_ID")
         .context("admitted verifier root thread identity absent")?;
     let client = UdsRuntimeClient::from_env()?;
-    if project.open_child_directory(OsStr::new("prepared"))?.is_some() {
+    if project
+        .open_child_directory(OsStr::new("prepared"))?
+        .is_some()
+    {
         // A new verifier process cannot inherit the original relay, pipe or
         // provider transcript. Reopening sealed files may aid diagnosis, but
         // never permits restaging or another START under this accepted root.
@@ -64,7 +71,8 @@ async fn main() -> Result<()> {
         let resumed = client.resume_scoped_child(&thread_id).await;
         let cleanup = match &resumed {
             Ok(locator) => {
-                abort_known_scoped_locators(&client, &thread_id, std::slice::from_ref(locator)).await
+                abort_known_scoped_locators(&client, &thread_id, std::slice::from_ref(locator))
+                    .await
             }
             Err(_) => Vec::new(),
         };
@@ -919,8 +927,16 @@ fn check_scoped_prepared_immutable(
         staging::DIRECT_HOME_ID,
     )?;
     let expected = BTreeMap::from([
-        (home.join("config.toml").to_string_lossy().into_owned(), baseline_sha256.to_owned()),
-        (home.join("environments.toml").to_string_lossy().into_owned(), environment_sha256.to_owned()),
+        (
+            home.join("config.toml").to_string_lossy().into_owned(),
+            baseline_sha256.to_owned(),
+        ),
+        (
+            home.join("environments.toml")
+                .to_string_lossy()
+                .into_owned(),
+            environment_sha256.to_owned(),
+        ),
     ]);
     ensure!(
         locator.prepared_immutable_sha256 == expected,
@@ -967,7 +983,9 @@ fn check_scoped_applied_target(
     );
     ensure!(
         receipt.matches_post_release_mounts(&locator.expected_mount_preparation)
-            && locator.held_mount_preparation.matches_commitments(&locator.expected_mount_preparation)
+            && locator
+                .held_mount_preparation
+                .matches_commitments(&locator.expected_mount_preparation)
             && receipt.owned_child_pid == locator.held_mount_preparation.owned_child_pid,
         "scoped producer applied mounts differ from held final-root preparation"
     );
@@ -1015,7 +1033,8 @@ fn signed_direct_target_commitments(
         realization_id,
         relative_path,
         ..
-    } = &recipe.executable_source else {
+    } = &recipe.executable_source
+    else {
         bail!("direct Codex target is not an admitted realization member");
     };
     ensure!(
@@ -1074,9 +1093,7 @@ fn signed_direct_environment_cwd_commitments(
     let executable = std::path::Path::new("/bin/true");
     let argv0 = OsString::from("/bin/true");
     let cwd = match &recipe.cwd_source {
-        ProducerCwdSource::PreparedDirectory { id } => {
-            prepared_directory_mount_destination(id)?
-        }
+        ProducerCwdSource::PreparedDirectory { id } => prepared_directory_mount_destination(id)?,
         ProducerCwdSource::VerifierPrivateWorkspace => {
             bail!("direct Codex cwd cannot be verifier-private")
         }
@@ -1089,7 +1106,8 @@ fn signed_direct_environment_cwd_commitments(
             cwd: &cwd,
             environment: &environment,
         },
-    ).map_err(anyhow::Error::msg)
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 fn signed_direct_environment(
@@ -1123,10 +1141,12 @@ fn signed_direct_environment(
     }
     environment.insert(OsString::from("TMPDIR"), OsString::from("/tmp"));
     ensure!(
-        environment.insert(
-            OsString::from("RYEOS_PRODUCER_STDIN_FD"),
-            OsString::from("0"),
-        ).is_none(),
+        environment
+            .insert(
+                OsString::from("RYEOS_PRODUCER_STDIN_FD"),
+                OsString::from("0"),
+            )
+            .is_none(),
         "direct Codex recipe collides with its protected channel"
     );
     Ok(environment)
@@ -1456,20 +1476,17 @@ mod tests {
                 "maximum_memory_bytes":1048576,
                 "maximum_processes":4
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let admitted = "[{\"id\":\"signed\"}]";
         let environment = signed_direct_environment(&recipe, admitted).unwrap();
         let project_dir = tempfile::tempdir().unwrap();
         let project = lillux::PinnedDirectory::open(project_dir.path())
             .unwrap()
             .unwrap();
-        let signed_target = signed_direct_target_commitments(
-            &recipe,
-            admitted,
-            &project,
-            "qualification/subject",
-        )
-        .unwrap();
+        let signed_target =
+            signed_direct_target_commitments(&recipe, admitted, &project, "qualification/subject")
+                .unwrap();
         let signed_executable = project_dir.path().join("qualification/subject/bin/codex");
         let signed_argv0 = signed_executable.as_os_str().to_os_string();
         let signed_arguments = vec![OsString::from("app-server")];
@@ -1487,43 +1504,47 @@ mod tests {
         assert_eq!(signed_target, expected_signed_target);
         assert!(signed_direct_target_commitments(&recipe, admitted, &project, "other").is_err());
         let mut wrong_subject = recipe.clone();
-        if let ProducerExecutableSource::AdmittedRealizationMember {
-            realization_id,
-            ..
-        } = &mut wrong_subject.executable_source
+        if let ProducerExecutableSource::AdmittedRealizationMember { realization_id, .. } =
+            &mut wrong_subject.executable_source
         {
             *realization_id = "other".into();
         }
-        assert!(signed_direct_target_commitments(
-            &wrong_subject,
-            admitted,
-            &project,
-            "qualification/subject"
-        )
-        .is_err());
+        assert!(
+            signed_direct_target_commitments(
+                &wrong_subject,
+                admitted,
+                &project,
+                "qualification/subject"
+            )
+            .is_err()
+        );
         let mut wrong_member = recipe.clone();
         if let ProducerExecutableSource::AdmittedRealizationMember { relative_path, .. } =
             &mut wrong_member.executable_source
         {
             *relative_path = "bin/other".into();
         }
-        assert!(signed_direct_target_commitments(
-            &wrong_member,
-            admitted,
-            &project,
-            "qualification/subject"
-        )
-        .is_err());
+        assert!(
+            signed_direct_target_commitments(
+                &wrong_member,
+                admitted,
+                &project,
+                "qualification/subject"
+            )
+            .is_err()
+        );
         let mut wrong_executable_source = recipe.clone();
         wrong_executable_source.executable_source =
             ProducerExecutableSource::AdmittedVerifierExecutable;
-        assert!(signed_direct_target_commitments(
-            &wrong_executable_source,
-            admitted,
-            &project,
-            "qualification/subject"
-        )
-        .is_err());
+        assert!(
+            signed_direct_target_commitments(
+                &wrong_executable_source,
+                admitted,
+                &project,
+                "qualification/subject"
+            )
+            .is_err()
+        );
         let mut changed_arguments = recipe.clone();
         changed_arguments.argv.push("--different".into());
         assert_ne!(
@@ -1551,13 +1572,15 @@ mod tests {
             signed_target
         );
         changed_target_cwd.cwd_source = ProducerCwdSource::VerifierPrivateWorkspace;
-        assert!(signed_direct_target_commitments(
-            &changed_target_cwd,
-            admitted,
-            &project,
-            "qualification/subject"
-        )
-        .is_err());
+        assert!(
+            signed_direct_target_commitments(
+                &changed_target_cwd,
+                admitted,
+                &project,
+                "qualification/subject"
+            )
+            .is_err()
+        );
         let mut changed_target_environment = recipe.clone();
         changed_target_environment.environment_bindings.insert(
             "LANG".into(),
@@ -1584,22 +1607,30 @@ mod tests {
             .unwrap();
         std::fs::rename(&selected_path, &displaced_path).unwrap();
         std::fs::create_dir(&selected_path).unwrap();
-        assert!(signed_direct_target_commitments(
-            &recipe,
-            admitted,
-            &pinned_selected,
-            "qualification/subject"
-        )
-        .is_err());
+        assert!(
+            signed_direct_target_commitments(
+                &recipe,
+                admitted,
+                &pinned_selected,
+                "qualification/subject"
+            )
+            .is_err()
+        );
         std::fs::remove_dir(&selected_path).unwrap();
         std::fs::rename(&displaced_path, &selected_path).unwrap();
         assert_eq!(environment.len(), 8);
-        assert_eq!(environment.get(OsStr::new("RYEOS_EXTERNAL_REALIZATIONS")),
-            Some(&OsString::from(admitted)));
-        assert_eq!(environment.get(OsStr::new("CODEX_HOME")),
-            Some(&OsString::from("/ryeos/producer-prepared/codex-home")));
-        assert_eq!(environment.get(OsStr::new("RYEOS_PRODUCER_STDIN_FD")),
-            Some(&OsString::from("0")));
+        assert_eq!(
+            environment.get(OsStr::new("RYEOS_EXTERNAL_REALIZATIONS")),
+            Some(&OsString::from(admitted))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("CODEX_HOME")),
+            Some(&OsString::from("/ryeos/producer-prepared/codex-home"))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("RYEOS_PRODUCER_STDIN_FD")),
+            Some(&OsString::from("0"))
+        );
         let executable = Path::new("/bin/true");
         let argv0 = OsString::from("/bin/true");
         let cwd = Path::new("/ryeos/producer-prepared/codex-occurrence");
@@ -1611,23 +1642,48 @@ mod tests {
                 cwd,
                 environment: &environment,
             },
-        ).unwrap();
+        )
+        .unwrap();
         check_scoped_direct_expected_environment_and_cwd(&recipe, admitted, &commitment).unwrap();
-        assert!(check_scoped_direct_expected_environment_and_cwd(&recipe, "different", &commitment).is_err());
+        assert!(
+            check_scoped_direct_expected_environment_and_cwd(&recipe, "different", &commitment)
+                .is_err()
+        );
         let mut changed_precontact = commitment.clone();
         changed_precontact.environment_sha256[0] ^= 1;
-        assert!(check_scoped_direct_expected_environment_and_cwd(&recipe, admitted, &changed_precontact).is_err());
+        assert!(
+            check_scoped_direct_expected_environment_and_cwd(
+                &recipe,
+                admitted,
+                &changed_precontact
+            )
+            .is_err()
+        );
         let mut changed_precontact_cwd = commitment.clone();
         changed_precontact_cwd.cwd_sha256[0] ^= 1;
-        assert!(check_scoped_direct_expected_environment_and_cwd(&recipe, admitted, &changed_precontact_cwd).is_err());
+        assert!(
+            check_scoped_direct_expected_environment_and_cwd(
+                &recipe,
+                admitted,
+                &changed_precontact_cwd
+            )
+            .is_err()
+        );
         let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
-            owned_child_pid:42, namespace_pid:1, effective_uid:1, effective_gid:1,
-            no_new_privs:true, seccomp_mode:2,
-            executable_sha256:[1;32], argv_sha256:[2;32],
-            environment_sha256:commitment.environment_sha256,
-            cwd_sha256:commitment.cwd_sha256,
-            post_release_mount_view:lillux::LinuxSandboxMountPreparationCommitments {
-                schema:1, mount_count:1, destination_access_sha256:[0;32],
+            owned_child_pid: 42,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: commitment.environment_sha256,
+            cwd_sha256: commitment.cwd_sha256,
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 1,
+                destination_access_sha256: [0; 32],
             },
         };
         check_scoped_direct_environment_and_cwd(&recipe, admitted, &receipt).unwrap();
@@ -1640,18 +1696,37 @@ mod tests {
         assert!(check_scoped_direct_environment_and_cwd(&recipe, admitted, &changed_cwd).is_err());
         let mut altered_recipe = recipe.clone();
         altered_recipe.environment_bindings.insert(
-            "LANG".into(), ProducerEnvironmentBinding::Literal { value:"POSIX".into() }
+            "LANG".into(),
+            ProducerEnvironmentBinding::Literal {
+                value: "POSIX".into(),
+            },
         );
-        assert!(check_scoped_direct_expected_environment_and_cwd(&altered_recipe, admitted, &commitment).is_err());
-        assert!(check_scoped_direct_environment_and_cwd(&altered_recipe, admitted, &receipt).is_err());
+        assert!(
+            check_scoped_direct_expected_environment_and_cwd(
+                &altered_recipe,
+                admitted,
+                &commitment
+            )
+            .is_err()
+        );
+        assert!(
+            check_scoped_direct_environment_and_cwd(&altered_recipe, admitted, &receipt).is_err()
+        );
         let mut different_cwd = recipe.clone();
         different_cwd.cwd_source = ProducerCwdSource::PreparedDirectory {
-            id:"different-occurrence".into(),
+            id: "different-occurrence".into(),
         };
-        assert!(check_scoped_direct_expected_environment_and_cwd(&different_cwd, admitted, &commitment).is_err());
-        assert!(check_scoped_direct_environment_and_cwd(&different_cwd, admitted, &receipt).is_err());
+        assert!(
+            check_scoped_direct_expected_environment_and_cwd(&different_cwd, admitted, &commitment)
+                .is_err()
+        );
+        assert!(
+            check_scoped_direct_environment_and_cwd(&different_cwd, admitted, &receipt).is_err()
+        );
         altered_recipe.environment_sources.clear();
-        assert!(check_scoped_direct_environment_and_cwd(&altered_recipe, admitted, &receipt).is_err());
+        assert!(
+            check_scoped_direct_environment_and_cwd(&altered_recipe, admitted, &receipt).is_err()
+        );
     }
 
     #[test]
@@ -1929,7 +2004,12 @@ mod tests {
                 .validate()
                 .is_err()
         );
-        for field in ["executable_sha256", "argv_sha256", "environment_sha256", "cwd_sha256"] {
+        for field in [
+            "executable_sha256",
+            "argv_sha256",
+            "environment_sha256",
+            "cwd_sha256",
+        ] {
             let mut changed = valid.clone();
             changed["applied_launch"][field][0] = json!(255);
             assert!(
@@ -1958,7 +2038,10 @@ mod tests {
             );
         }
         let mut missing_applied = valid.clone();
-        missing_applied.as_object_mut().unwrap().remove("applied_launch");
+        missing_applied
+            .as_object_mut()
+            .unwrap()
+            .remove("applied_launch");
         assert!(serde_json::from_value::<ScopedAttemptLocator>(missing_applied).is_err());
         let mut changed_mounts = valid.clone();
         changed_mounts["expected_mount_preparation"]["destination_access_sha256"][0] = json!(255);
@@ -1976,13 +2059,24 @@ mod tests {
         .unwrap();
         let mut exact_files = valid.clone();
         exact_files["prepared_immutable_sha256"] = json!(BTreeMap::from([
-            (home.join("config.toml").to_string_lossy().into_owned(), "1".repeat(64)),
-            (home.join("environments.toml").to_string_lossy().into_owned(), "2".repeat(64)),
+            (
+                home.join("config.toml").to_string_lossy().into_owned(),
+                "1".repeat(64)
+            ),
+            (
+                home.join("environments.toml")
+                    .to_string_lossy()
+                    .into_owned(),
+                "2".repeat(64)
+            ),
         ]));
         let exact: ScopedAttemptLocator = serde_json::from_value(exact_files.clone()).unwrap();
         check_scoped_prepared_immutable(&exact, &"1".repeat(64), &"2".repeat(64)).unwrap();
         let config_path = home.join("config.toml").to_string_lossy().into_owned();
-        let environment_path = home.join("environments.toml").to_string_lossy().into_owned();
+        let environment_path = home
+            .join("environments.toml")
+            .to_string_lossy()
+            .into_owned();
         for changed in [
             {
                 let mut value = exact_files.clone();
@@ -1992,13 +2086,15 @@ mod tests {
             {
                 let mut value = exact_files.clone();
                 value["prepared_immutable_sha256"]
-                    .as_object_mut().unwrap().remove(&environment_path);
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(&environment_path);
                 value
             },
             {
                 let mut value = exact_files.clone();
-                value["prepared_immutable_sha256"][home.join("extra.toml").to_string_lossy().as_ref()] =
-                    json!("4".repeat(64));
+                value["prepared_immutable_sha256"]
+                    [home.join("extra.toml").to_string_lossy().as_ref()] = json!("4".repeat(64));
                 value
             },
             {
@@ -2009,11 +2105,18 @@ mod tests {
             },
         ] {
             let changed: ScopedAttemptLocator = serde_json::from_value(changed).unwrap();
-            assert!(check_scoped_prepared_immutable(&changed, &"1".repeat(64), &"2".repeat(64)).is_err());
+            assert!(
+                check_scoped_prepared_immutable(&changed, &"1".repeat(64), &"2".repeat(64))
+                    .is_err()
+            );
         }
         exact_files["schema"] = json!("ryeos.scoped_producer_locator.v4");
-        assert!(serde_json::from_value::<ScopedAttemptLocator>(exact_files)
-            .unwrap().validate().is_err());
+        assert!(
+            serde_json::from_value::<ScopedAttemptLocator>(exact_files)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
         assert!(
             check_scoped_plan_coordinate(
                 &locator,
@@ -2080,10 +2183,12 @@ mod tests {
         }
         let mut wrong_held = valid.clone();
         wrong_held["held_mount_preparation"]["destination_access_sha256"][0] = json!(1);
-        assert!(serde_json::from_value::<ScopedAttemptLocator>(wrong_held)
-            .unwrap()
-            .validate()
-            .is_err());
+        assert!(
+            serde_json::from_value::<ScopedAttemptLocator>(wrong_held)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
         for (field, value) in [
             ("schema", json!(2)),
             ("mount_count", json!(2)),
@@ -2099,7 +2204,10 @@ mod tests {
             }
         }
         let mut missing_mounts = valid.clone();
-        missing_mounts.as_object_mut().unwrap().remove("expected_mount_preparation");
+        missing_mounts
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_mount_preparation");
         assert!(serde_json::from_value::<ScopedAttemptLocator>(missing_mounts).is_err());
         for field in ["recipe_digest", "scenario_digest", "isolation_plan_digest"] {
             let mut changed = valid.clone();
@@ -2121,7 +2229,10 @@ mod tests {
                 .is_err()
         );
         let mut missing_recipe = valid;
-        missing_recipe.as_object_mut().unwrap().remove("recipe_digest");
+        missing_recipe
+            .as_object_mut()
+            .unwrap()
+            .remove("recipe_digest");
         assert!(serde_json::from_value::<ScopedAttemptLocator>(missing_recipe).is_err());
         let mut no_prelaunch_target = json!({
             "schema": "ryeos.scoped_producer_locator.v7",
@@ -2145,20 +2256,36 @@ mod tests {
         let occurrence = root
             .create_child(std::ffi::OsStr::new("codex-occurrence"), 0o700)
             .unwrap();
-        let home = root.create_child(std::ffi::OsStr::new("codex-home"), 0o700).unwrap();
-        let foreign = root.create_child(std::ffi::OsStr::new("foreign"), 0o700).unwrap();
+        let home = root
+            .create_child(std::ffi::OsStr::new("codex-home"), 0o700)
+            .unwrap();
+        let foreign = root
+            .create_child(std::ffi::OsStr::new("foreign"), 0o700)
+            .unwrap();
         let pinned = BTreeMap::from([
-            (staging::DIRECT_OCCURRENCE_ID.to_owned(), occurrence.identity().unwrap()),
+            (
+                staging::DIRECT_OCCURRENCE_ID.to_owned(),
+                occurrence.identity().unwrap(),
+            ),
             (staging::DIRECT_HOME_ID.to_owned(), home.identity().unwrap()),
         ]);
         require_direct_prepared_source_join(&pinned, &pinned).unwrap();
 
         let mut wrong = pinned.clone();
-        wrong.insert(staging::DIRECT_HOME_ID.to_owned(), foreign.identity().unwrap());
+        wrong.insert(
+            staging::DIRECT_HOME_ID.to_owned(),
+            foreign.identity().unwrap(),
+        );
         assert!(require_direct_prepared_source_join(&wrong, &pinned).is_err());
         let mut swapped = pinned.clone();
-        swapped.insert(staging::DIRECT_HOME_ID.to_owned(), occurrence.identity().unwrap());
-        swapped.insert(staging::DIRECT_OCCURRENCE_ID.to_owned(), home.identity().unwrap());
+        swapped.insert(
+            staging::DIRECT_HOME_ID.to_owned(),
+            occurrence.identity().unwrap(),
+        );
+        swapped.insert(
+            staging::DIRECT_OCCURRENCE_ID.to_owned(),
+            home.identity().unwrap(),
+        );
         assert!(require_direct_prepared_source_join(&swapped, &pinned).is_err());
         let mut missing = pinned.clone();
         missing.remove(staging::DIRECT_HOME_ID);
@@ -2172,12 +2299,8 @@ mod tests {
             foreign.identity().unwrap(),
         );
         assert!(
-            require_direct_prepared_observation_join(
-                &pinned,
-                &substituted_observation,
-                &pinned,
-            )
-            .is_err()
+            require_direct_prepared_observation_join(&pinned, &substituted_observation, &pinned,)
+                .is_err()
         );
     }
 

@@ -22,10 +22,9 @@ use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator;
 use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotIntent,
     RuntimeSnapshotQualificationAdapterRequest, RuntimeSnapshotQualificationAdapterResponse,
-    RuntimeSnapshotQualificationOccurrence, RuntimeSnapshotReadinessObservation,
+    RuntimeSnapshotQualificationOccurrence, RuntimeSnapshotQualificationTerminalObservation,
     RuntimeSnapshotQualificationTerminationAdapterRequest,
-    RuntimeSnapshotQualificationTerminationAdapterResponse,
-    RuntimeSnapshotQualificationTerminalObservation,
+    RuntimeSnapshotQualificationTerminationAdapterResponse, RuntimeSnapshotReadinessObservation,
 };
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_PROTOCOL, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
@@ -373,7 +372,8 @@ pub(crate) fn terminate_restored_sandbox(
         spec.termination_terminal_proof_enabled() && spec.reconciliation_terminal_proof_enabled(),
         "signed provider spec has no exact terminal observation profile"
     );
-    let mutation = spec.termination_mutation_route()
+    let mutation = spec
+        .termination_mutation_route()
         .context("signed provider spec has no qualification termination route")?;
     let observation = if first_contact {
         spec.termination_observation_route()
@@ -447,25 +447,26 @@ pub(crate) fn terminate_restored_sandbox(
         if status != 200 {
             return None;
         }
-        let sandbox: crate::RenderSandbox = ryeos_external_execution_contract::from_json_slice_strict(
-            &body,
-            usize::try_from(crate::MAX_API_RESPONSE_BYTES).ok()?,
-        ).ok()?;
-        let terminated_at = crate::exact_terminal_timestamp(
-            &sandbox,
-            &request.intent.occurrence_id,
-            &settings,
-        )?;
-        Some(RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
-            observation: RuntimeSnapshotQualificationTerminalObservation {
-                schema: 1,
-                operation_id: request.intent.operation_id.clone(),
-                occurrence_id: request.intent.occurrence_id.clone(),
-                provider_response_sha256: lillux::sha256_hex(&body),
-                terminated_at: terminated_at.into(),
-                contact_deadline_exceeded: false,
+        let sandbox: crate::RenderSandbox =
+            ryeos_external_execution_contract::from_json_slice_strict(
+                &body,
+                usize::try_from(crate::MAX_API_RESPONSE_BYTES).ok()?,
+            )
+            .ok()?;
+        let terminated_at =
+            crate::exact_terminal_timestamp(&sandbox, &request.intent.occurrence_id, &settings)?;
+        Some(
+            RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
+                observation: RuntimeSnapshotQualificationTerminalObservation {
+                    schema: 1,
+                    operation_id: request.intent.operation_id.clone(),
+                    occurrence_id: request.intent.occurrence_id.clone(),
+                    provider_response_sha256: lillux::sha256_hex(&body),
+                    terminated_at: terminated_at.into(),
+                    contact_deadline_exceeded: false,
+                },
             },
-        })
+        )
     })
     .unwrap_or_else(pending);
     result.validate_for(&request)?;
@@ -1167,23 +1168,22 @@ mod tests {
             .remove("restored_verifier_operation_id");
         assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
         untrusted = serde_json::to_value(probe()).unwrap();
-        untrusted["authenticated_ready_evidence_hash"] =
-            serde_json::Value::String("7".repeat(64));
+        untrusted["authenticated_ready_evidence_hash"] = serde_json::Value::String("7".repeat(64));
         assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
         untrusted = serde_json::to_value(probe()).unwrap();
-        untrusted["writer_exclusion_evidence_hash"] =
-            serde_json::Value::String("9".repeat(64));
+        untrusted["writer_exclusion_evidence_hash"] = serde_json::Value::String("9".repeat(64));
         assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
         untrusted = serde_json::to_value(probe()).unwrap();
-        untrusted["lost_stream_survival_evidence_hash"] =
-            serde_json::Value::String("6".repeat(64));
+        untrusted["lost_stream_survival_evidence_hash"] = serde_json::Value::String("6".repeat(64));
         assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
         untrusted = serde_json::to_value(probe()).unwrap();
         untrusted["schema"] = serde_json::Value::from(4);
-        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted)
-            .unwrap()
-            .validate_for(&settings, &expected)
-            .is_err());
+        assert!(
+            RenderSnapshotProbe::from_probe_evidence(&untrusted)
+                .unwrap()
+                .validate_for(&settings, &expected)
+                .is_err()
+        );
         untrusted = serde_json::to_value(probe()).unwrap();
         untrusted["qualified"] = serde_json::Value::Bool(true);
         assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());

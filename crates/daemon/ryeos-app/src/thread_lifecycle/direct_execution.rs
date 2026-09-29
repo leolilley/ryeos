@@ -2845,8 +2845,7 @@ pub struct SpawnItemParams<'a> {
         Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     /// Protected launch channels derived from the admitted root purpose,
     /// never from tool parameters or a live project path.
-    pub isolation_target_channels:
-        Vec<ryeos_engine::isolation::IsolationTargetChannelAuthority>,
+    pub isolation_target_channels: Vec<ryeos_engine::isolation::IsolationTargetChannelAuthority>,
     /// Exact node trust-store root supplied by daemon configuration. Never
     /// reconstructed from an application or bundle filesystem layout.
     pub isolation_node_trusted_keys_dir: std::path::PathBuf,
@@ -3232,24 +3231,30 @@ pub fn spawn_item(
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
-        (Some(_), Some(_)) => return Err(SpawnItemFailure::before_contact(anyhow!(
-            "item launch prepared conflicting process scopes"
-        ))),
+        (Some(_), Some(_)) => {
+            return Err(SpawnItemFailure::before_contact(anyhow!(
+                "item launch prepared conflicting process scopes"
+            )));
+        }
     };
     let spawned = match spawned_result {
         Ok(spawned) => spawned,
         Err(error) => {
             let cleanup = match (resource_scope.as_ref(), thread_scope.as_ref()) {
-                (Some(prepared), None) => crate::execution_resources::cleanup_process_resource_reservation(
-                    state,
-                    prepared.reservation(),
-                ),
+                (Some(prepared), None) => {
+                    crate::execution_resources::cleanup_process_resource_reservation(
+                        state,
+                        prepared.reservation(),
+                    )
+                }
                 (None, Some(prepared)) => crate::execution_resources::cleanup_thread_scope_only(
                     state,
                     prepared.reservation(),
                 ),
                 (None, None) => return Err(SpawnItemFailure::engine(error)),
-                (Some(_), Some(_)) => Err(anyhow!("item launch owns conflicting scope reservations")),
+                (Some(_), Some(_)) => {
+                    Err(anyhow!("item launch owns conflicting scope reservations"))
+                }
             };
             return Err(SpawnItemFailure::after_scope_cleanup(error, cleanup));
         }

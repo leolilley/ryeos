@@ -412,10 +412,7 @@ impl LinuxSandboxMountPreparationCommitments {
 }
 
 impl LinuxSandboxMountPreparationReceipt {
-    pub fn matches_commitments(
-        &self,
-        expected: &LinuxSandboxMountPreparationCommitments,
-    ) -> bool {
+    pub fn matches_commitments(&self, expected: &LinuxSandboxMountPreparationCommitments) -> bool {
         self.schema == expected.schema
             && self.owned_child_pid > 0
             && self.mount_count == expected.mount_count
@@ -2007,7 +2004,10 @@ mod imp {
     ) -> Result<crate::secure_fs::PinnedDirectory, String> {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ENTERED: AtomicBool = AtomicBool::new(false);
-        if ENTERED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        if ENTERED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             return Err("private source filesystem entry is one-shot per process".into());
         }
         // No source is imported before this transition. Once user-namespace
@@ -2156,7 +2156,10 @@ mod imp {
                     || observed.st_ino != expected_child.st_ino
                     || mount_source_id(raw_fd(mount.source_fd)?)? != expected_mount
                 {
-                    return Err("private source mount is not the exact selected child and destination".into());
+                    return Err(
+                        "private source mount is not the exact selected child and destination"
+                            .into(),
+                    );
                 }
                 selected = true;
                 if mount.access != LinuxSandboxMountAccess::ReadOnly {
@@ -2355,8 +2358,9 @@ mod imp {
             {
                 continue;
             }
-            let path = std::fs::read_link(format!("/proc/self/fd/{fd}"))
-                .map_err(|error| format!("locate source before private namespace entry: {error}"))?;
+            let path = std::fs::read_link(format!("/proc/self/fd/{fd}")).map_err(|error| {
+                format!("locate source before private namespace entry: {error}")
+            })?;
             paths.insert(descriptor, path);
         }
         Ok(paths)
@@ -3956,7 +3960,9 @@ mod imp {
             || post_release_mount_view.destination_access_sha256
                 != mount_preparation.destination_access_sha256
         {
-            return Err("post-release target mounts differ from held final-root preparation".into());
+            return Err(
+                "post-release target mounts differ from held final-root preparation".into(),
+            );
         }
         exec_target_with_receipt(request, Some((applied_launch_fd, post_release_mount_view)))
     }
@@ -6701,7 +6707,12 @@ mod imp {
             assert!(
                 matches!(
                     network_error.raw_os_error(),
-                    Some(libc::ECONNREFUSED | libc::ENETUNREACH | libc::EHOSTUNREACH | libc::ENETDOWN)
+                    Some(
+                        libc::ECONNREFUSED
+                            | libc::ENETUNREACH
+                            | libc::EHOSTUNREACH
+                            | libc::ENETDOWN
+                    )
                 ),
                 "isolated target failed to connect for an unrelated reason: {network_error}"
             );
@@ -7002,7 +7013,12 @@ mod imp {
         }
 
         fn exercise_native_proc(terminal_export: bool, release_target: bool, alias_race: bool) {
-            exercise_native_proc_with_observation(terminal_export, release_target, None, alias_race);
+            exercise_native_proc_with_observation(
+                terminal_export,
+                release_target,
+                None,
+                alias_race,
+            );
         }
 
         fn exercise_native_proc_with_observation(
@@ -7069,11 +7085,15 @@ mod imp {
                     crate::secure_fs::pin_canonical_mount_source(runtime_fixture.path()).unwrap();
                 let writable_fixture = tempfile::tempdir().unwrap();
                 std::fs::create_dir(writable_fixture.path().join("view")).unwrap();
-                std::fs::write(writable_fixture.path().join("config.toml"), b"writable origin")
-                    .unwrap();
-                let host_alias_view = crate::secure_fs::PinnedDirectory::open(writable_fixture.path())
-                    .unwrap()
-                    .unwrap();
+                std::fs::write(
+                    writable_fixture.path().join("config.toml"),
+                    b"writable origin",
+                )
+                .unwrap();
+                let host_alias_view =
+                    crate::secure_fs::PinnedDirectory::open(writable_fixture.path())
+                        .unwrap()
+                        .unwrap();
                 let host_signal_view = host_alias_view
                     .open_child_directory(std::ffi::OsStr::new("view"))
                     .unwrap()
@@ -7304,23 +7324,29 @@ mod imp {
                                     .open_regular(std::ffi::OsStr::new("config.toml"), true)
                                     .map_err(|error| format!("open host alias: {error}"))?
                                     .ok_or("host config alias disappeared")?;
-                                let replacement = host_alias_view.rename_regular_child_noreplace_atomic(
-                                    std::ffi::OsStr::new("config.toml"),
-                                    std::ffi::OsStr::new("prior-config.toml"),
-                                    &original,
-                                );
+                                let replacement = host_alias_view
+                                    .rename_regular_child_noreplace_atomic(
+                                        std::ffi::OsStr::new("config.toml"),
+                                        std::ffi::OsStr::new("prior-config.toml"),
+                                        &original,
+                                    );
                                 if replacement.is_ok() {
                                     return Err("host replacement unexpectedly displaced the mounted source".into());
                                 }
-                                original.set_len(0).map_err(|error| format!("truncate host alias: {error}"))?;
+                                original
+                                    .set_len(0)
+                                    .map_err(|error| format!("truncate host alias: {error}"))?;
                                 use std::io::Write as _;
-                                original.write_all(b"host mutated origin")
+                                original
+                                    .write_all(b"host mutated origin")
                                     .map_err(|error| format!("write host alias: {error}"))?;
-                                host_signal_view.atomic_create_regular(
-                                    std::ffi::OsStr::new("host-mutated"),
-                                    b"ready",
-                                    0o600,
-                                ).map_err(|error| format!("signal host mutation: {error}"))?
+                                host_signal_view
+                                    .atomic_create_regular(
+                                        std::ffi::OsStr::new("host-mutated"),
+                                        b"ready",
+                                        0o600,
+                                    )
+                                    .map_err(|error| format!("signal host mutation: {error}"))?
                                     .ok_or("host mutation signal already exists")?;
                             }
                             let preparation = process.mount_preparation_receipt()?;
@@ -7835,19 +7861,33 @@ mod tests {
     #[test]
     fn private_source_filesystem_requires_explicit_positive_limits() {
         for limits in [
-            LinuxPrivateSourceLimits { max_bytes: 0, max_inodes: 1 },
-            LinuxPrivateSourceLimits { max_bytes: 4096, max_inodes: 0 },
-            LinuxPrivateSourceLimits { max_bytes: 64 * 1024 * 1024 * 1024 + 1, max_inodes: 1 },
-            LinuxPrivateSourceLimits { max_bytes: 4096, max_inodes: 2_000_001 },
+            LinuxPrivateSourceLimits {
+                max_bytes: 0,
+                max_inodes: 1,
+            },
+            LinuxPrivateSourceLimits {
+                max_bytes: 4096,
+                max_inodes: 0,
+            },
+            LinuxPrivateSourceLimits {
+                max_bytes: 64 * 1024 * 1024 * 1024 + 1,
+                max_inodes: 1,
+            },
+            LinuxPrivateSourceLimits {
+                max_bytes: 4096,
+                max_inodes: 2_000_001,
+            },
         ] {
             assert!(limits.validate().is_err());
         }
-        assert!(LinuxPrivateSourceLimits {
-            max_bytes: 4096,
-            max_inodes: 2,
-        }
-        .validate()
-        .is_ok());
+        assert!(
+            LinuxPrivateSourceLimits {
+                max_bytes: 4096,
+                max_inodes: 2,
+            }
+            .validate()
+            .is_ok()
+        );
     }
 
     #[cfg(target_os = "linux")]

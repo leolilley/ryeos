@@ -147,8 +147,8 @@ fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::Admit
     let admitted =
         admitted_worker_evidence::admit_worker(&state, "worker:codex/external-hosted-authoring")?;
     let signed = state.engine.with_checked_bundle_generation(|generation| {
-        let resolution = generation.effective_resolution_output(
-            ryeos_engine::engine::EffectiveItemRequest {
+        let resolution =
+            generation.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
                 item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                     "worker:codex/external-hosted-authoring",
                 )?,
@@ -156,11 +156,13 @@ fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::Admit
                 project_root: None,
                 subject_resolution_authority:
                     ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
-            },
-        )?;
+            })?;
         Ok::<_, anyhow::Error>((
             generation.request_engine_generation_identity().to_owned(),
-            resolution.effective_definition_digest()?.as_str().to_owned(),
+            resolution
+                .effective_definition_digest()?
+                .as_str()
+                .to_owned(),
         ))
     })?;
     ensure!(
@@ -742,7 +744,9 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
     ensure!(
         phase == "retired"
             && death_evidence.as_deref().is_some_and(lillux::valid_hash)
-            && retirement_evidence.as_deref().is_some_and(lillux::valid_hash),
+            && retirement_evidence
+                .as_deref()
+                .is_some_and(lillux::valid_hash),
         "scoped producer has not proved exact scope death and retirement"
     );
     let receipt = receipt
@@ -752,7 +756,9 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
         .as_deref()
         .context("missing scoped observation object")?;
     let mount_evidence: Value = serde_json::from_str(
-        mount_evidence.as_deref().context("missing retained mount preparation")?
+        mount_evidence
+            .as_deref()
+            .context("missing retained mount preparation")?,
     )?;
     let cas = lillux::CasStore::new(state.join(".ai/state/objects"));
     let observation = cas
@@ -770,9 +776,12 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
         "scoped observation differs from exact journal attempt"
     );
     ensure!(
-        mount_evidence["expected"]["mount_count"].as_u64().is_some_and(|count| count > 0)
+        mount_evidence["expected"]["mount_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
             && mount_evidence["expected"]["schema"] == mount_evidence["observed"]["schema"]
-            && mount_evidence["expected"]["mount_count"] == mount_evidence["observed"]["mount_count"]
+            && mount_evidence["expected"]["mount_count"]
+                == mount_evidence["observed"]["mount_count"]
             && mount_evidence["expected"]["destination_access_sha256"]
                 == mount_evidence["observed"]["destination_access_sha256"]
             && mount_evidence["observed"]["owned_child_pid"]
@@ -1590,7 +1599,9 @@ fn require_direct_qualification_process_scope(status: &Value) -> anyhow::Result<
             && status.pointer("/isolation/process_scopes/exclusive_session/ready")
                 == Some(&json!(true)),
         "signed direct Codex qualification requires a genuinely bound, qualified host-runtime process scope before product capture; observed {}",
-        status.pointer("/isolation/process_scopes").unwrap_or(&Value::Null)
+        status
+            .pointer("/isolation/process_scopes")
+            .unwrap_or(&Value::Null)
     );
     Ok(())
 }
@@ -1598,25 +1609,32 @@ fn require_direct_qualification_process_scope(status: &Value) -> anyhow::Result<
 #[cfg(all(unix, feature = "handoff-test-support"))]
 #[test]
 fn direct_qualification_preflight_requires_host_scope_not_trusted_process_group() {
-    assert!(require_direct_qualification_process_scope(&json!({
-        "isolation": {"process_scopes": {
-            "authority": "absent",
-            "exclusive_session": {"ready": false},
-            "trusted_exclusive_session": {"ready": true}
-        }}
-    })).is_err());
-    assert!(require_direct_qualification_process_scope(&json!({
-        "isolation": {"process_scopes": {
-            "authority": "present_unqualified",
-            "exclusive_session": {"ready": false}
-        }}
-    })).is_err());
+    assert!(
+        require_direct_qualification_process_scope(&json!({
+            "isolation": {"process_scopes": {
+                "authority": "absent",
+                "exclusive_session": {"ready": false},
+                "trusted_exclusive_session": {"ready": true}
+            }}
+        }))
+        .is_err()
+    );
+    assert!(
+        require_direct_qualification_process_scope(&json!({
+            "isolation": {"process_scopes": {
+                "authority": "present_unqualified",
+                "exclusive_session": {"ready": false}
+            }}
+        }))
+        .is_err()
+    );
     require_direct_qualification_process_scope(&json!({
         "isolation": {"process_scopes": {
             "authority": "qualified",
             "exclusive_session": {"ready": true}
         }}
-    })).unwrap();
+    }))
+    .unwrap();
 }
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
@@ -1647,19 +1665,27 @@ fn require_exact_direct_scripted_turn(output: &str) -> anyhow::Result<()> {
         ensure!(frame.is_object(), "direct Codex emitted a non-object frame");
         if let Some(id) = frame["id"].as_u64() {
             ensure!(
-                (1..=3).contains(&id) && response_ids.insert(id) && frame.get("error").is_none()
+                (1..=3).contains(&id)
+                    && response_ids.insert(id)
+                    && frame.get("error").is_none()
                     && frame.get("result").is_some(),
                 "direct Codex emitted a duplicate, error, or unexpected response: {frame}"
             );
             if id == 2 {
-                ensure!(response_ids.contains(&1), "thread response preceded initialization");
+                ensure!(
+                    response_ids.contains(&1),
+                    "thread response preceded initialization"
+                );
                 started_thread = frame
                     .pointer("/result/thread/id")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
             if id == 3 {
-                ensure!(started_thread.is_some(), "turn response preceded thread start");
+                ensure!(
+                    started_thread.is_some(),
+                    "turn response preceded thread start"
+                );
                 started_turn = frame
                     .pointer("/result/turn/id")
                     .and_then(Value::as_str)
@@ -1698,7 +1724,11 @@ fn direct_scripted_turn_rejects_duplicate_error_and_foreign_completion() {
         json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}),
     ];
     let encode = |frames: &[Value]| {
-        frames.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")
+        frames
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     assert!(require_exact_direct_scripted_turn(&encode(&valid)).is_ok());
     let mut duplicate = valid.to_vec();
@@ -1775,9 +1805,7 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
         .pointer("/result/error/stderr")
         .with_context(|| format!("failed direct verifier has no tool stderr: {terminal}"))?;
     ensure!(
-        serde_json::to_string(error)?.contains(
-            "complete qualification evidence remains unproven"
-        ),
+        serde_json::to_string(error)?.contains("complete qualification evidence remains unproven"),
         "direct run failed before its explicit no-claims boundary: {error}"
     );
     let scoped = exact_scoped_producer_observation(&harness.state_path, &root)?;

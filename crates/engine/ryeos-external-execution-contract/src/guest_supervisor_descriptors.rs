@@ -169,11 +169,16 @@ pub fn rebind_opened_guest_descriptors(
         output.descriptor = descriptor;
     }
     let mut records = content_records.iter().copied();
-    for (input, descriptor) in rebound.inputs.iter_mut().zip(runtime_mounts.iter().copied()) {
+    for (input, descriptor) in rebound
+        .inputs
+        .iter_mut()
+        .zip(runtime_mounts.iter().copied())
+    {
         input.descriptor = descriptor;
         match &mut input.content_authority {
             GuestMountContentAuthority::ProductManifest {
-                manifest_descriptor, ..
+                manifest_descriptor,
+                ..
             } => {
                 *manifest_descriptor = records.next().context("opened product record is absent")?;
             }
@@ -183,13 +188,17 @@ pub fn rebind_opened_guest_descriptors(
                 ..
             } => {
                 *binding_descriptor = records.next().context("opened source binding is absent")?;
-                *manifest_descriptor = records.next().context("opened source manifest is absent")?;
+                *manifest_descriptor =
+                    records.next().context("opened source manifest is absent")?;
             }
             GuestMountContentAuthority::RawFile { .. }
             | GuestMountContentAuthority::PrivateScratch { .. } => {}
         }
     }
-    ensure!(records.next().is_none(), "opened supervisor content record is extra");
+    ensure!(
+        records.next().is_none(),
+        "opened supervisor content record is extra"
+    );
     let highest = workspace_output
         .into_iter()
         .chain(runtime_mounts.iter().copied())

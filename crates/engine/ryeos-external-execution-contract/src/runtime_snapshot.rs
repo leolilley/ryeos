@@ -424,7 +424,8 @@ pub struct RuntimeSnapshotQualificationTerminationAdapterRequest {
 
 impl RuntimeSnapshotQualificationTerminationAdapterRequest {
     pub fn validate(&self) -> Result<()> {
-        self.intent.validate_for(&self.qualification_intent, &self.occurrence)?;
+        self.intent
+            .validate_for(&self.qualification_intent, &self.occurrence)?;
         ensure!(
             self.protocol == RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL
                 && self.provider_spec_digest == self.intent.provider_spec_digest
@@ -441,7 +442,9 @@ pub enum RuntimeSnapshotQualificationTerminationAdapterResponse {
     Terminal {
         observation: RuntimeSnapshotQualificationTerminalObservation,
     },
-    Pending { operation_id: String },
+    Pending {
+        operation_id: String,
+    },
 }
 
 impl RuntimeSnapshotQualificationTerminationAdapterResponse {
@@ -921,13 +924,22 @@ mod tests {
             attempt_deadline_ms: request.intent.attempt_deadline_ms + 2,
         };
         termination.operation_id = termination.derived_operation_id().unwrap();
-        termination.validate_for(&request.intent, &occurrence).unwrap();
+        termination
+            .validate_for(&request.intent, &occurrence)
+            .unwrap();
         let mut changed_deadline = termination.clone();
         changed_deadline.attempt_deadline_ms += 1;
-        assert_eq!(changed_deadline.derived_operation_id().unwrap(), termination.operation_id);
+        assert_eq!(
+            changed_deadline.derived_operation_id().unwrap(),
+            termination.operation_id
+        );
         let mut switched_occurrence = termination.clone();
         switched_occurrence.occurrence_id = "sbx-other".into();
-        assert!(switched_occurrence.validate_for(&request.intent, &occurrence).is_err());
+        assert!(
+            switched_occurrence
+                .validate_for(&request.intent, &occurrence)
+                .is_err()
+        );
         let terminal = RuntimeSnapshotQualificationTerminalObservation {
             schema: 1,
             operation_id: termination.operation_id.clone(),

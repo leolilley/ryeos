@@ -18,14 +18,12 @@ use ryeos_external_execution_contract::restored_runtime_measurement::{
 use ryeos_external_execution_contract::runtime_snapshot::{
     RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL, RUNTIME_SNAPSHOT_INTENT_SCHEMA,
     RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL, RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
-    RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotAdapterRequest,
-    RuntimeSnapshotAdapterResponse, RuntimeSnapshotIntent,
+    RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL, RUNTIME_SNAPSHOT_READINESS_PROTOCOL,
+    RuntimeSnapshotAdapterRequest, RuntimeSnapshotAdapterResponse, RuntimeSnapshotIntent,
     RuntimeSnapshotQualificationAdapterRequest, RuntimeSnapshotQualificationAdapterResponse,
-    RuntimeSnapshotQualificationIntent, RuntimeSnapshotReadinessRequest,
-    RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL,
-    RuntimeSnapshotQualificationTerminationAdapterRequest,
+    RuntimeSnapshotQualificationIntent, RuntimeSnapshotQualificationTerminationAdapterRequest,
     RuntimeSnapshotQualificationTerminationAdapterResponse,
-    RuntimeSnapshotQualificationTerminationIntent,
+    RuntimeSnapshotQualificationTerminationIntent, RuntimeSnapshotReadinessRequest,
 };
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use ryeos_state::external_content::products::{ProductShape, ProductStorage};
@@ -110,12 +108,18 @@ pub fn get_qualification_operation(
     operation_id: &str,
 ) -> Result<SnapshotQualificationRecord> {
     crate::operator_authority::require_admitted_operator(state, context)?;
-    ensure!(lillux::valid_hash(operation_id),
-        "qualification operation ID is not a canonical digest");
-    let record = state.state_store.snapshot_qualification_operation(operation_id)?
+    ensure!(
+        lillux::valid_hash(operation_id),
+        "qualification operation ID is not a canonical digest"
+    );
+    let record = state
+        .state_store
+        .snapshot_qualification_operation(operation_id)?
         .context("snapshot qualification operation is absent")?;
-    ensure!(record.intent.owner_principal == context.fingerprint,
-        "snapshot qualification belongs to another operator");
+    ensure!(
+        record.intent.owner_principal == context.fingerprint,
+        "snapshot qualification belongs to another operator"
+    );
     Ok(record)
 }
 
@@ -125,12 +129,18 @@ pub fn get_qualification_termination(
     operation_id: &str,
 ) -> Result<QualificationTerminationRecord> {
     crate::operator_authority::require_admitted_operator(state, context)?;
-    ensure!(lillux::valid_hash(operation_id),
-        "qualification termination ID is not a canonical digest");
-    let record = state.state_store.qualification_termination_operation(operation_id)?
+    ensure!(
+        lillux::valid_hash(operation_id),
+        "qualification termination ID is not a canonical digest"
+    );
+    let record = state
+        .state_store
+        .qualification_termination_operation(operation_id)?
         .context("qualification termination operation is absent")?;
-    ensure!(record.intent.owner_principal == context.fingerprint,
-        "qualification termination belongs to another operator");
+    ensure!(
+        record.intent.owner_principal == context.fingerprint,
+        "qualification termination belongs to another operator"
+    );
     Ok(record)
 }
 
@@ -452,7 +462,8 @@ pub fn terminate_qualification_occurrence(
     qualification_operation_id: &str,
 ) -> Result<QualificationTerminationRecord> {
     crate::operator_authority::require_admitted_operator(state, context)?;
-    let qualified = state.state_store
+    let qualified = state
+        .state_store
         .snapshot_qualification_operation(qualification_operation_id)?
         .context("snapshot qualification operation is absent")?;
     ensure!(
@@ -460,12 +471,20 @@ pub fn terminate_qualification_occurrence(
             && qualified.phase == SnapshotQualificationPhase::OccurrenceBound,
         "qualification termination has no operator-owned restored occurrence"
     );
-    let occurrence = qualified.occurrence.clone()
+    let occurrence = qualified
+        .occurrence
+        .clone()
         .context("qualification termination occurrence is absent")?;
-    let qualification = state.node_config.runtime_snapshot_qualification.iter()
+    let qualification = state
+        .node_config
+        .runtime_snapshot_qualification
+        .iter()
         .find(|binding| binding.digest() == qualified.intent.qualification_profile_digest)
         .context("current signed snapshot qualification binding is absent")?;
-    let producer = state.node_config.runtime_snapshot_production.iter()
+    let producer = state
+        .node_config
+        .runtime_snapshot_production
+        .iter()
         .find(|binding| {
             binding.id() == qualification.production_binding_id()
                 && binding.digest() == qualification.production_binding_digest()
@@ -480,7 +499,8 @@ pub fn terminate_qualification_occurrence(
     );
     let access = producer.credential_access()?;
     let credential = access.decode(state.vault.placement_credential(&access)?)?;
-    state.external_placement_backends
+    state
+        .external_placement_backends
         .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
     let now = lillux::time::timestamp_millis();
     let mut intent = RuntimeSnapshotQualificationTerminationIntent {
@@ -491,19 +511,27 @@ pub fn terminate_qualification_occurrence(
         owner_principal: context.fingerprint.clone(),
         provider_id: producer.backend().to_owned(),
         provider_spec_digest: qualification.provider_spec_digest().to_owned(),
-        attempt_deadline_ms: now.checked_add(i64::from(qualification.contact_timeout_seconds()) * 1_000)
+        attempt_deadline_ms: now
+            .checked_add(i64::from(qualification.contact_timeout_seconds()) * 1_000)
             .context("qualification termination deadline overflow")?,
     };
     intent.operation_id = intent.derived_operation_id()?;
-    if let Some(existing) = state.state_store
-        .qualification_termination_operation(&intent.operation_id)? {
+    if let Some(existing) = state
+        .state_store
+        .qualification_termination_operation(&intent.operation_id)?
+    {
         intent.attempt_deadline_ms = existing.intent.attempt_deadline_ms;
-        ensure!(intent == existing.intent,
-            "retained qualification termination changed signed coordinates");
+        ensure!(
+            intent == existing.intent,
+            "retained qualification termination changed signed coordinates"
+        );
     }
     intent.validate_for(&qualified.intent, &occurrence)?;
-    state.state_store.reserve_qualification_termination(&intent)?;
-    let claim = state.state_store
+    state
+        .state_store
+        .reserve_qualification_termination(&intent)?;
+    let claim = state
+        .state_store
         .claim_qualification_termination_attempt(&intent.operation_id)?;
     let first_contact = match claim {
         QualificationTerminationClaim::StartAttempt(_) => true,
@@ -521,28 +549,44 @@ pub fn terminate_qualification_occurrence(
     let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
         u64::from(qualification.contact_timeout_seconds()),
     ));
-    let attempted = state.external_placement_backends
+    let attempted = state
+        .external_placement_backends
         .terminate_snapshot_qualification_occurrence(
-            producer, qualification, &credential, &request, first_contact, deadline,
+            producer,
+            qualification,
+            &credential,
+            &request,
+            first_contact,
+            deadline,
         );
     match attempted {
         Ok(output) => match output.value {
-            RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal { mut observation } => {
+            RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
+                mut observation,
+            } => {
                 observation.contact_deadline_exceeded = output.deadline_exceeded;
-                state.state_store.bind_qualification_terminal_observation(&observation)
+                state
+                    .state_store
+                    .bind_qualification_terminal_observation(&observation)
             }
             RuntimeSnapshotQualificationTerminationAdapterResponse::Pending { .. } => {
                 if first_contact {
-                    state.state_store.quarantine_qualification_termination_attempt(&request.intent.operation_id)
+                    state
+                        .state_store
+                        .quarantine_qualification_termination_attempt(&request.intent.operation_id)
                 } else {
-                    state.state_store.qualification_termination_operation(&request.intent.operation_id)?
+                    state
+                        .state_store
+                        .qualification_termination_operation(&request.intent.operation_id)?
                         .context("qualification termination disappeared during reconciliation")
                 }
             }
         },
         Err(error) => {
             if first_contact {
-                state.state_store.quarantine_qualification_termination_attempt(&request.intent.operation_id)?;
+                state
+                    .state_store
+                    .quarantine_qualification_termination_attempt(&request.intent.operation_id)?;
             }
             Err(error)
         }
@@ -721,7 +765,9 @@ fn verify_probe_provider_terminal_record(
         lillux::valid_hash(operation_id) && lillux::valid_hash(observation_hash),
         "runtime probe has invalid provider terminal evidence identity"
     );
-    let retained = state.state_store.qualification_termination_operation(operation_id)?
+    let retained = state
+        .state_store
+        .qualification_termination_operation(operation_id)?
         .context("runtime probe names no retained qualification termination")?;
     validate_provider_terminal_join(
         &retained,
@@ -741,7 +787,9 @@ fn validate_provider_terminal_join(
     owner_principal: &str,
     observation_hash: &str,
 ) -> Result<()> {
-    let observation = retained.observation.as_ref()
+    let observation = retained
+        .observation
+        .as_ref()
         .context("runtime probe termination has no provider terminal observation")?;
     ensure!(
         retained.phase == QualificationTerminationPhase::Terminal
@@ -750,8 +798,9 @@ fn validate_provider_terminal_join(
             && retained.intent.occurrence_id == restored_occurrence_id
             && retained.intent.provider_id == provider_id
             && retained.intent.owner_principal == owner_principal
-            && lillux::sha256_hex(&ryeos_external_execution_contract::canonical_json(observation)?)
-                == observation_hash,
+            && lillux::sha256_hex(&ryeos_external_execution_contract::canonical_json(
+                observation
+            )?) == observation_hash,
         "runtime probe provider terminal status differs from exact retained occurrence"
     );
     Ok(())
@@ -1091,7 +1140,9 @@ mod tests {
             terminated_at: "2026-09-28T00:02:00Z".into(),
             contact_deadline_exceeded: false,
         };
-        let hash = lillux::sha256_hex(&ryeos_external_execution_contract::canonical_json(&observation).unwrap());
+        let hash = lillux::sha256_hex(
+            &ryeos_external_execution_contract::canonical_json(&observation).unwrap(),
+        );
         let mut retained = QualificationTerminationRecord {
             intent,
             phase: QualificationTerminationPhase::Terminal,
@@ -1099,20 +1150,34 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
         };
-        let check = |retained: &QualificationTerminationRecord, qualification: &str,
-                     occurrence: &str, hash: &str| {
+        let check = |retained: &QualificationTerminationRecord,
+                     qualification: &str,
+                     occurrence: &str,
+                     hash: &str| {
             validate_provider_terminal_join(
-                retained, qualification, occurrence,
-                "render-sandbox-early-access", &owner, hash,
+                retained,
+                qualification,
+                occurrence,
+                "render-sandbox-early-access",
+                &owner,
+                hash,
             )
         };
         assert!(check(&retained, &"2".repeat(64), "sbx-restored", &hash).is_ok());
         assert!(check(&retained, &"5".repeat(64), "sbx-restored", &hash).is_err());
         assert!(check(&retained, &"2".repeat(64), "sbx-other", &hash).is_err());
         assert!(check(&retained, &"2".repeat(64), "sbx-restored", &"6".repeat(64)).is_err());
-        retained.observation.as_mut().unwrap().contact_deadline_exceeded = true;
+        retained
+            .observation
+            .as_mut()
+            .unwrap()
+            .contact_deadline_exceeded = true;
         assert!(check(&retained, &"2".repeat(64), "sbx-restored", &hash).is_err());
-        retained.observation.as_mut().unwrap().contact_deadline_exceeded = false;
+        retained
+            .observation
+            .as_mut()
+            .unwrap()
+            .contact_deadline_exceeded = false;
         retained.phase = QualificationTerminationPhase::Quarantined;
         assert!(check(&retained, &"2".repeat(64), "sbx-restored", &hash).is_err());
     }

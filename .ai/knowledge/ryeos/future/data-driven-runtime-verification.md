@@ -1,13 +1,23 @@
+<!-- ryeos:signed:2026-09-29T00:19:35Z:ecd22eaf8ab8927bfe9ad74fa5afce215d5c20ffa328d3adc94fb564c2314c67:DOG5AAveRXJkXCsF4C3wm0/Z+YZLr6eUuAdDdO4ZFvxFcNqSbJVq0ylWFQHsEOVxrTNO39uxDHxBjq+COrRXAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: data-driven-runtime-verification
 title: Data-Driven Runtime Verification
 description: Future separation of declarative verification policy, reusable evidence transport, and runtime-specific protocol interpreters
 entry_type: design
-version: "0.1.0"
+version: "0.2.0"
 ```
 
 # Data-Driven Runtime Verification
+
+RyeOS already has a generic product qualification framework. Pinned GNU Python
+qualification uses that framework with specialized signed Tool content; it does
+not require Python-specific daemon logic. This direction also applies to the
+broader development and bundle-release workflow and restored guest evidence.
+Generalization remains separate from completing current execution proofs.
+Temporary execution plans belong in the repository's `.tmp/` workspace;
+durable knowledge should describe implemented contracts and explicitly deferred
+designs without depending on a temporary plan's continued presence.
 
 ## Status and scope
 
@@ -113,7 +123,7 @@ code can be reused behind those focused entry points.
 
 ## Evidence and trust boundary
 
-Keep the distinction explicit:
+For the current daemon-corroborated Codex profile, keep the distinction explicit:
 
 | Evidence | Authoritative owner |
 | --- | --- |
@@ -129,11 +139,15 @@ child, it must state that weaker/different evidence claim. If it requires
 daemon corroboration of the exact child, the child must use an owner and
 evidence contract that supplies it.
 
-Behavioral success alone is insufficient. Qualification must join the admitted
+For the current strong Codex claim, qualification must join the admitted
 scenario and subject identity, exact attempt, runtime observations, relevant
 provider evidence, whole-scope settlement, writer exclusion and frozen output
-under their respective owners. A transcript or peer request log is supporting
-evidence, not proof of executable identity or complete settlement.
+under their respective owners. A transcript or peer request log alone does not
+establish executable identity or complete settlement. Other claims select their
+required evidence owners and guarantees explicitly.
+The strong Codex requirements are not universal prerequisites for trusted-child
+checks or provider-backed point measurements, and those other contracts cannot
+be silently substituted for the active Codex claim.
 
 ## Codex as the first concrete scenario
 
@@ -181,10 +195,12 @@ A future implementation should demonstrate:
   resource bounds;
 - retries cannot duplicate non-idempotent input, and missing acknowledgements
   remain uncertain until reconciled;
-- the daemon's actual process owner supplies launch, isolation, capture and
-  settlement evidence; verifier-authored statements cannot substitute for it;
-- evidence is bound to the same signed scenario, subject, attempt, terminal,
-  frozen output and writer-exclusion result;
+- each required execution fact comes from its admitted owner; for the current
+  strong Codex profile, the daemon supplies launch, isolation, capture and
+  settlement evidence, which verifier-authored statements cannot replace;
+- evidence is bound to the same signed scenario, subject and attempt, including
+  the terminal, frozen output and writer-exclusion result when the selected
+  claim requires them; all remain mandatory for the current strong Codex claim;
 - negative tests reject substituted executables, changed policy, fabricated or
   mismatched observations, late provider contacts, incomplete settlement and
   restart ambiguity; and

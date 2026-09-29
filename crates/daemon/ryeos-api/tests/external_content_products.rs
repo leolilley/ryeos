@@ -468,7 +468,10 @@ async fn qualification_launch_reservation_is_one_shot_when_signed_relationship_r
         Arc::clone(&fixture.state),
     )
     .await;
-    assert!(first.is_err(), "unsigned relationship cannot launch a verifier");
+    assert!(
+        first.is_err(),
+        "unsigned relationship cannot launch a verifier"
+    );
     let status = fixture
         .state
         .state_store
@@ -484,7 +487,10 @@ async fn qualification_launch_reservation_is_one_shot_when_signed_relationship_r
         Arc::clone(&fixture.state),
     )
     .await;
-    assert!(second.is_err(), "repeating an uncertain launch id must not relaunch");
+    assert!(
+        second.is_err(),
+        "repeating an uncertain launch id must not relaunch"
+    );
     let repeated = fixture
         .state
         .state_store

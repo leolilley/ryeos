@@ -11,6 +11,7 @@
 //!
 //!   * `<state>/.ai/node/identity/private_key.pem`   (deterministic Ed25519)
 //!   * `<state>/.ai/node/identity/public-identity.json`
+//!   * `<state>/.ai/node/substrate-identity.json`
 //!   * `<state>/.ai/node/vault/private_key.pem`      (deterministic X25519)
 //!   * `<state>/.ai/node/vault/public_key.pem`
 //!   * `<user>/.ai/config/keys/signing/private_key.pem`
@@ -325,6 +326,18 @@ pub fn populate_initialized_state_with_identities(
     recovery
         .open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)
         .context("create fast-fixture thread-projection recovery authority")?;
+
+    // Init completion now binds the immutable substrate coordinate. Keep the
+    // fast fixture on the same contract as a real full-profile initialization.
+    let substrate = ryeos_node::SubstrateIdentity::new(
+        format!("sha256:{}", "1".repeat(64)),
+        1,
+        Some("full".to_owned()),
+    )
+    .context("construct fast-fixture substrate identity")?;
+    let substrate_path = state_path.join(AI_DIR).join("node/substrate-identity.json");
+    lillux::atomic_write(&substrate_path, &serde_json::to_vec_pretty(&substrate)?)
+        .with_context(|| format!("write {}", substrate_path.display()))?;
 
     // ── Node Ed25519 identity ──
     let node_identity_dir = state_path.join(AI_DIR).join("node").join("identity");

@@ -104,7 +104,7 @@ build_install_init_profile_args \
 build_install_init_profile_args \
     "$install_policy_root/.ai/node/policies" hosted-workflow 1
 [[ "${INSTALL_INIT_PROFILE_ARGS[*]}" == "--node-profile hosted-workflow --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
-[[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 0 ]]
+[[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 1 ]]
 
 # Repeated documents from one selected publisher are all validated but produce
 # one operator-facing trust decision instead of one line per bundle.

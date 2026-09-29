@@ -350,9 +350,7 @@ mod tests {
             Some(serde_json::json!({"thread": "T-one"}))
         );
         assert!(matches!(pinned, SelectionAttachment::Pinned { .. }));
-        assert!(
-            core.followed_selection_view_set(&instance).is_none()
-        );
+        assert!(core.followed_selection_view_set(&instance).is_none());
         let preferences = core.export_layout_preferences().unwrap();
         assert!(!preferences.contains("selection_attachments"));
         assert!(!preferences.contains("T-one"));

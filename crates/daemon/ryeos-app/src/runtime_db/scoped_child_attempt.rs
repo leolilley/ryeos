@@ -189,7 +189,9 @@ impl ScopedChildMountPreparationEvidence {
         );
         for (destination, digest) in &self.prepared_immutable_sha256 {
             let path = std::path::Path::new(destination);
-            let parent = path.parent().ok_or_else(|| anyhow!("immutable destination has no parent"))?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow!("immutable destination has no parent"))?;
             let root = std::path::Path::new("/ryeos/producer-prepared");
             anyhow::ensure!(
                 parent.parent() == Some(root)
@@ -1525,20 +1527,29 @@ mod tests {
     fn mount_evidence_requires_exact_observed_plan_digest() {
         let (_, _, identity) = fixture();
         let evidence = mount_evidence(&identity);
-        evidence.validate_observation_plan(&evidence.plan_digest, &identity).unwrap();
-        assert!(evidence.validate_observation_plan(
-            &format!("sha256:{}", "d".repeat(64)),
-            &identity,
-        ).is_err());
+        evidence
+            .validate_observation_plan(&evidence.plan_digest, &identity)
+            .unwrap();
+        assert!(
+            evidence
+                .validate_observation_plan(&format!("sha256:{}", "d".repeat(64)), &identity,)
+                .is_err()
+        );
         let mut wrong = evidence.clone();
         let source_root = tempfile::tempdir().unwrap();
-        let source = lillux::PinnedDirectory::open(source_root.path()).unwrap().unwrap();
+        let source = lillux::PinnedDirectory::open(source_root.path())
+            .unwrap()
+            .unwrap();
         // A canonical signed ID may retain an opaque source identity; a
         // traversal-shaped ID may not enter the durable mount evidence.
         let source = source.identity().unwrap();
-        wrong.prepared_directory_sources.insert("codex-home".into(), source);
+        wrong
+            .prepared_directory_sources
+            .insert("codex-home".into(), source);
         wrong.validate_for(&identity).unwrap();
-        wrong.prepared_directory_sources.insert("../foreign".into(), source);
+        wrong
+            .prepared_directory_sources
+            .insert("../foreign".into(), source);
         assert!(wrong.validate_for(&identity).is_err());
         wrong.prepared_directory_sources.clear();
         wrong.prepared_immutable_sha256.insert(
@@ -1610,7 +1621,10 @@ mod tests {
         wrong.process_scope = None;
         let mut wrong_mount = mount_evidence(&identity);
         wrong_mount.observed.destination_access_sha256[0] ^= 1;
-        assert!(db.attach_scoped_child_process(&initial.attempt_id, &identity, &wrong_mount).is_err());
+        assert!(
+            db.attach_scoped_child_process(&initial.attempt_id, &identity, &wrong_mount)
+                .is_err()
+        );
         assert!(
             db.attach_scoped_child_process(&initial.attempt_id, &wrong, &mount_evidence(&identity))
                 .is_err()
@@ -1618,8 +1632,12 @@ mod tests {
         db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
             .unwrap();
         assert!(
-            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
-                .is_err()
+            db.attach_scoped_child_process(
+                &initial.attempt_id,
+                &identity,
+                &mount_evidence(&identity)
+            )
+            .is_err()
         );
         assert!(
             db.permit_scoped_child_release(&initial.attempt_id, &wrong)
@@ -1902,8 +1920,12 @@ mod tests {
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
                 .unwrap();
-            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
-                .unwrap();
+            db.attach_scoped_child_process(
+                &initial.attempt_id,
+                &identity,
+                &mount_evidence(&identity),
+            )
+            .unwrap();
             db.permit_scoped_child_release(&initial.attempt_id, &identity)
                 .unwrap();
             db.reserve_scoped_child_input_operation(
@@ -2001,8 +2023,12 @@ mod tests {
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
                 .unwrap();
-            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
-                .unwrap();
+            db.attach_scoped_child_process(
+                &initial.attempt_id,
+                &identity,
+                &mount_evidence(&identity),
+            )
+            .unwrap();
             db.permit_scoped_child_release(&initial.attempt_id, &identity)
                 .unwrap();
         }
@@ -2106,8 +2132,12 @@ mod tests {
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
                 .unwrap();
-            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
-                .unwrap();
+            db.attach_scoped_child_process(
+                &initial.attempt_id,
+                &identity,
+                &mount_evidence(&identity),
+            )
+            .unwrap();
             db.permit_scoped_child_release(&initial.attempt_id, &identity)
                 .unwrap();
             db.claim_bound_scoped_child_retirement(&initial.attempt_id, &recovery)
@@ -2344,8 +2374,14 @@ mod tests {
             let db = RuntimeDb::open(&path).unwrap();
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
-            db.bind_scoped_child_scope(&initial.attempt_id, &recovery).unwrap();
-            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity)).unwrap();
+            db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
+                .unwrap();
+            db.attach_scoped_child_process(
+                &initial.attempt_id,
+                &identity,
+                &mount_evidence(&identity),
+            )
+            .unwrap();
             let mut tampered = mount_evidence(&identity);
             tampered.observed.destination_access_sha256[0] ^= 1;
             let encoded = lillux::canonical_json(&serde_json::to_value(tampered).unwrap()).unwrap();
@@ -2377,13 +2413,19 @@ mod tests {
             let db = RuntimeDb::open(&path).unwrap();
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
-            db.bind_scoped_child_scope(&initial.attempt_id, &recovery).unwrap();
-            db.attach_scoped_child_process(&initial.attempt_id, &identity, &evidence).unwrap();
-            db.permit_scoped_child_release(&initial.attempt_id, &identity).unwrap();
+            db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
+                .unwrap();
+            db.attach_scoped_child_process(&initial.attempt_id, &identity, &evidence)
+                .unwrap();
+            db.permit_scoped_child_release(&initial.attempt_id, &identity)
+                .unwrap();
         }
         let reopened = RuntimeDb::open_existing_current(&path).unwrap();
         assert_eq!(
-            reopened.get_scoped_child_attempt(&initial.attempt_id).unwrap().unwrap()
+            reopened
+                .get_scoped_child_attempt(&initial.attempt_id)
+                .unwrap()
+                .unwrap()
                 .mount_preparation_evidence,
             Some(evidence.clone())
         );
@@ -2403,7 +2445,8 @@ mod tests {
         conn.execute(
             "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
             params![initial.attempt_id, encoded],
-        ).unwrap();
+        )
+        .unwrap();
         assert!(RuntimeDb::open_existing_current(&path).is_err());
 
         let mut legacy = evidence;
@@ -2412,7 +2455,8 @@ mod tests {
         conn.execute(
             "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
             params![initial.attempt_id, encoded],
-        ).unwrap();
+        )
+        .unwrap();
         assert!(RuntimeDb::open_existing_current(&path).is_err());
     }
 
@@ -2426,33 +2470,48 @@ mod tests {
             let db = RuntimeDb::open(&path).unwrap();
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
-            db.bind_scoped_child_scope(&initial.attempt_id, &recovery).unwrap();
-            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
+            db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
                 .unwrap();
+            db.attach_scoped_child_process(
+                &initial.attempt_id,
+                &identity,
+                &mount_evidence(&identity),
+            )
+            .unwrap();
             let mut former = serde_json::to_value(mount_evidence(&identity)).unwrap();
             former["schema"] = serde_json::json!(2);
-            former.as_object_mut().unwrap().remove("prepared_directory_sources");
+            former
+                .as_object_mut()
+                .unwrap()
+                .remove("prepared_directory_sources");
             former_bytes = lillux::canonical_json(&former).unwrap();
             db.conn.execute(
                 "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
                 params![initial.attempt_id, former_bytes],
             ).unwrap();
-            db.conn.pragma_update(
-                None,
-                "application_id",
-                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
-            ).unwrap();
+            db.conn
+                .pragma_update(
+                    None,
+                    "application_id",
+                    RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+                )
+                .unwrap();
         }
         let error = RuntimeDb::open_existing_current(&path).err().unwrap();
         let message = format!("{error:#}");
-        assert!(message.contains("explicit no-backcompat reset"), "{message}");
+        assert!(
+            message.contains("explicit no-backcompat reset"),
+            "{message}"
+        );
         assert!(message.contains("stored schema_epoch=70"), "{message}");
         let conn = rusqlite::Connection::open(&path).unwrap();
-        let retained: String = conn.query_row(
-            "SELECT mount_preparation_evidence FROM scoped_child_attempt WHERE attempt_id=?1",
-            [&initial.attempt_id],
-            |row| row.get(0),
-        ).unwrap();
+        let retained: String = conn
+            .query_row(
+                "SELECT mount_preparation_evidence FROM scoped_child_attempt WHERE attempt_id=?1",
+                [&initial.attempt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(retained, former_bytes);
     }
 

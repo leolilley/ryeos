@@ -111,6 +111,10 @@ for path in "$root"/Dockerfile*; do
     if ! grep -Fq './scripts/populate-bundles.sh' <<<"$instructions"; then
         continue
     fi
+    if ! grep -Eqi '^run apt-get .* install .* python3-cryptography([[:space:]]|$)' <<<"$instructions"; then
+        echo "$(basename "$path") publishes bundles without the signed payload verifier's Python dependency" >&2
+        exit 1
+    fi
     for required in \
         'cp -a bundles .bundles-writable' \
         'rm -rf bundles' \

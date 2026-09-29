@@ -14702,40 +14702,61 @@ impl StateStore {
     pub(crate) fn qualification_termination_operation(
         &self,
         operation_id: &str,
-    ) -> Result<Option<runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationRecord>> {
-        self.lock()?.runtime_db.qualification_termination_operation(operation_id)
+    ) -> Result<
+        Option<
+            runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationRecord,
+        >,
+    > {
+        self.lock()?
+            .runtime_db
+            .qualification_termination_operation(operation_id)
     }
 
     pub(crate) fn reserve_qualification_termination(
         &self,
         intent: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationIntent,
-    ) -> Result<runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationRecord> {
+    ) -> Result<
+        runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationRecord,
+    > {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?.runtime_db.reserve_qualification_termination(intent)
+        self.lock()?
+            .runtime_db
+            .reserve_qualification_termination(intent)
     }
 
     pub(crate) fn claim_qualification_termination_attempt(
         &self,
         operation_id: &str,
-    ) -> Result<runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationClaim> {
+    ) -> Result<runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationClaim>
+    {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?.runtime_db.claim_qualification_termination_attempt(operation_id)
+        self.lock()?
+            .runtime_db
+            .claim_qualification_termination_attempt(operation_id)
     }
 
     pub(crate) fn bind_qualification_terminal_observation(
         &self,
         observation: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminalObservation,
-    ) -> Result<runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationRecord> {
+    ) -> Result<
+        runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationRecord,
+    > {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?.runtime_db.bind_qualification_terminal_observation(observation)
+        self.lock()?
+            .runtime_db
+            .bind_qualification_terminal_observation(observation)
     }
 
     pub(crate) fn quarantine_qualification_termination_attempt(
         &self,
         operation_id: &str,
-    ) -> Result<runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationRecord> {
+    ) -> Result<
+        runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationRecord,
+    > {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?.runtime_db.quarantine_qualification_termination_attempt(operation_id)
+        self.lock()?
+            .runtime_db
+            .quarantine_qualification_termination_attempt(operation_id)
     }
 
     pub(crate) fn reserve_snapshot_qualification(

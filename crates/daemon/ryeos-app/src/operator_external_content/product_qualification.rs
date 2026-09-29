@@ -995,6 +995,8 @@ pub(super) fn resolve_current_bundle_consumer_definitions(
 /// Admit the exact signed consumer Worker source against the policy's
 /// same-generation definition coordinates. This binds the source-derived D0
 /// but deliberately does not attest the environment, product or runtime.
+/// Component tests use this standalone path; production stages the full closure.
+#[cfg(test)]
 pub(super) fn admit_current_bundle_consumer_worker(
     state: &AppState,
     policy_source: &ProductQualificationPolicySource,
@@ -1052,9 +1054,13 @@ pub(super) struct AdmittedBundleConsumerEnvironment {
     pub realized_effective_definition_digest: String,
 }
 
+/// Standalone stage for component tests; production stages Worker and environment
+/// together.
+#[cfg(test)]
 pub(super) struct PreparedBundleConsumerEnvironment {
     admitted: AdmittedBundleConsumerEnvironment,
-    publication: Option<ryeos_state::PendingCasPublication>,
+    /// Keep the staged CAS roots alive while the test inspects admitted content.
+    _publication: Option<ryeos_state::PendingCasPublication>,
 }
 
 /// Proof inputs for a direct verifier, not a runnable Worker. The source and
@@ -1251,21 +1257,14 @@ fn exact_runtime_member_hash(
     Ok(member)
 }
 
+#[cfg(test)]
 impl PreparedBundleConsumerEnvironment {
     pub fn admitted(&self) -> &AdmittedBundleConsumerEnvironment {
         &self.admitted
     }
-
-    /// The owner retaining the qualification purpose must finish these CAS
-    /// roots. Definition admission alone does not own that publication.
-    pub fn publish(self) -> anyhow::Result<AdmittedBundleConsumerEnvironment> {
-        if let Some(publication) = self.publication {
-            publication.publish()?;
-        }
-        Ok(self.admitted)
-    }
 }
 
+#[cfg(test)]
 pub(super) fn prepare_current_bundle_consumer_environment(
     state: &AppState,
     policy_source: &ProductQualificationPolicySource,
@@ -1292,7 +1291,7 @@ pub(super) fn prepare_current_bundle_consumer_environment(
             realizations,
             realized_effective_definition_digest,
         },
-        publication,
+        _publication: publication,
     }))
 }
 
