@@ -256,7 +256,12 @@ pub fn finalize_pinned_qualification_launch(
         &prepared.policy_source.policy.verifier_parameters,
         CurrentVerifierContext {
             content: CurrentVerifierContent::Root(Some(&retained)),
-            logical_project_root: Some(project_root),
+            // Plan identity uses the same stable root as the admitted direct
+            // execution closure. `project_root` remains the exact materialized
+            // snapshot used for source and binding admission above.
+            logical_project_root: Some(Path::new(
+                ryeos_state::objects::ADMITTED_DIRECT_PROJECT_ROOT,
+            )),
             binding_subject_authority: Some(&plan_context.subject_resolution_authority),
             sealed_request: None,
             project_context_resolver: None,
