@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T01:49:27Z:00d29c5f79fe649a0cf1865f6c700aa617410a7b370eb50e38dc097bb7ed3fbe:14DCIP81SqgsV5M78f8thh3A3r1LHfdybHURVFNYZcPdIHI3nC+LzCtasPWisKFqyTKmZLe3Nflf4tCyiCPvAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T15:17:32Z:cf6bb9716cca2385d2e4f34d15aa776247391618466ece0188d55bf78b3af814:OMV/Gz4GYF7uOXhxL7asmB9PgvKC/MFTSBRbmUbKPLfiyFY9XAqjLEVpotkIn5NZf5LNiSTnU7RVJiey2RAFCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.32.0"
+version: "1.33.0"
 ```
 
 # Source-Local Bundle Development
@@ -49,6 +49,48 @@ below retains its original scope; it does not prove this source generation
 installed, qualified, calibrated or activated. Requalify changed checker/policy
 identities against retained subjects and reassess dependent release closure
 eligibility. Unchanged subject bytes alone do not require a rebuild.
+
+### Two signed static-input profiles, disposable-node proof — 2026-09-30
+
+The A and B source profiles have now each produced a captured product and an
+authority-issued qualification on separate disposable nodes. Both capsules
+name the same signed verifier source-content digest
+`0a58066032b2bbb6a9e24536be0ea7f30c64d11f48493dc40d9125f5296efc5f`.
+Their signed policy definition digests differ: A
+`8c3ebbcabfaf71430c36083d318cac70ccece2dab52d83a64c793ebe8695ddef`,
+B `0ea2da773cde1fcead2852e22a2077fa5f8d4b036778c53f74f86c1904a659e6`.
+The complete exact-program hashes differ because selected subject and policy
+parameters are part of that identity; identical checker source does not imply
+identical admitted execution.
+
+| Profile | Exact subject manifest | Captured witness | Issued qualification |
+| --- | --- | --- | --- |
+| A, 11 files / 9,989,612 bytes | `e16652fd10ff718182fe2b09fd8a4c913fc8c994baacf833e3e6a29a69750ebf` | `604a16cd72af3c6d6aecfea3e95dae015217929da723bc9c039137e6beace785` | `889f29f22efb6a907bf60d61f2d00131bfa685cb0f49b1bbec667eebf0ee31c3` |
+| B, 12 files / 9,990,972 bytes | `2d949d2079ffa86459ccba2960b73332893aa9adebb0fb65b1f9e4d0576b5ff1` | `8eff4fe35af8654236e5965cd28e93c5695d06ef68c811cc97ed0fc08bf8c26c` | `adbba4cdd6f6b91abe6ecd75e6375e2be82c37b4781bc96bbc9703c30c2689c4` |
+
+Each capsule binds a fresh completed protected verifier thread, exact pinned
+project snapshot, and `trusted_process_group_absent` settlement. Each reports
+`compiler_execution_proven: false`: this is an independent checksum-closure
+qualification, not native compiler execution or bundle release. The B run
+used the corrected A daemon with the signed B candidate data; do not call it
+a coherent rebuilt B host package. The B signed overlay and checker are now
+retained in `tests/fixtures/static-link-inputs-b/`; its real 12-file export
+passed signature, producer-copy, and verifier-inventory checks, including A
+profile rejection. Actual `native-build` and `core-seed-build` consumers each
+require Python, platform, Cargo-vendor and static-link-inputs selections, so
+positive A/B consumer admission and swapped/stale rejection remain open.
+
+The isolated qualification rehearsal branch joined the original source cut
+with committed `next` tip `4c5e9305f` at `5450b0b5a`. The operational A daemon
+and signed bundle set still come from the earlier pinned `ce23b1749` source;
+the merged generation has passed format, focused contract compilation and the
+B fixture check, but has not been rebuilt, signed, installed or qualified.
+The real release-authority node remains stopped on runtime schema epoch
+71-to-78 incompatibility. The read-only exact-epoch reset preview identified
+12 thread-chain heads and 36 chain artifacts for retirement while preserving
+project HEADs; authorization to retire that live history is pending. No real
+release qualification, publication, transfer, activation or recovery claim
+follows from these disposable proofs.
 
 The original local command, state-root, signing, and bundle-smoke workflow is
 implemented. The project-bundle and development-realization sections below
