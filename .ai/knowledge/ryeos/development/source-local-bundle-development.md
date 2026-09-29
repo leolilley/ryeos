@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T15:17:32Z:cf6bb9716cca2385d2e4f34d15aa776247391618466ece0188d55bf78b3af814:OMV/Gz4GYF7uOXhxL7asmB9PgvKC/MFTSBRbmUbKPLfiyFY9XAqjLEVpotkIn5NZf5LNiSTnU7RVJiey2RAFCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T16:03:09Z:fd70ccb1212d79ea4dbc4d832f73707c7c8c28122bb510919bd4c97e465230ea:IZL2wdZx0OCrdLIHA8whKTF/mKQOn6YDAUnpYeL8KM3MwBv+krhgyIPVNIPxkqlilP6ECKk/IefWasnT1Q4sDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.33.0"
+version: "1.33.1"
 ```
 
 # Source-Local Bundle Development
@@ -83,8 +83,16 @@ positive A/B consumer admission and swapped/stale rejection remain open.
 The isolated qualification rehearsal branch joined the original source cut
 with committed `next` tip `4c5e9305f` at `5450b0b5a`. The operational A daemon
 and signed bundle set still come from the earlier pinned `ce23b1749` source;
-the merged generation has passed format, focused contract compilation and the
-B fixture check, but has not been rebuilt, signed, installed or qualified.
+the merged generation has passed format, focused contract compilation, the
+B fixture check, and release-mode `cargo check` for `ryeos-app` and `ryeos-api`.
+It has not been rebuilt as a daemon, signed, installed or qualified. The
+disposable A node refused composition of only the qualified static-input
+selection for `native-build`: its signed Graph requires all four slots, and
+no consumer binding or build resulted. An epoch-71 recovery daemon probe from
+clean source `5cc0b240a` was interrupted during Thin LTO at the shared disk
+floor; it produced no binary. The real node's runtime database was copied
+byte-for-byte for offline recovery inspection, but no recovery or reset has
+occurred.
 The real release-authority node remains stopped on runtime schema epoch
 71-to-78 incompatibility. The read-only exact-epoch reset preview identified
 12 thread-chain heads and 36 chain artifacts for retirement while preserving
