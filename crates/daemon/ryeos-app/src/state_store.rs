@@ -14628,6 +14628,53 @@ impl StateStore {
             )
     }
 
+    pub(crate) fn snapshot_bootstrap_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<runtime_db::runtime_snapshot_bootstrap::SnapshotBootstrapRecord>> {
+        self.lock()?
+            .runtime_db
+            .snapshot_bootstrap_operation(operation_id)
+    }
+
+    pub(crate) fn reserve_snapshot_bootstrap(
+        &self,
+        intent: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapIntent,
+    ) -> Result<runtime_db::runtime_snapshot_bootstrap::SnapshotBootstrapRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.reserve_snapshot_bootstrap(intent)
+    }
+
+    pub(crate) fn claim_snapshot_bootstrap_attempt(
+        &self,
+        operation_id: &str,
+    ) -> Result<runtime_db::runtime_snapshot_bootstrap::SnapshotBootstrapAttemptClaim> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .claim_snapshot_bootstrap_attempt(operation_id)
+    }
+
+    pub(crate) fn bind_snapshot_bootstrap_occurrence(
+        &self,
+        occurrence: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapOccurrence,
+    ) -> Result<runtime_db::runtime_snapshot_bootstrap::SnapshotBootstrapRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .bind_snapshot_bootstrap_occurrence(occurrence)
+    }
+
+    pub(crate) fn quarantine_snapshot_bootstrap_attempt(
+        &self,
+        operation_id: &str,
+    ) -> Result<runtime_db::runtime_snapshot_bootstrap::SnapshotBootstrapRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .quarantine_snapshot_bootstrap_attempt(operation_id)
+    }
+
     /// The snapshot producer retains its one-attempt journal independently of
     /// any later execution placement. No state lock is held across contact.
     pub(crate) fn reserve_runtime_snapshot(
