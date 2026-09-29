@@ -29,15 +29,6 @@ and node fingerprint
 The daemon logged startup ready and the public readiness endpoint returned
 HTTP 200. No Codex turn or Render guest was launched by this deployment.
 
-An authenticated SSH attempt against the live instance closed before opening
-a shell. The v0.5.102 image has Debian's locked root account and no root SSH
-directory, so the target-local operator cannot yet mint an admission token or
-install an origin-bound configured-operator grant. The next image contains a
-generic container maintenance-account correction; it is not deployed here.
-One-off jobs cannot repair or bootstrap this state because Render runs them
-without the service's persistent disk. Do not treat the public readiness check
-as evidence of operator admission.
-
 ## Current qualification boundary
 
 The signed `render-sandbox` provider specification still declares
