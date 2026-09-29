@@ -22,6 +22,30 @@ pub struct MaterializationSignedItem {
     /// Hash of the whole signed source envelope, retained as a CAS blob.
     pub signed_blob_hash: String,
     pub raw_content_digest: String,
+    pub signature_envelope: MaterializationSignatureEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterializationSignatureEnvelope {
+    pub prefix: String,
+    pub suffix: Option<String>,
+    pub after_shebang: bool,
+}
+
+impl MaterializationSignatureEnvelope {
+    fn validate(&self) -> anyhow::Result<()> {
+        let valid = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 16
+                && value.bytes().all(|byte| byte.is_ascii_graphic())
+                && !value.contains("ryeos:signed")
+        };
+        if !valid(&self.prefix) || self.suffix.as_deref().is_some_and(|suffix| !valid(suffix)) {
+            anyhow::bail!("guest-runtime materialization signature envelope is invalid");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +163,7 @@ impl GuestRuntimeMaterializationSourceEvidence {
             ] {
                 require_hash(label, hash)?;
             }
+            item.signature_envelope.validate()?;
             let key = (item.resolved_ref.as_str(), item.bundle_name.as_str());
             if previous_item.is_some_and(|previous| previous >= key) {
                 anyhow::bail!(
@@ -366,6 +391,11 @@ mod tests {
                 signer_fingerprint: fingerprint.clone(),
                 signed_blob_hash: hash('b'),
                 raw_content_digest: hash('c'),
+                signature_envelope: MaterializationSignatureEnvelope {
+                    prefix: "#".to_owned(),
+                    suffix: None,
+                    after_shebang: false,
+                },
             }],
             signed_bundle_manifests: vec![MaterializationSignedBundleManifest {
                 bundle_name: "codex".to_owned(),

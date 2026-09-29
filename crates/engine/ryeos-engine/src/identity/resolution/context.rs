@@ -462,6 +462,8 @@ pub(crate) struct RawLoadedItem {
     pub source_root: ItemSourceRoot,
     pub winner_ai_root: PathBuf,
     pub matched_ext: String,
+    /// Exact checked-generation signature embedding used for this source.
+    pub signature_envelope: crate::contracts::SignatureEnvelope,
     pub trust_class: TrustClass,
     pub signer_fingerprint: Option<String>,
     /// Original file content (signature intact) — the parser's input.
@@ -608,6 +610,7 @@ pub(crate) fn load_item_raw(
         source_root: result.winner_root_identity,
         winner_ai_root: result.winner_ai_root,
         matched_ext: result.matched_ext,
+        signature_envelope: source_format.signature.clone(),
         trust_class,
         signer_fingerprint,
         content,

@@ -302,24 +302,106 @@ pub fn capture_signed_bundle_source_manifest(
             signature.signer_fingerprint
         )));
     }
-    let body = lillux::signature::strip_signature_lines(&raw);
+    let (body, canonical_header) = lillux::signature::strip_canonical_signature_with_envelope(
+        raw, "#", None, false,
+    )
+    .map_err(|error| {
+        EngineError::Internal(format!(
+            "runtime source-bundle manifest has a noncanonical signature envelope: {error}"
+        ))
+    })?;
+    if canonical_header
+        .as_ref()
+        .map(|header| header.signer_fingerprint.as_str())
+        != Some(signature.signer_fingerprint.as_str())
+    {
+        return Err(EngineError::Internal(
+            "runtime source-bundle manifest signature changed during canonical recheck".into(),
+        ));
+    }
+    let identity = validate_runtime_source_bundle_manifest_body(
+        &body,
+        expected_name,
+        &signature.signer_fingerprint,
+        &manifest_path.display().to_string(),
+    )?;
+    Ok(CapturedSignedBundleManifest {
+        identity,
+        signed_bytes,
+    })
+}
+
+/// Recheck historical signed Bundle bytes without consulting the current
+/// installed Bundle or treating the supplied key as fresh publisher authority.
+/// The caller must authenticate node testimony that this exact key was
+/// admitted under the checked generation named by that testimony.
+pub fn verify_retained_signed_bundle_manifest_bytes(
+    signed_bytes: &[u8],
+    expected_name: &str,
+    expected_signer: &str,
+    verifier: &lillux::crypto::VerifyingKey,
+) -> Result<SignedBundleManifestIdentity, EngineError> {
+    if signed_bytes.len() as u64 > crate::config_loading::MAX_BUNDLE_MANIFEST_BYTES {
+        return Err(EngineError::Internal(
+            "retained signed Bundle manifest exceeds its byte limit".into(),
+        ));
+    }
+    let signed = std::str::from_utf8(signed_bytes).map_err(|error| {
+        EngineError::Internal(format!("retained Bundle manifest is not UTF-8: {error}"))
+    })?;
+    let (body, header) =
+        lillux::signature::strip_canonical_signature_with_envelope(signed, "#", None, false)
+            .map_err(|error| {
+                EngineError::Internal(format!("retained Bundle signature envelope: {error}"))
+            })?;
+    let header = header.ok_or_else(|| {
+        EngineError::Internal("retained Bundle manifest has no canonical signature".into())
+    })?;
+    if lillux::crypto::fingerprint(verifier) != expected_signer
+        || !lillux::signature::is_valid_signature_for(
+            &header.content_hash,
+            &header.signature_b64,
+            &header.signer_fingerprint,
+            &body,
+            verifier,
+            expected_signer,
+        )
+    {
+        return Err(EngineError::Internal(
+            "retained Bundle manifest signature differs from historical verifier".into(),
+        ));
+    }
+    validate_runtime_source_bundle_manifest_body(
+        &body,
+        expected_name,
+        expected_signer,
+        "retained CAS",
+    )
+}
+
+fn validate_runtime_source_bundle_manifest_body(
+    body: &str,
+    expected_name: &str,
+    signer_fingerprint: &str,
+    source_description: &str,
+) -> Result<SignedBundleManifestIdentity, EngineError> {
     let manifest_value: serde_yaml::Value = serde_yaml::from_str(&body).map_err(|error| {
         EngineError::Internal(format!(
             "parse runtime source-bundle manifest {}: {error}",
-            manifest_path.display()
+            source_description
         ))
     })?;
     let manifest_mapping = manifest_value.as_mapping().ok_or_else(|| {
         EngineError::Internal(format!(
             "runtime source-bundle manifest must contain a YAML mapping: {}",
-            manifest_path.display()
+            source_description
         ))
     })?;
     for required in ["name", "version", "provides_kinds", "requires_kinds"] {
         if !manifest_mapping.contains_key(serde_yaml::Value::String(required.to_string())) {
             return Err(EngineError::Internal(format!(
                 "runtime source-bundle manifest is not ryeos.bundle-manifest/v1: missing required field {required:?} at {}",
-                manifest_path.display()
+                source_description
             )));
         }
     }
@@ -327,7 +409,7 @@ pub fn capture_signed_bundle_source_manifest(
         serde_yaml::from_value(manifest_value).map_err(|error| {
             EngineError::Internal(format!(
                 "runtime source-bundle manifest is not the current closed schema at {}: {error}",
-                manifest_path.display()
+                source_description
             ))
         })?;
     if manifest.name != expected_name {
@@ -339,7 +421,7 @@ pub fn capture_signed_bundle_source_manifest(
     manifest.runtime_authority.validate().map_err(|error| {
         EngineError::Internal(format!(
             "runtime source-bundle manifest has invalid runtime_authority at {}: {error}",
-            manifest_path.display()
+            source_description
         ))
     })?;
     let mut backend_ids = std::collections::BTreeSet::new();
@@ -387,16 +469,13 @@ pub fn capture_signed_bundle_source_manifest(
             )));
         }
     }
-    Ok(CapturedSignedBundleManifest {
-        identity: SignedBundleManifestIdentity {
-            name: manifest.name,
-            body_digest: lillux::sha256_hex(body.as_bytes()),
-            signer_fingerprint: signature.signer_fingerprint,
-            provides_kinds: manifest.provides_kinds,
-            requires_kinds: manifest.requires_kinds,
-            uses_kinds: manifest.uses_kinds,
-        },
-        signed_bytes,
+    Ok(SignedBundleManifestIdentity {
+        name: manifest.name,
+        body_digest: lillux::sha256_hex(body.as_bytes()),
+        signer_fingerprint: signer_fingerprint.to_owned(),
+        provides_kinds: manifest.provides_kinds,
+        requires_kinds: manifest.requires_kinds,
+        uses_kinds: manifest.uses_kinds,
     })
 }
 
@@ -1473,6 +1552,44 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn retained_bundle_bytes_receive_full_current_manifest_validation() {
+        let key = test_signing_key();
+        let fingerprint = lillux::crypto::fingerprint(&key.verifying_key());
+        let valid = lillux::signature::sign_content_at(
+            "name: codex\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n",
+            &key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
+        let identity = verify_retained_signed_bundle_manifest_bytes(
+            valid.as_bytes(),
+            "codex",
+            &fingerprint,
+            &key.verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(identity.name, "codex");
+
+        let incomplete = lillux::signature::sign_content_at(
+            "name: codex\nversion: 1.0.0\n",
+            &key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
+        assert!(
+            verify_retained_signed_bundle_manifest_bytes(
+                incomplete.as_bytes(),
+                "codex",
+                &fingerprint,
+                &key.verifying_key(),
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn widen_trusted_bundle_stays_trusted_bundle() {

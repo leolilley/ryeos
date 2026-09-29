@@ -1819,7 +1819,8 @@ mod tests {
                 "bundle_name": "codex",
                 "signer_fingerprint": signer,
                 "signed_blob_hash": signed_item,
-                "raw_content_digest": h("bb")
+                "raw_content_digest": h("bb"),
+                "signature_envelope": {"prefix": "#", "suffix": null, "after_shebang": false}
             }],
             "signed_bundle_manifests": [{
                 "bundle_name": "codex",
