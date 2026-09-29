@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T16:03:09Z:fd70ccb1212d79ea4dbc4d832f73707c7c8c28122bb510919bd4c97e465230ea:IZL2wdZx0OCrdLIHA8whKTF/mKQOn6YDAUnpYeL8KM3MwBv+krhgyIPVNIPxkqlilP6ECKk/IefWasnT1Q4sDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T16:28:13Z:9c6f61051461fde6227b3947167514ba63fd86389ee4422d73cf622a0c236c55:wq6etJbsBbH6mrx6x9+4QUZu9PdTPzz4/qDK6jGs/tVr18rBmhJZOvL8EkcoLh8MyMTnPQiwAZzIYYhEcsM1BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.33.1"
+version: "1.33.2"
 ```
 
 # Source-Local Bundle Development
@@ -62,6 +62,16 @@ B `0ea2da773cde1fcead2852e22a2077fa5f8d4b036778c53f74f86c1904a659e6`.
 The complete exact-program hashes differ because selected subject and policy
 parameters are part of that identity; identical checker source does not imply
 identical admitted execution.
+
+A direct comparison of the two retained verifier capsules also confirms one
+admitted checker implementation across the profiles: both bind executable
+content hash `1cc5c3f502179e2a4befae29658fb109102effefc75742893aa4a449fd3fbb03`,
+the same signed Tool source identity, runtime identity and protocol identity.
+They are distinct protected executions. Their admitted parameter digests,
+execution-plan hashes, exact-program hashes, terminal snapshots and settlement
+witnesses differ with the profile, subject and node. This is evidence that the
+checker artifact was reused under changed signed data, not that an earlier
+verifier run or its qualification was reused.
 
 | Profile | Exact subject manifest | Captured witness | Issued qualification |
 | --- | --- | --- | --- |
