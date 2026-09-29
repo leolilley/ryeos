@@ -1055,11 +1055,11 @@ pub enum LifecycleAdapterRequest {
         /// Its descriptor coordinates are identifiers, not adapter or guest
         /// process file descriptors. The importer must remap them only after
         /// exact package verification and private staging.
-        guest_input_projection: ExternalGuestInputProjection,
+        guest_input_projection: Box<ExternalGuestInputProjection>,
         guest_package: LifecycleGuestPackageDelivery,
         /// Carried separately from package bytes. The guest must still join
         /// this against independently retained placement before import.
-        import_ticket: staging_package::GuestImportTicket,
+        import_ticket: Box<staging_package::GuestImportTicket>,
     },
     ReconcileSupervisorActivation {
         common: LifecycleOperationCommon,
@@ -2648,9 +2648,9 @@ mod tests {
             occurrence,
             activation,
             guest_input_identity,
-            guest_input_projection,
+            guest_input_projection: Box::new(guest_input_projection),
             guest_package: package,
-            import_ticket: ticket,
+            import_ticket: Box::new(ticket),
         };
         request.validate().unwrap();
         let encoded = request.canonical_bytes().unwrap();

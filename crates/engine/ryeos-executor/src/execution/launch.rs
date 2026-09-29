@@ -6015,7 +6015,7 @@ async fn run_claimed_thread_row(
     // Existing-row paths (native resume/reconcile and rows created by their
     // dedicated lifecycle) must recompute launch authority for every attempt.
     // No persisted runtime data or admission output is accepted here.
-    let authority = match prepare_managed_launch_authority(
+    let mut authority = match prepare_managed_launch_authority(
         &params,
         &thread.thread_id,
         Some(&persisted_metadata),
@@ -6045,6 +6045,35 @@ async fn run_claimed_thread_row(
             return Err(error);
         }
     };
+    // An existing row retains its execution realization, but the selected
+    // resource handle is process-local. Re-select under current admission and
+    // verify against the sealed realization before the recovered process can
+    // spawn. Never infer resource authority merely from the retained hash.
+    let selected_resources = params
+        .state
+        .execution_resources
+        .select(authority.prepared_launch.target_requirement.as_ref())
+        .map_err(BuildAndLaunchError::Internal)?;
+    let verified = super::execution_realization::admit_or_verify(
+        params.state,
+        &persisted_metadata,
+        authority.effective_program.resolution(),
+        authority
+            .effective_program
+            .effective_definition_digest()
+            .as_str(),
+        &authority.selected_runtime.canonical_ref.to_string(),
+        &authority.selected_runtime.raw_content_digest,
+        selected_resources.selections(),
+        None,
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
+    if persisted_metadata.execution_realization_hash.as_deref() != Some(verified.hash.as_str()) {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "existing managed row resource selection differs from retained execution realization"
+        )));
+    }
+    authority.selected_resources = Some(selected_resources);
     run_claimed_thread_row_with_authority(
         params,
         thread,

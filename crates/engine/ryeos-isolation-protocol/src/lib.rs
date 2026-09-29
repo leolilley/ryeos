@@ -1618,12 +1618,12 @@ impl AdapterLaunchRequest {
                 "adapter descriptor overlaps stdio or another isolation protocol role",
             ));
         }
-        if let Some(transfer_fd) = self.loopback_transfer_fd {
-            if transfer_fd <= 2 || !descriptors.insert(transfer_fd) {
-                return Err(ProtocolValidationError::new(
-                    "loopback transfer descriptor overlaps stdio or another protocol role",
-                ));
-            }
+        if let Some(transfer_fd) = self.loopback_transfer_fd
+            && (transfer_fd <= 2 || !descriptors.insert(transfer_fd))
+        {
+            return Err(ProtocolValidationError::new(
+                "loopback transfer descriptor overlaps stdio or another protocol role",
+            ));
         }
         if let AdapterLaunchLifecycle::AwaitAttachment {
             release_fd,

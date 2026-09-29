@@ -652,8 +652,8 @@ fn verify_signed_import_handoff(
             && authorization.attachment_deadline_ms == activation.attachment_deadline_ms
             && authorization.base_snapshot_hash
                 == guest_input_projection.base_snapshot.snapshot_hash
-            && authorization.guest_inputs == *guest_input_projection
-            && authorization.ticket == *import_ticket
+            && authorization.guest_inputs == **guest_input_projection
+            && authorization.ticket == **import_ticket
             && authorization.ticket.guest_input_identity == *guest_input_identity
             && authorization.ticket.payload_sha256 == guest_package.payload_sha256
             && authorization.ticket.manifest_sha256 == guest_package.manifest_sha256
@@ -1723,9 +1723,9 @@ mod offline_fixture_tests {
             occurrence: occurrence.clone(),
             activation: activation.clone(),
             guest_input_identity: input_identity,
-            guest_input_projection: inputs.clone(),
+            guest_input_projection: Box::new(inputs.clone()),
             guest_package: package,
-            import_ticket: ticket.clone(),
+            import_ticket: Box::new(ticket.clone()),
         };
         request.validate().unwrap();
         let owner = SigningKey::from_bytes(&[41; 32]);

@@ -1033,7 +1033,7 @@ mod tests {
         )
         .unwrap();
         let response = RestoredVerifierAdapterResponse::Observed {
-            observation: RestoredVerifierAdapterObservation {
+            observation: Box::new(RestoredVerifierAdapterObservation {
                 schema: 1,
                 operation_id: request.intent.operation_id.clone(),
                 occurrence_id: request.occurrence.occurrence_id.clone(),
@@ -1043,7 +1043,7 @@ mod tests {
                 run_stream_sha256: parsed.response_sha256,
                 measurement: parsed.measurement,
                 contact_deadline_exceeded: false,
-            },
+            }),
         };
         response.validate_for(&request).unwrap();
         let mut changed = request.clone();
