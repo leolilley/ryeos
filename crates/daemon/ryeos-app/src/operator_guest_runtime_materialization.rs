@@ -233,9 +233,9 @@ fn signed_recipe_source_set_digest(sources: &[CapturedSignedBundleItemSource]) -
     }
     entries.sort_by(|left, right| (&left.0, &left.1, &left.2).cmp(&(&right.0, &right.1, &right.2)));
     ensure!(
-        entries.windows(2).all(
-            |pair| (&pair[0].0, &pair[0].1, &pair[0].2) != (&pair[1].0, &pair[1].1, &pair[1].2)
-        ),
+        entries
+            .windows(2)
+            .all(|pair| (&pair[0].0, &pair[0].1) != (&pair[1].0, &pair[1].1)),
         "materialization signed recipe source set has duplicate identities"
     );
     let entries: Vec<_> = entries.into_iter().map(|(_, _, _, entry)| entry).collect();
@@ -468,6 +468,7 @@ mod tests {
         );
         assert!(signed_recipe_source_set_digest(&[first.clone(), first.clone()]).is_err());
         let replaced = source("config:codex/first", b"different signed first");
+        assert!(signed_recipe_source_set_digest(&[first.clone(), replaced.clone()]).is_err());
         assert_ne!(
             signed_recipe_source_set_digest(&[replaced, second.clone()]).unwrap(),
             expected

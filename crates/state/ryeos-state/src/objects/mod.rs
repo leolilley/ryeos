@@ -41,6 +41,7 @@ pub mod external_content_activation;
 pub mod external_content_binding;
 pub mod external_content_manifest;
 pub mod external_large_content_manifest;
+pub mod guest_runtime_materialization;
 pub mod item_source;
 pub mod live_input;
 pub mod persistent_session_capsule;
@@ -133,6 +134,12 @@ pub use external_large_content_manifest::{
     LARGE_CONTENT_CHUNK_BYTES, MAX_LARGE_CONTENT_CHUNK_BYTES, MAX_LARGE_CONTENT_FILE_BYTES,
     MAX_LARGE_CONTENT_MANIFEST_BYTES, MAX_LARGE_CONTENT_MANIFEST_ENTRIES,
     MAX_LARGE_CONTENT_TOTAL_BYTES, MIN_LARGE_CONTENT_CHUNK_BYTES, load_if_large_content_manifest,
+};
+pub use guest_runtime_materialization::{
+    GUEST_RUNTIME_MATERIALIZATION_SCHEMA, GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
+    GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND, GuestRuntimeMaterializationSourceEvidence,
+    GuestRuntimeMaterializationSubject, MaterializationExecutorSource,
+    MaterializationSignedBundleManifest, MaterializationSignedItem,
 };
 pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};

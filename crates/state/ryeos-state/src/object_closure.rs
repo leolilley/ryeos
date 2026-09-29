@@ -1587,6 +1587,8 @@ mod tests {
             }),
             json!({"kind": "source_manifest"}),
             json!({"kind": "item_source"}),
+            json!({"kind": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND}),
+            json!({"kind": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND}),
         ] {
             assert!(
                 validate_current_object(&value).is_err(),
@@ -1782,6 +1784,125 @@ mod tests {
         .unwrap();
         let links = object_links(&attestation.to_value()).unwrap();
         assert_eq!(links.object_hashes, vec![subject]);
+    }
+
+    #[test]
+    fn guest_runtime_materialization_closure_is_narrow_and_typed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let signed_item = write_blob(&cas_root, b"signed recipe");
+        let signed_bundle = write_blob(&cas_root, b"signed Bundle manifest");
+        let signed_ref = write_blob(&cas_root, b"signed executor manifest ref");
+        let manifest_bytes = write_blob(&cas_root, b"canonical selected executor manifest");
+        let signed_sidecar = write_blob(&cas_root, b"signed selected ItemSource sidecar");
+        let payload = write_blob(&cas_root, b"exact guest owner executable");
+        let item_ref = "bin/x86_64-unknown-linux-gnu/owner";
+        let item_source = write_object(
+            &cas_root,
+            &json!({
+                "kind": "item_source",
+                "item_ref": item_ref,
+                "content_blob_hash": payload,
+                "integrity": "none",
+                "signature_info": null,
+                "mode": null
+            }),
+        );
+        let source = json!({
+            "schema": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SCHEMA,
+            "kind": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
+            "signed_recipe_items": [{
+                "resolved_ref": "config:codex/guest-owner-materialization",
+                "bundle_name": "codex",
+                "signer_fingerprint": h("aa"),
+                "signed_blob_hash": signed_item,
+                "raw_content_digest": h("bb")
+            }],
+            "signed_bundle_manifests": [{
+                "bundle_name": "codex",
+                "signer_fingerprint": h("cc"),
+                "signed_blob_hash": signed_bundle,
+                "body_digest": h("dd")
+            }],
+            "executor": {
+                "bundle_name": "codex",
+                "item_ref": item_ref,
+                "target_triple": "x86_64-unknown-linux-gnu",
+                "signer_fingerprint": h("ee"),
+                "signed_manifest_ref_blob_hash": signed_ref,
+                "manifest_object_blob_hash": manifest_bytes,
+                "item_source_object_hash": item_source,
+                "signed_sidecar_blob_hash": signed_sidecar,
+                "payload_blob_hash": payload
+            }
+        });
+        let source_hash = write_object(&cas_root, &source);
+        let runtime = write_object(
+            &cas_root,
+            &json!({
+                "kind": crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+                "schema": crate::objects::EXTERNAL_CONTENT_TREE_SCHEMA,
+                "entries": [],
+                "entry_count": 0,
+                "total_bytes": 0
+            }),
+        );
+        let subject = write_object(
+            &cas_root,
+            &json!({
+                "schema": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SCHEMA,
+                "kind": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND,
+                "coordinate_digest": h("ff"),
+                "runtime_manifest_hash": runtime,
+                "source_evidence_hash": source_hash
+            }),
+        );
+        let complete = collect_object_closure(&cas_root, [subject]).unwrap();
+        assert!(complete.is_complete(), "{complete:?}");
+        assert_eq!(complete.object_hashes.len(), 4);
+        assert_eq!(complete.blob_hashes.len(), 6);
+
+        let mut missing = source.clone();
+        missing["executor"]["signed_sidecar_blob_hash"] = json!(h("11"));
+        let missing_hash = write_object(&cas_root, &missing);
+        let missing_report = collect_object_closure(&cas_root, [missing_hash]).unwrap();
+        assert!(!missing_report.is_complete());
+        assert!(
+            missing_report
+                .missing_blobs
+                .iter()
+                .any(|entry| entry.hash == h("11"))
+        );
+
+        let mut wrong_ref = source;
+        wrong_ref["executor"]["item_ref"] = json!("bin/x86_64-unknown-linux-gnu/other");
+        let wrong_hash = write_object(&cas_root, &wrong_ref);
+        let wrong_report = collect_object_closure(&cas_root, [wrong_hash]).unwrap();
+        assert!(!wrong_report.is_complete());
+        assert!(
+            wrong_report
+                .malformed_objects
+                .iter()
+                .any(|entry| { entry.reason.contains("does not match embedded item_source") })
+        );
+
+        let wrong_subject = write_object(
+            &cas_root,
+            &json!({
+                "schema": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SCHEMA,
+                "kind": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND,
+                "coordinate_digest": h("ff"),
+                "runtime_manifest_hash": runtime,
+                "source_evidence_hash": runtime
+            }),
+        );
+        let wrong_kind_report = collect_object_closure(&cas_root, [wrong_subject]).unwrap();
+        assert!(!wrong_kind_report.is_complete());
+        assert!(wrong_kind_report.malformed_objects.iter().any(|entry| {
+            entry
+                .reason
+                .contains("expected kind guest_runtime_materialization_source")
+        }));
     }
 
     #[test]
