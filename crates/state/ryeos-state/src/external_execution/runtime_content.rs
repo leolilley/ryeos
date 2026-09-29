@@ -19,6 +19,7 @@ use crate::objects::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeContentRecordJoin {
     activation_receipt_hash: String,
+    activation_program_digest: String,
     binding_hash: String,
     consumer_ref: String,
     declaration_id: String,
@@ -89,6 +90,7 @@ impl RuntimeContentRecordJoin {
         );
         Ok(Self {
             activation_receipt_hash: activation_receipt_hash.to_owned(),
+            activation_program_digest: receipt.activation_program_digest.clone(),
             binding_hash: binding_hash.to_owned(),
             consumer_ref: expected_consumer_ref.to_owned(),
             declaration_id: expected_declaration_id.to_owned(),
@@ -103,6 +105,7 @@ impl RuntimeContentRecordJoin {
         crate::objects::canonical_value_digest(&serde_json::json!({
             "domain": "ryeos.runtime-content-record-join.v1",
             "activation_receipt_hash": self.activation_receipt_hash,
+            "activation_program_digest": self.activation_program_digest,
             "binding_hash": self.binding_hash,
             "consumer_ref": self.consumer_ref,
             "declaration_id": self.declaration_id,
@@ -115,6 +118,40 @@ impl RuntimeContentRecordJoin {
 
     pub fn manifest_hash(&self) -> &str {
         &self.manifest_hash
+    }
+
+    pub fn retained_subject(
+        &self,
+    ) -> Result<crate::external_content::qualification_subject::ContentQualificationSubject> {
+        let subject = crate::external_content::qualification_subject::ContentQualificationSubject {
+            schema:
+                crate::external_content::qualification_subject::CONTENT_QUALIFICATION_SUBJECT_SCHEMA,
+            activation_receipt_hash: self.activation_receipt_hash.clone(),
+            activation_program_digest: self.activation_program_digest.clone(),
+            binding_hash: self.binding_hash.clone(),
+            consumer_ref: self.consumer_ref.clone(),
+            declaration_id: self.declaration_id.clone(),
+            manifest_hash: self.manifest_hash.clone(),
+            manifest_kind: self.manifest_kind.clone(),
+            target_node_fingerprint: self.target_node_fingerprint.clone(),
+            realization: self.realization.clone(),
+        };
+        subject.validate()?;
+        Ok(subject)
+    }
+
+    /// A deserialized coordinate must be compared to a newly authenticated
+    /// record join. Matching its own hashes is never sufficient authority.
+    pub fn verify_retained_subject(
+        &self,
+        retained: &crate::external_content::qualification_subject::ContentQualificationSubject,
+    ) -> Result<()> {
+        retained.validate()?;
+        ensure!(
+            retained == &self.retained_subject()?,
+            "retained content subject differs from authenticated records"
+        );
+        Ok(())
     }
 }
 
@@ -238,6 +275,11 @@ mod tests {
         .unwrap();
         assert_eq!(joined.manifest_hash(), binding.manifest_hash);
         assert!(lillux::valid_hash(&joined.identity_digest().unwrap()));
+        let retained = joined.retained_subject().unwrap();
+        joined.verify_retained_subject(&retained).unwrap();
+        let mut changed = retained;
+        changed.activation_receipt_hash = "9".repeat(64);
+        assert!(joined.verify_retained_subject(&changed).is_err());
     }
 
     #[test]
