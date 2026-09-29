@@ -1817,10 +1817,26 @@ impl SealedRootExecutionRequest {
         // Validate the exact persisted invocation before rebinding its
         // disposable operational workspace.
         let mut request = self.restore(engine, capsule_root)?;
+        let protected_qualification = request
+            .root_admission
+            .as_ref()
+            .is_some_and(|admission| admission.product_qualification_purpose().is_some());
         let rebound_project_context = match provenance {
             crate::execution_provenance::ExecutionProvenance::Projectless { .. } => {
                 ProjectContext::None
             }
+            crate::execution_provenance::ExecutionProvenance::RootPinnedGeneration { .. }
+            | crate::execution_provenance::ExecutionProvenance::ChildPinnedGeneration { .. }
+            | crate::execution_provenance::ExecutionProvenance::ChildImmutableWorkspaceInput {
+                ..
+            } if protected_qualification => match &request.plan_context.project_context {
+                ProjectContext::SnapshotHash { hash }
+                    if provenance.pinned_snapshot_hash() == Some(hash.as_str()) =>
+                {
+                    ProjectContext::SnapshotHash { hash: hash.clone() }
+                }
+                _ => bail!("recovered qualification lost its sealed pinned snapshot context"),
+            },
             crate::execution_provenance::ExecutionProvenance::RootLiveProject { .. }
             | crate::execution_provenance::ExecutionProvenance::ChildLiveProject { .. }
             | crate::execution_provenance::ExecutionProvenance::RootPinnedGeneration { .. }

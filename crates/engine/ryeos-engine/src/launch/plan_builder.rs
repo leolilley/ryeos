@@ -1284,6 +1284,20 @@ fn build_plan_with_execution_root(
     // the complete meaning-blind implementation set those policies may name.
     let registry = RuntimeHandlerRegistry::with_builtins();
     let root_trust_class = widen_root_trust_class(item.trust_class, item.resolved.source_space);
+    // A pinned snapshot has a materialized execution root even though source
+    // lookup remains under its separate admitted project authority. Give the
+    // runtime compiler the same root already exposed in RYEOS_PROJECT_ROOT so
+    // cwd and typed project-path inputs can be relocated with the direct plan.
+    let runtime_execution_root = logical_project_root.unwrap_or_else(|| {
+        if matches!(
+            &ctx.project_context,
+            crate::contracts::ProjectContext::SnapshotHash { .. }
+        ) {
+            execution_project_root
+        } else {
+            project_root.as_deref()
+        }
+    });
     let spec = crate::runtime::compile_with_handlers_and_execution_root(
         &terminal.intermediates,
         &terminal.root_source_path,
@@ -1302,7 +1316,7 @@ fn build_plan_with_execution_root(
         root_trust_class,
         project_authority,
         sealed_content,
-        logical_project_root.unwrap_or(project_root.as_deref()),
+        runtime_execution_root,
     )?;
 
     // Step 5: Build plan node

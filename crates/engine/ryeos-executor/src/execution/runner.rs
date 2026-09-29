@@ -4127,6 +4127,31 @@ pub(crate) struct FinalizedDirectAdmission {
     source_policy: Option<ryeos_engine::launch::plan_builder::ExecutorSourcePolicyProjection>,
 }
 
+/// Concrete root used to compile an admitted direct plan before its paths are
+/// normalized into the portable execution closure. For a pinned snapshot this
+/// is the verified subject materialization, which can differ from the process
+/// input workspace selected later for a child or private execution.
+fn admitted_direct_project_root(params: &ExecutionParams) -> Result<Option<&Path>> {
+    match &params.resolved.plan_context.project_context {
+        ProjectContext::LocalPath { path } => Ok(Some(path.as_path())),
+        ProjectContext::SnapshotHash { hash } => {
+            let root = params.provenance.subject_effective_path();
+            anyhow::ensure!(
+                params.provenance.pinned_snapshot_hash() == Some(hash.as_str())
+                    && params
+                        .resolved
+                        .resolved_item
+                        .materialized_project_root
+                        .as_deref()
+                        == Some(root),
+                "pinned direct plan root differs from its verified subject materialization"
+            );
+            Ok(Some(root))
+        }
+        ProjectContext::None | ProjectContext::ProjectRef { .. } => Ok(None),
+    }
+}
+
 fn admitted_root_launch_metadata(
     state: &AppState,
     params: &ExecutionParams,
@@ -4211,12 +4236,7 @@ fn admitted_root_launch_metadata(
         executor_ref: Some(params.resolved.executor_ref.clone()),
         runtime_ref: Some(runtime_ref),
     };
-    let concrete_project_root = match &params.resolved.plan_context.project_context {
-        ProjectContext::LocalPath { path } => Some(path.as_path()),
-        ProjectContext::None
-        | ProjectContext::SnapshotHash { .. }
-        | ProjectContext::ProjectRef { .. } => None,
-    };
+    let concrete_project_root = admitted_direct_project_root(params)?;
     let admitted_project_root = prepared_plan.bind_logical_project_root(concrete_project_root)?;
     let admitted_artifact_identity =
         prepared_plan.admitted_artifact_identity(&params.resolved, protocol)?;
@@ -5076,15 +5096,20 @@ pub async fn run_and_wait(
     // copy executes against the concrete live or pinned workspace selected for
     // this launch. Rebind only typed/validated project paths after birth has
     // rooted the logical closure.
-    if matches!(
-        &params.resolved.plan_context.project_context,
-        ProjectContext::LocalPath { .. }
-    ) {
+    if admitted_direct_project_root(&params)
+        .map_err(|error| guard.fail_before_spawn(error))?
+        .is_some()
+    {
         let admitted_project_root =
             Path::new(ryeos_app::thread_lifecycle::ADMITTED_DIRECT_PROJECT_ROOT);
         prepared_plan
             .relocate_project_for_spawn(Some(admitted_project_root), Some(&effective_path))
             .map_err(|error| guard.fail_before_spawn(error.into()))?;
+    }
+    if matches!(
+        &params.resolved.plan_context.project_context,
+        ProjectContext::LocalPath { .. }
+    ) {
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: effective_path.clone(),
@@ -6147,15 +6172,20 @@ pub async fn run_detached(
             .bind_default_input_cwd_for_spawn(cwd)
             .map_err(|error| guard.fail_before_spawn(error))?;
     }
-    if matches!(
-        &params.resolved.plan_context.project_context,
-        ProjectContext::LocalPath { .. }
-    ) {
+    if admitted_direct_project_root(&params)
+        .map_err(|error| guard.fail_before_spawn(error))?
+        .is_some()
+    {
         let admitted_project_root =
             Path::new(ryeos_app::thread_lifecycle::ADMITTED_DIRECT_PROJECT_ROOT);
         prepared_plan
             .relocate_project_for_spawn(Some(admitted_project_root), Some(&effective_path))
             .map_err(|error| guard.fail_before_spawn(error.into()))?;
+    }
+    if matches!(
+        &params.resolved.plan_context.project_context,
+        ProjectContext::LocalPath { .. }
+    ) {
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: effective_path.clone(),
@@ -8665,6 +8695,11 @@ async fn run_existing_recovered_thread(
         params.provenance.project_authority(),
         ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
     ) && effective_path != params.provenance.effective_path()
+        && !params
+            .resolved
+            .root_admission
+            .as_ref()
+            .is_some_and(|admission| admission.product_qualification_purpose().is_some())
     {
         params.resolved.plan_context.project_context = ProjectContext::LocalPath {
             path: effective_path.clone(),
@@ -8715,10 +8750,8 @@ async fn run_existing_recovered_thread(
         .map_err(|error| guard.fail_before_spawn(error))?
         .ok_or_else(|| guard.fail_before_spawn(anyhow::anyhow!("state CAS root is unavailable")))?;
     let cas = lillux::CasStore::from_pinned_root(cas_directory);
-    let effective_project_root = match &params.resolved.plan_context.project_context {
-        ProjectContext::LocalPath { path } => Some(path.as_path()),
-        _ => None,
-    };
+    let effective_project_root =
+        admitted_direct_project_root(&params).map_err(|error| guard.fail_before_spawn(error))?;
     let mut prepared_plan = thread_lifecycle::PreparedItemPlan::recover_from_execution_closure(
         &admitted_capsule,
         &cas,
