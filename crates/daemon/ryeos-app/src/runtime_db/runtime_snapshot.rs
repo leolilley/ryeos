@@ -417,7 +417,9 @@ mod tests {
             adapter_artifact_hash: "4".repeat(64),
             provider_spec_digest: "d".repeat(64),
             settings_digest: "5".repeat(64),
-            product_witness_hash: "6".repeat(64),
+            source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "6".repeat(64),
+            },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
             controller_public_root: format!(

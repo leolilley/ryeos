@@ -409,10 +409,10 @@ fn retained_snapshot_creation(
     let creation: BoundSnapshotCreation =
         ryeos_external_execution_contract::from_json_slice_strict(&observation, 4096)?;
     ensure!(
-        creation.schema == 1
+        creation.schema == 2
             && creation.operation_id == intent.operation_id
             && creation.intent_digest == intent.digest()?
-            && creation.product_witness_hash == intent.product_witness_hash
+            && creation.source == intent.source
             && creation.guest_runtime_manifest_hash == intent.guest_runtime_manifest_hash
             && creation.controller_public_root == intent.controller_public_root
             && creation.owner_executable_sha256 == intent.owner_executable_sha256
@@ -463,9 +463,9 @@ fn creation_intent_for(
     settings: &SnapshotProductionSettings,
 ) -> SnapshotCreationIntent {
     SnapshotCreationIntent {
-        schema: 1,
+        schema: 2,
         operation_id: intent.operation_id.clone(),
-        product_witness_hash: intent.product_witness_hash.clone(),
+        source: intent.source.clone(),
         guest_runtime_manifest_hash: intent.guest_runtime_manifest_hash.clone(),
         controller_public_root: intent.controller_public_root.clone(),
         owner_executable_sha256: intent.owner_executable_sha256.clone(),
@@ -586,7 +586,7 @@ fn read_control_json(response: HttpResponse) -> Result<(u16, Vec<u8>)> {
 pub(crate) struct SnapshotCreationIntent {
     pub schema: u32,
     pub operation_id: String,
-    pub product_witness_hash: String,
+    pub source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: String,
     pub controller_public_root: String,
     pub owner_executable_sha256: String,
@@ -598,9 +598,8 @@ pub(crate) struct SnapshotCreationIntent {
 
 impl SnapshotCreationIntent {
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 1, "unsupported snapshot creation intent");
+        ensure!(self.schema == 2, "unsupported snapshot creation intent");
         for hash in [
-            &self.product_witness_hash,
             &self.guest_runtime_manifest_hash,
             &self.owner_executable_sha256,
         ] {
@@ -609,6 +608,7 @@ impl SnapshotCreationIntent {
                 "snapshot source identity is invalid"
             );
         }
+        self.source.validate()?;
         ensure!(
             self.operation_id.len() <= 256
                 && !self.operation_id.is_empty()
@@ -716,7 +716,7 @@ pub(crate) struct BoundSnapshotCreation {
     pub schema: u32,
     pub operation_id: String,
     pub intent_digest: String,
-    pub product_witness_hash: String,
+    pub source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: String,
     pub controller_public_root: String,
     pub owner_executable_sha256: String,
@@ -796,10 +796,10 @@ pub(crate) fn bind_snapshot_create_response(
         SnapshotStatus::Failed => anyhow::bail!("provider reported failed snapshot creation"),
     }
     Ok(BoundSnapshotCreation {
-        schema: 1,
+        schema: 2,
         operation_id: intent.operation_id.clone(),
         intent_digest: intent.digest()?,
-        product_witness_hash: intent.product_witness_hash.clone(),
+        source: intent.source.clone(),
         guest_runtime_manifest_hash: intent.guest_runtime_manifest_hash.clone(),
         controller_public_root: intent.controller_public_root.clone(),
         owner_executable_sha256: intent.owner_executable_sha256.clone(),
@@ -821,10 +821,10 @@ pub(crate) fn observe_snapshot_available(
 ) -> Result<AvailableSnapshotObservation> {
     intent.validate()?;
     ensure!(
-        creation.schema == 1
+        creation.schema == 2
             && creation.operation_id == intent.operation_id
             && creation.intent_digest == intent.digest()?
-            && creation.product_witness_hash == intent.product_witness_hash
+            && creation.source == intent.source
             && creation.guest_runtime_manifest_hash == intent.guest_runtime_manifest_hash
             && creation.controller_public_root == intent.controller_public_root
             && creation.owner_executable_sha256 == intent.owner_executable_sha256
@@ -896,9 +896,11 @@ mod tests {
     fn intent() -> SnapshotCreationIntent {
         let key = lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key();
         SnapshotCreationIntent {
-            schema: 1,
+            schema: 2,
             operation_id: "snapshot-op-1".into(),
-            product_witness_hash: "1".repeat(64),
+            source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "1".repeat(64),
+            },
             guest_runtime_manifest_hash: "2".repeat(64),
             controller_public_root: format!(
                 "ed25519:{}",
@@ -928,7 +930,7 @@ mod tests {
         let source = intent();
         let mut durable =
             ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotIntent {
-                schema: 1,
+                schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_INTENT_SCHEMA,
                 operation_id: String::new(),
                 owner_principal: format!("fp:{}", "1".repeat(64)),
                 provider_id: ADAPTER_ID.into(),
@@ -938,7 +940,7 @@ mod tests {
                 adapter_artifact_hash: "3".repeat(64),
                 provider_spec_digest: "4".repeat(64),
                 settings_digest: "5".repeat(64),
-                product_witness_hash: source.product_witness_hash.clone(),
+                source: source.source.clone(),
                 guest_runtime_manifest_hash: source.guest_runtime_manifest_hash.clone(),
                 owner_executable_sha256: source.owner_executable_sha256.clone(),
                 controller_public_root: source.controller_public_root.clone(),
@@ -1068,7 +1070,7 @@ mod tests {
         let body = serde_json::to_vec(&response()).unwrap();
         let bound = bind_snapshot_create_response(&profile, &intent, 202, &body).unwrap();
         assert_eq!(bound.snapshot_id, "snp-exact");
-        assert_eq!(bound.product_witness_hash, intent.product_witness_hash);
+        assert_eq!(bound.source, intent.source);
         assert_eq!(bound.intent_digest, intent.digest().unwrap());
         assert!(bind_snapshot_create_response(&profile, &intent, 201, &body).is_err());
         for (field, value) in [

@@ -814,7 +814,7 @@ mod tests {
         Vec<u8>,
     ) {
         let mut intent = RuntimeSnapshotIntent {
-            schema: 1,
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "1".repeat(64)),
             provider_id: ADAPTER_ID.into(),
@@ -824,7 +824,9 @@ mod tests {
             adapter_artifact_hash: "3".repeat(64),
             provider_spec_digest: "4".repeat(64),
             settings_digest: "5".repeat(64),
-            product_witness_hash: "6".repeat(64),
+            source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "6".repeat(64),
+            },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
             controller_public_root: public_root(),
