@@ -31,7 +31,13 @@ use crate::handler_context::HandlerContext;
 use crate::operator_authority::AdmittedOperatorAuthority;
 use crate::state::AppState;
 
+mod publication;
 mod retained;
+
+pub use publication::{
+    CurrentGuestOwnerMaterialization, PublishedGuestOwnerMaterialization,
+    load_current_guest_owner_materialization, publish_prepared_guest_owner_runtime,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -808,6 +814,27 @@ pub fn prepare_current_guest_owner_runtime(
 mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
+    use ryeos_state::Signer as _;
+
+    struct FixtureNodeSigner {
+        key: SigningKey,
+        fingerprint: String,
+    }
+
+    impl ryeos_state::Signer for FixtureNodeSigner {
+        fn sign(&self, data: &[u8]) -> Vec<u8> {
+            use lillux::crypto::Signer as _;
+            self.key.sign(data).to_bytes().to_vec()
+        }
+
+        fn fingerprint(&self) -> &str {
+            &self.fingerprint
+        }
+
+        fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+            self.key.verifying_key()
+        }
+    }
 
     fn hash(byte: char) -> String {
         byte.to_string().repeat(64)
@@ -900,6 +927,14 @@ mod tests {
     #[test]
     fn source_evidence_joins_selected_executor_and_root_recipe() {
         let mut source = fixture_source();
+        let node_signer = FixtureNodeSigner {
+            key: SigningKey::from_bytes(&[7u8; 32]),
+            fingerprint: lillux::crypto::fingerprint(
+                &SigningKey::from_bytes(&[7u8; 32]).verifying_key(),
+            ),
+        };
+        source.node_site_id = format!("site:{}", node_signer.fingerprint);
+        source.operator_authority.origin_site_id = source.node_site_id.clone();
         let signing_key = SigningKey::from_bytes(&[11u8; 32]);
         let verifier = signing_key.verifying_key();
         let payload = b"exact owner bytes";
@@ -1041,7 +1076,12 @@ mod tests {
         );
 
         let tmp = tempfile::tempdir().unwrap();
-        let cas = lillux::CasStore::new(tmp.path().join("objects"));
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(node_signer.fingerprint.clone(), node_signer.verifying_key());
+        let db = ryeos_state::StateDb::open(tmp.path(), std::sync::Arc::new(trust)).unwrap();
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let cas = authority.cas_store().unwrap();
         assert_eq!(
             cas.store_blob(&recipe.signed_bytes).unwrap(),
             evidence.signed_recipe_items[0].signed_blob_hash
@@ -1124,6 +1164,122 @@ mod tests {
         );
         let output_identity = retained::verify_output_closure(&cas, &source, &verified).unwrap();
         assert_eq!(output_identity.manifest_hash, source.runtime_manifest_hash);
+        let subject = ryeos_state::objects::GuestRuntimeMaterializationSubject {
+            schema: ryeos_state::objects::GUEST_RUNTIME_MATERIALIZATION_SCHEMA,
+            kind: ryeos_state::objects::GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND.to_owned(),
+            coordinate_digest: source.coordinate_digest().unwrap(),
+            runtime_manifest_hash: source.runtime_manifest_hash.clone(),
+            source_evidence_hash: evidence_hash.clone(),
+        };
+        let subject_hash = cas.store_object(&subject.to_value().unwrap()).unwrap();
+        let claim =
+            retained::MaterializationClaimEvidence::from_checked_source(&source, &signer_keys)
+                .unwrap();
+        let attestation = ryeos_state::objects::Attestation::unsigned(
+            subject_hash.clone(),
+            retained::CLAIM.to_owned(),
+            retained::POLICY.to_owned(),
+            "2026-09-29T00:00:00Z".to_owned(),
+            None,
+            serde_json::to_value(claim).unwrap(),
+        )
+        .sign(&node_signer)
+        .unwrap();
+        let testimony =
+            retained::verify_testimony(&cas, &attestation, &node_signer.verifying_key()).unwrap();
+        assert_eq!(testimony.subject, subject);
+        assert_eq!(testimony.source, source);
+        assert_eq!(testimony.output, output_identity);
+        let coordinate = source.coordinate_digest().unwrap();
+        let publication_key = ryeos_state::DurableCasPublicationKey::guest_runtime_materialization(
+            &source.materialization_binding_digest,
+            &coordinate,
+        )
+        .unwrap();
+        let mut stage = authority
+            .require_recovery()
+            .unwrap()
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &source.operator_authority.owner_principal,
+                "guest-runtime-materialization",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        stage
+            .protect_cas_closure(&guard, [subject_hash.as_str()], std::iter::empty())
+            .unwrap();
+        let candidate_hash = stage
+            .store_object(&guard, &cas, &attestation.to_value())
+            .unwrap();
+        let publish = |candidate: &ryeos_state::objects::Attestation| {
+            ryeos_state::immutable_testimony::publish_immutable_attestation(
+                &authority,
+                "guest-runtime-materialization",
+                &coordinate,
+                candidate,
+                &node_signer,
+                &guard,
+                |value| retained::verify_testimony(&cas, value, &node_signer.verifying_key()),
+                |hash| {
+                    let value = retained::load_object_bounded(&cas, hash, 64 * 1024)?;
+                    let incumbent = ryeos_state::objects::Attestation::from_value(&value)?;
+                    let verified =
+                        retained::verify_testimony(&cas, &incumbent, &node_signer.verifying_key())?;
+                    Ok((incumbent, verified))
+                },
+            )
+        };
+        let (_, reused) = publish(&attestation).unwrap();
+        assert!(!reused);
+        let head = ryeos_state::immutable_testimony::read_immutable_attestation_head(
+            &authority,
+            "guest-runtime-materialization",
+            &coordinate,
+            &guard,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(head.target_hash, candidate_hash);
+        stage
+            .protect_cas_closure(&guard, [head.target_hash.as_str()], std::iter::empty())
+            .unwrap();
+        stage.finish_admitted(&guard, &head.target_hash).unwrap();
+        let replay = ryeos_state::objects::Attestation::unsigned(
+            subject_hash,
+            retained::CLAIM.to_owned(),
+            retained::POLICY.to_owned(),
+            "2026-09-29T00:00:01Z".to_owned(),
+            None,
+            attestation.evidence.clone(),
+        )
+        .sign(&node_signer)
+        .unwrap();
+        let (_, reused) = publish(&replay).unwrap();
+        assert!(reused);
+        let head_after = ryeos_state::immutable_testimony::read_immutable_attestation_head(
+            &authority,
+            "guest-runtime-materialization",
+            &coordinate,
+            &guard,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(head_after.target_hash, candidate_hash);
+        assert!(
+            retained::verify_testimony(
+                &cas,
+                &attestation,
+                &SigningKey::from_bytes(&[9u8; 32]).verifying_key(),
+            )
+            .is_err()
+        );
+        let mut wrong_claim = attestation.clone();
+        wrong_claim.claim = "execution_captured".to_owned();
+        assert!(
+            retained::verify_testimony(&cas, &wrong_claim, &node_signer.verifying_key()).is_err()
+        );
         let mut wrong_profile = source.clone();
         wrong_profile.profile_digest = hash('8');
         assert!(retained::verify_output_closure(&cas, &wrong_profile, &verified).is_err());
@@ -1148,6 +1304,39 @@ mod tests {
         assert!(
             build_source_evidence(&changed, &[recipe], &[bundle], &signer_keys, &proof).is_err()
         );
+        drop(stage);
+        drop(cas);
+        drop(guard);
+        drop(authority);
+        drop(db);
+        let mut reopened_trust = ryeos_state::refs::TrustStore::new();
+        reopened_trust.insert(node_signer.fingerprint.clone(), node_signer.verifying_key());
+        let reopened =
+            ryeos_state::StateDb::open(tmp.path(), std::sync::Arc::new(reopened_trust)).unwrap();
+        let reopened_authority = reopened.pinned_authority().unwrap();
+        let reopened_guard = reopened_authority.acquire_shared_guard().unwrap();
+        let reopened_head = ryeos_state::immutable_testimony::read_immutable_attestation_head(
+            &reopened_authority,
+            "guest-runtime-materialization",
+            &coordinate,
+            &reopened_guard,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(reopened_head.target_hash, candidate_hash);
+        let reopened_cas = reopened_authority.cas_store().unwrap();
+        let reopened_value =
+            retained::load_object_bounded(&reopened_cas, &reopened_head.target_hash, 64 * 1024)
+                .unwrap();
+        let reopened_attestation =
+            ryeos_state::objects::Attestation::from_value(&reopened_value).unwrap();
+        let recovered = retained::verify_testimony(
+            &reopened_cas,
+            &reopened_attestation,
+            &node_signer.verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(recovered.subject, subject);
     }
 
     #[test]

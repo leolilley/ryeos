@@ -10,6 +10,23 @@ use anyhow::{Context as _, Result, bail};
 use crate::objects::Attestation;
 use crate::{CasMutationGuard, PinnedStateAuthority, Signer};
 
+/// Read the exact signed coordinate head beneath the already-pinned refs
+/// authority. The caller must authenticate and verify its target testimony.
+pub fn read_immutable_attestation_head(
+    authority: &PinnedStateAuthority,
+    namespace: &str,
+    coordinate_id: &str,
+    guard: &CasMutationGuard,
+) -> Result<Option<crate::refs::SignedRef>> {
+    authority.ensure_guard(guard)?;
+    crate::refs::read_verified_generic_head_ref_in_directory(
+        authority.refs_directory(),
+        namespace,
+        coordinate_id,
+        authority.trust_store(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn publish_immutable_attestation<T>(
     authority: &PinnedStateAuthority,
