@@ -173,6 +173,8 @@ pub struct ResolvedManagedActivationComponent {
     pub expected_manifest_hash: String,
     pub expected_manifest_kind: String,
     pub declaration_kind: ryeos_engine::external_content::ExternalContentKind,
+    pub declaration_mount_root: ryeos_engine::external_content::ExternalContentMountRoot,
+    pub declaration_mount: String,
     pub capture_bounds: ManagedActivationComponentBounds,
     pub expected_file_sha256: Option<String>,
 }
@@ -450,6 +452,8 @@ impl ManagedExternalContentActivation {
                 expected_manifest_hash,
                 expected_manifest_kind: expected_manifest_kind.to_owned(),
                 declaration_kind: declaration.kind,
+                declaration_mount_root: declaration.mount_root,
+                declaration_mount: declaration.mount.clone(),
                 capture_bounds,
                 expected_file_sha256,
             });

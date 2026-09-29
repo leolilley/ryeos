@@ -377,15 +377,15 @@ pub fn load_current_activation_receipt(
 }
 
 /// Join one current managed activation component to its current authorized
-/// binding and exact large-content manifest. The `realization` and mount must
-/// come from an independently admitted consumer definition. This relationship
+/// binding and exact large-content manifest. The mount is resolved from the
+/// signed consumer; the `realization` must come from its independently admitted
+/// execution definition. This relationship
 /// is deliberately not a runtime-qualification or execution grant.
 pub fn load_current_runtime_content_record(
     state: &crate::state::AppState,
     activation_ref: &str,
     acquisition_mode: AcquisitionMode,
     realization: &ryeos_state::objects::ExternalContentRealization,
-    expected_mount: &str,
 ) -> anyhow::Result<ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin> {
     let (activation, receipt_hash, receipt) =
         load_current_activation_receipt(state, activation_ref, acquisition_mode)?;
@@ -395,6 +395,8 @@ pub fn load_current_runtime_content_record(
         .find(|component| component.recipe.id == realization.id)
         .ok_or_else(|| anyhow::anyhow!("runtime realization has no signed activation component"))?;
     if component.declaration_kind != ryeos_engine::external_content::ExternalContentKind::Tree
+        || component.declaration_mount_root
+            != ryeos_engine::external_content::ExternalContentMountRoot::ExecutionRuntime
         || component.recipe.storage
             != crate::managed_external_content::ManagedComponentStorage::LargeContent
         || component.expected_manifest_kind
@@ -440,7 +442,7 @@ pub fn load_current_runtime_content_record(
         &activation.document.consumer_ref,
         &component.recipe.id,
         &component.expected_manifest_hash,
-        expected_mount,
+        &component.declaration_mount,
         state.identity.fingerprint(),
     )
 }
@@ -568,6 +570,9 @@ mod tests {
                 expected_manifest_hash: "d".repeat(64),
                 expected_manifest_kind: "fixture".to_owned(),
                 declaration_kind: ryeos_engine::external_content::ExternalContentKind::Tree,
+                declaration_mount_root:
+                    ryeos_engine::external_content::ExternalContentMountRoot::ExecutionRuntime,
+                declaration_mount: "runtime".to_owned(),
                 capture_bounds: ManagedActivationComponentBounds {
                     maximum_entries: 1,
                     maximum_depth: 1,
