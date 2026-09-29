@@ -61,6 +61,7 @@ pub mod node_policy;
 pub mod object_contracts;
 pub mod operator_authority;
 pub mod operator_external_content;
+pub mod operator_guest_runtime_materialization;
 pub mod operator_runtime_snapshot;
 pub mod persistent_session;
 pub mod principal;

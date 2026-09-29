@@ -4897,6 +4897,7 @@ pub mod test_support {
         state.node_config = Arc::new(crate::node_config::NodeConfigSnapshot {
             external_execution: vec![binding],
             runtime_snapshot_production: state.node_config.runtime_snapshot_production.clone(),
+            guest_runtime_materialization: state.node_config.guest_runtime_materialization.clone(),
             runtime_snapshot_qualification: state
                 .node_config
                 .runtime_snapshot_qualification

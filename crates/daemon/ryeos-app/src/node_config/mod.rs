@@ -118,6 +118,8 @@ pub struct NodeConfigSnapshot {
     pub external_execution: Vec<sections::external_execution::InstalledExternalExecutionBinding>,
     pub runtime_snapshot_production:
         Vec<sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding>,
+    pub guest_runtime_materialization:
+        Vec<sections::guest_runtime_materialization::InstalledGuestRuntimeMaterializationBinding>,
     pub runtime_snapshot_qualification:
         Vec<sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding>,
     /// All registered bundle records, in load order.
@@ -178,6 +180,7 @@ impl NodeConfigTable {
             Box::new(sections::route::RouteSection),
             Box::new(sections::external_execution::ExternalExecutionSection),
             Box::new(sections::runtime_snapshot_production::RuntimeSnapshotProductionSection),
+            Box::new(sections::guest_runtime_materialization::GuestRuntimeMaterializationSection),
             Box::new(sections::runtime_snapshot_qualification::RuntimeSnapshotQualificationSection),
         ])
         .expect("built-in node-config section table is valid")

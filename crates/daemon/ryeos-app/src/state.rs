@@ -398,6 +398,7 @@ pub mod test_support {
             node_config: Arc::new(crate::node_config::NodeConfigSnapshot {
                 external_execution: Vec::new(),
                 runtime_snapshot_production: Vec::new(),
+                guest_runtime_materialization: Vec::new(),
                 runtime_snapshot_qualification: Vec::new(),
                 bundles: Vec::new(),
                 routes: Vec::new(),
