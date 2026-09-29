@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T16:28:13Z:9c6f61051461fde6227b3947167514ba63fd86389ee4422d73cf622a0c236c55:wq6etJbsBbH6mrx6x9+4QUZu9PdTPzz4/qDK6jGs/tVr18rBmhJZOvL8EkcoLh8MyMTnPQiwAZzIYYhEcsM1BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T16:30:34Z:f088358a6292b352ef0a55a35908206de7ba261f0d6faf17ba9d71e4c12c0fdb:zD8fZq/oL51ZgyfeM8S9HITd89hxQhqxvqpXAFyRrdPlCyYgpl1jSevHGvT/u55+S7/9NMF530AW1D8bmhCKAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.33.2"
+version: "1.33.3"
 ```
 
 # Source-Local Bundle Development
@@ -109,6 +109,17 @@ The real release-authority node remains stopped on runtime schema epoch
 project HEADs; authorization to retire that live history is pending. No real
 release qualification, publication, transfer, activation or recovery claim
 follows from these disposable proofs.
+
+A read-only audit of that node's retained build-input capsules found that its
+installed GNU Python qualification policy is byte-identical to current source,
+while its platform, Cargo-vendor and static-input policies are predecessors.
+The retained platform capsule claims `development_platform_abi_v1`, whereas
+current release consumers require `development_platform_profile_v2`;
+Cargo-vendor changes from policy v1 to v2 even though its claim names remain;
+static inputs change from a v1 claim to the current profile v2 claim. Those
+four old capsules are not a current four-slot release input set. Re-admit and
+requalify affected exact retained products under current signed authority;
+unchanged product bytes alone are not a reason to rebuild them.
 
 The original local command, state-root, signing, and bundle-smoke workflow is
 implemented. The project-bundle and development-realization sections below
