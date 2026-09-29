@@ -375,7 +375,11 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
 /// the registered policy table. An explicitly selected schema cut instead
 /// proves only the complete node-signed predecessor occupant, because decoding
 /// retired section schemas is precisely what the cut must not require.
-pub fn preflight_existing_policy_generation(app_root: &Path, schema_cut: bool) -> Result<()> {
+pub fn preflight_existing_policy_generation(
+    app_root: &Path,
+    schema_cut: bool,
+    active_bundles: &[String],
+) -> Result<()> {
     let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
     let trust = TrustStore::load(None, &operator_config_root)
         .context("load node trust for policy-generation preflight")?;
@@ -383,13 +387,16 @@ pub fn preflight_existing_policy_generation(app_root: &Path, schema_cut: bool) -
         ryeos_app::node_policy::generation::validate_schema_cut_policy_occupant(app_root, &trust)
             .context("prove complete signed predecessor policy generation")
     } else {
-        ryeos_app::node_policy::generation::load_policy_generation(
+        let snapshot = ryeos_app::node_policy::load_snapshot(
             app_root,
             &trust,
             &ryeos_app::node_policy::NodePolicyTable::new(),
         )
-        .context("compile current signed node policy generation")
-        .map(|_| ())
+        .context("compile current signed node policy generation")?;
+        snapshot
+            .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
+            .require_bundle_sources(active_bundles.iter().map(String::as_str))
+            .context("check command authority for selected install bundles")
     }
 }
 

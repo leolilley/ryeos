@@ -481,7 +481,8 @@ impl<'a> BootstrapLoader<'a> {
         policy_table: &crate::node_policy::NodePolicyTable,
     ) -> Result<NodeConfigSnapshot> {
         let node_fingerprint = node_identity_fingerprint(self.app_root)?;
-        validate_bundle_command_authority(bundles, command_registration_authority)?;
+        command_registration_authority
+            .require_bundle_sources(bundles.iter().map(|bundle| bundle.name.as_str()))?;
         let mut builder =
             NodeConfigSnapshotBuilder::new(bundles, command_registration_authority.clone())?;
         reject_disallowed_bundle_section_contributions(config_table, policy_table, bundles)?;
@@ -611,21 +612,6 @@ fn section_scan_roots(
         );
     }
     Ok(roots)
-}
-
-fn validate_bundle_command_authority(
-    bundles: &[BundleRecord],
-    policy: &CommandRegistrationAuthority,
-) -> Result<()> {
-    for bundle in bundles {
-        if !policy.bundle_source_caps.contains_key(&bundle.name) {
-            bail!(
-                "command registration policy has no explicit authority for active bundle `{}`",
-                bundle.name
-            );
-        }
-    }
-    Ok(())
 }
 
 fn verify_section_signer(
