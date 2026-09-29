@@ -75,6 +75,10 @@ package() {
         name=$(basename "$bundle_dir")
         mkdir -p "$pkgdir/usr/share/ryeos/$name"
         cp -a "$bundle_dir/.ai" "$pkgdir/usr/share/ryeos/$name/.ai"
+        # Preserve signed, bundle-owned runtime specifications outside .ai.
+        if [[ -d "$bundle_dir/specs" && ! -L "$bundle_dir/specs" ]]; then
+            cp -a "$bundle_dir/specs" "$pkgdir/usr/share/ryeos/$name/specs"
+        fi
         # Publisher documents are informational metadata. Production init does
         # not import them as authority; it verifies with the compiled-in key.
         if [[ -f "$bundle_dir/PUBLISHER_TRUST.toml" ]]; then

@@ -28,7 +28,7 @@ use ryeos_engine::contracts::{
     ExecutionPlan, FinalCost, ItemMetadata, ItemSourceRoot, ItemSpace, LaunchMode, PinnedVersion,
     PlanArgument, PlanContext, PlanSubprocessSpec, Principal, ProjectContext, ResolvedItem,
     ResolvedSourceFormat, RuntimeEnvSource, ShadowedCandidate, SignatureEnvelope, SignatureHeader,
-    SignerFingerprint, ThreadTerminalStatus, TrustClass, VerifiedItem,
+    SignerFingerprint, SubjectResolutionAuthority, ThreadTerminalStatus, TrustClass, VerifiedItem,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_engine::history_policy::{
@@ -2801,22 +2801,36 @@ impl RootExecutionAdmission {
         )?;
         if let Some(purpose) = &self.product_qualification {
             purpose.validate()?;
-            let projectless_lane = self.plan_context.project_context == ProjectContext::None
-                && matches!(
+            let projectless_lane = matches!(
+                (
+                    &self.plan_context.project_context,
+                    &self.plan_context.subject_resolution_authority,
                     self.project_authority(),
-                    ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
-                );
+                ),
+                (
+                    ProjectContext::None,
+                    SubjectResolutionAuthority::Projectless,
+                    ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. },
+                )
+            );
             let pinned_lane = matches!(
-                (&self.plan_context.project_context, self.project_authority()),
+                (
+                    &self.plan_context.project_context,
+                    &self.plan_context.subject_resolution_authority,
+                    self.project_authority(),
+                ),
                 (
                     ProjectContext::SnapshotHash { hash },
+                    SubjectResolutionAuthority::PinnedGeneration {
+                        snapshot_hash: resolution_hash,
+                    },
                     ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
-                        snapshot_hash,
+                        snapshot_hash: authority_hash,
                         realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
                         workspace_outputs: None,
                         ..
                     },
-                ) if hash == snapshot_hash
+                ) if hash == resolution_hash && hash == authority_hash
             );
             if self.candidate_evaluation.is_some()
                 || self.plan_context.scheduled_fire.is_some()
