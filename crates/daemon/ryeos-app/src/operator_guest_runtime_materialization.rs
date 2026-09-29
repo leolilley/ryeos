@@ -31,6 +31,8 @@ use crate::handler_context::HandlerContext;
 use crate::operator_authority::AdmittedOperatorAuthority;
 use crate::state::AppState;
 
+mod retained;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuestOwnerMaterializationSource {
@@ -910,31 +912,48 @@ mod tests {
                 base64::engine::general_purpose::STANDARD.encode(verifier.to_bytes())
             ),
         }];
+        let recipe_body = "kind: config\nguest_owner_materialization: exact\n";
+        let signed_recipe = lillux::signature::sign_content_at(
+            recipe_body,
+            &signing_key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
+        source.recipe_content_digest = lillux::sha256_hex(recipe_body.as_bytes());
         let recipe = CapturedSignedBundleItemSource {
             resolved_ref: source.recipe_ref.clone(),
             source_root: ItemSourceRoot::Bundle {
                 name: source.bundle_name.clone(),
             },
             signer_fingerprint: source.recipe_publisher_fingerprint.clone(),
-            source_content_digest: lillux::sha256_hex(b"signed recipe"),
+            source_content_digest: lillux::sha256_hex(signed_recipe.as_bytes()),
             raw_content_digest: source.recipe_content_digest.clone(),
             signature_envelope: ryeos_engine::contracts::SignatureEnvelope {
                 prefix: "#".to_owned(),
                 suffix: None,
                 after_shebang: false,
             },
-            signed_bytes: b"signed recipe".to_vec(),
+            signed_bytes: signed_recipe.into_bytes(),
         };
+        let bundle_body = "name: codex\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n";
+        let signed_bundle = lillux::signature::sign_content_at(
+            bundle_body,
+            &signing_key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
         let bundle = CapturedSignedBundleManifest {
             identity: ryeos_engine::plan_builder::SignedBundleManifestIdentity {
                 name: source.bundle_name.clone(),
-                body_digest: hash('7'),
+                body_digest: lillux::sha256_hex(bundle_body.as_bytes()),
                 signer_fingerprint: source.recipe_publisher_fingerprint.clone(),
                 provides_kinds: vec![],
                 requires_kinds: vec![],
                 uses_kinds: vec![],
             },
-            signed_bytes: b"signed Bundle manifest".to_vec(),
+            signed_bytes: signed_bundle.into_bytes(),
         };
         source.signed_recipe_source_set_digest =
             signed_recipe_source_set_digest(std::slice::from_ref(&recipe)).unwrap();
@@ -1020,6 +1039,97 @@ mod tests {
             )
             .is_err()
         );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(tmp.path().join("objects"));
+        assert_eq!(
+            cas.store_blob(&recipe.signed_bytes).unwrap(),
+            evidence.signed_recipe_items[0].signed_blob_hash
+        );
+        assert_eq!(
+            cas.store_blob(&bundle.signed_bytes).unwrap(),
+            evidence.signed_bundle_manifests[0].signed_blob_hash
+        );
+        assert_eq!(
+            cas.store_blob(&proof.signed_manifest_ref).unwrap(),
+            evidence.executor.signed_manifest_ref_blob_hash
+        );
+        assert_eq!(
+            cas.store_blob(
+                lillux::canonical_json(&proof.manifest_object)
+                    .unwrap()
+                    .as_bytes()
+            )
+            .unwrap(),
+            evidence.executor.manifest_object_blob_hash
+        );
+        assert_eq!(
+            cas.store_object(&proof.item_source_object).unwrap(),
+            evidence.executor.item_source_object_hash
+        );
+        assert_eq!(
+            cas.store_blob(payload).unwrap(),
+            evidence.executor.payload_blob_hash
+        );
+        let evidence_hash = cas.store_object(&evidence.to_value().unwrap()).unwrap();
+        assert!(retained::verify_source_closure(&cas, &source, &evidence_hash).is_err());
+        assert_eq!(
+            cas.store_blob(&proof.signed_sidecar).unwrap(),
+            evidence.executor.signed_sidecar_blob_hash
+        );
+        let verified = retained::verify_source_closure(&cas, &source, &evidence_hash).unwrap();
+        assert_eq!(verified.payload_size, payload.len() as u64);
+        assert_eq!(verified.evidence, evidence);
+        let profile = br#"{"kind":"guest-owner-profile"}"#;
+        source.profile_digest = lillux::sha256_hex(profile);
+        let controller_root = hex::encode(
+            SigningKey::from_bytes(&[7u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let root_hash = lillux::sha256_hex(controller_root.as_bytes());
+        let output = ryeos_state::objects::external_content_manifest::ExternalContentManifestObject {
+            schema: ryeos_state::objects::external_content_manifest::EXTERNAL_CONTENT_TREE_SCHEMA.to_owned(),
+            kind: ryeos_state::objects::external_content_manifest::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
+            entries: vec![
+                ryeos_state::objects::external_content_manifest::ExternalContentManifestEntry {
+                    path: "bin".to_owned(), kind: ryeos_state::objects::external_content_manifest::ExternalContentManifestEntryKind::Dir,
+                    mode: None, blob_hash: None, size: None, target: None,
+                },
+                ryeos_state::objects::external_content_manifest::ExternalContentManifestEntry {
+                    path: format!("bin/{OWNER_NAME}"), kind: ryeos_state::objects::external_content_manifest::ExternalContentManifestEntryKind::File,
+                    mode: Some(0o755), blob_hash: Some(source.owner_executable_sha256.clone()), size: Some(payload.len() as u64), target: None,
+                },
+                ryeos_state::objects::external_content_manifest::ExternalContentManifestEntry {
+                    path: "controller-root.hex".to_owned(), kind: ryeos_state::objects::external_content_manifest::ExternalContentManifestEntryKind::File,
+                    mode: Some(0o644), blob_hash: Some(root_hash.clone()), size: Some(64), target: None,
+                },
+                ryeos_state::objects::external_content_manifest::ExternalContentManifestEntry {
+                    path: "guest-owner-profile.json".to_owned(), kind: ryeos_state::objects::external_content_manifest::ExternalContentManifestEntryKind::File,
+                    mode: Some(0o644), blob_hash: Some(source.profile_digest.clone()), size: Some(profile.len() as u64), target: None,
+                },
+            ],
+            entry_count: 4,
+            total_bytes: payload.len() as u64 + 64 + profile.len() as u64,
+        };
+        output.validate().unwrap();
+        source.runtime_manifest_hash = cas
+            .store_object(&serde_json::to_value(&output).unwrap())
+            .unwrap();
+        assert!(retained::verify_output_closure(&cas, &source, &verified).is_err());
+        assert_eq!(cas.store_blob(profile).unwrap(), source.profile_digest);
+        assert_eq!(
+            cas.store_blob(controller_root.as_bytes()).unwrap(),
+            root_hash
+        );
+        let output_identity = retained::verify_output_closure(&cas, &source, &verified).unwrap();
+        assert_eq!(output_identity.manifest_hash, source.runtime_manifest_hash);
+        let mut wrong_profile = source.clone();
+        wrong_profile.profile_digest = hash('8');
+        assert!(retained::verify_output_closure(&cas, &wrong_profile, &verified).is_err());
+        let mut wrong_coordinate = source.clone();
+        wrong_coordinate.signed_recipe_source_set_digest = hash('8');
+        assert!(retained::verify_source_closure(&cas, &wrong_coordinate, &evidence_hash).is_err());
 
         let mut changed = source.clone();
         changed.executor_sidecar_signed_digest = hash('8');
