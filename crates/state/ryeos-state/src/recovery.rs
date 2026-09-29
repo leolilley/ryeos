@@ -235,6 +235,13 @@ pub enum DurableCasPublicationKey {
         binding_digest: String,
         occurrence_digest: String,
     },
+    /// Exact controller-local source preparation. This is neither an
+    /// execution capture nor an external-content import; the coordinate must
+    /// bind recipe, installed source and admitted operator before publication.
+    GuestRuntimeMaterialization {
+        binding_digest: String,
+        source_coordinate_digest: String,
+    },
     /// One bundle-catalog upload/admission decision. This is deliberately
     /// distinct from project publication: a catalog never fabricates a project
     /// path and stale policy authority cannot be replayed after reconfiguration.
@@ -278,6 +285,18 @@ impl DurableCasPublicationKey {
         Ok(key)
     }
 
+    pub fn guest_runtime_materialization(
+        binding_digest: &str,
+        source_coordinate_digest: &str,
+    ) -> Result<Self> {
+        let key = Self::GuestRuntimeMaterialization {
+            binding_digest: binding_digest.to_owned(),
+            source_coordinate_digest: source_coordinate_digest.to_owned(),
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
     pub fn bundle_catalog(
         publisher_fingerprint: &str,
         catalog_namespace: &str,
@@ -314,6 +333,19 @@ impl DurableCasPublicationKey {
             } => {
                 validate_hash("external-candidate binding digest", binding_digest)?;
                 validate_hash("external-candidate occurrence digest", occurrence_digest)
+            }
+            Self::GuestRuntimeMaterialization {
+                binding_digest,
+                source_coordinate_digest,
+            } => {
+                validate_hash(
+                    "guest-runtime materialization binding digest",
+                    binding_digest,
+                )?;
+                validate_hash(
+                    "guest-runtime materialization source coordinate digest",
+                    source_coordinate_digest,
+                )
             }
             Self::BundleCatalog {
                 publisher_fingerprint,
@@ -3068,6 +3100,23 @@ mod tests {
             "blob_hashes": [],
             "large_object_hashes": [],
         })
+    }
+
+    #[test]
+    fn guest_runtime_materialization_has_a_distinct_exact_publication_key() {
+        let key = DurableCasPublicationKey::guest_runtime_materialization(&hash("a"), &hash("b"))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&key).unwrap(),
+            serde_json::json!({
+                "kind": "guest_runtime_materialization",
+                "binding_digest": hash("a"),
+                "source_coordinate_digest": hash("b"),
+            })
+        );
+        assert!(
+            DurableCasPublicationKey::guest_runtime_materialization(&hash("a"), "pending").is_err()
+        );
     }
 
     #[test]

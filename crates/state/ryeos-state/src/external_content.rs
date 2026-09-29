@@ -791,6 +791,20 @@ pub fn capture_tree(
     capture_tree_selected(root, Some((authored_excludes, policy)), budget, sink)
 }
 
+/// Capture an already-exact private realization into a caller-owned sink.
+/// No authored or policy exclusions apply: every ambient entry affects the
+/// result, and the caller supplies an explicit aggregate bound. A durable
+/// publisher must protect the resulting CAS closure before using it as source
+/// authority; this function alone does not publish testimony.
+#[cfg(unix)]
+pub fn capture_tree_exact(
+    root: &lillux::PinnedDirectory,
+    budget: &mut LaunchCaptureBudget,
+    sink: &mut dyn ExternalContentBlobSink,
+) -> anyhow::Result<ExternalContentManifestObject> {
+    capture_tree_selected(root, None, budget, sink)
+}
+
 /// Observe every entry beneath an already-pinned exact realization. Unlike
 /// source capture, this applies no authored, policy, or publisher exclusions:
 /// an ambient entry in a supposedly exact realization must change its identity
@@ -801,7 +815,7 @@ pub fn observe_external_content_tree_exact(
 ) -> anyhow::Result<ExternalContentManifestObject> {
     let mut budget = LaunchCaptureBudget::default();
     let mut sink = DigestOnlyExternalContentSink;
-    capture_tree_selected(root, None, &mut budget, &mut sink)
+    capture_tree_exact(root, &mut budget, &mut sink)
 }
 
 #[cfg(unix)]
@@ -1402,6 +1416,24 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path == "__pycache__/module.pyc")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_exact_capture_matches_observation_and_refuses_ambient_overflow() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("owner"), b"exact").unwrap();
+        let pinned = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let expected = observe_external_content_tree_exact(&pinned).unwrap();
+        let mut budget = LaunchCaptureBudget::bounded(3, 2, 16, 16).unwrap();
+        let mut sink = DigestOnlyExternalContentSink;
+        let captured = capture_tree_exact(&pinned, &mut budget, &mut sink).unwrap();
+        assert_eq!(captured, expected);
+
+        std::fs::write(root.path().join("ambient"), b"entry").unwrap();
+        std::fs::write(root.path().join("overflow"), b"entry").unwrap();
+        let mut budget = LaunchCaptureBudget::bounded(3, 2, 16, 16).unwrap();
+        assert!(capture_tree_exact(&pinned, &mut budget, &mut sink).is_err());
     }
 
     #[cfg(unix)]

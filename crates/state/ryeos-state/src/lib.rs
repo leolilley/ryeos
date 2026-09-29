@@ -63,7 +63,8 @@ pub use external_content::{
     LargeContentCapturePolicy, LaunchCaptureBudget, MAX_CAPTURE_BYTES, MAX_CAPTURE_DEPTH,
     MAX_CAPTURE_ENTRIES, MAX_CAPTURE_FILE_BYTES, VerifiedExternalContentClosure,
     capture_external_content_at, capture_file_at, capture_large_file, capture_large_tree,
-    capture_tree, external_content_manifest_digest, observe_external_content_tree_exact,
+    capture_tree, capture_tree_exact, external_content_manifest_digest,
+    observe_external_content_tree_exact,
 };
 pub use head_cache::{CachedHead, HeadCache};
 pub use large_object_store::{
