@@ -28,7 +28,7 @@ use ryeos_engine::contracts::{
     ExecutionPlan, FinalCost, ItemMetadata, ItemSourceRoot, ItemSpace, LaunchMode, PinnedVersion,
     PlanArgument, PlanContext, PlanSubprocessSpec, Principal, ProjectContext, ResolvedItem,
     ResolvedSourceFormat, RuntimeEnvSource, ShadowedCandidate, SignatureEnvelope, SignatureHeader,
-    SignerFingerprint, ThreadTerminalStatus, TrustClass, VerifiedItem,
+    SignerFingerprint, SubjectResolutionAuthority, ThreadTerminalStatus, TrustClass, VerifiedItem,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_engine::history_policy::{
@@ -2765,18 +2765,45 @@ impl RootExecutionAdmission {
         )?;
         if let Some(purpose) = &self.product_qualification {
             purpose.validate()?;
+            let projectless_lane = matches!(
+                (
+                    &self.plan_context.project_context,
+                    &self.plan_context.subject_resolution_authority,
+                    self.project_authority(),
+                ),
+                (
+                    ProjectContext::None,
+                    SubjectResolutionAuthority::Projectless,
+                    ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. },
+                )
+            );
+            let pinned_lane = matches!(
+                (
+                    &self.plan_context.project_context,
+                    &self.plan_context.subject_resolution_authority,
+                    self.project_authority(),
+                ),
+                (
+                    ProjectContext::SnapshotHash { hash },
+                    SubjectResolutionAuthority::PinnedGeneration {
+                        snapshot_hash: resolution_hash,
+                    },
+                    ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                        snapshot_hash: authority_hash,
+                        realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                        workspace_outputs: None,
+                        ..
+                    },
+                ) if hash == resolution_hash && hash == authority_hash
+            );
             if self.candidate_evaluation.is_some()
                 || self.plan_context.scheduled_fire.is_some()
-                || self.plan_context.project_context != ProjectContext::None
-                || !matches!(
-                    self.project_authority(),
-                    ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
-                )
+                || !(projectless_lane || pinned_lane)
                 || !self.ref_bindings.is_empty()
                 || self.usage_subject.is_some()
                 || self.usage_subject_asserted_by.is_some()
             {
-                bail!("qualification verifier is not a fresh projectless root");
+                bail!("qualification verifier is not a fresh projectless or read-only pinned root");
             }
             let verified = &self.verified_subject;
             if verified.resolved.source_space != ItemSpace::Bundle
@@ -2793,9 +2820,9 @@ impl RootExecutionAdmission {
             {
                 bail!("qualification purpose differs from admitted trusted verifier root");
             }
-            match self.product_selections.as_slice() {
-                [] => {}, // Signed fixed pin is checked against the exact subject realization.
-                [selected]
+            match (pinned_lane, self.product_selections.as_slice()) {
+                (false, []) => {}, // Signed fixed pin is checked against the exact subject realization.
+                (_, [selected])
                     if matches!(
                         selected.target,
                         ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
