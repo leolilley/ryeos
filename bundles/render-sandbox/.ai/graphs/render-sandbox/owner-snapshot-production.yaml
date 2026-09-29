@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-28T12:03:52Z:d85eea2901a5a037ee88d53629fbcccd5474d10a2d2db6d9024454c4ce3d8348:wagcHtKGxpF0j63KeGKP3+Rz13c+9RGSfR7ZYMinJRwh7O/zf24EP5GyfkiCKZeFZcX9mrqKva5cIQRUZ6SbAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T09:15:35Z:fb6d803ebaa6bd7c8f0a92f663677246efeb55f655735f138479c4541f04cd6b:BV4dJTuLDOugrgKh9TZDTJZuscxJIp5YHKpOeYdK343rOT5wtDCQTpLoxbLDde/sKoTs5m2jR0Mahz+jb0FYCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: render-sandbox
 version: "1.0.0"
 description: Receive one origin-admitted owner product and produce an unqualified Render snapshot locator
@@ -55,10 +55,12 @@ config:
         ref_bindings: {}
         params:
           binding_id: "${inputs.binding_id}"
-          witness_hash: "${inputs.witness_hash}"
           source:
-            kind: received
-            acceptance_hash: "${state.receipt.acceptance_hash}"
+            kind: captured_product
+            witness_hash: "${inputs.witness_hash}"
+            witness_source:
+              kind: received
+              acceptance_hash: "${state.receipt.acceptance_hash}"
           source_occurrence_id: "${inputs.source_occurrence_id}"
         thread: inline
       assign:

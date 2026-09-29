@@ -24,6 +24,7 @@ use ryeos_external_execution_contract::runtime_snapshot::{
     RuntimeSnapshotQualificationIntent, RuntimeSnapshotQualificationTerminationAdapterRequest,
     RuntimeSnapshotQualificationTerminationAdapterResponse,
     RuntimeSnapshotQualificationTerminationIntent, RuntimeSnapshotReadinessRequest,
+    RuntimeSnapshotSource,
 };
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use ryeos_state::external_content::products::{ProductShape, ProductStorage};
@@ -47,11 +48,22 @@ use crate::state::AppState;
 
 pub struct SnapshotProductionRequest {
     pub binding_id: String,
-    pub witness_hash: String,
-    pub source: ProductWitnessSource,
+    pub source: SnapshotProductionSource,
     pub source_occurrence_id: String,
     pub staged_identity: GuestOwnerRuntimeManifestIdentity,
     pub staged_root: lillux::PinnedDirectory,
+}
+
+pub enum SnapshotProductionSource {
+    CapturedProduct {
+        witness_hash: String,
+        source: ProductWitnessSource,
+    },
+    BundleMaterialization {
+        materialization_binding_id: String,
+        coordinate_digest: String,
+        attestation_hash: String,
+    },
 }
 
 /// Resolve a bounded staging ceiling exclusively from the current signed
@@ -820,7 +832,10 @@ fn validate_probe_snapshot_record(
             && record.intent.owner_principal == owner_principal
             && record.intent.owner_principal == proof.evidence.product_coordinate.owner_principal
             && record.intent.provider_id == provider_id
-            && record.intent.product_witness_hash == proof.evidence.product_witness_hash
+            && record.intent.source
+                == RuntimeSnapshotSource::CapturedProduct {
+                    product_witness_hash: proof.evidence.product_witness_hash.clone(),
+                }
             && record.intent.guest_runtime_manifest_hash == source.manifest_hash
             && record.intent.owner_executable_sha256 == source.owner_executable_sha256
             && record.intent.controller_public_root == source.controller_public_root,
@@ -836,6 +851,16 @@ pub fn produce(
     request: SnapshotProductionRequest,
 ) -> Result<RuntimeSnapshotRecord> {
     crate::operator_authority::require_admitted_operator(state, context)?;
+    // A materialization attests the upload bytes, not an arbitrary provider
+    // occurrence. The source sandbox must be bound to a retained bootstrap
+    // operation before this path may reserve a snapshot or contact Render.
+    ensure!(
+        !matches!(
+            &request.source,
+            SnapshotProductionSource::BundleMaterialization { .. }
+        ),
+        "materialized snapshot source has no authoritative bootstrap occurrence"
+    );
     let binding = state
         .node_config
         .runtime_snapshot_production
@@ -850,33 +875,78 @@ pub fn produce(
         .closure_limits()?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
-    let witness =
-        crate::operator_external_content::product_receipt::load_bounded_current_product_source(
-            state,
-            &authority,
-            &guard,
-            limits,
-            &context.fingerprint,
-            &request.witness_hash,
-            &request.source,
-            source_ceiling,
-        )?;
+    let (source, exact_identity) = match &request.source {
+        SnapshotProductionSource::CapturedProduct {
+            witness_hash,
+            source,
+        } => {
+            let witness = crate::operator_external_content::product_receipt::load_bounded_current_product_source(
+                state,
+                &authority,
+                &guard,
+                limits,
+                &context.fingerprint,
+                witness_hash,
+                source,
+                source_ceiling,
+            )?;
+            ensure!(
+                witness.evidence.declaration.shape == ProductShape::Tree
+                    && witness.evidence.declaration.storage == ProductStorage::Content,
+                "snapshot source is not an ordinary retained product tree"
+            );
+            let manifest = load_exact_cas_object_with_cas(
+                &authority.cas_store()?,
+                &witness.evidence.manifest_hash,
+                limits.max_object_bytes,
+            )?;
+            let identity = derive_guest_owner_runtime_manifest_identity(
+                &manifest,
+                state.identity.verifying_key(),
+            )?;
+            ensure!(
+                identity.manifest_hash == witness.evidence.manifest_hash
+                    && witness.attestation_hash == *witness_hash,
+                "snapshot product differs from its current witness"
+            );
+            (
+                RuntimeSnapshotSource::CapturedProduct {
+                    product_witness_hash: witness.attestation_hash,
+                },
+                identity,
+            )
+        }
+        SnapshotProductionSource::BundleMaterialization {
+            materialization_binding_id,
+            coordinate_digest,
+            attestation_hash,
+        } => {
+            let current = crate::operator_guest_runtime_materialization::load_current_guest_owner_materialization(
+                state,
+                context,
+                materialization_binding_id,
+                coordinate_digest,
+                attestation_hash,
+                &authority,
+                &guard,
+            )?;
+            ensure!(
+                current.source.maximum_owner_bytes <= source_ceiling,
+                "materialization owner exceeds signed snapshot source ceiling"
+            );
+            (
+                RuntimeSnapshotSource::BundleMaterialization {
+                    materialization_attestation_hash: current.attestation_hash,
+                    source_coordinate_digest: coordinate_digest.clone(),
+                    materialization_binding_digest: current.source.materialization_binding_digest,
+                },
+                current.identity,
+            )
+        }
+    };
     ensure!(
-        witness.evidence.declaration.shape == ProductShape::Tree
-            && witness.evidence.declaration.storage == ProductStorage::Content,
-        "snapshot source is not an ordinary retained product tree"
-    );
-    let manifest = load_exact_cas_object_with_cas(
-        &authority.cas_store()?,
-        &witness.evidence.manifest_hash,
-        limits.max_object_bytes,
-    )?;
-    let exact_identity =
-        derive_guest_owner_runtime_manifest_identity(&manifest, state.identity.verifying_key())?;
-    ensure!(
-        exact_identity == request.staged_identity
-            && witness.attestation_hash == request.witness_hash,
-        "snapshot upload identity differs from the current product witness"
+        exact_identity == request.staged_identity,
+        "snapshot upload identity differs from the current retained source"
     );
     drop(guard);
     let upload = seal_guest_owner_snapshot_upload(
@@ -897,6 +967,35 @@ pub fn produce(
     state
         .external_placement_backends
         .preflight_runtime_snapshot(binding, &credential)?;
+    if let SnapshotProductionSource::BundleMaterialization {
+        materialization_binding_id,
+        coordinate_digest,
+        attestation_hash,
+    } = &request.source
+    {
+        let contact_guard = authority.acquire_shared_guard()?;
+        let current = crate::operator_guest_runtime_materialization::load_current_guest_owner_materialization(
+            state,
+            context,
+            materialization_binding_id,
+            coordinate_digest,
+            attestation_hash,
+            &authority,
+            &contact_guard,
+        )?;
+        ensure!(
+            current.identity == exact_identity
+                && source
+                    == RuntimeSnapshotSource::BundleMaterialization {
+                        materialization_attestation_hash: current.attestation_hash,
+                        source_coordinate_digest: coordinate_digest.clone(),
+                        materialization_binding_digest: current
+                            .source
+                            .materialization_binding_digest,
+                    },
+            "materialization source changed before snapshot contact admission"
+        );
+    }
 
     let now = lillux::time::timestamp_millis();
     let mut intent = RuntimeSnapshotIntent {
@@ -910,7 +1009,7 @@ pub fn produce(
         adapter_artifact_hash: binding.adapter_artifact_hash().to_owned(),
         provider_spec_digest: binding.snapshot_spec_sha256().to_owned(),
         settings_digest: binding.settings_digest().to_owned(),
-        product_witness_hash: request.witness_hash,
+        source,
         guest_runtime_manifest_hash: exact_identity.manifest_hash,
         owner_executable_sha256: exact_identity.owner_executable_sha256,
         controller_public_root: exact_identity.controller_public_root,
@@ -1030,7 +1129,9 @@ mod tests {
             adapter_artifact_hash: "4".repeat(64),
             provider_spec_digest: "d".repeat(64),
             settings_digest: "5".repeat(64),
-            product_witness_hash: proof.evidence.product_witness_hash.clone(),
+            source: RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: proof.evidence.product_witness_hash.clone(),
+            },
             guest_runtime_manifest_hash: manifest_hash,
             owner_executable_sha256: source.owner_executable_sha256.clone(),
             controller_public_root: source.controller_public_root.clone(),
@@ -1080,7 +1181,9 @@ mod tests {
             .is_err()
         );
         record.phase = RuntimeSnapshotPhase::Bound;
-        record.intent.product_witness_hash = "f".repeat(64);
+        record.intent.source = RuntimeSnapshotSource::CapturedProduct {
+            product_witness_hash: "f".repeat(64),
+        };
         assert!(
             validate_probe_snapshot_record(
                 &record,
@@ -1092,7 +1195,9 @@ mod tests {
             )
             .is_err()
         );
-        record.intent.product_witness_hash = proof.evidence.product_witness_hash.clone();
+        record.intent.source = RuntimeSnapshotSource::CapturedProduct {
+            product_witness_hash: proof.evidence.product_witness_hash.clone(),
+        };
         assert!(
             validate_probe_snapshot_record(
                 &record,

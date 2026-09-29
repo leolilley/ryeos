@@ -18,9 +18,37 @@ pub type Request = ryeos_app::operator_external_content::products::ProductReques
 #[serde(deny_unknown_fields)]
 pub struct ProduceRuntimeSnapshotRequest {
     binding_id: String,
-    witness_hash: String,
-    source: ProductWitnessSource,
+    source: RuntimeSnapshotSourceRequest,
     source_occurrence_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RuntimeSnapshotSourceRequest {
+    CapturedProduct {
+        witness_hash: String,
+        witness_source: ProductWitnessSource,
+    },
+    BundleMaterialization {
+        materialization_binding_id: String,
+        coordinate_digest: String,
+        attestation_hash: String,
+    },
+}
+
+impl ProduceRuntimeSnapshotRequest {
+    fn require_authoritative_source_occurrence(&self) -> Result<()> {
+        // Materialization attests the bytes, not a caller-provided provider
+        // occurrence. The bootstrap journal must own that occurrence first.
+        anyhow::ensure!(
+            !matches!(
+                &self.source,
+                RuntimeSnapshotSourceRequest::BundleMaterialization { .. }
+            ),
+            "materialized snapshot source requires an authoritative bootstrap occurrence"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +179,7 @@ pub async fn produce_runtime_snapshot(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)?;
+    req.require_authoritative_source_occurrence()?;
     let result = tokio::task::spawn_blocking(move || {
         let ceiling = ryeos_app::operator_runtime_snapshot::staging_source_ceiling(
             &state,
@@ -158,27 +187,56 @@ pub async fn produce_runtime_snapshot(
             &req.binding_id,
         )?;
         let stage = state.state_store.begin_runtime_snapshot_stage()?;
-        let staged =
-            ryeos_executor::execution::external_guest_runtime_product::stage_current_guest_owner_runtime_product(
-                &state,
-                &ctx,
-                &req.witness_hash,
-                &req.source,
-                ceiling,
-                stage.root(),
-                stage.product_name(),
-            )?;
-        staged.ensure_current()?;
+        let (staged_identity, staged_root, source) = match req.source {
+            RuntimeSnapshotSourceRequest::CapturedProduct {
+                witness_hash,
+                witness_source,
+            } => {
+                let staged = ryeos_executor::execution::external_guest_runtime_product::stage_current_guest_owner_runtime_product(
+                    &state, &ctx, &witness_hash, &witness_source, ceiling,
+                    stage.root(), stage.product_name(),
+                )?;
+                staged.ensure_current()?;
+                (
+                    staged.identity().clone(),
+                    staged.root().try_clone()?,
+                    ryeos_app::operator_runtime_snapshot::SnapshotProductionSource::CapturedProduct {
+                        witness_hash,
+                        source: witness_source,
+                    },
+                )
+            }
+            RuntimeSnapshotSourceRequest::BundleMaterialization {
+                materialization_binding_id,
+                coordinate_digest,
+                attestation_hash,
+            } => {
+                let staged = ryeos_executor::execution::external_guest_runtime_product::stage_current_guest_owner_runtime_materialization(
+                    &state, &ctx, &materialization_binding_id, &coordinate_digest,
+                    &attestation_hash, ceiling, stage.root(), stage.product_name(),
+                )?;
+                staged.ensure_current_authority(&state, &ctx)?;
+                staged.ensure_current()?;
+                (
+                    staged.identity().clone(),
+                    staged.root().try_clone()?,
+                    ryeos_app::operator_runtime_snapshot::SnapshotProductionSource::BundleMaterialization {
+                        materialization_binding_id,
+                        coordinate_digest,
+                        attestation_hash,
+                    },
+                )
+            }
+        };
         let result = ryeos_app::operator_runtime_snapshot::produce(
             &state,
             &ctx,
             ryeos_app::operator_runtime_snapshot::SnapshotProductionRequest {
                 binding_id: req.binding_id,
-                witness_hash: req.witness_hash,
-                source: req.source,
+                source,
                 source_occurrence_id: req.source_occurrence_id,
-                staged_identity: staged.identity().clone(),
-                staged_root: staged.root().try_clone()?,
+                staged_identity,
+                staged_root,
             },
         )?;
         anyhow::Ok(result)
@@ -440,13 +498,33 @@ mod tests {
     fn runtime_snapshot_request_cannot_supply_upload_or_filesystem_authority() {
         let required = json!({
             "binding_id": "signed-render-producer",
-            "witness_hash": "a".repeat(64),
-            "source": {"kind": "local_capture"},
+            "source": {
+                "kind": "captured_product",
+                "witness_hash": "a".repeat(64),
+                "witness_source": {"kind": "local_capture"}
+            },
             "source_occurrence_id": "sbx-exact"
         });
-        assert!(
+        let captured =
             serde_json::from_value::<super::ProduceRuntimeSnapshotRequest>(required.clone())
-                .is_ok()
+                .unwrap();
+        captured.require_authoritative_source_occurrence().unwrap();
+        let materialized = json!({
+            "binding_id": "signed-render-producer",
+            "source": {
+                "kind": "bundle_materialization",
+                "materialization_binding_id": "signed-owner-materializer",
+                "coordinate_digest": "b".repeat(64),
+                "attestation_hash": "c".repeat(64)
+            },
+            "source_occurrence_id": "sbx-exact"
+        });
+        let materialized =
+            serde_json::from_value::<super::ProduceRuntimeSnapshotRequest>(materialized).unwrap();
+        assert!(
+            materialized
+                .require_authoritative_source_occurrence()
+                .is_err()
         );
         for (key, value) in [
             ("upload_path", json!("/tmp/ambient")),

@@ -10,6 +10,7 @@ pub mod guest_import_authorization;
 pub mod guest_supervisor_descriptors;
 pub mod restored_runtime_measurement;
 pub mod runtime_snapshot;
+pub mod runtime_snapshot_bootstrap;
 pub mod staging_package;
 
 use std::collections::{BTreeMap, BTreeSet};

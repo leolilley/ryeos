@@ -1,10 +1,9 @@
-# ryeos:signed:2026-09-28T06:27:48Z:e1c97f4d246c20390e3237674a2515672f13fbd690394b65af43035140696a0a:drfnfzxediHnJ974I6BxbITG0zqLedraBsD6h4DYx8EJSSuOf+fuI9oA1wESnfltisys7DO7rTe+mgDdvqoFCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T09:15:35Z:0da8aa12d5b690ab6d19dcbc9d80f0ba476de69a41a71180158867bc6b15b6e8:V7OXfRIrcAfpB54AgCVuwSiiMc+9ZYo7S0fq2FRefaw9kN9WjT4y2G+Umj9g7cnRPsAx2SNwh27DEexrzhcJDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.produce-runtime-snapshot
 required_caps: ["ryeos.execute.service.external-content/produce-runtime-snapshot"]
 schema:
   binding_id: string
-  witness_hash: string
   source: object
   source_occurrence_id: string
-description: Produce one unqualified provider snapshot locator from an exact retained guest-owner product under the current signed producer binding; admitted operator only
+description: Produce one unqualified provider snapshot locator from an exact retained captured guest-owner product under the current signed producer binding; materialized sources remain closed until bootstrap ownership is admitted

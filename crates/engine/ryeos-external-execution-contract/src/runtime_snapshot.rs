@@ -2,7 +2,7 @@
 //!
 //! The intent owns one provider-sequence attempt. A provider locator is
 //! only an attempt result; restored bytes and runtime behavior require an
-//! independent qualification rooted in the retained product witness.
+//! independent qualification rooted in the retained source testimony.
 
 use anyhow::{Result, ensure};
 use base64::Engine as _;
@@ -11,9 +11,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::canonical_json;
 
-pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 1;
+pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 2;
 pub const RUNTIME_SNAPSHOT_RESULT_SCHEMA: u32 = 2;
-pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v2";
+pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v3";
 pub const RUNTIME_SNAPSHOT_READINESS_PROTOCOL: &str = "ryeos.runtime-snapshot-readiness.v1";
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA: u32 = 1;
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL: &str =
@@ -22,6 +22,50 @@ pub const RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL: &str =
     "ryeos.runtime-snapshot-qualification-termination.v1";
 pub const MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES: usize = 24 * 1024;
 pub const MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES: u64 = 64 * 1024 * 1024 + 16 * 1024;
+
+/// Provenance of an exact owner-runtime tree. Neither variant alone qualifies
+/// the restored provider snapshot or grants a worker execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeSnapshotSource {
+    CapturedProduct {
+        product_witness_hash: String,
+    },
+    BundleMaterialization {
+        materialization_attestation_hash: String,
+        source_coordinate_digest: String,
+        materialization_binding_digest: String,
+    },
+}
+
+impl RuntimeSnapshotSource {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::CapturedProduct {
+                product_witness_hash,
+            } => {
+                require_hash(product_witness_hash, "product witness")?;
+            }
+            Self::BundleMaterialization {
+                materialization_attestation_hash,
+                source_coordinate_digest,
+                materialization_binding_digest,
+            } => {
+                for (label, value) in [
+                    (
+                        "materialization attestation",
+                        materialization_attestation_hash,
+                    ),
+                    ("materialization coordinate", source_coordinate_digest),
+                    ("materialization binding", materialization_binding_digest),
+                ] {
+                    require_hash(value, label)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// One sealed invocation of the exact admitted snapshot producer. The upload
 /// descriptor is a process-local transport coordinate, not durable identity;
@@ -103,7 +147,7 @@ pub struct RuntimeSnapshotIntent {
     pub adapter_artifact_hash: String,
     pub provider_spec_digest: String,
     pub settings_digest: String,
-    pub product_witness_hash: String,
+    pub source: RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: String,
     pub owner_executable_sha256: String,
     pub controller_public_root: String,
@@ -124,13 +168,13 @@ impl RuntimeSnapshotIntent {
             ("adapter", &self.adapter_artifact_hash),
             ("provider spec", &self.provider_spec_digest),
             ("settings", &self.settings_digest),
-            ("product witness", &self.product_witness_hash),
             ("guest runtime manifest", &self.guest_runtime_manifest_hash),
             ("owner executable", &self.owner_executable_sha256),
             ("upload", &self.upload_sha256),
         ] {
             require_hash(value, label)?;
         }
+        self.source.validate()?;
         let owner = self
             .owner_principal
             .strip_prefix("fp:")
@@ -168,7 +212,7 @@ impl RuntimeSnapshotIntent {
     /// attempt opportunity by choosing another operation ID.
     pub fn derived_operation_id(&self) -> Result<String> {
         let coordinates = (
-            "ryeos.runtime-snapshot-operation.v1",
+            "ryeos.runtime-snapshot-operation.v2",
             &self.owner_principal,
             &self.provider_id,
             &self.source_occurrence_id,
@@ -177,7 +221,7 @@ impl RuntimeSnapshotIntent {
             &self.adapter_artifact_hash,
             &self.provider_spec_digest,
             &self.settings_digest,
-            &self.product_witness_hash,
+            &self.source,
             &self.guest_runtime_manifest_hash,
             &self.owner_executable_sha256,
             &self.controller_public_root,
@@ -660,7 +704,7 @@ mod tests {
 
     fn intent() -> RuntimeSnapshotIntent {
         let mut intent = RuntimeSnapshotIntent {
-            schema: 1,
+            schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "2".repeat(64)),
             provider_id: "render-sandbox-early-access".into(),
@@ -670,7 +714,9 @@ mod tests {
             adapter_artifact_hash: "4".repeat(64),
             provider_spec_digest: "d".repeat(64),
             settings_digest: "5".repeat(64),
-            product_witness_hash: "6".repeat(64),
+            source: RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "6".repeat(64),
+            },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
             controller_public_root: format!(
@@ -689,8 +735,18 @@ mod tests {
     fn source_and_delivery_changes_move_intent_identity() {
         let baseline = intent();
         let digest = baseline.digest().unwrap();
+        let mut materialized = baseline.clone();
+        materialized.source = RuntimeSnapshotSource::BundleMaterialization {
+            materialization_attestation_hash: "a".repeat(64),
+            source_coordinate_digest: "b".repeat(64),
+            materialization_binding_digest: "c".repeat(64),
+        };
+        assert!(materialized.validate().is_err());
+        materialized.operation_id = materialized.derived_operation_id().unwrap();
+        materialized.validate().unwrap();
+        assert_ne!(materialized.operation_id, baseline.operation_id);
+        assert_ne!(materialized.digest().unwrap(), digest);
         for field in [
-            "product_witness_hash",
             "guest_runtime_manifest_hash",
             "controller_public_root",
             "upload_sha256",
