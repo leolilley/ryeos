@@ -22,13 +22,16 @@ use ryeos_external_execution::guest_runtime_product::{
 use ryeos_state::objects::{
     GUEST_RUNTIME_MATERIALIZATION_SCHEMA, GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
     GuestRuntimeMaterializationSourceEvidence, MaterializationExecutorSource,
-    MaterializationSignedBundleManifest, MaterializationSignedItem,
+    MaterializationSignatureEnvelope, MaterializationSignedBundleManifest,
+    MaterializationSignedItem, MaterializationSignerKey,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
 use crate::operator_authority::AdmittedOperatorAuthority;
 use crate::state::AppState;
+
+mod retained;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -192,6 +195,7 @@ pub struct PreparedGuestOwnerMaterialization {
     source: GuestOwnerMaterializationSource,
     signed_recipe_sources: Vec<CapturedSignedBundleItemSource>,
     signed_bundle_manifests: Vec<CapturedSignedBundleManifest>,
+    signer_keys: Vec<MaterializationSignerKey>,
     executor_source_proof: BundlePayloadSourceProof,
 }
 
@@ -246,6 +250,7 @@ fn signed_recipe_source_set_digest(sources: &[CapturedSignedBundleItemSource]) -
             "signer_fingerprint": source.signer_fingerprint,
             "source_content_digest": source.source_content_digest,
             "raw_content_digest": source.raw_content_digest,
+            "signature_envelope": source.signature_envelope,
             }),
         ));
     }
@@ -267,6 +272,7 @@ fn build_source_evidence(
     source: &GuestOwnerMaterializationSource,
     recipe_sources: &[CapturedSignedBundleItemSource],
     bundle_manifests: &[CapturedSignedBundleManifest],
+    signer_keys: &[MaterializationSignerKey],
     executor: &BundlePayloadSourceProof,
 ) -> Result<GuestRuntimeMaterializationSourceEvidence> {
     source.coordinate_digest()?;
@@ -332,6 +338,11 @@ fn build_source_evidence(
             signer_fingerprint: item.signer_fingerprint.clone(),
             signed_blob_hash: lillux::sha256_hex(&item.signed_bytes),
             raw_content_digest: item.raw_content_digest.clone(),
+            signature_envelope: MaterializationSignatureEnvelope {
+                prefix: item.signature_envelope.prefix.clone(),
+                suffix: item.signature_envelope.suffix.clone(),
+                after_shebang: item.signature_envelope.after_shebang,
+            },
         });
     }
     signed_recipe_items.sort_by(|left, right| {
@@ -352,6 +363,7 @@ fn build_source_evidence(
         kind: GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND.to_owned(),
         signed_recipe_items,
         signed_bundle_manifests,
+        signer_keys: signer_keys.to_vec(),
         executor: MaterializationExecutorSource {
             bundle_name: source.bundle_name.clone(),
             item_ref: executor.selected_item_ref.clone(),
@@ -366,6 +378,182 @@ fn build_source_evidence(
     };
     evidence.validate()?;
     Ok(evidence)
+}
+
+fn verify_retained_signed_recipe_item(
+    item: &MaterializationSignedItem,
+    signer: &MaterializationSignerKey,
+    signed_bytes: &[u8],
+) -> Result<()> {
+    ensure!(
+        item.signer_fingerprint == signer.signer_fingerprint,
+        "retained recipe item signer differs from its selected verifier"
+    );
+    verify_retained_signed_envelope(
+        signed_bytes,
+        &item.signed_blob_hash,
+        &item.raw_content_digest,
+        &item.signature_envelope,
+        signer,
+    )?;
+    Ok(())
+}
+
+fn verify_retained_signed_envelope(
+    signed_bytes: &[u8],
+    signed_hash: &str,
+    body_hash: &str,
+    envelope: &MaterializationSignatureEnvelope,
+    signer: &MaterializationSignerKey,
+) -> Result<String> {
+    ensure!(
+        lillux::sha256_hex(signed_bytes) == signed_hash,
+        "retained signed source bytes differ from their address"
+    );
+    let key = retained_verifier(signer)?;
+    let signed = std::str::from_utf8(signed_bytes)?;
+    let (raw, header) = lillux::signature::strip_canonical_signature_with_envelope(
+        signed,
+        &envelope.prefix,
+        envelope.suffix.as_deref(),
+        envelope.after_shebang,
+    )?;
+    let header = header.context("retained source has no canonical signature header")?;
+    ensure!(
+        lillux::sha256_hex(raw.as_bytes()) == body_hash
+            && lillux::signature::is_valid_signature_for(
+                &header.content_hash,
+                &header.signature_b64,
+                &header.signer_fingerprint,
+                lillux::signature::content_to_sign(&raw, envelope.after_shebang),
+                &key,
+                &signer.signer_fingerprint,
+            ),
+        "retained source signature or parsed body changed"
+    );
+    Ok(raw)
+}
+
+fn verify_retained_signed_bundle_manifest(
+    manifest: &MaterializationSignedBundleManifest,
+    signer: &MaterializationSignerKey,
+    signed_bytes: &[u8],
+) -> Result<()> {
+    ensure!(
+        manifest.signer_fingerprint == signer.signer_fingerprint
+            && lillux::sha256_hex(signed_bytes) == manifest.signed_blob_hash,
+        "retained Bundle manifest signer differs from historical verifier"
+    );
+    let identity = ryeos_engine::plan_builder::verify_retained_signed_bundle_manifest_bytes(
+        signed_bytes,
+        &manifest.bundle_name,
+        &manifest.signer_fingerprint,
+        &retained_verifier(signer)?,
+    )?;
+    ensure!(
+        identity.body_digest == manifest.body_digest
+            && identity.name == manifest.bundle_name
+            && identity.signer_fingerprint == manifest.signer_fingerprint,
+        "retained signed Bundle manifest identity changed"
+    );
+    Ok(())
+}
+
+fn retained_verifier(signer: &MaterializationSignerKey) -> Result<lillux::crypto::VerifyingKey> {
+    let encoded = signer
+        .verifying_key
+        .strip_prefix("ed25519:")
+        .context("retained recipe verifier is not Ed25519")?;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+    let key_bytes: [u8; 32] = decoded
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("retained recipe verifier length changed"))?;
+    let key = lillux::crypto::VerifyingKey::from_bytes(&key_bytes)?;
+    ensure!(
+        lillux::crypto::fingerprint(&key) == signer.signer_fingerprint,
+        "retained recipe verifier differs from fingerprint"
+    );
+    Ok(key)
+}
+
+fn verify_retained_executor_source(
+    evidence: &GuestRuntimeMaterializationSourceEvidence,
+    signed_manifest_ref: &[u8],
+    manifest_object: &serde_json::Value,
+    item_source_object: &serde_json::Value,
+    signed_sidecar: &[u8],
+    payload: &[u8],
+) -> Result<()> {
+    evidence.validate()?;
+    let executor = &evidence.executor;
+    ensure!(
+        executor.item_ref == format!("bin/{}/{}", executor.target_triple, OWNER_NAME),
+        "retained executor is not the exact guest occurrence owner"
+    );
+    let signer = evidence
+        .signer_keys
+        .iter()
+        .find(|key| key.signer_fingerprint == executor.signer_fingerprint)
+        .context("retained executor signer has no historical verifier")?;
+    let key = retained_verifier(signer)?;
+    ensure!(
+        lillux::sha256_hex(signed_manifest_ref) == executor.signed_manifest_ref_blob_hash,
+        "retained executor manifest ref bytes changed"
+    );
+    let signed_ref = std::str::from_utf8(signed_manifest_ref)?;
+    let verified_ref = ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
+        signed_ref,
+        |fingerprint| (fingerprint == signer.signer_fingerprint).then(|| key.clone()),
+        TrustClass::TrustedBundle,
+    )?;
+    ensure!(
+        verified_ref.signer_fingerprint == executor.signer_fingerprint
+            && verified_ref.manifest_hash == executor.manifest_object_blob_hash,
+        "retained executor manifest ref differs from source evidence"
+    );
+    let manifest_bytes = lillux::canonical_json(manifest_object)?;
+    ensure!(
+        lillux::sha256_hex(manifest_bytes.as_bytes()) == executor.manifest_object_blob_hash,
+        "retained executor manifest object bytes changed"
+    );
+    let selected = ryeos_engine::executor_resolution::verify_executor_manifest_object(
+        manifest_object,
+        &executor.manifest_object_blob_hash,
+    )?;
+    ensure!(
+        selected.get(&executor.item_ref) == Some(&executor.item_source_object_hash),
+        "retained executor manifest does not select ItemSource"
+    );
+    let item_source_bytes = lillux::canonical_json(item_source_object)?;
+    ensure!(
+        lillux::sha256_hex(item_source_bytes.as_bytes()) == executor.item_source_object_hash,
+        "retained executor ItemSource object bytes changed"
+    );
+    let (content_hash, mode) = ryeos_engine::executor_resolution::verify_executor_item_source(
+        item_source_object,
+        &executor.item_source_object_hash,
+        &executor.item_ref,
+    )?;
+    ensure!(
+        content_hash == executor.payload_blob_hash && mode == 0o755,
+        "retained executor ItemSource differs from the executable payload contract"
+    );
+    verify_retained_signed_envelope(
+        signed_sidecar,
+        &executor.signed_sidecar_blob_hash,
+        &executor.item_source_object_hash,
+        &MaterializationSignatureEnvelope {
+            prefix: "#".to_owned(),
+            suffix: None,
+            after_shebang: false,
+        },
+        signer,
+    )?;
+    ensure!(
+        lillux::sha256_hex(payload) == executor.payload_blob_hash,
+        "retained executor payload bytes changed"
+    );
+    Ok(())
 }
 
 impl PreparedGuestOwnerMaterialization {
@@ -401,6 +589,7 @@ impl PreparedGuestOwnerMaterialization {
             &self.source,
             &self.signed_recipe_sources,
             &self.signed_bundle_manifests,
+            &self.signer_keys,
             &self.executor_source_proof,
         )
     }
@@ -487,6 +676,39 @@ pub fn prepare_current_guest_owner_runtime(
             .signer_fingerprint
             .as_deref()
             .context("guest owner recipe has no admitted publisher")?;
+        let mut signer_fingerprints = signed_recipe_sources
+            .iter()
+            .map(|item| item.signer_fingerprint.clone())
+            .chain(
+                signed_bundle_manifests
+                    .iter()
+                    .map(|item| item.identity.signer_fingerprint.clone()),
+            )
+            .collect::<std::collections::BTreeSet<_>>();
+        signer_fingerprints.insert(publisher.to_owned());
+        let signer_keys = signer_fingerprints
+            .into_iter()
+            .map(|fingerprint| {
+                let key = state
+                    .engine
+                    .node_trust_store
+                    .get(&fingerprint)
+                    .context("checked materialization signer has no retained verifier")?;
+                ensure!(
+                    key.fingerprint == fingerprint
+                        && lillux::crypto::fingerprint(&key.verifying_key) == fingerprint,
+                    "checked materialization signer verifier differs from fingerprint"
+                );
+                Ok(MaterializationSignerKey {
+                    signer_fingerprint: fingerprint,
+                    verifying_key: format!(
+                        "ed25519:{}",
+                        base64::engine::general_purpose::STANDARD
+                            .encode(key.verifying_key.to_bytes())
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let recipe: GuestOwnerMaterializationRecipe = serde_json::from_value(
             resolution
                 .composed
@@ -576,6 +798,7 @@ pub fn prepare_current_guest_owner_runtime(
             source,
             signed_recipe_sources,
             signed_bundle_manifests,
+            signer_keys,
             executor_source_proof: payload.source_proof,
         })
     })
@@ -600,6 +823,11 @@ mod tests {
             signer_fingerprint: hash('a'),
             source_content_digest: lillux::sha256_hex(bytes),
             raw_content_digest: hash('b'),
+            signature_envelope: ryeos_engine::contracts::SignatureEnvelope {
+                prefix: "#".to_owned(),
+                suffix: None,
+                after_shebang: false,
+            },
             signed_bytes: bytes.to_vec(),
         };
         let first = source("config:codex/first", b"signed first");
@@ -614,6 +842,12 @@ mod tests {
         assert!(signed_recipe_source_set_digest(&[first.clone(), replaced.clone()]).is_err());
         assert_ne!(
             signed_recipe_source_set_digest(&[replaced, second.clone()]).unwrap(),
+            expected
+        );
+        let mut alternate_envelope = second.clone();
+        alternate_envelope.signature_envelope.prefix = "//".to_owned();
+        assert_ne!(
+            signed_recipe_source_set_digest(&[first.clone(), alternate_envelope]).unwrap(),
             expected
         );
         let mut changed = first;
@@ -666,26 +900,60 @@ mod tests {
     #[test]
     fn source_evidence_joins_selected_executor_and_root_recipe() {
         let mut source = fixture_source();
+        let signing_key = SigningKey::from_bytes(&[11u8; 32]);
+        let verifier = signing_key.verifying_key();
+        let payload = b"exact owner bytes";
+        source.owner_executable_sha256 = lillux::sha256_hex(payload);
+        source.recipe_publisher_fingerprint = lillux::crypto::fingerprint(&verifier);
+        let signer_keys = vec![MaterializationSignerKey {
+            signer_fingerprint: source.recipe_publisher_fingerprint.clone(),
+            verifying_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(verifier.to_bytes())
+            ),
+        }];
+        let recipe_body = "kind: config\nguest_owner_materialization: exact\n";
+        let signed_recipe = lillux::signature::sign_content_at(
+            recipe_body,
+            &signing_key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
+        source.recipe_content_digest = lillux::sha256_hex(recipe_body.as_bytes());
         let recipe = CapturedSignedBundleItemSource {
             resolved_ref: source.recipe_ref.clone(),
             source_root: ItemSourceRoot::Bundle {
                 name: source.bundle_name.clone(),
             },
             signer_fingerprint: source.recipe_publisher_fingerprint.clone(),
-            source_content_digest: lillux::sha256_hex(b"signed recipe"),
+            source_content_digest: lillux::sha256_hex(signed_recipe.as_bytes()),
             raw_content_digest: source.recipe_content_digest.clone(),
-            signed_bytes: b"signed recipe".to_vec(),
+            signature_envelope: ryeos_engine::contracts::SignatureEnvelope {
+                prefix: "#".to_owned(),
+                suffix: None,
+                after_shebang: false,
+            },
+            signed_bytes: signed_recipe.into_bytes(),
         };
+        let bundle_body = "name: codex\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n";
+        let signed_bundle = lillux::signature::sign_content_at(
+            bundle_body,
+            &signing_key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
         let bundle = CapturedSignedBundleManifest {
             identity: ryeos_engine::plan_builder::SignedBundleManifestIdentity {
                 name: source.bundle_name.clone(),
-                body_digest: hash('7'),
+                body_digest: lillux::sha256_hex(bundle_body.as_bytes()),
                 signer_fingerprint: source.recipe_publisher_fingerprint.clone(),
                 provides_kinds: vec![],
                 requires_kinds: vec![],
                 uses_kinds: vec![],
             },
-            signed_bytes: b"signed Bundle manifest".to_vec(),
+            signed_bytes: signed_bundle.into_bytes(),
         };
         source.signed_recipe_source_set_digest =
             signed_recipe_source_set_digest(std::slice::from_ref(&recipe)).unwrap();
@@ -708,12 +976,30 @@ mod tests {
         });
         source.executor_manifest_hash =
             ryeos_state::objects::canonical_value_digest(&manifest).unwrap();
+        let signed_ref = lillux::signature::sign_content_at(
+            &format!(
+                "{}\n{}\n",
+                ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN,
+                source.executor_manifest_hash
+            ),
+            &signing_key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
+        let signed_sidecar = lillux::signature::sign_content_at(
+            &lillux::canonical_json(&item_source).unwrap(),
+            &signing_key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
         let proof = BundlePayloadSourceProof {
             selected_item_ref: item_ref,
-            signed_manifest_ref: b"signed manifest ref".to_vec(),
+            signed_manifest_ref: signed_ref.into_bytes(),
             manifest_object: manifest,
             item_source_object: item_source,
-            signed_sidecar: b"signed sidecar".to_vec(),
+            signed_sidecar: signed_sidecar.into_bytes(),
         };
         source.executor_manifest_ref_signed_digest = lillux::sha256_hex(&proof.signed_manifest_ref);
         source.executor_sidecar_signed_digest = lillux::sha256_hex(&proof.signed_sidecar);
@@ -721,6 +1007,7 @@ mod tests {
             &source,
             std::slice::from_ref(&recipe),
             std::slice::from_ref(&bundle),
+            &signer_keys,
             &proof,
         )
         .unwrap();
@@ -732,15 +1019,251 @@ mod tests {
             evidence.signed_recipe_items[0].raw_content_digest,
             source.recipe_content_digest
         );
+        verify_retained_executor_source(
+            &evidence,
+            &proof.signed_manifest_ref,
+            &proof.manifest_object,
+            &proof.item_source_object,
+            &proof.signed_sidecar,
+            payload,
+        )
+        .unwrap();
+        assert!(
+            verify_retained_executor_source(
+                &evidence,
+                &proof.signed_manifest_ref,
+                &proof.manifest_object,
+                &proof.item_source_object,
+                &proof.signed_sidecar,
+                b"changed owner bytes",
+            )
+            .is_err()
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(tmp.path().join("objects"));
+        assert_eq!(
+            cas.store_blob(&recipe.signed_bytes).unwrap(),
+            evidence.signed_recipe_items[0].signed_blob_hash
+        );
+        assert_eq!(
+            cas.store_blob(&bundle.signed_bytes).unwrap(),
+            evidence.signed_bundle_manifests[0].signed_blob_hash
+        );
+        assert_eq!(
+            cas.store_blob(&proof.signed_manifest_ref).unwrap(),
+            evidence.executor.signed_manifest_ref_blob_hash
+        );
+        assert_eq!(
+            cas.store_blob(
+                lillux::canonical_json(&proof.manifest_object)
+                    .unwrap()
+                    .as_bytes()
+            )
+            .unwrap(),
+            evidence.executor.manifest_object_blob_hash
+        );
+        assert_eq!(
+            cas.store_object(&proof.item_source_object).unwrap(),
+            evidence.executor.item_source_object_hash
+        );
+        assert_eq!(
+            cas.store_blob(payload).unwrap(),
+            evidence.executor.payload_blob_hash
+        );
+        let evidence_hash = cas.store_object(&evidence.to_value().unwrap()).unwrap();
+        assert!(retained::verify_source_closure(&cas, &source, &evidence_hash).is_err());
+        assert_eq!(
+            cas.store_blob(&proof.signed_sidecar).unwrap(),
+            evidence.executor.signed_sidecar_blob_hash
+        );
+        let verified = retained::verify_source_closure(&cas, &source, &evidence_hash).unwrap();
+        assert_eq!(verified.payload_size, payload.len() as u64);
+        assert_eq!(verified.evidence, evidence);
+        let profile = br#"{"kind":"guest-owner-profile"}"#;
+        source.profile_digest = lillux::sha256_hex(profile);
+        let controller_root = hex::encode(
+            SigningKey::from_bytes(&[7u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let root_hash = lillux::sha256_hex(controller_root.as_bytes());
+        let output = ryeos_state::objects::external_content_manifest::ExternalContentManifestObject {
+            schema: ryeos_state::objects::external_content_manifest::EXTERNAL_CONTENT_TREE_SCHEMA.to_owned(),
+            kind: ryeos_state::objects::external_content_manifest::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
+            entries: vec![
+                ryeos_state::objects::external_content_manifest::ExternalContentManifestEntry {
+                    path: "bin".to_owned(), kind: ryeos_state::objects::external_content_manifest::ExternalContentManifestEntryKind::Dir,
+                    mode: None, blob_hash: None, size: None, target: None,
+                },
+                ryeos_state::objects::external_content_manifest::ExternalContentManifestEntry {
+                    path: format!("bin/{OWNER_NAME}"), kind: ryeos_state::objects::external_content_manifest::ExternalContentManifestEntryKind::File,
+                    mode: Some(0o755), blob_hash: Some(source.owner_executable_sha256.clone()), size: Some(payload.len() as u64), target: None,
+                },
+                ryeos_state::objects::external_content_manifest::ExternalContentManifestEntry {
+                    path: "controller-root.hex".to_owned(), kind: ryeos_state::objects::external_content_manifest::ExternalContentManifestEntryKind::File,
+                    mode: Some(0o644), blob_hash: Some(root_hash.clone()), size: Some(64), target: None,
+                },
+                ryeos_state::objects::external_content_manifest::ExternalContentManifestEntry {
+                    path: "guest-owner-profile.json".to_owned(), kind: ryeos_state::objects::external_content_manifest::ExternalContentManifestEntryKind::File,
+                    mode: Some(0o644), blob_hash: Some(source.profile_digest.clone()), size: Some(profile.len() as u64), target: None,
+                },
+            ],
+            entry_count: 4,
+            total_bytes: payload.len() as u64 + 64 + profile.len() as u64,
+        };
+        output.validate().unwrap();
+        source.runtime_manifest_hash = cas
+            .store_object(&serde_json::to_value(&output).unwrap())
+            .unwrap();
+        assert!(retained::verify_output_closure(&cas, &source, &verified).is_err());
+        assert_eq!(cas.store_blob(profile).unwrap(), source.profile_digest);
+        assert_eq!(
+            cas.store_blob(controller_root.as_bytes()).unwrap(),
+            root_hash
+        );
+        let output_identity = retained::verify_output_closure(&cas, &source, &verified).unwrap();
+        assert_eq!(output_identity.manifest_hash, source.runtime_manifest_hash);
+        let mut wrong_profile = source.clone();
+        wrong_profile.profile_digest = hash('8');
+        assert!(retained::verify_output_closure(&cas, &wrong_profile, &verified).is_err());
+        let mut wrong_coordinate = source.clone();
+        wrong_coordinate.signed_recipe_source_set_digest = hash('8');
+        assert!(retained::verify_source_closure(&cas, &wrong_coordinate, &evidence_hash).is_err());
 
         let mut changed = source.clone();
         changed.executor_sidecar_signed_digest = hash('8');
         assert!(
-            build_source_evidence(&changed, &[recipe.clone()], &[bundle.clone()], &proof).is_err()
+            build_source_evidence(
+                &changed,
+                &[recipe.clone()],
+                &[bundle.clone()],
+                &signer_keys,
+                &proof
+            )
+            .is_err()
         );
         changed = source.clone();
         changed.recipe_content_digest = hash('8');
-        assert!(build_source_evidence(&changed, &[recipe], &[bundle], &proof).is_err());
+        assert!(
+            build_source_evidence(&changed, &[recipe], &[bundle], &signer_keys, &proof).is_err()
+        );
+    }
+
+    #[test]
+    fn retained_recipe_rechecks_exact_signature_without_live_bundle() {
+        let key = SigningKey::from_bytes(&[21u8; 32]);
+        let verifier = key.verifying_key();
+        let body = "kind: config\nvalue: exact\n";
+        let signed =
+            lillux::signature::sign_content_at(body, &key, "#", None, "2026-09-29T00:00:00Z");
+        let signer = MaterializationSignerKey {
+            signer_fingerprint: lillux::crypto::fingerprint(&verifier),
+            verifying_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(verifier.to_bytes())
+            ),
+        };
+        let item = MaterializationSignedItem {
+            resolved_ref: "config:codex/guest-owner-materialization".to_owned(),
+            bundle_name: "codex".to_owned(),
+            signer_fingerprint: signer.signer_fingerprint.clone(),
+            signed_blob_hash: lillux::sha256_hex(signed.as_bytes()),
+            raw_content_digest: lillux::sha256_hex(body.as_bytes()),
+            signature_envelope: MaterializationSignatureEnvelope {
+                prefix: "#".to_owned(),
+                suffix: None,
+                after_shebang: false,
+            },
+        };
+        verify_retained_signed_recipe_item(&item, &signer, signed.as_bytes()).unwrap();
+        let mut substituted = item.clone();
+        substituted.signature_envelope.prefix = "//".to_owned();
+        assert!(
+            verify_retained_signed_recipe_item(&substituted, &signer, signed.as_bytes()).is_err()
+        );
+        substituted = item;
+        substituted.raw_content_digest = hash('a');
+        assert!(
+            verify_retained_signed_recipe_item(&substituted, &signer, signed.as_bytes()).is_err()
+        );
+
+        let bundle_body = "name: codex\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n";
+        let signed_bundle = lillux::signature::sign_content_at(
+            bundle_body,
+            &key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
+        let bundle = MaterializationSignedBundleManifest {
+            bundle_name: "codex".to_owned(),
+            signer_fingerprint: signer.signer_fingerprint.clone(),
+            signed_blob_hash: lillux::sha256_hex(signed_bundle.as_bytes()),
+            body_digest: lillux::sha256_hex(bundle_body.as_bytes()),
+        };
+        verify_retained_signed_bundle_manifest(&bundle, &signer, signed_bundle.as_bytes()).unwrap();
+        let mut changed_bundle = bundle;
+        changed_bundle.bundle_name = "other".to_owned();
+        assert!(
+            verify_retained_signed_bundle_manifest(
+                &changed_bundle,
+                &signer,
+                signed_bundle.as_bytes()
+            )
+            .is_err()
+        );
+        let malformed = lillux::signature::sign_content_at(
+            "name: codex\nversion: 1.0.0\n",
+            &key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
+        changed_bundle.bundle_name = "codex".to_owned();
+        changed_bundle.signed_blob_hash = lillux::sha256_hex(malformed.as_bytes());
+        changed_bundle.body_digest = lillux::sha256_hex(b"name: codex\nversion: 1.0.0\n");
+        assert!(
+            verify_retained_signed_bundle_manifest(&changed_bundle, &signer, malformed.as_bytes())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn retained_referenced_source_verifies_after_shebang_envelope() {
+        let key = SigningKey::from_bytes(&[22u8; 32]);
+        let body = "#!/usr/bin/env python3\nprint('bounded')\n";
+        let signed = lillux::signature::sign_content_at_with_options(
+            body,
+            &key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+            true,
+        );
+        let signer = MaterializationSignerKey {
+            signer_fingerprint: lillux::crypto::fingerprint(&key.verifying_key()),
+            verifying_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes())
+            ),
+        };
+        let item = MaterializationSignedItem {
+            resolved_ref: "tool:codex/example".to_owned(),
+            bundle_name: "codex".to_owned(),
+            signer_fingerprint: signer.signer_fingerprint.clone(),
+            signed_blob_hash: lillux::sha256_hex(signed.as_bytes()),
+            raw_content_digest: lillux::sha256_hex(body.as_bytes()),
+            signature_envelope: MaterializationSignatureEnvelope {
+                prefix: "#".to_owned(),
+                suffix: None,
+                after_shebang: true,
+            },
+        };
+        verify_retained_signed_recipe_item(&item, &signer, signed.as_bytes()).unwrap();
+        let mut changed = item;
+        changed.signature_envelope.after_shebang = false;
+        assert!(verify_retained_signed_recipe_item(&changed, &signer, signed.as_bytes()).is_err());
     }
 
     #[test]

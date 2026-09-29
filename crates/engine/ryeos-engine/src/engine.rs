@@ -941,6 +941,7 @@ pub struct CapturedSignedBundleItemSource {
     pub signer_fingerprint: String,
     pub source_content_digest: String,
     pub raw_content_digest: String,
+    pub signature_envelope: crate::contracts::SignatureEnvelope,
     pub signed_bytes: Vec<u8>,
 }
 
@@ -1094,6 +1095,28 @@ impl CheckedEngineGeneration<'_> {
                     "signed materialization source changed under checked generation".into(),
                 ));
             }
+            let (strict_raw, strict_header) =
+                lillux::signature::strip_canonical_signature_with_envelope(
+                    &raw.content,
+                    &raw.signature_envelope.prefix,
+                    raw.signature_envelope.suffix.as_deref(),
+                    raw.signature_envelope.after_shebang,
+                )
+                .map_err(|error| {
+                    EngineError::Internal(format!(
+                        "materialization source signature envelope is not canonical: {error}"
+                    ))
+                })?;
+            if strict_raw != raw.raw_content
+                || strict_header
+                    .as_ref()
+                    .map(|header| header.signer_fingerprint.as_str())
+                    != Some(signer)
+            {
+                return Err(EngineError::Internal(
+                    "materialization source signature differs from checked resolution".into(),
+                ));
+            }
             let bytes = raw.content.into_bytes();
             total = total.checked_add(bytes.len()).ok_or_else(|| {
                 EngineError::Internal("materialization source byte count overflow".into())
@@ -1109,6 +1132,7 @@ impl CheckedEngineGeneration<'_> {
                 signer_fingerprint: signer.to_owned(),
                 source_content_digest: ancestor.source_content_digest.clone(),
                 raw_content_digest: ancestor.raw_content_digest.clone(),
+                signature_envelope: raw.signature_envelope,
                 signed_bytes: bytes,
             });
         }
