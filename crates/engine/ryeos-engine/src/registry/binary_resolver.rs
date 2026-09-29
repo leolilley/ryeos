@@ -93,6 +93,30 @@ struct VerifiedBundleBinary {
     source_proof: BundlePayloadSourceProof,
 }
 
+const MAX_EXECUTOR_MANIFEST_OBJECT_BYTES: u64 = 1024 * 1024;
+const MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES: u64 = 64 * 1024;
+
+fn load_executor_cas_object_bounded(
+    cas: &lillux::CasStore,
+    hash: &str,
+    maximum_bytes: u64,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let Some((file, size)) = cas.open_object(hash)? else {
+        return Ok(None);
+    };
+    let bytes = lillux::read_open_regular_file_exact_bounded(file, size, maximum_bytes)?;
+    anyhow::ensure!(
+        lillux::sha256_hex(&bytes) == hash,
+        "executor CAS object hash changed"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(
+        lillux::canonical_json(&value)?.as_bytes() == bytes,
+        "executor CAS object is not canonical JSON"
+    );
+    Ok(Some(value))
+}
+
 impl CapturedBundlePayload {
     pub fn authority(&self) -> &lillux::InheritedDescriptorAuthority {
         &self.handle
@@ -631,14 +655,14 @@ fn resolve_bundle_binary_ref_for_target(
     let objects_dir = bundle_root.join(crate::AI_DIR).join("objects");
     let cas = lillux::cas::CasStore::new(objects_dir);
 
-    let manifest_value = cas
-        .get_object(&manifest_hash)
-        .map_err(|e| {
-            EngineError::Internal(format!("CAS read error for manifest {manifest_hash}: {e}"))
-        })?
-        .ok_or_else(|| EngineError::BinManifestMissing {
-            bundle_root: bundle_root.display().to_string(),
-        })?;
+    let manifest_value =
+        load_executor_cas_object_bounded(&cas, &manifest_hash, MAX_EXECUTOR_MANIFEST_OBJECT_BYTES)
+            .map_err(|e| {
+                EngineError::Internal(format!("CAS read error for manifest {manifest_hash}: {e}"))
+            })?
+            .ok_or_else(|| EngineError::BinManifestMissing {
+                bundle_root: bundle_root.display().to_string(),
+            })?;
 
     let item_source_hashes = crate::executor_resolution::verify_executor_manifest_object(
         &manifest_value,
@@ -657,18 +681,21 @@ fn resolve_bundle_binary_ref_for_target(
                 triple: triple.to_string(),
             })?;
 
-    let item_source = cas
-        .get_object(item_source_hash)
-        .map_err(|e| {
-            EngineError::Internal(format!(
-                "CAS read error for item_source {item_source_hash}: {e}"
-            ))
-        })?
-        .ok_or_else(|| {
-            EngineError::Internal(format!(
-                "item_source {item_source_hash} for {item_ref} not found in CAS"
-            ))
-        })?;
+    let item_source = load_executor_cas_object_bounded(
+        &cas,
+        item_source_hash,
+        MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES,
+    )
+    .map_err(|e| {
+        EngineError::Internal(format!(
+            "CAS read error for item_source {item_source_hash}: {e}"
+        ))
+    })?
+    .ok_or_else(|| {
+        EngineError::Internal(format!(
+            "item_source {item_source_hash} for {item_ref} not found in CAS"
+        ))
+    })?;
 
     let (signed_sidecar_fingerprint, signed_sidecar) = verify_item_source_sidecar(
         &bin_name,
@@ -987,26 +1014,29 @@ fn verify_bundle_executor_manifest_items(
     }
 
     let cas = lillux::cas::CasStore::new(ai_dir.join("objects"));
-    let manifest_value = cas
-        .get_object(&verified_manifest_ref.manifest_hash)
-        .map_err(|error| {
-            bundle_executor_error(
-                bundle_root,
-                format!(
-                    "read executor manifest object {}: {error}",
-                    verified_manifest_ref.manifest_hash
-                ),
-            )
-        })?
-        .ok_or_else(|| {
-            bundle_executor_error(
-                bundle_root,
-                format!(
-                    "executor manifest object {} is missing from bundle CAS",
-                    verified_manifest_ref.manifest_hash
-                ),
-            )
-        })?;
+    let manifest_value = load_executor_cas_object_bounded(
+        &cas,
+        &verified_manifest_ref.manifest_hash,
+        MAX_EXECUTOR_MANIFEST_OBJECT_BYTES,
+    )
+    .map_err(|error| {
+        bundle_executor_error(
+            bundle_root,
+            format!(
+                "read executor manifest object {}: {error}",
+                verified_manifest_ref.manifest_hash
+            ),
+        )
+    })?
+    .ok_or_else(|| {
+        bundle_executor_error(
+            bundle_root,
+            format!(
+                "executor manifest object {} is missing from bundle CAS",
+                verified_manifest_ref.manifest_hash
+            ),
+        )
+    })?;
     let item_source_hashes = crate::executor_resolution::verify_executor_manifest_object(
         &manifest_value,
         &verified_manifest_ref.manifest_hash,
@@ -1027,20 +1057,23 @@ fn verify_bundle_executor_manifest_items(
         require_regular_artifact(bundle_root, &bin_path, "installed executable")?;
 
         let item_source_hash = &item_source_hashes[item_ref];
-        let item_source = cas
-            .get_object(item_source_hash)
-            .map_err(|error| {
-                bundle_executor_error(
-                    bundle_root,
-                    format!("read ItemSource {item_source_hash} for {item_ref}: {error}"),
-                )
-            })?
-            .ok_or_else(|| {
-                bundle_executor_error(
-                    bundle_root,
-                    format!("ItemSource {item_source_hash} for {item_ref} is missing from CAS"),
-                )
-            })?;
+        let item_source = load_executor_cas_object_bounded(
+            &cas,
+            item_source_hash,
+            MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES,
+        )
+        .map_err(|error| {
+            bundle_executor_error(
+                bundle_root,
+                format!("read ItemSource {item_source_hash} for {item_ref}: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            bundle_executor_error(
+                bundle_root,
+                format!("ItemSource {item_source_hash} for {item_ref} is missing from CAS"),
+            )
+        })?;
         let (sidecar_signer, _) = verify_item_source_sidecar(
             bin_name,
             &bin_path,
@@ -1981,6 +2014,21 @@ mod tests {
                 TrustClass::TrustedBundle,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn executor_cas_object_read_refuses_oversize_before_decode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(tmp.path().join("objects"));
+        let value = serde_json::json!({"large": "x".repeat(4096)});
+        let hash = cas.store_object(&value).unwrap();
+        assert!(load_executor_cas_object_bounded(&cas, &hash, 1024).is_err());
+        assert_eq!(
+            load_executor_cas_object_bounded(&cas, &hash, 8192)
+                .unwrap()
+                .unwrap(),
+            value
         );
     }
 

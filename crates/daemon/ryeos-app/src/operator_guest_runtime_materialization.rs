@@ -15,9 +15,14 @@ use ryeos_engine::plan_builder::CapturedSignedBundleManifest;
 use ryeos_engine::resolution::TrustClass;
 use ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime;
 use ryeos_external_execution::guest_runtime_product::{
-    GuestOwnerMaterializationRecipe, GuestOwnerRuntimeManifestIdentity,
+    GuestOwnerMaterializationRecipe, GuestOwnerRuntimeManifestIdentity, OWNER_NAME,
     derive_guest_owner_runtime_manifest_identity,
     produce_guest_owner_runtime_from_admitted_payload,
+};
+use ryeos_state::objects::{
+    GUEST_RUNTIME_MATERIALIZATION_SCHEMA, GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
+    GuestRuntimeMaterializationSourceEvidence, MaterializationExecutorSource,
+    MaterializationSignedBundleManifest, MaterializationSignedItem,
 };
 use serde::{Deserialize, Serialize};
 
@@ -258,6 +263,111 @@ fn signed_recipe_source_set_digest(sources: &[CapturedSignedBundleItemSource]) -
     }))
 }
 
+fn build_source_evidence(
+    source: &GuestOwnerMaterializationSource,
+    recipe_sources: &[CapturedSignedBundleItemSource],
+    bundle_manifests: &[CapturedSignedBundleManifest],
+    executor: &BundlePayloadSourceProof,
+) -> Result<GuestRuntimeMaterializationSourceEvidence> {
+    source.coordinate_digest()?;
+    ensure!(
+        signed_recipe_source_set_digest(recipe_sources)? == source.signed_recipe_source_set_digest
+            && signed_bundle_manifest_set_digest(bundle_manifests)?
+                == source.signed_bundle_manifest_set_digest,
+        "retained materialization recipe source sets differ from coordinate"
+    );
+    ensure!(
+        recipe_sources.iter().any(|item| {
+            item.resolved_ref == source.recipe_ref
+                && item.raw_content_digest == source.recipe_content_digest
+                && item.signer_fingerprint == source.recipe_publisher_fingerprint
+                && item.source_root
+                    == ItemSourceRoot::Bundle {
+                        name: source.bundle_name.clone(),
+                    }
+        }) && bundle_manifests.iter().any(|manifest| {
+            manifest.identity.name == source.bundle_name
+                && manifest.identity.signer_fingerprint == source.recipe_publisher_fingerprint
+        }),
+        "retained materialization root recipe or executor Bundle differs from coordinate"
+    );
+    let manifest_bytes = lillux::canonical_json(&executor.manifest_object)?;
+    let item_source_bytes = lillux::canonical_json(&executor.item_source_object)?;
+    ensure!(
+        lillux::sha256_hex(manifest_bytes.as_bytes()) == source.executor_manifest_hash
+            && lillux::sha256_hex(item_source_bytes.as_bytes()) == source.executor_item_source_hash
+            && lillux::sha256_hex(&executor.signed_manifest_ref)
+                == source.executor_manifest_ref_signed_digest
+            && lillux::sha256_hex(&executor.signed_sidecar)
+                == source.executor_sidecar_signed_digest,
+        "retained executor proof differs from materialization coordinate"
+    );
+    let selected = ryeos_engine::executor_resolution::verify_executor_manifest_object(
+        &executor.manifest_object,
+        &source.executor_manifest_hash,
+    )?;
+    ensure!(
+        executor.selected_item_ref == format!("bin/{}/{}", source.guest_target_triple, OWNER_NAME)
+            && selected.get(&executor.selected_item_ref) == Some(&source.executor_item_source_hash),
+        "retained executor manifest does not select the captured ItemSource"
+    );
+    let (payload_hash, _) = ryeos_engine::executor_resolution::verify_executor_item_source(
+        &executor.item_source_object,
+        &source.executor_item_source_hash,
+        &executor.selected_item_ref,
+    )?;
+    ensure!(
+        payload_hash == source.owner_executable_sha256,
+        "retained executor ItemSource does not select the materialized payload"
+    );
+
+    let mut signed_recipe_items = Vec::with_capacity(recipe_sources.len());
+    for item in recipe_sources {
+        let ItemSourceRoot::Bundle { name } = &item.source_root else {
+            anyhow::bail!("retained materialization recipe item is not Bundle content");
+        };
+        signed_recipe_items.push(MaterializationSignedItem {
+            resolved_ref: item.resolved_ref.clone(),
+            bundle_name: name.clone(),
+            signer_fingerprint: item.signer_fingerprint.clone(),
+            signed_blob_hash: lillux::sha256_hex(&item.signed_bytes),
+            raw_content_digest: item.raw_content_digest.clone(),
+        });
+    }
+    signed_recipe_items.sort_by(|left, right| {
+        (&left.resolved_ref, &left.bundle_name).cmp(&(&right.resolved_ref, &right.bundle_name))
+    });
+    let mut signed_bundle_manifests = bundle_manifests
+        .iter()
+        .map(|item| MaterializationSignedBundleManifest {
+            bundle_name: item.identity.name.clone(),
+            signer_fingerprint: item.identity.signer_fingerprint.clone(),
+            signed_blob_hash: lillux::sha256_hex(&item.signed_bytes),
+            body_digest: item.identity.body_digest.clone(),
+        })
+        .collect::<Vec<_>>();
+    signed_bundle_manifests.sort_by(|left, right| left.bundle_name.cmp(&right.bundle_name));
+    let evidence = GuestRuntimeMaterializationSourceEvidence {
+        schema: GUEST_RUNTIME_MATERIALIZATION_SCHEMA,
+        kind: GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND.to_owned(),
+        signed_recipe_items,
+        signed_bundle_manifests,
+        executor: MaterializationExecutorSource {
+            bundle_name: source.bundle_name.clone(),
+            item_ref: executor.selected_item_ref.clone(),
+            target_triple: source.guest_target_triple.clone(),
+            signer_fingerprint: source.recipe_publisher_fingerprint.clone(),
+            signed_manifest_ref_blob_hash: source.executor_manifest_ref_signed_digest.clone(),
+            manifest_object_blob_hash: source.executor_manifest_hash.clone(),
+            item_source_object_hash: source.executor_item_source_hash.clone(),
+            signed_sidecar_blob_hash: source.executor_sidecar_signed_digest.clone(),
+            payload_blob_hash: source.owner_executable_sha256.clone(),
+        },
+    };
+    evidence.validate()?;
+    Ok(evidence)
+}
+
 impl PreparedGuestOwnerMaterialization {
     pub fn root(&self) -> &lillux::PinnedDirectory {
         &self.root
@@ -284,6 +394,15 @@ impl PreparedGuestOwnerMaterialization {
 
     pub fn executor_source_proof(&self) -> &BundlePayloadSourceProof {
         &self.executor_source_proof
+    }
+
+    pub fn source_evidence(&self) -> Result<GuestRuntimeMaterializationSourceEvidence> {
+        build_source_evidence(
+            &self.source,
+            &self.signed_recipe_sources,
+            &self.signed_bundle_manifests,
+            &self.executor_source_proof,
+        )
     }
 
     pub fn ensure_current(&self) -> Result<()> {
@@ -502,9 +621,8 @@ mod tests {
         assert!(signed_recipe_source_set_digest(&[changed, second]).is_err());
     }
 
-    #[test]
-    fn materialization_coordinate_distinguishes_source_not_result_bytes() {
-        let source = GuestOwnerMaterializationSource {
+    fn fixture_source() -> GuestOwnerMaterializationSource {
+        GuestOwnerMaterializationSource {
             schema: 1,
             materializer_protocol: "ryeos.guest-owner-materialization.v1".into(),
             materialization_binding_id: "owner".into(),
@@ -542,7 +660,92 @@ mod tests {
                 )
             ),
             runtime_manifest_hash: hash('6'),
+        }
+    }
+
+    #[test]
+    fn source_evidence_joins_selected_executor_and_root_recipe() {
+        let mut source = fixture_source();
+        let recipe = CapturedSignedBundleItemSource {
+            resolved_ref: source.recipe_ref.clone(),
+            source_root: ItemSourceRoot::Bundle {
+                name: source.bundle_name.clone(),
+            },
+            signer_fingerprint: source.recipe_publisher_fingerprint.clone(),
+            source_content_digest: lillux::sha256_hex(b"signed recipe"),
+            raw_content_digest: source.recipe_content_digest.clone(),
+            signed_bytes: b"signed recipe".to_vec(),
         };
+        let bundle = CapturedSignedBundleManifest {
+            identity: ryeos_engine::plan_builder::SignedBundleManifestIdentity {
+                name: source.bundle_name.clone(),
+                body_digest: hash('7'),
+                signer_fingerprint: source.recipe_publisher_fingerprint.clone(),
+                provides_kinds: vec![],
+                requires_kinds: vec![],
+                uses_kinds: vec![],
+            },
+            signed_bytes: b"signed Bundle manifest".to_vec(),
+        };
+        source.signed_recipe_source_set_digest =
+            signed_recipe_source_set_digest(std::slice::from_ref(&recipe)).unwrap();
+        source.signed_bundle_manifest_set_digest =
+            signed_bundle_manifest_set_digest(std::slice::from_ref(&bundle)).unwrap();
+        let item_ref = format!("bin/{}/{}", source.guest_target_triple, OWNER_NAME);
+        let item_source = serde_json::json!({
+            "kind": "item_source",
+            "item_ref": item_ref,
+            "content_blob_hash": source.owner_executable_sha256,
+            "integrity": format!("sha256:{}", source.owner_executable_sha256),
+            "signature_info": null,
+            "mode": 0o755,
+        });
+        source.executor_item_source_hash =
+            ryeos_state::objects::canonical_value_digest(&item_source).unwrap();
+        let manifest = serde_json::json!({
+            "kind": "source_manifest",
+            "item_source_hashes": {item_ref.clone(): source.executor_item_source_hash},
+        });
+        source.executor_manifest_hash =
+            ryeos_state::objects::canonical_value_digest(&manifest).unwrap();
+        let proof = BundlePayloadSourceProof {
+            selected_item_ref: item_ref,
+            signed_manifest_ref: b"signed manifest ref".to_vec(),
+            manifest_object: manifest,
+            item_source_object: item_source,
+            signed_sidecar: b"signed sidecar".to_vec(),
+        };
+        source.executor_manifest_ref_signed_digest = lillux::sha256_hex(&proof.signed_manifest_ref);
+        source.executor_sidecar_signed_digest = lillux::sha256_hex(&proof.signed_sidecar);
+        let evidence = build_source_evidence(
+            &source,
+            std::slice::from_ref(&recipe),
+            std::slice::from_ref(&bundle),
+            &proof,
+        )
+        .unwrap();
+        assert_eq!(
+            evidence.executor.item_source_object_hash,
+            source.executor_item_source_hash
+        );
+        assert_eq!(
+            evidence.signed_recipe_items[0].raw_content_digest,
+            source.recipe_content_digest
+        );
+
+        let mut changed = source.clone();
+        changed.executor_sidecar_signed_digest = hash('8');
+        assert!(
+            build_source_evidence(&changed, &[recipe.clone()], &[bundle.clone()], &proof).is_err()
+        );
+        changed = source.clone();
+        changed.recipe_content_digest = hash('8');
+        assert!(build_source_evidence(&changed, &[recipe], &[bundle], &proof).is_err());
+    }
+
+    #[test]
+    fn materialization_coordinate_distinguishes_source_not_result_bytes() {
+        let source = fixture_source();
         let coordinate = source.coordinate_digest().unwrap();
         let mut changed = source.clone();
         changed.runtime_manifest_hash = hash('7');
