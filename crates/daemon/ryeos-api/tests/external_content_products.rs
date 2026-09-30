@@ -95,6 +95,7 @@ fn fixture_with_remote_owner(
         "ryeos.execute.service.external-content/import".to_owned(),
         "ryeos.execute.service.external-content/product".to_owned(),
         "ryeos.execute.service.external-content/launch-product-qualification".to_owned(),
+        "ryeos.execute.service.external-content/launch-content-qualification".to_owned(),
     ];
     ryeos_app::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
@@ -449,6 +450,87 @@ async fn product_services_refuse_unadmitted_operator_contexts() {
             .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn disabled_acquisition_policy_retains_one_shot_content_launch_coordinates() {
+    let fixture = fixture(false, 4096, true);
+    let launch_id = format!("L-{}", "b".repeat(32));
+    let parameters = json!({
+        "launch_id": launch_id,
+        "activation_ref": "config:fixture/missing-activation",
+        "declaration_id": "runtime"
+    });
+    let descriptor = product_qualification_launch::CONTENT_DESCRIPTOR;
+    let first = (descriptor.handler)(
+        parameters.clone(),
+        fixture.context.clone(),
+        Arc::clone(&fixture.state),
+    )
+    .await;
+    let error = first.expect_err("disabled acquisition policy cannot launch a verifier");
+    assert!(
+        format!("{error:#}").contains("disabled"),
+        "fixture must refuse at the disabled managed-acquisition policy boundary: {error:#}"
+    );
+    let status = fixture
+        .state
+        .state_store
+        .launch_planning_status(&launch_id, &fixture.context.fingerprint)
+        .unwrap()
+        .expect("accepted content coordinate must remain owner-queryable");
+    assert_eq!(status.status, "failed");
+    assert!(status.thread_id.is_none());
+    let second = (descriptor.handler)(
+        parameters,
+        fixture.context.clone(),
+        Arc::clone(&fixture.state),
+    )
+    .await;
+    assert!(
+        second.is_err(),
+        "refused accepted coordinate must not relaunch"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .state_store
+            .launch_planning_status(&launch_id, &fixture.context.fingerprint,)
+            .unwrap()
+            .unwrap(),
+        status
+    );
+}
+
+#[tokio::test]
+async fn product_launch_scope_cannot_reserve_acquired_content_work() {
+    let fixture = fixture(false, 4096, true);
+    let mut context = fixture.context.clone();
+    context.scopes.retain(|scope| {
+        scope != "ryeos.execute.service.external-content/launch-content-qualification"
+    });
+    let launch_id = format!("L-{}", "c".repeat(32));
+    let error = (product_qualification_launch::CONTENT_DESCRIPTOR.handler)(
+        json!({
+            "launch_id": launch_id,
+            "activation_ref": "config:fixture/missing-activation",
+            "declaration_id": "runtime"
+        }),
+        context,
+        Arc::clone(&fixture.state),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("missing required capability"));
+    assert!(
+        fixture
+            .state
+            .state_store
+            .launch_planning_status(&launch_id, &fixture.context.fingerprint,)
+            .unwrap()
+            .is_none(),
+        "authorization refusal must precede reservation"
+    );
 }
 
 #[tokio::test]
