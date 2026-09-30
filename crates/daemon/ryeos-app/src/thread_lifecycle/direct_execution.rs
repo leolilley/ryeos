@@ -2638,7 +2638,7 @@ pub fn prepare_external_qualification_local_worker_plan(
     state: &crate::state::AppState,
     root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
 ) -> Result<PreparedItemPlan> {
-    with_prepared_external_qualification_local_worker_plan(state, root, Ok)
+    with_prepared_external_qualification_local_worker_plan(state, root, |plan, _, _, _| Ok(plan))
 }
 
 /// Keep one checked signed Bundle generation through local Q material binding.
@@ -2647,17 +2647,21 @@ pub fn prepare_external_qualification_local_worker_plan(
 pub fn with_prepared_external_qualification_local_worker_plan<T>(
     state: &crate::state::AppState,
     root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
-    bind: impl FnOnce(PreparedItemPlan) -> Result<T>,
+    bind: impl FnOnce(
+        PreparedItemPlan,
+        &ryeos_engine::kind_registry::PersistentSessionDecl,
+        &ryeos_engine::protocols::VerifiedProtocol,
+        &Value,
+    ) -> Result<T>,
 ) -> Result<T> {
     state.engine.with_checked_bundle_generation(|generation| {
         let resolution = root.current_local_worker_resolution(generation)?;
-        let identity = &root
+        let content = root
             .purpose()
             .consumer_content
             .as_ref()
-            .context("qualification-only root has no accepted Worker content")?
-            .definitions
-            .worker;
+            .context("qualification-only root has no accepted Worker content")?;
+        let identity = &content.definitions.worker;
         let canonical = CanonicalRef::parse(&identity.canonical_ref)?;
         let execute_cap = ryeos_runtime::authorizer::canonical_cap(
             &canonical.kind,
@@ -2698,6 +2702,10 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
             .get("worker")
             .and_then(|schema| schema.execution.as_ref())
             .context("qualification-only Worker has no execution schema")?;
+        let declaration = execution
+            .persistent_session
+            .as_ref()
+            .context("qualification-only Worker has no signed session lifecycle")?;
         let protocol_ref = match execution
             .terminator
             .as_ref()
@@ -2711,11 +2719,10 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
             }
         };
         let signed_protocol = state.engine.protocols.require(&protocol_ref)?;
-        let session = signed_protocol
-            .descriptor
-            .session
-            .as_ref()
-            .context("qualification-only Worker protocol has no session contract")?;
+        let session = ryeos_engine::protocols::validate_persistent_session_protocol(
+            &signed_protocol.descriptor,
+        )
+        .map_err(anyhow::Error::msg)?;
         use ryeos_engine::protocols::descriptor::{
             PersistentSessionProcessMode, PersistentSessionWorkspaceAuthority,
         };
@@ -2727,6 +2734,14 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
                 != ryeos_engine::protocols::PersistentSessionChannel::InheritedUnixSocket
         {
             bail!("qualification-only local Worker requires a dedicated trusted session protocol");
+        }
+        if session.readiness_identity_env.is_none()
+            || (!content.process_environment.is_empty()
+                && !session.runtime_env_allowlist.iter().any(|name| {
+                    name == ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV
+                }))
+        {
+            bail!("qualification-only Worker protocol lacks its signed readiness or process environment slot");
         }
         let filesystem_ceiling =
             execution.project_filesystem_authority_ceiling(&resolution.composed.composed)?;
@@ -2788,17 +2803,23 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
             .execution_resources
             .select(plan.target_requirement.as_ref())?;
         require_qualification_no_resources(plan.target_requirement.as_ref(), &selected_resources)?;
-        bind(PreparedItemPlan {
-            plan,
-            timeout_secs,
-            root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity::Bundle {
-                manifest_hash: bundle_identity.body_digest,
-                manifest_signer_fingerprint: bundle_identity.signer_fingerprint,
+        bind(
+            PreparedItemPlan {
+                plan,
+                timeout_secs,
+                root_subject_source_identity:
+                    ryeos_state::objects::DirectRootSourceIdentity::Bundle {
+                        manifest_hash: bundle_identity.body_digest,
+                        manifest_signer_fingerprint: bundle_identity.signer_fingerprint,
+                    },
+                admitted_command: None,
+                realization_command: None,
+                resource_policy: PersistentSessionResourcePolicy::QualificationNoResources,
             },
-            admitted_command: None,
-            realization_command: None,
-            resource_policy: PersistentSessionResourcePolicy::QualificationNoResources,
-        })
+            declaration,
+            signed_protocol,
+            &resolution.composed.composed,
+        )
     })
 }
 

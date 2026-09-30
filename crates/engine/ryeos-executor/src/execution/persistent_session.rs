@@ -2023,7 +2023,7 @@ struct PersistentSessionResourceOverrides {
     real_uid_process_limit: Option<u64>,
 }
 
-fn apply_resource_overrides(
+pub(crate) fn apply_resource_overrides(
     declaration: &mut PersistentSessionDecl,
     composed: &Value,
 ) -> Result<()> {

@@ -10,13 +10,28 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, ensure};
 use ryeos_app::operator_external_content::product_qualification::PreparedExternalQualificationRoot;
 use ryeos_app::temp_dir_guard::TempDirGuard;
-use ryeos_state::objects::{ExternalContentRealizationSet, ExternalRealizationDelivery};
+use ryeos_engine::protocols::descriptor::PersistentSessionProtocol;
+use ryeos_state::objects::{
+    ExternalContentRealizationSet, ExternalRealizationDelivery, PersistentSessionLifecycleContract,
+    PersistentSessionWireContract,
+};
+
+/// Exact signed Worker lifecycle and protocol selected with its checked plan.
+/// The protocol carries workspace/network authority, channel environment,
+/// readiness identity slot, and runtime environment allowlist. No later
+/// caller needs to resolve another Bundle generation to start or speak to Q.
+pub(crate) struct PreparedExternalQualificationLocalSession {
+    pub(crate) lifecycle: PersistentSessionLifecycleContract,
+    pub(crate) wire: PersistentSessionWireContract,
+    pub(crate) protocol: PersistentSessionProtocol,
+}
 
 /// The plan, immutable mounts, and exact source/cache/workspace lifelines stay
 /// in one owner until a future Q process owner transfers them to its held
 /// subprocess. This carries no connector, scope, or provider-contact permit.
 pub(crate) struct PreparedExternalQualificationLocalMaterials {
     plan: ryeos_app::thread_lifecycle::PreparedItemPlan,
+    session: PreparedExternalQualificationLocalSession,
     mounts: Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     lifelines: Vec<Box<dyn Send + Sync>>,
     workspace: PathBuf,
@@ -28,6 +43,7 @@ impl PreparedExternalQualificationLocalMaterials {
         self,
     ) -> (
         ryeos_app::thread_lifecycle::PreparedItemPlan,
+        PreparedExternalQualificationLocalSession,
         Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
         Vec<Box<dyn Send + Sync>>,
         PathBuf,
@@ -35,6 +51,7 @@ impl PreparedExternalQualificationLocalMaterials {
     ) {
         (
             self.plan,
+            self.session,
             self.mounts,
             self.lifelines,
             self.workspace,
@@ -79,7 +96,18 @@ pub(crate) fn prepare_external_qualification_local_materials(
     ryeos_app::thread_lifecycle::with_prepared_external_qualification_local_worker_plan(
         state,
         root,
-        |mut plan| {
+        |mut plan, declaration, signed_protocol, composed| {
+            let mut declaration = declaration.clone();
+            super::persistent_session::apply_resource_overrides(&mut declaration, composed)?;
+            let session = PreparedExternalQualificationLocalSession {
+                lifecycle: super::persistent_session::lifecycle_contract(&declaration)?,
+                wire: super::persistent_session::wire_contract(signed_protocol)?,
+                protocol: ryeos_engine::protocols::validate_persistent_session_protocol(
+                    &signed_protocol.descriptor,
+                )
+                .map_err(anyhow::Error::msg)?
+                .clone(),
+            };
             let content = root
                 .purpose()
                 .consumer_content
@@ -149,6 +177,7 @@ pub(crate) fn prepare_external_qualification_local_materials(
             lifelines.push(Box::new(workspace_lifeline));
             Ok(PreparedExternalQualificationLocalMaterials {
                 plan,
+                session,
                 mounts,
                 lifelines,
                 workspace: workspace_path,
