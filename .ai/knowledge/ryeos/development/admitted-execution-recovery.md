@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T01:38:01Z:886243d5ec89871b94bf8305283ebd45405035a91907976d9ded2511f823f648:77QJUm6h1TuHkf3ycz+03WwO7ouiXWQ0o2YVDsWmAR1jwVHBEeCVO0LX3mKA5oO+Xe5aiiXcyt6PIlS7JohBCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T01:57:54Z:0e94adceb0ae39b0786a89726d454bfd3564c8bd97d2c12fcd6f4ad106c0b718:JcMGugMEUQGpLbN6PzZztGzBQJxHqdsmUUXPlSIIbpzSiCCJBtxI8jb6naLzFMFydcvYqDOzNba8WiYY5ffOAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.1"
+version: "1.1.2"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -86,6 +86,20 @@ authorize execution with newly selected inputs. See
 for the supported signed profiles and input contract. Source coverage of these
 boundaries is separate from an installed verifier's execution and settlement
 evidence.
+
+An activated-content qualification has a different source owner. Its accepted
+launch derives the subject, policy, verifier and claims from the current
+node-signed activation and signed consumer allowance, then seals that exact
+purpose in a projectless, fixed-pin verifier root. `qualify-content` constructs
+testimony from the accepted root, terminal and retained execution realization;
+its immutable node-signed publication head is keyed by the sealed purpose and
+terminal coordinates. A fresh read of that head must also check its expiry,
+current activation and binding, signed allowance, and current verifier identity.
+Neither the head nor a successful verifier run alone grants hosted Worker
+admission. The consumer-context product claim still needs an independently
+authorized hosted lifecycle and its exact runtime parity evidence. These
+source paths require an installed acceptance run before they can be reported
+as operational qualification.
 
 ## Qualification schema cut
 
