@@ -2895,6 +2895,117 @@ pub(crate) enum ExternalRelayFileContactProgress {
     PendingHttpNotFound(crate::runtime_db::external_execution::RelayTransferRecord),
 }
 
+/// The only guest file coordinate a Q relay caller may ask the controller to
+/// advance. Paths, bytes, deadlines and limits come from the sealed bootstrap
+/// and durable journal, never from this request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalQualificationRelayStep {
+    Attach,
+    Exchange { sequence: u32 },
+}
+
+/// A missing exact file consumes one of the journal's bounded GET attempts.
+/// The caller must use the signed poll interval rather than its own loop delay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalQualificationRelayPending {
+    pub read_attempts: u32,
+    pub deadline_ms: i64,
+    pub poll_interval_ms: u32,
+}
+
+/// One bounded slot advancement may do a guest GET, semantic application,
+/// controller PUT and readback GET. These are transport states, not Ready,
+/// ACK, or native/provider settlement evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalQualificationRelayStepProgress {
+    GuestRequestPending(ExternalQualificationRelayPending),
+    ControllerResponsePending(ExternalQualificationRelayPending),
+    ControllerResponseAccepted,
+}
+
+/// Advance exactly one Q relay slot. The caller owns polling pace and the
+/// process-local Q lifeline. The file contact itself takes the per-placement
+/// gate and rechecks live authority in its journal transaction. This method
+/// cannot take the occurrence mutex: a local Worker may hold it while waiting
+/// for the guest exchange that this method must transport. An exact 404 only
+/// yields Pending; all other contact errors remain errors. The current signed
+/// Render profile keeps this unreachable from a live Q loop.
+#[allow(dead_code)]
+pub fn advance_external_qualification_relay_step(
+    state: &AppState,
+    placement: &str,
+    step: ExternalQualificationRelayStep,
+) -> Result<ExternalQualificationRelayStepProgress> {
+    use crate::runtime_db::external_execution::{RelayDirection, RelayKind, RelayTransferPhase};
+
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    // This rejoins the live Q owner, original activation and sealed signed
+    // relay selection before any contact. The contact path repeats those DB
+    // checks after it obtains the per-placement gate.
+    let original = recover_original_external_relay_bootstrap(state, placement)?;
+    let poll_interval_ms = original.bootstrap().controller.relay()?.poll_interval_ms;
+    let (kind, sequence) = match step {
+        ExternalQualificationRelayStep::Attach => (RelayKind::Attach, 0),
+        ExternalQualificationRelayStep::Exchange { sequence } => (RelayKind::Exchange, sequence),
+    };
+    match contact_original_external_relay_transfer(
+        state,
+        placement,
+        kind,
+        sequence,
+        RelayDirection::GuestToController,
+        None,
+    )? {
+        ExternalRelayFileContactProgress::PendingHttpNotFound(record) => {
+            ensure!(
+                record.phase == RelayTransferPhase::Reading,
+                "Q relay missing request lost its bounded read claim"
+            );
+            Ok(ExternalQualificationRelayStepProgress::GuestRequestPending(
+                ExternalQualificationRelayPending {
+                    read_attempts: record.read_attempts,
+                    deadline_ms: record.intent.deadline_ms,
+                    poll_interval_ms,
+                },
+            ))
+        }
+        ExternalRelayFileContactProgress::Accepted(record) => {
+            ensure!(
+                record.phase == RelayTransferPhase::Accepted,
+                "Q relay guest request has no exact accepted bytes"
+            );
+            match apply_and_contact_original_external_relay_request(
+                state, placement, kind, sequence,
+            )? {
+                ExternalRelayFileContactProgress::PendingHttpNotFound(response) => {
+                    ensure!(
+                        response.phase == RelayTransferPhase::UploadPossible,
+                        "Q relay response ambiguity lost its one-shot upload claim"
+                    );
+                    Ok(
+                        ExternalQualificationRelayStepProgress::ControllerResponsePending(
+                            ExternalQualificationRelayPending {
+                                read_attempts: response.read_attempts,
+                                deadline_ms: response.intent.deadline_ms,
+                                poll_interval_ms,
+                            },
+                        ),
+                    )
+                }
+                ExternalRelayFileContactProgress::Accepted(response) => {
+                    ensure!(
+                        response.phase == RelayTransferPhase::Accepted,
+                        "Q relay response has no exact transport readback"
+                    );
+                    Ok(ExternalQualificationRelayStepProgress::ControllerResponseAccepted)
+                }
+            }
+        }
+    }
+}
+
 /// Apply one accepted guest file at the existing channel boundary, then
 /// reserve and contact only the exact owner-signed committed response. No
 /// operator Q loop calls this yet. An indeterminate application is deliberately
