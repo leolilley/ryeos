@@ -40,8 +40,10 @@ use super::{
 // v31 binds its explicit qualification subject. v32 is the strict source cut
 // for the retained remote-verifier inventory. A verifier's selected policy,
 // witness and purpose cannot enter or leave the sealed invocation without
-// moving the exact program identity.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 32;
+// moving the exact program identity. The current v34 contract also seals the
+// consumer runtime realization and admitted qualification use. Dispatch-effect
+// replay epoch 14 retires effects from predecessor capsule contracts.
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 34;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";
 

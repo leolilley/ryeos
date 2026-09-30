@@ -126,8 +126,7 @@ fn consumer_execution_requires_scoped_producer_proof() {
     assert!(error.to_string().contains("no scoped producer attempt"));
 }
 
-#[test]
-fn launch_purpose_retains_same_generation_consumer_definitions() {
+fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
     let mut purpose = launch_purpose();
     let context = ProductQualificationConsumerExecutionContext {
         worker_ref: "worker:codex/external-hosted-authoring".into(),
@@ -170,6 +169,7 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
     });
     assert!(purpose.validate().is_err());
     purpose.consumer_content = Some(ProductQualificationConsumerContentIdentity {
+        qualification_use: None,
         definitions: purpose.consumer_definitions.as_ref().unwrap().clone(),
         declaration_authority: QualificationConsumerDeclarationAuthority::CapturedProduct {
             relationship_definition: definition("config:codex/guest-runtime-products"),
@@ -183,6 +183,16 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
             total_bytes: 1,
         },
         worker_profile_hash: "4".repeat(64),
+        runtime_realization: crate::objects::ExternalContentRealization {
+            id: "guest-runtime".into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: purpose.subject_manifest_hash.clone(),
+            entry_count: 1,
+            total_bytes: 1,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "guest-runtime".into(),
+        },
         worker_preselection_effective_definition_digest: "5".repeat(64),
         worker_literals: ExternalContentRealizationSet::new(vec![
             crate::objects::ExternalContentRealization {
@@ -223,27 +233,75 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
         },
     });
     purpose.validate().unwrap();
-    let mut activated = purpose.clone();
+    purpose
+}
+
+#[test]
+fn consumer_runtime_identity_is_required_and_subject_bound() {
+    let purpose = consumer_launch_purpose_fixture();
+    let content = purpose.consumer_content.as_ref().unwrap();
+    let mut missing = serde_json::to_value(content).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("runtime_realization");
+    assert!(
+        serde_json::from_value::<ProductQualificationConsumerContentIdentity>(missing).is_err()
+    );
+    let mut changed = purpose.clone();
+    changed
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .runtime_realization
+        .manifest_hash = "e".repeat(64);
+    assert!(changed.validate().is_err());
+    let mut duplicated = purpose.clone();
+    let content = duplicated.consumer_content.as_mut().unwrap();
+    content.worker_literals = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .cloned()
+            .chain(std::iter::once(content.runtime_realization.clone()))
+            .collect(),
+    )
+    .unwrap();
+    assert!(duplicated.validate().is_err());
+    let mut overlapping = purpose;
+    let content = overlapping.consumer_content.as_mut().unwrap();
+    content.runtime_realization.mount =
+        content.worker_literals.iter().next().unwrap().mount.clone();
+    assert!(overlapping.validate().is_err());
+}
+
+#[test]
+fn activated_launch_purpose_retains_exact_subject_runtime_realization() {
+    let purpose = consumer_launch_purpose_fixture();
+    let context = purpose
+        .policy_source
+        .policy
+        .consumer_execution_context
+        .as_ref()
+        .unwrap();
     let mut subject = crate::external_content::qualification_purpose::tests::content_subject(
         &purpose.subject_manifest_hash,
     );
     subject.consumer_ref = context.worker_ref.clone();
-    activated.subject = QualificationSubject::ActivatedContent {
-        content: subject.clone(),
-    };
-    let original_literals = purpose
+    subject.realization = purpose
         .consumer_content
         .as_ref()
         .unwrap()
-        .worker_literals
+        .runtime_realization
         .clone();
     let mut captured_with_subject_literal = purpose.clone();
-    captured_with_subject_literal
+    let content = captured_with_subject_literal
         .consumer_content
         .as_mut()
-        .unwrap()
-        .worker_literals = ExternalContentRealizationSet::new(
-        original_literals
+        .unwrap();
+    content.worker_literals = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
             .iter()
             .cloned()
             .chain(std::iter::once(subject.realization.clone()))
@@ -251,50 +309,139 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
     )
     .unwrap();
     assert!(captured_with_subject_literal.validate().is_err());
-    let activated_content = activated.consumer_content.as_mut().unwrap();
-    activated_content.declaration_authority =
-        QualificationConsumerDeclarationAuthority::ActivatedContent {
-            activation_definition: definition("config:codex/runtime-activation"),
-            declaration_id: context.product_declaration_id.clone(),
-            allowance:
-                crate::external_content::qualification_allowance::ContentQualificationAllowance {
-                    activation_ref: "config:codex/runtime-activation".into(),
-                    policy_ref: purpose.policy_source.canonical_ref.clone(),
-                    required_claims: purpose.required_claims.clone(),
-                },
-        };
-    activated_content.worker_literals = ExternalContentRealizationSet::new(
-        original_literals
-            .iter()
-            .cloned()
-            .chain(std::iter::once(subject.realization.clone()))
-            .collect(),
-    )
-    .unwrap();
+
+    let mut activated = purpose.clone();
+    activated.subject = QualificationSubject::ActivatedContent {
+        content: subject.clone(),
+    };
+    activated
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .declaration_authority = QualificationConsumerDeclarationAuthority::ActivatedContent {
+        activation_definition: ProductQualificationBundleDefinitionIdentity {
+            canonical_ref: "config:codex/runtime-activation".into(),
+            raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
+            publisher_fingerprint: "c".repeat(64),
+        },
+        declaration_id: context.product_declaration_id.clone(),
+        allowance:
+            crate::external_content::qualification_allowance::ContentQualificationAllowance {
+                activation_ref: "config:codex/runtime-activation".into(),
+                policy_ref: purpose.policy_source.canonical_ref.clone(),
+                required_claims: purpose.required_claims.clone(),
+            },
+    };
     activated.validate().unwrap();
+
     let mut missing_subject = activated.clone();
     missing_subject
         .consumer_content
         .as_mut()
         .unwrap()
-        .worker_literals = original_literals.clone();
+        .runtime_realization
+        .id = "other-runtime".into();
     assert!(missing_subject.validate().is_err());
     let mut swapped_subject = activated.clone();
-    let mut wrong_realization = subject.realization.clone();
-    wrong_realization.manifest_hash = "0".repeat(64);
     swapped_subject
         .consumer_content
         .as_mut()
         .unwrap()
-        .worker_literals = ExternalContentRealizationSet::new(
-        original_literals
+        .runtime_realization
+        .manifest_hash = "0".repeat(64);
+    assert!(swapped_subject.validate().is_err());
+    let content = activated.consumer_content.as_mut().unwrap();
+    content.worker_literals = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
             .iter()
             .cloned()
-            .chain(std::iter::once(wrong_realization))
+            .chain(std::iter::once(subject.realization))
             .collect(),
     )
     .unwrap();
-    assert!(swapped_subject.validate().is_err());
+    assert!(activated.validate().is_err());
+}
+
+#[test]
+fn launch_purpose_retains_same_generation_consumer_definitions() {
+    let mut purpose = consumer_launch_purpose_fixture();
+    let context = purpose
+        .policy_source
+        .policy
+        .consumer_execution_context
+        .clone()
+        .unwrap();
+    let definition = |reference: &str| ProductQualificationBundleDefinitionIdentity {
+        canonical_ref: reference.into(),
+        raw_content_digest: "a".repeat(64),
+        effective_definition_digest: "b".repeat(64),
+        publisher_fingerprint: "c".repeat(64),
+    };
+    let content = purpose.consumer_content.as_ref().unwrap();
+    let mut wire = serde_json::to_value(content).unwrap();
+    assert!(wire["qualification_use"].is_null());
+    wire.as_object_mut().unwrap().remove("qualification_use");
+    assert!(serde_json::from_value::<ProductQualificationConsumerContentIdentity>(wire).is_err());
+    let mut changed_use = content.clone();
+    let realizations = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .chain(content.environment_realizations.iter())
+            .chain(std::iter::once(&content.runtime_realization))
+            .cloned()
+            .collect(),
+    )
+    .unwrap();
+    let qualified_use = crate::external_execution::admission::ExternalCandidateQualificationUse {
+        schema: crate::external_execution::admission::QUALIFICATION_CONTEXT_SCHEMA.into(),
+        requirement_digest: "1".repeat(64),
+        profile_hash: content.worker_profile_hash.clone(),
+        source_binding_hash: content.worker_source.binding_hash.clone(),
+        source_content_manifest_hash: content.worker_source.content_manifest_hash.clone(),
+        provider_executable_manifest_hash: "2".repeat(64),
+        execution_environment_digest: crate::external_execution::admission::ExternalCandidateQualificationUse::admitted_execution_environment_digest(
+            &realizations, &content.executable_search, &content.process_environment).unwrap(),
+    };
+    changed_use.qualification_use = Some(qualified_use.clone());
+    changed_use
+        .validate_for(&context, purpose.consumer_definitions.as_ref().unwrap())
+        .unwrap();
+    let incomplete = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .chain(content.environment_realizations.iter())
+            .cloned()
+            .collect(),
+    )
+    .unwrap();
+    let mut omitted_runtime = changed_use.clone();
+    omitted_runtime.qualification_use.as_mut().unwrap().execution_environment_digest =
+        crate::external_execution::admission::ExternalCandidateQualificationUse::admitted_execution_environment_digest(
+            &incomplete, &content.executable_search, &content.process_environment).unwrap();
+    assert!(
+        omitted_runtime
+            .validate_for(&context, purpose.consumer_definitions.as_ref().unwrap())
+            .is_err()
+    );
+    changed_use
+        .qualification_use
+        .as_mut()
+        .unwrap()
+        .execution_environment_digest = "3".repeat(64);
+    assert!(
+        changed_use
+            .validate_for(&context, purpose.consumer_definitions.as_ref().unwrap())
+            .is_err()
+    );
+    assert!(
+        qualified_use
+            .require_qualified_use(&serde_json::json!({}))
+            .is_err()
+    );
     let captured_authority = purpose
         .consumer_content
         .as_ref()
@@ -479,6 +626,7 @@ pub(crate) fn launch_purpose() -> QualificationLaunchPurpose {
         consumer_definitions: None,
         consumer_content: None,
         producer_recipe_sources: BTreeMap::new(),
+        remote_verifier_sources: BTreeMap::new(),
         subject_declaration_id: policy.subject_declaration_id.clone(),
         subject_manifest_hash: "f".repeat(64),
         required_claims: vec!["command_probe".into()],
@@ -1394,6 +1542,136 @@ fn policy_is_closed_bounded_and_has_no_shell_or_wildcard_lane() {
     let mut wire = serde_json::to_value(policy()).unwrap();
     wire["command"] = json!("host-python");
     assert!(ProductQualificationPolicy::from_value(&wire).is_err());
+}
+
+#[test]
+fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
+    let (source, policy) = remote_verifier_source::tests::fixture();
+    let mut purpose = launch_purpose();
+    purpose.policy_source = policy;
+    purpose
+        .producer_recipe_sources
+        .insert("remote_codex".into(), source.producer_source.clone());
+    assert!(purpose.validate().is_err());
+    purpose
+        .remote_verifier_sources
+        .insert("remote_codex".into(), source);
+    assert!(
+        purpose
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("no admitted consumer use")
+    );
+    let local = consumer_launch_purpose_fixture();
+    purpose.policy_source.policy.consumer_execution_context =
+        local.policy_source.policy.consumer_execution_context;
+    purpose.consumer_definitions = local.consumer_definitions;
+    purpose.consumer_content = local.consumer_content;
+    let content = purpose.consumer_content.as_mut().unwrap();
+    let realizations = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .chain(content.environment_realizations.iter())
+            .chain(std::iter::once(&content.runtime_realization))
+            .cloned()
+            .collect(),
+    )
+    .unwrap();
+    let qualified_use = crate::external_execution::admission::ExternalCandidateQualificationUse {
+        schema: crate::external_execution::admission::QUALIFICATION_CONTEXT_SCHEMA.into(),
+        requirement_digest: "1".repeat(64), profile_hash: content.worker_profile_hash.clone(),
+        source_binding_hash: content.worker_source.binding_hash.clone(),
+        source_content_manifest_hash: content.worker_source.content_manifest_hash.clone(),
+        provider_executable_manifest_hash: "2".repeat(64),
+        execution_environment_digest: crate::external_execution::admission::ExternalCandidateQualificationUse::admitted_execution_environment_digest(
+            &realizations, &content.executable_search, &content.process_environment).unwrap(),
+    };
+    purpose.policy_source.policy.verifier_parameters = qualified_use.parameters().unwrap();
+    content.qualification_use = Some(qualified_use);
+    purpose.admitted_parameters_digest = purpose
+        .policy_source
+        .policy
+        .admitted_parameters_digest()
+        .unwrap();
+    purpose.validate().unwrap();
+    let mut missing_use = purpose.clone();
+    let source = &purpose.remote_verifier_sources["remote_codex"];
+    let selection = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection {
+        scenario_source_digest: source.scenario_source_digest.clone(),
+        verifier_artifact_hash: source.executor.payload_blob_hash.clone(),
+        archive_budget: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
+    };
+    let coordinate = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate {
+        schema: 1, accepted_root_id: "T-pure-data-fixture".into(), accepted_capsule_hash: "a".repeat(64),
+        qualification_purpose_digest: canonical_value_digest(&serde_json::to_value(&purpose).unwrap()).unwrap(),
+        scenario_id: "remote_codex".into(), scenario_source_digest: selection.scenario_source_digest.clone(),
+        subject_digest: canonical_value_digest(&serde_json::to_value(&purpose.subject).unwrap()).unwrap(),
+        use_digest: canonical_value_digest(&serde_json::to_value(purpose.consumer_content.as_ref().unwrap().qualification_use.as_ref().unwrap()).unwrap()).unwrap(),
+        prerequisite_measurement_attempt_id: "b".repeat(64), prerequisite_measurement_observation_digest: "c".repeat(64),
+    };
+    // Pure data joins do not prove a born root or prerequisite measurement.
+    purpose
+        .validate_remote_consumer_coordinate(&coordinate, &selection)
+        .unwrap();
+    for field in ["purpose", "subject", "use", "scenario"] {
+        let mut changed = coordinate.clone();
+        match field {
+            "purpose" => changed.qualification_purpose_digest = "d".repeat(64),
+            "subject" => changed.subject_digest = "d".repeat(64),
+            "use" => changed.use_digest = "d".repeat(64),
+            "scenario" => changed.scenario_source_digest = "d".repeat(64),
+            _ => unreachable!(),
+        }
+        assert!(
+            purpose
+                .validate_remote_consumer_coordinate(&changed, &selection)
+                .is_err()
+        );
+    }
+    let mut wrong_artifact = selection.clone();
+    wrong_artifact.verifier_artifact_hash = "d".repeat(64);
+    assert!(
+        purpose
+            .validate_remote_consumer_coordinate(&coordinate, &wrong_artifact)
+            .is_err()
+    );
+    missing_use
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .qualification_use = None;
+    assert!(missing_use.validate().is_err());
+    let mut wrong_parameters = purpose.clone();
+    wrong_parameters.policy_source.policy.verifier_parameters = json!({});
+    wrong_parameters.admitted_parameters_digest = wrong_parameters
+        .policy_source
+        .policy
+        .admitted_parameters_digest()
+        .unwrap();
+    assert!(wrong_parameters.validate().is_err());
+    let mut changed = purpose.clone();
+    let source = changed
+        .remote_verifier_sources
+        .remove("remote_codex")
+        .unwrap();
+    changed
+        .remote_verifier_sources
+        .insert("unknown_scenario".into(), source);
+    assert!(changed.validate().is_err());
+    let mut predecessor = purpose;
+    predecessor.schema = "ryeos.qualification_launch_purpose.v2".into();
+    assert!(predecessor.validate().is_err());
+}
+
+#[test]
+fn product_evidence_refuses_predecessor_use_retention_schema() {
+    let current = evidence();
+    current.validate().unwrap();
+    let mut predecessor = serde_json::to_value(current).unwrap();
+    predecessor["schema"] = json!("ryeos.product_qualification_evidence.v10");
+    assert!(ProductQualificationEvidence::from_value(&predecessor).is_err());
 }
 
 #[test]

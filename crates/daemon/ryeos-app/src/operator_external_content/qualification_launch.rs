@@ -87,6 +87,47 @@ pub enum PreparedQualificationLaunch {
 }
 
 impl PreparedQualificationLaunch {
+    /// Extend the source-owned lease without transferring or publishing it.
+    pub fn stage_remote_verifier_sources(
+        &mut self,
+        state: &AppState,
+        producer_sources: &std::collections::BTreeMap<String, ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity>,
+    ) -> Result<std::collections::BTreeMap<String, ryeos_state::external_content::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource>>{
+        let policy = self.policy_source().clone();
+        let subject = self.subject_manifest_hash().to_owned();
+        let mut retained = std::collections::BTreeMap::new();
+        for (scenario_id, scenario) in &policy.policy.producer_scenarios {
+            if scenario.remote_verifier.is_none() {
+                continue;
+            }
+            let verifier = super::product_qualification::prepare_remote_consumer_verifier_from_admitted_sources(
+                state, &policy, producer_sources, &subject, scenario_id,
+            )?;
+            let publication = match self {
+                Self::CapturedProduct(source) => source.consumer_publication_mut()?,
+                Self::ActivatedContent {
+                    consumer_content, ..
+                } => consumer_content
+                    .as_mut()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("remote verifier requires admitted consumer content")
+                    })?
+                    .publication_mut()?,
+            };
+            retained.insert(
+                scenario_id.clone(),
+                verifier.stage_in_publication(
+                    state,
+                    &policy,
+                    scenario_id,
+                    &subject,
+                    publication,
+                )?,
+            );
+        }
+        Ok(retained)
+    }
+
     pub fn consumer_content_identity(&self) -> Result<Option<ryeos_state::external_content::products::qualification::ProductQualificationConsumerContentIdentity>>{
         match self {
             Self::CapturedProduct(source) => source.consumer_content_identity(),

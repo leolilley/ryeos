@@ -17,15 +17,157 @@ use crate::routing_observation::{MAX_EVENT_BYTES, MAX_EVENTS, MAX_TOTAL_BYTES};
 #[must_use = "retain the app-server owner until stop proves exact-child and reader settlement"]
 pub struct AppServerObservation {
     child: SubordinateProcess,
-    input: Option<SubordinateProcessInput>,
-    output: SubordinateProcessOutput,
     diagnostics: SubordinateDiagnosticDrain,
+    protocol: AppServerProtocol<SubordinateAppServerTransport>,
+    force_attempted: bool,
+}
+
+/// Bounded application bytes only. Implementations retain their transport;
+/// this interface grants no process, descendant or writer-settlement claims.
+/// OS readiness and pipe operations remain with Lillux.
+pub trait AppServerTransport {
+    fn write_all_until(&mut self, bytes: &[u8], deadline: MonotonicDeadline) -> Result<()>;
+    fn read_frame_until(
+        &mut self,
+        delimiter: u8,
+        maximum_bytes: usize,
+        deadline: MonotonicDeadline,
+    ) -> Result<Vec<u8>>;
+}
+
+/// Shared Codex protocol state, independent of the enclosing process owner.
+/// A namespace owner can use this same collector without manufacturing an
+/// exact-child owner or starting an additional Worker/session lifecycle.
+pub struct AppServerProtocol<T: AppServerTransport> {
+    transport: T,
     notifications: Vec<Value>,
     frames: usize,
     bytes: usize,
     deadline: MonotonicDeadline,
     scripted_phase: ScriptedPhase,
-    force_attempted: bool,
+}
+
+pub struct SubordinateAppServerTransport {
+    input: Option<SubordinateProcessInput>,
+    output: SubordinateProcessOutput,
+}
+
+/// Protocol ends of an independently owned native namespace. The caller
+/// retains the held/released process and must settle that whole namespace;
+/// dropping this transport closes pipes only. No reader task is created.
+pub struct SandboxAppServerTransport {
+    pipes: lillux::sandbox::LinuxSandboxPipes,
+    diagnostic_bytes: usize,
+    diagnostic_eof: bool,
+}
+
+impl SandboxAppServerTransport {
+    pub fn new(pipes: lillux::sandbox::LinuxSandboxPipes) -> Self {
+        Self {
+            pipes,
+            diagnostic_bytes: 0,
+            diagnostic_eof: false,
+        }
+    }
+}
+
+impl AppServerTransport for SandboxAppServerTransport {
+    fn write_all_until(&mut self, bytes: &[u8], deadline: MonotonicDeadline) -> Result<()> {
+        use std::io::Write as _;
+        self.pipes
+            .protocol_streams_until(deadline)?
+            .input
+            .write_all(bytes)?;
+        Ok(())
+    }
+
+    fn read_frame_until(
+        &mut self,
+        delimiter: u8,
+        maximum_bytes: usize,
+        deadline: MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        use std::io::Read as _;
+        let mut streams = self.pipes.protocol_streams_until(deadline)?;
+        let mut frame = Vec::new();
+        loop {
+            ensure!(
+                !deadline.has_elapsed(),
+                "native app-server read deadline expired"
+            );
+            if !self.diagnostic_eof {
+                let ready = streams
+                    .output
+                    .wait_readable_with_stream(&streams.diagnostics)?;
+                if ready.auxiliary_readable() {
+                    let mut bytes = [0_u8; 4096];
+                    let count = streams.diagnostics.read(&mut bytes)?;
+                    if count == 0 {
+                        self.diagnostic_eof = true;
+                    } else {
+                        self.diagnostic_bytes = self
+                            .diagnostic_bytes
+                            .checked_add(count)
+                            .context("native app-server diagnostic byte overflow")?;
+                        ensure!(
+                            self.diagnostic_bytes <= 1024 * 1024,
+                            "native app-server diagnostic byte bound"
+                        );
+                    }
+                }
+                if !ready.channel_readable() {
+                    continue;
+                }
+            }
+            let mut byte = [0_u8; 1];
+            if streams.output.read(&mut byte)? == 0 {
+                return Ok(frame);
+            }
+            ensure!(
+                frame.len() < maximum_bytes,
+                "native app-server frame byte bound"
+            );
+            frame.push(byte[0]);
+            if byte[0] == delimiter {
+                return Ok(frame);
+            }
+        }
+    }
+}
+
+impl AppServerTransport for SubordinateAppServerTransport {
+    fn write_all_until(&mut self, bytes: &[u8], deadline: MonotonicDeadline) -> Result<()> {
+        self.input
+            .as_mut()
+            .context("closed app-server input")?
+            .write_all_until(bytes, deadline)?;
+        Ok(())
+    }
+
+    fn read_frame_until(
+        &mut self,
+        delimiter: u8,
+        maximum_bytes: usize,
+        deadline: MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        Ok(self
+            .output
+            .read_frame_until(delimiter, maximum_bytes, deadline)?)
+    }
+}
+
+impl std::ops::Deref for AppServerObservation {
+    type Target = AppServerProtocol<SubordinateAppServerTransport>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.protocol
+    }
+}
+
+impl std::ops::DerefMut for AppServerObservation {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.protocol
+    }
 }
 
 enum ScriptedPhase {
@@ -141,15 +283,28 @@ impl AppServerObservation {
     ) -> Self {
         Self {
             child,
-            input: Some(input),
-            output,
             diagnostics,
+            protocol: AppServerProtocol::new(
+                SubordinateAppServerTransport {
+                    input: Some(input),
+                    output,
+                },
+                deadline,
+            ),
+            force_attempted: false,
+        }
+    }
+}
+
+impl<T: AppServerTransport> AppServerProtocol<T> {
+    pub fn new(transport: T, deadline: MonotonicDeadline) -> Self {
+        Self {
+            transport,
             notifications: Vec::new(),
             frames: 0,
             bytes: 0,
             deadline,
             scripted_phase: ScriptedPhase::Fresh,
-            force_attempted: false,
         }
     }
 
@@ -157,25 +312,49 @@ impl AppServerObservation {
         &self.notifications
     }
 
+    /// Narrow an enclosing collector's ceiling without renewing this owner's
+    /// original lifetime. All subsequent protocol reads and writes use it.
+    pub(crate) fn tighten_deadline(&mut self, deadline: MonotonicDeadline) -> MonotonicDeadline {
+        self.deadline = self.deadline.min(deadline);
+        self.deadline
+    }
+
     pub fn send(&mut self, message: Value) -> Result<()> {
+        ensure!(
+            !self.deadline.has_elapsed(),
+            "app-server write deadline expired"
+        );
         let mut bytes = serde_json::to_vec(&message)?;
         bytes.push(b'\n');
         ensure!(bytes.len() <= MAX_EVENT_BYTES, "request frame bound");
-        self.input
-            .as_mut()
-            .context("closed app-server input")?
-            .write_all_until(&bytes, self.deadline)?;
+        self.transport.write_all_until(&bytes, self.deadline)?;
+        ensure!(
+            !self.deadline.has_elapsed(),
+            "app-server write exceeded deadline"
+        );
         Ok(())
     }
 
     pub fn next(&mut self) -> Result<Value> {
         ensure!(
+            !self.deadline.has_elapsed(),
+            "app-server read deadline expired"
+        );
+        ensure!(
             self.frames < MAX_EVENTS + 16,
             "app-server frame count bound"
         );
         let frame = self
-            .output
+            .transport
             .read_frame_until(b'\n', MAX_EVENT_BYTES, self.deadline)?;
+        ensure!(
+            !self.deadline.has_elapsed(),
+            "app-server read exceeded deadline"
+        );
+        ensure!(
+            frame.len() <= MAX_EVENT_BYTES,
+            "app-server frame byte bound"
+        );
         ensure!(
             frame.last() == Some(&b'\n'),
             "app-server ended mid-protocol"
@@ -351,7 +530,9 @@ impl AppServerObservation {
             );
         }
     }
+}
 
+impl AppServerObservation {
     /// Retry on uncertainty while retaining `self`; a failing stop is not
     /// terminal evidence and dropping the owner may invoke blocking cleanup.
     pub fn stop(&mut self) -> Result<AppServerStopOutcome> {
@@ -370,7 +551,7 @@ impl AppServerObservation {
         graceful_deadline: MonotonicDeadline,
         force_deadline: MonotonicDeadline,
     ) -> Result<AppServerStopOutcome> {
-        self.input = None;
+        self.protocol.transport.input = None;
         let child_settled = (|| -> Result<AppServerStopOutcome> {
             if let Some(exit) = self
                 .child
@@ -414,6 +595,99 @@ impl AppServerObservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MemoryTransport {
+        frames: std::collections::VecDeque<Vec<u8>>,
+        writes: Vec<Value>,
+    }
+
+    impl AppServerTransport for MemoryTransport {
+        fn write_all_until(&mut self, bytes: &[u8], _: MonotonicDeadline) -> Result<()> {
+            self.writes.push(serde_json::from_slice(bytes)?);
+            Ok(())
+        }
+
+        fn read_frame_until(&mut self, _: u8, _: usize, _: MonotonicDeadline) -> Result<Vec<u8>> {
+            self.frames
+                .pop_front()
+                .context("memory transcript exhausted")
+        }
+    }
+
+    fn memory_protocol(terminal_thread: &str) -> AppServerProtocol<MemoryTransport> {
+        let messages = [
+            json!({"id":1,"result":{}}),
+            json!({"id":2,"result":{"thread":{"id":"thread-one"}}}),
+            json!({"id":3,"result":{"turn":{"id":"turn-one"}}}),
+            json!({"method":"turn/completed","params":{
+                "threadId":terminal_thread,"turn":{"id":"turn-one","status":"completed"}}}),
+        ];
+        AppServerProtocol::new(
+            MemoryTransport {
+                frames: messages
+                    .into_iter()
+                    .map(|message| {
+                        let mut bytes = serde_json::to_vec(&message).unwrap();
+                        bytes.push(b'\n');
+                        bytes
+                    })
+                    .collect(),
+                writes: Vec::new(),
+            },
+            MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+        )
+    }
+
+    #[test]
+    fn shared_protocol_checks_turn_without_claiming_process_ownership() {
+        let mut protocol = memory_protocol("thread-one");
+        protocol.initialize_scripted().unwrap();
+        let thread = protocol.start_scripted_thread().unwrap();
+        let turn = protocol.start_scripted_turn(&thread).unwrap();
+        protocol
+            .await_scripted_turn_completed(&thread, &turn)
+            .unwrap();
+        assert_eq!(protocol.transport.writes.len(), 4);
+        assert_eq!(protocol.transport.writes[0]["method"], "initialize");
+        assert_eq!(protocol.transport.writes[3]["method"], "turn/start");
+        assert!(protocol.start_scripted_turn(&thread).is_err());
+
+        let mut changed = memory_protocol("another-thread");
+        changed.initialize_scripted().unwrap();
+        let thread = changed.start_scripted_thread().unwrap();
+        let turn = changed.start_scripted_turn(&thread).unwrap();
+        assert!(
+            changed
+                .await_scripted_turn_completed(&thread, &turn)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn shared_protocol_expiry_refuses_before_transport_contact() {
+        let mut protocol = memory_protocol("thread-one");
+        protocol.tighten_deadline(MonotonicDeadline::after(
+            lillux::time::Duration::from_millis(0),
+        ));
+        assert!(protocol.initialize_scripted().is_err());
+        assert!(protocol.transport.writes.is_empty());
+        assert_eq!(protocol.transport.frames.len(), 4);
+    }
+
+    #[test]
+    fn shared_protocol_refuses_transport_frame_overflow_and_truncation() {
+        let mut oversized = memory_protocol("thread-one");
+        oversized.transport.frames =
+            std::collections::VecDeque::from([vec![b' '; MAX_EVENT_BYTES + 1]]);
+        assert!(oversized.next().is_err());
+        assert!(oversized.notifications().is_empty());
+
+        let mut truncated = memory_protocol("thread-one");
+        truncated.transport.frames =
+            std::collections::VecDeque::from([br#"{"id":1,"result":{}}"#.to_vec()]);
+        assert!(truncated.initialize_scripted().is_err());
+        assert!(truncated.start_scripted_thread().is_err());
+    }
 
     fn pinned_shell() -> lillux::PinnedRegularFile {
         let shell = std::fs::canonicalize("/bin/sh").unwrap();

@@ -6,9 +6,11 @@
 
 use std::collections::BTreeMap;
 
+use crate::objects::canonical_value_digest;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use super::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource;
 use super::products::qualification::{
     MAX_PRODUCT_QUALIFICATION_EVIDENCE_BYTES, ProductProducerRecipeSourceIdentity,
     ProductQualificationConsumerContentIdentity, ProductQualificationConsumerDefinitionIdentity,
@@ -19,7 +21,7 @@ use super::products::{validate_canonical_unsuffixed_ref, validate_hash, validate
 use super::qualification_execution::QualificationExecutionPurposeView;
 use super::qualification_subject::ContentQualificationSubject;
 
-pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v2";
+pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v5";
 
 /// These sources have different authentication and CAS retention rules. An
 /// activation receipt is never a producer witness or product relationship.
@@ -82,6 +84,8 @@ pub struct QualificationLaunchPurpose {
     pub consumer_content: Option<ProductQualificationConsumerContentIdentity>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub producer_recipe_sources: BTreeMap<String, ProductProducerRecipeSourceIdentity>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remote_verifier_sources: BTreeMap<String, QualificationRemoteVerifierSource>,
     /// Verifier-side subject slot; it may differ from the consuming source's
     /// declaration ID. Its manifest must still identify the same exact bytes.
     pub subject_declaration_id: String,
@@ -94,6 +98,43 @@ pub struct QualificationLaunchPurpose {
 }
 
 impl QualificationLaunchPurpose {
+    /// Data agreement shared by controller admission and the guest consumer.
+    /// This does not authenticate a born root, signatures, occurrence liveness
+    /// or provider contact. Those remain with the enclosing execution owner.
+    pub fn validate_remote_consumer_coordinate(
+        &self,
+        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+        selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    ) -> Result<()> {
+        self.validate()?;
+        selection.validate_coordinate(coordinate)?;
+        if canonical_value_digest(&serde_json::to_value(self)?)?
+            != coordinate.qualification_purpose_digest
+            || canonical_value_digest(&serde_json::to_value(&self.subject)?)?
+                != coordinate.subject_digest
+        {
+            bail!("consumer coordinate differs from sealed qualification purpose");
+        }
+        let source = self
+            .remote_verifier_sources
+            .get(&coordinate.scenario_id)
+            .context("sealed qualification purpose has no selected remote verifier")?;
+        let qualified_use = self
+            .consumer_content
+            .as_ref()
+            .and_then(|content| content.qualification_use.as_ref())
+            .context("accepted consumer purpose has no admitted use")?;
+        if canonical_value_digest(&serde_json::to_value(qualified_use)?)? != coordinate.use_digest {
+            bail!("consumer coordinate differs from accepted admitted use");
+        }
+        if source.scenario_source_digest != selection.scenario_source_digest
+            || source.executor.payload_blob_hash != selection.verifier_artifact_hash
+        {
+            bail!("consumer verifier differs from accepted signed source artifact");
+        }
+        Ok(())
+    }
+
     pub fn execution_view(&self) -> Result<QualificationExecutionPurposeView<'_>> {
         QualificationExecutionPurposeView::from_purpose(self)
     }
@@ -121,6 +162,9 @@ impl QualificationLaunchPurpose {
             (Some(context), Some(definitions), Some(content)) => {
                 definitions.validate_for(context)?;
                 content.validate_for(context, definitions)?;
+                if content.runtime_realization.manifest_hash != self.subject_manifest_hash {
+                    bail!("consumer runtime manifest differs from qualification subject");
+                }
                 use super::products::qualification::QualificationConsumerDeclarationAuthority;
                 match (&self.subject, &content.declaration_authority) {
                     (
@@ -136,16 +180,11 @@ impl QualificationLaunchPurpose {
                         },
                     ) => {
                         allowance.validate_policy_source(&self.policy_source)?;
-                        let realized_subject = content
-                            .worker_literals
-                            .iter()
-                            .find(|realized| realized.id == *declaration_id)
-                            .context("activated qualification Worker omits its subject")?;
                         if subject.consumer_ref != definitions.worker.canonical_ref
                             || subject.declaration_id != *declaration_id
                             || context.product_declaration_id != *declaration_id
-                            || realized_subject != &subject.realization
                             || allowance.required_claims != self.required_claims
+                            || content.runtime_realization != subject.realization
                         {
                             bail!(
                                 "activated consumer declaration differs from qualification purpose"
@@ -178,6 +217,30 @@ impl QualificationLaunchPurpose {
                 && source.bundle_generation_identity != definitions.bundle_generation_identity
             {
                 bail!("qualification producer and consumer use different Bundle generations");
+            }
+        }
+        let remote_scenarios = self
+            .policy_source
+            .policy
+            .producer_scenarios
+            .iter()
+            .filter(|(_, scenario)| scenario.remote_verifier.is_some())
+            .count();
+        if self.remote_verifier_sources.len() != remote_scenarios {
+            bail!("qualification purpose does not retain every signed remote verifier");
+        }
+        if remote_scenarios > 0 {
+            let qualified_use = self
+                .consumer_content
+                .as_ref()
+                .and_then(|content| content.qualification_use.as_ref())
+                .context("remote qualification purpose has no admitted consumer use")?;
+            qualified_use.require_qualified_use(&self.policy_source.policy.verifier_parameters)?;
+        }
+        for (name, verifier) in &self.remote_verifier_sources {
+            verifier.validate_for(&self.policy_source, name)?;
+            if self.producer_recipe_sources.get(name) != Some(&verifier.producer_source) {
+                bail!("retained remote verifier differs from admitted producer source");
             }
         }
         validate_name(&self.subject_declaration_id)?;

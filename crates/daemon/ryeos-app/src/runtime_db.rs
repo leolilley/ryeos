@@ -2649,7 +2649,15 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 77 retains a complete verifier stream observation separately from its
 // one-shot contact claim. A late observation remains visible but cannot
 // silently qualify a runtime.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 96;
+// Epoch 99 requires closed tagged verifier observations and purpose-bound
+// consumer-use retention. Untagged predecessor measurements are not decoded
+// as current consumer verification authority.
+// Epoch 100 retains the exact admitted consumer selection in the existing
+// immutable verifier-attempt row. Absent predecessor selection cannot be
+// reconstructed from mutable installed configuration during recovery.
+// Epoch 102 requires protected consumer archive budgets in the immutable
+// verifier selection. Predecessor rows cannot acquire limits from live policy.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 102;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -3572,6 +3580,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "consumer_selection_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
                         name: "phase",

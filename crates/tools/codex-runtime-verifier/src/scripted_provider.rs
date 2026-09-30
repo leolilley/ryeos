@@ -9,21 +9,38 @@ use anyhow::{Result, bail, ensure};
 use serde_json::{Value, json};
 
 pub const REQUEST_COUNT: usize = 5;
-#[cfg(test)]
 pub const GUEST_COMMAND_SCRIPT: &str = "pwd; rg --version";
 #[cfg(test)]
 pub const GUEST_ABSENT_CANDIDATE_SCRIPT: &str = r#"pwd; rg --version; if test -e candidate-strategy.txt || test -L candidate-strategy.txt; then exit 74; else printf "%s\n" candidate-absent; fi"#;
-#[cfg(test)]
 pub const PATCH_INPUT: &str = "*** Begin Patch\n*** Add File: candidate-strategy.txt\n+composed external candidate C\n*** End Patch";
-#[cfg(test)]
 pub const CANDIDATE_RELATIVE_PATH: &str = "candidate-strategy.txt";
-#[cfg(test)]
 pub const CANDIDATE_PATH: &str = "/workspace/candidate-strategy.txt";
-#[cfg(test)]
 pub const CANDIDATE_URI: &str = "file:///workspace/candidate-strategy.txt";
-#[cfg(test)]
 pub const CANDIDATE_CONTENT: &str = "composed external candidate C\n";
 pub const GUEST_SHELL: &str = "/ryeos/realizations/authoring-tools/bin/zsh";
+
+/// Shared finite outcome and routing constraints for fixture and consumer use.
+/// The caller must separately establish the scripted peer's process identity.
+pub fn validate_configuration(expected_command_output: &str, responses_origin: &str) -> Result<()> {
+    ensure!(
+        expected_command_output.len() <= 8192
+            && expected_command_output.starts_with("/workspace\nripgrep ")
+            && expected_command_output.ends_with('\n')
+            && !expected_command_output.contains('\0'),
+        "invalid authored command output"
+    );
+    let origin = responses_origin
+        .strip_prefix("http://")
+        .ok_or_else(|| anyhow::anyhow!("scripted peer origin is not explicit HTTP"))?;
+    let address: std::net::SocketAddr = origin.parse()?;
+    ensure!(
+        address.ip().is_loopback()
+            && address.port() != 0
+            && responses_origin == format!("http://{address}"),
+        "scripted peer origin is not canonical loopback"
+    );
+    Ok(())
+}
 
 pub fn response_item(
     number: usize,
@@ -211,6 +228,45 @@ pub fn check_requests(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_fixture_matches_finite_script() {
+        let fixture = CandidateFixture::production_fixture();
+        assert_eq!(fixture.patch_input(), PATCH_INPUT);
+        assert_eq!(fixture.path(), CANDIDATE_PATH);
+        assert_eq!(fixture.uri(), CANDIDATE_URI);
+        assert_eq!(
+            GuestCommandFixture::WorkspaceRgVersion.render_command(&fixture),
+            GUEST_COMMAND_SCRIPT
+        );
+    }
+
+    #[test]
+    fn finite_configuration_refuses_ambient_routes_and_unplanned_outcomes() {
+        let expected = "/workspace\nripgrep fixture\n";
+        validate_configuration(expected, "http://127.0.0.1:1234").unwrap();
+        validate_configuration(expected, "http://[::1]:1234").unwrap();
+        for origin in [
+            "https://example.com",
+            "http://example.com:1234",
+            "http://0.0.0.0:1234",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:1234/",
+            "http://127.0.0.1:01234",
+        ] {
+            assert!(
+                validate_configuration(expected, origin).is_err(),
+                "{origin}"
+            );
+        }
+        for output in [
+            "observed output",
+            "/workspace\nripgrep fixture",
+            "/workspace\nripgrep \0\n",
+        ] {
+            assert!(validate_configuration(output, "http://127.0.0.1:1234").is_err());
+        }
+    }
 
     #[test]
     fn authored_candidate_changes_payload_without_changing_mandatory_operations() {

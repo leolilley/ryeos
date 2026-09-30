@@ -8,8 +8,8 @@ use ryeos_external_execution::lifecycle_adapter::{
     LifecycleAdapterInvocation, run_lifecycle_adapter,
 };
 use ryeos_external_execution_contract::restored_runtime_measurement::{
-    MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES, RestoredVerifierAdapterRequest,
-    RestoredVerifierAdapterResponse,
+    MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES, MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES,
+    RestoredVerifierAdapterRequest, RestoredVerifierAdapterResponse,
 };
 use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotAdapterRequest,
@@ -1227,12 +1227,21 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
     ) -> Result<ExternalLifecycleObservation<RestoredVerifierAdapterResponse>> {
         self.preflight_snapshot_qualification_create(producer, qualification, credential)?;
         request.validate()?;
+        let verifier_selection_matches = match &request.intent.purpose {
+            ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { .. } => {
+                request.consumer_selection.is_none()
+                    && request.intent.verifier_artifact_hash == qualification.verifier_artifact_hash()
+            }
+            ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } => {
+                request.consumer_selection.as_ref() == Some(qualification.consumer_verifier(coordinate)?)
+            }
+        };
         ensure!(
             request.qualification_intent.qualification_profile_digest == qualification.digest()
                 && request.qualification_intent.adapter_artifact_hash == self.adapter_hash
                 && request.qualification_intent.provider_spec_digest == self.provider_spec.sha256
                 && request.qualification_intent.settings_digest == qualification.settings_digest()
-                && request.intent.verifier_artifact_hash == qualification.verifier_artifact_hash()
+                && verifier_selection_matches
                 && request.source_intent.production_profile_digest == producer.digest()
                 && request.upload_descriptor
                     == upload.inherited_descriptor().map_err(anyhow::Error::msg)?,
@@ -1276,7 +1285,7 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             deadline,
         )?;
         let value: RestoredVerifierAdapterResponse =
-            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+            from_json_slice_strict(&output.bytes, MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES)
                 .map_err(|_| anyhow::anyhow!("invalid restored verifier adapter response"))?;
         value
             .validate_for(request)
@@ -1285,6 +1294,12 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             ensure!(
                 !observation.contact_deadline_exceeded,
                 "restored verifier adapter claimed daemon-only deadline evidence"
+            );
+        }
+        if let RestoredVerifierAdapterResponse::ConsumerObserved { observation, .. } = &value {
+            ensure!(
+                !observation.contact_deadline_exceeded,
+                "consumer verifier adapter claimed daemon-only deadline evidence"
             );
         }
         Ok(ExternalLifecycleObservation {

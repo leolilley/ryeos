@@ -236,6 +236,7 @@ pub(crate) fn write_guest_package<W: Write>(
     inventory_tree(
         &base,
         "base",
+        0o700,
         false,
         &mut entries,
         &mut total_regular_bytes,
@@ -319,6 +320,7 @@ pub(crate) fn write_guest_package<W: Write>(
                 inventory_tree(
                     &root,
                     &name,
+                    0o700,
                     matches!(
                         input.content_authority,
                         GuestMountContentAuthority::ProductManifest { .. }
@@ -420,7 +422,7 @@ pub(crate) fn write_guest_package<W: Write>(
     Ok((stream.finish()?, manifest))
 }
 
-fn inventory_root_file(
+pub(crate) fn inventory_root_file(
     authority: &lillux::InheritedDescriptorAuthority,
     path: &str,
     entries: &mut Vec<GuestStagingEntry>,
@@ -452,20 +454,25 @@ fn inventory_root_file(
     )
 }
 
-fn inventory_tree(
+pub(crate) fn inventory_tree(
     root: &lillux::PinnedDirectory,
     name: &str,
+    root_mode: u32,
     allows_symlinks: bool,
     entries: &mut Vec<GuestStagingEntry>,
     total: &mut u64,
     maximum_regular_bytes: u64,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<()> {
+    ensure!(
+        matches!(root_mode, 0o700 | 0o755),
+        "invalid guest inventory root mode"
+    );
     push_entry(
         entries,
         GuestStagingEntry::Directory {
             path: name.into(),
-            mode: 0o700,
+            mode: root_mode,
         },
     )?;
     inventory_children(

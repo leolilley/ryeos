@@ -20,6 +20,39 @@ pub struct GuestScenario<'a> {
     pub candidate_content: &'a [u8],
 }
 
+/// Authored protocol expectations shared by fixture and production evidence.
+/// Their envelope identities are checked by their respective admitted owners;
+/// transcript agreement alone grants no execution or qualification authority.
+pub struct GuestProtocolScenario<'a> {
+    pub shell: &'a str,
+    pub guest_cwd_uri: &'a str,
+    pub guest_command: &'a str,
+    pub secret_read_command: &'a str,
+    pub expected_command_output: &'a str,
+    pub controller_canary_value: &'a str,
+    pub secret_read_denial: &'a str,
+    pub candidate_uri: &'a str,
+    pub candidate_relative_path: &'a str,
+    pub candidate_content: &'a [u8],
+}
+
+impl<'a> From<&GuestScenario<'a>> for GuestProtocolScenario<'a> {
+    fn from(scenario: &GuestScenario<'a>) -> Self {
+        Self {
+            shell: scenario.shell,
+            guest_cwd_uri: scenario.guest_cwd_uri,
+            guest_command: scenario.guest_command,
+            secret_read_command: scenario.secret_read_command,
+            expected_command_output: scenario.expected_command_output,
+            controller_canary_value: scenario.controller_canary_value,
+            secret_read_denial: scenario.secret_read_denial,
+            candidate_uri: scenario.candidate_uri,
+            candidate_relative_path: scenario.candidate_relative_path,
+            candidate_content: scenario.candidate_content,
+        }
+    }
+}
+
 fn json_lines(encoded: &Value, forwarded_prefix: Option<usize>) -> Result<Vec<Value>> {
     let encoded = encoded.as_str().context("transcript absent")?;
     ensure!(encoded.len() <= 1_400_000, "encoded transcript bound");
@@ -51,13 +84,23 @@ fn json_lines(encoded: &Value, forwarded_prefix: Option<usize>) -> Result<Vec<Va
 
 pub fn check_guest_observation(observation: &Value, scenario: &GuestScenario<'_>) -> Result<()> {
     let request_hash = scenario.request_sha256;
-    let secret_command = scenario.secret_read_command;
-    let expected_output = scenario.expected_command_output;
     ensure!(
         observation["schema"] == "test.routed_guest_observation.v1"
             && observation["request_sha256"] == request_hash,
         "guest observation changed input identity"
     );
+    check_guest_protocol(observation, &scenario.into())
+}
+
+/// Exact transcript/native-control/capture semantics after independent envelope
+/// authentication. It does not authenticate that observation's writer or prove
+/// provider death; callers must join those separate execution facts.
+pub fn check_guest_protocol(
+    observation: &Value,
+    scenario: &GuestProtocolScenario<'_>,
+) -> Result<()> {
+    let secret_command = scenario.secret_read_command;
+    let expected_output = scenario.expected_command_output;
     ensure!(
         observation["namespace_exit"] == "Signal(9)",
         "guest namespace was not exactly settled"
@@ -406,6 +449,16 @@ mod tests {
         "guest_input_base64":STANDARD.encode(&input),"guest_output_base64":STANDARD.encode(&output),
         "forwarded_output_bytes":output.len(),"captured_files":{"result":hash}});
         check_guest_observation(&observation, &scenario).unwrap();
+        // Production uses its separately authenticated attempt envelope. The
+        // common semantic checker does not invent a fixture request identity.
+        let mut production = observation.clone();
+        production["schema"] = json!("ryeos.consumer-native-observation.v1");
+        production.as_object_mut().unwrap().remove("request_sha256");
+        let protocol = GuestProtocolScenario::from(&scenario);
+        check_guest_protocol(&production, &protocol).unwrap();
+        assert!(check_guest_observation(&production, &scenario).is_err());
+        production["captured_files"]["result"] = json!("b".repeat(64));
+        assert!(check_guest_protocol(&production, &protocol).is_err());
         let mut changed = observation.clone();
         changed["request_sha256"] = json!("b".repeat(64));
         assert!(check_guest_observation(&changed, &scenario).is_err());

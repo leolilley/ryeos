@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     GuestOwnerMaterializationSource, ItemSourceRoot, OWNER_NAME, verify_retained_executor_source,
-    verify_retained_signed_bundle_manifest, verify_retained_signed_recipe_item,
+    verify_retained_signed_bundle_item, verify_retained_signed_bundle_manifest,
 };
 
 const MAX_SOURCE_OBJECT_BYTES: u64 = 256 * 1024;
@@ -213,7 +213,7 @@ pub(super) fn verify_source_closure(
             .find(|key| key.signer_fingerprint == item.signer_fingerprint)
             .context("retained recipe signer has no historical verifier")?;
         let bytes = load_blob_bounded(cas, &item.signed_blob_hash, MAX_SIGNED_RECIPE_BYTES)?;
-        verify_retained_signed_recipe_item(item, signer, &bytes)?;
+        verify_retained_signed_bundle_item(item, signer, &bytes)?;
     }
     for manifest in &evidence.signed_bundle_manifests {
         let signer = evidence

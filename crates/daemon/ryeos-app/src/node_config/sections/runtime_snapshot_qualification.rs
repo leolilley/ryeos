@@ -42,8 +42,8 @@ impl QualificationDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
             self.kind == "node"
-                && self.schema == 2
-                && self.protocol == "ryeos.runtime-snapshot-qualification.v2",
+                && self.schema == 3
+                && self.protocol == "ryeos.runtime-snapshot-qualification.v3",
             "unsupported runtime snapshot qualification binding"
         );
         ensure!(
@@ -216,8 +216,8 @@ mod tests {
         let settings = serde_json::json!({"schema":1,"owner_id":"owner-1"});
         QualificationDocument {
             kind: "node".into(),
-            schema: 2,
-            protocol: "ryeos.runtime-snapshot-qualification.v2".into(),
+            schema: 3,
+            protocol: "ryeos.runtime-snapshot-qualification.v3".into(),
             production_binding_id: "render-source".into(),
             production_binding_digest: "1".repeat(64),
             provider_spec_digest: "2".repeat(64),
@@ -248,12 +248,17 @@ mod tests {
 
     #[test]
     fn consumer_selection_is_explicit_bounded_and_distinct_from_owner_artifact() {
+        let mut predecessor = document();
+        predecessor.schema = 2;
+        predecessor.protocol = "ryeos.runtime-snapshot-qualification.v2".into();
+        assert!(predecessor.validate().is_err());
         let mut selected = document();
         selected.consumer_verifiers.insert(
             "routed-consumer".into(),
             ConsumerRuntimeVerifierSelection {
                 scenario_source_digest: "4".repeat(64),
                 verifier_artifact_hash: "5".repeat(64),
+                archive_budget: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
             },
         );
         selected.validate().unwrap();
@@ -275,6 +280,7 @@ mod tests {
                 ConsumerRuntimeVerifierSelection {
                     scenario_source_digest: "4".repeat(64),
                     verifier_artifact_hash: "5".repeat(64),
+                    archive_budget: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
                 },
             );
         }

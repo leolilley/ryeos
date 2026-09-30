@@ -1105,6 +1105,22 @@ pub(crate) fn bind_external_guest_realizations(
     )
 }
 
+/// Materialize the exact retained inventory supplied by an authenticated
+/// execution owner. This redeems CAS content and retains generation leases;
+/// it does not authenticate a caller-authored set or admit a guest/Worker.
+pub(crate) fn bind_retained_external_guest_realizations(
+    state: &ryeos_app::state::AppState,
+    realized: &ryeos_state::objects::ExternalContentRealizationSet,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    bind_external_realization_set_with(
+        state,
+        realized.clone(),
+        Path::new("/workspace"),
+        ExternalRealizationBinding::IsolationMounts,
+        None,
+    )
+}
+
 /// Exact project-relative roots populated from separately admitted external
 /// realizations. Native private-copy fold-back excludes these operational
 /// shadows so input realizations never become project output bytes.
@@ -1192,6 +1208,17 @@ fn bind_external_realizations_with(
         return Ok(None);
     };
     let realized = RealizedExternalContentSet::from_value(value)?;
+    bind_external_realization_set_with(state, realized, project_path, binding, budget)
+}
+
+fn bind_external_realization_set_with(
+    state: &ryeos_app::state::AppState,
+    realized: RealizedExternalContentSet,
+    project_path: &Path,
+    binding: ExternalRealizationBinding,
+    budget: Option<&PrivateMaterializationBudget>,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    realized.validate()?;
     if realized.is_empty() {
         return Ok(None);
     }
@@ -2771,7 +2798,7 @@ mod tests {
                 serde_json::from_value(invocation["resolution_output"].clone()).unwrap();
             resolution.composed.derived.insert(
                 ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY.into(),
-                ExternalContentRealizationSet::new(vec![realization])
+                ExternalContentRealizationSet::new(vec![realization.clone()])
                     .unwrap()
                     .to_value()
                     .unwrap(),
@@ -2783,6 +2810,28 @@ mod tests {
                 None,
             )
             .unwrap();
+            let retained = super::super::external_guest_inputs::prepare_retained_product_inputs(
+                &state,
+                &ExternalContentRealizationSet::new(vec![realization]).unwrap(),
+                Path::new("/workspace"),
+                None,
+            )
+            .unwrap();
+            assert_eq!(retained.destinations, prepared.destinations);
+            assert_eq!(
+                retained.inputs[0].authority_id,
+                prepared.inputs[0].authority_id
+            );
+            assert_eq!(retained.inputs[0].bytes, prepared.inputs[0].bytes);
+            assert!(!retained.leases.is_empty());
+            assert_eq!(
+                retained.authorities[0]
+                    .read_regular_file_stable_bounded(8)
+                    .unwrap()
+                    .0,
+                b"retained"
+            );
+            drop(retained);
             let [input] = prepared.inputs.as_slice() else {
                 panic!("expected one product")
             };

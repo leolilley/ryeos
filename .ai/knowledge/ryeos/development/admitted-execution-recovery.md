@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T04:33:06Z:3cb499fff044a4afb33d206f86678227543ab89cb24f28502cd584e0f4d8dda5:mmeF3e8KxFYgdWJivRANWO2EdcGXIrrcGfcul4G/Xv4CHcewR7h/o6K5AFMSf1Nm0bxDSerTHznH6vuenIGBAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T10:51:05Z:a18f22b832a9e4cd3e118774302e912862306ded61d15472a191aad2c82fe2c8:5D5D3zrZtmXqqWA15BJZ6xliomiwMdethwsiK2bOA8wCc+g9Lj03bOqzraZV19ZWMGAxR1YkvnDCbmm5M+vlBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.12"
+version: "1.1.13"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -142,46 +142,45 @@ activated-content evidence reader still refuses consumer execution context.
 The new retained shape therefore does not enable hosted Worker claims by
 itself; that requires the separate applied-runtime and lifecycle proof.
 
-For activated content, the signed Worker's pinned runtime declaration is also
-its qualification subject. The retained Worker realization set must contain
-that declaration and match the activated subject's complete realization;
-missing or swapped subject bytes are refused. A captured-product subject is
-selected separately and cannot reappear as a Worker literal. Both lanes retain
-their other exact Worker and environment realizations without inventing a
-different source authority. Consumer-context testimony structurally requires
-a daemon-owned scoped producer attempt. Activated-content publication checks
-the retained consumer source-binding and realization CAS closure, while fresh
-proof, publication and protected-runtime selection rederive the current signed
-consumer and compare it with the sealed identity. These checks remain source
-and read-side prerequisites: the result claim gate, content-evidence reader
-and product proof/selection gates still refuse consumer-context claims until
-the applied runtime and hosted lifecycle joins are complete and tested.
+For either declaration authority, the qualification subject is retained as a
+separate `runtime_realization`. It must match the authenticated product or
+activated-content subject and cannot also appear among Worker literals. The
+other exact Worker and environment realizations remain bound to their signed
+definitions. Remote consumers additionally retain the admission-derived
+qualification use and its digest over the complete execution environment.
+Consumer-context testimony requires a daemon-owned scoped producer attempt.
+The accepted purpose now retains the signed remote verifier source closure and
+its exact payload; later contact must match the protected selection, occurrence,
+accepted root and retained source. These are source contracts, not operational
+qualification. The product result claim gate still refuses consumer-context
+claims until applied-runtime parity and hosted lifecycle evidence are joined.
 
 ## Qualification schema cut
 
 The current qualification purpose is a tagged source: a captured product and
 an activated content subject have different provenance. Sealed-root schema 22
-and admitted capsule schema 32 retain that distinction. The current decoder
-does not reinterpret predecessor schema-21 roots or schema-30/31 capsules as new
-launch authority. A node retaining those heads must complete an explicit,
+and admitted capsule schema 34 retain that distinction. The current decoder
+does not reinterpret predecessor schema-21 roots or schema-30 through 33
+capsules as new launch authority. A node retaining those heads must complete an explicit,
 reviewed execution-history recovery cut before the new generation can admit
 fresh execution. Retained CAS bytes can remain archival evidence; they do not
 become current qualification or consumer permission.
 
-The source-specific declaration change advances qualification launch purpose
-to v2, product qualification evidence to v10 and activated-content evidence
-to v2. Predecessor evidence is not reinterpreted under these decoders. Even
+The retained source and consumer-input cuts advance qualification launch purpose
+to v5, product qualification evidence to v12 and activated-content evidence
+to v5. Predecessor evidence is not reinterpreted under these decoders. Even
 when its subject bytes are unchanged, a product needed by the current release
 consumer must be requalified under the final installed generation; the A/B
 static-input qualifications remain evidence of their earlier verifier runs,
 not current four-slot `native-build` or `core-seed-build` permission.
 
-Dispatch-effect replay moves to operational epoch 13 for the schema-32
-contract. Capsule 32 is the strict schema boundary chosen for retained
-remote-verifier inventory; exact source retention and protected contact joins
-remain separate admission requirements. The supported explicit reset retires
+Dispatch-effect replay moves to operational epoch 14 for the schema-34
+contract. Capsule 34 binds retained remote-verifier sources and complete
+production consumer inputs into the launch authority. Exact source retention
+and protected contact joins remain separate admission requirements. The
+supported explicit reset retires
 predecessor dispatch-effect rows and preserves independent provider-call
-rows from the immediate prior epoch. It does not reinterpret schema-31
+rows from the immediate prior epoch. It does not reinterpret predecessor
 qualification or launch authority.
 This source decision does not reset a node. Recovery must use the exact
 final binary's guarded dry-run and account for every authority it would retire;
@@ -198,17 +197,16 @@ not permission to discard live execution authority.
 Runtime operator epoch 95 introduced pre-release executable, argv,
 environment and cwd commitments in the scoped attempt journal. A later
 observation must match that journaled target and the relay handoff. The
-current source advances to epoch 96 because remote verifier attempts now tag
-their purpose: owner measurement and consumer-runtime verification have
-distinct stable coordinates. The existing Render contact adapter admits only
-the owner-measurement arm; a consumer coordinate is neither a contact grant
-nor hosted-runtime qualification. Predecessor runtime rows cannot silently
-supply either the pre-release commitments or the new purpose identity.
+current source advances to operator epoch 102 as remote verifier attempts,
+retained source closure and production consumer inputs acquire distinct stable
+coordinates. Neither a consumer coordinate nor a retained contact transcript
+alone grants hosted-runtime qualification. Predecessor runtime rows cannot
+supply the current attempt and consumer authority by reinterpretation.
 
-The signed runtime-snapshot qualification profile now requires schema 2. Its
+The signed runtime-snapshot qualification profile now requires schema 3. Its
 bounded `consumer_verifiers` map selects a verifier artifact and exact signed
 scenario source for each consumer scenario, separately from the owner-measurement
-verifier artifact. A missing scenario, changed source digest, or schema-1
+verifier artifact. A missing scenario, changed source digest, or schema-2
 profile is refused. This signed selection is only artifact authority: the
 consumer attempt still needs daemon-owned prerequisite measurement, accepted
 root and same-occurrence joins before remote contact, and the observed guest

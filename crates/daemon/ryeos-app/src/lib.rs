@@ -72,6 +72,7 @@ pub mod projection_repair;
 pub mod prospective_admission;
 pub mod recovery_execution_gate;
 pub mod resolution_cache;
+mod retained_bundle_evidence;
 pub mod route_diagnostics;
 pub mod route_raw;
 pub mod runtime_capability_admission;

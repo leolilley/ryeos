@@ -686,6 +686,7 @@ fn push_qualification_consumer_content_edges(
         .worker_literals
         .iter()
         .chain(content.environment_realizations.iter())
+        .chain(std::iter::once(&content.runtime_realization))
     {
         super::push_typed_hash(
             &realized.manifest_hash,
@@ -761,6 +762,47 @@ fn push_qualification_purpose_edges(
             serde_json::from_value(content.clone())
                 .map_err(|error| format!("invalid retained qualification consumer content: {error}"))?;
         push_qualification_consumer_content_edges(&content, links)?;
+    }
+    if let Some(sources) = value.get("remote_verifier_sources") {
+        let sources: std::collections::BTreeMap<String,
+            crate::external_content::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource> =
+            serde_json::from_value(sources.clone())
+                .map_err(|error| format!("invalid retained remote verifier inventory: {error}"))?;
+        if sources.len() > crate::external_content::products::qualification::MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS {
+            return Err("retained remote verifier inventory exceeds its bound".into());
+        }
+        for source in sources.values() {
+            source.validate().map_err(|error| error.to_string())?;
+            links.blob_hashes.extend(
+                source
+                    .signed_items
+                    .iter()
+                    .map(|item| item.signed_blob_hash.clone()),
+            );
+            links.blob_hashes.extend(
+                source
+                    .signed_bundle_manifests
+                    .iter()
+                    .map(|manifest| manifest.signed_blob_hash.clone()),
+            );
+            let executor = &source.executor;
+            links.blob_hashes.extend([
+                source.policy_resolution_blob_hash.clone(),
+                source.recipe_resolution_blob_hash.clone(),
+                executor.payload_blob_hash.clone(),
+                executor.signed_manifest_ref_blob_hash.clone(),
+                executor.manifest_object_blob_hash.clone(),
+                executor.signed_sidecar_blob_hash.clone(),
+            ]);
+            super::push_typed_hash(
+                &executor.item_source_object_hash,
+                ExpectedObject::ItemSource {
+                    item_ref: executor.item_ref.clone(),
+                },
+                None,
+                &mut links.object_edges,
+            )?;
+        }
     }
     Ok(())
 }
@@ -1585,6 +1627,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn qualification_purpose_retains_the_complete_remote_verifier_closure() {
+        let (source, _) = crate::external_content::products::qualification::remote_verifier_source::tests::fixture();
+        let purpose = serde_json::json!({
+            "subject": crate::external_content::qualification_purpose::QualificationSubject::CapturedProduct {
+                product_witness_hash: "7".repeat(64),
+                witness_source: crate::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+                relationship_name: "fixture".into(),
+            },
+            "remote_verifier_sources": {"remote_codex": source.clone()},
+        });
+        let mut links = ContractLinks::leaf();
+        push_qualification_purpose_edges(&purpose, &mut links).unwrap();
+        for hash in source
+            .signed_items
+            .iter()
+            .map(|item| &item.signed_blob_hash)
+            .chain(
+                source
+                    .signed_bundle_manifests
+                    .iter()
+                    .map(|manifest| &manifest.signed_blob_hash),
+            )
+            .chain([
+                &source.policy_resolution_blob_hash,
+                &source.recipe_resolution_blob_hash,
+                &source.executor.payload_blob_hash,
+                &source.executor.signed_manifest_ref_blob_hash,
+                &source.executor.manifest_object_blob_hash,
+                &source.executor.signed_sidecar_blob_hash,
+            ])
+        {
+            assert!(
+                links.blob_hashes.contains(hash),
+                "missing verifier blob edge {hash}"
+            );
+        }
+        assert!(
+            links
+                .object_edges
+                .iter()
+                .any(|edge| edge.hash == source.executor.item_source_object_hash
+                    && matches!(&edge.expected,
+                ExpectedObject::ItemSource { item_ref } if item_ref == &source.executor.item_ref))
+        );
+        let mut invalid = purpose;
+        invalid["remote_verifier_sources"]["remote_codex"]["executor"]["item_ref"] =
+            serde_json::json!("bin/x86_64-unknown-linux-musl/codex");
+        assert!(push_qualification_purpose_edges(&invalid, &mut ContractLinks::leaf()).is_err());
+    }
+
+    #[test]
     fn activated_qualification_retains_its_own_provenance() {
         use crate::external_content::qualification_purpose::{
             QualificationSubject, tests::content_subject,
@@ -1683,6 +1776,7 @@ mod tests {
             mount: id.into(),
         };
         let content = ProductQualificationConsumerContentIdentity {
+            qualification_use: None,
             definitions: ProductQualificationConsumerDefinitionIdentity {
                 bundle_generation_identity: "generation".into(),
                 worker: definition("worker:codex/authoring"),
@@ -1701,6 +1795,7 @@ mod tests {
                 total_bytes: 1,
             },
             worker_profile_hash: "6".repeat(64),
+            runtime_realization: realization("runtime", "b".repeat(64)),
             worker_preselection_effective_definition_digest: "7".repeat(64),
             worker_literals: ExternalContentRealizationSet::new(vec![realization(
                 "codex",
@@ -1733,7 +1828,12 @@ mod tests {
         let links = links_admitted_launch_capsule(&capsule).unwrap();
         let mut evidence_edges = ContractLinks::leaf();
         push_qualification_consumer_content_edges(&content, &mut evidence_edges).unwrap();
-        for hash in [&source_binding, &worker_manifest, &environment_manifest] {
+        for hash in [
+            &source_binding,
+            &worker_manifest,
+            &environment_manifest,
+            &content.runtime_realization.manifest_hash,
+        ] {
             assert!(links.object_edges.iter().any(|edge| &edge.hash == hash));
             assert!(
                 evidence_edges
@@ -1742,7 +1842,7 @@ mod tests {
                     .any(|edge| &edge.hash == hash)
             );
         }
-        assert_eq!(links.object_edges.len(), 5);
+        assert_eq!(links.object_edges.len(), 6);
     }
 
     #[test]

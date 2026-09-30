@@ -4,8 +4,11 @@
 //! still needs to own the native guest and real app-server observations.
 
 pub mod app_server;
+pub mod consumer_protocol;
+pub mod consumer_record;
 pub mod guest_observation;
 pub mod native_guest;
+pub mod production_inputs;
 pub mod routing_observation;
 pub mod scoped_app_server;
 pub mod scoped_relay;
@@ -82,6 +85,13 @@ pub struct CandidateFixture {
 }
 
 impl CandidateFixture {
+    pub(crate) fn production_fixture() -> Self {
+        Self {
+            relative_path: scripted_provider::CANDIDATE_RELATIVE_PATH.into(),
+            content: scripted_provider::CANDIDATE_CONTENT.into(),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (1..=64).contains(&self.relative_path.len())
@@ -224,6 +234,53 @@ impl QualificationExecutionEnvironment {
             "bound runtime role is not pinned runtime content"
         );
         Ok(member)
+    }
+
+    /// Product-edge projection from the accepted consumer input, not a fixture
+    /// translation. The enclosing admission owner must authenticate this
+    /// retained value and its CAS closure before transport; this method checks
+    /// its internal identity and the exact Codex production shape only.
+    pub fn from_retained_production_consumer(
+        content: &ryeos_state::external_content::products::qualification::ProductQualificationConsumerContentIdentity,
+        consumer: &ryeos_state::external_content::products::qualification::ProductQualificationConsumerExecutionContext,
+    ) -> Result<Self> {
+        content.validate_for(consumer, &content.definitions)?;
+        let context = content
+            .qualification_use
+            .as_ref()
+            .context("production consumer has no admission-derived qualification use")?;
+        let product =
+            ExternalContentRealizationSet::new(vec![content.runtime_realization.clone()])?;
+        let realizations = ExternalContentRealizationSet::new(
+            content
+                .worker_literals
+                .iter()
+                .chain(content.environment_realizations.iter())
+                .chain(product.iter())
+                .cloned()
+                .collect(),
+        )?;
+        let selected = Self {
+            realizations,
+            executable_search: content.executable_search.clone(),
+            process_environment: content.process_environment.clone(),
+        };
+        let tools = content
+            .environment_realizations
+            .iter()
+            .find(|entry| entry.id == "authoring-tools")
+            .context("production consumer has no admitted authoring tools")?;
+        selected.validate_production_codex_closure(
+            &content.worker_literals,
+            &content.environment_realizations,
+            &product,
+            &content.executable_search,
+            &content.process_environment,
+            context,
+            &tools.manifest_hash,
+            &content.runtime_realization.manifest_hash,
+        )?;
+        Ok(selected)
     }
 
     /// Production-only closure-shape preflight. The caller must supply
@@ -488,7 +545,7 @@ fn validate_scripted_baseline(
     Ok(bytes)
 }
 
-fn expected_scripted_baseline(origin: &str) -> String {
+pub(crate) fn expected_scripted_baseline(origin: &str) -> String {
     r#"model = "gpt-5.5"
 model_provider = "routing-fixture"
 approval_policy = "never"
@@ -865,16 +922,10 @@ impl Parameters {
             (1..=1024 * 1024).contains(&self.configuration.capture_limit_bytes),
             "invalid capture limit"
         );
-        ensure!(
-            self.configuration.expected_command_output.len() <= 8192
-                && self
-                    .configuration
-                    .expected_command_output
-                    .starts_with("/workspace\nripgrep ")
-                && self.configuration.expected_command_output.ends_with('\n')
-                && !self.configuration.expected_command_output.contains('\0'),
-            "invalid authored command output"
-        );
+        scripted_provider::validate_configuration(
+            &self.configuration.expected_command_output,
+            &self.configuration.responses_origin,
+        )?;
         if self.configuration.profile.command_fixture
             == GuestCommandFixture::WorkspaceRgVersionRequireAbsentCandidate
         {
@@ -885,18 +936,6 @@ impl Parameters {
                 "absent-candidate fixture lacks its authored result"
             );
         }
-        let origin = self
-            .configuration
-            .responses_origin
-            .strip_prefix("http://")
-            .context("scripted peer origin is not explicit HTTP")?;
-        let address: std::net::SocketAddr = origin.parse()?;
-        ensure!(
-            address.ip().is_loopback()
-                && address.port() != 0
-                && self.configuration.responses_origin == format!("http://{address}"),
-            "scripted peer origin is not canonical loopback"
-        );
         self.configuration.requirement.validate()?;
         self.configuration.expected_producer_recipe.validate()?;
         let direct = &self.configuration.expected_producer_recipe;
@@ -1315,6 +1354,127 @@ mod tests {
                     &"7".repeat(64),
                 )
                 .is_err()
+        );
+        // The remote product edge consumes retained production inputs, never
+        // the four-tree fixture selector or an independently authored union.
+        use ryeos_state::external_content::products::qualification::{
+            ProductQualificationBundleDefinitionIdentity,
+            ProductQualificationConsumerContentIdentity,
+            ProductQualificationConsumerDefinitionIdentity,
+            ProductQualificationConsumerExecutionContext,
+            ProductQualificationConsumerRuntimeMemberIdentity,
+            QualificationConsumerDeclarationAuthority,
+        };
+        let consumer = ProductQualificationConsumerExecutionContext {
+            worker_ref: "worker:codex/external-hosted-authoring".into(),
+            product_declaration_id: "guest-runtime".into(),
+            environment_ref: "config:codex/environments/authoring".into(),
+            worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
+            environment_binding: "environment".into(),
+        };
+        let definition = |reference: &str| ProductQualificationBundleDefinitionIdentity {
+            canonical_ref: reference.into(),
+            raw_content_digest: "8".repeat(64),
+            effective_definition_digest: "8".repeat(64),
+            publisher_fingerprint: "8".repeat(64),
+        };
+        let content = ProductQualificationConsumerContentIdentity {
+            qualification_use: Some(context.clone()),
+            definitions: ProductQualificationConsumerDefinitionIdentity {
+                bundle_generation_identity: "production-fixture".into(),
+                worker: definition(&consumer.worker_ref),
+                environment: definition(&consumer.environment_ref),
+                worker_execution: definition(&consumer.worker_execution_ref),
+            },
+            declaration_authority: QualificationConsumerDeclarationAuthority::CapturedProduct {
+                relationship_definition: definition("config:codex/guest-runtime-products"),
+            },
+            worker_source: ryeos_state::objects::EffectiveSourceClosureProjection {
+                schema: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+                binding_hash: context.source_binding_hash.clone(),
+                content_manifest_hash: context.source_content_manifest_hash.clone(),
+                owner_key: "8".repeat(64),
+                file_count: 1,
+                total_bytes: 1,
+            },
+            worker_profile_hash: context.profile_hash.clone(),
+            worker_preselection_effective_definition_digest: "8".repeat(64),
+            worker_literals: worker.clone(),
+            runtime_realization: product.iter().next().unwrap().clone(),
+            environment_realized_effective_definition_digest: "8".repeat(64),
+            environment_realizations: environment.clone(),
+            executable_search: admitted_search.clone(),
+            process_environment: admitted_process_environment.clone(),
+            runtime_member: ProductQualificationConsumerRuntimeMemberIdentity {
+                product_declaration_id: consumer.product_declaration_id.clone(),
+                relative_path: "bin/codex".into(),
+                executable_sha256: "9".repeat(64),
+            },
+        };
+        let projected = QualificationExecutionEnvironment::from_retained_production_consumer(
+            &content, &consumer,
+        )
+        .unwrap();
+        assert_eq!(projected.realizations, base.realizations);
+        assert_eq!(projected.digest().unwrap(), base.digest().unwrap());
+        let requirement = scenario().requirement;
+        let mut descriptor_content = content.clone();
+        descriptor_content
+            .qualification_use
+            .as_mut()
+            .unwrap()
+            .requirement_digest = requirement.qualification_requirement_digest().unwrap();
+        // Inventory refusal is tested without creating authority or pretending
+        // this is an applied native execution.
+        assert!(
+            production_inputs::verify_production_descriptor_inputs(
+                &descriptor_content,
+                &consumer,
+                &requirement,
+                &[],
+                &BTreeMap::new(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("inventory")
+        );
+        let mut wrong_recipe = requirement.clone();
+        wrong_recipe.runtime_recipe.executable_relative_path = "bin/other".into();
+        assert!(
+            production_inputs::verify_production_descriptor_inputs(
+                &descriptor_content,
+                &consumer,
+                &wrong_recipe,
+                &[],
+                &BTreeMap::new(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("recipe")
+        );
+        let mut changed = content.clone();
+        changed.qualification_use = None;
+        assert!(
+            QualificationExecutionEnvironment::from_retained_production_consumer(
+                &changed, &consumer
+            )
+            .is_err()
+        );
+        let mut changed = content.clone();
+        changed.runtime_realization.manifest_hash = "f".repeat(64);
+        assert!(
+            QualificationExecutionEnvironment::from_retained_production_consumer(
+                &changed, &consumer
+            )
+            .is_err()
+        );
+        let mut changed = content.clone();
+        changed.process_environment.clear();
+        assert!(
+            QualificationExecutionEnvironment::from_retained_production_consumer(
+                &changed, &consumer
+            )
+            .is_err()
         );
         let mut entries = all();
         entries.retain(|r| r.id != "codex-rg");

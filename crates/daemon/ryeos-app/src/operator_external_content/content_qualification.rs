@@ -77,6 +77,10 @@ pub struct PreparedContentQualificationConsumer {
 }
 
 impl PreparedContentQualificationConsumer {
+    pub(super) fn publication_mut(&mut self) -> Result<&mut ryeos_state::PendingCasPublication> {
+        self.inputs.publication_mut()
+    }
+
     pub fn prepare(
         state: &AppState,
         operator: &HandlerContext,
