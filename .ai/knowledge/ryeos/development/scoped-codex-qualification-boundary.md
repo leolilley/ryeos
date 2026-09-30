@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-30T01:04:16Z:a25b8fd9e1013f661b55749ee70ff02d868a86a939137fd6baf3cfa9c0bc82bd:u7sEKM1AT9Ki2jk7DVZo4adY90ZGMH9La/1mj+FB45OI0I8rkiOK9vNKbgiMjZ5POJMP/IV2RR/EhNXVgeoMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T01:34:23Z:09bb0df159fe0b2a9e4645cf65b9d6ac9657f8bf00f97a372e7549dec4163936:ZdOPheACRr4RUSJyO9Es1bTDAZw7EAnUyq0Tjo8zIDzWvOl64cHHZhUV6CzgkyGx++qkxWeh7KCx+ImvA4CzDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -298,6 +298,18 @@ still requires exact pre-release ACK, target-namespace realization visibility,
 app-server conversation, provider contact accounting, whole-scope/writer
 settlement, frozen candidate, and the negative cuts for wrong/lost ACK,
 verifier death, cancellation, restart, and replay.
+
+The fast harness copies a Core fixture into a temporary app root and spawns
+`ryeosd` directly. A command-line tweak or test-owned environment value cannot
+turn that process into a protected host-associated node. The supported
+association is `ryeos node host setup`: an administrator operation for a
+stopped app root that pins the account, public node identity, installed
+root-owned daemon image, and Lillux process-scope delegation. The native
+positive diagnostic therefore needs a disposable installed node provisioned
+through that host boundary, with the signed fixture and exact binaries admitted
+there. Keep the fast-fixture positive test ignored until a host-backed runner
+owns that complete setup and cleanup; removing its ignore marker or weakening
+scope preflight would not supply the missing process authority.
 
 The conditional START receiver also needs a complete failure owner. A
 root-authorized exact-attempt abort callback now claims cleanup-only retirement
