@@ -426,6 +426,43 @@ impl RuntimeDb {
         read_scratch(&self.conn, placement)
     }
 
+    /// A retry may report transport completion only for the same one-use Q
+    /// attempt after its original scratch is Closed and its normal provider,
+    /// local and native terminal evidence still rejoins. Cleanup of a failed
+    /// or cancelled attempt cannot be promoted to a completed transport.
+    pub(crate) fn completed_qualification_guest_scratch_transport(
+        &self,
+        placement: &str,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+        qualification_operation_id: &str,
+        owner_principal: &str,
+        program_digest: &str,
+    ) -> Result<bool> {
+        let Some(record) = read_scratch(&self.conn, placement)? else {
+            return Ok(false);
+        };
+        if record.phase != QualificationGuestScratchPhase::Closed {
+            return Ok(false);
+        }
+        ensure!(
+            record.coordinate == *coordinate
+                && record.qualification_operation_id == qualification_operation_id
+                && record.owner_principal == owner_principal
+                && record.program_digest == program_digest
+                && matches!(
+                    record.cleanup_basis.as_ref(),
+                    Some(QualificationGuestScratchCleanupBasis::SettledAllocation {
+                        settled_phase: ExternalAllocationPhase::Terminated,
+                        ..
+                    })
+                ),
+            "closed Q scratch does not prove this exact completed transport"
+        );
+        require_cleanup_basis(&self.conn, &record)?;
+        self.ensure_external_qualification_normal_terminal(placement)?;
+        Ok(true)
+    }
+
     /// Refuse every replay, including a prior Reserved row whose child may
     /// never have been created. No provider/allocation contact occurs here.
     pub(crate) fn reserve_qualification_guest_scratch(

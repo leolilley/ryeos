@@ -26,6 +26,40 @@ pub struct PreparedQualificationGuestScratch {
     custody: Arc<QualificationGuestScratchCustody>,
 }
 
+/// Historical, read-only retry of an already completed transport. Re-admit
+/// the caller's exact accepted root and current signed Worker before reading
+/// the one-use scratch row. The runtime journal then requires the original
+/// Closed row and the same normal provider, local and native terminal facts.
+/// This returns no semantic verifier verdict or qualification claim.
+pub fn prove_retained_qualification_transport_completed(
+    state: &AppState,
+    context: &HandlerContext,
+    coordinate: &ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ObjectClosureLimits,
+) -> Result<bool> {
+    let root = crate::operator_external_content::product_qualification::prepare_external_qualification_root(
+        state,
+        context,
+        coordinate,
+        qualification_operation_id,
+        limits,
+    )?;
+    let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+        coordinate,
+        qualification_operation_id,
+    )?;
+    state
+        .state_store
+        .completed_qualification_guest_scratch_transport(
+            &placement,
+            coordinate,
+            qualification_operation_id,
+            &context.fingerprint,
+            &root.program().digest()?,
+        )
+}
+
 /// Retire one exact original Q input tree. The journal first proves that no
 /// allocation was ever made, or that the exact provider allocation and any
 /// local Worker/connector are durably settled. It then records cleanup intent,

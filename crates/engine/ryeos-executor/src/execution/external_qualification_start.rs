@@ -34,6 +34,15 @@ pub fn run_consumer_runtime_verification_transport(
         .node_policy
         .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
+    if ryeos_app::external_qualification_guest_scratch::prove_retained_qualification_transport_completed(
+        state,
+        context,
+        coordinate,
+        qualification_operation_id,
+        limits,
+    )? {
+        return Ok(());
+    }
     let scratch = ryeos_app::external_qualification_guest_scratch::prepare_original_qualification_guest_scratch(
         state,
         context,

@@ -15603,6 +15603,25 @@ impl StateStore {
             .qualification_guest_scratch(placement)
     }
 
+    pub(crate) fn completed_qualification_guest_scratch_transport(
+        &self,
+        placement: &str,
+        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+        qualification_operation_id: &str,
+        owner_principal: &str,
+        program_digest: &str,
+    ) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .completed_qualification_guest_scratch_transport(
+                placement,
+                coordinate,
+                qualification_operation_id,
+                owner_principal,
+                program_digest,
+            )
+    }
+
     /// First Q scratch intent precedes filesystem Create and allocation
     /// reservation. The nonserializable accepted-root proof is checked before
     /// the transaction repeats current occurrence and measurement liveness.
