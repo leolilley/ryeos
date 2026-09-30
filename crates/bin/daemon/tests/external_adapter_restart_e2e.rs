@@ -9,6 +9,10 @@
 
 mod common;
 
+mod host_backed_qualification;
+
+use host_backed_qualification::QualificationEndpoint;
+
 #[path = "../../../../tests/e2e/external-execution/support/signed_bundle.rs"]
 mod signed_bundle;
 
@@ -915,7 +919,7 @@ fn admit_independent_verifier_input_root(
 }
 
 async fn import_independent_verifier_tree(
-    harness: &DaemonHarness,
+    harness: &impl QualificationEndpoint,
     member: &str,
     storage: &str,
     maximum_bytes: u64,
@@ -956,7 +960,9 @@ async fn import_independent_verifier_tree(
 
 /// The public service, not fixture-side hashing, produces the four identities
 /// that can subsequently be committed into the signed verifier scenario.
-async fn import_independent_verifier_trees(harness: &DaemonHarness) -> anyhow::Result<[Value; 4]> {
+async fn import_independent_verifier_trees(
+    harness: &impl QualificationEndpoint,
+) -> anyhow::Result<[Value; 4]> {
     let mut imports = Vec::with_capacity(4);
     for (member, storage, limit) in [
         ("subject", "large_content", 268_435_456),
@@ -994,7 +1000,7 @@ fn require_independent_verifier_imports_match_scenario(
 }
 
 async fn bind_independent_verifier_tree(
-    harness: &DaemonHarness,
+    harness: &impl QualificationEndpoint,
     imported: &Value,
     expected_publisher: &str,
 ) -> anyhow::Result<Value> {
@@ -1373,7 +1379,7 @@ fn direct_scenario_authors_import_identities_after_signed_worker_admission() -> 
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 async fn capture_codex_subject_for_verifier(
-    harness: &DaemonHarness,
+    harness: &impl QualificationEndpoint,
     inputs: &codex_runtime_producer::ProductionInputs,
 ) -> anyhow::Result<Value> {
     use anyhow::{Context as _, ensure};
@@ -1416,8 +1422,8 @@ async fn capture_codex_subject_for_verifier(
     let mut project = tempfile::tempdir()?;
     project.disable_cleanup(true);
     std::fs::create_dir(project.path().join(".ai"))?;
-    let launch_id = "L-8c91a32effdd468f94c7daf2e8a4f8a5";
-    let (accepted, terminal) = public_launch::terminal_launch(
+    let launch_id = format!("L-{:032x}", rand::random::<u128>());
+    let (accepted, terminal) = direct_qualification_terminal_launch(
         harness,
         json!({
             "item_ref":codex_runtime_producer::PRODUCER_REF,
@@ -1428,7 +1434,7 @@ async fn capture_codex_subject_for_verifier(
             "execution_policy":ExecutionPolicy::local_pinned_capture(ExecutionResponse::Accepted)
                 .exclude_operator_vault(),
         }),
-        launch_id,
+        &launch_id,
         std::time::Duration::from_secs(420),
     )
     .await?;
@@ -1462,6 +1468,64 @@ async fn capture_codex_subject_for_verifier(
         captured["witness_hash"]
     );
     Ok(captured)
+}
+
+#[cfg(all(unix, feature = "handoff-test-support"))]
+async fn direct_qualification_terminal_launch(
+    harness: &impl QualificationEndpoint,
+    request: Value,
+    launch_id: &str,
+    observation_timeout: std::time::Duration,
+) -> anyhow::Result<(Value, Value)> {
+    use anyhow::{Context as _, ensure};
+
+    ensure!(
+        (std::time::Duration::from_secs(1)..=std::time::Duration::from_secs(600))
+            .contains(&observation_timeout),
+        "direct diagnostic observation timeout outside bound"
+    );
+    let (status, accepted) = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        harness.post_json("/execute/launch", request),
+    )
+    .await
+    .with_context(|| format!("launch acceptance timed out for {launch_id}; do not relaunch"))??;
+    ensure!(
+        status == reqwest::StatusCode::ACCEPTED && accepted["launch_id"] == launch_id,
+        "direct diagnostic was not accepted exactly: {status}: {accepted}"
+    );
+    let root = accepted["thread_id"]
+        .as_str()
+        .context("accepted diagnostic root absent")?
+        .to_owned();
+    ryeos_runtime::validate_runtime_thread_id(&root).map_err(anyhow::Error::msg)?;
+    let terminal = tokio::time::timeout(observation_timeout, async {
+        loop {
+            let detail =
+                production_service(harness, "service:threads/get", json!({"thread_id":root}))
+                    .await?;
+            ensure!(
+                detail.pointer("/thread/thread_id") == Some(&json!(root)),
+                "direct diagnostic observation changed root identity"
+            );
+            let status = detail
+                .pointer("/thread/status")
+                .and_then(Value::as_str)
+                .and_then(ryeos_state::objects::ThreadStatus::from_str_lossy)
+                .context("direct diagnostic has no known thread status")?;
+            if status.is_terminal() {
+                return Ok::<_, anyhow::Error>(detail);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("exact root {root} observation timed out; do not relaunch"))??;
+    ensure!(
+        terminal.pointer("/thread/chain_root_id") == Some(&json!(root)),
+        "direct diagnostic terminal changed its exact root"
+    );
+    Ok((accepted, terminal))
 }
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
@@ -1761,17 +1825,188 @@ fn direct_scripted_turn_rejects_duplicate_error_and_foreign_completion() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a host-backed disposable harness plus exact Codex/producer/verifier binaries; current fast fixture refuses scope preflight"]
 async fn signed_independent_verifier_qualifies_direct_codex_diagnostic() -> anyhow::Result<()> {
-    use anyhow::{Context as _, ensure};
-
     let (harness, scenario, captured_subject) = prepare_signed_direct_qualification_fixture(
         ryeos_codex_runtime_verifier::GuestCommandFixture::WorkspaceRgVersion,
         false,
         None,
     )
     .await?;
-    let launch_id = "L-771adc873ac744bd89f1cac896098f51";
+    verify_direct_codex_diagnostic(&harness, &scenario, &captured_subject).await
+}
+
+/// Operational acceptance against an already prepared, disposable native
+/// host service. Its administrator-owned association and signed node policy
+/// are external prerequisites. This test never provisions or installs them.
+#[cfg(all(unix, feature = "handoff-test-support"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an explicitly prepared disposable supervised node, pinned final installed image and exact signed fixture"]
+async fn host_backed_signed_direct_codex_diagnostic() -> anyhow::Result<()> {
+    use anyhow::{Context as _, ensure};
+
+    let host =
+        host_backed_qualification::HostBackedQualificationEndpoint::from_explicit_disposable_node(
+        )?;
+    let status = production_service(&host, "service:node/status", json!({})).await?;
+    host.require_running_status(&status)?;
+    require_direct_qualification_process_scope(&status)?;
+    let configuration = native_unsigned_direct_configuration(
+        ryeos_codex_runtime_verifier::GuestCommandFixture::WorkspaceRgVersion,
+    )?;
+    let (input_root, admitted) = stage_independent_verifier_inputs(&configuration)?;
+    let scenario = author_independent_verifier_scenario_from_public_import(
+        input_root.path(),
+        configuration,
+        &admitted,
+    )
+    .await?;
+    let fixture_publisher = common::fast_fixture::publisher_signing_key();
+    let bundle = host.state_path().join("codex-runtime-fixture");
+    for (relative, expected) in
+        scenario.signed_sources(&fixture_publisher, common::fast_fixture::FAST_FIXTURE_TIME)?
+    {
+        let actual =
+            lillux::read_regular_file_bounded_no_follow(&bundle.join(relative), 1024 * 1024)?;
+        ensure!(
+            actual == expected,
+            "installed signed direct diagnostic differs from exact authored scenario"
+        );
+    }
+    let verifier_path = PathBuf::from(
+        std::env::var_os("RYEOS_TEST_CODEX_RUNTIME_VERIFIER_BIN")
+            .context("RYEOS_TEST_CODEX_RUNTIME_VERIFIER_BIN is required")?,
+    );
+    let expected_verifier =
+        lillux::read_regular_file_bounded_no_follow(&verifier_path, 64 * 1024 * 1024)?;
+    let installed_verifier = lillux::read_regular_file_bounded_no_follow(
+        &bundle
+            .join(".ai/bin")
+            .join(env!("RYEOSD_HOST_TRIPLE"))
+            .join(independent_verifier_scenario::VERIFIER_BIN),
+        64 * 1024 * 1024,
+    )?;
+    ensure!(
+        installed_verifier == expected_verifier,
+        "installed direct verifier differs from exact built payload"
+    );
+
+    // The externally prepared import root is a signed node-policy input.
+    // Public imports prove that its actual bytes equal the authored scenario.
+    let producer_inputs = preexisting_codex_producer_inputs(host.state_path())?;
+    let captured_subject = capture_codex_subject_for_verifier(&host, &producer_inputs).await?;
+    ensure!(
+        captured_subject["evidence"]["manifest_hash"] == scenario.subject_manifest_hash,
+        "host-backed Codex subject differs from signed direct scenario"
+    );
+    let subject = production_service(
+        &host,
+        "service:external-content/import",
+        json!({
+            "source":"retained_product",
+            "witness_hash":captured_subject["witness_hash"],
+            "witness_source":{"kind":"local_capture"},
+            "maximum_bytes":268_435_456,
+        }),
+    )
+    .await?;
+    let staged = [
+        subject,
+        import_independent_verifier_tree(&host, "controller", "content", 64 * 1024 * 1024).await?,
+        import_independent_verifier_tree(&host, "tools", "content", 64 * 1024 * 1024).await?,
+        import_independent_verifier_tree(&host, "configurations", "content", 1024 * 1024).await?,
+    ];
+    require_independent_verifier_imports_match_scenario(&staged, &scenario)?;
+    for imported in &staged {
+        bind_independent_verifier_tree(
+            &host,
+            imported,
+            &lillux::signature::compute_fingerprint(&fixture_publisher.verifying_key()),
+        )
+        .await?;
+    }
+    verify_direct_codex_diagnostic(&host, &scenario, &captured_subject).await
+}
+
+#[cfg(all(unix, feature = "handoff-test-support"))]
+fn preexisting_codex_producer_inputs(
+    state: &Path,
+) -> anyhow::Result<codex_runtime_producer::ProductionInputs> {
+    use anyhow::{Context as _, ensure};
+
+    let bundle = state.join(".ai/bundles/codex/.ai");
+    // The disposable production fixture installs the Graph, Tool and product
+    // relationship; activation remains signed source in the exact checkout.
+    let activation = std::fs::read_to_string(
+        common::workspace_root()
+            .join("bundles/codex/.ai/config/codex/guest-runtime-activation.yaml"),
+    )?;
+    let activation: Value =
+        serde_yaml::from_str(&lillux::signature::strip_signature_lines(&activation))?;
+    let tool = std::fs::read_to_string(bundle.join("tools/codex/guest-runtime/produce.yaml"))?;
+    let tool: Value = serde_yaml::from_str(&lillux::signature::strip_signature_lines(&tool))?;
+    let member = &activation["sources"][0]["members"][0];
+    let file_sha256 = member["sha256"]
+        .as_str()
+        .filter(|hash| lillux::valid_hash(hash))
+        .context("installed Codex producer lacks exact member hash")?
+        .to_owned();
+    let maximum_bytes = member["maximum_bytes"]
+        .as_u64()
+        .filter(|bound| (1..=268_435_456).contains(bound))
+        .context("installed Codex producer has invalid member bound")?;
+    let input_manifest_hash = tool["external_content"][0]["digest"]
+        .as_str()
+        .filter(|hash| lillux::valid_hash(hash))
+        .context("installed Codex producer has no exact input manifest")?
+        .to_owned();
+    ensure!(
+        activation["consumer_ref"] == codex_runtime_producer::CONSUMER_REF
+            && member["path"] == "bin/codex"
+            && member["executable"] == true,
+        "installed Codex producer selected a different consumer or executable"
+    );
+    let pinned = lillux::secure_fs::open_pinned_regular_file_no_follow(
+        &state.join("codex-fixture-inputs/codex"),
+    )?;
+    let observed = pinned.observation()?;
+    ensure!(
+        (1..=maximum_bytes).contains(&observed.size())
+            && pinned.digest_stable_exact(&observed)? == file_sha256,
+        "prepared Codex producer input differs from installed exact member"
+    );
+    let expected_producer_sha256 = std::env::var("RYEOS_TEST_CODEX_GUEST_RUNTIME_PRODUCER_SHA256")
+        .context("RYEOS_TEST_CODEX_GUEST_RUNTIME_PRODUCER_SHA256 is required")?;
+    let producer_path = bundle
+        .join("bin")
+        .join(env!("RYEOSD_HOST_TRIPLE"))
+        .join("ryeos-codex-guest-runtime-producer");
+    let producer = lillux::secure_fs::open_pinned_regular_file_no_follow(&producer_path)?;
+    let producer_observation = producer.observation()?;
+    ensure!(
+        lillux::valid_hash(&expected_producer_sha256)
+            && producer.digest_stable_exact(&producer_observation)? == expected_producer_sha256,
+        "installed Codex producer differs from exact pinned static payload"
+    );
+    Ok(codex_runtime_producer::ProductionInputs {
+        file_sha256,
+        input_manifest_hash,
+        maximum_bytes,
+        total_bytes: observed.size(),
+        producer_sha256: expected_producer_sha256,
+    })
+}
+
+#[cfg(all(unix, feature = "handoff-test-support"))]
+async fn verify_direct_codex_diagnostic(
+    harness: &impl QualificationEndpoint,
+    scenario: &independent_verifier_scenario::IndependentVerifierScenario,
+    captured_subject: &Value,
+) -> anyhow::Result<()> {
+    use anyhow::{Context as _, ensure};
+
+    let launch_id = format!("L-{:032x}", rand::random::<u128>());
+    eprintln!("direct Codex diagnostic launch_id={launch_id}; do not relaunch on uncertainty");
     let accepted = production_service(
-        &harness,
+        harness,
         "service:external-content/launch-product-qualification",
         json!({
             "launch_id":launch_id,
@@ -1793,7 +2028,7 @@ async fn signed_independent_verifier_qualifies_direct_codex_diagnostic() -> anyh
     let terminal = tokio::time::timeout(std::time::Duration::from_secs(330), async {
         loop {
             let detail =
-                production_service(&harness, "service:threads/get", json!({"thread_id":root}))
+                production_service(harness, "service:threads/get", json!({"thread_id":root}))
                     .await?;
             ensure!(
                 detail.pointer("/thread/thread_id") == Some(&json!(root)),
@@ -1833,7 +2068,7 @@ async fn signed_independent_verifier_qualifies_direct_codex_diagnostic() -> anyh
             && result.subject_manifest_hash == scenario.subject_manifest_hash,
         "direct verifier did not propose the exact signed diagnostic claims"
     );
-    let scoped = exact_scoped_producer_observation(&harness.state_path, &root)?;
+    let scoped = exact_scoped_producer_observation(harness.state_path(), &root)?;
     let recipe_digest = scenario.expected_producer_recipe.digest()?;
     ensure!(
         scoped["launch_owner"]["thread_id"] == root
@@ -1860,7 +2095,7 @@ async fn signed_independent_verifier_qualifies_direct_codex_diagnostic() -> anyh
         "verifier result did not name the exact daemon-retained scoped observation"
     );
     let published = production_service(
-        &harness,
+        harness,
         "service:external-content/qualify-product",
         json!({
             "witness_hash":captured_subject["witness_hash"],
@@ -1875,7 +2110,7 @@ async fn signed_independent_verifier_qualifies_direct_codex_diagnostic() -> anyh
         .as_str()
         .filter(|hash| lillux::valid_hash(hash))
         .context("direct diagnostic qualification was not published")?;
-    let cas = lillux::CasStore::new(harness.state_path.join(".ai/state/objects"));
+    let cas = lillux::CasStore::new(harness.state_path().join(".ai/state/objects"));
     let attestation: ryeos_state::objects::Attestation = serde_json::from_value(
         cas.get_object(qualification_hash)?
             .context("published direct diagnostic attestation is missing from CAS")?,
@@ -2787,13 +3022,13 @@ async fn public_retained_runtime_capture_uses_real_pinned_producer() -> anyhow::
 }
 
 async fn production_service(
-    harness: &DaemonHarness,
+    harness: &impl QualificationEndpoint,
     item_ref: &str,
     parameters: Value,
 ) -> anyhow::Result<Value> {
     let (status, response) = tokio::time::timeout(
         std::time::Duration::from_secs(120),
-        harness.post_execute(item_ref, ".", parameters),
+        harness.post_execute(item_ref, parameters),
     )
     .await
     .with_context(|| {
