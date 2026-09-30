@@ -449,6 +449,32 @@ pub struct PreparedItemPlan {
     root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity,
     admitted_command: Option<ryeos_engine::isolation::IsolationAdmittedCommand>,
     realization_command: Option<PreparedRealizationCommand>,
+    resource_policy: PersistentSessionResourcePolicy,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersistentSessionResourcePolicy {
+    Ordinary,
+    QualificationNoResources,
+}
+
+/// The Q process journal has no resource or financial owner. Check the signed
+/// target itself as well as the node's current selection, so even a changed
+/// selector or an unexpected financial ceiling fails before process contact.
+fn require_qualification_no_resources(
+    target: Option<&ryeos_engine::contracts::ExecutionTargetRequirement>,
+    selected: &crate::execution_resources::SelectedExecutionResources,
+) -> Result<()> {
+    ensure!(
+        target.is_none_or(|target| target.resources.is_empty())
+            && selected.selections().is_empty()
+            && selected.devices().is_none()
+            && selected.accounting_authorities().is_empty()
+            && selected.max_concurrent_exclusive_allocations().is_none()
+            && selected.cleanup_allowance_ms().is_none(),
+        "qualification-only Worker cannot select execution resources or financial operations"
+    );
+    Ok(())
 }
 
 /// Portable coordinate for an executable member of one admitted realization.
@@ -1738,6 +1764,7 @@ impl PreparedItemPlan {
             root_subject_source_identity: root_subject_source_identity.clone(),
             admitted_command,
             realization_command,
+            resource_policy: PersistentSessionResourcePolicy::Ordinary,
         })
     }
 
@@ -1824,6 +1851,14 @@ impl PreparedItemPlan {
         let selected_resources = state
             .execution_resources
             .select(self.plan.target_requirement.as_ref())?;
+        if self.resource_policy == PersistentSessionResourcePolicy::QualificationNoResources {
+            // Repeat the preflight against the selected generation immediately
+            // before any scope/resource reservation or held child creation.
+            require_qualification_no_resources(
+                self.plan.target_requirement.as_ref(),
+                &selected_resources,
+            )?;
+        }
         let mut prepared_scope = None;
         let resource_reservation = match (process_scope.as_ref(), process_scope_allocation) {
             (Some(scope), Some(allocation)) => {
@@ -2738,6 +2773,10 @@ pub fn prepare_external_qualification_local_worker_plan(
             );
         }
         let timeout_secs = spec.timeout_secs;
+        let selected_resources = state
+            .execution_resources
+            .select(plan.target_requirement.as_ref())?;
+        require_qualification_no_resources(plan.target_requirement.as_ref(), &selected_resources)?;
         Ok(PreparedItemPlan {
             plan,
             timeout_secs,
@@ -2747,6 +2786,7 @@ pub fn prepare_external_qualification_local_worker_plan(
             },
             admitted_command: None,
             realization_command: None,
+            resource_policy: PersistentSessionResourcePolicy::QualificationNoResources,
         })
     })
 }
@@ -2846,6 +2886,7 @@ fn prepare_item_plan_with_logical_context(
             root_subject_source_identity,
             admitted_command: None,
             realization_command: None,
+            resource_policy: PersistentSessionResourcePolicy::Ordinary,
         })
     })
 }
@@ -2937,6 +2978,7 @@ pub fn prepare_captured_item_plan(
             root_subject_source_identity,
             admitted_command: None,
             realization_command: None,
+            resource_policy: PersistentSessionResourcePolicy::Ordinary,
         })
     })
 }
@@ -3943,6 +3985,7 @@ mod tests {
             root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity::Project,
             admitted_command: None,
             realization_command: None,
+            resource_policy: PersistentSessionResourcePolicy::Ordinary,
         }
     }
 
