@@ -439,6 +439,13 @@ async fn handle_source(
             .map_err(|error| HandlerError::BadRequest(format!(
                 "qualification producer recipe admission refused: {error:#}"
             )))?;
+    let remote_verifier_sources = prepared
+        .stage_remote_verifier_sources(&state, &producer_recipe_sources)
+        .map_err(|error| {
+            HandlerError::BadRequest(format!(
+                "qualification remote verifier staging refused: {error:#}"
+            ))
+        })?;
     let consumer_content = prepared.consumer_content_identity().map_err(|error| {
         HandlerError::BadRequest(format!(
             "qualification consumer content identity refused: {error:#}"
@@ -472,6 +479,7 @@ async fn handle_source(
         consumer_definitions,
         consumer_content,
         producer_recipe_sources,
+        remote_verifier_sources,
         subject_declaration_id: prepared
             .policy_source()
             .policy

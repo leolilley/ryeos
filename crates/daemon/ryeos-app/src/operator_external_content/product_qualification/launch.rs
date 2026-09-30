@@ -99,6 +99,15 @@ pub struct PreparedProductQualificationLaunch {
 }
 
 impl PreparedProductQualificationLaunch {
+    pub(in crate::operator_external_content) fn consumer_publication_mut(
+        &mut self,
+    ) -> Result<&mut ryeos_state::PendingCasPublication> {
+        self.consumer_content
+            .as_mut()
+            .context("remote verifier requires admitted consumer content")?
+            .publication_mut()
+    }
+
     pub fn consumer_content_identity(
         &self,
     ) -> Result<Option<ProductQualificationConsumerContentIdentity>> {

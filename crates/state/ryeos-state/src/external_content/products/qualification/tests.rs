@@ -385,6 +385,7 @@ pub(crate) fn launch_purpose() -> QualificationLaunchPurpose {
         consumer_definitions: None,
         consumer_content: None,
         producer_recipe_sources: BTreeMap::new(),
+        remote_verifier_sources: BTreeMap::new(),
         subject_declaration_id: policy.subject_declaration_id.clone(),
         subject_manifest_hash: "f".repeat(64),
         required_claims: vec!["command_probe".into()],
@@ -1261,6 +1262,33 @@ fn policy_is_closed_bounded_and_has_no_shell_or_wildcard_lane() {
     let mut wire = serde_json::to_value(policy()).unwrap();
     wire["command"] = json!("host-python");
     assert!(ProductQualificationPolicy::from_value(&wire).is_err());
+}
+
+#[test]
+fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
+    let (source, policy) = remote_verifier_source::tests::fixture();
+    let mut purpose = launch_purpose();
+    purpose.policy_source = policy;
+    purpose
+        .producer_recipe_sources
+        .insert("remote_codex".into(), source.producer_source.clone());
+    assert!(purpose.validate().is_err());
+    purpose
+        .remote_verifier_sources
+        .insert("remote_codex".into(), source);
+    purpose.validate().unwrap();
+    let mut changed = purpose.clone();
+    let source = changed
+        .remote_verifier_sources
+        .remove("remote_codex")
+        .unwrap();
+    changed
+        .remote_verifier_sources
+        .insert("unknown_scenario".into(), source);
+    assert!(changed.validate().is_err());
+    let mut predecessor = purpose;
+    predecessor.schema = "ryeos.qualification_launch_purpose.v2".into();
+    assert!(predecessor.validate().is_err());
 }
 
 #[test]

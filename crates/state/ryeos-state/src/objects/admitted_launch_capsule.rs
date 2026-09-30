@@ -39,7 +39,7 @@ use super::{
 // v30 classifies product-qualification purpose as executable-program authority.
 // A verifier's selected policy, witness and purpose cannot enter or leave the
 // sealed invocation without moving the exact program identity.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 31;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 32;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";
 

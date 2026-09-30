@@ -2649,7 +2649,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 77 retains a complete verifier stream observation separately from its
 // one-shot contact claim. A late observation remains visible but cannot
 // silently qualify a runtime.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 96;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 97;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

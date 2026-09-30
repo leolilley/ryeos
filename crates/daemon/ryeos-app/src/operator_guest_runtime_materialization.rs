@@ -29,6 +29,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
 use crate::operator_authority::AdmittedOperatorAuthority;
+use crate::retained_bundle_evidence::{
+    retained_verifier, verify_retained_signed_bundle_item, verify_retained_signed_bundle_manifest,
+    verify_retained_signed_envelope,
+};
 use crate::state::AppState;
 
 mod publication;
@@ -385,102 +389,6 @@ fn build_source_evidence(
     };
     evidence.validate()?;
     Ok(evidence)
-}
-
-fn verify_retained_signed_recipe_item(
-    item: &RetainedSignedBundleItem,
-    signer: &RetainedBundleSignerKey,
-    signed_bytes: &[u8],
-) -> Result<()> {
-    ensure!(
-        item.signer_fingerprint == signer.signer_fingerprint,
-        "retained recipe item signer differs from its selected verifier"
-    );
-    verify_retained_signed_envelope(
-        signed_bytes,
-        &item.signed_blob_hash,
-        &item.raw_content_digest,
-        &item.signature_envelope,
-        signer,
-    )?;
-    Ok(())
-}
-
-fn verify_retained_signed_envelope(
-    signed_bytes: &[u8],
-    signed_hash: &str,
-    body_hash: &str,
-    envelope: &RetainedSignatureEnvelope,
-    signer: &RetainedBundleSignerKey,
-) -> Result<String> {
-    ensure!(
-        lillux::sha256_hex(signed_bytes) == signed_hash,
-        "retained signed source bytes differ from their address"
-    );
-    let key = retained_verifier(signer)?;
-    let signed = std::str::from_utf8(signed_bytes)?;
-    let (raw, header) = lillux::signature::strip_canonical_signature_with_envelope(
-        signed,
-        &envelope.prefix,
-        envelope.suffix.as_deref(),
-        envelope.after_shebang,
-    )?;
-    let header = header.context("retained source has no canonical signature header")?;
-    ensure!(
-        lillux::sha256_hex(raw.as_bytes()) == body_hash
-            && lillux::signature::is_valid_signature_for(
-                &header.content_hash,
-                &header.signature_b64,
-                &header.signer_fingerprint,
-                lillux::signature::content_to_sign(&raw, envelope.after_shebang),
-                &key,
-                &signer.signer_fingerprint,
-            ),
-        "retained source signature or parsed body changed"
-    );
-    Ok(raw)
-}
-
-fn verify_retained_signed_bundle_manifest(
-    manifest: &RetainedSignedBundleManifest,
-    signer: &RetainedBundleSignerKey,
-    signed_bytes: &[u8],
-) -> Result<()> {
-    ensure!(
-        manifest.signer_fingerprint == signer.signer_fingerprint
-            && lillux::sha256_hex(signed_bytes) == manifest.signed_blob_hash,
-        "retained Bundle manifest signer differs from historical verifier"
-    );
-    let identity = ryeos_engine::plan_builder::verify_retained_signed_bundle_manifest_bytes(
-        signed_bytes,
-        &manifest.bundle_name,
-        &manifest.signer_fingerprint,
-        &retained_verifier(signer)?,
-    )?;
-    ensure!(
-        identity.body_digest == manifest.body_digest
-            && identity.name == manifest.bundle_name
-            && identity.signer_fingerprint == manifest.signer_fingerprint,
-        "retained signed Bundle manifest identity changed"
-    );
-    Ok(())
-}
-
-fn retained_verifier(signer: &RetainedBundleSignerKey) -> Result<lillux::crypto::VerifyingKey> {
-    let encoded = signer
-        .verifying_key
-        .strip_prefix("ed25519:")
-        .context("retained recipe verifier is not Ed25519")?;
-    let decoded = base64::engine::general_purpose::STANDARD.decode(encoded)?;
-    let key_bytes: [u8; 32] = decoded
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("retained recipe verifier length changed"))?;
-    let key = lillux::crypto::VerifyingKey::from_bytes(&key_bytes)?;
-    ensure!(
-        lillux::crypto::fingerprint(&key) == signer.signer_fingerprint,
-        "retained recipe verifier differs from fingerprint"
-    );
-    Ok(key)
 }
 
 fn verify_retained_executor_source(
@@ -1366,16 +1274,16 @@ mod tests {
                 after_shebang: false,
             },
         };
-        verify_retained_signed_recipe_item(&item, &signer, signed.as_bytes()).unwrap();
+        verify_retained_signed_bundle_item(&item, &signer, signed.as_bytes()).unwrap();
         let mut substituted = item.clone();
         substituted.signature_envelope.prefix = "//".to_owned();
         assert!(
-            verify_retained_signed_recipe_item(&substituted, &signer, signed.as_bytes()).is_err()
+            verify_retained_signed_bundle_item(&substituted, &signer, signed.as_bytes()).is_err()
         );
         substituted = item;
         substituted.raw_content_digest = hash('a');
         assert!(
-            verify_retained_signed_recipe_item(&substituted, &signer, signed.as_bytes()).is_err()
+            verify_retained_signed_bundle_item(&substituted, &signer, signed.as_bytes()).is_err()
         );
 
         let bundle_body = "name: codex\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n";
@@ -1450,10 +1358,10 @@ mod tests {
                 after_shebang: true,
             },
         };
-        verify_retained_signed_recipe_item(&item, &signer, signed.as_bytes()).unwrap();
+        verify_retained_signed_bundle_item(&item, &signer, signed.as_bytes()).unwrap();
         let mut changed = item;
         changed.signature_envelope.after_shebang = false;
-        assert!(verify_retained_signed_recipe_item(&changed, &signer, signed.as_bytes()).is_err());
+        assert!(verify_retained_signed_bundle_item(&changed, &signer, signed.as_bytes()).is_err());
     }
 
     #[test]

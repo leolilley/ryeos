@@ -1702,6 +1702,7 @@ pub mod test_support {
                 consumer_definitions: None,
                 consumer_content: None,
                 producer_recipe_sources: BTreeMap::new(),
+                remote_verifier_sources: BTreeMap::new(),
                 subject_declaration_id: product.verifier.subject_declaration_id.clone(),
                 subject_manifest_hash: runtime_manifest_hash.into(),
                 required_claims: super::REQUIRED_CLAIMS

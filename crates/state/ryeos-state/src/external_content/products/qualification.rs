@@ -24,6 +24,8 @@ use crate::objects::{
     SessionProcessEnvironmentValue, canonical_value_digest, validate_session_process_environment,
 };
 
+pub mod remote_verifier_source;
+
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v3";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
 pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v10";

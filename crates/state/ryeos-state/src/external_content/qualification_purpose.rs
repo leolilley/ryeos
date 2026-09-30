@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use super::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource;
 use super::products::qualification::{
     MAX_PRODUCT_QUALIFICATION_EVIDENCE_BYTES, ProductProducerRecipeSourceIdentity,
     ProductQualificationConsumerContentIdentity, ProductQualificationConsumerDefinitionIdentity,
@@ -19,7 +20,7 @@ use super::products::{validate_canonical_unsuffixed_ref, validate_hash, validate
 use super::qualification_execution::QualificationExecutionPurposeView;
 use super::qualification_subject::ContentQualificationSubject;
 
-pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v2";
+pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v3";
 
 /// These sources have different authentication and CAS retention rules. An
 /// activation receipt is never a producer witness or product relationship.
@@ -82,6 +83,8 @@ pub struct QualificationLaunchPurpose {
     pub consumer_content: Option<ProductQualificationConsumerContentIdentity>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub producer_recipe_sources: BTreeMap<String, ProductProducerRecipeSourceIdentity>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remote_verifier_sources: BTreeMap<String, QualificationRemoteVerifierSource>,
     /// Verifier-side subject slot; it may differ from the consuming source's
     /// declaration ID. Its manifest must still identify the same exact bytes.
     pub subject_declaration_id: String,
@@ -172,6 +175,22 @@ impl QualificationLaunchPurpose {
                 && source.bundle_generation_identity != definitions.bundle_generation_identity
             {
                 bail!("qualification producer and consumer use different Bundle generations");
+            }
+        }
+        let remote_scenarios = self
+            .policy_source
+            .policy
+            .producer_scenarios
+            .iter()
+            .filter(|(_, scenario)| scenario.remote_verifier.is_some())
+            .count();
+        if self.remote_verifier_sources.len() != remote_scenarios {
+            bail!("qualification purpose does not retain every signed remote verifier");
+        }
+        for (name, verifier) in &self.remote_verifier_sources {
+            verifier.validate_for(&self.policy_source, name)?;
+            if self.producer_recipe_sources.get(name) != Some(&verifier.producer_source) {
+                bail!("retained remote verifier differs from admitted producer source");
             }
         }
         validate_name(&self.subject_declaration_id)?;

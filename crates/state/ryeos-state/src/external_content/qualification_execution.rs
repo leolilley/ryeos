@@ -25,6 +25,10 @@ pub struct QualificationExecutionPurposeView<'a> {
     policy_source: &'a ProductQualificationPolicySource,
     consumer_content: Option<&'a ProductQualificationConsumerContentIdentity>,
     producer_recipe_sources: &'a BTreeMap<String, ProductProducerRecipeSourceIdentity>,
+    remote_verifier_sources: &'a BTreeMap<
+        String,
+        super::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource,
+    >,
     subject_declaration_id: &'a str,
     subject_manifest_hash: &'a str,
 }
@@ -37,6 +41,7 @@ impl<'a> QualificationExecutionPurposeView<'a> {
             policy_source: &purpose.policy_source,
             consumer_content: purpose.consumer_content.as_ref(),
             producer_recipe_sources: &purpose.producer_recipe_sources,
+            remote_verifier_sources: &purpose.remote_verifier_sources,
             subject_declaration_id: &purpose.subject_declaration_id,
             subject_manifest_hash: &purpose.subject_manifest_hash,
         })
@@ -65,6 +70,13 @@ impl<'a> QualificationExecutionPurposeView<'a> {
 
     pub fn subject_declaration_id(&self) -> &'a str {
         self.subject_declaration_id
+    }
+
+    pub fn remote_verifier_source(
+        &self,
+        scenario_id: &str,
+    ) -> Option<&'a super::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource>{
+        self.remote_verifier_sources.get(scenario_id)
     }
 
     pub fn subject_manifest_hash(&self) -> &'a str {
