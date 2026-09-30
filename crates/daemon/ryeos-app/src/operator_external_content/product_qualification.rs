@@ -2097,6 +2097,127 @@ pub fn resolve_current_bundle_producer_recipe_for_purpose(
     })
 }
 
+/// Exact current preflight data, not a remote-contact or publication grant.
+/// The accepted-root owner must retain the payload and its complete source
+/// proof before transfer; recovery must use that retained closure, not resolve
+/// replacement Bundle bytes through this fresh-work helper.
+pub struct PreparedRemoteConsumerVerifier {
+    pub scenario_source_digest: String,
+    pub producer_source: ProductProducerRecipeSourceIdentity,
+    pub payload: ryeos_engine::binary_resolver::CapturedBundlePayload,
+    /// Verified envelopes captured with the payload, never reopened from
+    /// diagnostic source paths during later publication or recovery.
+    pub signed_sources: Vec<ryeos_engine::engine::CapturedSignedBundleItemSource>,
+    pub signed_bundle_manifests: Vec<ryeos_engine::plan_builder::CapturedSignedBundleManifest>,
+    pub historical_verifying_keys: BTreeMap<String, [u8; 32]>,
+}
+
+/// Resolve the independently selected guest verifier below the existing
+/// admitted qualification purpose. The producer executable is never used as
+/// a verifier fallback, and all source reads share one checked generation.
+pub fn prepare_remote_consumer_verifier_for_purpose(
+    state: &AppState,
+    purpose: &ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView<'_>,
+    scenario_id: &str,
+    protected_selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+) -> anyhow::Result<PreparedRemoteConsumerVerifier> {
+    protected_selection.validate()?;
+    state.engine.with_checked_bundle_generation(|generation| {
+        let current = resolve_current_bundle_producer_recipe_for_purpose(state, purpose, scenario_id)?;
+        let producer_source = current.source_identity()?;
+        let scenario = purpose.policy_source().policy.producer_scenarios.get(scenario_id)
+            .context("remote consumer verifier scenario was not admitted")?;
+        let scenario_source_digest = scenario.remote_verifier_source_digest(&producer_source)?;
+        if scenario_source_digest != protected_selection.scenario_source_digest {
+            bail!("remote consumer verifier source differs from protected node selection");
+        }
+        let selection = scenario.remote_verifier.as_ref()
+            .context("remote consumer scenario selects no independent verifier")?;
+        let bundle_name = selection.binary_ref.strip_prefix("bin:")
+            .and_then(|path| path.split_once('/')).map(|(bundle, _)| bundle)
+            .context("remote verifier has no exact Bundle namespace")?;
+        let bundle_root = state.engine.registered_bundle_root(bundle_name)
+            .context("remote verifier Bundle has no admitted root")?;
+        let payload = ryeos_engine::binary_resolver::capture_bundle_payload_for_target(
+            &selection.binary_ref, &selection.guest_target_triple, bundle_root,
+            &state.engine.node_trust_store,
+            ryeos_external_execution_contract::restored_runtime_measurement::MAX_RESTORATION_VERIFIER_BYTES,
+        )?;
+        if payload.identity.signer_fingerprint != producer_source.publisher_fingerprint
+            || payload.identity.target_triple != selection.guest_target_triple
+            || payload.identity.content_hash != protected_selection.verifier_artifact_hash
+            || payload.bytes == 0
+        {
+            bail!("remote verifier payload differs from signed source or protected artifact");
+        }
+        let mut signed_sources = BTreeMap::new();
+        for reference in [&purpose.policy_source().canonical_ref, &producer_source.canonical_ref] {
+            let resolution = resolve_consumer_definition_in_generation(generation, reference, "config")?;
+            let identity = consumer_definition_identity(&resolution)?;
+            let (raw, effective, publisher) = if reference == &producer_source.canonical_ref {
+                (&producer_source.raw_content_digest, &producer_source.effective_definition_digest,
+                 &producer_source.publisher_fingerprint)
+            } else {
+                let policy = purpose.policy_source();
+                (&policy.raw_content_digest, &policy.effective_definition_digest,
+                 &policy.publisher_fingerprint)
+            };
+            if identity.raw_content_digest != *raw
+                || identity.effective_definition_digest != *effective
+                || identity.publisher_fingerprint != *publisher
+            {
+                bail!("remote verifier signed source changed before capture");
+            }
+            for source in generation.capture_verified_signed_bundle_sources(&resolution)? {
+                if let Some(previous) = signed_sources.get(&source.resolved_ref) {
+                    let previous: &ryeos_engine::engine::CapturedSignedBundleItemSource = previous;
+                    if previous.signed_bytes != source.signed_bytes
+                        || previous.raw_content_digest != source.raw_content_digest
+                        || previous.source_root != source.source_root
+                        || previous.signer_fingerprint != source.signer_fingerprint
+                    {
+                        bail!("remote verifier source closures conflict");
+                    }
+                } else {
+                    signed_sources.insert(source.resolved_ref.clone(), source);
+                }
+            }
+        }
+        let signed_sources: Vec<_> = signed_sources.into_values().collect();
+        if signed_sources.is_empty() || signed_sources.len() > 32
+            || signed_sources.iter().try_fold(0usize, |total, source|
+                total.checked_add(source.signed_bytes.len())).is_none_or(|bytes| bytes > 4 * 1024 * 1024)
+        {
+            bail!("remote verifier signed source closure exceeds its bound");
+        }
+        let signed_bundle_manifests = generation.capture_verified_source_bundle_manifests(&signed_sources)?;
+        if !signed_bundle_manifests.iter().any(|manifest|
+            manifest.identity.name == bundle_name
+                && manifest.identity.signer_fingerprint == payload.identity.signer_fingerprint)
+        {
+            bail!("remote verifier payload Bundle is absent from signed source closure");
+        }
+        let fingerprints: std::collections::BTreeSet<_> = signed_sources.iter()
+            .map(|source| source.signer_fingerprint.clone())
+            .chain(signed_bundle_manifests.iter().map(|manifest| manifest.identity.signer_fingerprint.clone()))
+            .chain(std::iter::once(payload.identity.signer_fingerprint.clone())).collect();
+        let historical_verifying_keys = fingerprints.into_iter().map(|fingerprint| {
+            let key = state.engine.node_trust_store.get(&fingerprint)
+                .context("remote verifier captured signer has no checked public verifier")?;
+            if key.fingerprint != fingerprint
+                || lillux::crypto::fingerprint(&key.verifying_key) != fingerprint
+            {
+                bail!("remote verifier public verifier differs from captured signer");
+            }
+            Ok((fingerprint, key.verifying_key.to_bytes()))
+        }).collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        Ok(PreparedRemoteConsumerVerifier {
+            scenario_source_digest, producer_source, payload, signed_sources,
+            signed_bundle_manifests, historical_verifying_keys,
+        })
+    })
+}
+
 /// Borrow the producer's input exclusively from the accepted verifier root.
 /// Operational SQLite coordinates locate the CAS capsule, but neither caller
 /// text nor a fresh policy resolution can supply or modify these bytes.

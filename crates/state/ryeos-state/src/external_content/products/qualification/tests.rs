@@ -119,6 +119,7 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
         "direct_codex".into(),
         ProductQualificationProducerScenario {
             recipe_ref: "config:codex/direct-probe".into(),
+            remote_verifier: None,
         },
     );
     purpose.producer_recipe_sources.insert(
@@ -415,6 +416,7 @@ fn launch_purpose_pins_every_signed_producer_recipe_source() {
         "native_codex".into(),
         ProductQualificationProducerScenario {
             recipe_ref: recipe_ref.clone(),
+            remote_verifier: None,
         },
     );
     assert!(purpose.validate().is_err());
@@ -659,6 +661,7 @@ fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
         "native_codex".into(),
         ProductQualificationProducerScenario {
             recipe_ref: source.canonical_ref.clone(),
+            remote_verifier: None,
         },
     );
     let scoped = ProductQualificationScopedAttemptProof {
@@ -1261,12 +1264,104 @@ fn policy_is_closed_bounded_and_has_no_shell_or_wildcard_lane() {
 }
 
 #[test]
+fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
+    let mut value = policy();
+    let mut scenario = ProductQualificationProducerScenario {
+        recipe_ref: "config:fixtures/recipe".into(),
+        remote_verifier: Some(ProductQualificationRemoteVerifierSelection {
+            binary_ref: "bin:fixtures/guest-verifier".into(),
+            guest_target_triple: "x86_64-unknown-linux-musl".into(),
+        }),
+    };
+    value
+        .producer_scenarios
+        .insert("remote_codex".into(), scenario.clone());
+    value.validate().unwrap();
+    let source = ProductProducerRecipeSourceIdentity {
+        bundle_generation_identity: "generation-1".into(),
+        canonical_ref: scenario.recipe_ref.clone(),
+        raw_content_digest: "a".repeat(64),
+        effective_definition_digest: "b".repeat(64),
+        publisher_fingerprint: "c".repeat(64),
+        recipe_digest: "d".repeat(64),
+    };
+    let original = scenario.remote_verifier_source_digest(&source).unwrap();
+    scenario.remote_verifier.as_mut().unwrap().binary_ref = "bin:fixtures/other-verifier".into();
+    assert_ne!(
+        original,
+        scenario.remote_verifier_source_digest(&source).unwrap()
+    );
+    scenario
+        .remote_verifier
+        .as_mut()
+        .unwrap()
+        .guest_target_triple = "aarch64-unknown-linux-musl".into();
+    assert_ne!(
+        original,
+        scenario.remote_verifier_source_digest(&source).unwrap()
+    );
+    let mut wrong_source = source.clone();
+    wrong_source.canonical_ref = "config:fixtures/other-recipe".into();
+    assert!(
+        scenario
+            .remote_verifier_source_digest(&wrong_source)
+            .is_err()
+    );
+    scenario.remote_verifier = None;
+    assert!(scenario.remote_verifier_source_digest(&source).is_err());
+
+    for binary in [
+        "/bin/verifier",
+        "tool:fixtures/verifier",
+        "bin:foreign/verifier",
+        "bin:fixtures/verifier@latest",
+        "bin:fixtures/../verifier",
+    ] {
+        let mut invalid = value.clone();
+        invalid
+            .producer_scenarios
+            .get_mut("remote_codex")
+            .unwrap()
+            .remote_verifier
+            .as_mut()
+            .unwrap()
+            .binary_ref = binary.into();
+        assert!(invalid.validate().is_err(), "accepted binary {binary}");
+    }
+    for target in [
+        "",
+        "../escape",
+        "x86_64/linux",
+        "X86_64-linux",
+        "target with spaces",
+    ] {
+        let mut invalid = value.clone();
+        invalid
+            .producer_scenarios
+            .get_mut("remote_codex")
+            .unwrap()
+            .remote_verifier
+            .as_mut()
+            .unwrap()
+            .guest_target_triple = target.into();
+        assert!(invalid.validate().is_err(), "accepted target {target}");
+    }
+    let mut wire = serde_json::to_value(&value).unwrap();
+    wire["producer_scenarios"]["remote_codex"]["remote_verifier"]["command"] = json!("/bin/sh");
+    assert!(ProductQualificationPolicy::from_value(&wire).is_err());
+    wire = serde_json::to_value(value).unwrap();
+    wire["schema"] = json!("ryeos.product_qualification_policy.v2");
+    assert!(ProductQualificationPolicy::from_value(&wire).is_err());
+}
+
+#[test]
 fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
     let mut value = policy();
     value.producer_scenarios.insert(
         "native_codex".into(),
         ProductQualificationProducerScenario {
             recipe_ref: "config:fixtures/independent-runtime/native-codex-producer".into(),
+            remote_verifier: None,
         },
     );
     assert!(value.validate().is_ok());
@@ -1283,6 +1378,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
             name.into(),
             ProductQualificationProducerScenario {
                 recipe_ref: "config:fixtures/recipe".into(),
+                remote_verifier: None,
             },
         );
         assert!(invalid.validate().is_err(), "accepted scenario {name:?}");
@@ -1308,6 +1404,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
             format!("scenario_{index}"),
             ProductQualificationProducerScenario {
                 recipe_ref: "config:fixtures/recipe".into(),
+                remote_verifier: None,
             },
         );
     }

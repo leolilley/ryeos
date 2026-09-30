@@ -24,7 +24,7 @@ use crate::objects::{
     SessionProcessEnvironmentValue, canonical_value_digest, validate_session_process_environment,
 };
 
-pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v2";
+pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v3";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
 pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v10";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
@@ -370,6 +370,88 @@ impl ProductQualificationConsumerExecutionContext {
 #[serde(deny_unknown_fields)]
 pub struct ProductQualificationProducerScenario {
     pub recipe_ref: String,
+    /// An independent semantic verifier for the remote occurrence. Absence
+    /// selects no remote verifier; the producer target is never a fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_verifier: Option<ProductQualificationRemoteVerifierSelection>,
+}
+
+/// Signed executable selection, not a caller path or executable permission.
+/// Admission still captures the exact payload and source proof and compares
+/// its hash with the protected node selection before any remote contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationRemoteVerifierSelection {
+    pub binary_ref: String,
+    pub guest_target_triple: String,
+}
+
+impl ProductQualificationRemoteVerifierSelection {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_canonical_unsuffixed_ref("remote qualification verifier", &self.binary_ref)?;
+        if !self.binary_ref.starts_with("bin:") {
+            bail!("remote qualification verifier must be a Bundle binary ref");
+        }
+        if self.guest_target_triple.is_empty()
+            || self.guest_target_triple.len() > 128
+            || !self.guest_target_triple.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+        {
+            bail!("remote qualification verifier target is not a bounded executor segment");
+        }
+        Ok(())
+    }
+}
+
+impl ProductQualificationProducerScenario {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_canonical_unsuffixed_ref("qualification producer recipe", &self.recipe_ref)?;
+        if !self.recipe_ref.starts_with("config:") {
+            bail!("qualification producer recipe must be a Config ref");
+        }
+        if let Some(verifier) = &self.remote_verifier {
+            verifier.validate()?;
+            let recipe_bundle = self
+                .recipe_ref
+                .strip_prefix("config:")
+                .and_then(|path| path.split_once('/'))
+                .map(|(bundle, _)| bundle);
+            let verifier_bundle = verifier
+                .binary_ref
+                .strip_prefix("bin:")
+                .and_then(|path| path.split_once('/'))
+                .map(|(bundle, _)| bundle);
+            if recipe_bundle.is_none() || recipe_bundle != verifier_bundle {
+                bail!("remote verifier must belong to its signed scenario recipe Bundle");
+            }
+        }
+        Ok(())
+    }
+
+    /// Commits the independently selected guest verifier as well as the
+    /// retained target recipe. A recipe-only digest cannot protect a changed
+    /// verifier selection under an otherwise identical scenario name.
+    pub fn remote_verifier_source_digest(
+        &self,
+        source: &ProductProducerRecipeSourceIdentity,
+    ) -> anyhow::Result<String> {
+        self.validate()?;
+        source.validate()?;
+        let verifier = self
+            .remote_verifier
+            .as_ref()
+            .context("qualification scenario has no remote verifier")?;
+        verifier.validate()?;
+        if source.canonical_ref != self.recipe_ref {
+            bail!("remote verifier source differs from signed scenario recipe");
+        }
+        canonical_value_digest(&serde_json::json!({
+            "domain": "ryeos.remote-consumer-verifier-source.v1",
+            "scenario": self,
+            "producer_source": source,
+        }))
+    }
 }
 
 impl ProductQualificationPolicy {
@@ -404,13 +486,7 @@ impl ProductQualificationPolicy {
         }
         for (name, scenario) in &self.producer_scenarios {
             validate_name(name)?;
-            validate_canonical_unsuffixed_ref(
-                "qualification producer recipe",
-                &scenario.recipe_ref,
-            )?;
-            if !scenario.recipe_ref.starts_with("config:") {
-                bail!("qualification producer recipe must be a Config ref");
-            }
+            scenario.validate()?;
         }
         bounded(
             self,

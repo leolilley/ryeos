@@ -32,7 +32,7 @@ fn signed_codex_consumer_definitions_share_one_checked_bundle_generation() -> Re
     let policy = r#"category: test
 version: "1.0.0"
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v2
+  schema: ryeos.product_qualification_policy.v3
   verifier_ref: tool:fixtures/qualify_runtime
   subject_declaration_id: guest-runtime
   allowed_claims: [runtime_qualified]
@@ -394,7 +394,7 @@ workload_client: null
     let policy = r#"category: test
 version: "1.0.0"
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v2
+  schema: ryeos.product_qualification_policy.v3
   verifier_ref: tool:fixtures/qualify_runtime
   subject_declaration_id: guest-runtime
   allowed_claims: [runtime_qualified]
