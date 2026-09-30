@@ -9,6 +9,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_app::external_qualification_command::{
+    QualificationWorkerCommandOutcome, SignedQualificationWorkerRequest,
+};
 use ryeos_app::external_qualification_local::{
     QualificationLocalOwner, with_qualification_local_owner,
 };
@@ -133,6 +136,44 @@ impl ExternalQualificationLocalWorker {
         &self.state_root
     }
 
+    /// Send the one signed Request through this exact attached exclusive
+    /// Worker. The app owns the durable contact and observation journal;
+    /// this owner only lends the already attached pool process for one send.
+    /// The returned outcome is communication evidence, not qualification.
+    pub(crate) fn execute_one_signed_request(
+        &self,
+        state: &ryeos_app::state::AppState,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+        selected: &SignedQualificationWorkerRequest,
+    ) -> Result<QualificationWorkerCommandOutcome> {
+        ensure!(
+            self.wire_max_bytes == selected.wire_max_bytes,
+            "Q selected Request changed the attached signed wire maximum"
+        );
+        let placement = self.ready.placement().to_owned();
+        let binding_digest = self.ready.binding().digest()?;
+        let pool = Arc::clone(&state.persistent_sessions);
+        ryeos_app::external_qualification_command::execute_signed_qualification_worker_request(
+            state,
+            &placement,
+            coordinate,
+            &binding_digest,
+            self.ready.root(),
+            selected,
+            &self.process_identity,
+            |body, deadline, on_delta| {
+                pool.execute_exclusive_attributed_with_deadline(
+                    &placement,
+                    None,
+                    body,
+                    || deadline.has_elapsed(),
+                    |delta| on_delta(delta),
+                    Some(deadline),
+                )
+            },
+        )
+    }
+
     /// The pool's `Reaped` result includes successful invocation of both the
     /// exact Q process-row settlement and connector relay retirement. Keep the
     /// original Ready, workspace, and state-root owners even if this fails.
@@ -182,6 +223,55 @@ impl ExternalQualificationLocalWorker {
         }
         result
     }
+}
+
+/// Select the signed Request before Q held start so the pushed-batch sink can
+/// capture its exact digest. The start independently rechecks the accepted
+/// Worker and protocol under its Q occurrence gate. The later send reselects
+/// the same Request under that gate before consuming the one-use contact row.
+pub(crate) fn start_external_qualification_local_worker_for_signed_request(
+    state: &ryeos_app::state::AppState,
+    coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ready: ExternalQualificationReady,
+) -> Result<(
+    ExternalQualificationLocalWorker,
+    SignedQualificationWorkerRequest,
+)> {
+    let placement = ready.placement().to_owned();
+    let binding_digest = ready.binding().digest()?;
+    let selected =
+        ryeos_app::external_qualification_command::select_signed_qualification_worker_request(
+            state,
+            &placement,
+            coordinate,
+            &binding_digest,
+            ready.root(),
+        )?;
+    let sink_state = state.clone();
+    let sink_placement = placement.clone();
+    let sink_digest = selected.digest.clone();
+    let selected_wire_max_bytes = selected.wire_max_bytes;
+    let worker = start_external_qualification_local_worker(
+        state,
+        coordinate,
+        ready,
+        move |wire_max_bytes| {
+            ensure!(
+                wire_max_bytes == selected_wire_max_bytes,
+                "Q held Worker changed its selected signed wire maximum"
+            );
+            Ok(Arc::new(move |batch| {
+                ryeos_app::external_qualification_command::ingest_qualification_worker_observation_batch(
+                    &sink_state,
+                    &sink_placement,
+                    &sink_digest,
+                    wire_max_bytes,
+                    batch,
+                )
+            }))
+        },
+    )?;
+    Ok((worker, selected))
 }
 
 /// Attach the exact held Worker before release, then publish it to the
