@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T06:52:09Z:91b586d175c2f412068397a342d40a0957664a72ff5bc2b076bcc411ce74e841:BlSSPZ3NJevvzDjC0lwBcjsIPeBNCfwaz25E5P6GfYZvwLyNIF/zS3OXJMXV4bx9yq17QQh4Kyg4dDuxPUyOCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-30T02:45:20Z:f4453d5e377853b23ef00c7029ff590214e925381a99225190dad4039ad9ed36:Mg/W6i0myNl0os+8QxZEraiZ5oiTfJj4gCTOd3tOo14mUs3bHXWcsvGarsVX1Mg+BpxCVwgdx7b4y67Kb6ffCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 forced_login_method = "chatgpt"
 cli_auth_credentials_store = "file"
 model_provider = "openai"
