@@ -2244,6 +2244,8 @@ pub struct PreparedExternalQualificationRoot {
     capsule: ryeos_state::objects::AdmittedLaunchCapsule,
     purpose: ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
     program: AdmittedExternalQualificationSessionProgram,
+    worker_profile: ryeos_state::objects::AdmittedStructuredSessionProfile,
+    worker_source_owner: ryeos_state::objects::SourceOwnerIdentity,
 }
 
 impl PreparedExternalQualificationRoot {
@@ -2259,6 +2261,98 @@ impl PreparedExternalQualificationRoot {
 
     pub fn program(&self) -> &AdmittedExternalQualificationSessionProgram {
         &self.program
+    }
+
+    pub fn worker_profile(&self) -> &ryeos_state::objects::AdmittedStructuredSessionProfile {
+        &self.worker_profile
+    }
+
+    /// Resolve the Worker used by a local plan under the caller's one checked
+    /// Bundle generation. The accepted root owns the source/profile/use; the
+    /// current signed WorkerExecution owns the session selection.
+    pub(crate) fn current_local_worker_resolution(
+        &self,
+        generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+    ) -> anyhow::Result<ResolutionOutput> {
+        self.program.validate_against_purpose(&self.purpose)?;
+        let content = self
+            .purpose
+            .consumer_content
+            .as_ref()
+            .context("qualification-only root has no accepted Worker content")?;
+        if self.worker_profile.profile_hash != content.worker_profile_hash
+            || self.program.qualification_use.profile_hash != self.worker_profile.profile_hash
+        {
+            bail!("qualification-only Worker profile differs from accepted use");
+        }
+        let context = self
+            .purpose
+            .policy_source
+            .policy
+            .consumer_execution_context
+            .as_ref()
+            .context("qualification-only root has no signed consumer context")?;
+        content.definitions.validate_for(context)?;
+        if generation.request_engine_generation_identity()
+            != content.definitions.bundle_generation_identity
+            || resolve_current_bundle_qualification_policy_in_generation(
+                generation,
+                &self.purpose.policy_source.canonical_ref,
+            )? != self.purpose.policy_source
+        {
+            bail!("qualification-only Worker changed its accepted Bundle generation or policy");
+        }
+        let worker =
+            resolve_consumer_definition_in_generation(generation, &context.worker_ref, "worker")?;
+        let environment = resolve_consumer_definition_in_generation(
+            generation,
+            &context.environment_ref,
+            "config",
+        )?;
+        let worker_execution = resolve_consumer_definition_in_generation(
+            generation,
+            &context.worker_execution_ref,
+            "worker_execution",
+        )?;
+        if consumer_definition_identity(&worker)? != content.definitions.worker
+            || consumer_definition_identity(&environment)? != content.definitions.environment
+            || consumer_definition_identity(&worker_execution)?
+                != content.definitions.worker_execution
+        {
+            bail!("qualification-only Worker definitions changed after admission");
+        }
+        if crate::source_closure_admission::source_owner_identity(&worker)?
+            != self.worker_source_owner
+        {
+            bail!("qualification-only Worker source owner changed after admission");
+        }
+        if environment
+            .composed
+            .composed
+            .get("worker_ref")
+            .and_then(serde_json::Value::as_str)
+            != Some(context.worker_ref.as_str())
+        {
+            bail!("qualification-only environment names a different Worker");
+        }
+        let execution_config = worker_execution
+            .composed
+            .composed
+            .get("config")
+            .context("qualification-only WorkerExecution has no config")?;
+        let execution_worker = execution_config
+            .get("worker_ref")
+            .context("qualification-only WorkerExecution has no worker_ref")?;
+        if execution_config
+            .get("environment_binding")
+            .and_then(serde_json::Value::as_str)
+            != Some(context.environment_binding.as_str())
+            || (!execution_worker.is_null()
+                && execution_worker.as_str() != Some(context.worker_ref.as_str()))
+        {
+            bail!("qualification-only WorkerExecution differs from signed Worker binding");
+        }
+        Ok(worker)
     }
 }
 
@@ -2353,6 +2447,8 @@ pub fn prepare_external_qualification_root(
         capsule,
         purpose: purpose.clone(),
         program,
+        worker_profile: profile,
+        worker_source_owner: owner,
     })
 }
 

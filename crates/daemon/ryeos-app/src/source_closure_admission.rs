@@ -1179,7 +1179,7 @@ fn require_manifest_entry(candidate: &CapturedSourceCandidate, entry: &str) -> a
     Ok(())
 }
 
-fn source_owner_identity(
+pub(crate) fn source_owner_identity(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
 ) -> anyhow::Result<ryeos_state::objects::SourceOwnerIdentity> {
     let signer =
