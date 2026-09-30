@@ -9,7 +9,8 @@ use ryeos_external_execution_contract::{
 };
 use ryeos_state::external_execution::ExecutionChannelBinding;
 use ryeos_state::external_execution::admission::{
-    AdmittedExternalExecutionProgram, ExternalCandidateProcFilesystem, ExternalDirectSealedInput,
+    AdmittedExternalExecutionProgram, ExternalCandidateProcFilesystem,
+    ExternalCandidateRuntimeRecipe, ExternalDirectSealedInput,
 };
 use serde::{Deserialize, Serialize};
 
@@ -77,23 +78,31 @@ struct LauncherCommandFields {
     stdin: Option<ExternalDirectSealedInput>,
 }
 
+fn session_command_fields(
+    recipe: &ExternalCandidateRuntimeRecipe,
+) -> Result<LauncherCommandFields> {
+    Ok(LauncherCommandFields {
+        executable: recipe.namespace_executable()?,
+        argv0: recipe.argv0.clone(),
+        arguments: recipe.arguments.clone(),
+        cwd: recipe.cwd.clone(),
+        max_stdout_bytes: recipe.max_stdout_bytes,
+        max_stderr_bytes: recipe.max_stderr_bytes,
+        proc_filesystem: recipe.proc_filesystem,
+        contain_process_group: recipe.contain_process_group,
+        nested_sandbox: recipe.nested_sandbox,
+        stdin: None,
+    })
+}
+
 fn command_fields(program: &AdmittedExternalExecutionProgram) -> Result<LauncherCommandFields> {
     program.validate()?;
     Ok(match program {
         AdmittedExternalExecutionProgram::StructuredSession(program) => {
-            let recipe = &program.requirement.runtime_recipe;
-            LauncherCommandFields {
-                executable: recipe.namespace_executable()?,
-                argv0: recipe.argv0.clone(),
-                arguments: recipe.arguments.clone(),
-                cwd: recipe.cwd.clone(),
-                max_stdout_bytes: recipe.max_stdout_bytes,
-                max_stderr_bytes: recipe.max_stderr_bytes,
-                proc_filesystem: recipe.proc_filesystem,
-                contain_process_group: recipe.contain_process_group,
-                nested_sandbox: recipe.nested_sandbox,
-                stdin: None,
-            }
+            session_command_fields(&program.requirement.runtime_recipe)?
+        }
+        AdmittedExternalExecutionProgram::QualificationStructuredSession(program) => {
+            session_command_fields(&program.requirement.runtime_recipe)?
         }
         AdmittedExternalExecutionProgram::DirectCommand(program) => {
             let projection = program.projection();

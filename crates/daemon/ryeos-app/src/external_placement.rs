@@ -1359,6 +1359,9 @@ impl ExternalPlacementBackendRegistry {
                 );
                 program.requirement.required_lifecycle_capabilities.clone()
             }
+            AdmittedExternalExecutionProgram::QualificationStructuredSession(_) => {
+                bail!("qualification-only session has no ordinary placement backend authority")
+            }
             AdmittedExternalExecutionProgram::DirectCommand(program) => {
                 ensure!(matches!(contract.workload,
                     crate::node_config::sections::external_execution::ExternalWorkloadBinding::DirectCommand {})
@@ -2551,6 +2554,9 @@ fn validate_external_placement_program(
                     && program.selection_identity_digest == session.runtime_selection_identity,
                 "external supervisor program contradicts its protected lifecycle binding"
             );
+        }
+        AdmittedExternalExecutionProgram::QualificationStructuredSession(_) => {
+            bail!("qualification-only session has no ordinary allocation owner")
         }
         AdmittedExternalExecutionProgram::DirectCommand(program) => {
             let ExternalAllocationOwner::DirectThread {

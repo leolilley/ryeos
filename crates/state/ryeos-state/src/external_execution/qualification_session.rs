@@ -5,6 +5,10 @@
 //! retained Worker profile with the already sealed qualification purpose.
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::{
+    ExternalGuestInputProjection, GuestMountAccess, GuestMountContentAuthority, GuestMountKind,
+    GuestProductManifestKind,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::external_content::products::ProductShape;
@@ -167,5 +171,38 @@ impl AdmittedExternalQualificationSessionProgram {
             "domain": "ryeos.external-qualification-session-program.v1",
             "program": self,
         }))
+    }
+
+    /// The selected runtime product must be one exact read-only guest mount.
+    /// This checks the closed projection; descriptor and manifest bytes are
+    /// authenticated separately by the guest-input owner.
+    pub fn validate_guest_inputs(&self, inputs: &ExternalGuestInputProjection) -> Result<()> {
+        self.validate()?;
+        inputs.validate()?;
+        let expected_kind = match self.runtime_manifest_kind.as_str() {
+            EXTERNAL_CONTENT_MANIFEST_KIND => GuestProductManifestKind::Content,
+            EXTERNAL_LARGE_CONTENT_MANIFEST_KIND => GuestProductManifestKind::LargeContent,
+            _ => unreachable!("validated qualification manifest kind"),
+        };
+        ensure!(
+            inputs.inputs.iter().any(|input| {
+                input.authority_id == self.requirement.runtime_product_declaration_id
+                    && input.destination
+                        == self.requirement.runtime_recipe.runtime_mount_destination
+                    && input.kind == GuestMountKind::Directory
+                    && input.access == GuestMountAccess::ReadOnly
+                    && matches!(
+                        &input.content_authority,
+                        GuestMountContentAuthority::ProductManifest {
+                            manifest_kind,
+                            manifest_hash,
+                            ..
+                        } if *manifest_kind == expected_kind
+                            && manifest_hash == &self.runtime_manifest_hash
+                    )
+            }),
+            "qualification-only guest inputs lost their exact read-only runtime"
+        );
+        Ok(())
     }
 }
