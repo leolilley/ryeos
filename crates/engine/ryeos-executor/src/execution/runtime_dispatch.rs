@@ -3369,6 +3369,7 @@ mod tests {
             accounting_scope: None,
             workload_client_grant: None,
             scoped_producer_grant: None,
+            remote_consumer_grant: None,
         };
 
         let ctx = parent_execution_context_from_capability(&cap);

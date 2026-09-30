@@ -40,6 +40,38 @@ impl AdmittedScopedProducerGrant {
     }
 }
 
+/// Sealed remote-consumer root authority, not a local isolation promise.
+/// Launcher construction must come from the admitted capsule; request data
+/// cannot manufacture this non-serializable bearer projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedRemoteConsumerGrant {
+    pub purpose: QualificationLaunchPurpose,
+    pub root_thread_id: String,
+    pub launch_owner: String,
+    pub admitted_capsule_hash: String,
+    pub root_raw_content_digest: String,
+}
+
+impl AdmittedRemoteConsumerGrant {
+    pub fn validate(&self) -> Result<()> {
+        self.purpose.validate()?;
+        ryeos_runtime::validate_runtime_thread_id(&self.root_thread_id)
+            .map_err(anyhow::Error::msg)?;
+        let owner: crate::runtime_db::LaunchOwner = serde_json::from_str(&self.launch_owner)?;
+        if owner.thread_id != self.root_thread_id
+            || owner.monotonic_launch_epoch == 0
+            || owner.unpredictable_nonce.is_empty()
+            || owner.daemon_generation_id != crate::runtime_db::daemon_generation_id()
+            || !lillux::valid_hash(&self.admitted_capsule_hash)
+            || !lillux::valid_hash(&self.root_raw_content_digest)
+            || self.purpose.remote_verifier_sources.is_empty()
+        {
+            bail!("remote consumer grant differs from its exact live root authority");
+        }
+        Ok(())
+    }
+}
+
 /// Hook identity admitted at the same launch boundary that mints callback
 /// authority. Runtime callback input may select one of these identities; it
 /// cannot author a new provenance label for durable hook evidence.
@@ -93,6 +125,19 @@ impl CallbackRuntimeMethodSurface {
             "runtime.scoped_child_close_input".into(),
         ])
         .expect("fixed qualification callback surface is canonical")
+    }
+
+    /// Finite remote-consumer protocol, distinct from local process authority.
+    /// This surface alone grants nothing: the launcher and each handler must
+    /// join the actual verifier root, sealed purpose and retained occurrence.
+    pub fn qualification_remote_consumer() -> Self {
+        Self::exact(vec![
+            "runtime.consumer_verification_inputs".into(),
+            "runtime.consumer_verification_start".into(),
+            "runtime.consumer_verification_observe".into(),
+            "runtime.consumer_verification_settle".into(),
+        ])
+        .expect("fixed remote qualification callback surface is canonical")
     }
 
     pub fn exact(mut methods: Vec<String>) -> Result<Self> {
@@ -483,6 +528,8 @@ pub struct CallbackCapability {
     /// Absent on every ordinary Tool and managed runtime. Bound at most once,
     /// before a protected verifier's callback token is exposed.
     pub scoped_producer_grant: Option<AdmittedScopedProducerGrant>,
+    /// Distinct remote product edge; carries no enforced local scope claim.
+    pub remote_consumer_grant: Option<AdmittedRemoteConsumerGrant>,
 }
 
 impl CallbackCapability {
@@ -601,6 +648,7 @@ impl CallbackCapabilityStore {
             accounting_scope: None,
             workload_client_grant: None,
             scoped_producer_grant: None,
+            remote_consumer_grant: None,
         };
 
         self.capabilities.lock().unwrap().insert(token, cap.clone());
@@ -727,7 +775,7 @@ impl CallbackCapabilityStore {
         grant.validate()?;
         Ok(match self.capabilities.lock().unwrap().get_mut(token) {
             Some(cap) => {
-                if cap.workload_client_grant.is_some() {
+                if cap.workload_client_grant.is_some() || cap.remote_consumer_grant.is_some() {
                     bail!("callback workload-client grant was already bound");
                 }
                 cap.workload_client_grant = Some(grant);
@@ -748,7 +796,7 @@ impl CallbackCapabilityStore {
         grant.validate()?;
         Ok(match self.capabilities.lock().unwrap().get_mut(token) {
             Some(cap) => {
-                if cap.scoped_producer_grant.is_some() {
+                if cap.scoped_producer_grant.is_some() || cap.remote_consumer_grant.is_some() {
                     bail!("callback scoped-producer grant was already bound");
                 }
                 if cap.thread_id != grant.root_thread_id
@@ -758,6 +806,43 @@ impl CallbackCapabilityStore {
                     bail!("callback scoped-producer grant contradicts its root bearer");
                 }
                 cap.scoped_producer_grant = Some(grant);
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Bind the remote purpose and its method ceiling atomically, before the
+    /// freshly minted token is exposed. There is no second bearer store.
+    pub fn set_remote_consumer_grant(
+        &self,
+        token: &str,
+        grant: AdmittedRemoteConsumerGrant,
+    ) -> Result<bool> {
+        grant.validate()?;
+        Ok(match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                if cap.expires_at.has_elapsed()
+                    || cap.remote_consumer_grant.is_some()
+                    || cap.scoped_producer_grant.is_some()
+                    || cap.workload_client_grant.is_some()
+                    || cap.runtime_method_surface.is_exact()
+                {
+                    bail!("remote consumer grant requires a fresh exclusive callback bearer");
+                }
+                if cap.thread_id != grant.root_thread_id
+                    || cap.chain_root_id != grant.root_thread_id
+                    || cap.launch_owner.as_deref() != Some(grant.launch_owner.as_str())
+                    || cap.item_ref.as_deref() != Some(grant.purpose.verifier_ref.as_str())
+                    || cap.root_raw_content_digest != grant.root_raw_content_digest
+                    || cap.effective_definition_digest.as_deref()
+                        != Some(grant.purpose.verifier_realized_definition_digest.as_str())
+                {
+                    bail!("remote consumer grant contradicts its admitted root bearer");
+                }
+                cap.runtime_method_surface =
+                    CallbackRuntimeMethodSurface::qualification_remote_consumer();
+                cap.remote_consumer_grant = Some(grant);
                 true
             }
             None => false,
@@ -1124,6 +1209,36 @@ mod tests {
                 .is_err(),
             "an exact bearer must never be widened or replaced in place"
         );
+    }
+
+    #[test]
+    fn remote_qualification_surface_does_not_inherit_local_or_publication_authority() {
+        let remote = CallbackRuntimeMethodSurface::qualification_remote_consumer();
+        let local = CallbackRuntimeMethodSurface::qualification_scoped_producer();
+        assert_ne!(
+            remote.exact_surface_digest().unwrap(),
+            local.exact_surface_digest().unwrap()
+        );
+        for method in [
+            "runtime.consumer_verification_inputs",
+            "runtime.consumer_verification_start",
+            "runtime.consumer_verification_observe",
+            "runtime.consumer_verification_settle",
+        ] {
+            remote.authorize(method).unwrap();
+            assert!(local.authorize(method).is_err());
+        }
+        for method in [
+            "runtime.scoped_child_start",
+            "runtime.scoped_child_read",
+            "runtime.dispatch_action",
+            "runtime.spawn_follow_child",
+            "runtime.author_item",
+            "runtime.publish_artifact",
+            "runtime.provider_attempt_prepare",
+        ] {
+            assert!(remote.authorize(method).is_err());
+        }
     }
 
     #[test]
@@ -1497,6 +1612,7 @@ mod tests {
             accounting_scope: None,
             workload_client_grant: None,
             scoped_producer_grant: None,
+            remote_consumer_grant: None,
         };
 
         let cloned = cap.clone();
