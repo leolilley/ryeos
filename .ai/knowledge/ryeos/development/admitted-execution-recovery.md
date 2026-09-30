@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T03:09:39Z:a5414a79ee01f2ef05b630e30f80f9ee3649e87d484c5d5ab0e4b3ec2070a568:CLv1wbtwSS4M6sTC5SR2kNhUMRxS20uSs9/9vSZUuI109KVVEwzpBdIWKonLUrPNOHcYKawIJUdsUsAcJV8jCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T03:18:55Z:232159e939faf665aa43d8515b6293d49c50ac19ca6140f16efc762dd7f85b49:GuQnTU6kHN0CExLPkGB7lpxD6hOi6inmlHfUNUeXranLXP2loYI35H3zlJo9YR0OyzP/Ac82LF98eRkQv0BdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.8"
+version: "1.1.9"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -191,10 +191,15 @@ must review a separate read-only inventory of nonempty tables and retained
 chain/project heads before confirming the cut. The reset also requires settled
 process-scope lifetimes and a stopped node; an incompatible capsule alone is
 not permission to discard live execution authority.
-The current source has runtime operator epoch 95 because scoped mount evidence
-now retains executable, argv, environment and cwd commitments before target
-release. A later observation must match that journaled target and the relay
-handoff, so predecessor runtime rows cannot silently supply those facts.
+Runtime operator epoch 95 introduced pre-release executable, argv,
+environment and cwd commitments in the scoped attempt journal. A later
+observation must match that journaled target and the relay handoff. The
+current source advances to epoch 96 because remote verifier attempts now tag
+their purpose: owner measurement and consumer-runtime verification have
+distinct stable coordinates. The existing Render contact adapter admits only
+the owner-measurement arm; a consumer coordinate is neither a contact grant
+nor hosted-runtime qualification. Predecessor runtime rows cannot silently
+supply either the pre-release commitments or the new purpose identity.
 
 ## What recovery must NOT do
 
