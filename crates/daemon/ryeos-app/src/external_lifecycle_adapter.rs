@@ -1249,8 +1249,12 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         );
         upload.require_owned_regular()?;
         let observation = upload.regular_file_observation()?;
+        let expected_upload_mode = match &request.intent.purpose {
+            ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { .. } => 0o600,
+            ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime { .. } => 0o400,
+        };
         ensure!(
-            observation.full_permission_mode()? == 0o600
+            observation.full_permission_mode()? == expected_upload_mode
                 && observation.size() == request.upload_bytes
                 && upload.digest_regular_file_stable_exact(&observation)? == request.upload_sha256,
             "restored verifier upload changed before adapter invocation"
