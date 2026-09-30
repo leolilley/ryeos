@@ -29,7 +29,7 @@ const TRANSCRIPT_LIMIT: usize = 1024 * 1024;
 
 /// Convert the retained wall-clock contact bound once at native startup.
 /// Cleanup is a separate finite settlement allowance, never more work time.
-pub(crate) fn production_deadlines(
+pub fn production_deadlines(
     attempt_deadline_ms: i64,
     now_ms: i64,
 ) -> Result<(MonotonicDeadline, MonotonicDeadline)> {

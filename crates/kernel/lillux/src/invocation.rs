@@ -238,46 +238,17 @@ pub(crate) mod linux {
         let lease = retain_fork_sensitive_descriptors_until(deadline)?;
         // Adopt BOTH before validating either, so partial validation cannot leak
         // the other valid endpoint. Never construct File around an absent fd.
-        let adopt = |fd: u32| -> io::Result<File> {
-            if unsafe { libc::fcntl(fd as i32, libc::F_GETFD) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(unsafe { File::from_raw_fd(fd as i32) })
-        };
-        let input = adopt(input);
-        let output = adopt(output);
+        let input = unsafe { adopt_pipe_endpoint(input) };
+        let output = unsafe { adopt_pipe_endpoint(output) };
         let input = input?;
         let output = output?;
-        let inspect = |file: &File, access| -> io::Result<(libc::dev_t, libc::ino_t)> {
-            let fd = file.as_raw_fd();
-            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-            if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let stat = unsafe { stat.assume_init() };
-            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-            if flags < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if stat.st_mode & libc::S_IFMT != libc::S_IFIFO || flags & libc::O_ACCMODE != access {
-                return Err(invalid(
-                    "invocation requires a read pipe and a distinct write pipe",
-                ));
-            }
-            Ok((stat.st_dev, stat.st_ino))
-        };
-        let input_identity = inspect(&input, libc::O_RDONLY)?;
-        let output_identity = inspect(&output, libc::O_WRONLY)?;
+        let input_identity = inspect_pipe_endpoint(&input, libc::O_RDONLY)?;
+        let output_identity = inspect_pipe_endpoint(&output, libc::O_WRONLY)?;
         if input_identity == output_identity {
             return Err(invalid("invocation pipes alias the same pipe"));
         }
         for file in [&input, &output] {
-            let fd = file.as_raw_fd();
-            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
+            make_pipe_nonblocking(file)?;
         }
         let input = InheritedDescriptorAuthority::from_owned_file(input, &lease)
             .map_err(io::Error::other)?;
@@ -285,6 +256,60 @@ pub(crate) mod linux {
             .map_err(io::Error::other)?;
         check_deadline(deadline)?;
         Ok((input, output))
+    }
+
+    /// Same exclusive startup ownership as acquire, but no input is selected.
+    pub(crate) unsafe fn acquire_output(
+        output: u32,
+        deadline: MonotonicDeadline,
+    ) -> io::Result<InheritedDescriptorAuthority> {
+        if output > i32::MAX as u32 {
+            return Err(invalid("invocation output exceeds fd range"));
+        }
+        check_deadline(deadline)?;
+        let lease = retain_fork_sensitive_descriptors_until(deadline)?;
+        let output = unsafe { adopt_pipe_endpoint(output) }?;
+        inspect_pipe_endpoint(&output, libc::O_WRONLY)?;
+        make_pipe_nonblocking(&output)?;
+        let output = InheritedDescriptorAuthority::from_owned_file(output, &lease)
+            .map_err(io::Error::other)?;
+        check_deadline(deadline)?;
+        Ok(output)
+    }
+
+    unsafe fn adopt_pipe_endpoint(fd: u32) -> io::Result<File> {
+        if unsafe { libc::fcntl(fd as i32, libc::F_GETFD) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { File::from_raw_fd(fd as i32) })
+    }
+
+    fn inspect_pipe_endpoint(file: &File, access: i32) -> io::Result<(libc::dev_t, libc::ino_t)> {
+        let fd = file.as_raw_fd();
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let stat = unsafe { stat.assume_init() };
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFIFO || flags & libc::O_ACCMODE != access {
+            return Err(invalid(
+                "invocation requires a read pipe and a distinct write pipe",
+            ));
+        }
+        Ok((stat.st_dev, stat.st_ino))
+    }
+
+    fn make_pipe_nonblocking(file: &File) -> io::Result<()> {
+        let fd = file.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub(super) fn retry(fd: i32, events: i16, deadline: MonotonicDeadline) -> io::Result<()> {

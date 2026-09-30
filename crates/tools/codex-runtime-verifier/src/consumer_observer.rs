@@ -18,6 +18,40 @@ use crate::consumer_record::{
     MAX_CONSUMER_INPUT_RECORD_BYTES,
 };
 
+pub const CONSUMER_STARTUP_FLAG: &str = "--consumer-challenge-b64";
+
+/// Exact bounded argument decoding, not authorization of the run channel.
+pub fn decode_startup_arguments(
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<ConsumerRuntimeChallenge> {
+    use base64::Engine as _;
+    let mut arguments = arguments.into_iter();
+    ensure!(
+        arguments.next().as_deref() == Some(OsStr::new(CONSUMER_STARTUP_FLAG)),
+        "consumer observer requires its exact startup flag"
+    );
+    let encoded = arguments
+        .next()
+        .context("consumer observer challenge absent")?;
+    ensure!(
+        arguments.next().is_none(),
+        "consumer observer received extra arguments"
+    );
+    let encoded = encoded
+        .to_str()
+        .context("consumer observer challenge is not UTF-8")?;
+    ensure!(
+        !encoded.is_empty() && encoded.len() <= 8192,
+        "consumer observer challenge exceeds startup bound"
+    );
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded)?;
+    ensure!(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes) == encoded,
+        "consumer observer challenge is not canonical base64url"
+    );
+    ConsumerRuntimeChallenge::parse(&bytes)
+}
+
 /// Failure custody only, not an additional execution journal or workflow.
 /// An uncertain cleanup returns this same value with its owners intact. The
 /// enclosing attempt must quarantine and settle the provider occurrence.
@@ -211,12 +245,17 @@ impl PreparedConsumerObserver {
 /// Call only at exclusive synchronous startup, before any thread or child.
 /// The root account transition is irreversible. Any partial grant or failure
 /// makes this occurrence unsuitable for reuse; never repair or relaunch it.
-pub fn prepare_startup(challenge: &ConsumerRuntimeChallenge) -> Result<PreparedConsumerObserver> {
+pub fn prepare_startup(
+    challenge: &ConsumerRuntimeChallenge,
+    active_deadline: MonotonicDeadline,
+    cleanup_deadline: MonotonicDeadline,
+) -> Result<PreparedConsumerObserver> {
     challenge.validate()?;
-    let (active_deadline, cleanup_deadline) = crate::native_guest::production_deadlines(
-        challenge.intent.attempt_deadline_ms,
-        lillux::time::timestamp_millis(),
-    )?;
+    let active_deadline = active_deadline.min(cleanup_deadline);
+    ensure!(
+        !active_deadline.has_elapsed(),
+        "consumer startup deadlines expired"
+    );
     let runtime_root = PinnedDirectory::open(Path::new("/ryeos/guest-runtime"))?
         .context("consumer observer installed runtime absent")?;
     let runtime =
@@ -291,6 +330,27 @@ pub fn prepare_startup(challenge: &ConsumerRuntimeChallenge) -> Result<PreparedC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_arguments_refuse_missing_extra_aliased_and_invalid_encodings() {
+        for args in [
+            vec![],
+            vec![CONSUMER_STARTUP_FLAG],
+            vec!["--challenge-b64", "e30"],
+            vec![CONSUMER_STARTUP_FLAG, "e30", "extra"],
+            vec![CONSUMER_STARTUP_FLAG, "%%%"],
+            vec![CONSUMER_STARTUP_FLAG, "e30="],
+            vec![CONSUMER_STARTUP_FLAG, "e30"],
+        ] {
+            assert!(
+                decode_startup_arguments(args.into_iter().map(std::ffi::OsString::from)).is_err()
+            );
+        }
+        assert!(
+            decode_startup_arguments([CONSUMER_STARTUP_FLAG.into(), "x".repeat(8193).into(),])
+                .is_err()
+        );
+    }
 
     #[test]
     fn pre_contact_failure_preserves_original_error_without_live_owners() {
