@@ -165,7 +165,7 @@ pub fn install_before_start(
     write_signed_new(
         &state_path.join(format!(".ai/node/external_execution/{BINDING_ID}.yaml")),
         &json!({
-            "kind":"node", "schema":14,
+            "kind":"node", "schema":15,
             "protocol":ryeos_state::external_execution::admission::PROTOCOL,
             "workload":{"kind":"direct_command"}, "backend":"synthetic-local",
             "account":"ordinary-fixture", "capacity_group":"ordinary-fixture",
@@ -177,6 +177,7 @@ pub fn install_before_start(
             "supervisor_artifact_hash":supervisor_hash, "supervisor_artifact_bytes":supervisor_bytes,
             "guest_runtime_manifest_hash":guest_runtime_manifest_hash,
             "runtime_qualification":null,
+            "runtime_content_qualification":null,
             "launcher_artifact_hash":launcher_hash, "launcher_artifact_bytes":launcher_bytes,
             "network_policy":"supervisor_pinned_owner_only_candidate_denied_v1",
             "storage_policy":"ephemeral_private_candidate_v1",
