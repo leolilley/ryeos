@@ -401,7 +401,7 @@ impl RuntimeDb {
     ) -> Result<ExternalProtocolOutputClaim> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let binding = load_binding(&tx, placement)?;
-        require_structured_session_channel(&binding)?;
+        require_session_protocol_channel(&binding)?;
         NodeJournalOwner.require_owner(&tx, &binding)?;
         let row: Option<(i64, String, String, String)> = tx
             .query_row(
@@ -467,6 +467,14 @@ impl RuntimeDb {
                 .permits_pending_input(),
             "external protocol output cannot be newly delivered after stop"
         );
+        if matches!(
+            binding.execution_mode,
+            ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+        ) {
+            let allocation = read(&tx, placement)?
+                .context("external qualification protocol output lost its allocation")?;
+            require_contactable_qualification_owner(&tx, &allocation.reservation)?;
+        }
         let claimed = journal::claim_application(
             &tx,
             &NodeJournalOwner,
@@ -1924,6 +1932,24 @@ fn require_structured_session_channel(binding: &ExecutionChannelBinding) -> Resu
         "external session operation requires a structured-session channel"
     );
     Ok(())
+}
+
+/// Protocol delivery is shared with the zero-export qualification session.
+/// Quiesce and candidate import continue to require the ordinary-only guard.
+fn require_session_protocol_channel(binding: &ExecutionChannelBinding) -> Result<()> {
+    match binding.execution_mode {
+        ryeos_state::external_execution::ExternalExecutionMode::StructuredSession {} => Ok(()),
+        ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {} => {
+            ensure!(
+                binding.candidate_export_max_bytes == 0,
+                "qualification protocol channel cannot export a candidate"
+            );
+            Ok(())
+        }
+        ryeos_state::external_execution::ExternalExecutionMode::DirectCommand { .. } => {
+            bail!("external protocol output requires a session channel")
+        }
+    }
 }
 
 struct NodeJournalOwner;
