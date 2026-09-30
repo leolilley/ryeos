@@ -1027,6 +1027,21 @@ pub(super) fn resolve_current_bundle_consumer_definitions(
         return Ok(None);
     };
     context.validate_relationship_consumer(&relationship.consumer)?;
+    resolve_current_signed_bundle_consumer_definitions(state, policy_source)
+}
+
+/// Shared signed-definition admission for consumer probes. Captured-product
+/// callers separately validate their relationship; activated-content callers
+/// must separately authenticate their activation and consuming allowance.
+/// Neither authority may be synthesized merely to reuse this definition join.
+/// This returns identities only, never permission to launch or qualify.
+pub(super) fn resolve_current_signed_bundle_consumer_definitions(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+) -> anyhow::Result<Option<ProductQualificationConsumerDefinitionIdentity>> {
+    let Some(context) = &policy_source.policy.consumer_execution_context else {
+        return Ok(None);
+    };
     state.engine.with_checked_bundle_generation(|generation| {
         let current_policy = resolve_current_bundle_qualification_policy_in_generation(
             generation,
