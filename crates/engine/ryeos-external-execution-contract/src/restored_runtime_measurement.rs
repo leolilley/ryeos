@@ -24,6 +24,81 @@ pub const MAX_RESTORED_OWNER_RESULT_BYTES: usize = 4096;
 pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v1";
 pub const MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES: usize = 32 * 1024;
 
+/// Stable coordinates for a consumer verification on an already measured
+/// qualification occurrence. These are commitments, not authentication or
+/// permission to contact a provider. The daemon must join them to its born
+/// accepted root, signed scenario and same-occurrence measurement journal.
+/// Nonce, deadlines and upload representations deliberately do not belong
+/// here: changing them must not mint another logical verification contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerRuntimeVerificationCoordinate {
+    pub schema: u32,
+    pub accepted_root_id: String,
+    pub accepted_capsule_hash: String,
+    pub qualification_purpose_digest: String,
+    pub scenario_id: String,
+    pub scenario_source_digest: String,
+    pub subject_digest: String,
+    pub use_digest: String,
+    pub prerequisite_measurement_attempt_id: String,
+    pub prerequisite_measurement_observation_digest: String,
+}
+
+impl ConsumerRuntimeVerificationCoordinate {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == 1,
+            "unsupported consumer verification coordinate"
+        );
+        ensure!(
+            self.accepted_root_id.starts_with("T-")
+                && self.accepted_root_id.len() <= 128
+                && self.accepted_root_id.len() > 2
+                && self
+                    .accepted_root_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+            "consumer verification root coordinate is invalid"
+        );
+        ensure!(
+            !self.scenario_id.is_empty()
+                && self.scenario_id.len() <= 128
+                && self
+                    .scenario_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+            "consumer verification scenario coordinate is invalid"
+        );
+        for (label, digest) in [
+            ("accepted capsule", &self.accepted_capsule_hash),
+            ("qualification purpose", &self.qualification_purpose_digest),
+            ("scenario source", &self.scenario_source_digest),
+            ("subject", &self.subject_digest),
+            ("use", &self.use_digest),
+            (
+                "prerequisite attempt",
+                &self.prerequisite_measurement_attempt_id,
+            ),
+            (
+                "prerequisite observation",
+                &self.prerequisite_measurement_observation_digest,
+            ),
+        ] {
+            require_hash(digest, label)?;
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        self.validate()?;
+        Ok(hex::encode(Sha256::digest(canonical_json(&(
+            "ryeos.consumer-runtime-verification-coordinate.v1",
+            self,
+        ))?)))
+    }
+}
+
 /// Sealed, one-contact handoff. The descriptor number is process-local; the
 /// exact upload bytes and hash remain part of the retained attempt. No field
 /// here grants a second attempt or qualifies the restored runtime.
@@ -385,6 +460,53 @@ fn require_hash(value: &str, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn consumer_coordinate_binds_each_authoritative_identity() {
+        let coordinate = super::ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-fixture-root".into(),
+            accepted_capsule_hash: "a".repeat(64),
+            qualification_purpose_digest: "b".repeat(64),
+            scenario_id: "routed-consumer".into(),
+            scenario_source_digest: "c".repeat(64),
+            subject_digest: "d".repeat(64),
+            use_digest: "e".repeat(64),
+            prerequisite_measurement_attempt_id: "f".repeat(64),
+            prerequisite_measurement_observation_digest: "1".repeat(64),
+        };
+        let original = coordinate.digest().unwrap();
+        let value = serde_json::to_value(&coordinate).unwrap();
+        for field in [
+            "accepted_capsule_hash",
+            "qualification_purpose_digest",
+            "scenario_source_digest",
+            "subject_digest",
+            "use_digest",
+            "prerequisite_measurement_attempt_id",
+            "prerequisite_measurement_observation_digest",
+        ] {
+            let mut changed = value.clone();
+            changed[field] = serde_json::json!("2".repeat(64));
+            let changed: super::ConsumerRuntimeVerificationCoordinate =
+                serde_json::from_value(changed).unwrap();
+            assert_ne!(changed.digest().unwrap(), original, "{field}");
+        }
+        let mut changed = coordinate.clone();
+        changed.accepted_root_id = "T-other-root".into();
+        assert_ne!(changed.digest().unwrap(), original);
+        changed = coordinate.clone();
+        changed.scenario_id = "different-scenario".into();
+        assert_ne!(changed.digest().unwrap(), original);
+        changed = coordinate.clone();
+        changed.prerequisite_measurement_observation_digest.clear();
+        assert!(changed.validate().is_err());
+        let mut excess = value;
+        excess["qualified"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<super::ConsumerRuntimeVerificationCoordinate>(excess).is_err()
+        );
+    }
+
     use super::*;
     use base64::Engine as _;
 
