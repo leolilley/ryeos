@@ -2657,7 +2657,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // reconstructed from mutable installed configuration during recovery.
 // Epoch 102 requires protected consumer archive budgets in the immutable
 // verifier selection. Predecessor rows cannot acquire limits from live policy.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 102;
+// Epoch 103 binds consumer attempts to the retained installed guest runtime
+// manifest. Predecessor purposes cannot acquire an account/profile identity
+// from an uploaded archive or mutable settings during recovery.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 103;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

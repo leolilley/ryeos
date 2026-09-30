@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T10:51:05Z:a18f22b832a9e4cd3e118774302e912862306ded61d15472a191aad2c82fe2c8:5D5D3zrZtmXqqWA15BJZ6xliomiwMdethwsiK2bOA8wCc+g9Lj03bOqzraZV19ZWMGAxR1YkvnDCbmm5M+vlBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T10:59:04Z:85999fd19f119eadc706b227920de2f671941782d7897741b0466e5a926139d4:S59tedmd0PdJVm27MQ46Vy3JW2zu9dzLPT0pOGqbyKcgulA4uD9HagEnNb2ONxF4Cjjq3+q2oZ3MIkGnWSYdDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.13"
+version: "1.1.14"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -197,10 +197,11 @@ not permission to discard live execution authority.
 Runtime operator epoch 95 introduced pre-release executable, argv,
 environment and cwd commitments in the scoped attempt journal. A later
 observation must match that journaled target and the relay handoff. The
-current source advances to operator epoch 102 as remote verifier attempts,
-retained source closure and production consumer inputs acquire distinct stable
-coordinates. Neither a consumer coordinate nor a retained contact transcript
-alone grants hosted-runtime qualification. Predecessor runtime rows cannot
+current source advances to operator epoch 103 as remote verifier attempts,
+retained source closure, production consumer inputs and the consumer's outer
+process owner acquire distinct stable coordinates. Neither a consumer
+coordinate nor a retained contact transcript alone grants hosted-runtime
+qualification. Predecessor runtime rows cannot
 supply the current attempt and consumer authority by reinterpretation.
 
 The signed runtime-snapshot qualification profile now requires schema 3. Its

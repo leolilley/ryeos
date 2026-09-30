@@ -18,8 +18,169 @@ use crate::QualificationExecutionEnvironment;
 
 pub const CONSUMER_INPUT_RECORD_NAME: &str = "consumer-input.json";
 pub const MAX_CONSUMER_INPUT_RECORD_BYTES: usize = 96 * 1024;
+/// Exact archive mode shared by publication, import and subordinate selection.
+const CONSUMER_VERIFIER_MODE: u32 = 0o500;
 /// Dedicated command-environment startup input, never an admission credential.
 pub const CONSUMER_NATIVE_CHALLENGE_ENV: &str = "RYEOS_CONSUMER_NATIVE_CHALLENGE_B64";
+pub const CONSUMER_INPUT_ROOT_ENV: &str = "RYEOS_CONSUMER_INPUT_ROOT";
+const OUTER_INPUT_ROOT: &str = "/consumer-input";
+const OUTER_HOME: &str = "/consumer-home";
+const OUTER_NATIVE_CONTROL: &str = "/consumer-native-control";
+pub(crate) const MAX_OUTER_COMPLETION_BYTES: usize = 1024;
+
+/// One-way request to settle an already-owned outer namespace. This is not a
+/// completion acknowledgment, process-death proof or permission to relaunch.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerOuterCompletionRequest {
+    schema: String,
+    operation_id: String,
+    challenge_digest: String,
+    input_record_sha256: String,
+}
+
+impl ConsumerOuterCompletionRequest {
+    pub fn for_inputs(
+        record: &ConsumerInputRecord,
+        challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+    ) -> Result<Self> {
+        challenge.validate()?;
+        record.validate_attempt(&challenge.intent)?;
+        ensure!(
+            record.selection == challenge.selection,
+            "outer completion request substituted protected selection"
+        );
+        Ok(Self {
+            schema: "ryeos.codex.consumer_outer_completion.v1".into(),
+            operation_id: challenge.intent.operation_id.clone(),
+            challenge_digest: challenge.intent.consumer_challenge_digest()?,
+            input_record_sha256: lillux::sha256_hex(&record.canonical_bytes()?),
+        })
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        let bytes = lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes();
+        ensure!(
+            bytes.len() <= MAX_OUTER_COMPLETION_BYTES,
+            "outer completion request exceeds bound"
+        );
+        Ok(bytes)
+    }
+
+    pub fn parse_for_inputs(
+        bytes: &[u8],
+        record: &ConsumerInputRecord,
+        challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+    ) -> Result<Self> {
+        ensure!(
+            bytes.len() <= MAX_OUTER_COMPLETION_BYTES,
+            "outer completion request exceeds bound"
+        );
+        let request: Self = serde_json::from_slice(bytes)?;
+        ensure!(
+            request.canonical_bytes()? == bytes
+                && Self::for_inputs(record, challenge)?.canonical_bytes()? == bytes,
+            "outer completion request is not canonical or differs from exact attempt"
+        );
+        Ok(request)
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    #[test]
+    fn outer_completion_encoding_is_bounded_and_strict_not_settlement_evidence() {
+        let request = ConsumerOuterCompletionRequest {
+            schema: "ryeos.codex.consumer_outer_completion.v1".into(),
+            operation_id: "operation".into(),
+            challenge_digest: "a".repeat(64),
+            input_record_sha256: "b".repeat(64),
+        };
+        let bytes = request.canonical_bytes().unwrap();
+        assert!(bytes.len() < MAX_OUTER_COMPLETION_BYTES);
+        let decoded: ConsumerOuterCompletionRequest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.canonical_bytes().unwrap(), bytes);
+        let mut unknown: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        unknown["settled"] = true.into();
+        assert!(serde_json::from_value::<ConsumerOuterCompletionRequest>(unknown).is_err());
+        let mut oversized = request;
+        oversized.operation_id = "x".repeat(MAX_OUTER_COMPLETION_BYTES);
+        assert!(oversized.canonical_bytes().is_err());
+    }
+
+    #[test]
+    fn consumer_configuration_requires_explicit_outer_network_without_aliases() {
+        let hash = "a".repeat(64);
+        let context = serde_json::json!({
+            "schema": ryeos_state::external_execution::admission::QUALIFICATION_CONTEXT_SCHEMA,
+            "requirement_digest":hash, "profile_hash":hash,
+            "source_binding_hash":hash, "source_content_manifest_hash":hash,
+            "provider_executable_manifest_hash":hash, "execution_environment_digest":hash,
+        });
+        let value = serde_json::json!({
+            "schema":"ryeos.codex.consumer_verifier.v1",
+            "expected_command_output":"/workspace\nripgrep fixture\n",
+            "responses_origin":"http://127.0.0.1:1234",
+            "outer_network":"shared_guest_loopback",
+            "external_candidate_qualification_context":context,
+        });
+        let configuration: ConsumerVerifierConfiguration =
+            serde_json::from_value(value.clone()).unwrap();
+        configuration.validate().unwrap();
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove("outer_network");
+        assert!(serde_json::from_value::<ConsumerVerifierConfiguration>(missing).is_err());
+        for invalid in ["host", "isolated", "auto"] {
+            let mut changed = value.clone();
+            changed["outer_network"] = invalid.into();
+            assert!(serde_json::from_value::<ConsumerVerifierConfiguration>(changed).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn native_control_is_private_and_disjoint_from_imported_source() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = lillux::PinnedDirectory::open(temporary.path())
+            .unwrap()
+            .unwrap();
+        let imported = parent
+            .create_child(std::ffi::OsStr::new("imported"), 0o700)
+            .unwrap();
+        let control = parent
+            .create_child(std::ffi::OsStr::new("control"), 0o700)
+            .unwrap();
+        require_private_disjoint_control(&imported, &control).unwrap();
+        assert!(imported.entries_no_follow_bounded(1).unwrap().is_empty());
+        assert!(control.entries_no_follow_bounded(1).unwrap().is_empty());
+        assert!(require_private_disjoint_control(&imported, &imported).is_err());
+        assert!(require_private_disjoint_control(&imported, &parent).is_err());
+        let nested = imported
+            .create_child(std::ffi::OsStr::new("nested"), 0o700)
+            .unwrap();
+        assert!(require_private_disjoint_control(&imported, &nested).is_err());
+        let public = parent
+            .create_child(std::ffi::OsStr::new("public"), 0o755)
+            .unwrap();
+        // Set the fixture's intended public mode independently of test umask.
+        std::fs::set_permissions(public.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(require_private_disjoint_control(&imported, &public).is_err());
+    }
+}
+
+fn require_private_disjoint_control(
+    imported: &lillux::PinnedDirectory,
+    control: &lillux::PinnedDirectory,
+) -> Result<()> {
+    imported.ensure_path_binding()?;
+    control.require_owner_private_directory()?;
+    control.ensure_path_binding()?;
+    imported.require_disjoint_directory_tree(control)?;
+    Ok(())
+}
 
 /// Codex-specific finite scenario parameters, not another runtime recipe.
 /// Executable, guest recipe and input identities come from the accepted record.
@@ -30,8 +191,19 @@ pub struct ConsumerVerifierConfiguration {
     pub schema: String,
     pub expected_command_output: String,
     pub responses_origin: String,
+    pub outer_network: ConsumerOuterNetwork,
     pub external_candidate_qualification_context:
         ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+}
+
+/// Explicit signed scenario routing. This shares only the disposable guest's
+/// network namespace with its outside observer; it does not promise network
+/// isolation for the outer Codex process. Inner command execution stays under
+/// its separately admitted runtime recipe and isolated network policy.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsumerOuterNetwork {
+    SharedGuestLoopback,
 }
 
 impl ConsumerVerifierConfiguration {
@@ -68,7 +240,100 @@ pub struct ImportedConsumerInputs {
     record_sha256: String,
 }
 
+/// Exact outer request with imported-source and mount-descriptor custody.
+/// Request construction is not admission, launch, exec success or settlement.
+pub struct PreparedConsumerOuterRequest<'a> {
+    request: lillux::LinuxSandboxRequest,
+    _imported: &'a ImportedConsumerInputs,
+    _mount_descriptors: Vec<lillux::InheritedDescriptorAuthority>,
+    _protected_owner: lillux::PinnedDirectory,
+}
+
+impl PreparedConsumerOuterRequest<'_> {
+    pub fn request(&self) -> &lillux::LinuxSandboxRequest {
+        &self.request
+    }
+}
+
 impl ImportedConsumerInputs {
+    /// Select the exact admitted verifier for the dedicated outer-owner role.
+    /// This prepares a subordinate launch only: the enclosing verifier retains
+    /// attempt authority, pipe supervision and all settlement/evidence joins.
+    pub fn prepare_outer_owner_launch(
+        &self,
+        record: &ConsumerInputRecord,
+        challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+        fresh_home: &lillux::PinnedDirectory,
+        native_control: &lillux::PinnedDirectory,
+        protected_owner: &lillux::PinnedDirectory,
+    ) -> Result<lillux::PinnedSubordinateProcessRequest> {
+        use crate::consumer_outer_owner::{OUTER_CHALLENGE_ENV, OUTER_CONTROL_ENV, OUTER_HOME_ENV};
+        use base64::Engine as _;
+        self.require_record_challenge(record, challenge)?;
+        self.require_control_root(native_control)?;
+        self.require_control_root(fresh_home)?;
+        self.require_control_root(protected_owner)?;
+        fresh_home.require_disjoint_directory_tree(native_control)?;
+        protected_owner.require_disjoint_directory_tree(fresh_home)?;
+        protected_owner.require_disjoint_directory_tree(native_control)?;
+        let name = ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_VERIFIER_REMOTE_NAME;
+        let executable = self
+            .root
+            .open_pinned_regular(std::ffi::OsStr::new(name), false)?
+            .context("retained consumer verifier executable absent")?;
+        let descriptor = executable.inherited_descriptor_authority()?;
+        ensure!(
+            descriptor.same_file_identity(&self._verifier)?,
+            "consumer owner executable substituted retained verifier"
+        );
+        record.verify_verifier_payload(&descriptor)?;
+        ensure!(
+            executable.permission_mode()? == CONSUMER_VERIFIER_MODE,
+            "consumer owner executable mode changed"
+        );
+        let encoded =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge.canonical_bytes()?);
+        ensure!(
+            encoded.len() <= 8192,
+            "outer owner challenge exceeds startup bound"
+        );
+        let directory_path = |directory: &lillux::PinnedDirectory| -> Result<String> {
+            directory.ensure_path_binding()?;
+            ensure!(
+                directory.path().is_absolute(),
+                "outer launch directory must be absolute"
+            );
+            Ok(directory
+                .path()
+                .to_str()
+                .context("outer launch directory is not UTF-8")?
+                .to_owned())
+        };
+        Ok(lillux::PinnedSubordinateProcessRequest {
+            executable,
+            cwd: protected_owner.try_clone()?,
+            argv0: Some("ryeos-consumer-outer-owner".into()),
+            args: vec![],
+            envs: vec![
+                (OUTER_CHALLENGE_ENV.into(), encoded),
+                (CONSUMER_INPUT_ROOT_ENV.into(), directory_path(&self.root)?),
+                (OUTER_HOME_ENV.into(), directory_path(fresh_home)?),
+                (OUTER_CONTROL_ENV.into(), directory_path(native_control)?),
+                ("LANG".into(), "C".into()),
+                ("LC_ALL".into(), "C".into()),
+            ],
+            limits: None,
+            inherited_fds: vec![],
+        })
+    }
+
+    /// Mutable protocol control/staging must not share the imported source
+    /// tree. The enclosing owner retains this directory and its mount policy;
+    /// this check neither authenticates the caller nor excludes other writers.
+    pub(crate) fn require_control_root(&self, control: &lillux::PinnedDirectory) -> Result<()> {
+        require_private_disjoint_control(&self.root, control)
+    }
+
     /// Deliver the one-way finish signal after the scripted turn is complete,
     /// while Codex's command transport is still alive. This requests settlement;
     /// it is not an acknowledgment that writers are excluded or output is frozen.
@@ -76,12 +341,13 @@ impl ImportedConsumerInputs {
         &self,
         record: &ConsumerInputRecord,
         challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+        control: &lillux::PinnedDirectory,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<()> {
         self.require_record_challenge(record, challenge)?;
+        self.require_control_root(control)?;
         ensure!(!deadline.has_elapsed(), "consumer finish deadline expired");
-        let started = self
-            .root
+        let started = control
             .open_pinned_regular(std::ffi::OsStr::new("native-started"), false)?
             .context("consumer native execution has not started")?;
         ensure!(
@@ -94,13 +360,11 @@ impl ImportedConsumerInputs {
             !deadline.has_elapsed(),
             "consumer finish delivery deadline expired"
         );
-        if self
-            .root
+        if control
             .atomic_create_pinned_regular(std::ffi::OsStr::new("finish"), b"capture", 0o400)?
             .is_none()
         {
-            let existing = self
-                .root
+            let existing = control
                 .open_pinned_regular(std::ffi::OsStr::new("finish"), false)?
                 .context("consumer finish marker disappeared")?;
             ensure!(
@@ -110,6 +374,7 @@ impl ImportedConsumerInputs {
             );
         }
         self.root.ensure_path_binding()?;
+        control.ensure_path_binding()?;
         ensure!(
             !deadline.has_elapsed(),
             "consumer finish acknowledgment exceeded deadline"
@@ -124,18 +389,20 @@ impl ImportedConsumerInputs {
         &self,
         record: &ConsumerInputRecord,
         challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+        control: &lillux::PinnedDirectory,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Option<Vec<u8>>> {
         self.require_record_challenge(record, challenge)?;
+        self.require_control_root(control)?;
         ensure!(
             !deadline.has_elapsed(),
             "consumer observation deadline expired"
         );
-        let Some(file) = self
-            .root
-            .open_pinned_regular(std::ffi::OsStr::new("guest-observation.json"), false)?
+        let Some(file) =
+            control.open_pinned_regular(std::ffi::OsStr::new("guest-observation.json"), false)?
         else {
             self.root.ensure_path_binding()?;
+            control.ensure_path_binding()?;
             ensure!(
                 !deadline.has_elapsed(),
                 "consumer observation lookup exceeded deadline"
@@ -158,6 +425,7 @@ impl ImportedConsumerInputs {
             "consumer native observation differs from exact attempt"
         );
         self.root.ensure_path_binding()?;
+        control.ensure_path_binding()?;
         ensure!(
             !deadline.has_elapsed(),
             "consumer observation read exceeded deadline"
@@ -181,16 +449,17 @@ impl ImportedConsumerInputs {
         Ok(())
     }
 
-    /// Prepare the existing pinned app-server launch without spawning it.
-    /// The enclosing verifier owns this fresh home, scripted peer, protocol,
-    /// descendant settlement and output acceptance. Native guest execution
-    /// remains the command environment, not a second Worker/session workflow.
-    pub fn prepare_codex_app_server(
-        &self,
+    /// Prepare the outer native app-server request without launching it.
+    /// The dedicated single-thread owner retains namespace settlement; the
+    /// observer/peer and protected owner evidence remain outside every mount.
+    pub fn prepare_codex_outer_request<'a>(
+        &'a self,
         record: &ConsumerInputRecord,
         challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
         fresh_home: &lillux::PinnedDirectory,
-    ) -> Result<lillux::PinnedSubordinateProcessRequest> {
+        native_control: &lillux::PinnedDirectory,
+        protected_owner: &lillux::PinnedDirectory,
+    ) -> Result<PreparedConsumerOuterRequest<'a>> {
         challenge.validate()?;
         record.validate_attempt(&challenge.intent)?;
         ensure!(
@@ -198,8 +467,16 @@ impl ImportedConsumerInputs {
             "app-server challenge substituted protected selection"
         );
         let configuration = record.scripted_configuration()?;
+        self.require_control_root(native_control)?;
         fresh_home.require_owner_private_directory()?;
         fresh_home.ensure_path_binding()?;
+        fresh_home.require_disjoint_directory_tree(native_control)?;
+        fresh_home.require_disjoint_directory_tree(&self.root)?;
+        protected_owner.require_owner_private_directory()?;
+        protected_owner.ensure_path_binding()?;
+        for exposed in [&self.root, fresh_home, native_control] {
+            protected_owner.require_disjoint_directory_tree(exposed)?;
+        }
         ensure!(
             fresh_home.entries_no_follow_bounded(1)?.is_empty(),
             "consumer Codex home is not fresh"
@@ -218,11 +495,13 @@ impl ImportedConsumerInputs {
         // Selection before writes prevents invalid delivery from causing home
         // mutation; selection afterward rejects contamination beneath products.
         let _ = self.controller_codex_executable(record)?;
-        let root = self.root.try_clone()?.into_inherited_descriptor_path()?;
-        let verifier = self._verifier.clone();
+        let verifier_path = std::path::Path::new(OUTER_INPUT_ROOT).join(
+            ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_VERIFIER_REMOTE_NAME,
+        );
         let commands = crate::staging::render_consumer_command_environment(
-            verifier.path(),
-            root.path(),
+            &verifier_path,
+            std::path::Path::new(OUTER_INPUT_ROOT),
+            std::path::Path::new(OUTER_NATIVE_CONTROL),
             challenge,
         )?;
         let baseline = crate::expected_scripted_baseline(&configuration.responses_origin);
@@ -238,34 +517,86 @@ impl ImportedConsumerInputs {
                 .atomic_create_pinned_regular(std::ffi::OsStr::new(name), bytes, 0o400)?
                 .context("consumer Codex configuration already exists")?;
         }
-        let executable = self.controller_codex_executable(record)?;
+        let _ = self.controller_codex_executable(record)?;
         fresh_home.ensure_path_binding()?;
-        let home = fresh_home.try_clone()?.into_inherited_descriptor_path()?;
-        let home_path = home
-            .path()
-            .to_str()
-            .context("consumer Codex home is not UTF-8")?
-            .to_owned();
-        Ok(lillux::PinnedSubordinateProcessRequest {
-            executable,
-            cwd: self.root.try_clone()?,
-            argv0: Some("codex".into()),
-            args: vec![
+        let codex_index = self.production_codex_index(record)?;
+        let mount_descriptors = vec![
+            self.root.inherited_descriptor_authority()?,
+            fresh_home.inherited_descriptor_authority()?,
+            native_control.inherited_descriptor_authority()?,
+        ];
+        let mounts = mount_descriptors
+            .iter()
+            .zip([
+                (OUTER_INPUT_ROOT, lillux::LinuxSandboxMountAccess::ReadOnly),
+                (OUTER_HOME, lillux::LinuxSandboxMountAccess::Writable),
+                (
+                    OUTER_NATIVE_CONTROL,
+                    lillux::LinuxSandboxMountAccess::Writable,
+                ),
+            ])
+            .map(|(descriptor, (destination, access))| {
+                Ok(lillux::LinuxSandboxMount {
+                    source_fd: descriptor
+                        .inherited_descriptor()
+                        .map_err(anyhow::Error::msg)?,
+                    destination: destination.into(),
+                    access,
+                    layer: 0,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let request = lillux::LinuxSandboxRequest {
+            executable: std::path::Path::new(OUTER_INPUT_ROOT)
+                .join(format!("product-{codex_index:02}")),
+            cwd: OUTER_INPUT_ROOT.into(),
+            argv0: "codex".into(),
+            arguments: vec![
                 "--strict-config".into(),
                 "-c".into(),
                 "check_for_update_on_startup=false".into(),
                 "app-server".into(),
             ],
-            envs: vec![
-                ("CODEX_HOME".into(), home_path.clone()),
-                ("HOME".into(), home_path),
-                ("PATH".into(), String::new()),
+            environment: std::collections::BTreeMap::from([
+                ("CODEX_HOME".into(), OUTER_HOME.into()),
+                ("HOME".into(), OUTER_HOME.into()),
+                ("PATH".into(), std::ffi::OsString::new()),
                 ("LANG".into(), "C".into()),
                 ("LC_ALL".into(), "C".into()),
-            ],
-            limits: None,
-            inherited_fds: vec![home, verifier, root],
+            ]),
+            mounts,
+            fixed_parent_views: vec![],
+            overlay: None,
+            network: match configuration.outer_network {
+                ConsumerOuterNetwork::SharedGuestLoopback => lillux::LinuxSandboxNetwork::Host,
+            },
+            private_tmp: true,
+            proc_filesystem: lillux::LinuxSandboxProcFilesystem::PidNamespaceNested,
+            minimal_devices: true,
+            character_devices: vec![],
+            target_channels: vec![],
+            lifecycle: lillux::LinuxSandboxLifecycle::Run,
+            contain_process_group: false,
+            nested_sandbox: true,
+            aggregate_limits: None,
+        };
+        protected_owner.ensure_path_binding()?;
+        self.root.ensure_path_binding()?;
+        native_control.ensure_path_binding()?;
+        Ok(PreparedConsumerOuterRequest {
+            request,
+            _imported: self,
+            _mount_descriptors: mount_descriptors,
+            _protected_owner: protected_owner.try_clone()?,
         })
+    }
+
+    fn production_codex_index(&self, record: &ConsumerInputRecord) -> Result<usize> {
+        record
+            .production_realizations()?
+            .iter()
+            .position(|entry| entry.id == "codex")
+            .context("production consumer has no controller Codex literal")
     }
 
     /// Select the controller app-server executable from the imported worker
@@ -300,11 +631,7 @@ impl ImportedConsumerInputs {
             &self.inputs,
             &self.descriptors,
         )?;
-        let index = record
-            .production_realizations()?
-            .iter()
-            .position(|entry| entry.id == "codex")
-            .context("production consumer has no controller Codex literal")?;
+        let index = self.production_codex_index(record)?;
         let input = self
             .inputs
             .get(index)
@@ -348,14 +675,16 @@ impl ImportedConsumerInputs {
         &self,
         record: &ConsumerInputRecord,
         private: &crate::production_inputs::ProductionPrivateStaging,
+        control: &lillux::PinnedDirectory,
         input: lillux::inherited_pipes::InheritedPipeInput,
         output: &mut lillux::inherited_pipes::InheritedPipeOutput,
         interrupt: lillux::inherited_pipes::PipeInterrupt,
         active: lillux::time::MonotonicDeadline,
         cleanup: lillux::time::MonotonicDeadline,
     ) -> Result<crate::native_guest::NativeProtocolObservation> {
+        self.require_control_root(control)?;
         let prepared = self.prepare_native(record, private)?;
-        self.root
+        control
             .atomic_create_pinned_regular(
                 std::ffi::OsStr::new("native-started"),
                 self.record_sha256.as_bytes(),
@@ -367,7 +696,7 @@ impl ImportedConsumerInputs {
         // Keep prepared (including its private descriptor custody) alive until
         // the shared loop has settled the whole namespace and drained output.
         crate::native_guest::run_prepared_protocol(
-            &self.root,
+            || crate::native_guest::capture_requested(control),
             prepared.request().clone(),
             input,
             output,
@@ -501,6 +830,10 @@ impl ConsumerInputRecord {
         let verifier = root
             .open_inherited_regular(std::ffi::OsStr::new(CONSUMER_VERIFIER_REMOTE_NAME), false)?
             .context("imported consumer verifier is missing")?;
+        ensure!(
+            verifier.regular_file_observation()?.portable_mode()? == CONSUMER_VERIFIER_MODE,
+            "imported consumer verifier mode differs from exact delivery"
+        );
         self.verify_verifier_payload(&verifier)?;
         let destinations = ryeos_state::external_execution::admission::ExternalCandidateGuestEnvironment::expected_destinations(
             &self.requirement, &realizations,
@@ -671,7 +1004,7 @@ impl ConsumerInputRecord {
                 },
                 GuestStagingEntry::RegularFile {
                     path: CONSUMER_VERIFIER_REMOTE_NAME.into(),
-                    mode: 0o500,
+                    mode: CONSUMER_VERIFIER_MODE,
                     bytes: payload_bytes,
                     sha256: self.selection.verifier_artifact_hash.clone(),
                 },

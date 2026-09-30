@@ -638,6 +638,7 @@ mod tests {
         consumer.verifier_artifact_hash = selection.verifier_artifact_hash.clone();
         consumer.purpose = ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime {
             coordinate: coordinate.clone(), nonce_hex: "8".repeat(64),
+            guest_runtime_manifest_hash: source.guest_runtime_manifest_hash.clone(),
         };
         consumer.operation_id = consumer.derived_operation_id().unwrap();
         assert!(

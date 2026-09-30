@@ -1098,9 +1098,23 @@ mod tests {
         consumer.intent.purpose = RemoteVerificationPurpose::ConsumerRuntime {
             coordinate,
             nonce_hex: "8".repeat(64),
+            guest_runtime_manifest_hash: consumer.source_intent.guest_runtime_manifest_hash.clone(),
         };
         consumer.intent.operation_id = consumer.intent.derived_operation_id().unwrap();
         consumer.validate().unwrap();
+        let mut substituted_runtime = consumer.clone();
+        let RemoteVerificationPurpose::ConsumerRuntime {
+            guest_runtime_manifest_hash,
+            ..
+        } = &mut substituted_runtime.intent.purpose
+        else {
+            unreachable!()
+        };
+        *guest_runtime_manifest_hash = "0".repeat(64);
+        substituted_runtime.intent.operation_id =
+            substituted_runtime.intent.derived_operation_id().unwrap();
+        assert!(substituted_runtime.validate().is_err());
+        assert!(substituted_runtime.consumer_challenge().is_err());
         let challenge = consumer.consumer_challenge().unwrap();
         assert_eq!(challenge.intent, consumer.intent);
         assert_eq!(

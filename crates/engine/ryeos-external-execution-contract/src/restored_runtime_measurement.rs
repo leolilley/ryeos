@@ -22,7 +22,7 @@ pub const CONSUMER_VERIFIER_REMOTE_NAME: &str = "ryeos-external-guest-consumer-v
 pub const MAX_RESTORATION_VERIFIER_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_RESTORED_OWNER_CHALLENGE_BYTES: usize = 4096;
 pub const MAX_RESTORED_OWNER_RESULT_BYTES: usize = 4096;
-pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v3";
+pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v4";
 pub const MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES: usize = 32 * 1024;
 // Complete canonical product-verifier evidence, not decoded transcript size.
 pub const MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES: u64 = 5 * 1024 * 1024;
@@ -610,6 +610,9 @@ pub enum RemoteVerificationPurpose {
     ConsumerRuntime {
         coordinate: ConsumerRuntimeVerificationCoordinate,
         nonce_hex: String,
+        /// Exact installed owner runtime, selected from the retained snapshot
+        /// source. Its manifest commits the account profile used at startup.
+        guest_runtime_manifest_hash: String,
     },
 }
 
@@ -625,10 +628,13 @@ impl RemoteVerificationPurpose {
             Self::ConsumerRuntime {
                 coordinate,
                 nonce_hex,
+                guest_runtime_manifest_hash,
             } => {
                 coordinate.validate()?;
                 require_hash(nonce_hex, "consumer challenge nonce")?;
-                serde_json::json!({"kind": "consumer_runtime", "coordinate": coordinate})
+                require_hash(guest_runtime_manifest_hash, "consumer owner runtime")?;
+                serde_json::json!({"kind": "consumer_runtime", "coordinate": coordinate,
+                    "guest_runtime_manifest_hash": guest_runtime_manifest_hash})
             }
         };
         Ok(hex::encode(Sha256::digest(canonical_json(&value)?)))
@@ -662,23 +668,26 @@ impl RestoredVerifierAttemptIntent {
         let RemoteVerificationPurpose::ConsumerRuntime {
             coordinate,
             nonce_hex,
+            guest_runtime_manifest_hash,
         } = &self.purpose
         else {
             anyhow::bail!("owner measurement has no consumer challenge");
         };
         coordinate.validate()?;
         require_hash(nonce_hex, "consumer challenge nonce")?;
+        require_hash(guest_runtime_manifest_hash, "consumer owner runtime")?;
         require_hash(&self.verifier_artifact_hash, "consumer verifier artifact")?;
         ensure!(
             self.schema == 2 && self.operation_id == self.derived_operation_id()?,
             "consumer challenge has no exact retained attempt identity"
         );
         Ok(hex::encode(Sha256::digest(canonical_json(&(
-            "ryeos.consumer-runtime-challenge.v1",
+            "ryeos.consumer-runtime-challenge.v2",
             &self.operation_id,
             &self.verifier_artifact_hash,
             coordinate,
             nonce_hex,
+            guest_runtime_manifest_hash,
         ))?)))
     }
 
@@ -700,6 +709,7 @@ impl RestoredVerifierAttemptIntent {
         let RemoteVerificationPurpose::ConsumerRuntime {
             coordinate,
             nonce_hex,
+            guest_runtime_manifest_hash,
         } = &self.purpose
         else {
             anyhow::bail!("owner measurement cannot use consumer verification admission");
@@ -708,6 +718,7 @@ impl RestoredVerifierAttemptIntent {
         require_hash(&self.upload_sha256, "consumer upload")?;
         ensure!(
             coordinate == expected_coordinate
+                && guest_runtime_manifest_hash == &source.guest_runtime_manifest_hash
                 && self.schema == 2
                 && self.qualification_operation_id == qualification.operation_id
                 && self.restored_occurrence_id == occurrence.occurrence_id
@@ -1059,6 +1070,7 @@ mod tests {
         attempt.purpose = RemoteVerificationPurpose::ConsumerRuntime {
             coordinate,
             nonce_hex: "2".repeat(64),
+            guest_runtime_manifest_hash: "7".repeat(64),
         };
         let consumer_identity = attempt.derived_operation_id().unwrap();
         attempt.operation_id = consumer_identity.clone();
@@ -1090,6 +1102,27 @@ mod tests {
             format!("{RESTORATION_VERIFIER_REMOTE_DIRECTORY}/consumer-{consumer_identity}")
         );
         let fresh_challenge = attempt.consumer_challenge_digest().unwrap();
+        let mut changed_runtime = attempt.clone();
+        let RemoteVerificationPurpose::ConsumerRuntime {
+            guest_runtime_manifest_hash,
+            ..
+        } = &mut changed_runtime.purpose
+        else {
+            unreachable!();
+        };
+        *guest_runtime_manifest_hash = "8".repeat(64);
+        changed_runtime.operation_id = changed_runtime.derived_operation_id().unwrap();
+        assert_ne!(changed_runtime.operation_id, consumer_identity);
+        assert_ne!(
+            changed_runtime.consumer_challenge_digest().unwrap(),
+            fresh_challenge
+        );
+        let mut predecessor = serde_json::to_value(&attempt).unwrap();
+        predecessor["purpose"]
+            .as_object_mut()
+            .unwrap()
+            .remove("guest_runtime_manifest_hash");
+        assert!(serde_json::from_value::<RestoredVerifierAttemptIntent>(predecessor).is_err());
         assert_ne!(consumer_identity, identity);
         assert!(attempt.owner_challenge().is_err());
         let RemoteVerificationPurpose::ConsumerRuntime { nonce_hex, .. } = &mut attempt.purpose

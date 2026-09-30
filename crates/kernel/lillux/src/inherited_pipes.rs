@@ -310,6 +310,98 @@ impl InheritedPipeInput {
     }
 }
 impl InheritedPipeOutput {
+    #[cfg(target_os = "linux")]
+    fn finish_written_prefix(
+        &mut self,
+        count: usize,
+        deadline: MonotonicDeadline,
+    ) -> io::Result<usize> {
+        // A prefix has already reached the pipe. Interruption is terminal and
+        // must preserve poisoning, never masquerade as zero-progress EINTR.
+        self.interrupt.check(Some(deadline)).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("inherited output prefix delivered before terminal interruption: {error}"),
+            )
+        })?;
+        self.poisoned = false;
+        Ok(count)
+    }
+
+    /// Attempts one bounded nonblocking write. Success reports the exact prefix
+    /// delivered, not an application acknowledgement. Only known-zero transient
+    /// failures permit retry on this same owner; uncertain failures poison it.
+    pub fn try_write_chunk(
+        &mut self,
+        bytes: &[u8],
+        deadline: MonotonicDeadline,
+    ) -> io::Result<usize> {
+        if self.poisoned {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "inherited output poisoned",
+            ));
+        }
+        if bytes.len() > self.maximum {
+            return Err(invalid("inherited output chunk exceeds bound"));
+        }
+        self.interrupt.check(Some(deadline)).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("inherited output operation cancelled or expired: {error}"),
+            )
+        })?;
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        self.poisoned = true;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let signal = crate::invocation::linux::BlockedSigpipe::new()?;
+            let result = unsafe {
+                libc::write(
+                    self.pipe.file().as_raw_fd(),
+                    bytes.as_ptr().cast(),
+                    bytes.len().min(8192),
+                )
+            };
+            if result > 0 {
+                // Delivery happened. Cancellation now must not look like a
+                // zero-byte EINTR that the enclosing relay may retry or ignore
+                // while accepting completion. Keep this owner poisoned.
+                return self.finish_written_prefix(result as usize, deadline);
+            }
+            if result == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "inherited output made no progress",
+                ));
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EPIPE) {
+                signal.consume_new_sigpipe();
+            }
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) {
+                self.interrupt.check(Some(deadline)).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("inherited output retry forbidden after interruption: {error}"),
+                    )
+                })?;
+                self.poisoned = false;
+            }
+            Err(error)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(unsupported())
+        }
+    }
+
     /// Failure after entering an operation permanently poisons this half.
     /// Bytes may already have reached the peer; success is not application ACK.
     pub fn write_all(&mut self, bytes: &[u8], deadline: MonotonicDeadline) -> io::Result<()> {
@@ -410,6 +502,90 @@ mod tests {
             parent_reader,
         )
     }
+    #[test]
+    fn delivered_prefix_then_cancellation_is_terminal_and_poisoned() {
+        let (pair, _writer, mut reader) = pair(4);
+        let (_, mut output, interrupt) = pair.split();
+        // Deterministically exercise the post-syscall boundary after actual
+        // pipe delivery, without a scheduling-dependent cancellation race.
+        output.poisoned = true;
+        let mut writer = output.pipe.file();
+        writer.write_all(b"sent").unwrap();
+        interrupt.interrupt().unwrap();
+        assert_eq!(
+            output
+                .finish_written_prefix(4, deadline())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(output.poisoned);
+        let mut delivered = [0; 4];
+        reader.read_exact(&mut delivered).unwrap();
+        assert_eq!(&delivered, b"sent");
+        assert_eq!(
+            output
+                .try_write_chunk(b"redo", deadline())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
+    fn nonblocking_output_cancellation_is_not_retryable_syscall_interruption() {
+        let (pair, _writer, _reader) = pair(4);
+        let (_, mut output, interrupt) = pair.split();
+        interrupt.interrupt().unwrap();
+        let error = output.try_write_chunk(b"data", deadline()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ));
+    }
+
+    #[test]
+    fn nonblocking_output_reports_prefix_and_recovers_after_backpressure() {
+        let (pair, _writer, mut reader) = pair(8192);
+        let (_, mut output, _) = pair.split();
+        let bytes = [7u8; 8192];
+        let mut delivered = 0usize;
+        loop {
+            match output.try_write_chunk(&bytes, deadline()) {
+                Ok(n) => {
+                    assert!(n > 0 && n <= bytes.len());
+                    delivered += n;
+                    assert!(delivered <= 16 * 1024 * 1024);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                other => panic!("unexpected write: {other:?}"),
+            }
+        }
+        let mut drained = vec![0; delivered];
+        reader.read_exact(&mut drained).unwrap();
+        assert!(drained.iter().all(|byte| *byte == 7));
+        assert_eq!(output.try_write_chunk(b"done", deadline()).unwrap(), 4);
+        let mut tail = [0; 4];
+        reader.read_exact(&mut tail).unwrap();
+        assert_eq!(&tail, b"done");
+        drop(reader);
+        assert_eq!(
+            output
+                .try_write_chunk(b"lost", deadline())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            output
+                .try_write_chunk(b"retry", deadline())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
     #[test]
     fn interactive_chunks_actual_eof_and_bounds() {
         let (pair, mut writer, mut reader) = pair(4);
