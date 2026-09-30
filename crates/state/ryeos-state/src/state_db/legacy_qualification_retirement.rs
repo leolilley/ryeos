@@ -5,6 +5,7 @@
 //! exclusive CAS guard for the entire operation. An independently copied full
 //! state archive is checked before the first durable no-start intent.
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path};
@@ -261,6 +262,50 @@ impl StateDb {
         Ok(rows)
     }
 
+    /// Simulate the signed-head closure after this namespace is retired,
+    /// while every live head is still present. A failure here must precede
+    /// the durable intent and the first destructive ref operation.
+    fn verify_remaining_signed_head_closure(&self) -> Result<()> {
+        crate::refs::validate_authoritative_ref_namespaces_in_directory(&self._refs_directory)?;
+        let mut roots = BTreeSet::new();
+        for head in crate::refs::list_verified_generic_head_refs_in_directory(
+            &self._refs_directory,
+            "",
+            &self.trust_store,
+        )? {
+            if head.namespace != NAMESPACE {
+                roots.insert(head.target_hash);
+            }
+        }
+        for head in crate::refs::list_verified_project_head_refs_in_directory(
+            &self._refs_directory,
+            &self.trust_store,
+        )? {
+            roots.insert(head.signed_ref.target_hash);
+        }
+        for head in crate::refs::list_verified_deployed_project_refs_in_directory(
+            &self._refs_directory,
+            &self.trust_store,
+        )? {
+            roots.insert(head.signed_ref.target_hash);
+        }
+        let closure =
+            crate::object_closure::collect_object_closure_with_cas(&self.pinned_cas()?, roots)?;
+        if !closure.is_complete() {
+            if let Some(incompatible) = closure.decisive_incompatible_current_schema() {
+                bail!("post-retirement signed-head closure is incompatible: {incompatible}");
+            }
+            bail!(
+                "post-retirement signed-head closure is incomplete: missing={}, missing_blobs={}, malformed={}, unsupported={}",
+                closure.missing_objects.len(),
+                closure.missing_blobs.len(),
+                closure.malformed_objects.len(),
+                closure.unsupported_objects.len(),
+            );
+        }
+        Ok(())
+    }
+
     /// Retire only the exact reviewed predecessor heads after a full copied
     /// state archive has been checked. Any interruption leaves a startup fence.
     pub fn retire_legacy_product_qualification_heads(
@@ -275,6 +320,7 @@ impl StateDb {
             guard.is_exclusive(),
             "qualification retirement requires exclusive CAS guard"
         );
+        self.verify_remaining_signed_head_closure()?;
         let archive = open_archive(archive_state_root, &self._runtime_state_directory)?;
         let mut intent = if let Some(retained) = read_intent(&self._recovery_directory)? {
             ensure!(
