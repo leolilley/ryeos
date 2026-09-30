@@ -14,7 +14,7 @@
     "operations"
   ],
   "properties": {
-    "schema": { "const": 4 },
+    "schema": { "const": 5 },
     "provider_profile": { "const": "render_sandbox_v1" },
     "settings_schema_digest": {
       "type": "string",
@@ -60,6 +60,7 @@
         "reconcile_allocation",
         "activate_supervisor",
         "reconcile_supervisor_activation",
+        "relay_file",
         "terminate",
         "reconcile_termination",
         "bootstrap_terminated_list"
@@ -74,6 +75,7 @@
         "reconcile_supervisor_activation": {
           "$ref": "#/$defs/pending_operation"
         },
+        "relay_file": { "$ref": "#/$defs/relay_file_operation" },
         "terminate": { "$ref": "#/$defs/terminate_operation" },
         "reconcile_termination": { "$ref": "#/$defs/reconcile_termination_operation" },
         "bootstrap_terminated_list": { "$ref": "#/$defs/bootstrap_terminated_list_operation" }
@@ -348,6 +350,21 @@
       "additionalProperties": false,
       "required": ["kind"],
       "properties": { "kind": { "const": "unsupported_pending" } }
+    },
+    "relay_file_operation": {
+      "oneOf": [
+        { "$ref": "#/$defs/pending_operation" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "mutation_route", "observation_route"],
+          "properties": {
+            "kind": { "const": "journal_claimed_file_relay" },
+            "mutation_route": { "const": "sandbox_file_upload_token_by_id" },
+            "observation_route": { "const": "sandbox_file_download_token_by_id" }
+          }
+        }
+      ]
     },
     "qualification_create_operation": {
       "type": "object", "additionalProperties": false,

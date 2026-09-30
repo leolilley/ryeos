@@ -252,6 +252,7 @@ enum OperationKind {
     CreateOnce,
     UploadThenRunOncePending,
     UploadThenRunOnce,
+    JournalClaimedFileRelay,
     UnsupportedPending,
     TerminateOnceThenObserveExact,
     ObserveExactOccurrence,
@@ -291,6 +292,7 @@ pub(crate) struct Operations {
     reconcile_allocation: OperationSpec,
     activate_supervisor: OperationSpec,
     reconcile_supervisor_activation: OperationSpec,
+    relay_file: OperationSpec,
     pub(crate) terminate: OperationSpec,
     pub(crate) reconcile_termination: OperationSpec,
     bootstrap_terminated_list: OperationSpec,
@@ -373,7 +375,7 @@ impl ProviderSpec {
 
     fn validate(&self, settings_schema_digest: &str) -> Result<()> {
         ensure!(
-            self.schema == 4
+            self.schema == 5
                 && self.provider_profile == ProviderProfile::RenderSandboxV1
                 && self.origin_profile == OriginProfile::RenderApiV1
                 && self.settings_schema_digest == settings_schema_digest
@@ -526,6 +528,15 @@ impl ProviderSpec {
                     .is_empty_pending(),
             "provider spec reconciliation or activation operation is unsupported"
         );
+        ensure!(
+            self.operations.relay_file.is_empty_pending()
+                || (self
+                    .operations
+                    .activate_supervisor
+                    .is_one_shot_pending_activation()
+                    && self.operations.relay_file.is_journal_claimed_file_relay()),
+            "provider spec relay file operation is unsupported"
+        );
         let terminate = &self.operations.terminate;
         ensure!(
             terminate.kind == OperationKind::TerminateOnceThenObserveExact
@@ -602,6 +613,34 @@ impl ProviderSpec {
         self.operations
             .activate_supervisor
             .is_one_shot_pending_activation()
+    }
+
+    pub(crate) fn relay_file_enabled(&self) -> bool {
+        self.operations.relay_file.is_journal_claimed_file_relay()
+    }
+
+    pub(crate) fn relay_file_upload_route(&self) -> Result<RouteName> {
+        ensure!(
+            self.relay_file_enabled(),
+            "signed Render relay file operation is disabled"
+        );
+        Ok(self
+            .operations
+            .relay_file
+            .mutation_route
+            .expect("validated relay upload route"))
+    }
+
+    pub(crate) fn relay_file_download_route(&self) -> Result<RouteName> {
+        ensure!(
+            self.relay_file_enabled(),
+            "signed Render relay file operation is disabled"
+        );
+        Ok(self
+            .operations
+            .relay_file
+            .observation_route
+            .expect("validated relay download route"))
     }
 
     pub(crate) fn api_base(&self) -> &'static str {
@@ -881,6 +920,18 @@ impl ProviderSpec {
 }
 
 impl OperationSpec {
+    fn is_journal_claimed_file_relay(&self) -> bool {
+        self.kind == OperationKind::JournalClaimedFileRelay
+            && self.route.is_none()
+            && self.precondition_profile.is_none()
+            && self.body.is_none()
+            && self.bind_proof_profile.is_none()
+            && self.no_occurrence_proof_profile.is_none()
+            && self.mutation_route == Some(RouteName::SandboxFileUploadTokenById)
+            && self.observation_route == Some(RouteName::SandboxFileDownloadTokenById)
+            && self.terminal_proof_profile.is_none()
+    }
+
     fn is_one_shot_pending_activation(&self) -> bool {
         self.kind == OperationKind::UploadThenRunOncePending
             && self.precondition_profile == Some(PreconditionProfile::RenderQualifiedGuestRuntimeV1)
@@ -1055,6 +1106,80 @@ mod tests {
     }
 
     #[test]
+    fn relay_file_requires_explicit_exact_signed_operation_and_activation_selection() {
+        let mut value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        let pending = ProviderSpec::parse(&fixture(), SETTINGS_SCHEMA_DIGEST).unwrap();
+        assert!(!pending.relay_file_enabled());
+        assert!(pending.relay_file_upload_route().is_err());
+        assert!(pending.relay_file_download_route().is_err());
+        let mut missing = value.clone();
+        missing["operations"]
+            .as_object_mut()
+            .unwrap()
+            .remove("relay_file");
+        assert!(
+            ProviderSpec::parse(
+                &serde_json::to_vec(&missing).unwrap(),
+                SETTINGS_SCHEMA_DIGEST
+            )
+            .is_err()
+        );
+        missing = value.clone();
+        missing["schema"] = serde_json::json!(4);
+        assert!(
+            ProviderSpec::parse(
+                &serde_json::to_vec(&missing).unwrap(),
+                SETTINGS_SCHEMA_DIGEST
+            )
+            .is_err()
+        );
+
+        value["operations"]["relay_file"] = serde_json::json!({
+            "kind": "journal_claimed_file_relay",
+            "mutation_route": "sandbox_file_upload_token_by_id",
+            "observation_route": "sandbox_file_download_token_by_id"
+        });
+        assert!(
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
+        );
+        value["operations"]["activate_supervisor"] = serde_json::json!({
+            "kind": "upload_then_run_once_pending",
+            "precondition_profile": "render_qualified_guest_runtime_v1"
+        });
+        let selected =
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .unwrap();
+        assert_eq!(
+            selected.relay_file_upload_route().unwrap(),
+            RouteName::SandboxFileUploadTokenById
+        );
+        assert_eq!(
+            selected.relay_file_download_route().unwrap(),
+            RouteName::SandboxFileDownloadTokenById
+        );
+        assert!(
+            !selected
+                .effective_capabilities()
+                .contains(&LifecycleCapability::SupervisorActivation)
+        );
+
+        value["operations"]["relay_file"]["observation_route"] =
+            serde_json::json!("sandbox_run_stream_token_by_id");
+        assert!(
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
+        );
+        value["operations"]["relay_file"]["observation_route"] =
+            serde_json::json!("sandbox_file_download_token_by_id");
+        value["operations"]["relay_file"]["route"] = serde_json::json!("sandbox_collection");
+        assert!(
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn one_shot_activation_profile_is_closed_and_reconciliation_stays_pending() {
         let mut value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
         value["operations"]["activate_supervisor"] = serde_json::json!({
@@ -1173,8 +1298,8 @@ mod tests {
     fn spec_rejects_unknown_configuration_and_unreviewed_routes() {
         let fixture = String::from_utf8(fixture()).unwrap();
         let with_capability_claim = fixture.replacen(
-            "\"schema\": 4,",
-            "\"schema\": 4,\n  \"capabilities\": [\"exact_terminal_observation\"],",
+            "\"schema\": 5,",
+            "\"schema\": 5,\n  \"capabilities\": [\"exact_terminal_observation\"],",
             1,
         );
         assert!(

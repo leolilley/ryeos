@@ -15,7 +15,7 @@ use ryeos_http_transport::{HttpClient, RequestBodySource};
 use zeroize::Zeroizing;
 
 use crate::activation_contact::proxy_request;
-use crate::provider_spec::{ProviderSpec, RouteName};
+use crate::provider_spec::ProviderSpec;
 use crate::proxy_route::{
     BoundConnectToken, MAX_CONNECT_RESPONSE_BYTES, ProxyOperation, bind_connect_response,
     connect_token_url,
@@ -63,8 +63,8 @@ impl<'a> RenderRelayFileContact<'a> {
             ProxyOperation::DownloadFile { remote_path },
         ] {
             let route = match operation {
-                ProxyOperation::UploadFile { .. } => RouteName::SandboxFileUploadTokenById,
-                ProxyOperation::DownloadFile { .. } => RouteName::SandboxFileDownloadTokenById,
+                ProxyOperation::UploadFile { .. } => provider_spec.relay_file_upload_route()?,
+                ProxyOperation::DownloadFile { .. } => provider_spec.relay_file_download_route()?,
                 ProxyOperation::RunStream => unreachable!(),
             };
             let (url, target) = api_url(
@@ -101,10 +101,10 @@ impl<'a> RenderRelayFileContact<'a> {
     fn mint(&self, operation: ProxyOperation<'_>) -> Result<BoundConnectToken> {
         let route = match operation {
             ProxyOperation::UploadFile { remote_path } if remote_path == self.remote_path => {
-                RouteName::SandboxFileUploadTokenById
+                self.provider_spec.relay_file_upload_route()?
             }
             ProxyOperation::DownloadFile { remote_path } if remote_path == self.remote_path => {
-                RouteName::SandboxFileDownloadTokenById
+                self.provider_spec.relay_file_download_route()?
             }
             _ => anyhow::bail!("Render relay may mint only its exact file slot"),
         };

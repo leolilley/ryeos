@@ -1,5 +1,5 @@
 {
-  "schema": 4,
+  "schema": 5,
   "provider_profile": "render_sandbox_v1",
   "settings_schema_digest": "f5b4994d71a6896ddad77bf2a08716fdc3527ea4f91579f084112ca69dad7172",
   "bootstrap_settings_schema_digest": "45ed0ff8f70a838227995f3807d9c0361d1718d7b6b1f0772e4ba6861933f779",
@@ -131,6 +131,7 @@
     "reconcile_allocation": { "kind": "unsupported_pending" },
     "activate_supervisor": { "kind": "unsupported_pending" },
     "reconcile_supervisor_activation": { "kind": "unsupported_pending" },
+    "relay_file": { "kind": "unsupported_pending" },
     "terminate": {
       "kind": "terminate_once_then_observe_exact",
       "mutation_route": "sandbox_terminate_by_id",

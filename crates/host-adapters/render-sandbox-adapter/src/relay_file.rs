@@ -89,6 +89,10 @@ pub(super) fn operate() -> Result<()> {
     let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
     let (provider_spec, _) =
         parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)?;
+    // Routes alone are shared with other signed operations. The relay needs
+    // its own explicit selection before reading settings or network inputs.
+    provider_spec.relay_file_upload_route()?;
+    provider_spec.relay_file_download_route()?;
     let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
     ensure!(
         lillux::sha256_hex(&settings_bytes) == request.settings_digest,

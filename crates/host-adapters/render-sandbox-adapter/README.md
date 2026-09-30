@@ -169,8 +169,8 @@ that a proxy operation has been safely implemented.
 It also constructs only the pinned CLI's exact API token-mint routes for the
 same Sandbox and owner: file upload/download with a validated path, or run
 stream. The constructor does not mint a token. The signed provider profile now
-fixes separate upload and download token routes in strict schema 4, but the
-one-shot activation contact still rejects download. A durable relay owner must
+fixes separate upload and download token routes in strict schema 5, and its
+relay-file operation remains `unsupported_pending`. A durable relay owner must
 authorize each transfer and reconcile ambiguous contact before that route is
 used. A lost mint response must not cause a second mint or upload/run attempt
 under the same activation claim.
