@@ -15804,6 +15804,17 @@ impl StateStore {
         state
             .qualification_workspace_custody
             .ensure_unregistered(&current.placement_thread_id)?;
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_unregistered_rollback(&coordinate)?;
+        anyhow::ensure!(
+            Arc::ptr_eq(retained.workspace(), workspace)
+                && retained
+                    .state_root_parent()
+                    .is_same_directory(state_root_parent)?
+                && retained.state_root().is_same_directory(state_root)?,
+            "Q rollback changed its retained original descriptor custody"
+        );
         let workspace_root = Path::new(&current.workspace_root);
         let project = workspace_root.join("project");
         let state_path = Path::new(&current.state_root);
@@ -15837,33 +15848,137 @@ impl StateStore {
             "Q unregistered state root was replaced before rollback"
         );
 
-        let intent = {
+        {
             let _permit = self.acquire_write_permit()?;
             self.lock()?
                 .runtime_db
-                .begin_unregistered_qualification_precreate_rollback(&current)?
-        };
-        workspace.remove_uncreated_workspace_now()?;
-        let workspace_removed = {
-            let _permit = self.acquire_write_permit()?;
-            self.lock()?
-                .runtime_db
-                .record_qualification_workspace_removed(&intent)?
-        };
+                .begin_unregistered_qualification_precreate_rollback(&current)?;
+        }
+        self.resume_unregistered_qualification_rollback(state, &current.placement_thread_id)
+    }
+
+    /// Same-daemon continuation of the original no-Create rollback. A cold
+    /// daemon has no retained descriptor pair and cannot infer removal from
+    /// diagnostic paths or a missing current configuration entry.
+    pub(crate) fn resume_unregistered_qualification_rollback(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        use std::ffi::OsStr;
+
         anyhow::ensure!(
-            state_root_parent.remove_empty_child_if_same(name, state_root)?,
-            "Q original state root was not empty or changed during rollback"
+            std::ptr::eq(self, Arc::as_ptr(&state.state_store)),
+            "Q rollback resume belongs to another StateStore"
         );
-        let state_removed = {
+        let mut current = self
+            .qualification_local_start(placement)?
+            .context("Q rollback resume lost its retained start")?;
+        anyhow::ensure!(
+            matches!(
+                current.phase,
+                runtime_db::external_execution::QualificationLocalStartPhase::CleanupIntent
+                    | runtime_db::external_execution::QualificationLocalStartPhase::WorkspaceRemoved
+                    | runtime_db::external_execution::QualificationLocalStartPhase::StateRemoved
+                    | runtime_db::external_execution::QualificationLocalStartPhase::Closed
+            ) && current.backend_id.is_none()
+                && current.backend_version.is_none()
+                && current.workspace_receipt.is_none()
+                && current.creator_identity.is_none()
+                && current.scope_allocation.is_none()
+                && current.scope_recovery.is_none()
+                && current.worker_incarnation_digest.is_none()
+                && current.view_borrow_intent.is_none(),
+            "Q rollback resume lacks its exact no-Create cleanup phase"
+        );
+        let coordinate =
+            crate::qualification_workspace_custody::QualificationWorkspaceCustodyCoordinate::from_start(&current)?;
+        state
+            .qualification_workspace_custody
+            .ensure_unregistered(placement)?;
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_unregistered_rollback(&coordinate)?;
+        let workspace = retained.workspace();
+        let parent = retained.state_root_parent();
+        let root = retained.state_root();
+        let name = OsStr::new(&current.workspace_id);
+        let state_parent_path = Path::new(&current.state_root)
+            .parent()
+            .context("Q rollback state root has no parent")?;
+        anyhow::ensure!(
+            workspace.owned_scratch_root()?.path() == Path::new(&current.workspace_root)
+                && root.path() == Path::new(&current.state_root)
+                && parent.path() == state_parent_path
+                && state_parent_path
+                    == self
+                        .state_authority
+                        .runtime_directory()
+                        .path()
+                        .join("cache")
+                        .join("qualification-local"),
+            "Q rollback resume changed its original pinned root coordinates"
+        );
+        parent.ensure_path_binding()?;
+
+        if current.phase
+            == runtime_db::external_execution::QualificationLocalStartPhase::CleanupIntent
+        {
+            workspace.remove_uncreated_workspace_now()?;
+            workspace.prove_uncreated_workspace_removed()?;
+            current = {
+                let _permit = self.acquire_write_permit()?;
+                self.lock()?
+                    .runtime_db
+                    .record_qualification_workspace_removed(&current)?
+            };
+        } else {
+            workspace.prove_uncreated_workspace_removed()?;
+        }
+
+        if current.phase
+            == runtime_db::external_execution::QualificationLocalStartPhase::WorkspaceRemoved
+        {
+            match parent.open_child_directory(name)? {
+                Some(child) => {
+                    anyhow::ensure!(
+                        child.is_same_directory(root)?
+                            && parent.remove_empty_child_if_same(name, root)?,
+                        "Q rollback state root changed or remained nonempty"
+                    );
+                }
+                None => {
+                    // The original unlink may have succeeded before its
+                    // durable CAS. The same retained parent proves absence.
+                }
+            }
+            anyhow::ensure!(
+                parent.open_child_directory(name)?.is_none(),
+                "Q rollback state root reappeared before receipt"
+            );
+            current = {
+                let _permit = self.acquire_write_permit()?;
+                self.lock()?
+                    .runtime_db
+                    .record_qualification_state_root_removed(&current)?
+            };
+        } else {
+            anyhow::ensure!(
+                parent.open_child_directory(name)?.is_none(),
+                "Q rollback state root reappeared after removal receipt"
+            );
+        }
+
+        if current.phase
+            == runtime_db::external_execution::QualificationLocalStartPhase::StateRemoved
+        {
             let _permit = self.acquire_write_permit()?;
-            self.lock()?
+            current = self
+                .lock()?
                 .runtime_db
-                .record_qualification_state_root_removed(&workspace_removed)?
-        };
-        let _permit = self.acquire_write_permit()?;
-        self.lock()?
-            .runtime_db
-            .close_qualification_local_start(&state_removed)
+                .close_qualification_local_start(&current)?;
+        }
+        Ok(current)
     }
 
     pub(crate) fn reserve_qualification_local_scope_retirement(
