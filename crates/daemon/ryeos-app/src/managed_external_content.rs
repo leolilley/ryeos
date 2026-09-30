@@ -173,6 +173,8 @@ pub struct ResolvedManagedActivationComponent {
     pub expected_manifest_hash: String,
     pub expected_manifest_kind: String,
     pub declaration_kind: ryeos_engine::external_content::ExternalContentKind,
+    pub declaration_mount_root: ryeos_engine::external_content::ExternalContentMountRoot,
+    pub declaration_mount: String,
     pub capture_bounds: ManagedActivationComponentBounds,
     pub expected_file_sha256: Option<String>,
 }
@@ -450,6 +452,8 @@ impl ManagedExternalContentActivation {
                 expected_manifest_hash,
                 expected_manifest_kind: expected_manifest_kind.to_owned(),
                 declaration_kind: declaration.kind,
+                declaration_mount_root: declaration.mount_root,
+                declaration_mount: declaration.mount.clone(),
                 capture_bounds,
                 expected_file_sha256,
             });
@@ -684,30 +688,35 @@ pub fn resolve_activation(
     if canonical.to_string() != activation_ref || canonical.kind != "config" {
         bail!("managed activation requires one canonical config ref");
     }
-    let effective = state.engine.with_checked_bundle_generation(|generation| {
-        generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
-            item_ref: canonical,
-            expected_kind: Some("config".to_owned()),
-            project_root: None,
-            subject_resolution_authority:
-                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
-        })
-    })?;
-    require_trusted_bundle_item(&effective, "managed activation config")?;
-    let publisher_fingerprint = item_publisher(&effective, "managed activation config")?;
-    let document = ManagedExternalContentActivation::from_value(&effective.composed_value)?;
-
-    let consumer_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&document.consumer_ref)
-        .map_err(|error| anyhow::anyhow!("invalid activation consumer ref: {error}"))?;
-    let consumer = state.engine.with_checked_bundle_generation(|generation| {
-        generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
-            item_ref: consumer_ref,
-            expected_kind: None,
-            project_root: None,
-            subject_resolution_authority:
-                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
-        })
-    })?;
+    // The activation and its consumer are one signed relationship. Resolving
+    // them in separate generation operations permits a Bundle replacement
+    // between reads to assemble a source program that never existed.
+    let (effective, consumer, document, publisher_fingerprint) =
+        state.engine.with_checked_bundle_generation(|generation| {
+            let effective =
+                generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    item_ref: canonical,
+                    expected_kind: Some("config".to_owned()),
+                    project_root: None,
+                    subject_resolution_authority:
+                        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+                })?;
+            require_trusted_bundle_item(&effective, "managed activation config")?;
+            let publisher_fingerprint = item_publisher(&effective, "managed activation config")?;
+            let document = ManagedExternalContentActivation::from_value(&effective.composed_value)?;
+            let consumer_ref =
+                ryeos_engine::canonical_ref::CanonicalRef::parse(&document.consumer_ref)
+                    .map_err(|error| anyhow::anyhow!("invalid activation consumer ref: {error}"))?;
+            let consumer =
+                generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    item_ref: consumer_ref,
+                    expected_kind: None,
+                    project_root: None,
+                    subject_resolution_authority:
+                        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+                })?;
+            Ok::<_, anyhow::Error>((effective, consumer, document, publisher_fingerprint))
+        })?;
     require_trusted_bundle_item(&consumer, "managed activation consumer")?;
     let consumer_publisher = item_publisher(&consumer, "managed activation consumer")?;
     if consumer_publisher != publisher_fingerprint {

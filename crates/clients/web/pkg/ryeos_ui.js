@@ -476,7 +476,7 @@ function errorMessage(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/shared/utils.js
+//#region node_modules/svelte/src/internal/shared/utils.js
 var is_array = Array.isArray;
 var index_of = Array.prototype.indexOf;
 var includes = Array.prototype.includes;
@@ -541,6 +541,7 @@ var ERROR_VALUE = 1 << 23;
 var STATE_SYMBOL = Symbol("$state");
 /** Marks component export objects, so that `proxy(...)` leaves them untouched */
 var COMPONENT_SYMBOL = Symbol("component");
+var LEGACY_PROPS = Symbol("legacy props");
 var LOADING_ATTR_SYMBOL = Symbol("");
 var ATTRIBUTES_CACHE = Symbol("attributes");
 var CLASS_CACHE = Symbol("class");
@@ -554,7 +555,7 @@ var STALE_REACTION = new class StaleReactionError extends Error {
 }();
 var IS_XHTML = !!globalThis.document?.contentType && /* @__PURE__ */ globalThis.document.contentType.includes("xml");
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/constants.js
+//#region node_modules/svelte/src/constants.js
 var HYDRATION_ERROR = {};
 var UNINITIALIZED = Symbol("uninitialized");
 var NAMESPACE_HTML = "http://www.w3.org/1999/xhtml";
@@ -578,7 +579,7 @@ function svelte_boundary_reset_noop() {
 	console.warn(`https://svelte.dev/e/svelte_boundary_reset_noop`);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/hydration.js
+//#region node_modules/svelte/src/internal/client/dom/hydration.js
 /** @import { TemplateNode } from '#client' */
 /**
 * Use this variable to guard everything related to hydration code so it can be treeshaken out
@@ -657,7 +658,7 @@ function read_hydration_instruction(node) {
 	return node.data;
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/equality.js
+//#region node_modules/svelte/src/internal/client/reactivity/equality.js
 /** @import { Equals } from '#client' */
 /** @type {Equals} */
 function equals(value) {
@@ -684,7 +685,7 @@ function lifecycle_outside_component(name) {
 	throw new Error(`https://svelte.dev/e/lifecycle_outside_component`);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/errors.js
+//#region node_modules/svelte/src/internal/client/errors.js
 /**
 * Cannot create a `$derived(...)` with an `await` expression outside of an effect tree
 * @returns {never}
@@ -733,6 +734,14 @@ function effect_update_depth_exceeded() {
 	throw new Error(`https://svelte.dev/e/effect_update_depth_exceeded`);
 }
 /**
+* Cannot do `bind:%key%={undefined}` when `%key%` has a fallback value
+* @param {string} key
+* @returns {never}
+*/
+function props_invalid_value(key) {
+	throw new Error(`https://svelte.dev/e/props_invalid_value`);
+}
+/**
 * `setContext` must be called when a component first initializes, not in a subsequent effect or after an `await` expression
 * @returns {never}
 */
@@ -768,13 +777,13 @@ function svelte_boundary_reset_onerror() {
 	throw new Error(`https://svelte.dev/e/svelte_boundary_reset_onerror`);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/flags/index.js
+//#region node_modules/svelte/src/internal/flags/index.js
 /** True if experimental.async=true */
 var async_mode_flag = false;
 /** True if we're not certain that we only have Svelte 5 code in the compilation */
 var legacy_mode_flag = false;
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/shared/context.js
+//#region node_modules/svelte/src/internal/shared/context.js
 /**
 * @typedef {{ p: Context | null, c: Map<unknown, unknown> | null }} Context
 */
@@ -797,7 +806,7 @@ function get_or_init_context_map(context, name) {
 	return context.c ??= new Map(get_parent_context(context) || void 0);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/context.js
+//#region node_modules/svelte/src/internal/client/context.js
 /** @import { ComponentContext, DevStackEntry, Effect } from '#client' */
 /** @type {ComponentContext | null} */
 var component_context = null;
@@ -895,7 +904,7 @@ function is_runes() {
 	return !legacy_mode_flag || component_context !== null && component_context.l === null;
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/task.js
+//#region node_modules/svelte/src/internal/client/dom/task.js
 /** @type {Array<() => void>} */
 var micro_tasks = [];
 function run_micro_tasks() {
@@ -915,8 +924,14 @@ function queue_micro_task(fn) {
 	}
 	micro_tasks.push(fn);
 }
+/**
+* Synchronously run any queued tasks.
+*/
+function flush_tasks() {
+	while (micro_tasks.length > 0) run_micro_tasks();
+}
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/status.js
+//#region node_modules/svelte/src/internal/client/reactivity/status.js
 /** @import { Derived, Signal } from '#client' */
 var STATUS_MASK = ~(DIRTY | MAYBE_DIRTY | CLEAN);
 /**
@@ -935,7 +950,7 @@ function update_derived_status(derived) {
 	else set_signal_status(derived, MAYBE_DIRTY);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/utils.js
+//#region node_modules/svelte/src/internal/client/reactivity/utils.js
 /** @import { Derived, Effect, Value } from '#client' */
 /**
 * @param {Value[] | null} deps
@@ -963,14 +978,37 @@ function defer_effect(effect, dirty_effects, maybe_dirty_effects) {
 	set_signal_status(effect, CLEAN);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/store.js
+//#region node_modules/svelte/src/internal/client/reactivity/store.js
 /**
 * We set this to `true` when updating a store so that we correctly
 * schedule effects if the update takes place inside a `$:` effect
 */
 var legacy_is_updating_store = false;
+/**
+* Whether or not the prop currently being read is a store binding, as in
+* `<Child bind:x={$y} />`. If it is, we treat the prop as mutable even in
+* runes mode, and skip `binding_property_non_reactive` validation
+*/
+var is_store_binding = false;
+/**
+* Returns a tuple that indicates whether `fn()` reads a prop that is a store binding.
+* Used to prevent `binding_property_non_reactive` validation false positives and
+* ensure that these props are treated as mutable even in runes mode
+* @template T
+* @param {() => T} fn
+* @returns {[T, boolean]}
+*/
+function capture_store_binding(fn) {
+	var previous_is_store_binding = is_store_binding;
+	try {
+		is_store_binding = false;
+		return [fn(), is_store_binding];
+	} finally {
+		is_store_binding = previous_is_store_binding;
+	}
+}
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/misc.js
+//#region node_modules/svelte/src/internal/client/dom/elements/misc.js
 /**
 * The child of a textarea actually corresponds to the defaultValue property, so we need
 * to remove it upon hydration to avoid a bug when someone resets the form value.
@@ -993,7 +1031,7 @@ function add_form_reset_listener() {
 	}
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/bindings/shared.js
+//#region node_modules/svelte/src/internal/client/dom/elements/bindings/shared.js
 /**
 * @template T
 * @param {() => T} fn
@@ -1010,8 +1048,28 @@ function without_reactive_context(fn) {
 		set_active_effect(previous_effect);
 	}
 }
+/**
+* Listen to the given event, and then instantiate a global form reset listener if not already done,
+* to notify all bindings when the form is reset
+* @param {HTMLElement} element
+* @param {string} event
+* @param {(is_reset?: true) => void} handler
+* @param {(is_reset?: true) => void} [on_reset]
+*/
+function listen_to_event_and_reset_event(element, event, handler, on_reset = handler) {
+	element.addEventListener(event, () => without_reactive_context(handler));
+	const prev = element[FORM_RESET_HANDLER];
+	if (prev)
+ /** @type {any} */ element[FORM_RESET_HANDLER] = () => {
+		prev();
+		on_reset(true);
+	};
+	else
+ /** @type {any} */ element[FORM_RESET_HANDLER] = () => on_reset(true);
+	add_form_reset_listener();
+}
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/async.js
+//#region node_modules/svelte/src/internal/client/reactivity/async.js
 /** @import { Blocker, Effect, Source, Value } from '#client' */
 /**
 * @param {Blocker[]} blockers
@@ -1300,7 +1358,7 @@ function unfreeze_derived_effects(derived) {
 	for (const e of derived.effects) if (e.teardown && e.fn !== null) update_effect(e);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/batch.js
+//#region node_modules/svelte/src/internal/client/reactivity/batch.js
 /** @import { Fork } from 'svelte' */
 /** @import { Derived, Effect, Reaction, Source, Value } from '#client' */
 /** @type {Batch | null} */
@@ -1889,6 +1947,31 @@ var Batch = class Batch {
 		this.linked = false;
 	}
 };
+/**
+* Synchronously flush any pending updates.
+* Returns void if no callback is provided, otherwise returns the result of calling the callback.
+* @template [T=void]
+* @param {(() => T) | undefined} [fn]
+* @returns {T}
+*/
+function flushSync(fn) {
+	var was_flushing_sync = is_flushing_sync;
+	is_flushing_sync = true;
+	try {
+		var result;
+		if (fn) {
+			if (current_batch !== null && !current_batch.is_fork) current_batch.flush();
+			result = fn();
+		}
+		while (true) {
+			flush_tasks();
+			if (current_batch === null) return result;
+			current_batch.flush();
+		}
+	} finally {
+		is_flushing_sync = was_flushing_sync;
+	}
+}
 function infinite_loop_guard() {
 	try {
 		effect_update_depth_exceeded();
@@ -2015,7 +2098,7 @@ function reset_all(effect) {
 	}
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/sources.js
+//#region node_modules/svelte/src/internal/client/reactivity/sources.js
 /** @import { Derived, Effect, Source, Value } from '#client' */
 /** @type {Set<Effect>} */
 var eager_effects = /* @__PURE__ */ new Set();
@@ -2314,7 +2397,7 @@ function proxy(value) {
 	});
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/operations.js
+//#region node_modules/svelte/src/internal/client/dom/operations.js
 /** @import { Effect, TemplateNode } from '#client' */
 /** @type {Window} */
 var $window;
@@ -2539,7 +2622,7 @@ function invoke_error_boundary(error, effect) {
 	throw error;
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/effects.js
+//#region node_modules/svelte/src/internal/client/reactivity/effects.js
 /** @import { Blocker, ComponentContext, ComponentContextLegacy, Derived, Effect, TemplateNode, TransitionManager } from '#client' */
 /**
 * @param {'$effect' | '$effect.pre' | '$inspect'} rune
@@ -2919,14 +3002,14 @@ function move_effect(effect, fragment) {
 	}
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/legacy.js
+//#region node_modules/svelte/src/internal/client/legacy.js
 /**
 * @type {Set<Value> | null}
 * @deprecated
 */
 var captured_signals = null;
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/runtime.js
+//#region node_modules/svelte/src/internal/client/runtime.js
 /** @import { Derived, Effect, Reaction, Source, Value } from '#client' */
 /**
 * True if updating in an effect context that is reactive (i.e. not branch/root effects)
@@ -3182,6 +3265,18 @@ function update_effect(effect) {
 	}
 }
 /**
+* Returns a promise that resolves once any pending state changes have been applied.
+* @returns {Promise<void>}
+*/
+async function tick() {
+	if (async_mode_flag) return new Promise((f) => {
+		requestAnimationFrame(() => f());
+		setTimeout(() => f());
+	});
+	await Promise.resolve();
+	flushSync();
+}
+/**
 * @template V
 * @param {Value<V>} signal
 * @returns {V}
@@ -3301,7 +3396,7 @@ function is_passive_event(name) {
 	return PASSIVE_EVENTS.includes(name);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/events.js
+//#region node_modules/svelte/src/internal/client/dom/elements/events.js
 /**
 * Used on elements, as a map of event type -> event handler,
 * and on events themselves to track which element handled an event
@@ -3449,7 +3544,7 @@ function handle_event_propagation(event) {
 	}
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/reconciler.js
+//#region node_modules/svelte/src/internal/client/dom/reconciler.js
 var policy = globalThis?.window?.trustedTypes && /* @__PURE__ */ globalThis.window.trustedTypes.createPolicy("svelte-trusted-html", {
 /** @param {string} html */
 createHTML: (html) => {
@@ -3468,7 +3563,7 @@ function create_fragment_from_html(html) {
 	return elem.content;
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/template.js
+//#region node_modules/svelte/src/internal/client/dom/template.js
 /** @import { Effect, EffectNodes, TemplateNode } from '#client' */
 /** @import { TemplateStructure } from './types' */
 /**
@@ -3614,7 +3709,7 @@ function append(anchor, dom) {
 	anchor.before(dom);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/reactivity/create-subscriber.js
+//#region node_modules/svelte/src/reactivity/create-subscriber.js
 /**
 * Returns a `subscribe` function that integrates external event-based systems with Svelte's reactivity.
 * It's particularly useful for integrating with web APIs like `MediaQuery`, `IntersectionObserver`, or `WebSocket`.
@@ -3687,7 +3782,7 @@ function createSubscriber(start) {
 	};
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/boundary.js
+//#region node_modules/svelte/src/internal/client/dom/blocks/boundary.js
 /** @import { Effect, Source, TemplateNode, } from '#client' */
 /**
 * @typedef {{
@@ -4190,7 +4285,7 @@ function unmount(component, options) {
 	return Promise.resolve();
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/branches.js
+//#region node_modules/svelte/src/internal/client/dom/blocks/branches.js
 /** @import { Effect, TemplateNode } from '#client' */
 /**
 * @typedef {{ effect: Effect, fragment: DocumentFragment }} Branch
@@ -4338,7 +4433,7 @@ var BranchManager = class {
 	}
 };
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/if.js
+//#region node_modules/svelte/src/internal/client/dom/blocks/if.js
 /** @import { TemplateNode } from '#client' */
 /**
 * @param {TemplateNode} node
@@ -4384,7 +4479,7 @@ function if_block(node, fn, elseif = false) {
 	}, flags);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/each.js
+//#region node_modules/svelte/src/internal/client/dom/blocks/each.js
 /** @import { EachItem, EachOutroGroup, EachState, Effect, EffectNodes, MaybeSource, Source, TemplateNode, TransitionManager, Value } from '#client' */
 /** @import { Batch } from '../../reactivity/batch.js'; */
 /**
@@ -4801,7 +4896,7 @@ function link(state, prev, next) {
 	else next.prev = prev;
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/shared/attributes.js
+//#region node_modules/svelte/src/internal/shared/attributes.js
 var whitespace = [..." 	\n\r\f\xA0\v﻿"];
 /**
 * @param {any} value
@@ -4911,7 +5006,7 @@ function to_style(value, styles) {
 	return value == null ? null : String(value);
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/class.js
+//#region node_modules/svelte/src/internal/client/dom/elements/class.js
 /**
 * @param {Element} dom
 * @param {boolean | number} is_html
@@ -4938,7 +5033,7 @@ function set_class(dom, is_html, value, hash, prev_classes, next_classes) {
 	return next_classes;
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/style.js
+//#region node_modules/svelte/src/internal/client/dom/elements/style.js
 /**
 * @param {Element & ElementCSSInlineStyle} dom
 * @param {Record<string, any>} prev
@@ -4978,7 +5073,7 @@ function set_style(dom, value, prev_styles, next_styles) {
 	return next_styles;
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/attributes.js
+//#region node_modules/svelte/src/internal/client/dom/elements/attributes.js
 /** @import { Blocker, Effect } from '#client' */
 var IS_CUSTOM_ELEMENT = Symbol("is custom element");
 var IS_HTML = Symbol("is html");
@@ -5070,7 +5165,70 @@ function get_setters(element) {
 	return setters;
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/bindings/this.js
+//#region node_modules/svelte/src/internal/client/dom/elements/bindings/input.js
+/** @import { Batch } from '../../../reactivity/batch.js' */
+/**
+* @param {HTMLInputElement} input
+* @param {() => unknown} get
+* @param {(value: unknown) => void} set
+* @returns {void}
+*/
+function bind_value(input, get, set = get) {
+	var batches = /* @__PURE__ */ new WeakSet();
+	listen_to_event_and_reset_event(input, "input", async (is_reset) => {
+		/** @type {any} */
+		var value = is_reset ? input.defaultValue : input.value;
+		value = is_numberlike_input(input) ? to_number(value) : value;
+		set(value);
+		if (current_batch !== null) batches.add(current_batch);
+		await tick();
+		if (value !== (value = get())) {
+			var start = input.selectionStart;
+			var end = input.selectionEnd;
+			var length = input.value.length;
+			input.value = value ?? "";
+			if (end !== null) {
+				var new_length = input.value.length;
+				if (start === end && end === length && new_length > length) {
+					input.selectionStart = new_length;
+					input.selectionEnd = new_length;
+				} else {
+					input.selectionStart = start;
+					input.selectionEnd = Math.min(end, new_length);
+				}
+			}
+		}
+	});
+	if (hydrating && input.defaultValue !== input.value || untrack(get) == null && input.value) {
+		set(is_numberlike_input(input) ? to_number(input.value) : input.value);
+		if (current_batch !== null) batches.add(current_batch);
+	}
+	render_effect(() => {
+		var value = get();
+		if (input === document.activeElement) {
+			var batch = async_mode_flag ? previous_batch : current_batch;
+			if (batches.has(batch)) return;
+		}
+		if (is_numberlike_input(input) && value === to_number(input.value)) return;
+		if (input.type === "date" && !value && !input.value) return;
+		if (value !== input.value) input.value = value ?? "";
+	});
+}
+/**
+* @param {HTMLInputElement} input
+*/
+function is_numberlike_input(input) {
+	var type = input.type;
+	return type === "number" || type === "range";
+}
+/**
+* @param {string} value
+*/
+function to_number(value) {
+	return value === "" ? null : +value;
+}
+//#endregion
+//#region node_modules/svelte/src/internal/client/dom/elements/bindings/this.js
 /** @import { ComponentContext, Effect } from '#client' */
 /**
 * @param {any} bound_value
@@ -5121,6 +5279,99 @@ function bind_this(element_or_component = mark_as_component(), update, get_value
 	});
 	return element_or_component;
 }
+//#endregion
+//#region node_modules/svelte/src/internal/client/reactivity/props.js
+/** @import { Derived, Effect, Source } from './types.js' */
+/**
+* This function is responsible for synchronizing a possibly bound prop with the inner component state.
+* It is used whenever the compiler sees that the component writes to the prop, or when it has a default prop_value.
+* @template V
+* @param {Record<string, unknown>} props
+* @param {string} key
+* @param {number} flags
+* @param {V | (() => V)} [fallback]
+* @returns {(() => V | ((arg: V) => V) | ((arg: V, mutation: boolean) => V))}
+*/
+function prop(props, key, flags, fallback) {
+	var runes = !legacy_mode_flag || (flags & 2) !== 0;
+	var bindable = (flags & 8) !== 0;
+	var lazy = (flags & 16) !== 0;
+	var fallback_value = fallback;
+	var fallback_dirty = true;
+	var fallback_signal = void 0;
+	var get_fallback = () => {
+		if (lazy && runes) {
+			fallback_signal ??= /* @__PURE__ */ derived(fallback);
+			return get(fallback_signal);
+		}
+		if (fallback_dirty) {
+			fallback_dirty = false;
+			fallback_value = lazy ? untrack(fallback) : fallback;
+		}
+		return fallback_value;
+	};
+	/** @type {((v: V) => void) | undefined} */
+	let setter;
+	if (bindable) {
+		var is_entry_props = STATE_SYMBOL in props || LEGACY_PROPS in props;
+		setter = get_descriptor(props, key)?.set ?? (is_entry_props && key in props ? (v) => props[key] = v : void 0);
+	}
+	/** @type {V} */
+	var initial_value;
+	var is_store_sub = false;
+	if (bindable) [initial_value, is_store_sub] = capture_store_binding(() => props[key]);
+	else initial_value = props[key];
+	if (initial_value === void 0 && fallback !== void 0) {
+		initial_value = get_fallback();
+		if (setter) {
+			if (runes) props_invalid_value(key);
+			setter(initial_value);
+		}
+	}
+	/** @type {() => V} */
+	var getter;
+	if (runes) getter = () => {
+		var value = props[key];
+		if (value === void 0) return get_fallback();
+		fallback_dirty = true;
+		return value;
+	};
+	else getter = () => {
+		var value = props[key];
+		if (value !== void 0) fallback_value = void 0;
+		return value === void 0 ? fallback_value : value;
+	};
+	if (runes && (flags & 4) === 0) return getter;
+	if (setter) {
+		var legacy_parent = props.$$legacy;
+		return (function(value, mutation) {
+			if (arguments.length > 0) {
+				if (!runes || !mutation || legacy_parent || is_store_sub)
+ /** @type {Function} */ setter(mutation ? getter() : value);
+				return value;
+			}
+			return getter();
+		});
+	}
+	var overridden = false;
+	var d = ((flags & 1) !== 0 ? derived : derived_safe_equal)(() => {
+		overridden = false;
+		return getter();
+	});
+	if (bindable) get(d);
+	var parent_effect = active_effect;
+	return (function(value, mutation) {
+		if (arguments.length > 0) {
+			const new_value = mutation ? get(d) : runes && bindable ? proxy(value) : value;
+			set(d, new_value);
+			overridden = true;
+			if (fallback_value !== void 0) fallback_value = new_value;
+			return value;
+		}
+		if (is_destroying_effect && overridden || (parent_effect.f & 16384) !== 0) return d.v;
+		return get(d);
+	});
+}
 if (typeof HTMLElement === "function");
 /**
 * `onMount`, like [`$effect`](https://svelte.dev/docs/svelte/$effect), schedules a function to run as soon as the component has been mounted to the DOM.
@@ -5145,6 +5396,19 @@ function onMount(fn) {
 	});
 }
 /**
+* Schedules a callback to run immediately before the component is unmounted.
+*
+* Out of `onMount`, `beforeUpdate`, `afterUpdate` and `onDestroy`, this is the
+* only one that runs inside a server-side component.
+*
+* @param {() => any} fn
+* @returns {void}
+*/
+function onDestroy(fn) {
+	if (component_context === null) lifecycle_outside_component("onDestroy");
+	onMount(() => () => untrack(fn));
+}
+/**
 * Legacy-mode: Init callbacks object for onMount/beforeUpdate/afterUpdate
 * @param {ComponentContext} context
 */
@@ -5157,7 +5421,7 @@ function init_update_callbacks(context) {
 	};
 }
 //#endregion
-//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/disclose-version.js
+//#region node_modules/svelte/src/internal/disclose-version.js
 if (typeof window !== "undefined") ((window.__svelte ??= {}).v ??= /* @__PURE__ */ new Set()).add("5");
 //#endregion
 //#region browser/runtime/context.ts
@@ -5170,53 +5434,98 @@ function dispatchUi() {
 }
 //#endregion
 //#region browser/app/Navigation.svelte
-var root$17 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
-var root_1$10 = /* @__PURE__ */ from_html(`<aside class="navigation" aria-label="RyeOS navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`);
+var root$19 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
+var root_1$14 = /* @__PURE__ */ from_html(`<button aria-label="Close view navigation"></button> <aside id="ryeos-navigation" aria-label="RyeOS view navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`, 1);
 function Navigation($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
-	var aside = root_1$10();
+	let panel;
+	user_effect(() => {
+		if ($$props.open) tick().then(() => {
+			panel?.querySelector("button:not([disabled])")?.focus();
+		});
+	});
+	function handleKeys(event) {
+		if (!$$props.open) return;
+		if (event.key === "Escape") {
+			event.preventDefault();
+			$$props.onClose();
+			return;
+		}
+		if (event.key !== "Tab") return;
+		const controls = Array.from(panel.querySelectorAll("button:not([disabled]), [href], [tabindex]:not([tabindex='-1'])"));
+		if (controls.length === 0) return;
+		const first = controls.at(0);
+		const last = controls.at(-1);
+		if (!first || !last) return;
+		if (event.shiftKey && document.activeElement === first) {
+			event.preventDefault();
+			last.focus();
+		} else if (!event.shiftKey && document.activeElement === last) {
+			event.preventDefault();
+			first.focus();
+		}
+	}
+	var fragment = root_1$14();
+	event("keydown", $window, handleKeys);
+	var button = first_child(fragment);
+	let classes;
+	var aside = sibling(button, 2);
+	let classes_1;
 	var div = child(aside);
 	var text = only_child(sibling(child(div)), true);
 	reset(div);
 	var nav = sibling(div, 2);
 	each(nav, 21, () => $$props.model.items, (item) => item.id, ($$anchor, item) => {
-		var button = root$17();
-		let classes;
-		var span_1 = sibling(child(button), 2);
+		var button_1 = root$19();
+		let classes_2;
+		var span_1 = sibling(child(button_1), 2);
 		var text_1 = only_child(child(span_1), true);
 		reset(span_1);
-		reset(button);
+		reset(button_1);
 		template_effect(() => {
-			classes = set_class(button, 1, "", null, classes, { active: get(item).selected });
+			set_attribute(button_1, "aria-current", get(item).selected ? "page" : void 0);
+			classes_2 = set_class(button_1, 1, "", null, classes_2, { active: get(item).selected });
 			set_text(text_1, get(item).label);
 		});
-		delegated("click", button, () => dispatch({
-			type: "activate",
-			intent: get(item).intent
-		}));
-		append($$anchor, button);
+		delegated("click", button_1, () => {
+			dispatch({
+				type: "activate",
+				intent: get(item).intent
+			});
+			$$props.onClose();
+		});
+		append($$anchor, button_1);
 	});
 	reset(nav);
 	reset(aside);
-	template_effect(($0) => set_text(text, $0), [() => String($$props.model.items.length).padStart(2, "0")]);
-	append($$anchor, aside);
+	bind_this(aside, ($$value) => panel = $$value, () => panel);
+	template_effect(($0) => {
+		classes = set_class(button, 1, "navigation-scrim", null, classes, { open: $$props.open });
+		set_attribute(button, "tabindex", $$props.open ? 0 : -1);
+		classes_1 = set_class(aside, 1, "navigation", null, classes_1, { open: $$props.open });
+		set_text(text, $0);
+	}, [() => String($$props.model.items.length).padStart(2, "0")]);
+	delegated("click", button, function(...$$args) {
+		$$props.onClose?.apply(this, $$args);
+	});
+	append($$anchor, fragment);
 	pop();
 }
 delegate(["click"]);
 //#endregion
 //#region browser/app/Notices.svelte
-var root$16 = /* @__PURE__ */ from_html(`<div class="notice"><span> </span> <button aria-label="Dismiss notice">×</button></div>`);
-var root_1$9 = /* @__PURE__ */ from_html(`<aside class="notice-stack" aria-label="RyeOS notices" aria-live="polite" aria-atomic="false"></aside>`);
+var root$18 = /* @__PURE__ */ from_html(`<div class="notice"><span> </span> <button aria-label="Dismiss notice">×</button></div>`);
+var root_1$13 = /* @__PURE__ */ from_html(`<aside class="notice-stack" aria-label="RyeOS notices" aria-live="polite" aria-atomic="false"></aside>`);
 function Notices($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var aside = root_1$9();
+		var aside = root_1$13();
 		each(aside, 21, () => $$props.notices, (notice) => notice.id, ($$anchor, notice) => {
-			var div = root$16();
+			var div = root$18();
 			var span = child(div);
 			var text = only_child(span, true);
 			var button = sibling(span, 2);
@@ -5245,22 +5554,30 @@ function Notices($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/app/OverlayLayer.svelte
-var root$15 = /* @__PURE__ */ from_html(`<span> </span>`);
-var root_1$8 = /* @__PURE__ */ from_html(`<div class="overlay-columns"></div>`);
-var root_2$6 = /* @__PURE__ */ from_html(`<span class="overlay-secondary"> </span>`);
-var root_3$4 = /* @__PURE__ */ from_html(`<span class="overlay-secondary overlay-disabled-reason"> </span>`);
-var root_4$4 = /* @__PURE__ */ from_html(`<small> </small>`);
-var root_5$4 = /* @__PURE__ */ from_html(`<button class="overlay-secondary-action">↗</button>`);
-var root_6$4 = /* @__PURE__ */ from_html(`<div><button role="option"><span class="overlay-primary"><!> </span> <!> <!> <!></button> <!></div>`);
-var root_7$3 = /* @__PURE__ */ from_html(`<p class="overlay-empty">No matching entries</p>`);
-var root_8$3 = /* @__PURE__ */ from_html(`<footer> </footer>`);
-var root_9$2 = /* @__PURE__ */ from_html(`<div class="overlay-scrim" role="presentation"><div class="overlay-panel" role="dialog" aria-modal="true" tabindex="-1"><header><div><small> </small><h2> </h2></div> <button class="overlay-close">×</button></header> <input class="overlay-query" type="search" autocomplete="off" spellcheck="false"/> <!> <div class="overlay-items" role="listbox"></div> <!></div></div>`);
+var root$17 = /* @__PURE__ */ from_html(`<span> </span>`);
+var root_1$12 = /* @__PURE__ */ from_html(`<div class="overlay-columns"></div>`);
+var root_2$8 = /* @__PURE__ */ from_html(`<span class="overlay-secondary"> </span>`);
+var root_3$7 = /* @__PURE__ */ from_html(`<span class="overlay-secondary overlay-disabled-reason"> </span>`);
+var root_4$6 = /* @__PURE__ */ from_html(`<small> </small>`);
+var root_5$5 = /* @__PURE__ */ from_html(`<button class="overlay-secondary-action">↗</button>`);
+var root_6$5 = /* @__PURE__ */ from_html(`<div><button role="option"><span class="overlay-primary"><!> </span> <!> <!> <!></button> <!></div>`);
+var root_7$5 = /* @__PURE__ */ from_html(`<p class="overlay-empty">No matching entries</p>`);
+var root_8$4 = /* @__PURE__ */ from_html(`<footer> </footer>`);
+var root_9$3 = /* @__PURE__ */ from_html(`<div class="overlay-scrim" role="presentation"><div class="overlay-panel" role="dialog" aria-modal="true" tabindex="-1"><header><div><small> </small><h2> </h2></div> <button class="overlay-close">×</button></header> <input class="overlay-query" type="search" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-haspopup="listbox" autocomplete="off" spellcheck="false"/> <!> <div class="overlay-items" role="listbox"></div> <!></div></div>`);
 function OverlayLayer($$anchor, $$props) {
 	push($$props, true);
 	let queryInput;
 	let panel;
+	let opener = null;
 	const dispatch = dispatchUi();
-	onMount(() => queryInput?.focus());
+	onMount(() => {
+		opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		queryInput?.focus();
+	});
+	onDestroy(() => {
+		const active = document.activeElement;
+		if (opener?.isConnected && (active === document.body || active === null || active instanceof Node && panel?.contains(active))) opener.focus();
+	});
 	function select(itemId) {
 		dispatch({
 			type: "set_overlay_selection",
@@ -5285,7 +5602,7 @@ function OverlayLayer($$anchor, $$props) {
 				type: "move_overlay_selection",
 				delta: event.key === "ArrowDown" ? 1 : -1
 			});
-		} else if (event.key === "Enter") {
+		} else if (event.key === "Enter" && event.target === queryInput) {
 			event.preventDefault();
 			dispatch({
 				type: "choose_overlay",
@@ -5300,7 +5617,7 @@ function OverlayLayer($$anchor, $$props) {
 			focusable[next]?.focus();
 		}
 	}
-	var div = root_9$2();
+	var div = root_9$3();
 	var div_1 = child(div);
 	var header = child(div_1);
 	var div_2 = child(header);
@@ -5316,9 +5633,9 @@ function OverlayLayer($$anchor, $$props) {
 	bind_this(input, ($$value) => queryInput = $$value, () => queryInput);
 	var node = sibling(input, 2);
 	var consequent = ($$anchor) => {
-		var div_3 = root_1$8();
+		var div_3 = root_1$12();
 		each(div_3, 21, () => $$props.model.columns, index, ($$anchor, column) => {
-			var span = root$15();
+			var span = root$17();
 			var text_2 = only_child(span, true);
 			template_effect(() => set_text(text_2, get(column)));
 			append($$anchor, span);
@@ -5332,7 +5649,7 @@ function OverlayLayer($$anchor, $$props) {
 	});
 	var div_4 = sibling(node, 2);
 	each(div_4, 23, () => $$props.model.items, (item, index) => `${item.category}:${item.primary}:${index}`, ($$anchor, item, index) => {
-		var div_5 = root_6$4();
+		var div_5 = root_6$5();
 		let classes;
 		var button_1 = child(div_5);
 		var span_1 = child(button_1);
@@ -5349,7 +5666,7 @@ function OverlayLayer($$anchor, $$props) {
 		reset(span_1);
 		var node_2 = sibling(span_1, 2);
 		var consequent_2 = ($$anchor) => {
-			var span_2 = root_2$6();
+			var span_2 = root_2$8();
 			var text_5 = only_child(span_2, true);
 			template_effect(() => set_text(text_5, get(item).secondary));
 			append($$anchor, span_2);
@@ -5359,7 +5676,7 @@ function OverlayLayer($$anchor, $$props) {
 		});
 		var node_3 = sibling(node_2, 2);
 		var consequent_3 = ($$anchor) => {
-			var span_3 = root_3$4();
+			var span_3 = root_3$7();
 			var text_6 = only_child(span_3, true);
 			template_effect(() => {
 				set_attribute(span_3, "id", `overlay-reason-${get(item).id}`);
@@ -5372,7 +5689,7 @@ function OverlayLayer($$anchor, $$props) {
 		});
 		var node_4 = sibling(node_3, 2);
 		var consequent_4 = ($$anchor) => {
-			var small_1 = root_4$4();
+			var small_1 = root_4$6();
 			var text_7 = only_child(small_1, true);
 			template_effect(() => set_text(text_7, get(item).meta));
 			append($$anchor, small_1);
@@ -5383,7 +5700,7 @@ function OverlayLayer($$anchor, $$props) {
 		reset(button_1);
 		var node_5 = sibling(button_1, 2);
 		var consequent_5 = ($$anchor) => {
-			var button_2 = root_5$4();
+			var button_2 = root_5$5();
 			template_effect(() => {
 				set_attribute(button_2, "data-focus-key", `overlay:${$$props.model.id}:item:${get(item).id}:alternate`);
 				set_attribute(button_2, "aria-label", `Alternate action for ${get(item).primary}`);
@@ -5401,6 +5718,7 @@ function OverlayLayer($$anchor, $$props) {
 				header: get(item).header
 			});
 			set_style(div_5, `--depth:${get(item).depth}`);
+			set_attribute(button_1, "id", `overlay-option-${$$props.model.id}-${get(index)}`);
 			set_attribute(button_1, "aria-selected", $1);
 			set_attribute(button_1, "aria-describedby", get(item).disabled_reason ? `overlay-reason-${get(item).id}` : void 0);
 			set_attribute(button_1, "data-focus-key", `overlay:${$$props.model.id}:item:${get(item).id}`);
@@ -5411,12 +5729,12 @@ function OverlayLayer($$anchor, $$props) {
 		event("pointerenter", button_1, () => select(get(item).id));
 		append($$anchor, div_5);
 	}, ($$anchor) => {
-		append($$anchor, root_7$3());
+		append($$anchor, root_7$5());
 	});
 	reset(div_4);
 	var node_6 = sibling(div_4, 2);
 	var consequent_6 = ($$anchor) => {
-		var footer = root_8$3();
+		var footer = root_8$4();
 		var text_8 = only_child(footer, true);
 		template_effect(() => set_text(text_8, $$props.model.hint));
 		append($$anchor, footer);
@@ -5427,7 +5745,7 @@ function OverlayLayer($$anchor, $$props) {
 	reset(div_1);
 	bind_this(div_1, ($$value) => panel = $$value, () => panel);
 	reset(div);
-	template_effect(() => {
+	template_effect(($0) => {
 		set_attribute(div_1, "aria-labelledby", `overlay-title-${$$props.model.id}`);
 		set_text(text$1, $$props.model.widget);
 		set_attribute(h2, "id", `overlay-title-${$$props.model.id}`);
@@ -5436,8 +5754,11 @@ function OverlayLayer($$anchor, $$props) {
 		set_attribute(input, "data-focus-key", `overlay:${$$props.model.id}:query`);
 		set_value(input, $$props.model.query);
 		set_attribute(input, "aria-label", `Filter ${$$props.model.title}`);
+		set_attribute(input, "aria-controls", `overlay-options-${$$props.model.id}`);
+		set_attribute(input, "aria-activedescendant", $0);
+		set_attribute(div_4, "id", `overlay-options-${$$props.model.id}`);
 		set_attribute(div_4, "aria-label", $$props.model.title);
-	});
+	}, [() => $$props.model.selected >= 0n && $$props.model.selected < BigInt($$props.model.items.length) ? `overlay-option-${$$props.model.id}-${$$props.model.selected}` : void 0]);
 	delegated("click", div, (event) => event.target === event.currentTarget && dispatch({ type: "close_overlay" }));
 	delegated("keydown", div_1, handleKey);
 	delegated("click", button, () => dispatch({ type: "close_overlay" }));
@@ -7100,7 +7421,7 @@ function colorValue(value) {
 }
 //#endregion
 //#region browser/app/AmbientLayer.svelte
-var root$14 = /* @__PURE__ */ from_html(`<div class="ambient-layer" aria-hidden="true"><canvas></canvas></div>`);
+var root$16 = /* @__PURE__ */ from_html(`<div class="ambient-layer" aria-hidden="true"><canvas></canvas></div>`);
 function AmbientLayer($$anchor, $$props) {
 	push($$props, true);
 	let canvas;
@@ -7119,7 +7440,7 @@ function AmbientLayer($$anchor, $$props) {
 	user_effect(() => {
 		controller?.update($$props.scene, get(options));
 	});
-	var div = root$14();
+	var div = root$16();
 	bind_this(child(div), ($$value) => canvas = $$value, () => canvas);
 	reset(div);
 	template_effect(() => set_style(div, `--ambient-opacity:${$$props.ambient.opacity ?? 1}`));
@@ -7128,17 +7449,17 @@ function AmbientLayer($$anchor, $$props) {
 }
 //#endregion
 //#region browser/app/StatusBar.svelte
-var root$13 = /* @__PURE__ */ from_html(`<span> </span>`);
-var root_1$7 = /* @__PURE__ */ from_html(`<footer class="status-bar"><!> <span class="key-hint"> </span></footer>`);
+var root$15 = /* @__PURE__ */ from_html(`<span> </span>`);
+var root_1$11 = /* @__PURE__ */ from_html(`<footer class="status-bar"><!> <span class="key-hint"> </span></footer>`);
 function StatusBar($$anchor, $$props) {
 	push($$props, true);
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var footer = root_1$7();
+		var footer = root_1$11();
 		var node_1 = child(footer);
 		each(node_1, 17, () => $$props.model.segments, index, ($$anchor, segment) => {
-			var span = root$13();
+			var span = root$15();
 			let classes;
 			var text = only_child(span);
 			template_effect(() => {
@@ -7161,10 +7482,12 @@ function StatusBar($$anchor, $$props) {
 }
 //#endregion
 //#region browser/app/SystemBar.svelte
-var root$12 = /* @__PURE__ */ from_html(`<header class="system-bar"><div class="brand" aria-label="RyeOS"><span class="brand-mark" aria-hidden="true">◇</span> <span> </span></div> <div class="system-context"><span class="presence">●</span> <span> </span> <span class="separator">/</span> <span> </span></div> <div class="system-state"><span> </span> <span class="transport"> </span></div></header>`);
+var root$14 = /* @__PURE__ */ from_html(`<button class="system-navigation" aria-controls="ryeos-navigation">Views</button>`);
+var root_1$10 = /* @__PURE__ */ from_html(`<header class="system-bar"><div class="brand" aria-label="RyeOS"><span class="brand-mark" aria-hidden="true">◇</span> <span> </span></div> <div class="system-context"><span class="presence">●</span> <span> </span> <span class="separator">/</span> <span title="Signed surface"> </span></div> <div class="system-state"><span> </span> <span class="transport"> </span> <!> <button class="system-launch" data-focus-key="shell:launch">Launch</button> <button class="system-commands" data-focus-key="shell:commands" aria-label="Open context commands" title="Context commands">⌘</button></div></header>`);
 function SystemBar($$anchor, $$props) {
 	push($$props, true);
-	var header = root$12();
+	const dispatch = dispatchUi();
+	var header = root_1$10();
 	var div = child(header);
 	var text = only_child(sibling(child(div), 2), true);
 	reset(div);
@@ -7179,60 +7502,163 @@ function SystemBar($$anchor, $$props) {
 	var text_3 = only_child(span_4, true);
 	var span_5 = sibling(span_4, 2);
 	var text_4 = only_child(span_5, true);
+	var node = sibling(span_5, 2);
+	var consequent = ($$anchor) => {
+		var button = root$14();
+		template_effect(() => set_attribute(button, "aria-expanded", $$props.navigationOpen));
+		delegated("click", button, (event) => $$props.onToggleNavigation(event.currentTarget));
+		append($$anchor, button);
+	};
+	if_block(node, ($$render) => {
+		if ($$props.navigationAvailable) $$render(consequent);
+	});
+	var button_1 = sibling(node, 2);
+	var button_2 = sibling(button_1, 2);
 	reset(div_2);
 	reset(header);
 	template_effect(() => {
 		set_text(text, $$props.chrome.title);
 		set_attribute(span_1, "data-tone", $$props.chrome.health_tone);
 		set_text(text_1, $$props.session.user_principal_id ?? "local");
-		set_text(text_2, $$props.session.project_path ?? $$props.session.surface_ref);
+		set_text(text_2, $$props.session.surface_ref);
 		set_text(text_3, $$props.chrome.health_label);
 		set_attribute(span_5, "data-freshness", $$props.transport.freshness);
 		set_text(text_4, $$props.transport.freshness);
 	});
+	delegated("click", button_1, () => dispatch({
+		type: "open_overlay",
+		overlay_id: "views"
+	}));
+	delegated("click", button_2, () => dispatch({
+		type: "open_overlay",
+		overlay_id: "commands"
+	}));
 	append($$anchor, header);
 	pop();
 }
+delegate(["click"]);
 //#endregion
 //#region browser/app/ViewSetStrip.svelte
-var root$11 = /* @__PURE__ */ from_html(`<span class="view-set-actions" role="group"><button title="Duplicate view set">⧉</button> <button title="Close view set">×</button></span>`);
-var root_1$6 = /* @__PURE__ */ from_html(`<div><button class="view-set-select"><span class="ordinal"> </span> <span> </span></button> <!></div>`);
-var root_2$5 = /* @__PURE__ */ from_html(`<nav class="view-set-strip" aria-label="View sets"><!> <button class="new-view-set" aria-label="New view set">＋</button></nav>`);
+var root$13 = /* @__PURE__ */ from_html(`<form class="view-set-rename"><input aria-label="View set name"/> <button type="submit" aria-label="Save view set name">✓</button> <button type="button" aria-label="Cancel rename">×</button></form>`);
+var root_1$9 = /* @__PURE__ */ from_html(`<button class="view-set-select"><span class="ordinal"> </span> <span> </span></button>`);
+var root_2$7 = /* @__PURE__ */ from_html(`<span class="view-set-actions" role="group"><button title="Rename view set">✎</button> <button title="Duplicate view set">⧉</button> <button title="Close view set">×</button></span>`);
+var root_3$6 = /* @__PURE__ */ from_html(`<div><!> <!></div>`);
+var root_4$5 = /* @__PURE__ */ from_html(`<nav class="view-set-strip" aria-label="View sets"><!> <button class="new-view-set" aria-label="New view set">＋</button> <div class="view-set-context" aria-label="Focused view and layout"><span> </span> <span aria-label="Layout"> </span></div></nav>`);
 function ViewSetStrip($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
+	let editingId = /* @__PURE__ */ state(null);
+	let draft = /* @__PURE__ */ state("");
+	let renameInput = /* @__PURE__ */ state(void 0);
+	async function beginRename(id, title) {
+		set(draft, title, true);
+		set(editingId, id, true);
+		await tick();
+		if (get(editingId) === id) {
+			get(renameInput)?.focus();
+			get(renameInput)?.select();
+		}
+	}
+	async function leaveRename() {
+		const id = get(editingId);
+		set(editingId, null);
+		await tick();
+		if (id !== null) document.querySelector(`[data-focus-key="view-set:${id}:select"]`)?.focus();
+	}
+	async function finishRename() {
+		const title = get(draft).trim();
+		if (get(editingId) !== null && title) dispatch({
+			type: "activate",
+			intent: {
+				type: "rename_view_set",
+				view_set_id: get(editingId),
+				title
+			}
+		});
+		await leaveRename();
+	}
+	user_effect(() => {
+		if (get(editingId) !== null && !$$props.model.tabs.some((tab) => tab.view_set_id === get(editingId) && tab.active)) set(editingId, null);
+	});
 	var fragment = comment();
 	var node = first_child(fragment);
-	var consequent_1 = ($$anchor) => {
-		var nav = root_2$5();
+	var consequent_2 = ($$anchor) => {
+		var nav = root_4$5();
 		var node_1 = child(nav);
 		each(node_1, 17, () => $$props.model.tabs, (tab) => tab.view_set_id, ($$anchor, tab) => {
-			var div = root_1$6();
+			var div = root_3$6();
 			let classes;
-			var button = child(div);
-			var span = child(button);
-			var text = only_child(span, true);
-			var text_1 = only_child(sibling(span, 2), true);
-			reset(button);
-			var node_2 = sibling(button, 2);
+			var node_2 = child(div);
 			var consequent = ($$anchor) => {
-				var span_2 = root$11();
-				var button_1 = child(span_2);
-				var button_2 = sibling(button_1, 2);
+				var form = root$13();
+				var input = child(form);
+				remove_input_defaults(input);
+				bind_this(input, ($$value) => set(renameInput, $$value), () => get(renameInput));
+				var button = sibling(input, 4);
+				reset(form);
+				template_effect(() => set_attribute(input, "data-focus-key", `view-set:${get(tab).view_set_id}:rename`));
+				event("submit", form, (event) => {
+					event.preventDefault();
+					finishRename();
+				});
+				delegated("keydown", input, (event) => {
+					event.stopPropagation();
+					if (event.key === "Escape") {
+						event.preventDefault();
+						leaveRename();
+					}
+				});
+				bind_value(input, () => get(draft), ($$value) => set(draft, $$value));
+				delegated("click", button, leaveRename);
+				append($$anchor, form);
+			};
+			var alternate = ($$anchor) => {
+				var button_1 = root_1$9();
+				var span = child(button_1);
+				var text = only_child(span, true);
+				var text_1 = only_child(sibling(span, 2), true);
+				reset(button_1);
+				template_effect(($0) => {
+					set_attribute(button_1, "data-focus-key", `view-set:${get(tab).view_set_id}:select`);
+					set_attribute(button_1, "aria-current", get(tab).active ? "page" : void 0);
+					set_text(text, $0);
+					set_text(text_1, get(tab).title);
+				}, [() => String(get(tab).number).padStart(2, "0")]);
+				delegated("click", button_1, () => dispatch({
+					type: "activate",
+					intent: {
+						type: "select_view_set",
+						view_set_id: get(tab).view_set_id
+					}
+				}));
+				append($$anchor, button_1);
+			};
+			if_block(node_2, ($$render) => {
+				if (get(editingId) === get(tab).view_set_id) $$render(consequent);
+				else $$render(alternate, -1);
+			});
+			var node_3 = sibling(node_2, 2);
+			var consequent_1 = ($$anchor) => {
+				var span_2 = root_2$7();
+				var button_2 = child(span_2);
+				var button_3 = sibling(button_2, 2);
+				var button_4 = sibling(button_3, 2);
 				reset(span_2);
 				template_effect(() => {
 					set_attribute(span_2, "aria-label", `${get(tab).title} view-set actions`);
-					set_attribute(button_1, "aria-label", `Duplicate ${get(tab).title}`);
-					set_attribute(button_2, "aria-label", `Close ${get(tab).title}`);
+					set_attribute(button_2, "aria-label", `Rename ${get(tab).title}`);
+					set_attribute(button_3, "aria-label", `Duplicate ${get(tab).title}`);
+					set_attribute(button_4, "aria-label", `Close ${get(tab).title}`);
 				});
-				delegated("click", button_1, () => dispatch({
+				delegated("click", button_2, () => beginRename(get(tab).view_set_id, get(tab).title));
+				delegated("click", button_3, () => dispatch({
 					type: "activate",
 					intent: {
 						type: "duplicate_view_set",
 						view_set_id: get(tab).view_set_id
 					}
 				}));
-				delegated("click", button_2, () => dispatch({
+				delegated("click", button_4, () => dispatch({
 					type: "activate",
 					intent: {
 						type: "close_view_set",
@@ -7241,45 +7667,43 @@ function ViewSetStrip($$anchor, $$props) {
 				}));
 				append($$anchor, span_2);
 			};
-			if_block(node_2, ($$render) => {
-				if (get(tab).active) $$render(consequent);
+			if_block(node_3, ($$render) => {
+				if (get(tab).active) $$render(consequent_1);
 			});
 			reset(div);
-			template_effect(($0) => {
-				classes = set_class(div, 1, "view-set-tab", null, classes, { active: get(tab).active });
-				set_attribute(button, "aria-current", get(tab).active ? "page" : void 0);
-				set_text(text, $0);
-				set_text(text_1, get(tab).title);
-			}, [() => String(get(tab).number).padStart(2, "0")]);
-			delegated("click", button, () => dispatch({
-				type: "activate",
-				intent: {
-					type: "select_view_set",
-					view_set_id: get(tab).view_set_id
-				}
-			}));
+			template_effect(() => classes = set_class(div, 1, "view-set-tab", null, classes, { active: get(tab).active }));
 			append($$anchor, div);
 		});
-		var button_3 = sibling(node_1, 2);
+		var button_5 = sibling(node_1, 2);
+		var div_1 = sibling(button_5, 2);
+		var span_3 = child(div_1);
+		var text_2 = only_child(span_3, true);
+		var text_3 = only_child(sibling(span_3, 2), true);
+		reset(div_1);
 		reset(nav);
-		delegated("click", button_3, () => dispatch({
+		template_effect(() => {
+			set_attribute(span_3, "title", $$props.model.focused_title);
+			set_text(text_2, $$props.model.focused_title);
+			set_text(text_3, $$props.model.layout_symbol);
+		});
+		delegated("click", button_5, () => dispatch({
 			type: "activate",
 			intent: { type: "new_view_set" }
 		}));
 		append($$anchor, nav);
 	};
 	if_block(node, ($$render) => {
-		if ($$props.model.visible) $$render(consequent_1);
+		if ($$props.model.visible) $$render(consequent_2);
 	});
 	append($$anchor, fragment);
 	pop();
 }
-delegate(["click"]);
+delegate(["keydown", "click"]);
 //#endregion
 //#region browser/components/InputComposer.svelte
-var root$10 = /* @__PURE__ */ from_html(`<div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div>`);
-var root_1$5 = /* @__PURE__ */ from_html(`<button>↑</button>`);
-var root_2$4 = /* @__PURE__ */ from_html(`<section><!> <textarea></textarea> <div class="composer-actions"><span> </span><!></div></section>`);
+var root$12 = /* @__PURE__ */ from_html(`<div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div>`);
+var root_1$8 = /* @__PURE__ */ from_html(`<button>↑</button>`);
+var root_2$6 = /* @__PURE__ */ from_html(`<section><!> <textarea></textarea> <div class="composer-actions"><span> </span><!></div></section>`);
 function InputComposer($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -7299,11 +7723,11 @@ function InputComposer($$anchor, $$props) {
 			}
 		});
 	}
-	var section = root_2$4();
+	var section = root_2$6();
 	let classes;
 	var node = child(section);
 	var consequent = ($$anchor) => {
-		var div = root$10();
+		var div = root$12();
 		var text_1 = only_child(sibling(child(div)), true);
 		next();
 		reset(div);
@@ -7320,8 +7744,11 @@ function InputComposer($$anchor, $$props) {
 	var text_2 = only_child(span_1, true);
 	var node_1 = sibling(span_1);
 	var consequent_1 = ($$anchor) => {
-		var button = root_1$5();
-		template_effect(() => button.disabled = !$$props.model.submit_enabled);
+		var button = root_1$8();
+		template_effect(() => {
+			set_attribute(button, "aria-label", `Send to ${$$props.model.route_label}`);
+			button.disabled = !$$props.model.submit_enabled;
+		});
 		delegated("click", button, () => dispatch({
 			type: "input_at",
 			address: $$props.model.address,
@@ -7382,6 +7809,422 @@ delegate([
 	"click"
 ]);
 //#endregion
+//#region browser/views/SceneView.svelte
+var root$11 = /* @__PURE__ */ from_html(`<button> </button>`);
+var root_1$7 = /* @__PURE__ */ from_html(`<div class="atlas-layers"></div> <div class="atlas-lenses" aria-label="Atlas lens"></div>`, 1);
+var root_2$5 = /* @__PURE__ */ from_html(`<div class="atlas-toolbar"><div class="atlas-identity"><strong> </strong><span> </span></div> <div class="atlas-projections" aria-label="Atlas projection"></div> <!></div>`);
+var root_3$5 = /* @__PURE__ */ from_svg(`<line></line>`);
+var root_4$4 = /* @__PURE__ */ from_svg(`<text> </text>`);
+var root_5$4 = /* @__PURE__ */ from_svg(`<polygon></polygon>`);
+var root_6$4 = /* @__PURE__ */ from_svg(`<rect></rect>`);
+var root_7$4 = /* @__PURE__ */ from_svg(`<circle></circle>`);
+var root_8$3 = /* @__PURE__ */ from_svg(`<title> </title>`);
+var root_9$2 = /* @__PURE__ */ from_svg(`<g><!><!></g>`);
+var root_10$2 = /* @__PURE__ */ from_svg(`<circle class="atlas-stack-item" r="0.055"><title> </title></circle>`);
+var root_11$1 = /* @__PURE__ */ from_svg(`<g><circle></circle><text> </text></g><!>`, 1);
+var root_12$1 = /* @__PURE__ */ from_svg(`<!><!>`, 1);
+var root_13$1 = /* @__PURE__ */ from_html(`<div class="scene-view"><!> <svg role="img" preserveAspectRatio="xMidYMid meet"><!><!></svg></div>`);
+function SceneView($$anchor, $$props) {
+	push($$props, true);
+	const dispatch = dispatchUi();
+	const points = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => [object.position, object.end].filter((point) => point != null)));
+	const bounds = /* @__PURE__ */ user_derived(() => {
+		const xs = get(points).map((point) => Number(point[0] ?? 0));
+		const ys = get(points).map((point) => -Number(point[1] ?? 0));
+		const minX = xs.length ? Math.min(...xs) : 0;
+		const maxX = xs.length ? Math.max(...xs) : 1;
+		const minY = ys.length ? Math.min(...ys) : 0;
+		const maxY = ys.length ? Math.max(...ys) : 1;
+		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
+		const width = Math.max(40, maxX - minX + 40) * scale;
+		const height = Math.max(30, maxY - minY + 30) * scale;
+		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${-Number($$props.scene.camera.target[1] ?? 0) - height / 2} ${width} ${height}`;
+	});
+	const accessibleLabel = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => object.label ? [object.label] : []).join("; ") || "Scene");
+	const activate = (intent) => intent && dispatch({
+		type: "activate",
+		intent
+	});
+	const radius = (object) => Math.max(1, Number(object.scale?.[0] ?? 5));
+	const x = (object) => Number(object.position?.[0] ?? 0);
+	const y = (object) => -Number(object.position?.[1] ?? 0);
+	const atlasNodes = /* @__PURE__ */ user_derived(() => new Map(($$props.scene.atlas?.nodes ?? []).map((node) => [node.id, node])));
+	const atlasBounds = /* @__PURE__ */ user_derived(() => {
+		const bounds = $$props.scene.atlas?.bounds;
+		if (!bounds) return "-10 -10 20 20";
+		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
+		const width = Math.max(4, bounds.x_max - bounds.x_min + 4) * scale;
+		const height = Math.max(4, bounds.z_max - bounds.z_min + 4) * scale;
+		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${Number($$props.scene.camera.target[2] ?? 0) - height / 2} ${width} ${height}`;
+	});
+	const atlasPoint = (position) => ({
+		x: Number(position[0] ?? 0),
+		y: Number(position[2] ?? position[1] ?? 0)
+	});
+	const actionById = /* @__PURE__ */ user_derived(() => new Map($$props.scene.actions.map((action) => [action.id, action])));
+	const actions = (group) => $$props.scene.actions.filter((action) => action.group === group);
+	const runAction = (action) => action && dispatch(action.event);
+	const keyAction = (event, action) => {
+		if (event.key === "Enter" || event.key === " ") {
+			event.preventDefault();
+			runAction(action);
+		}
+	};
+	var div = root_13$1();
+	var node_1 = child(div);
+	var consequent_1 = ($$anchor) => {
+		var div_1 = root_2$5();
+		var div_2 = child(div_1);
+		var strong = child(div_2);
+		var text = only_child(strong, true);
+		var text_1 = only_child(sibling(strong));
+		reset(div_2);
+		var div_3 = sibling(div_2, 2);
+		each(div_3, 21, () => actions("projection"), (action) => action.id, ($$anchor, action) => {
+			var button = root$11();
+			let classes;
+			var text_2 = only_child(button, true);
+			template_effect(() => {
+				set_attribute(button, "aria-pressed", get(action).active);
+				classes = set_class(button, 1, "", null, classes, { active: get(action).active });
+				set_text(text_2, get(action).label);
+			});
+			delegated("click", button, () => runAction(get(action)));
+			append($$anchor, button);
+		});
+		reset(div_3);
+		var node_2 = sibling(div_3, 2);
+		var consequent = ($$anchor) => {
+			var fragment = root_1$7();
+			var div_4 = first_child(fragment);
+			each(div_4, 21, () => actions("layer"), (action) => action.id, ($$anchor, action) => {
+				var button_1 = root$11();
+				let classes_1;
+				var text_3 = only_child(button_1, true);
+				template_effect(() => {
+					set_attribute(button_1, "aria-pressed", get(action).active);
+					classes_1 = set_class(button_1, 1, "", null, classes_1, { active: get(action).active });
+					set_text(text_3, get(action).label);
+				});
+				delegated("click", button_1, () => runAction(get(action)));
+				append($$anchor, button_1);
+			});
+			reset(div_4);
+			var div_5 = sibling(div_4, 2);
+			each(div_5, 21, () => actions("lens"), (action) => action.id, ($$anchor, action) => {
+				var button_2 = root$11();
+				let classes_2;
+				var text_4 = only_child(button_2, true);
+				template_effect(() => {
+					set_attribute(button_2, "aria-pressed", get(action).active);
+					classes_2 = set_class(button_2, 1, "", null, classes_2, { active: get(action).active });
+					set_text(text_4, get(action).label);
+				});
+				delegated("click", button_2, () => runAction(get(action)));
+				append($$anchor, button_2);
+			});
+			reset(div_5);
+			append($$anchor, fragment);
+		};
+		if_block(node_2, ($$render) => {
+			if ($$props.scene.atlas.projection === "ai_space") $$render(consequent);
+		});
+		reset(div_1);
+		template_effect(() => {
+			set_text(text, $$props.scene.atlas.root_label);
+			set_text(text_1, `${$$props.scene.atlas.nodes.length ?? ""} regions`);
+		});
+		append($$anchor, div_1);
+	};
+	if_block(node_1, ($$render) => {
+		if ($$props.scene.atlas) $$render(consequent_1);
+	});
+	var svg = sibling(node_1, 2);
+	let classes_3;
+	var node_3 = child(svg);
+	each(node_3, 17, () => $$props.scene.objects, (object) => object.id, ($$anchor, object) => {
+		const r = /* @__PURE__ */ user_derived(() => radius(get(object)));
+		const ox = /* @__PURE__ */ user_derived(() => x(get(object)));
+		const oy = /* @__PURE__ */ user_derived(() => y(get(object)));
+		const end = /* @__PURE__ */ user_derived(() => get(object).end);
+		var g = root_9$2();
+		let classes_4;
+		var node_4 = child(g);
+		var consequent_2 = ($$anchor) => {
+			var line = root_3$5();
+			template_effect(($0, $1) => {
+				set_attribute(line, "x1", get(ox));
+				set_attribute(line, "y1", get(oy));
+				set_attribute(line, "x2", $0);
+				set_attribute(line, "y2", $1);
+				set_attribute(line, "stroke", get(object).color);
+			}, [() => Number(get(end)[0] ?? 0), () => -Number(get(end)[1] ?? 0)]);
+			append($$anchor, line);
+		};
+		var consequent_3 = ($$anchor) => {
+			var text_5 = root_4$4();
+			var text_6 = only_child(text_5, true);
+			template_effect(() => {
+				set_attribute(text_5, "x", get(ox));
+				set_attribute(text_5, "y", get(oy));
+				set_attribute(text_5, "fill", get(object).color);
+				set_text(text_6, get(object).label ?? "");
+			});
+			append($$anchor, text_5);
+		};
+		var consequent_4 = ($$anchor) => {
+			var polygon = root_5$4();
+			template_effect(() => {
+				set_attribute(polygon, "points", `${get(ox)},${get(oy) - get(r)} ${get(ox) + get(r)},${get(oy)} ${get(ox)},${get(oy) + get(r)} ${get(ox) - get(r)},${get(oy)}`);
+				set_attribute(polygon, "stroke", get(object).color);
+			});
+			append($$anchor, polygon);
+		};
+		var consequent_5 = ($$anchor) => {
+			var rect = root_6$4();
+			template_effect(() => {
+				set_attribute(rect, "x", get(ox) - get(r));
+				set_attribute(rect, "y", get(oy) - get(r));
+				set_attribute(rect, "width", get(r) * 2);
+				set_attribute(rect, "height", get(r) * 2);
+				set_attribute(rect, "stroke", get(object).color);
+			});
+			append($$anchor, rect);
+		};
+		var alternate = ($$anchor) => {
+			var circle = root_7$4();
+			template_effect(() => {
+				set_attribute(circle, "cx", get(ox));
+				set_attribute(circle, "cy", get(oy));
+				set_attribute(circle, "r", get(r));
+				set_attribute(circle, "stroke", get(object).color);
+			});
+			append($$anchor, circle);
+		};
+		if_block(node_4, ($$render) => {
+			if (get(end)) $$render(consequent_2);
+			else if (get(object).kind === "text") $$render(consequent_3, 1);
+			else if (get(object).glyph === "diamond") $$render(consequent_4, 2);
+			else if (get(object).glyph === "square") $$render(consequent_5, 3);
+			else $$render(alternate, -1);
+		});
+		var node_5 = sibling(node_4);
+		var consequent_6 = ($$anchor) => {
+			var title = root_8$3();
+			var text_7 = only_child(title, true);
+			template_effect(() => set_text(text_7, get(object).label));
+			append($$anchor, title);
+		};
+		if_block(node_5, ($$render) => {
+			if (get(object).label && get(object).kind !== "text") $$render(consequent_6);
+		});
+		reset(g);
+		template_effect(() => {
+			set_attribute(g, "data-tone", get(object).tone);
+			set_attribute(g, "opacity", get(object).opacity);
+			set_attribute(g, "role", get(object).intent ? "button" : void 0);
+			set_attribute(g, "tabindex", get(object).intent ? 0 : void 0);
+			classes_4 = set_class(g, 0, "", null, classes_4, { interactive: get(object).intent != null });
+		});
+		delegated("click", g, () => activate(get(object).intent));
+		delegated("keydown", g, (event) => {
+			if (event.key === "Enter" || event.key === " ") {
+				event.preventDefault();
+				activate(get(object).intent);
+			}
+		});
+		append($$anchor, g);
+	});
+	var node_6 = sibling(node_3);
+	var consequent_8 = ($$anchor) => {
+		var fragment_1 = root_12$1();
+		var node_7 = first_child(fragment_1);
+		each(node_7, 17, () => $$props.scene.atlas.links, (link) => link.id, ($$anchor, link) => {
+			const from = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).from));
+			const to = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).to));
+			var fragment_2 = comment();
+			var node_8 = first_child(fragment_2);
+			var consequent_7 = ($$anchor) => {
+				const start = /* @__PURE__ */ user_derived(() => atlasPoint(get(from).position));
+				const end = /* @__PURE__ */ user_derived(() => atlasPoint(get(to).position));
+				var line_1 = root_3$5();
+				template_effect(() => {
+					set_attribute(line_1, "x1", get(start).x);
+					set_attribute(line_1, "y1", get(start).y);
+					set_attribute(line_1, "x2", get(end).x);
+					set_attribute(line_1, "y2", get(end).y);
+					set_attribute(line_1, "data-kind", get(link).kind);
+				});
+				append($$anchor, line_1);
+			};
+			if_block(node_8, ($$render) => {
+				if (get(from) && get(to)) $$render(consequent_7);
+			});
+			append($$anchor, fragment_2);
+		});
+		each(sibling(node_7), 17, () => $$props.scene.atlas.nodes, (node) => node.id, ($$anchor, node) => {
+			const point = /* @__PURE__ */ user_derived(() => atlasPoint(get(node).position));
+			const nodeAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`node:${get(node).id}`));
+			var fragment_3 = root_11$1();
+			var g_1 = first_child(fragment_3);
+			let classes_5;
+			var circle_1 = child(g_1);
+			var text_8 = sibling(circle_1);
+			var text_9 = only_child(text_8, true);
+			reset(g_1);
+			each(sibling(g_1), 19, () => get(node).stack.slice(0, 4), (item) => item.id, ($$anchor, item, index) => {
+				const itemAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`item:${get(item).id}`));
+				var circle_2 = root_10$2();
+				var text_10 = only_child(child(circle_2), true);
+				reset(circle_2);
+				template_effect(() => {
+					set_attribute(circle_2, "data-kind", get(item).kind);
+					set_attribute(circle_2, "cx", get(point).x + get(index) * .11);
+					set_attribute(circle_2, "cy", get(point).y - .24);
+					set_attribute(circle_2, "role", get(itemAction) ? "button" : void 0);
+					set_attribute(circle_2, "tabindex", get(itemAction) ? 0 : void 0);
+					set_text(text_10, get(item).canonical_ref);
+				});
+				delegated("click", circle_2, () => runAction(get(itemAction)));
+				delegated("keydown", circle_2, (event) => keyAction(event, get(itemAction)));
+				append($$anchor, circle_2);
+			});
+			template_effect(($0) => {
+				classes_5 = set_class(g_1, 0, "atlas-node", null, classes_5, {
+					selected: get(node).state.selected,
+					highlighted: get(node).state.highlighted,
+					dimmed: get(node).state.dimmed
+				});
+				set_attribute(g_1, "role", get(nodeAction) ? "button" : void 0);
+				set_attribute(g_1, "tabindex", get(nodeAction) ? 0 : void 0);
+				set_attribute(circle_1, "cx", get(point).x);
+				set_attribute(circle_1, "cy", get(point).y);
+				set_attribute(circle_1, "r", $0);
+				set_attribute(text_8, "x", get(point).x + .28);
+				set_attribute(text_8, "y", get(point).y + .08);
+				set_text(text_9, get(node).label);
+			}, [() => Math.max(.18, .16 + get(node).stack.length * .045)]);
+			delegated("click", g_1, () => runAction(get(nodeAction)));
+			delegated("keydown", g_1, (event) => keyAction(event, get(nodeAction)));
+			append($$anchor, fragment_3);
+		});
+		append($$anchor, fragment_1);
+	};
+	if_block(node_6, ($$render) => {
+		if ($$props.scene.atlas) $$render(consequent_8);
+	});
+	reset(svg);
+	reset(div);
+	template_effect(() => {
+		set_attribute(svg, "viewBox", $$props.scene.atlas ? get(atlasBounds) : get(bounds));
+		set_attribute(svg, "aria-label", $$props.scene.atlas ? `${$$props.scene.atlas.root_label} atlas` : get(accessibleLabel));
+		classes_3 = set_class(svg, 0, "", null, classes_3, { "atlas-canvas": $$props.scene.atlas != null });
+	});
+	append($$anchor, div);
+	pop();
+}
+delegate(["click", "keydown"]);
+//#endregion
+//#region browser/components/ViewSupplement.svelte
+var root$10 = /* @__PURE__ */ from_html(`<section class="view-supplement-scene" aria-label="View topology"><!></section>`);
+var root_1$6 = /* @__PURE__ */ from_html(`<header> </header>`);
+var root_2$4 = /* @__PURE__ */ from_html(`<div><span> </span><code> </code></div>`);
+var root_3$4 = /* @__PURE__ */ from_html(`<section class="view-supplement-excerpt"><!> <div class="view-supplement-code"></div></section>`);
+var root_4$3 = /* @__PURE__ */ from_html(`<strong> </strong>`);
+var root_5$3 = /* @__PURE__ */ from_html(`<div><span> </span><small> </small></div>`);
+var root_6$3 = /* @__PURE__ */ from_html(`<footer class="view-supplement-footer"><!> <!></footer>`);
+var root_7$3 = /* @__PURE__ */ from_html(`<!> <!>`, 1);
+function ViewSupplement($$anchor, $$props) {
+	push($$props, true);
+	var fragment = comment();
+	var node = first_child(fragment);
+	var consequent = ($$anchor) => {
+		var section = root$10();
+		SceneView(child(section), { get scene() {
+			return $$props.model.scene;
+		} });
+		reset(section);
+		append($$anchor, section);
+	};
+	var consequent_5 = ($$anchor) => {
+		var fragment_1 = root_7$3();
+		var node_2 = first_child(fragment_1);
+		var consequent_2 = ($$anchor) => {
+			var section_1 = root_3$4();
+			var node_3 = child(section_1);
+			var consequent_1 = ($$anchor) => {
+				var header = root_1$6();
+				var text = only_child(header, true);
+				template_effect(() => set_text(text, $$props.model.excerpt_title));
+				append($$anchor, header);
+			};
+			if_block(node_3, ($$render) => {
+				if ($$props.model.excerpt_title) $$render(consequent_1);
+			});
+			var div = sibling(node_3, 2);
+			each(div, 21, () => $$props.model.excerpt, index, ($$anchor, row) => {
+				var div_1 = root_2$4();
+				var span = child(div_1);
+				var text_1 = only_child(span, true);
+				var text_2 = only_child(sibling(span), true);
+				reset(div_1);
+				template_effect(() => {
+					set_attribute(div_1, "data-tone", get(row).tone);
+					set_text(text_1, get(row).field);
+					set_text(text_2, get(row).value);
+				});
+				append($$anchor, div_1);
+			});
+			reset(div);
+			reset(section_1);
+			template_effect(() => set_attribute(section_1, "aria-label", $$props.model.excerpt_title || "Excerpt"));
+			append($$anchor, section_1);
+		};
+		if_block(node_2, ($$render) => {
+			if ($$props.model.excerpt.length) $$render(consequent_2);
+		});
+		var node_4 = sibling(node_2, 2);
+		var consequent_4 = ($$anchor) => {
+			var footer = root_6$3();
+			var node_5 = child(footer);
+			var consequent_3 = ($$anchor) => {
+				var strong = root_4$3();
+				var text_3 = only_child(strong, true);
+				template_effect(() => set_text(text_3, $$props.model.footer));
+				append($$anchor, strong);
+			};
+			if_block(node_5, ($$render) => {
+				if ($$props.model.footer) $$render(consequent_3);
+			});
+			each(sibling(node_5, 2), 17, () => $$props.model.footer_rows, index, ($$anchor, row) => {
+				var div_2 = root_5$3();
+				var span_1 = child(div_2);
+				var text_4 = only_child(span_1, true);
+				var text_5 = only_child(sibling(span_1), true);
+				reset(div_2);
+				template_effect(() => {
+					set_attribute(div_2, "data-tone", get(row).tone);
+					set_text(text_4, get(row).field);
+					set_text(text_5, get(row).value);
+				});
+				append($$anchor, div_2);
+			});
+			reset(footer);
+			append($$anchor, footer);
+		};
+		if_block(node_4, ($$render) => {
+			if ($$props.model.footer || $$props.model.footer_rows.length) $$render(consequent_4);
+		});
+		append($$anchor, fragment_1);
+	};
+	if_block(node, ($$render) => {
+		if ($$props.phase === "content" && $$props.model.scene) $$render(consequent);
+		else if ($$props.phase === "footer") $$render(consequent_5, 1);
+	});
+	append($$anchor, fragment);
+	pop();
+}
+//#endregion
 //#region browser/components/EmptyState.svelte
 var root$9 = /* @__PURE__ */ from_html(`<div class="empty-state"><span>◇</span><strong> </strong><p> </p></div>`);
 function EmptyState($$anchor, $$props) {
@@ -7395,6 +8238,40 @@ function EmptyState($$anchor, $$props) {
 		set_text(text_1, $$props.message);
 	});
 	append($$anchor, div);
+}
+//#endregion
+//#region browser/components/RowDetails.svelte
+var root$8 = /* @__PURE__ */ from_html(`<div><dt> </dt> <dd> </dd></div>`);
+var root_1$5 = /* @__PURE__ */ from_html(`<dl class="row-details"></dl>`);
+function RowDetails($$anchor, $$props) {
+	push($$props, true);
+	let label = prop($$props, "label", 3, "Details");
+	var fragment = comment();
+	var node = first_child(fragment);
+	var consequent = ($$anchor) => {
+		var dl = root_1$5();
+		each(dl, 23, () => $$props.details, (detail, index) => `${detail.field}:${index}`, ($$anchor, detail) => {
+			var div = root$8();
+			var dt = child(div);
+			var text = only_child(dt, true);
+			var text_1 = only_child(sibling(dt, 2), true);
+			reset(div);
+			template_effect(() => {
+				set_attribute(div, "data-tone", get(detail).tone ?? void 0);
+				set_text(text, get(detail).field || "detail");
+				set_text(text_1, get(detail).value);
+			});
+			append($$anchor, div);
+		});
+		reset(dl);
+		template_effect(() => set_attribute(dl, "aria-label", label()));
+		append($$anchor, dl);
+	};
+	if_block(node, ($$render) => {
+		if ($$props.details.length) $$render(consequent);
+	});
+	append($$anchor, fragment);
+	pop();
 }
 //#endregion
 //#region browser/visuals/ryeos_field_accessibility.js
@@ -8126,7 +9003,7 @@ function contrastingTextColor(color) {
 }
 //#endregion
 //#region browser/views/GridPreview.svelte
-var root$8 = /* @__PURE__ */ from_html(`<figure class="field-preview"><figcaption> </figcaption> <canvas></canvas></figure>`);
+var root$7 = /* @__PURE__ */ from_html(`<figure class="field-preview"><figcaption> </figcaption> <canvas></canvas></figure>`);
 function GridPreview($$anchor, $$props) {
 	push($$props, true);
 	let canvas;
@@ -8135,7 +9012,7 @@ function GridPreview($$anchor, $$props) {
 	user_effect(() => {
 		if (canvas) drawIndexedGrid(canvas, $$props.preview, { scale: 9 });
 	});
-	var figure = root$8();
+	var figure = root$7();
 	var figcaption = child(figure);
 	var text = only_child(figcaption, true);
 	var canvas_1 = sibling(figcaption, 2);
@@ -8155,13 +9032,13 @@ function GridPreview($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/views/FieldView.svelte
-var root$7 = /* @__PURE__ */ from_html(`<button> </button>`);
+var root$6 = /* @__PURE__ */ from_html(`<button> </button>`);
 var root_1$4 = /* @__PURE__ */ from_html(`<button>Clear</button>`);
 var root_2$3 = /* @__PURE__ */ from_html(`<button> </button> <button> </button> <!>`, 1);
 var root_3$3 = /* @__PURE__ */ from_html(`<nav class="field-rail" aria-label="Durable execution events"></nav>`);
-var root_4$3 = /* @__PURE__ */ from_html(`<div role="treeitem" tabindex="-1"> </div>`);
-var root_5$3 = /* @__PURE__ */ from_html(`<strong> </strong><small> </small> <!> <!>`, 1);
-var root_6$3 = /* @__PURE__ */ from_html(`<small class="field-warning"> </small>`);
+var root_4$2 = /* @__PURE__ */ from_html(`<div role="treeitem" tabindex="-1"> </div>`);
+var root_5$2 = /* @__PURE__ */ from_html(`<strong> </strong><small> </small> <!> <!> <!>`, 1);
+var root_6$2 = /* @__PURE__ */ from_html(`<small class="field-warning"> </small>`);
 var root_7$2 = /* @__PURE__ */ from_html(`<aside class="field-detail"><!> <!></aside>`);
 var root_8$2 = /* @__PURE__ */ from_html(`<section class="field-view"><header class="field-toolbar"><div class="field-identity"><strong> </strong><span> </span></div> <div class="field-controls"><button>◀</button> <button> </button> <button>▶</button> <button>Live</button> <!> <!> <!></div> <input type="search" placeholder="Search field" aria-label="Search field entities"/></header> <!> <div class="field-stage"><canvas aria-hidden="true"></canvas></div> <div class="field-accessibility" role="tree" tabindex="0"></div> <!></section>`);
 function FieldView($$anchor, $$props) {
@@ -8239,7 +9116,7 @@ function FieldView($$anchor, $$props) {
 	var button_3 = sibling(button_2, 2);
 	var node = sibling(button_3, 2);
 	each(node, 17, () => $$props.field.groups, (group) => group.id, ($$anchor, group) => {
-		var button_4 = root$7();
+		var button_4 = root$6();
 		var text_3 = only_child(button_4);
 		template_effect(() => set_text(text_3, `${get(group).collapsed ? "▸" : "▾"} ${get(group).label ?? ""}`));
 		delegated("click", button_4, () => dispatch({
@@ -8252,7 +9129,7 @@ function FieldView($$anchor, $$props) {
 	});
 	var node_1 = sibling(node, 2);
 	each(node_1, 17, () => $$props.field.layers, (layer) => layer.id, ($$anchor, layer) => {
-		var button_5 = root$7();
+		var button_5 = root$6();
 		var text_4 = only_child(button_5);
 		template_effect(() => {
 			set_attribute(button_5, "aria-pressed", get(layer).visible);
@@ -8313,7 +9190,7 @@ function FieldView($$anchor, $$props) {
 	var consequent_2 = ($$anchor) => {
 		var nav = root_3$3();
 		each(nav, 21, () => $$props.field.replay.rail, index, ($$anchor, entry) => {
-			var button_9 = root$7();
+			var button_9 = root$6();
 			let classes;
 			var text_7 = only_child(button_9, true);
 			template_effect(() => {
@@ -8342,7 +9219,7 @@ function FieldView($$anchor, $$props) {
 	reset(div_2);
 	var div_3 = sibling(div_2, 2);
 	each(div_3, 21, () => get(accessibilityItems), (item) => item.id, ($$anchor, item) => {
-		var div_4 = root_4$3();
+		var div_4 = root_4$2();
 		var text_8 = only_child(div_4);
 		template_effect(() => {
 			set_attribute(div_4, "id", get(item).domId);
@@ -8366,14 +9243,26 @@ function FieldView($$anchor, $$props) {
 		var aside = root_7$2();
 		var node_6 = child(aside);
 		var consequent_3 = ($$anchor) => {
-			var fragment_1 = root_5$3();
+			var fragment_1 = root_5$2();
 			var strong_1 = first_child(fragment_1);
 			var text_9 = only_child(strong_1, true);
 			var small = sibling(strong_1);
 			var text_10 = only_child(small, true);
 			var node_7 = sibling(small, 2);
-			each(node_7, 17, () => get(selectedRelations), (relation) => relation.id, ($$anchor, relation) => {
-				var button_10 = root$7();
+			{
+				let $0 = /* @__PURE__ */ user_derived(() => `${get(selected).label} details`);
+				RowDetails(node_7, {
+					get details() {
+						return get(selected).detail;
+					},
+					get label() {
+						return get($0);
+					}
+				});
+			}
+			var node_8 = sibling(node_7, 2);
+			each(node_8, 17, () => get(selectedRelations), (relation) => relation.id, ($$anchor, relation) => {
+				var button_10 = root$6();
 				var text_11 = only_child(button_10, true);
 				template_effect(() => {
 					button_10.disabled = !get(relation).activate_intent;
@@ -8385,7 +9274,7 @@ function FieldView($$anchor, $$props) {
 				}));
 				append($$anchor, button_10);
 			});
-			each(sibling(node_7, 2), 17, () => get(previews), (preview) => preview.id, ($$anchor, preview) => {
+			each(sibling(node_8, 2), 17, () => get(previews), (preview) => preview.id, ($$anchor, preview) => {
 				GridPreview($$anchor, {
 					get preview() {
 						return get(preview);
@@ -8410,7 +9299,7 @@ function FieldView($$anchor, $$props) {
 			if (get(selected)) $$render(consequent_3);
 		});
 		each(sibling(node_6, 2), 17, () => $$props.field.warnings, index, ($$anchor, warning) => {
-			var small_1 = root_6$3();
+			var small_1 = root_6$2();
 			var text_12 = only_child(small_1, true);
 			template_effect(() => set_text(text_12, get(warning)));
 			append($$anchor, small_1);
@@ -8515,345 +9404,35 @@ delegate([
 	"dblclick"
 ]);
 //#endregion
-//#region browser/views/SceneView.svelte
-var root$6 = /* @__PURE__ */ from_html(`<button> </button>`);
-var root_1$3 = /* @__PURE__ */ from_html(`<div class="atlas-layers"></div> <div class="atlas-lenses" aria-label="Atlas lens"></div>`, 1);
-var root_2$2 = /* @__PURE__ */ from_html(`<div class="atlas-toolbar"><div class="atlas-identity"><strong> </strong><span> </span></div> <div class="atlas-projections" aria-label="Atlas projection"></div> <!></div>`);
-var root_3$2 = /* @__PURE__ */ from_svg(`<line></line>`);
-var root_4$2 = /* @__PURE__ */ from_svg(`<text> </text>`);
-var root_5$2 = /* @__PURE__ */ from_svg(`<polygon></polygon>`);
-var root_6$2 = /* @__PURE__ */ from_svg(`<rect></rect>`);
-var root_7$1 = /* @__PURE__ */ from_svg(`<circle></circle>`);
-var root_8$1 = /* @__PURE__ */ from_svg(`<title> </title>`);
-var root_9$1 = /* @__PURE__ */ from_svg(`<g><!><!></g>`);
-var root_10$1 = /* @__PURE__ */ from_svg(`<circle class="atlas-stack-item" r="0.055"><title> </title></circle>`);
-var root_11$1 = /* @__PURE__ */ from_svg(`<g><circle></circle><text> </text></g><!>`, 1);
-var root_12$1 = /* @__PURE__ */ from_svg(`<!><!>`, 1);
-var root_13$1 = /* @__PURE__ */ from_html(`<div class="scene-view"><!> <svg role="img" preserveAspectRatio="xMidYMid meet"><!><!></svg></div>`);
-function SceneView($$anchor, $$props) {
-	push($$props, true);
-	const dispatch = dispatchUi();
-	const points = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => [object.position, object.end].filter((point) => point != null)));
-	const bounds = /* @__PURE__ */ user_derived(() => {
-		const xs = get(points).map((point) => Number(point[0] ?? 0));
-		const ys = get(points).map((point) => -Number(point[1] ?? 0));
-		const minX = xs.length ? Math.min(...xs) : 0;
-		const maxX = xs.length ? Math.max(...xs) : 1;
-		const minY = ys.length ? Math.min(...ys) : 0;
-		const maxY = ys.length ? Math.max(...ys) : 1;
-		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
-		const width = Math.max(40, maxX - minX + 40) * scale;
-		const height = Math.max(30, maxY - minY + 30) * scale;
-		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${-Number($$props.scene.camera.target[1] ?? 0) - height / 2} ${width} ${height}`;
-	});
-	const accessibleLabel = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => object.label ? [object.label] : []).join("; ") || "Scene");
-	const activate = (intent) => intent && dispatch({
-		type: "activate",
-		intent
-	});
-	const radius = (object) => Math.max(1, Number(object.scale?.[0] ?? 5));
-	const x = (object) => Number(object.position?.[0] ?? 0);
-	const y = (object) => -Number(object.position?.[1] ?? 0);
-	const atlasNodes = /* @__PURE__ */ user_derived(() => new Map(($$props.scene.atlas?.nodes ?? []).map((node) => [node.id, node])));
-	const atlasBounds = /* @__PURE__ */ user_derived(() => {
-		const bounds = $$props.scene.atlas?.bounds;
-		if (!bounds) return "-10 -10 20 20";
-		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
-		const width = Math.max(4, bounds.x_max - bounds.x_min + 4) * scale;
-		const height = Math.max(4, bounds.z_max - bounds.z_min + 4) * scale;
-		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${Number($$props.scene.camera.target[2] ?? 0) - height / 2} ${width} ${height}`;
-	});
-	const atlasPoint = (position) => ({
-		x: Number(position[0] ?? 0),
-		y: Number(position[2] ?? position[1] ?? 0)
-	});
-	const actionById = /* @__PURE__ */ user_derived(() => new Map($$props.scene.actions.map((action) => [action.id, action])));
-	const actions = (group) => $$props.scene.actions.filter((action) => action.group === group);
-	const runAction = (action) => action && dispatch(action.event);
-	const keyAction = (event, action) => {
-		if (event.key === "Enter" || event.key === " ") {
-			event.preventDefault();
-			runAction(action);
-		}
-	};
-	var div = root_13$1();
-	var node_1 = child(div);
-	var consequent_1 = ($$anchor) => {
-		var div_1 = root_2$2();
-		var div_2 = child(div_1);
-		var strong = child(div_2);
-		var text = only_child(strong, true);
-		var text_1 = only_child(sibling(strong));
-		reset(div_2);
-		var div_3 = sibling(div_2, 2);
-		each(div_3, 21, () => actions("projection"), (action) => action.id, ($$anchor, action) => {
-			var button = root$6();
-			let classes;
-			var text_2 = only_child(button, true);
-			template_effect(() => {
-				set_attribute(button, "aria-pressed", get(action).active);
-				classes = set_class(button, 1, "", null, classes, { active: get(action).active });
-				set_text(text_2, get(action).label);
-			});
-			delegated("click", button, () => runAction(get(action)));
-			append($$anchor, button);
-		});
-		reset(div_3);
-		var node_2 = sibling(div_3, 2);
-		var consequent = ($$anchor) => {
-			var fragment = root_1$3();
-			var div_4 = first_child(fragment);
-			each(div_4, 21, () => actions("layer"), (action) => action.id, ($$anchor, action) => {
-				var button_1 = root$6();
-				let classes_1;
-				var text_3 = only_child(button_1, true);
-				template_effect(() => {
-					set_attribute(button_1, "aria-pressed", get(action).active);
-					classes_1 = set_class(button_1, 1, "", null, classes_1, { active: get(action).active });
-					set_text(text_3, get(action).label);
-				});
-				delegated("click", button_1, () => runAction(get(action)));
-				append($$anchor, button_1);
-			});
-			reset(div_4);
-			var div_5 = sibling(div_4, 2);
-			each(div_5, 21, () => actions("lens"), (action) => action.id, ($$anchor, action) => {
-				var button_2 = root$6();
-				let classes_2;
-				var text_4 = only_child(button_2, true);
-				template_effect(() => {
-					set_attribute(button_2, "aria-pressed", get(action).active);
-					classes_2 = set_class(button_2, 1, "", null, classes_2, { active: get(action).active });
-					set_text(text_4, get(action).label);
-				});
-				delegated("click", button_2, () => runAction(get(action)));
-				append($$anchor, button_2);
-			});
-			reset(div_5);
-			append($$anchor, fragment);
-		};
-		if_block(node_2, ($$render) => {
-			if ($$props.scene.atlas.projection === "ai_space") $$render(consequent);
-		});
-		reset(div_1);
-		template_effect(() => {
-			set_text(text, $$props.scene.atlas.root_label);
-			set_text(text_1, `${$$props.scene.atlas.nodes.length ?? ""} regions`);
-		});
-		append($$anchor, div_1);
-	};
-	if_block(node_1, ($$render) => {
-		if ($$props.scene.atlas) $$render(consequent_1);
-	});
-	var svg = sibling(node_1, 2);
-	let classes_3;
-	var node_3 = child(svg);
-	each(node_3, 17, () => $$props.scene.objects, (object) => object.id, ($$anchor, object) => {
-		const r = /* @__PURE__ */ user_derived(() => radius(get(object)));
-		const ox = /* @__PURE__ */ user_derived(() => x(get(object)));
-		const oy = /* @__PURE__ */ user_derived(() => y(get(object)));
-		const end = /* @__PURE__ */ user_derived(() => get(object).end);
-		var g = root_9$1();
-		let classes_4;
-		var node_4 = child(g);
-		var consequent_2 = ($$anchor) => {
-			var line = root_3$2();
-			template_effect(($0, $1) => {
-				set_attribute(line, "x1", get(ox));
-				set_attribute(line, "y1", get(oy));
-				set_attribute(line, "x2", $0);
-				set_attribute(line, "y2", $1);
-				set_attribute(line, "stroke", get(object).color);
-			}, [() => Number(get(end)[0] ?? 0), () => -Number(get(end)[1] ?? 0)]);
-			append($$anchor, line);
-		};
-		var consequent_3 = ($$anchor) => {
-			var text_5 = root_4$2();
-			var text_6 = only_child(text_5, true);
-			template_effect(() => {
-				set_attribute(text_5, "x", get(ox));
-				set_attribute(text_5, "y", get(oy));
-				set_attribute(text_5, "fill", get(object).color);
-				set_text(text_6, get(object).label ?? "");
-			});
-			append($$anchor, text_5);
-		};
-		var consequent_4 = ($$anchor) => {
-			var polygon = root_5$2();
-			template_effect(() => {
-				set_attribute(polygon, "points", `${get(ox)},${get(oy) - get(r)} ${get(ox) + get(r)},${get(oy)} ${get(ox)},${get(oy) + get(r)} ${get(ox) - get(r)},${get(oy)}`);
-				set_attribute(polygon, "stroke", get(object).color);
-			});
-			append($$anchor, polygon);
-		};
-		var consequent_5 = ($$anchor) => {
-			var rect = root_6$2();
-			template_effect(() => {
-				set_attribute(rect, "x", get(ox) - get(r));
-				set_attribute(rect, "y", get(oy) - get(r));
-				set_attribute(rect, "width", get(r) * 2);
-				set_attribute(rect, "height", get(r) * 2);
-				set_attribute(rect, "stroke", get(object).color);
-			});
-			append($$anchor, rect);
-		};
-		var alternate = ($$anchor) => {
-			var circle = root_7$1();
-			template_effect(() => {
-				set_attribute(circle, "cx", get(ox));
-				set_attribute(circle, "cy", get(oy));
-				set_attribute(circle, "r", get(r));
-				set_attribute(circle, "stroke", get(object).color);
-			});
-			append($$anchor, circle);
-		};
-		if_block(node_4, ($$render) => {
-			if (get(end)) $$render(consequent_2);
-			else if (get(object).kind === "text") $$render(consequent_3, 1);
-			else if (get(object).glyph === "diamond") $$render(consequent_4, 2);
-			else if (get(object).glyph === "square") $$render(consequent_5, 3);
-			else $$render(alternate, -1);
-		});
-		var node_5 = sibling(node_4);
-		var consequent_6 = ($$anchor) => {
-			var title = root_8$1();
-			var text_7 = only_child(title, true);
-			template_effect(() => set_text(text_7, get(object).label));
-			append($$anchor, title);
-		};
-		if_block(node_5, ($$render) => {
-			if (get(object).label && get(object).kind !== "text") $$render(consequent_6);
-		});
-		reset(g);
-		template_effect(() => {
-			set_attribute(g, "data-tone", get(object).tone);
-			set_attribute(g, "opacity", get(object).opacity);
-			set_attribute(g, "role", get(object).intent ? "button" : void 0);
-			set_attribute(g, "tabindex", get(object).intent ? 0 : void 0);
-			classes_4 = set_class(g, 0, "", null, classes_4, { interactive: get(object).intent != null });
-		});
-		delegated("click", g, () => activate(get(object).intent));
-		delegated("keydown", g, (event) => {
-			if (event.key === "Enter" || event.key === " ") {
-				event.preventDefault();
-				activate(get(object).intent);
-			}
-		});
-		append($$anchor, g);
-	});
-	var node_6 = sibling(node_3);
-	var consequent_8 = ($$anchor) => {
-		var fragment_1 = root_12$1();
-		var node_7 = first_child(fragment_1);
-		each(node_7, 17, () => $$props.scene.atlas.links, (link) => link.id, ($$anchor, link) => {
-			const from = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).from));
-			const to = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).to));
-			var fragment_2 = comment();
-			var node_8 = first_child(fragment_2);
-			var consequent_7 = ($$anchor) => {
-				const start = /* @__PURE__ */ user_derived(() => atlasPoint(get(from).position));
-				const end = /* @__PURE__ */ user_derived(() => atlasPoint(get(to).position));
-				var line_1 = root_3$2();
-				template_effect(() => {
-					set_attribute(line_1, "x1", get(start).x);
-					set_attribute(line_1, "y1", get(start).y);
-					set_attribute(line_1, "x2", get(end).x);
-					set_attribute(line_1, "y2", get(end).y);
-					set_attribute(line_1, "data-kind", get(link).kind);
-				});
-				append($$anchor, line_1);
-			};
-			if_block(node_8, ($$render) => {
-				if (get(from) && get(to)) $$render(consequent_7);
-			});
-			append($$anchor, fragment_2);
-		});
-		each(sibling(node_7), 17, () => $$props.scene.atlas.nodes, (node) => node.id, ($$anchor, node) => {
-			const point = /* @__PURE__ */ user_derived(() => atlasPoint(get(node).position));
-			const nodeAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`node:${get(node).id}`));
-			var fragment_3 = root_11$1();
-			var g_1 = first_child(fragment_3);
-			let classes_5;
-			var circle_1 = child(g_1);
-			var text_8 = sibling(circle_1);
-			var text_9 = only_child(text_8, true);
-			reset(g_1);
-			each(sibling(g_1), 19, () => get(node).stack.slice(0, 4), (item) => item.id, ($$anchor, item, index) => {
-				const itemAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`item:${get(item).id}`));
-				var circle_2 = root_10$1();
-				var text_10 = only_child(child(circle_2), true);
-				reset(circle_2);
-				template_effect(() => {
-					set_attribute(circle_2, "data-kind", get(item).kind);
-					set_attribute(circle_2, "cx", get(point).x + get(index) * .11);
-					set_attribute(circle_2, "cy", get(point).y - .24);
-					set_attribute(circle_2, "role", get(itemAction) ? "button" : void 0);
-					set_attribute(circle_2, "tabindex", get(itemAction) ? 0 : void 0);
-					set_text(text_10, get(item).canonical_ref);
-				});
-				delegated("click", circle_2, () => runAction(get(itemAction)));
-				delegated("keydown", circle_2, (event) => keyAction(event, get(itemAction)));
-				append($$anchor, circle_2);
-			});
-			template_effect(($0) => {
-				classes_5 = set_class(g_1, 0, "atlas-node", null, classes_5, {
-					selected: get(node).state.selected,
-					highlighted: get(node).state.highlighted,
-					dimmed: get(node).state.dimmed
-				});
-				set_attribute(g_1, "role", get(nodeAction) ? "button" : void 0);
-				set_attribute(g_1, "tabindex", get(nodeAction) ? 0 : void 0);
-				set_attribute(circle_1, "cx", get(point).x);
-				set_attribute(circle_1, "cy", get(point).y);
-				set_attribute(circle_1, "r", $0);
-				set_attribute(text_8, "x", get(point).x + .28);
-				set_attribute(text_8, "y", get(point).y + .08);
-				set_text(text_9, get(node).label);
-			}, [() => Math.max(.18, .16 + get(node).stack.length * .045)]);
-			delegated("click", g_1, () => runAction(get(nodeAction)));
-			delegated("keydown", g_1, (event) => keyAction(event, get(nodeAction)));
-			append($$anchor, fragment_3);
-		});
-		append($$anchor, fragment_1);
-	};
-	if_block(node_6, ($$render) => {
-		if ($$props.scene.atlas) $$render(consequent_8);
-	});
-	reset(svg);
-	reset(div);
-	template_effect(() => {
-		set_attribute(svg, "viewBox", $$props.scene.atlas ? get(atlasBounds) : get(bounds));
-		set_attribute(svg, "aria-label", $$props.scene.atlas ? `${$$props.scene.atlas.root_label} atlas` : get(accessibleLabel));
-		classes_3 = set_class(svg, 0, "", null, classes_3, { "atlas-canvas": $$props.scene.atlas != null });
-	});
-	append($$anchor, div);
-	pop();
-}
-delegate(["click", "keydown"]);
-//#endregion
 //#region browser/views/ViewRenderer.svelte
 var root$5 = /* @__PURE__ */ from_html(`<div> </div>`);
-var root_1$2 = /* @__PURE__ */ from_html(`<div class="text-view"></div>`);
-var root_2$1 = /* @__PURE__ */ from_html(`<small>bounded preview</small>`);
-var root_3$1 = /* @__PURE__ */ from_html(`<article class="document-view"><header><span> </span><!></header> <pre> </pre></article>`);
+var root_1$3 = /* @__PURE__ */ from_html(`<div class="text-view"></div>`);
+var root_2$2 = /* @__PURE__ */ from_html(`<small>bounded preview</small>`);
+var root_3$2 = /* @__PURE__ */ from_html(`<article class="document-view"><header><span> </span><!></header> <pre> </pre></article>`);
 var root_4$1 = /* @__PURE__ */ from_html(`<small> </small>`);
 var root_5$1 = /* @__PURE__ */ from_html(`<span class="row-meta"> </span>`);
-var root_6$1 = /* @__PURE__ */ from_html(`<button><span class="row-glyph"> </span> <span class="row-copy"><strong> </strong><!></span> <!></button>`);
-var root_7 = /* @__PURE__ */ from_html(`<div class="rows-view" role="list"></div>`);
-var root_8 = /* @__PURE__ */ from_html(`<span role="columnheader"> </span>`);
-var root_9 = /* @__PURE__ */ from_html(`<span role="cell"> </span>`);
-var root_10 = /* @__PURE__ */ from_html(`<button role="row"></button>`);
-var root_11 = /* @__PURE__ */ from_html(`<div class="table-view" role="table"><div class="table-head" role="row"></div> <!></div>`);
-var root_12 = /* @__PURE__ */ from_html(`<p> </p>`);
-var root_13 = /* @__PURE__ */ from_html(`<strong> </strong><!>`, 1);
-var root_14 = /* @__PURE__ */ from_html(`<span> </span><!>`, 1);
-var root_15 = /* @__PURE__ */ from_html(`<span class="timeline-separator"> </span>`);
-var root_16 = /* @__PURE__ */ from_html(`<button><!></button>`);
-var root_17 = /* @__PURE__ */ from_html(`<div class="timeline-view"></div>`);
-var root_18 = /* @__PURE__ */ from_html(`<button><span> </span><small> </small></button>`);
-var root_19 = /* @__PURE__ */ from_html(`<section><button><span> </span><span> </span></button> <!></section>`);
-var root_20 = /* @__PURE__ */ from_html(`<div class="sections-view"></div>`);
-var root_21 = /* @__PURE__ */ from_html(`<div class="view"><!></div>`);
+var root_6$1 = /* @__PURE__ */ from_html(`<button class="row-disclosure"> </button>`);
+var root_7$1 = /* @__PURE__ */ from_html(`<div class="view-record" role="listitem"><div class="view-record-line"><button><span class="row-glyph"> </span> <span class="row-copy"><strong> </strong><!></span> <!></button> <!></div> <!></div>`);
+var root_8$1 = /* @__PURE__ */ from_html(`<div class="rows-view" role="list"></div>`);
+var root_9$1 = /* @__PURE__ */ from_html(`<span role="columnheader"> </span>`);
+var root_10$1 = /* @__PURE__ */ from_html(`<div role="cell"><button> </button></div>`);
+var root_11 = /* @__PURE__ */ from_html(`<div class="table-detail" role="row"><div role="cell"><!></div></div>`);
+var root_12 = /* @__PURE__ */ from_html(`<div class="table-record" role="rowgroup"><div role="row"><!> <div class="table-action-cell" role="cell"><!></div></div> <!></div>`);
+var root_13 = /* @__PURE__ */ from_html(`<div class="table-view" role="table"><div class="table-head" role="row"><!><span class="table-action-head" role="columnheader">detail</span></div> <!></div>`);
+var root_14 = /* @__PURE__ */ from_html(`<p> </p>`);
+var root_15 = /* @__PURE__ */ from_html(`<strong> </strong><!>`, 1);
+var root_16 = /* @__PURE__ */ from_html(`<span> </span><!>`, 1);
+var root_17 = /* @__PURE__ */ from_html(`<span class="timeline-separator"> </span>`);
+var root_18 = /* @__PURE__ */ from_html(`<div class="view-record"><div class="view-record-line"><button><!></button> <!></div> <!></div>`);
+var root_19 = /* @__PURE__ */ from_html(`<div class="timeline-view"></div>`);
+var root_20 = /* @__PURE__ */ from_html(`<div class="view-record"><div class="view-record-line"><button><span> </span><small> </small></button><!></div> <!></div>`);
+var root_21 = /* @__PURE__ */ from_html(`<section><button><span> </span><span> </span></button> <!></section>`);
+var root_22 = /* @__PURE__ */ from_html(`<div class="sections-view"></div>`);
+var root_23 = /* @__PURE__ */ from_html(`<button> </button>`);
+var root_24 = /* @__PURE__ */ from_html(`<div class="required-subject-actions" aria-label="Compatible current selections"></div>`);
+var root_25 = /* @__PURE__ */ from_html(`<p class="required-subject-waiting">Select a compatible subject in another open set.</p>`);
+var root_26 = /* @__PURE__ */ from_html(`<section class="required-subject" aria-live="polite"><span class="required-subject-kicker">Unresolved view</span> <h3> </h3> <p><strong> </strong> </p> <!></section>`);
+var root_27 = /* @__PURE__ */ from_html(`<div class="view"><!></div>`);
 function ViewRenderer($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -8866,10 +9445,20 @@ function ViewRenderer($$anchor, $$props) {
 			activate: true
 		});
 	};
-	var div = root_21();
+	const expand = (itemId, expanded) => dispatch({
+		type: "toggle_view_item_expansion",
+		instance_key: $$props.instanceKey,
+		item_id: itemId,
+		expand: !expanded
+	});
+	const expandTimeline = (index) => {
+		const itemId = $$props.model.type === "timeline" ? $$props.model.entry_ids[index] : void 0;
+		if (itemId) expand(itemId, $$props.model.type === "timeline" && ($$props.model.entry_expanded?.[index] ?? false));
+	};
+	var div = root_27();
 	var node = child(div);
 	var consequent = ($$anchor) => {
-		var div_1 = root_1$2();
+		var div_1 = root_1$3();
 		each(div_1, 21, () => $$props.model.lines, index, ($$anchor, line) => {
 			var div_2 = root$5();
 			var text = only_child(div_2, true);
@@ -8884,13 +9473,13 @@ function ViewRenderer($$anchor, $$props) {
 		append($$anchor, div_1);
 	};
 	var consequent_2 = ($$anchor) => {
-		var article = root_3$1();
+		var article = root_3$2();
 		var header = child(article);
 		var span = child(header);
 		var text_1 = only_child(span, true);
 		var node_1 = sibling(span);
 		var consequent_1 = ($$anchor) => {
-			append($$anchor, root_2$1());
+			append($$anchor, root_2$2());
 		};
 		if_block(node_1, ($$render) => {
 			if ($$props.model.truncated) $$render(consequent_1);
@@ -8905,10 +9494,12 @@ function ViewRenderer($$anchor, $$props) {
 		});
 		append($$anchor, article);
 	};
-	var consequent_5 = ($$anchor) => {
-		var div_3 = root_7();
-		each(div_3, 23, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
-			var button = root_6$1();
+	var consequent_7 = ($$anchor) => {
+		var div_3 = root_8$1();
+		each(div_3, 21, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
+			var div_4 = root_7$1();
+			var div_5 = child(div_4);
+			var button = child(div_5);
 			let classes;
 			var span_1 = child(button);
 			var text_3 = only_child(span_1, true);
@@ -8937,7 +9528,43 @@ function ViewRenderer($$anchor, $$props) {
 				if (get(row).meta) $$render(consequent_4);
 			});
 			reset(button);
+			var node_4 = sibling(button, 2);
+			var consequent_5 = ($$anchor) => {
+				var button_1 = root_6$1();
+				var text_7 = only_child(button_1, true);
+				template_effect(() => {
+					set_attribute(button_1, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} ${get(row).primary}`);
+					set_attribute(button_1, "aria-expanded", get(row).expanded);
+					set_text(text_7, get(row).expanded ? "▾" : "▸");
+				});
+				delegated("click", button_1, () => expand(get(row).id, get(row).expanded));
+				append($$anchor, button_1);
+			};
+			if_block(node_4, ($$render) => {
+				if (get(row).expandable) $$render(consequent_5);
+			});
+			reset(div_5);
+			var node_5 = sibling(div_5, 2);
+			var consequent_6 = ($$anchor) => {
+				{
+					let $0 = /* @__PURE__ */ user_derived(() => get(row).detail ?? []);
+					let $1 = /* @__PURE__ */ user_derived(() => `${get(row).primary} details`);
+					RowDetails($$anchor, {
+						get details() {
+							return get($0);
+						},
+						get label() {
+							return get($1);
+						}
+					});
+				}
+			};
+			if_block(node_5, ($$render) => {
+				if (get(row).expanded) $$render(consequent_6);
+			});
+			reset(div_4);
 			template_effect(() => {
+				set_attribute(div_4, "data-expanded", get(row).expanded);
 				set_attribute(button, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
 				set_attribute(button, "data-tone", get(row).tone);
 				classes = set_class(button, 1, "", null, classes, { selected: get(row).selected });
@@ -8945,180 +9572,301 @@ function ViewRenderer($$anchor, $$props) {
 				set_text(text_4, get(row).primary);
 			});
 			delegated("click", button, () => select(get(row).id));
-			append($$anchor, button);
+			append($$anchor, div_4);
 		});
 		reset(div_3);
 		template_effect(() => set_attribute(div_3, "aria-label", $$props.model.title));
 		append($$anchor, div_3);
 	};
-	var consequent_6 = ($$anchor) => {
-		var div_4 = root_11();
-		var div_5 = child(div_4);
-		each(div_5, 21, () => $$props.model.columns, index, ($$anchor, column) => {
-			var span_4 = root_8();
-			var text_7 = only_child(span_4, true);
-			template_effect(() => set_text(text_7, get(column)));
+	var consequent_10 = ($$anchor) => {
+		var div_6 = root_13();
+		var div_7 = child(div_6);
+		each(child(div_7), 17, () => $$props.model.columns, index, ($$anchor, column) => {
+			var span_4 = root_9$1();
+			var text_8 = only_child(span_4, true);
+			template_effect(() => set_text(text_8, get(column)));
 			append($$anchor, span_4);
 		});
-		reset(div_5);
-		each(sibling(div_5, 2), 19, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
-			var button_1 = root_10();
+		next();
+		reset(div_7);
+		each(sibling(div_7, 2), 17, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
+			var div_8 = root_12();
+			var div_9 = child(div_8);
 			let classes_1;
-			each(button_1, 21, () => get(row).cells, index, ($$anchor, cell, index, $$array) => {
-				var span_5 = root_9();
-				var text_8 = only_child(span_5, true);
+			var node_8 = child(div_9);
+			each(node_8, 17, () => get(row).cells, index, ($$anchor, cell, index) => {
+				var div_10 = root_10$1();
+				var button_2 = child(div_10);
+				var text_9 = only_child(button_2, true);
+				reset(div_10);
 				template_effect(() => {
-					set_attribute(span_5, "data-tone", get(row).cell_tones?.[index] ?? void 0);
-					set_text(text_8, get(cell));
+					set_attribute(div_10, "data-tone", get(row).cell_tones?.[index] ?? void 0);
+					set_attribute(button_2, "data-focus-key", index === 0 ? `view:${$$props.instanceKey}:item:${get(row).id}` : void 0);
+					set_attribute(button_2, "aria-label", `Select row: ${get(cell)}`);
+					set_text(text_9, get(cell));
 				});
-				append($$anchor, span_5);
+				delegated("click", button_2, () => select(get(row).id));
+				append($$anchor, div_10);
 			});
-			reset(button_1);
+			var div_11 = sibling(node_8, 2);
+			var node_9 = child(div_11);
+			var consequent_8 = ($$anchor) => {
+				var button_3 = root_6$1();
+				var text_10 = only_child(button_3, true);
+				template_effect(() => {
+					set_attribute(button_3, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} row`);
+					set_attribute(button_3, "aria-expanded", get(row).expanded);
+					set_text(text_10, get(row).expanded ? "▾" : "▸");
+				});
+				delegated("click", button_3, () => expand(get(row).id, get(row).expanded));
+				append($$anchor, button_3);
+			};
+			if_block(node_9, ($$render) => {
+				if (get(row).expandable) $$render(consequent_8);
+			});
+			reset(div_11);
+			reset(div_9);
+			var node_10 = sibling(div_9, 2);
+			var consequent_9 = ($$anchor) => {
+				var div_12 = root_11();
+				var div_13 = child(div_12);
+				var node_11 = child(div_13);
+				{
+					let $0 = /* @__PURE__ */ user_derived(() => get(row).detail ?? []);
+					RowDetails(node_11, {
+						get details() {
+							return get($0);
+						},
+						label: "Row details"
+					});
+				}
+				reset(div_13);
+				reset(div_12);
+				template_effect(() => set_attribute(div_13, "aria-colspan", $$props.model.columns.length + 1));
+				append($$anchor, div_12);
+			};
+			if_block(node_10, ($$render) => {
+				if (get(row).expanded) $$render(consequent_9);
+			});
+			reset(div_8);
 			template_effect(() => {
-				set_attribute(button_1, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
-				set_attribute(button_1, "data-tone", get(row).tone);
-				classes_1 = set_class(button_1, 1, "", null, classes_1, { selected: get(row).selected });
+				set_attribute(div_8, "data-expanded", get(row).expanded);
+				classes_1 = set_class(div_9, 1, "table-record-line", null, classes_1, { selected: get(row).selected });
+				set_attribute(div_9, "data-tone", get(row).tone);
 			});
-			delegated("click", button_1, () => select(get(row).id));
-			append($$anchor, button_1);
+			append($$anchor, div_8);
 		});
-		reset(div_4);
+		reset(div_6);
 		template_effect(() => {
-			set_attribute(div_4, "aria-label", $$props.model.title);
-			set_style(div_4, `--columns:${$$props.model.columns.length}`);
+			set_attribute(div_6, "aria-label", $$props.model.title);
+			set_style(div_6, `--columns:${$$props.model.columns.length}`);
 		});
-		append($$anchor, div_4);
+		append($$anchor, div_6);
 	};
-	var consequent_12 = ($$anchor) => {
-		var div_6 = root_17();
-		each(div_6, 21, () => $$props.model.entries, index, ($$anchor, entry, index) => {
-			var button_2 = root_16();
+	var consequent_18 = ($$anchor) => {
+		var div_14 = root_19();
+		each(div_14, 21, () => $$props.model.entries, index, ($$anchor, entry, index) => {
+			var div_15 = root_18();
+			var div_16 = child(div_15);
+			var button_4 = child(div_16);
 			let classes_2;
-			var node_5 = child(button_2);
-			var consequent_7 = ($$anchor) => {
-				var p = root_12();
-				var text_9 = only_child(p, true);
+			var node_12 = child(button_4);
+			var consequent_11 = ($$anchor) => {
+				var p = root_14();
+				var text_11 = only_child(p, true);
 				template_effect(() => {
 					set_attribute(p, "data-tone", get(entry).tone);
-					set_text(text_9, get(entry).text);
+					set_text(text_11, get(entry).text);
 				});
 				append($$anchor, p);
 			};
-			var consequent_9 = ($$anchor) => {
-				var fragment = root_13();
-				var strong_1 = first_child(fragment);
-				var text_10 = only_child(strong_1, true);
-				var node_6 = sibling(strong_1);
-				var consequent_8 = ($$anchor) => {
+			var consequent_13 = ($$anchor) => {
+				var fragment_1 = root_15();
+				var strong_1 = first_child(fragment_1);
+				var text_12 = only_child(strong_1, true);
+				var node_13 = sibling(strong_1);
+				var consequent_12 = ($$anchor) => {
 					var small_2 = root_4$1();
-					var text_11 = only_child(small_2, true);
-					template_effect(() => set_text(text_11, get(entry).meta));
+					var text_13 = only_child(small_2, true);
+					template_effect(() => set_text(text_13, get(entry).meta));
 					append($$anchor, small_2);
 				};
-				if_block(node_6, ($$render) => {
-					if (get(entry).meta) $$render(consequent_8);
+				if_block(node_13, ($$render) => {
+					if (get(entry).meta) $$render(consequent_12);
 				});
-				template_effect(() => set_text(text_10, get(entry).primary));
-				append($$anchor, fragment);
-			};
-			var consequent_11 = ($$anchor) => {
-				var fragment_1 = root_14();
-				var span_6 = first_child(fragment_1);
-				var text_12 = only_child(span_6, true);
-				var node_7 = sibling(span_6);
-				var consequent_10 = ($$anchor) => {
-					var small_3 = root_4$1();
-					var text_13 = only_child(small_3, true);
-					template_effect(() => set_text(text_13, get(entry).meta));
-					append($$anchor, small_3);
-				};
-				if_block(node_7, ($$render) => {
-					if (get(entry).meta) $$render(consequent_10);
-				});
-				template_effect(() => set_text(text_12, get(entry).summary));
+				template_effect(() => set_text(text_12, get(entry).primary));
 				append($$anchor, fragment_1);
 			};
-			var alternate = ($$anchor) => {
-				var span_7 = root_15();
-				var text_14 = only_child(span_7, true);
-				template_effect(() => set_text(text_14, get(entry).label));
-				append($$anchor, span_7);
-			};
-			if_block(node_5, ($$render) => {
-				if (get(entry).type === "block") $$render(consequent_7);
-				else if (get(entry).type === "line") $$render(consequent_9, 1);
-				else if (get(entry).type === "pair") $$render(consequent_11, 2);
-				else $$render(alternate, -1);
-			});
-			reset(button_2);
-			template_effect(($0) => {
-				set_attribute(button_2, "data-focus-key", `view:${$$props.instanceKey}:item:${$$props.model.entry_ids[index]}`);
-				classes_2 = set_class(button_2, 1, "timeline-entry", null, classes_2, { selected: $0 });
-				set_attribute(button_2, "data-kind", get(entry).type);
-				set_style(button_2, `--indent:${$$props.model.entry_indents[index] ?? 0}`);
-			}, [() => $$props.model.selected === BigInt(index)]);
-			delegated("click", button_2, () => select($$props.model.entry_ids[index]));
-			append($$anchor, button_2);
-		});
-		reset(div_6);
-		template_effect(() => set_attribute(div_6, "aria-label", $$props.model.title));
-		append($$anchor, div_6);
-	};
-	var consequent_14 = ($$anchor) => {
-		var div_7 = root_20();
-		each(div_7, 21, () => $$props.model.sections, index, ($$anchor, section) => {
-			var section_1 = root_19();
-			let classes_3;
-			var button_3 = child(section_1);
-			let classes_4;
-			var span_8 = child(button_3);
-			var text_15 = only_child(span_8);
-			var text_16 = only_child(sibling(span_8), true);
-			reset(button_3);
-			var node_8 = sibling(button_3, 2);
-			var consequent_13 = ($$anchor) => {
-				var fragment_2 = comment();
-				each(first_child(fragment_2), 17, () => get(section).rows, (row) => row.id, ($$anchor, row) => {
-					var button_4 = root_18();
-					let classes_5;
-					var span_10 = child(button_4);
-					var text_17 = only_child(span_10, true);
-					var text_18 = only_child(sibling(span_10), true);
-					reset(button_4);
-					template_effect(() => {
-						set_attribute(button_4, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
-						classes_5 = set_class(button_4, 1, "section-row", null, classes_5, { selected: get(row).selected });
-						set_text(text_17, get(row).primary);
-						set_text(text_18, get(row).meta ?? get(row).secondary ?? "");
-					});
-					delegated("click", button_4, () => select(get(row).id));
-					append($$anchor, button_4);
+			var consequent_15 = ($$anchor) => {
+				var fragment_2 = root_16();
+				var span_5 = first_child(fragment_2);
+				var text_14 = only_child(span_5, true);
+				var node_14 = sibling(span_5);
+				var consequent_14 = ($$anchor) => {
+					var small_3 = root_4$1();
+					var text_15 = only_child(small_3, true);
+					template_effect(() => set_text(text_15, get(entry).meta));
+					append($$anchor, small_3);
+				};
+				if_block(node_14, ($$render) => {
+					if (get(entry).meta) $$render(consequent_14);
 				});
+				template_effect(() => set_text(text_14, get(entry).summary));
 				append($$anchor, fragment_2);
 			};
-			if_block(node_8, ($$render) => {
-				if (!get(section).collapsed) $$render(consequent_13);
+			var alternate = ($$anchor) => {
+				var span_6 = root_17();
+				var text_16 = only_child(span_6, true);
+				template_effect(() => set_text(text_16, get(entry).label));
+				append($$anchor, span_6);
+			};
+			if_block(node_12, ($$render) => {
+				if (get(entry).type === "block") $$render(consequent_11);
+				else if (get(entry).type === "line") $$render(consequent_13, 1);
+				else if (get(entry).type === "pair") $$render(consequent_15, 2);
+				else $$render(alternate, -1);
+			});
+			reset(button_4);
+			var node_15 = sibling(button_4, 2);
+			var consequent_16 = ($$anchor) => {
+				var button_5 = root_6$1();
+				var text_17 = only_child(button_5, true);
+				template_effect(() => {
+					set_attribute(button_5, "aria-label", `${$$props.model.entry_expanded?.[index] ? "Collapse" : "Expand"} timeline entry`);
+					set_attribute(button_5, "aria-expanded", $$props.model.entry_expanded?.[index] ?? false);
+					set_text(text_17, $$props.model.entry_expanded?.[index] ? "▾" : "▸");
+				});
+				delegated("click", button_5, () => expandTimeline(index));
+				append($$anchor, button_5);
+			};
+			if_block(node_15, ($$render) => {
+				if ($$props.model.entry_expandable?.[index]) $$render(consequent_16);
+			});
+			reset(div_16);
+			var node_16 = sibling(div_16, 2);
+			var consequent_17 = ($$anchor) => {
+				{
+					let $0 = /* @__PURE__ */ user_derived(() => $$props.model.entry_details?.[index] ?? []);
+					RowDetails($$anchor, {
+						get details() {
+							return get($0);
+						},
+						label: "Timeline entry details"
+					});
+				}
+			};
+			if_block(node_16, ($$render) => {
+				if ($$props.model.entry_expanded?.[index]) $$render(consequent_17);
+			});
+			reset(div_15);
+			template_effect(($0) => {
+				set_attribute(div_15, "data-expanded", $$props.model.entry_expanded?.[index] ?? false);
+				set_attribute(button_4, "data-focus-key", `view:${$$props.instanceKey}:item:${$$props.model.entry_ids[index]}`);
+				classes_2 = set_class(button_4, 1, "timeline-entry", null, classes_2, { selected: $0 });
+				set_attribute(button_4, "data-kind", get(entry).type);
+				set_style(button_4, `--indent:${$$props.model.entry_indents[index] ?? 0}`);
+			}, [() => $$props.model.selected === BigInt(index)]);
+			delegated("click", button_4, () => select($$props.model.entry_ids[index]));
+			append($$anchor, div_15);
+		});
+		reset(div_14);
+		template_effect(() => set_attribute(div_14, "aria-label", $$props.model.title));
+		append($$anchor, div_14);
+	};
+	var consequent_22 = ($$anchor) => {
+		var div_17 = root_22();
+		each(div_17, 21, () => $$props.model.sections, index, ($$anchor, section) => {
+			var section_1 = root_21();
+			let classes_3;
+			var button_6 = child(section_1);
+			let classes_4;
+			var span_7 = child(button_6);
+			var text_18 = only_child(span_7);
+			var text_19 = only_child(sibling(span_7), true);
+			reset(button_6);
+			var node_17 = sibling(button_6, 2);
+			var consequent_21 = ($$anchor) => {
+				var fragment_4 = comment();
+				each(first_child(fragment_4), 17, () => get(section).rows, (row) => row.id, ($$anchor, row) => {
+					var div_18 = root_20();
+					var div_19 = child(div_18);
+					var button_7 = child(div_19);
+					let classes_5;
+					var span_9 = child(button_7);
+					var text_20 = only_child(span_9, true);
+					var text_21 = only_child(sibling(span_9), true);
+					reset(button_7);
+					var node_19 = sibling(button_7);
+					var consequent_19 = ($$anchor) => {
+						var button_8 = root_6$1();
+						var text_22 = only_child(button_8, true);
+						template_effect(() => {
+							set_attribute(button_8, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} ${get(row).primary}`);
+							set_attribute(button_8, "aria-expanded", get(row).expanded);
+							set_text(text_22, get(row).expanded ? "▾" : "▸");
+						});
+						delegated("click", button_8, () => expand(get(row).id, get(row).expanded));
+						append($$anchor, button_8);
+					};
+					if_block(node_19, ($$render) => {
+						if (get(row).expandable) $$render(consequent_19);
+					});
+					reset(div_19);
+					var node_20 = sibling(div_19, 2);
+					var consequent_20 = ($$anchor) => {
+						{
+							let $0 = /* @__PURE__ */ user_derived(() => get(row).detail ?? []);
+							let $1 = /* @__PURE__ */ user_derived(() => `${get(row).primary} details`);
+							RowDetails($$anchor, {
+								get details() {
+									return get($0);
+								},
+								get label() {
+									return get($1);
+								}
+							});
+						}
+					};
+					if_block(node_20, ($$render) => {
+						if (get(row).expanded) $$render(consequent_20);
+					});
+					reset(div_18);
+					template_effect(() => {
+						set_attribute(div_18, "data-expanded", get(row).expanded);
+						set_attribute(button_7, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
+						classes_5 = set_class(button_7, 1, "section-row", null, classes_5, { selected: get(row).selected });
+						set_attribute(button_7, "data-tone", get(row).tone);
+						set_text(text_20, get(row).primary);
+						set_text(text_21, get(row).meta ?? get(row).secondary ?? "");
+					});
+					delegated("click", button_7, () => select(get(row).id));
+					append($$anchor, div_18);
+				});
+				append($$anchor, fragment_4);
+			};
+			if_block(node_17, ($$render) => {
+				if (!get(section).collapsed) $$render(consequent_21);
 			});
 			reset(section_1);
 			template_effect(($0) => {
 				classes_3 = set_class(section_1, 1, "", null, classes_3, { collapsed: get(section).collapsed });
-				set_attribute(button_3, "data-focus-key", `view:${$$props.instanceKey}:section:${get(section).id}`);
-				classes_4 = set_class(button_3, 1, "", null, classes_4, { selected: get(section).header_selected });
-				set_text(text_15, `${get(section).collapsed ? "▸" : "▾"} ${get(section).title ?? ""}`);
-				set_text(text_16, $0);
+				set_attribute(button_6, "data-focus-key", `view:${$$props.instanceKey}:section:${get(section).id}`);
+				classes_4 = set_class(button_6, 1, "", null, classes_4, { selected: get(section).header_selected });
+				set_text(text_18, `${get(section).collapsed ? "▸" : "▾"} ${get(section).title ?? ""}`);
+				set_text(text_19, $0);
 			}, [() => String(get(section).count).padStart(2, "0")]);
-			delegated("click", button_3, () => dispatch({
+			delegated("click", button_6, () => dispatch({
 				type: "toggle_view_section",
 				instance_key: $$props.instanceKey,
 				section_id: get(section).id
 			}));
 			append($$anchor, section_1);
 		});
-		reset(div_7);
-		template_effect(() => set_attribute(div_7, "aria-label", $$props.model.title));
-		append($$anchor, div_7);
+		reset(div_17);
+		template_effect(() => set_attribute(div_17, "aria-label", $$props.model.title));
+		append($$anchor, div_17);
 	};
-	var consequent_15 = ($$anchor) => {
+	var consequent_23 = ($$anchor) => {
 		EmptyState($$anchor, {
 			get title() {
 				return $$props.model.title;
@@ -9128,12 +9876,58 @@ function ViewRenderer($$anchor, $$props) {
 			}
 		});
 	};
-	var consequent_16 = ($$anchor) => {
+	var consequent_25 = ($$anchor) => {
+		var section_2 = root_26();
+		var h3 = sibling(child(section_2), 2);
+		var text_23 = only_child(h3, true);
+		var p_1 = sibling(h3, 2);
+		var strong_2 = child(p_1);
+		var text_24 = only_child(strong_2, true);
+		var text_25 = sibling(strong_2);
+		reset(p_1);
+		var node_21 = sibling(p_1, 2);
+		var consequent_24 = ($$anchor) => {
+			var div_20 = root_24();
+			each(div_20, 21, () => $$props.model.actions, index, ($$anchor, action, index) => {
+				var button_9 = root_23();
+				var text_26 = only_child(button_9, true);
+				template_effect(() => {
+					set_attribute(button_9, "data-focus-key", `view:${$$props.instanceKey}:required-subject:${index}`);
+					set_attribute(button_9, "title", get(action).title);
+					set_text(text_26, get(action).label);
+				});
+				delegated("click", button_9, () => dispatch({
+					type: "activate",
+					intent: get(action).intent
+				}));
+				append($$anchor, button_9);
+			});
+			reset(div_20);
+			append($$anchor, div_20);
+		};
+		var alternate_1 = ($$anchor) => {
+			append($$anchor, root_25());
+		};
+		if_block(node_21, ($$render) => {
+			if ($$props.model.actions.length > 0) $$render(consequent_24);
+			else $$render(alternate_1, -1);
+		});
+		reset(section_2);
+		template_effect(($0) => {
+			set_attribute(section_2, "aria-labelledby", `required-subject-${$$props.tileId}`);
+			set_attribute(h3, "id", `required-subject-${$$props.tileId}`);
+			set_text(text_23, $$props.model.title);
+			set_text(text_24, $$props.model.input);
+			set_text(text_25, ` needs ${$0 ?? ""}.`);
+		}, [() => $$props.model.facets.join(", ")]);
+		append($$anchor, section_2);
+	};
+	var consequent_26 = ($$anchor) => {
 		SceneView($$anchor, { get scene() {
 			return $$props.model.scene;
 		} });
 	};
-	var consequent_17 = ($$anchor) => {
+	var consequent_27 = ($$anchor) => {
 		FieldView($$anchor, {
 			get field() {
 				return $$props.model.field;
@@ -9146,13 +9940,14 @@ function ViewRenderer($$anchor, $$props) {
 	if_block(node, ($$render) => {
 		if ($$props.model.type === "text") $$render(consequent);
 		else if ($$props.model.type === "document") $$render(consequent_2, 1);
-		else if ($$props.model.type === "rows") $$render(consequent_5, 2);
-		else if ($$props.model.type === "table") $$render(consequent_6, 3);
-		else if ($$props.model.type === "timeline") $$render(consequent_12, 4);
-		else if ($$props.model.type === "sections") $$render(consequent_14, 5);
-		else if ($$props.model.type === "placeholder") $$render(consequent_15, 6);
-		else if ($$props.model.type === "map" || $$props.model.type === "atlas") $$render(consequent_16, 7);
-		else if ($$props.model.type === "field") $$render(consequent_17, 8);
+		else if ($$props.model.type === "rows") $$render(consequent_7, 2);
+		else if ($$props.model.type === "table") $$render(consequent_10, 3);
+		else if ($$props.model.type === "timeline") $$render(consequent_18, 4);
+		else if ($$props.model.type === "sections") $$render(consequent_22, 5);
+		else if ($$props.model.type === "placeholder") $$render(consequent_23, 6);
+		else if ($$props.model.type === "required_subject") $$render(consequent_25, 7);
+		else if ($$props.model.type === "map" || $$props.model.type === "atlas") $$render(consequent_26, 8);
+		else if ($$props.model.type === "field") $$render(consequent_27, 9);
 	});
 	reset(div);
 	template_effect(() => set_attribute(div, "data-view", $$props.model.type));
@@ -9162,11 +9957,14 @@ function ViewRenderer($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/layout/DockSlot.svelte
-var root$4 = /* @__PURE__ */ from_html(`<aside><header><span> </span><span> </span></header> <!> <!> <!></aside>`);
+var root$4 = /* @__PURE__ */ from_html(`<p> </p>`);
+var root_1$2 = /* @__PURE__ */ from_html(`<div class="heading-meta"> </div>`);
+var root_2$1 = /* @__PURE__ */ from_html(`<div class="content-heading"><small> </small><h1> </h1><!><!></div>`);
+var root_3$1 = /* @__PURE__ */ from_html(`<aside><header><span> </span><span> </span></header> <!> <!> <!> <!> <!> <!></aside>`);
 function DockSlot($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
-	var aside = root$4();
+	var aside = root_3$1();
 	let classes;
 	var header = child(aside);
 	var span = child(header);
@@ -9174,18 +9972,67 @@ function DockSlot($$anchor, $$props) {
 	var text_1 = only_child(sibling(span), true);
 	reset(header);
 	var node = sibling(header, 2);
-	var consequent = ($$anchor) => {
+	var consequent_2 = ($$anchor) => {
+		var div = root_2$1();
+		var small = child(div);
+		var text_2 = only_child(small, true);
+		var h1 = sibling(small);
+		var text_3 = only_child(h1, true);
+		var node_1 = sibling(h1);
+		var consequent = ($$anchor) => {
+			var p = root$4();
+			var text_4 = only_child(p, true);
+			template_effect(() => set_text(text_4, $$props.model.heading.summary));
+			append($$anchor, p);
+		};
+		if_block(node_1, ($$render) => {
+			if ($$props.model.heading.summary) $$render(consequent);
+		});
+		var node_2 = sibling(node_1);
+		var consequent_1 = ($$anchor) => {
+			var div_1 = root_1$2();
+			var text_5 = only_child(div_1, true);
+			template_effect(($0) => set_text(text_5, $0), [() => $$props.model.heading.metadata.join("  /  ")]);
+			append($$anchor, div_1);
+		};
+		if_block(node_2, ($$render) => {
+			if ($$props.model.heading.metadata.length) $$render(consequent_1);
+		});
+		reset(div);
+		template_effect(() => {
+			set_text(text_2, $$props.model.heading.eyebrow);
+			set_text(text_3, $$props.model.heading.title);
+		});
+		append($$anchor, div);
+	};
+	if_block(node, ($$render) => {
+		if ($$props.model.heading) $$render(consequent_2);
+	});
+	var node_3 = sibling(node, 2);
+	var consequent_3 = ($$anchor) => {
 		InputComposer($$anchor, { get model() {
 			return $$props.model.input;
 		} });
 	};
-	if_block(node, ($$render) => {
-		if ($$props.model.input?.live_filter) $$render(consequent);
+	if_block(node_3, ($$render) => {
+		if ($$props.model.input?.live_filter) $$render(consequent_3);
 	});
-	var node_1 = sibling(node, 2);
+	var node_4 = sibling(node_3, 2);
+	var consequent_4 = ($$anchor) => {
+		ViewSupplement($$anchor, {
+			get model() {
+				return $$props.model.supplement;
+			},
+			phase: "content"
+		});
+	};
+	if_block(node_4, ($$render) => {
+		if ($$props.model.supplement) $$render(consequent_4);
+	});
+	var node_5 = sibling(node_4, 2);
 	{
 		let $0 = /* @__PURE__ */ user_derived(() => String($$props.model.instance_key));
-		ViewRenderer(node_1, {
+		ViewRenderer(node_5, {
 			get model() {
 				return $$props.model.view;
 			},
@@ -9197,22 +10044,35 @@ function DockSlot($$anchor, $$props) {
 			}
 		});
 	}
-	var node_2 = sibling(node_1, 2);
-	var consequent_1 = ($$anchor) => {
+	var node_6 = sibling(node_5, 2);
+	var consequent_5 = ($$anchor) => {
+		ViewSupplement($$anchor, {
+			get model() {
+				return $$props.model.supplement;
+			},
+			phase: "footer"
+		});
+	};
+	if_block(node_6, ($$render) => {
+		if ($$props.model.supplement) $$render(consequent_5);
+	});
+	var node_7 = sibling(node_6, 2);
+	var consequent_6 = ($$anchor) => {
 		InputComposer($$anchor, { get model() {
 			return $$props.model.input;
 		} });
 	};
-	if_block(node_2, ($$render) => {
-		if ($$props.model.input && !$$props.model.input.live_filter) $$render(consequent_1);
+	if_block(node_7, ($$render) => {
+		if ($$props.model.input && !$$props.model.input.live_filter) $$render(consequent_6);
 	});
 	reset(aside);
 	template_effect(() => {
 		classes = set_class(aside, 1, "dock-slot", null, classes, { focused: $$props.model.focused });
+		set_attribute(aside, "data-keyboard-focus", $$props.model.focused ? "current" : void 0);
 		set_attribute(aside, "data-edge", $$props.model.edge);
 		set_style(aside, `--dock-size:${$$props.model.size}`);
-		set_text(text, $$props.model.title);
-		set_text(text_1, $$props.model.edge);
+		set_text(text, $$props.model.supplement?.frame_label || $$props.model.title);
+		set_text(text_1, $$props.model.attachment_label || $$props.model.supplement?.frame_detail || $$props.model.edge);
 	});
 	delegated("pointerdown", aside, () => {
 		if (!$$props.model.focused) dispatch({
@@ -9232,62 +10092,121 @@ function DockSlot($$anchor, $$props) {
 delegate(["pointerdown", "focusin"]);
 //#endregion
 //#region browser/layout/TileFrame.svelte
-var root$3 = /* @__PURE__ */ from_html(`<button role="tab"> </button>`);
-var root_1$1 = /* @__PURE__ */ from_html(`<div class="view-tabs" role="tablist"></div>`);
-var root_2 = /* @__PURE__ */ from_html(`<header><div class="tile-title-row"><div class="tile-identity"><span class="tile-signal"></span><strong> </strong></div> <div class="tile-tools"><button class="tile-tool"> </button></div></div> <!></header>`);
-var root_3 = /* @__PURE__ */ from_html(`<p> </p>`);
-var root_4 = /* @__PURE__ */ from_html(`<div class="heading-meta"> </div>`);
-var root_5 = /* @__PURE__ */ from_html(`<div class="content-heading"><small> </small><h1> </h1><!><!></div>`);
-var root_6 = /* @__PURE__ */ from_html(`<article><!> <!> <!> <!> <!></article>`);
+var root$3 = /* @__PURE__ */ from_html(`<span class="tile-frame-detail"> </span>`);
+var root_1$1 = /* @__PURE__ */ from_html(`<span class="tile-frame-detail" title="Selection attachment"> </span>`);
+var root_2 = /* @__PURE__ */ from_html(`<button> </button>`);
+var root_3 = /* @__PURE__ */ from_html(`<details class="tile-action-menu"><summary title="View actions">⋮</summary> <div class="tile-action-list"></div></details>`);
+var root_4 = /* @__PURE__ */ from_html(`<button role="tab"> </button>`);
+var root_5 = /* @__PURE__ */ from_html(`<div class="view-tabs" role="tablist"></div>`);
+var root_6 = /* @__PURE__ */ from_html(`<header tabindex="-1"><div class="tile-title-row"><div class="tile-identity"><span class="tile-signal"></span><strong> </strong><!></div> <div class="tile-tools"><!> <button class="tile-tool"> </button> <!></div></div> <!></header>`);
+var root_7 = /* @__PURE__ */ from_html(`<p> </p>`);
+var root_8 = /* @__PURE__ */ from_html(`<div class="heading-meta"> </div>`);
+var root_9 = /* @__PURE__ */ from_html(`<div class="content-heading"><small> </small><h1> </h1><!><!></div>`);
+var root_10 = /* @__PURE__ */ from_html(`<article><!> <!> <!> <!> <!> <!> <!></article>`);
 function TileFrame($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
-	var article = root_6();
+	let actionSummary = /* @__PURE__ */ state(void 0);
+	var article = root_10();
 	let classes;
 	var node = child(article);
-	var consequent_1 = ($$anchor) => {
-		var header = root_2();
+	var consequent_4 = ($$anchor) => {
+		var header = root_6();
 		let classes_1;
 		var div = child(header);
 		var div_1 = child(div);
-		var text = only_child(sibling(child(div_1)), true);
+		var strong = sibling(child(div_1));
+		var text = only_child(strong, true);
+		var node_1 = sibling(strong);
+		var consequent = ($$anchor) => {
+			var span = root$3();
+			var text_1 = only_child(span, true);
+			template_effect(() => set_text(text_1, $$props.model.supplement.frame_detail));
+			append($$anchor, span);
+		};
+		if_block(node_1, ($$render) => {
+			if ($$props.model.supplement?.frame_detail) $$render(consequent);
+		});
 		reset(div_1);
 		var div_2 = sibling(div_1, 2);
-		var button = child(div_2);
-		var text_1 = only_child(button, true);
-		reset(div_2);
-		reset(div);
-		var node_1 = sibling(div, 2);
-		var consequent = ($$anchor) => {
-			var div_3 = root_1$1();
-			each(div_3, 21, () => $$props.model.tabs, (tab) => tab.tile_id, ($$anchor, tab) => {
-				var button_1 = root$3();
-				let classes_2;
-				var text_2 = only_child(button_1, true);
+		var node_2 = child(div_2);
+		var consequent_1 = ($$anchor) => {
+			var span_1 = root_1$1();
+			var text_2 = only_child(span_1, true);
+			template_effect(() => set_text(text_2, $$props.model.attachment_label));
+			append($$anchor, span_1);
+		};
+		if_block(node_2, ($$render) => {
+			if ($$props.model.attachment_label) $$render(consequent_1);
+		});
+		var button = sibling(node_2, 2);
+		var text_3 = only_child(button, true);
+		var node_3 = sibling(button, 2);
+		var consequent_2 = ($$anchor) => {
+			var details = root_3();
+			var summary = child(details);
+			bind_this(summary, ($$value) => set(actionSummary, $$value), () => get(actionSummary));
+			var div_3 = sibling(summary, 2);
+			each(div_3, 21, () => $$props.model.intents, index, ($$anchor, action) => {
+				var button_1 = root_2();
+				var text_4 = only_child(button_1, true);
 				template_effect(() => {
-					set_attribute(button_1, "aria-selected", get(tab).active);
-					classes_2 = set_class(button_1, 1, "", null, classes_2, { active: get(tab).active });
-					set_text(text_2, get(tab).title);
+					set_attribute(button_1, "title", get(action).title);
+					set_text(text_4, get(action).label);
 				});
-				delegated("click", button_1, () => dispatch({
-					type: "focus_changed",
-					target: get(tab).tile_id
-				}));
+				delegated("click", button_1, (event) => {
+					const menu = event.currentTarget.closest("details");
+					if (menu) menu.open = false;
+					get(actionSummary)?.focus();
+					dispatch({
+						type: "activate",
+						intent: get(action).intent
+					});
+				});
 				append($$anchor, button_1);
 			});
 			reset(div_3);
-			append($$anchor, div_3);
+			reset(details);
+			template_effect(() => set_attribute(summary, "aria-label", `Actions for ${$$props.model.title}`));
+			append($$anchor, details);
 		};
-		if_block(node_1, ($$render) => {
-			if ($$props.model.tabs.length > 1) $$render(consequent);
+		if_block(node_3, ($$render) => {
+			if ($$props.model.intents.length) $$render(consequent_2);
+		});
+		reset(div_2);
+		reset(div);
+		var node_4 = sibling(div, 2);
+		var consequent_3 = ($$anchor) => {
+			var div_4 = root_5();
+			each(div_4, 21, () => $$props.model.tabs, (tab) => tab.tile_id, ($$anchor, tab) => {
+				var button_2 = root_4();
+				let classes_2;
+				var text_5 = only_child(button_2, true);
+				template_effect(() => {
+					set_attribute(button_2, "aria-selected", get(tab).active);
+					classes_2 = set_class(button_2, 1, "", null, classes_2, { active: get(tab).active });
+					set_text(text_5, get(tab).title);
+				});
+				delegated("click", button_2, () => dispatch({
+					type: "focus_changed",
+					target: get(tab).tile_id
+				}));
+				append($$anchor, button_2);
+			});
+			reset(div_4);
+			append($$anchor, div_4);
+		};
+		if_block(node_4, ($$render) => {
+			if ($$props.model.tabs.length > 1) $$render(consequent_3);
 		});
 		reset(header);
 		template_effect(() => {
 			classes_1 = set_class(header, 1, "tile-header", null, classes_1, { grouped: $$props.model.group_label });
-			set_text(text, $$props.model.group_label ?? $$props.model.title);
+			set_attribute(header, "data-focus-key", `view:${$$props.model.instance_key}:header`);
+			set_text(text, $$props.model.supplement?.frame_label || $$props.model.group_label || $$props.model.title);
 			set_attribute(button, "aria-label", $$props.model.maximized ? "Restore view" : "Maximize view");
 			set_attribute(button, "title", $$props.model.maximized ? "Restore view" : "Maximize view");
-			set_text(text_1, $$props.model.maximized ? "↙" : "↗");
+			set_text(text_3, $$props.model.maximized ? "↙" : "↗");
 		});
 		delegated("click", button, () => dispatch({
 			type: "activate",
@@ -9299,56 +10218,68 @@ function TileFrame($$anchor, $$props) {
 		append($$anchor, header);
 	};
 	if_block(node, ($$render) => {
-		if (!$$props.model.chrome_hidden) $$render(consequent_1);
+		if (!$$props.model.chrome_hidden) $$render(consequent_4);
 	});
-	var node_2 = sibling(node, 2);
-	var consequent_4 = ($$anchor) => {
-		var div_4 = root_5();
-		var small = child(div_4);
-		var text_3 = only_child(small, true);
+	var node_5 = sibling(node, 2);
+	var consequent_7 = ($$anchor) => {
+		var div_5 = root_9();
+		var small = child(div_5);
+		var text_6 = only_child(small, true);
 		var h1 = sibling(small);
-		var text_4 = only_child(h1, true);
-		var node_3 = sibling(h1);
-		var consequent_2 = ($$anchor) => {
-			var p = root_3();
-			var text_5 = only_child(p, true);
-			template_effect(() => set_text(text_5, $$props.model.heading.summary));
+		var text_7 = only_child(h1, true);
+		var node_6 = sibling(h1);
+		var consequent_5 = ($$anchor) => {
+			var p = root_7();
+			var text_8 = only_child(p, true);
+			template_effect(() => set_text(text_8, $$props.model.heading.summary));
 			append($$anchor, p);
 		};
-		if_block(node_3, ($$render) => {
-			if ($$props.model.heading.summary) $$render(consequent_2);
+		if_block(node_6, ($$render) => {
+			if ($$props.model.heading.summary) $$render(consequent_5);
 		});
-		var node_4 = sibling(node_3);
-		var consequent_3 = ($$anchor) => {
-			var div_5 = root_4();
-			var text_6 = only_child(div_5, true);
-			template_effect(($0) => set_text(text_6, $0), [() => $$props.model.heading.metadata.join("  /  ")]);
-			append($$anchor, div_5);
+		var node_7 = sibling(node_6);
+		var consequent_6 = ($$anchor) => {
+			var div_6 = root_8();
+			var text_9 = only_child(div_6, true);
+			template_effect(($0) => set_text(text_9, $0), [() => $$props.model.heading.metadata.join("  /  ")]);
+			append($$anchor, div_6);
 		};
-		if_block(node_4, ($$render) => {
-			if ($$props.model.heading.metadata.length) $$render(consequent_3);
+		if_block(node_7, ($$render) => {
+			if ($$props.model.heading.metadata.length) $$render(consequent_6);
 		});
-		reset(div_4);
+		reset(div_5);
 		template_effect(() => {
-			set_text(text_3, $$props.model.heading.eyebrow);
-			set_text(text_4, $$props.model.heading.title);
+			set_text(text_6, $$props.model.heading.eyebrow);
+			set_text(text_7, $$props.model.heading.title);
 		});
-		append($$anchor, div_4);
+		append($$anchor, div_5);
 	};
-	if_block(node_2, ($$render) => {
-		if ($$props.model.heading) $$render(consequent_4);
+	if_block(node_5, ($$render) => {
+		if ($$props.model.heading) $$render(consequent_7);
 	});
-	var node_5 = sibling(node_2, 2);
-	var consequent_5 = ($$anchor) => {
+	var node_8 = sibling(node_5, 2);
+	var consequent_8 = ($$anchor) => {
 		InputComposer($$anchor, { get model() {
 			return $$props.model.input;
 		} });
 	};
-	if_block(node_5, ($$render) => {
-		if ($$props.model.input?.live_filter) $$render(consequent_5);
+	if_block(node_8, ($$render) => {
+		if ($$props.model.input?.live_filter) $$render(consequent_8);
 	});
-	var node_6 = sibling(node_5, 2);
-	ViewRenderer(node_6, {
+	var node_9 = sibling(node_8, 2);
+	var consequent_9 = ($$anchor) => {
+		ViewSupplement($$anchor, {
+			get model() {
+				return $$props.model.supplement;
+			},
+			phase: "content"
+		});
+	};
+	if_block(node_9, ($$render) => {
+		if ($$props.model.supplement) $$render(consequent_9);
+	});
+	var node_10 = sibling(node_9, 2);
+	ViewRenderer(node_10, {
 		get model() {
 			return $$props.model.view;
 		},
@@ -9359,14 +10290,26 @@ function TileFrame($$anchor, $$props) {
 			return $$props.model.instance_key;
 		}
 	});
-	var node_7 = sibling(node_6, 2);
-	var consequent_6 = ($$anchor) => {
+	var node_11 = sibling(node_10, 2);
+	var consequent_10 = ($$anchor) => {
+		ViewSupplement($$anchor, {
+			get model() {
+				return $$props.model.supplement;
+			},
+			phase: "footer"
+		});
+	};
+	if_block(node_11, ($$render) => {
+		if ($$props.model.supplement) $$render(consequent_10);
+	});
+	var node_12 = sibling(node_11, 2);
+	var consequent_11 = ($$anchor) => {
 		InputComposer($$anchor, { get model() {
 			return $$props.model.input;
 		} });
 	};
-	if_block(node_7, ($$render) => {
-		if ($$props.model.input && !$$props.model.input.live_filter) $$render(consequent_6);
+	if_block(node_12, ($$render) => {
+		if ($$props.model.input && !$$props.model.input.live_filter) $$render(consequent_11);
 	});
 	reset(article);
 	template_effect(() => {
@@ -9375,6 +10318,7 @@ function TileFrame($$anchor, $$props) {
 			transparent: $$props.model.background_transparent
 		});
 		set_attribute(article, "data-instance", $$props.model.instance_key);
+		set_attribute(article, "data-keyboard-focus", $$props.model.focused ? "current" : void 0);
 		set_attribute(article, "data-scroll-key", `tile:${$$props.model.instance_key}`);
 	});
 	delegated("pointerdown", article, () => {
@@ -9399,9 +10343,69 @@ delegate([
 ]);
 //#endregion
 //#region browser/layout/LayoutNode.svelte
-var root$2 = /* @__PURE__ */ from_html(`<div class="split"><!> <div class="split-divider" role="separator"></div> <!></div>`);
+var root$2 = /* @__PURE__ */ from_html(`<div class="split"><!>  <div class="split-divider" role="separator" tabindex="0" aria-label="Resize views"></div> <!></div>`);
 function LayoutNode_1($$anchor, $$props) {
 	push($$props, true);
+	let path = prop($$props, "path", 19, () => []);
+	const dispatch = dispatchUi();
+	let region = /* @__PURE__ */ state(void 0);
+	let drag = null;
+	function resize(ratio, layoutGuard = $$props.guard, splitPath = path()) {
+		dispatch({
+			type: "activate",
+			intent: {
+				type: "resize_split",
+				layout_guard: layoutGuard,
+				path: splitPath,
+				ratio
+			}
+		});
+	}
+	function begin(event) {
+		if (event.button !== 0 || $$props.model.type !== "split" || !get(region)) return;
+		const rect = get(region).getBoundingClientRect();
+		const horizontal = $$props.model.axis === "horizontal";
+		const styles = getComputedStyle(get(region));
+		const gap = parseFloat(horizontal ? styles.columnGap : styles.rowGap) || 0;
+		const divider = event.currentTarget;
+		const dividerSize = horizontal ? divider.offsetWidth : divider.offsetHeight;
+		drag = {
+			pointer: event.pointerId,
+			guard: $$props.guard,
+			path: [...path()],
+			start: horizontal ? event.clientX : event.clientY,
+			ratio: $$props.model.ratio,
+			extent: (horizontal ? rect.width : rect.height) - 2 * gap - dividerSize,
+			horizontal,
+			min: $$props.minRatio,
+			max: $$props.maxRatio
+		};
+		event.currentTarget.setPointerCapture(event.pointerId);
+		event.preventDefault();
+	}
+	function end(event) {
+		if (!drag || drag.pointer !== event.pointerId) return;
+		const retained = drag;
+		drag = null;
+		if (retained.extent <= 0) return;
+		const position = retained.horizontal ? event.clientX : event.clientY;
+		if (position === retained.start) return;
+		resize(Math.max(retained.min, Math.min(retained.max, retained.ratio + (position - retained.start) / retained.extent)), retained.guard, retained.path);
+	}
+	function key(event) {
+		if ($$props.model.type !== "split") return;
+		const negative = $$props.model.axis === "horizontal" ? "ArrowLeft" : "ArrowUp";
+		if (![
+			negative,
+			$$props.model.axis === "horizontal" ? "ArrowRight" : "ArrowDown",
+			"Home",
+			"End"
+		].includes(event.key)) return;
+		event.preventDefault();
+		event.stopPropagation();
+		const ratio = event.key === "Home" ? $$props.minRatio : event.key === "End" ? $$props.maxRatio : $$props.model.ratio + (event.key === negative ? -.05 : .05);
+		resize(Math.max($$props.minRatio, Math.min($$props.maxRatio, ratio)));
+	}
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
@@ -9412,19 +10416,67 @@ function LayoutNode_1($$anchor, $$props) {
 	var alternate = ($$anchor) => {
 		var div = root$2();
 		var node_1 = child(div);
-		LayoutNode_1(node_1, { get model() {
-			return $$props.model.first;
-		} });
+		{
+			let $0 = /* @__PURE__ */ user_derived(() => [...path(), "first"]);
+			LayoutNode_1(node_1, {
+				get model() {
+					return $$props.model.first;
+				},
+				get guard() {
+					return $$props.guard;
+				},
+				get minRatio() {
+					return $$props.minRatio;
+				},
+				get maxRatio() {
+					return $$props.maxRatio;
+				},
+				get path() {
+					return get($0);
+				}
+			});
+		}
 		var div_1 = sibling(node_1, 2);
-		LayoutNode_1(sibling(div_1, 2), { get model() {
-			return $$props.model.second;
-		} });
+		var node_2 = sibling(div_1, 2);
+		{
+			let $0 = /* @__PURE__ */ user_derived(() => [...path(), "second"]);
+			LayoutNode_1(node_2, {
+				get model() {
+					return $$props.model.second;
+				},
+				get guard() {
+					return $$props.guard;
+				},
+				get minRatio() {
+					return $$props.minRatio;
+				},
+				get maxRatio() {
+					return $$props.maxRatio;
+				},
+				get path() {
+					return get($0);
+				}
+			});
+		}
 		reset(div);
-		template_effect(() => {
+		bind_this(div, ($$value) => set(region, $$value), () => get(region));
+		template_effect(($0, $1, $2) => {
 			set_attribute(div, "data-axis", $$props.model.axis);
-			set_style(div, `--split:${$$props.model.ratio}`);
+			set_style(div, `--split:${$$props.model.ratio}fr;--split-rest:${1 - $$props.model.ratio}fr`);
+			set_attribute(div_1, "aria-valuemin", $0);
+			set_attribute(div_1, "aria-valuemax", $1);
+			set_attribute(div_1, "aria-valuenow", $2);
 			set_attribute(div_1, "aria-orientation", $$props.model.axis === "horizontal" ? "vertical" : "horizontal");
-		});
+		}, [
+			() => Math.round($$props.minRatio * 100),
+			() => Math.round($$props.maxRatio * 100),
+			() => Math.round($$props.model.ratio * 100)
+		]);
+		delegated("pointerdown", div_1, begin);
+		delegated("pointerup", div_1, end);
+		event("pointercancel", div_1, () => drag = null);
+		event("lostpointercapture", div_1, () => drag = null);
+		delegated("keydown", div_1, key);
 		append($$anchor, div);
 	};
 	if_block(node, ($$render) => {
@@ -9434,6 +10486,11 @@ function LayoutNode_1($$anchor, $$props) {
 	append($$anchor, fragment);
 	pop();
 }
+delegate([
+	"pointerdown",
+	"pointerup",
+	"keydown"
+]);
 //#endregion
 //#region browser/layout/ViewSet.svelte
 var root$1 = /* @__PURE__ */ from_html(`<div class="view-set-backdrop" aria-label="Empty view set"></div>`);
@@ -9465,9 +10522,20 @@ function ViewSet($$anchor, $$props) {
 	var section = sibling(node_1, 2);
 	var node_2 = child(section);
 	var consequent_2 = ($$anchor) => {
-		LayoutNode_1($$anchor, { get model() {
-			return $$props.model.root;
-		} });
+		LayoutNode_1($$anchor, {
+			get model() {
+				return $$props.model.root;
+			},
+			get guard() {
+				return $$props.model.layout_guard;
+			},
+			get minRatio() {
+				return $$props.model.split_min_ratio;
+			},
+			get maxRatio() {
+				return $$props.model.split_max_ratio;
+			}
+		});
 	};
 	var consequent_3 = ($$anchor) => {
 		SceneView($$anchor, { get scene() {
@@ -9512,18 +10580,39 @@ function ViewSet($$anchor, $$props) {
 }
 //#endregion
 //#region browser/app/RyeOs.svelte
-var root = /* @__PURE__ */ from_html(`<div class="ryeos-shell"><!> <!> <!> <div><!> <!></div> <!> <!> <!></div>`);
+var root = /* @__PURE__ */ from_html(`<div><!> <!> <!> <div><!> <!></div> <!> <!> <!></div>`);
 function RyeOs($$anchor, $$props) {
 	push($$props, true);
 	let replacement = /* @__PURE__ */ state(null);
+	let navigationOpen = /* @__PURE__ */ state(false);
+	let navigationOpener = null;
 	let envelope = /* @__PURE__ */ user_derived(() => get(replacement) ?? $$props.initialEnvelope);
 	provideDispatchUi((event) => $$props.dispatchUi(event));
 	/** Replace the sole renderer-owned root cell with one committed envelope. */
 	function replaceEnvelope(next) {
 		set(replacement, next, true);
 	}
+	function toggleNavigation(opener) {
+		if (get(navigationOpen)) {
+			closeNavigation();
+			return;
+		}
+		navigationOpener = opener;
+		set(navigationOpen, true);
+	}
+	function closeNavigation() {
+		const active = document.activeElement;
+		const panel = document.getElementById("ryeos-navigation");
+		const ownsFocus = active === document.body || active === null || active instanceof Element && (panel?.contains(active) || active.classList.contains("navigation-scrim"));
+		set(navigationOpen, false);
+		if (ownsFocus && navigationOpener?.isConnected) {
+			const opener = navigationOpener;
+			tick().then(() => opener.focus());
+		}
+	}
 	var $$exports = { replaceEnvelope };
 	var div = root();
+	let classes;
 	var node = child(div);
 	var consequent = ($$anchor) => {
 		AmbientLayer($$anchor, {
@@ -9539,28 +10628,44 @@ function RyeOs($$anchor, $$props) {
 		if (get(envelope).view_model.session.ambient.show_background) $$render(consequent);
 	});
 	var node_1 = sibling(node, 2);
-	SystemBar(node_1, {
-		get chrome() {
-			return get(envelope).view_model.chrome;
-		},
-		get session() {
-			return get(envelope).view_model.session;
-		},
-		get transport() {
-			return get(envelope).view_model.transport;
-		}
-	});
+	{
+		let $0 = /* @__PURE__ */ user_derived(() => get(envelope).view_model.navigation.items.length > 0);
+		SystemBar(node_1, {
+			get chrome() {
+				return get(envelope).view_model.chrome;
+			},
+			get session() {
+				return get(envelope).view_model.session;
+			},
+			get transport() {
+				return get(envelope).view_model.transport;
+			},
+			get navigationAvailable() {
+				return get($0);
+			},
+			get navigationOpen() {
+				return get(navigationOpen);
+			},
+			onToggleNavigation: toggleNavigation
+		});
+	}
 	var node_2 = sibling(node_1, 2);
 	ViewSetStrip(node_2, { get model() {
 		return get(envelope).view_model.presentation.chrome.top_bar;
 	} });
 	var div_1 = sibling(node_2, 2);
-	let classes;
+	let classes_1;
 	var node_3 = child(div_1);
 	var consequent_1 = ($$anchor) => {
-		Navigation($$anchor, { get model() {
-			return get(envelope).view_model.navigation;
-		} });
+		Navigation($$anchor, {
+			get model() {
+				return get(envelope).view_model.navigation;
+			},
+			get open() {
+				return get(navigationOpen);
+			},
+			onClose: closeNavigation
+		});
 	};
 	if_block(node_3, ($$render) => {
 		if (get(envelope).view_model.navigation.items.length > 0) $$render(consequent_1);
@@ -9584,9 +10689,13 @@ function RyeOs($$anchor, $$props) {
 	});
 	reset(div);
 	template_effect(($0) => {
+		classes = set_class(div, 1, "ryeos-shell", null, classes, {
+			"without-set-strip": !get(envelope).view_model.presentation.chrome.top_bar.visible,
+			"without-status-bar": !get(envelope).view_model.presentation.chrome.status_bar.visible
+		});
 		set_attribute(div, "data-generation", $0);
 		set_attribute(div, "data-theme", get(envelope).view_model.presentation.theme.id);
-		classes = set_class(div_1, 1, "shell-body", null, classes, { "with-navigation": get(envelope).view_model.navigation.items.length > 0 });
+		classes_1 = set_class(div_1, 1, "shell-body", null, classes_1, { "with-navigation": get(envelope).view_model.navigation.items.length > 0 });
 	}, [() => String(get(envelope).generation)]);
 	append($$anchor, div);
 	return pop($$exports);
@@ -9656,6 +10765,10 @@ function restoreBrowserPresentation(root, snapshot) {
 	let focus = snapshot.focus ?? modalReturnFocus.get(root) ?? null;
 	if (!focus) return;
 	let target = root.querySelector(`[data-focus-key="${cssEscape(focus.key)}"]`);
+	if (!target && focus.key.includes(":required-subject:")) {
+		const instance = focus.key.slice(5, focus.key.lastIndexOf(":required-subject:"));
+		target = root.querySelector(`[data-focus-key="${cssEscape(`view:${instance}:header`)}"]`);
+	}
 	if (!target) {
 		focus = modalReturnFocus.get(root) ?? null;
 		if (!focus) return;
@@ -9697,6 +10810,11 @@ async function runEffect(effect) {
 			location.assign(`${launch.pathname}${launch.search}${launch.hash}`);
 			return success(effect, "browser_only", null);
 		}
+		case "release_binding_attachment": return success(effect, "browser_only", unwrapResult$1(await postEncodedJson("/ui/api/session/attachments/detach", encodeJsonBody({
+			binding_attachment_id: kind.binding_attachment_id,
+			binding_generation: kind.binding_generation,
+			binding_digest: kind.binding_digest
+		}))));
 	}
 }
 function failedEffectResult(effect, error) {
@@ -9892,7 +11010,7 @@ function createSessionRuntime(options) {
 		seatObserved = startupBaseline.length;
 		await reconcileRetainedAppend();
 		if (closed || epoch !== seatEpoch) return;
-		const opened = unwrapResult(await invokeSeat("open", {}));
+		const opened = unwrapResult(await invokeSeat("open", options.surfaceAttachment));
 		if (closed || epoch !== seatEpoch) return;
 		seatThreadId = stringField(opened, "thread_id");
 		if (!seatThreadId) throw new Error("seat/open returned no durable seat thread");
@@ -9947,7 +11065,7 @@ function createSessionRuntime(options) {
 			lastEngineSeq: BigInt(retained.last_engine_seq),
 			eventCount: retained.event_count,
 			payloadDigest: retained.payload_digest
-		}, options.sessionId);
+		}, options.sessionId, options.surfaceAttachment);
 		clearRetainedAppend(pendingStorageKey);
 	}
 	function attachEvents() {
@@ -10164,7 +11282,7 @@ function createSessionRuntime(options) {
 				lastEngineSeq,
 				eventCount: batch.length,
 				payloadDigest
-			}, options.sessionId);
+			}, options.sessionId, options.surfaceAttachment);
 			if (closed || epoch !== seatEpoch || threadId !== seatThreadId || producer !== seatProducer) return;
 			clearRetainedAppend(pendingStorageKey);
 			pendingSeatEvents.splice(0, batch.length);
@@ -10228,7 +11346,7 @@ function createSessionRuntime(options) {
 async function invokeSeat(operation, body) {
 	return postJson(`/ui/api/session/seat/${operation}`, body);
 }
-async function appendWithExactRetry(encodedRequest, expected, sessionId) {
+async function appendWithExactRetry(encodedRequest, expected, sessionId, surfaceAttachment) {
 	const url = "/ui/api/session/seat/append";
 	let authenticationReconciled = false;
 	for (let attempt = 1;; attempt += 1) try {
@@ -10243,7 +11361,7 @@ async function appendWithExactRetry(encodedRequest, expected, sessionId) {
 		return;
 	} catch (error) {
 		if (isAuthenticationResponse(error) && !authenticationReconciled) {
-			await requireCurrentSession(sessionId);
+			await requireCurrentSession(sessionId, surfaceAttachment);
 			authenticationReconciled = true;
 			continue;
 		}
@@ -10256,8 +11374,12 @@ async function appendWithExactRetry(encodedRequest, expected, sessionId) {
 function isAuthenticationResponse(error) {
 	return error instanceof HttpResponseError && (error.status === 401 || error.status === 403);
 }
-async function requireCurrentSession(expectedSessionId) {
-	if (requiredStringField(unwrapResult(await getJson("/ui/api/session/current")), "session_id") !== expectedSessionId) throw new Error("browser session changed while reconciling a seat append");
+async function requireCurrentSession(expectedSessionId, expectedAttachment) {
+	const current = unwrapResult(await getJson("/ui/api/session/current"));
+	if (requiredStringField(current, "session_id") !== expectedSessionId) throw new Error("browser session changed while reconciling a seat append");
+	const attachments = current.binding_attachments;
+	if (!Array.isArray(attachments)) throw new Error("browser session attachments changed while reconciling a seat append");
+	if (attachments.filter((value) => isRecord(value) && value.binding_attachment_id === expectedAttachment.binding_attachment_id && exactIntegerField(value, "binding_generation") === BigInt(expectedAttachment.binding_generation) && value.binding_digest === expectedAttachment.binding_digest).length !== 1) throw new Error("browser surface attachment changed while reconciling a seat append");
 }
 function isRetryableResponse(error) {
 	return error instanceof UnknownDeliveryError || error instanceof HttpResponseError && error.status >= 500;
@@ -10397,6 +11519,7 @@ async function bootRyeOs(root) {
 	const wasm = await loadWasm();
 	await wasm.default({ module_or_path: "/ui/assets/ryeos_web_bg.wasm" });
 	const sessionUnknown = await getJson("/ui/api/session/current");
+	const surfaceAttachment = sessionSurfaceAttachment(sessionUnknown);
 	const initial = wasm.ryeos_start(sessionUnknown, viewport(), BigInt(Date.now()));
 	let runtime;
 	let sessionRuntime = null;
@@ -10433,6 +11556,7 @@ async function bootRyeOs(root) {
 	sessionRuntime = createSessionRuntime({
 		sessionId: sessionId(sessionUnknown),
 		eventsUrl: sessionEventsUrl(sessionUnknown),
+		surfaceAttachment,
 		seatEvents: () => wasm.ryeos_seat_events(),
 		commitEvent: (event) => runtime.enqueueEvent(event),
 		replaySeatEvents: (events) => runtime.commitMutation(() => wasm.ryeos_replay_seat_events(events))
@@ -10462,6 +11586,31 @@ async function bootRyeOs(root) {
 		await renderer.destroy();
 	} };
 }
+/** Resolve the immutable authored launch attachment without treating array order as authority. */
+function sessionSurfaceAttachment(session) {
+	const record = sessionRecord(session);
+	const surfaceAttachmentId = requiredNonEmptyString(record, "surface_attachment_id");
+	if (!Array.isArray(record.binding_attachments)) throw new Error("authenticated browser session binding_attachments is invalid");
+	const matches = record.binding_attachments.filter((attachment) => typeof attachment === "object" && attachment !== null && !Array.isArray(attachment) && attachment.binding_attachment_id === surfaceAttachmentId);
+	if (matches.length !== 1) throw new Error("authenticated browser session does not contain exactly one surface attachment");
+	const attachment = matches[0];
+	const generation = attachment.binding_generation;
+	if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) throw new Error("authenticated browser session surface attachment generation is invalid");
+	return {
+		binding_attachment_id: requiredNonEmptyString(attachment, "binding_attachment_id"),
+		binding_generation: generation,
+		binding_digest: requiredNonEmptyString(attachment, "binding_digest")
+	};
+}
+function sessionRecord(session) {
+	if (typeof session !== "object" || session === null || Array.isArray(session)) throw new Error("authenticated browser session is not an object");
+	return session;
+}
+function requiredNonEmptyString(record, field) {
+	const value = record[field];
+	if (typeof value !== "string" || value.length === 0) throw new Error(`authenticated browser session ${field} is invalid`);
+	return value;
+}
 function sessionEventsUrl(session) {
 	if (typeof session !== "object" || session === null || Array.isArray(session)) throw new Error("authenticated browser session is not an object");
 	const value = session.events_url;
@@ -10470,8 +11619,7 @@ function sessionEventsUrl(session) {
 	return value;
 }
 function sessionId(session) {
-	if (typeof session !== "object" || session === null || Array.isArray(session)) throw new Error("authenticated browser session is not an object");
-	const value = session.session_id;
+	const value = sessionRecord(session).session_id;
 	if (typeof value !== "string" || value.length === 0) throw new Error("authenticated browser session has no session_id");
 	return value;
 }
@@ -10505,7 +11653,7 @@ function attachBrowserEvents(wasm, runtime) {
 		if (isTypingTarget(event.target)) return;
 		const key = keyEvent(event);
 		if (!key) return;
-		if (key.key === "enter" && !hasModifiers(key) && isNativeActivationTarget(event.target)) return;
+		if ((event.key === "Enter" || event.key === " ") && !hasModifiers(key) && isNativeActivationTarget(event.target)) return;
 		let handled = false;
 		runtime.commitMutation(() => {
 			const outcome = wasm.ryeos_key(key);

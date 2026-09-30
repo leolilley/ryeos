@@ -52,6 +52,7 @@ pub mod project_file;
 pub mod project_snapshot;
 pub mod project_snapshot_policy;
 pub mod project_tree;
+pub mod retained_lifecycle_artifacts;
 pub mod source_closure;
 pub mod source_manifest;
 pub mod state_anchor;
@@ -179,6 +180,11 @@ pub use project_file::ProjectFile;
 pub use project_snapshot::ProjectSnapshot;
 pub use project_snapshot_policy::ProjectSnapshotPolicy;
 pub use project_tree::ProjectTree;
+pub use retained_lifecycle_artifacts::{
+    RETAINED_LIFECYCLE_ARTIFACTS_KIND, RETAINED_LIFECYCLE_ARTIFACTS_SCHEMA,
+    RetainedLifecycleArtifacts, RetainedLifecycleExecutable, RetainedLifecycleExecutableRole,
+    RetainedLifecycleSpec, RetainedLifecycleSpecRole,
+};
 pub use source_closure::{
     EFFECTIVE_SOURCE_BINDING_KIND, EFFECTIVE_SOURCE_BINDING_SCHEMA, EffectiveSourceBinding,
     EffectiveSourceClosureProjection, LogicalSourceRoot, MAX_SOURCE_BINDING_BYTES,

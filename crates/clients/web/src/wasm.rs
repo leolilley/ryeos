@@ -168,7 +168,7 @@ pub fn ryeos_open_saved_view_set_template(encoded: &str) -> Result<JsValue, JsVa
             .as_mut()
             .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
         let effects = core
-            .open_saved_view_set_template(&template)
+            .open_saved_view_set_template_in_active_context(&template)
             .map_err(|error| JsValue::from_str(&error))?;
         ryeos_envelope(core, effects)
     })

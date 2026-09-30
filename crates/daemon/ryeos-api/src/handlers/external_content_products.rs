@@ -19,7 +19,6 @@ pub type Request = ryeos_app::operator_external_content::products::ProductReques
 pub struct ProduceRuntimeSnapshotRequest {
     binding_id: String,
     source: RuntimeSnapshotSourceRequest,
-    source_occurrence_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,33 +27,115 @@ enum RuntimeSnapshotSourceRequest {
     CapturedProduct {
         witness_hash: String,
         witness_source: ProductWitnessSource,
+        source_occurrence_id: String,
     },
     BundleMaterialization {
         materialization_binding_id: String,
         coordinate_digest: String,
         attestation_hash: String,
+        bootstrap_operation_id: String,
     },
-}
-
-impl ProduceRuntimeSnapshotRequest {
-    fn require_authoritative_source_occurrence(&self) -> Result<()> {
-        // Materialization attests the bytes, not a caller-provided provider
-        // occurrence. The bootstrap journal must own that occurrence first.
-        anyhow::ensure!(
-            !matches!(
-                &self.source,
-                RuntimeSnapshotSourceRequest::BundleMaterialization { .. }
-            ),
-            "materialized snapshot source requires an authoritative bootstrap occurrence"
-        );
-        Ok(())
-    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GetRuntimeSnapshotRequest {
     operation_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapRuntimeSourceRequest {
+    binding_id: String,
+    materialization_binding_id: String,
+    coordinate_digest: String,
+    attestation_hash: String,
+    maximum_lifetime_seconds: u32,
+}
+
+pub async fn bootstrap_runtime_source(
+    req: BootstrapRuntimeSourceRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let result = tokio::task::spawn_blocking(move || {
+        ryeos_app::operator_runtime_snapshot::bootstrap_source(
+            &state,
+            &ctx,
+            ryeos_app::operator_runtime_snapshot::SnapshotBootstrapRequest {
+                binding_id: req.binding_id,
+                materialization_binding_id: req.materialization_binding_id,
+                coordinate_digest: req.coordinate_digest,
+                attestation_hash: req.attestation_hash,
+                maximum_lifetime_seconds: req.maximum_lifetime_seconds,
+            },
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("bootstrap source join failed: {error}"))??;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub async fn get_bootstrap_runtime_source(
+    req: GetRuntimeSnapshotRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    Ok(serde_json::to_value(
+        ryeos_app::operator_runtime_snapshot::get_bootstrap_source(
+            &state,
+            &ctx,
+            &req.operation_id,
+        )?,
+    )?)
+}
+
+pub async fn observe_bootstrap_runtime_source(
+    req: GetRuntimeSnapshotRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let result = tokio::task::spawn_blocking(move || {
+        ryeos_app::operator_runtime_snapshot::observe_bootstrap_source(
+            &state,
+            &ctx,
+            &req.operation_id,
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("bootstrap readiness join failed: {error}"))??;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub async fn terminate_bootstrap_runtime_source(
+    req: GetRuntimeSnapshotRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let result = tokio::task::spawn_blocking(move || {
+        ryeos_app::operator_runtime_snapshot::terminate_bootstrap_source(
+            &state,
+            &ctx,
+            &req.operation_id,
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("bootstrap termination join failed: {error}"))??;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub async fn get_bootstrap_runtime_source_termination(
+    req: GetRuntimeSnapshotRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    Ok(serde_json::to_value(
+        ryeos_app::operator_runtime_snapshot::get_bootstrap_source_termination(
+            &state,
+            &ctx,
+            &req.operation_id,
+        )?,
+    )?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,13 +254,29 @@ pub async fn observe_runtime_snapshot_readiness(
     Ok(serde_json::to_value(observed)?)
 }
 
+pub async fn continue_runtime_snapshot_create(
+    req: GetRuntimeSnapshotRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let result = tokio::task::spawn_blocking(move || {
+        ryeos_app::operator_runtime_snapshot::continue_staged_create(
+            &state,
+            &ctx,
+            &req.operation_id,
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("snapshot create continuation join failed: {error}"))??;
+    Ok(serde_json::to_value(result)?)
+}
+
 pub async fn produce_runtime_snapshot(
     req: ProduceRuntimeSnapshotRequest,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
     ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)?;
-    req.require_authoritative_source_occurrence()?;
     let result = tokio::task::spawn_blocking(move || {
         let ceiling = ryeos_app::operator_runtime_snapshot::staging_source_ceiling(
             &state,
@@ -191,6 +288,7 @@ pub async fn produce_runtime_snapshot(
             RuntimeSnapshotSourceRequest::CapturedProduct {
                 witness_hash,
                 witness_source,
+                source_occurrence_id,
             } => {
                 let staged = ryeos_executor::execution::external_guest_runtime_product::stage_current_guest_owner_runtime_product(
                     &state, &ctx, &witness_hash, &witness_source, ceiling,
@@ -203,6 +301,7 @@ pub async fn produce_runtime_snapshot(
                     ryeos_app::operator_runtime_snapshot::SnapshotProductionSource::CapturedProduct {
                         witness_hash,
                         source: witness_source,
+                        source_occurrence_id,
                     },
                 )
             }
@@ -210,6 +309,7 @@ pub async fn produce_runtime_snapshot(
                 materialization_binding_id,
                 coordinate_digest,
                 attestation_hash,
+                bootstrap_operation_id,
             } => {
                 let staged = ryeos_executor::execution::external_guest_runtime_product::stage_current_guest_owner_runtime_materialization(
                     &state, &ctx, &materialization_binding_id, &coordinate_digest,
@@ -224,6 +324,7 @@ pub async fn produce_runtime_snapshot(
                         materialization_binding_id,
                         coordinate_digest,
                         attestation_hash,
+                        bootstrap_operation_id,
                     },
                 )
             }
@@ -234,7 +335,6 @@ pub async fn produce_runtime_snapshot(
             ryeos_app::operator_runtime_snapshot::SnapshotProductionRequest {
                 binding_id: req.binding_id,
                 source,
-                source_occurrence_id: req.source_occurrence_id,
                 staged_identity,
                 staged_root,
             },
@@ -341,6 +441,102 @@ pub const PRODUCE_RUNTIME_SNAPSHOT_DESCRIPTOR: ServiceDescriptor = ServiceDescri
         })
     },
 };
+
+pub const CONTINUE_RUNTIME_SNAPSHOT_CREATE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/continue-runtime-snapshot-create",
+    endpoint: "external-content.continue-runtime-snapshot-create",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/continue-runtime-snapshot-create"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            continue_runtime_snapshot_create(
+                crate::handler_error::parse_request(params)?,
+                ctx,
+                state,
+            )
+            .await
+        })
+    },
+};
+
+pub const BOOTSTRAP_RUNTIME_SOURCE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/bootstrap-runtime-source",
+    endpoint: "external-content.bootstrap-runtime-source",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/bootstrap-runtime-source"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            bootstrap_runtime_source(crate::handler_error::parse_request(params)?, ctx, state).await
+        })
+    },
+};
+
+pub const GET_BOOTSTRAP_RUNTIME_SOURCE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/bootstrap-runtime-source-operation",
+    endpoint: "external-content.bootstrap-runtime-source-operation",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/bootstrap-runtime-source-operation"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            get_bootstrap_runtime_source(crate::handler_error::parse_request(params)?, ctx, state)
+                .await
+        })
+    },
+};
+
+pub const OBSERVE_BOOTSTRAP_RUNTIME_SOURCE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/observe-bootstrap-runtime-source",
+    endpoint: "external-content.observe-bootstrap-runtime-source",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/observe-bootstrap-runtime-source"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            observe_bootstrap_runtime_source(
+                crate::handler_error::parse_request(params)?,
+                ctx,
+                state,
+            )
+            .await
+        })
+    },
+};
+
+pub const TERMINATE_BOOTSTRAP_RUNTIME_SOURCE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/terminate-bootstrap-runtime-source",
+    endpoint: "external-content.terminate-bootstrap-runtime-source",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/terminate-bootstrap-runtime-source"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            terminate_bootstrap_runtime_source(
+                crate::handler_error::parse_request(params)?,
+                ctx,
+                state,
+            )
+            .await
+        })
+    },
+};
+
+pub const GET_BOOTSTRAP_RUNTIME_SOURCE_TERMINATION_DESCRIPTOR: ServiceDescriptor =
+    ServiceDescriptor {
+        service_ref: "service:external-content/bootstrap-runtime-source-termination",
+        endpoint: "external-content.bootstrap-runtime-source-termination",
+        availability: ServiceAvailability::DaemonOnly,
+        required_caps: &[
+            "ryeos.execute.service.external-content/bootstrap-runtime-source-termination",
+        ],
+        handler: |params, ctx, state| {
+            Box::pin(async move {
+                get_bootstrap_runtime_source_termination(
+                    crate::handler_error::parse_request(params)?,
+                    ctx,
+                    state,
+                )
+                .await
+            })
+        },
+    };
 
 pub const GET_RUNTIME_SNAPSHOT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:external-content/runtime-snapshot",
@@ -501,30 +697,37 @@ mod tests {
             "source": {
                 "kind": "captured_product",
                 "witness_hash": "a".repeat(64),
-                "witness_source": {"kind": "local_capture"}
-            },
-            "source_occurrence_id": "sbx-exact"
+                "witness_source": {"kind": "local_capture"},
+                "source_occurrence_id": "sbx-exact"
+            }
         });
         let captured =
             serde_json::from_value::<super::ProduceRuntimeSnapshotRequest>(required.clone())
                 .unwrap();
-        captured.require_authoritative_source_occurrence().unwrap();
+        assert!(matches!(
+            captured.source,
+            super::RuntimeSnapshotSourceRequest::CapturedProduct { .. }
+        ));
         let materialized = json!({
             "binding_id": "signed-render-producer",
             "source": {
                 "kind": "bundle_materialization",
                 "materialization_binding_id": "signed-owner-materializer",
                 "coordinate_digest": "b".repeat(64),
-                "attestation_hash": "c".repeat(64)
-            },
-            "source_occurrence_id": "sbx-exact"
+                "attestation_hash": "c".repeat(64),
+                "bootstrap_operation_id": "d".repeat(64)
+            }
         });
         let materialized =
             serde_json::from_value::<super::ProduceRuntimeSnapshotRequest>(materialized).unwrap();
+        assert!(matches!(
+            materialized.source,
+            super::RuntimeSnapshotSourceRequest::BundleMaterialization { .. }
+        ));
+        let mut substituted = required.clone();
+        substituted["source"]["bootstrap_operation_id"] = json!("d".repeat(64));
         assert!(
-            materialized
-                .require_authoritative_source_occurrence()
-                .is_err()
+            serde_json::from_value::<super::ProduceRuntimeSnapshotRequest>(substituted).is_err()
         );
         for (key, value) in [
             ("upload_path", json!("/tmp/ambient")),

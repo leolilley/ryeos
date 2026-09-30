@@ -1,0 +1,6 @@
+kind: service
+endpoint: external-content.bootstrap-runtime-source-termination
+required_caps: ["ryeos.execute.service.external-content/bootstrap-runtime-source-termination"]
+schema:
+  operation_id: string
+description: Read the exact retained termination of a runtime-source sandbox

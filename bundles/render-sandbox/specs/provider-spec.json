@@ -1,7 +1,8 @@
 {
-  "schema": 2,
+  "schema": 3,
   "provider_profile": "render_sandbox_v1",
   "settings_schema_digest": "f5b4994d71a6896ddad77bf2a08716fdc3527ea4f91579f084112ca69dad7172",
+  "bootstrap_settings_schema_digest": "45ed0ff8f70a838227995f3807d9c0361d1718d7b6b1f0772e4ba6861933f779",
   "qualification_settings_schema_digest": "5d50565bccc9ef5986032ef3649e5499c6549c298bc8674a4e5043bf553cfc9c",
   "origin_profile": "render_api_v1",
   "routes": {
@@ -78,6 +79,20 @@
       "bind_proof_profile": "render_sandbox_create_201_v1",
       "no_occurrence_proof_profile": "render_no_request_sent_v1"
     },
+    "bootstrap_create": {
+      "kind": "create_once",
+      "route": "sandbox_collection",
+      "precondition_profile": "render_materialization_bootstrap_v1",
+      "body": {
+        "ownerId": { "source": "settings.owner_id" },
+        "plan": { "source": "settings.plan" },
+        "region": { "source": "settings.region" },
+        "timeoutSeconds": { "source": "bootstrap.maximum_lifetime_seconds" },
+        "networkPolicy": { "literal": { "default": "deny-all" } }
+      },
+      "bind_proof_profile": "render_sandbox_create_201_v1",
+      "no_occurrence_proof_profile": "render_no_request_sent_v1"
+    },
     "qualification_create": {
       "kind": "create_once",
       "route": "sandbox_collection",
@@ -112,6 +127,11 @@
       "kind": "observe_exact_occurrence",
       "route": "sandbox_by_id",
       "terminal_proof_profile": "render_sandbox_terminal_v1"
+    },
+    "bootstrap_terminated_list": {
+      "kind": "observe_exact_occurrence",
+      "route": "sandbox_collection",
+      "terminal_proof_profile": "render_sandbox_terminated_list_v1"
     }
   }
 }

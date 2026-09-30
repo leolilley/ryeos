@@ -363,7 +363,11 @@ mod tests {
         let output = lillux::PinnedDirectory::open(&output).unwrap().unwrap();
         let root_key = SigningKey::from_bytes(&[43; 32]).verifying_key();
         let profile = GuestOwnerRuntimeProfile {
-            schema: 1,
+            schema: 2,
+            account: lillux::GuestRuntimeAccount::Unix {
+                uid: 65534,
+                gid: 65534,
+            },
             private_source_max_bytes: 32 * 1024 * 1024,
             private_source_max_inodes: 1024,
             owner_timeout_seconds: 600,

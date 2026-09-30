@@ -1,0 +1,10 @@
+kind: service
+endpoint: external-content.bootstrap-runtime-source
+required_caps: ["ryeos.execute.service.external-content/bootstrap-runtime-source"]
+schema:
+  binding_id: string
+  materialization_binding_id: string
+  coordinate_digest: string
+  attestation_hash: string
+  maximum_lifetime_seconds: integer
+description: Create one bounded source sandbox from the current admitted runtime materialization; this does not grant upload, snapshot, or worker authority

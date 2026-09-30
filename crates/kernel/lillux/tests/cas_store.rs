@@ -142,6 +142,53 @@ fn bounded_blob_read_refuses_oversize_and_corruption() {
 }
 
 #[test]
+fn streamed_blob_verification_refuses_oversize_and_corruption() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let bytes = vec![b'x'; 256 * 1024 + 13];
+    let hash = store.store_blob(&bytes).expect("store");
+    assert_eq!(
+        store
+            .verify_blob_bounded(&hash, bytes.len() as u64)
+            .unwrap(),
+        Some(bytes.len() as u64)
+    );
+    assert!(
+        store
+            .verify_blob_bounded(&hash, bytes.len() as u64 - 1)
+            .is_err()
+    );
+    let path = shard_path(store.root(), "blobs", &hash, "");
+    fs::write(&path, vec![b'y'; bytes.len()]).expect("inject same-size corruption");
+    assert!(
+        store
+            .verify_blob_bounded(&hash, bytes.len() as u64)
+            .is_err()
+    );
+}
+
+#[test]
+fn bounded_object_read_checks_address_and_canonical_encoding() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let value = serde_json::json!({"kind": "test", "schema": 1});
+    let bytes = canonical_json(&value).unwrap();
+    let hash = store.store_object(&value).unwrap();
+    assert_eq!(
+        store.get_object_bounded(&hash, bytes.len() as u64).unwrap(),
+        Some(value)
+    );
+    assert!(
+        store
+            .get_object_bounded(&hash, bytes.len() as u64 - 1)
+            .is_err()
+    );
+    let path = shard_path(store.root(), "objects", &hash, ".json");
+    fs::write(&path, br#"{"schema":1,"kind":"test"}"#).unwrap();
+    assert!(store.get_object_bounded(&hash, 1024).is_err());
+}
+
+#[test]
 fn store_blob_is_idempotent() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = CasStore::new(tmp.path().to_path_buf());

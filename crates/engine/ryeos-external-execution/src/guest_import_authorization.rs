@@ -26,6 +26,7 @@ const MAX_OWNER_PROFILE_BYTES: u64 = 4 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct GuestOwnerRuntimeProfile {
     pub schema: u32,
+    pub account: lillux::GuestRuntimeAccount,
     pub private_source_max_bytes: u64,
     pub private_source_max_inodes: u64,
     pub owner_timeout_seconds: u32,
@@ -34,9 +35,10 @@ pub struct GuestOwnerRuntimeProfile {
 impl GuestOwnerRuntimeProfile {
     pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 1,
+            self.schema == 2,
             "unsupported installed guest-owner profile"
         );
+        self.account.validate()?;
         self.private_source_limits()
             .validate()
             .map_err(anyhow::Error::msg)?;
@@ -479,7 +481,11 @@ mod tests {
         std::fs::write(
             &profile_file,
             ryeos_external_execution_contract::canonical_json(&GuestOwnerRuntimeProfile {
-                schema: 1,
+                schema: 2,
+                account: lillux::GuestRuntimeAccount::Unix {
+                    uid: 65534,
+                    gid: 65534,
+                },
                 private_source_max_bytes: 32 * 1024 * 1024,
                 private_source_max_inodes: 1024,
                 owner_timeout_seconds: 10,

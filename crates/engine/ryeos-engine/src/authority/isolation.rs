@@ -2846,6 +2846,7 @@ impl IsolationRuntime {
                 max_address_space_bytes: requested.max_address_space_bytes,
                 max_cpu_seconds: requested.max_cpu_seconds,
                 max_processes: requested.max_processes,
+                deny_process_creation: requested.deny_process_creation,
                 max_stdout_bytes: Some(
                     requested
                         .max_stdout_bytes
@@ -4743,6 +4744,9 @@ impl IsolationRuntime {
                 .and_then(|limits| limits.max_address_space_bytes),
             max_cpu_seconds: limits.as_ref().and_then(|limits| limits.max_cpu_seconds),
             max_processes: limits.as_ref().and_then(|limits| limits.max_processes),
+            deny_process_creation: limits
+                .as_ref()
+                .is_some_and(|limits| limits.deny_process_creation),
         });
 
         Ok(CompiledIsolationLaunch {

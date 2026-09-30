@@ -496,6 +496,25 @@ impl RyeOsCore {
         )
     }
 
+    /// Open a reusable composition using the admitted insertion context
+    /// already retained for the active view set. Browser/client adapters must
+    /// not choose an attachment coordinate supplied by presentation code.
+    pub fn open_saved_view_set_template_in_active_context(
+        &mut self,
+        template: &SavedViewSetTemplate,
+    ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
+        let active_view_set_id = self
+            .view_sets
+            .get(self.active_view_set)
+            .ok_or("active view set is unavailable")?
+            .id;
+        let insertion_attachment_id = self
+            .insertion_attachment_id(active_view_set_id)
+            .ok_or("active view set has no admitted insertion context")?
+            .to_owned();
+        self.open_saved_view_set_template(template, &insertion_attachment_id)
+    }
+
     /// Open with explicit fresh subjects and explicit saved-set resolutions.
     /// Neither input can grant authority: the insertion attachment and every
     /// view are still revalidated before the fresh mounts are committed.
@@ -1083,7 +1102,7 @@ mod tests {
 
         let mut reopened = core();
         reopened
-            .open_saved_view_set_template(&template, "attachment:test")
+            .open_saved_view_set_template_in_active_context(&template)
             .unwrap();
         let unresolved_instance = center_mounts(&reopened.view_sets[1]).unwrap()[0].clone();
         assert!(matches!(

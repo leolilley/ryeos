@@ -18,10 +18,13 @@ pub(crate) struct ProviderSpec {
     schema: u32,
     provider_profile: ProviderProfile,
     settings_schema_digest: String,
+    bootstrap_settings_schema_digest: String,
     qualification_settings_schema_digest: String,
     origin_profile: OriginProfile,
     routes: Routes,
     operations: Operations,
+    #[serde(skip)]
+    bootstrap_profile_digest: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -162,6 +165,8 @@ enum LifetimeFieldSource {
     ReservationMaximumLifetimeSeconds,
     #[serde(rename = "qualification.maximum_lifetime_seconds")]
     QualificationMaximumLifetimeSeconds,
+    #[serde(rename = "bootstrap.maximum_lifetime_seconds")]
+    BootstrapMaximumLifetimeSeconds,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -199,8 +204,12 @@ struct CreateBodyMapping {
     timeout_seconds: LifetimeSource,
     #[serde(rename = "networkPolicy")]
     network_policy: NetworkPolicyLiteral,
-    #[serde(rename = "snapshotId")]
-    snapshot_id: StringSource,
+    #[serde(
+        rename = "snapshotId",
+        default,
+        deserialize_with = "deserialize_non_null_option"
+    )]
+    snapshot_id: Option<StringSource>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -210,6 +219,7 @@ enum PreconditionProfile {
     RenderQualifiedGuestRuntimeV1,
     RenderBoundRuntimeSnapshotV1,
     RenderBoundQualificationOccurrenceV1,
+    RenderMaterializationBootstrapV1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -228,6 +238,8 @@ enum NoOccurrenceProofProfile {
 enum TerminalProofProfile {
     #[serde(rename = "render_sandbox_terminal_v1")]
     RenderSandboxTerminalV1,
+    #[serde(rename = "render_sandbox_terminated_list_v1")]
+    RenderSandboxTerminatedListV1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -269,6 +281,7 @@ pub(crate) struct OperationSpec {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Operations {
     pub(crate) allocate: OperationSpec,
+    bootstrap_create: OperationSpec,
     qualification_create: OperationSpec,
     qualification_verify: OperationSpec,
     reconcile_allocation: OperationSpec,
@@ -276,6 +289,7 @@ pub(crate) struct Operations {
     reconcile_supervisor_activation: OperationSpec,
     pub(crate) terminate: OperationSpec,
     pub(crate) reconcile_termination: OperationSpec,
+    bootstrap_terminated_list: OperationSpec,
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,6 +326,15 @@ pub(crate) struct CreateProjection {
     pub(crate) snapshot_id: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BootstrapCreateProjection {
+    pub(crate) owner_id: String,
+    pub(crate) plan: PlanValue,
+    pub(crate) region: String,
+    pub(crate) timeout_seconds: u32,
+    pub(crate) network_policy_default: NetworkPolicyDefault,
+}
+
 impl ProviderSpec {
     pub(crate) fn parse(bytes: &[u8], settings_schema_digest: &str) -> Result<Self> {
         ensure!(
@@ -320,20 +343,39 @@ impl ProviderSpec {
                     <= usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES).unwrap_or(usize::MAX),
             "provider spec exceeds its signed byte bound"
         );
-        let spec: Self = from_json_slice_strict(
+        let mut spec: Self = from_json_slice_strict(
             bytes,
             usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES).unwrap_or(usize::MAX),
         )?;
         spec.validate(settings_schema_digest)?;
+        let value: serde_json::Value = from_json_slice_strict(
+            bytes,
+            usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES).unwrap_or(usize::MAX),
+        )?;
+        let profile = value
+            .get("operations")
+            .and_then(|value| value.get("bootstrap_create"))
+            .context("signed provider spec lacks bootstrap profile")?;
+        spec.bootstrap_profile_digest = lillux::sha256_hex(
+            ryeos_external_execution_contract::canonical_json(&(
+                "ryeos.render-bootstrap-profile.v1",
+                profile,
+            ))?
+            .as_slice(),
+        );
         Ok(spec)
     }
 
     fn validate(&self, settings_schema_digest: &str) -> Result<()> {
         ensure!(
-            self.schema == 2
+            self.schema == 3
                 && self.provider_profile == ProviderProfile::RenderSandboxV1
                 && self.origin_profile == OriginProfile::RenderApiV1
                 && self.settings_schema_digest == settings_schema_digest
+                && self.bootstrap_settings_schema_digest
+                    == lillux::sha256_hex(include_bytes!(
+                        "../fixtures/bootstrap-settings.schema.json"
+                    ))
                 && self.qualification_settings_schema_digest
                     == lillux::sha256_hex(include_bytes!(
                         "../fixtures/qualification-settings.schema.json"
@@ -409,6 +451,21 @@ impl ProviderSpec {
                 && allocate.terminal_proof_profile.is_none(),
             "provider spec allocation operation is unsupported"
         );
+        let bootstrap = &self.operations.bootstrap_create;
+        ensure!(
+            bootstrap.kind == OperationKind::CreateOnce
+                && bootstrap.route == Some(RouteName::SandboxCollection)
+                && bootstrap.precondition_profile
+                    == Some(PreconditionProfile::RenderMaterializationBootstrapV1)
+                && bootstrap.body.as_ref() == Some(&expected_bootstrap_create_body_mapping())
+                && bootstrap.bind_proof_profile == Some(BindProofProfile::RenderSandboxCreate201V1)
+                && bootstrap.no_occurrence_proof_profile
+                    == Some(NoOccurrenceProofProfile::RenderNoRequestSentV1)
+                && bootstrap.mutation_route.is_none()
+                && bootstrap.observation_route.is_none()
+                && bootstrap.terminal_proof_profile.is_none(),
+            "provider spec bootstrap create operation is unsupported"
+        );
         let qualification = &self.operations.qualification_create;
         ensure!(
             qualification.kind == OperationKind::CreateOnce
@@ -481,6 +538,20 @@ impl ProviderSpec {
                     == Some(TerminalProofProfile::RenderSandboxTerminalV1),
             "provider spec termination reconciliation is unsupported"
         );
+        let terminal_list = &self.operations.bootstrap_terminated_list;
+        ensure!(
+            terminal_list.kind == OperationKind::ObserveExactOccurrence
+                && terminal_list.route == Some(RouteName::SandboxCollection)
+                && terminal_list.precondition_profile.is_none()
+                && terminal_list.body.is_none()
+                && terminal_list.bind_proof_profile.is_none()
+                && terminal_list.no_occurrence_proof_profile.is_none()
+                && terminal_list.mutation_route.is_none()
+                && terminal_list.observation_route.is_none()
+                && terminal_list.terminal_proof_profile
+                    == Some(TerminalProofProfile::RenderSandboxTerminatedListV1),
+            "provider spec bootstrap terminal list is unsupported"
+        );
         Ok(())
     }
 
@@ -531,6 +602,14 @@ impl ProviderSpec {
         self.operations.qualification_create.route
     }
 
+    pub(crate) fn bootstrap_create_route(&self) -> Option<RouteName> {
+        self.operations.bootstrap_create.route
+    }
+
+    pub(crate) fn bootstrap_profile_digest(&self) -> &str {
+        &self.bootstrap_profile_digest
+    }
+
     pub(crate) fn qualification_verifier_routes(&self) -> (RouteName, RouteName) {
         // `validate_operations` has already checked both finite route names.
         (
@@ -572,6 +651,10 @@ impl ProviderSpec {
 
     pub(crate) fn reconciliation_route(&self) -> Option<RouteName> {
         self.operations.reconcile_termination.route
+    }
+
+    pub(crate) fn bootstrap_terminal_list_route(&self) -> Option<RouteName> {
+        self.operations.bootstrap_terminated_list.route
     }
 
     pub(crate) fn reconciliation_terminal_proof_enabled(&self) -> bool {
@@ -675,7 +758,12 @@ impl ProviderSpec {
             StringFieldSource::SettingsRegion => settings_region,
             _ => anyhow::bail!("provider spec region projection is unsupported"),
         };
-        let snapshot_id = match mapping.snapshot_id.source {
+        let snapshot_id = match mapping
+            .snapshot_id
+            .as_ref()
+            .context("allocation snapshot mapping missing")?
+            .source
+        {
             StringFieldSource::SettingsSnapshotId => settings_snapshot_id,
             _ => anyhow::bail!("provider spec snapshot projection is unsupported"),
         };
@@ -686,6 +774,9 @@ impl ProviderSpec {
             LifetimeFieldSource::ReservationMaximumLifetimeSeconds => reservation_lifetime_seconds,
             LifetimeFieldSource::QualificationMaximumLifetimeSeconds => {
                 anyhow::bail!("worker allocation cannot select qualification lifetime")
+            }
+            LifetimeFieldSource::BootstrapMaximumLifetimeSeconds => {
+                anyhow::bail!("worker allocation cannot select bootstrap lifetime")
             }
         };
         Ok(CreateProjection {
@@ -716,7 +807,8 @@ impl ProviderSpec {
             mapping.owner_id.source == StringFieldSource::SettingsOwnerId
                 && mapping.region.source == StringFieldSource::SettingsRegion
                 && mapping.plan.source == PlanFieldSource::SettingsPlan
-                && mapping.snapshot_id.source == StringFieldSource::QualificationLocatorSnapshotId
+                && mapping.snapshot_id.as_ref().map(|source| source.source)
+                    == Some(StringFieldSource::QualificationLocatorSnapshotId)
                 && mapping.timeout_seconds.source
                     == LifetimeFieldSource::QualificationMaximumLifetimeSeconds
                 && mapping.network_policy.literal.default == NetworkPolicyDefault::DenyAll,
@@ -738,6 +830,33 @@ impl ProviderSpec {
             timeout_seconds: maximum_lifetime_seconds,
             network_policy_default: NetworkPolicyDefault::DenyAll,
             snapshot_id: bound_snapshot_id.to_owned(),
+        })
+    }
+
+    pub(crate) fn bootstrap_create_projection(
+        &self,
+        settings_owner_id: &str,
+        settings_plan: PlanValue,
+        settings_region: &str,
+        maximum_lifetime_seconds: u32,
+    ) -> Result<BootstrapCreateProjection> {
+        let mapping = self
+            .operations
+            .bootstrap_create
+            .body
+            .as_ref()
+            .context("provider spec has no bootstrap create mapping")?;
+        ensure!(
+            mapping == &expected_bootstrap_create_body_mapping()
+                && (1..=3600).contains(&maximum_lifetime_seconds),
+            "bootstrap create mapping or lifetime differs from signed profile"
+        );
+        Ok(BootstrapCreateProjection {
+            owner_id: settings_owner_id.to_owned(),
+            plan: settings_plan,
+            region: settings_region.to_owned(),
+            timeout_seconds: maximum_lifetime_seconds,
+            network_policy_default: NetworkPolicyDefault::DenyAll,
         })
     }
 }
@@ -832,9 +951,9 @@ fn expected_create_body_mapping() -> CreateBodyMapping {
                 default: NetworkPolicyDefault::DenyAll,
             },
         },
-        snapshot_id: StringSource {
+        snapshot_id: Some(StringSource {
             source: StringFieldSource::SettingsSnapshotId,
-        },
+        }),
     }
 }
 
@@ -857,9 +976,32 @@ fn expected_qualification_create_body_mapping() -> CreateBodyMapping {
                 default: NetworkPolicyDefault::DenyAll,
             },
         },
-        snapshot_id: StringSource {
+        snapshot_id: Some(StringSource {
             source: StringFieldSource::QualificationLocatorSnapshotId,
+        }),
+    }
+}
+
+fn expected_bootstrap_create_body_mapping() -> CreateBodyMapping {
+    CreateBodyMapping {
+        owner_id: StringSource {
+            source: StringFieldSource::SettingsOwnerId,
         },
+        plan: PlanSource {
+            source: PlanFieldSource::SettingsPlan,
+        },
+        region: StringSource {
+            source: StringFieldSource::SettingsRegion,
+        },
+        timeout_seconds: LifetimeSource {
+            source: LifetimeFieldSource::BootstrapMaximumLifetimeSeconds,
+        },
+        network_policy: NetworkPolicyLiteral {
+            literal: NetworkPolicyValue {
+                default: NetworkPolicyDefault::DenyAll,
+            },
+        },
+        snapshot_id: None,
     }
 }
 
@@ -991,8 +1133,8 @@ mod tests {
     fn spec_rejects_unknown_configuration_and_unreviewed_routes() {
         let fixture = String::from_utf8(fixture()).unwrap();
         let with_capability_claim = fixture.replacen(
-            "\"schema\": 2,",
-            "\"schema\": 2,\n  \"capabilities\": [\"exact_terminal_observation\"],",
+            "\"schema\": 3,",
+            "\"schema\": 3,\n  \"capabilities\": [\"exact_terminal_observation\"],",
             1,
         );
         assert!(
@@ -1107,6 +1249,41 @@ mod tests {
                 SETTINGS_SCHEMA_DIGEST
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn bootstrap_create_is_unsnapshotted_and_closed_to_other_field_sources() {
+        let spec = ProviderSpec::parse(&fixture(), SETTINGS_SCHEMA_DIGEST).unwrap();
+        assert_eq!(
+            spec.bootstrap_create_route(),
+            Some(RouteName::SandboxCollection)
+        );
+        let projected = spec
+            .bootstrap_create_projection("owner-1", PlanValue::Starter, "oregon", 900)
+            .unwrap();
+        assert_eq!(projected.owner_id, "owner-1");
+        assert_eq!(projected.timeout_seconds, 900);
+        assert_eq!(
+            projected.network_policy_default,
+            NetworkPolicyDefault::DenyAll
+        );
+        let mut value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        value["operations"]["bootstrap_create"]["body"]["snapshotId"] =
+            serde_json::json!({"source":"settings.snapshot_id"});
+        assert!(
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
+        );
+        value["operations"]["bootstrap_create"]["body"]
+            .as_object_mut()
+            .unwrap()
+            .remove("snapshotId");
+        value["operations"]["bootstrap_create"]["body"]["timeoutSeconds"] =
+            serde_json::json!({"source":"reservation.maximum_lifetime_seconds"});
+        assert!(
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
         );
     }
 

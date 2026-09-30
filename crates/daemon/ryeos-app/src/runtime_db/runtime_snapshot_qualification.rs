@@ -337,6 +337,9 @@ mod tests {
             owner_principal: format!("fp:{}", "2".repeat(64)),
             provider_id: "render-sandbox-early-access".into(),
             source_occurrence_id: "sbx-source".into(),
+            source_bootstrap_operation_id: None,
+            source_created_at: None,
+            source_timeout_seconds: None,
             provider_group_id: "sbg-group".into(),
             production_profile_digest: "3".repeat(64),
             adapter_artifact_hash: "4".repeat(64),
@@ -370,7 +373,7 @@ mod tests {
             provider_creation_observation: serde_json::json!({"schema":1}),
             adapter_observation_sha256: lillux::sha256_hex(br#"{"schema":1}"#),
         };
-        db.bind_runtime_snapshot_locator(&locator).unwrap();
+        db.bind_runtime_snapshot_locator(&locator, false).unwrap();
         let readiness = RuntimeSnapshotReadinessObservation {
             schema: 1,
             operation_id: source.operation_id.clone(),

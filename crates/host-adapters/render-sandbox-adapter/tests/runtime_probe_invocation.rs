@@ -20,7 +20,11 @@ fn adapter() -> lillux::InheritedDescriptorAuthority {
         .unwrap()
 }
 
-fn invocation(with_credential: bool) -> anyhow::Result<(LifecycleRuntimeProbeRequest, Vec<u8>)> {
+fn invocation(
+    with_credential: bool,
+    request_materialized: bool,
+    probe_materialized: bool,
+) -> anyhow::Result<(LifecycleRuntimeProbeRequest, Vec<u8>)> {
     let adapter = adapter();
     let observation = adapter.regular_file_observation()?;
     let artifact_hash = adapter.digest_regular_file_stable_exact(&observation)?;
@@ -39,15 +43,29 @@ fn invocation(with_credential: bool) -> anyhow::Result<(LifecycleRuntimeProbeReq
         "snapshot_id": "snp-exact",
         "tls_roots_der_base64": ["AA=="]
     }))?;
+    let captured_source =
+        ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+            product_witness_hash: "1".repeat(64),
+        };
+    let materialized_source =
+        ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::BundleMaterialization {
+            materialization_attestation_hash: "1".repeat(64),
+            source_coordinate_digest: "2".repeat(64),
+            materialization_binding_digest: "3".repeat(64),
+        };
     let request = LifecycleRuntimeProbeRequest {
-        schema: 1,
+        schema: 2,
         protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
         adapter_id: "render-sandbox-early-access".into(),
         adapter_artifact_hash: artifact_hash,
         settings_digest: lillux::sha256_hex(&settings),
         binding_hash: "4".repeat(64),
         qualification_attestation_hash: "a".repeat(64),
-        product_witness_hash: "1".repeat(64),
+        runtime_source: if request_materialized {
+            materialized_source.clone()
+        } else {
+            captured_source.clone()
+        },
         account: "account".into(),
         source: LifecycleRuntimeProbeSource {
             manifest_hash: "2".repeat(64),
@@ -56,8 +74,12 @@ fn invocation(with_credential: bool) -> anyhow::Result<(LifecycleRuntimeProbeReq
             controller_public_root: public_root.clone(),
         },
         probe_evidence: serde_json::json!({
-            "schema": 5,
-            "product_witness_hash": "1".repeat(64),
+            "schema": 6,
+            "runtime_source": if probe_materialized {
+                serde_json::to_value(&materialized_source)?
+            } else {
+                serde_json::to_value(&captured_source)?
+            },
             "guest_runtime_manifest_hash": "2".repeat(64),
             "controller_public_root": public_root,
             "owner_id": "owner",
@@ -119,8 +141,16 @@ fn invocation(with_credential: bool) -> anyhow::Result<(LifecycleRuntimeProbeReq
 
 #[test]
 fn sealed_probe_invokes_exact_adapter_without_contact_authority() {
-    let (request, bytes) = invocation(false).unwrap();
+    let (request, bytes) = invocation(false, false, false).unwrap();
     let response: LifecycleRuntimeProbeResponse = from_json_slice_strict(&bytes, 4096).unwrap();
     response.validate_for(&request).unwrap();
-    assert!(invocation(true).is_err());
+    let (materialized_request, materialized_bytes) = invocation(false, true, true).unwrap();
+    let materialized_response: LifecycleRuntimeProbeResponse =
+        from_json_slice_strict(&materialized_bytes, 4096).unwrap();
+    materialized_response
+        .validate_for(&materialized_request)
+        .unwrap();
+    assert!(invocation(true, false, false).is_err());
+    assert!(invocation(false, false, true).is_err());
+    assert!(invocation(false, true, false).is_err());
 }

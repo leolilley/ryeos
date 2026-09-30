@@ -19,6 +19,7 @@ pub mod connector;
 pub mod export;
 pub mod guest_journal;
 pub mod journal;
+pub mod runtime_content;
 pub mod supervisor_journal;
 pub mod transcript;
 pub mod transport;

@@ -22,6 +22,12 @@ pub enum LifecycleAdapterInvocation {
     VerifyRuntimeProbe,
     Operate,
     ProduceSnapshot,
+    ProduceSnapshotUpload,
+    ProduceSnapshotCreate,
+    BootstrapSourceCreate,
+    BootstrapSourceReadiness,
+    BootstrapSourceTerminate,
+    BootstrapSourceObserveTermination,
     ObserveSnapshotReadiness,
     QualifySnapshotCreate,
     QualifySnapshotVerify,
@@ -44,12 +50,25 @@ impl LifecycleAdapterInvocation {
             Self::VerifyRuntimeProbe => "verify-runtime-probe",
             Self::Operate => "operate",
             Self::ProduceSnapshot => "produce-snapshot",
+            Self::ProduceSnapshotUpload => "produce-snapshot-upload",
+            Self::ProduceSnapshotCreate => "produce-snapshot-create",
+            Self::BootstrapSourceCreate => "bootstrap-source-create",
+            Self::BootstrapSourceReadiness => "bootstrap-source-readiness",
+            Self::BootstrapSourceTerminate => "bootstrap-source-terminate",
+            Self::BootstrapSourceObserveTermination => "bootstrap-source-observe-termination",
             Self::ObserveSnapshotReadiness => "observe-snapshot-readiness",
             Self::QualifySnapshotCreate => "qualify-snapshot-create",
             Self::QualifySnapshotVerify => "qualify-snapshot-verify",
             Self::QualifySnapshotTerminate => "qualify-snapshot-terminate",
             Self::ObserveSnapshotTermination => "observe-snapshot-termination",
         }
+    }
+
+    fn requires_no_process_creation(self) -> bool {
+        matches!(
+            self,
+            Self::ProduceSnapshot | Self::ProduceSnapshotUpload | Self::ProduceSnapshotCreate
+        )
     }
 }
 
@@ -93,6 +112,7 @@ pub fn run_lifecycle_adapter(
             max_open_files: Some(MAX_LIFECYCLE_ADAPTER_OPEN_FILES),
             max_stdout_bytes: Some(MAX_LIFECYCLE_RESPONSE_BYTES as u64),
             max_stderr_bytes: Some(MAX_LIFECYCLE_ADAPTER_STDERR_BYTES),
+            deny_process_creation: invocation.requires_no_process_creation(),
             ..lillux::SubprocessLimits::default()
         }),
         inherited_fds: inherited,
@@ -138,8 +158,10 @@ fn lifecycle_adapter_output(
         "unsuccessful_exit"
     };
     // This private runner uses direct spawn_until: no process scope or
-    // supervised attachment is admitted. A complete late exit may be read
-    // only as protocol observation, never upgraded to timely host success.
+    // supervised attachment is admitted. Snapshot production uses Lillux's
+    // fail-closed no-process-creation limit, which excludes local descendants
+    // but does not settle remote provider work. A complete late
+    // exit is protocol observation, never timely host success.
     let complete = result.exit_code == 0
         && result.output_limit_exceeded.is_none()
         && !result.stdout_truncated
@@ -156,6 +178,11 @@ fn lifecycle_adapter_output(
                         invocation,
                         LifecycleAdapterInvocation::Operate
                             | LifecycleAdapterInvocation::ProduceSnapshot
+                            | LifecycleAdapterInvocation::ProduceSnapshotUpload
+                            | LifecycleAdapterInvocation::ProduceSnapshotCreate
+                            | LifecycleAdapterInvocation::BootstrapSourceCreate
+                            | LifecycleAdapterInvocation::BootstrapSourceTerminate
+                            | LifecycleAdapterInvocation::BootstrapSourceObserveTermination
                             | LifecycleAdapterInvocation::ObserveSnapshotReadiness
                             | LifecycleAdapterInvocation::QualifySnapshotCreate
                             | LifecycleAdapterInvocation::QualifySnapshotVerify
@@ -174,6 +201,23 @@ fn lifecycle_adapter_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_process_creation_is_scoped_to_snapshot_mutations() {
+        assert!(LifecycleAdapterInvocation::ProduceSnapshot.requires_no_process_creation());
+        assert!(LifecycleAdapterInvocation::ProduceSnapshotUpload.requires_no_process_creation());
+        assert!(LifecycleAdapterInvocation::ProduceSnapshotCreate.requires_no_process_creation());
+        for invocation in [
+            LifecycleAdapterInvocation::Operate,
+            LifecycleAdapterInvocation::BootstrapSourceCreate,
+            LifecycleAdapterInvocation::BootstrapSourceTerminate,
+            LifecycleAdapterInvocation::QualifySnapshotCreate,
+            LifecycleAdapterInvocation::QualifySnapshotTerminate,
+            LifecycleAdapterInvocation::ObserveSnapshotReadiness,
+        ] {
+            assert!(!invocation.requires_no_process_creation());
+        }
+    }
 
     fn late_result() -> lillux::SubprocessResult {
         lillux::SubprocessResult {

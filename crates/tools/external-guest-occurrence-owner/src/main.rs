@@ -94,10 +94,38 @@ fn read_signed_import(activation: &lillux::PinnedDirectory) -> Result<Vec<u8>> {
     .map_err(anyhow::Error::msg)
 }
 
+/// Render starts the exact owner executable as the Sandbox administrator.
+/// Before any guest work, give only the two mutable private roots and their
+/// already-uploaded exact files to the signed non-root account, then discard
+/// administrator credentials irreversibly. Immutable runtime members remain
+/// root-owned and readable but not writable by that account.
+fn prepare_non_root_owner() -> Result<()> {
+    let runtime_root = lillux::PinnedDirectory::open(Path::new(RUNTIME_ROOT))?
+        .context("guest owner runtime root is absent before account transition")?;
+    let observed = ObservedGuestRuntime::observe(&runtime_root)?;
+    let account = &observed.profile().account;
+    let activation = lillux::PinnedDirectory::open(Path::new(ACTIVATION_ROOT))?
+        .context("guest owner activation root is absent")?;
+    for name in [IMPORT_NAME, PACKAGE_NAME] {
+        let file = activation
+            .open_pinned_regular(OsStr::new(name), false)?
+            .with_context(|| format!("guest owner has no uploaded {name}"))?;
+        account.grant_private_file(&file)?;
+    }
+    account.grant_private_directory(&activation)?;
+    let ryeos_root = lillux::PinnedDirectory::open(Path::new("/ryeos"))?
+        .context("guest owner namespace root is absent")?;
+    let occurrences = ryeos_root.open_or_create_child(OsStr::new("occurrences"), 0o700)?;
+    account.grant_private_directory(&occurrences)?;
+    account.drop_current_process()?;
+    Ok(())
+}
+
 fn run(assignment_bytes: &[u8]) -> Result<()> {
     let runtime_root = lillux::PinnedDirectory::open(Path::new(RUNTIME_ROOT))?
         .context("qualified guest runtime root is absent")?;
     let runtime = ObservedGuestRuntime::observe(&runtime_root)?;
+    runtime.profile().account.require_current_process()?;
     let activation = open_private_root(ACTIVATION_ROOT)?;
     let occurrences = open_private_root(OCCURRENCES_ROOT)?;
     runtime.require_disjoint_directory_tree(&activation)?;
@@ -180,6 +208,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
 
 fn main() -> Result<()> {
     let assignment = decode_assignment_argument(std::env::args_os().skip(1))?;
+    prepare_non_root_owner()?;
     run(&assignment)
 }
 
