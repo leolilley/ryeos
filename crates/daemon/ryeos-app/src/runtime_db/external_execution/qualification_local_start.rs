@@ -18,7 +18,9 @@ CREATE TABLE external_qualification_local_start (
     channel_binding_digest TEXT NOT NULL,
     phase TEXT NOT NULL CHECK (phase IN
         ('reserved','workspace_creating','workspace_ready','scope_allocating',
-         'scope_bound','worker_attached','cleanup_unproved')),
+         'scope_bound','worker_attached','cleanup_unproved','cleanup_intent',
+         'scope_retirement_pending','scope_retired','view_closed',
+         'destroy_pending','destroyed','workspace_removed','state_removed','closed')),
     record_json TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
@@ -65,7 +67,20 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
       OR (OLD.phase='scope_bound' AND NEW.phase='worker_attached')
       OR (OLD.phase='workspace_creating' AND NEW.phase='workspace_creating')
       OR (OLD.phase='scope_bound' AND NEW.phase='scope_bound')
-      OR (OLD.phase!='cleanup_unproved' AND NEW.phase='cleanup_unproved'))
+      OR (OLD.phase IN ('reserved','workspace_creating','workspace_ready',
+                       'scope_allocating','scope_bound','worker_attached')
+          AND NEW.phase='cleanup_unproved')
+      OR (OLD.phase IN ('reserved','workspace_ready','scope_allocating',
+                       'scope_bound','worker_attached','cleanup_unproved')
+          AND NEW.phase='cleanup_intent')
+      OR (OLD.phase='cleanup_intent' AND NEW.phase IN ('scope_retirement_pending','workspace_removed'))
+      OR (OLD.phase='scope_retirement_pending' AND NEW.phase='scope_retired')
+      OR (OLD.phase='scope_retired' AND NEW.phase='view_closed')
+      OR (OLD.phase='view_closed' AND NEW.phase='destroy_pending')
+      OR (OLD.phase='destroy_pending' AND NEW.phase='destroyed')
+      OR (OLD.phase='destroyed' AND NEW.phase='workspace_removed')
+      OR (OLD.phase='workspace_removed' AND NEW.phase='state_removed')
+      OR (OLD.phase='state_removed' AND NEW.phase='closed'))
 BEGIN SELECT RAISE(ABORT, 'qualification local start transition changed its one-use owner'); END;
 CREATE TRIGGER external_qualification_local_start_no_delete
 BEFORE DELETE ON external_qualification_local_start
@@ -82,6 +97,15 @@ pub enum QualificationLocalStartPhase {
     ScopeBound,
     WorkerAttached,
     CleanupUnproved,
+    CleanupIntent,
+    ScopeRetirementPending,
+    ScopeRetired,
+    ViewClosed,
+    DestroyPending,
+    Destroyed,
+    WorkspaceRemoved,
+    StateRemoved,
+    Closed,
 }
 
 impl QualificationLocalStartPhase {
@@ -94,6 +118,15 @@ impl QualificationLocalStartPhase {
             Self::ScopeBound => "scope_bound",
             Self::WorkerAttached => "worker_attached",
             Self::CleanupUnproved => "cleanup_unproved",
+            Self::CleanupIntent => "cleanup_intent",
+            Self::ScopeRetirementPending => "scope_retirement_pending",
+            Self::ScopeRetired => "scope_retired",
+            Self::ViewClosed => "view_closed",
+            Self::DestroyPending => "destroy_pending",
+            Self::Destroyed => "destroyed",
+            Self::WorkspaceRemoved => "workspace_removed",
+            Self::StateRemoved => "state_removed",
+            Self::Closed => "closed",
         }
     }
 }
@@ -116,6 +149,39 @@ pub struct QualificationWorkspaceBorrowIntent {
     pub workspace_id: String,
     pub view_identity: String,
     pub reserved_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QualificationLocalCleanupRoute {
+    NoCreate,
+    Created,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QualificationWorkspaceDestroyReceipt {
+    pub backend_id: String,
+    pub backend_version: String,
+    pub pinned_root_identities: BTreeMap<String, String>,
+    pub mount_identity: String,
+    pub destroyed_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QualificationLocalCleanupEvidence {
+    pub route: QualificationLocalCleanupRoute,
+    pub prior_failure_reason: Option<String>,
+    pub intent_at_ms: i64,
+    pub scope_retirement_intent_at_ms: Option<i64>,
+    pub scope_retired_at_ms: Option<i64>,
+    pub view_closed_at_ms: Option<i64>,
+    pub destroy_intent_at_ms: Option<i64>,
+    pub destroy_receipt: Option<QualificationWorkspaceDestroyReceipt>,
+    pub workspace_removed_at_ms: Option<i64>,
+    pub state_removed_at_ms: Option<i64>,
+    pub closed_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -146,6 +212,7 @@ pub struct QualificationLocalStartRecord {
     pub scope_recovery: Option<lillux::ProcessScopeRecovery>,
     pub worker_incarnation_digest: Option<String>,
     pub cleanup_reason: Option<String>,
+    cleanup: Option<QualificationLocalCleanupEvidence>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -283,7 +350,8 @@ impl QualificationLocalStartRecord {
                         && self.view_borrow_intent.is_none()
                         && self.scope_allocation.is_none()
                         && self.scope_recovery.is_none()
-                        && self.worker_incarnation_digest.is_none(),
+                        && self.worker_incarnation_digest.is_none()
+                        && self.cleanup.is_none(),
                 QualificationLocalStartPhase::WorkspaceCreating =>
                     self.backend_id.is_some()
                         && self.backend_version.is_some()
@@ -291,39 +359,143 @@ impl QualificationLocalStartRecord {
                         && self.view_borrow_intent.is_none()
                         && self.scope_allocation.is_none()
                         && self.scope_recovery.is_none()
-                        && self.worker_incarnation_digest.is_none(),
+                        && self.worker_incarnation_digest.is_none()
+                        && self.cleanup.is_none(),
                 QualificationLocalStartPhase::WorkspaceReady =>
                     self.workspace_receipt.is_some()
                         && self.creator_identity.is_some()
                         && self.view_borrow_intent.is_none()
                         && self.scope_allocation.is_none()
                         && self.scope_recovery.is_none()
-                        && self.worker_incarnation_digest.is_none(),
+                        && self.worker_incarnation_digest.is_none()
+                        && self.cleanup.is_none(),
                 QualificationLocalStartPhase::ScopeAllocating =>
                     self.workspace_receipt.is_some()
                         && self.creator_identity.is_some()
                         && self.view_borrow_intent.is_none()
                         && self.scope_allocation.is_some()
                         && self.scope_recovery.is_none()
-                        && self.worker_incarnation_digest.is_none(),
+                        && self.worker_incarnation_digest.is_none()
+                        && self.cleanup.is_none(),
                 QualificationLocalStartPhase::ScopeBound =>
                     self.workspace_receipt.is_some()
                         && self.creator_identity.is_some()
                         && self.scope_allocation.is_some()
                         && self.scope_recovery.is_some()
-                        && self.worker_incarnation_digest.is_none(),
+                        && self.worker_incarnation_digest.is_none()
+                        && self.cleanup.is_none(),
                 QualificationLocalStartPhase::WorkerAttached =>
                     self.workspace_receipt.is_some()
                         && self.creator_identity.is_some()
                         && self.view_borrow_intent.is_some()
                         && self.scope_allocation.is_some()
                         && self.scope_recovery.is_some()
-                        && self.worker_incarnation_digest.is_some(),
-                QualificationLocalStartPhase::CleanupUnproved => true,
+                        && self.worker_incarnation_digest.is_some()
+                        && self.cleanup.is_none(),
+                QualificationLocalStartPhase::CleanupUnproved => self.cleanup.is_none(),
+                QualificationLocalStartPhase::CleanupIntent
+                | QualificationLocalStartPhase::ScopeRetirementPending
+                | QualificationLocalStartPhase::ScopeRetired
+                | QualificationLocalStartPhase::ViewClosed
+                | QualificationLocalStartPhase::DestroyPending
+                | QualificationLocalStartPhase::Destroyed
+                | QualificationLocalStartPhase::WorkspaceRemoved
+                | QualificationLocalStartPhase::StateRemoved
+                | QualificationLocalStartPhase::Closed => self.cleanup.is_some(),
             } && (self.phase == QualificationLocalStartPhase::CleanupUnproved)
                 == self.cleanup_reason.is_some(),
             "qualification local start has impossible phase evidence"
         );
+        if let Some(cleanup) = &self.cleanup {
+            self.validate_cleanup(cleanup)?;
+        }
+        Ok(())
+    }
+
+    fn validate_cleanup(&self, cleanup: &QualificationLocalCleanupEvidence) -> Result<()> {
+        if let Some(reason) = &cleanup.prior_failure_reason {
+            validate_bounded_runtime_text("prior local cleanup failure", reason, 1024)?;
+        }
+        let stage = match self.phase {
+            QualificationLocalStartPhase::CleanupIntent => 0,
+            QualificationLocalStartPhase::ScopeRetirementPending => 1,
+            QualificationLocalStartPhase::ScopeRetired => 2,
+            QualificationLocalStartPhase::ViewClosed => 3,
+            QualificationLocalStartPhase::DestroyPending => 4,
+            QualificationLocalStartPhase::Destroyed => 5,
+            QualificationLocalStartPhase::WorkspaceRemoved => 6,
+            QualificationLocalStartPhase::StateRemoved => 7,
+            QualificationLocalStartPhase::Closed => 8,
+            _ => bail!("qualification cleanup evidence has no cleanup phase"),
+        };
+        let created = cleanup.route == QualificationLocalCleanupRoute::Created;
+        ensure!(
+            !created || self.scope_allocation.is_none() || self.scope_recovery.is_some(),
+            "qualification cleanup cannot retire an unbound process scope"
+        );
+        ensure!(
+            (created && self.workspace_receipt.is_some() && self.creator_identity.is_some())
+                || (!created
+                    && self.workspace_receipt.is_none()
+                    && self.backend_id.is_none()
+                    && self.backend_version.is_none()
+                    && self.creator_identity.is_none()
+                    && self.view_borrow_intent.is_none()
+                    && self.scope_allocation.is_none()
+                    && self.scope_recovery.is_none()
+                    && self.worker_incarnation_digest.is_none()
+                    && !matches!(stage, 1..=5)),
+            "qualification cleanup changed its Create route"
+        );
+        ensure!(
+            cleanup.intent_at_ms >= self.created_at_ms
+                && cleanup.intent_at_ms <= self.updated_at_ms
+                && cleanup.scope_retirement_intent_at_ms.is_some() == (created && stage >= 1)
+                && cleanup.scope_retired_at_ms.is_some() == (created && stage >= 2)
+                && cleanup.view_closed_at_ms.is_some() == (created && stage >= 3)
+                && cleanup.destroy_intent_at_ms.is_some() == (created && stage >= 4)
+                && cleanup.destroy_receipt.is_some() == (created && stage >= 5)
+                && cleanup.workspace_removed_at_ms.is_some() == (stage >= 6)
+                && cleanup.state_removed_at_ms.is_some() == (stage >= 7)
+                && cleanup.closed_at_ms.is_some() == (stage >= 8),
+            "qualification cleanup phase lacks its exact ordered evidence"
+        );
+        let mut previous = cleanup.intent_at_ms;
+        for instant in [
+            cleanup.scope_retirement_intent_at_ms,
+            cleanup.scope_retired_at_ms,
+            cleanup.view_closed_at_ms,
+            cleanup.destroy_intent_at_ms,
+            cleanup
+                .destroy_receipt
+                .as_ref()
+                .map(|receipt| receipt.destroyed_at_ms),
+            cleanup.workspace_removed_at_ms,
+            cleanup.state_removed_at_ms,
+            cleanup.closed_at_ms,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            ensure!(
+                instant >= previous && instant <= self.updated_at_ms,
+                "qualification cleanup evidence time regressed"
+            );
+            previous = instant;
+        }
+        if let Some(destroyed) = &cleanup.destroy_receipt {
+            let created = self
+                .workspace_receipt
+                .as_ref()
+                .context("qualification Destroy lost its original Create receipt")?;
+            ensure!(
+                destroyed.backend_id == created.backend_id
+                    && destroyed.backend_version == created.backend_version
+                    && destroyed.pinned_root_identities == created.pinned_root_identities
+                    && destroyed.mount_identity == created.mount_identity,
+                "qualification Destroy receipt changed its signed Create identity"
+            );
+        }
         Ok(())
     }
 }
@@ -470,6 +642,53 @@ fn now_after(current: &QualificationLocalStartRecord) -> Result<i64> {
     Ok(i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms))
 }
 
+fn require_local_processes_settled(conn: &Connection, placement: &str) -> Result<()> {
+    let worker: Option<String> = conn
+        .query_row(
+            "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+            [placement],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let connector: Option<String> = conn
+        .query_row(
+            "SELECT state FROM external_execution_connector WHERE placement_thread_id=?1",
+            [placement],
+            |row| row.get(0),
+        )
+        .optional()?;
+    ensure!(
+        worker.as_deref().is_none_or(|phase| phase == "terminal")
+            && connector.as_deref().is_none_or(|state| state == "closed"),
+        "qualification local cleanup retains a live Worker or connector"
+    );
+    Ok(())
+}
+
+fn cleanup_cas(
+    conn: &Connection,
+    expected: &QualificationLocalStartRecord,
+    from: QualificationLocalStartPhase,
+    to: QualificationLocalStartPhase,
+    mutate: impl FnOnce(&Connection, &mut QualificationLocalStartRecord, i64) -> Result<()>,
+) -> Result<QualificationLocalStartRecord> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let current = read_local_start(&tx, &expected.placement_thread_id)?
+        .context("qualification local cleanup lost its original row")?;
+    ensure!(
+        current == *expected && current.phase == from,
+        "qualification local cleanup lost its exact phase CAS"
+    );
+    let mut next = current.clone();
+    let now = now_after(&current)?;
+    next.phase = to;
+    next.updated_at_ms = now;
+    mutate(&tx, &mut next, now)?;
+    transition(&tx, &current, &next)?;
+    tx.commit()?;
+    Ok(next)
+}
+
 pub(super) fn validate_local_starts(conn: &Connection) -> Result<()> {
     let mut statement = conn.prepare("SELECT placement_thread_id FROM external_qualification_local_start ORDER BY placement_thread_id")?;
     let placements = statement
@@ -478,6 +697,19 @@ pub(super) fn validate_local_starts(conn: &Connection) -> Result<()> {
     for placement in placements {
         let record =
             read_local_start(conn, &placement)?.context("qualification local start disappeared")?;
+        if matches!(
+            record.phase,
+            QualificationLocalStartPhase::ScopeRetirementPending
+                | QualificationLocalStartPhase::ScopeRetired
+                | QualificationLocalStartPhase::ViewClosed
+                | QualificationLocalStartPhase::DestroyPending
+                | QualificationLocalStartPhase::Destroyed
+                | QualificationLocalStartPhase::WorkspaceRemoved
+                | QualificationLocalStartPhase::StateRemoved
+                | QualificationLocalStartPhase::Closed
+        ) {
+            require_local_processes_settled(conn, &placement)?;
+        }
         let process: Option<String> = conn.query_row(
             "SELECT process_identity_json FROM external_qualification_worker_process WHERE placement_thread_id=?1",
             [&placement], |row| row.get(0),
@@ -491,6 +723,15 @@ pub(super) fn validate_local_starts(conn: &Connection) -> Result<()> {
                         record.phase,
                         QualificationLocalStartPhase::WorkerAttached
                             | QualificationLocalStartPhase::CleanupUnproved
+                            | QualificationLocalStartPhase::CleanupIntent
+                            | QualificationLocalStartPhase::ScopeRetirementPending
+                            | QualificationLocalStartPhase::ScopeRetired
+                            | QualificationLocalStartPhase::ViewClosed
+                            | QualificationLocalStartPhase::DestroyPending
+                            | QualificationLocalStartPhase::Destroyed
+                            | QualificationLocalStartPhase::WorkspaceRemoved
+                            | QualificationLocalStartPhase::StateRemoved
+                            | QualificationLocalStartPhase::Closed
                     ) && record.worker_incarnation_digest.as_deref()
                         == Some(identity.owner_incarnation_digest()?.as_str())
                         && record.scope_recovery.as_ref() == identity.process_scope.as_ref(),
@@ -687,6 +928,7 @@ impl RuntimeDb {
             scope_recovery: None,
             worker_incarnation_digest: None,
             cleanup_reason: None,
+            cleanup: None,
             created_at_ms: now,
             updated_at_ms: now,
         };
@@ -940,8 +1182,16 @@ impl RuntimeDb {
         let current = read_local_start(&tx, placement)?
             .context("qualification local cleanup has no start")?;
         ensure!(
-            current.phase != QualificationLocalStartPhase::CleanupUnproved,
-            "qualification local cleanup fence is already retained"
+            matches!(
+                current.phase,
+                QualificationLocalStartPhase::Reserved
+                    | QualificationLocalStartPhase::WorkspaceCreating
+                    | QualificationLocalStartPhase::WorkspaceReady
+                    | QualificationLocalStartPhase::ScopeAllocating
+                    | QualificationLocalStartPhase::ScopeBound
+                    | QualificationLocalStartPhase::WorkerAttached
+            ),
+            "qualification local cleanup fence is already retained or positive cleanup began"
         );
         let mut next = current.clone();
         next.phase = QualificationLocalStartPhase::CleanupUnproved;
@@ -950,5 +1200,263 @@ impl RuntimeDb {
         transition(&tx, &current, &next)?;
         tx.commit()?;
         Ok(next)
+    }
+
+    /// Fence all new local contact before any physical cleanup. The caller's
+    /// StateStore wrapper authenticates process-local original custody. An
+    /// incomplete Create has no view receipt and cannot enter this route.
+    pub(crate) fn begin_qualification_local_cleanup(
+        &self,
+        expected: &QualificationLocalStartRecord,
+    ) -> Result<QualificationLocalStartRecord> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current = read_local_start(&tx, &expected.placement_thread_id)?
+            .context("qualification cleanup lost its retained start")?;
+        ensure!(
+            current == *expected,
+            "qualification cleanup changed its original custody row"
+        );
+        let route = if current.phase == QualificationLocalStartPhase::Reserved
+            || (current.phase == QualificationLocalStartPhase::CleanupUnproved
+                && current.backend_id.is_none()
+                && current.workspace_receipt.is_none())
+        {
+            ensure!(
+                current.creator_identity.is_none()
+                    && current.scope_allocation.is_none()
+                    && current.view_borrow_intent.is_none(),
+                "no-Create cleanup has possible backend or process contact"
+            );
+            require_local_processes_settled(&tx, &current.placement_thread_id)?;
+            QualificationLocalCleanupRoute::NoCreate
+        } else {
+            ensure!(
+                matches!(
+                    current.phase,
+                    QualificationLocalStartPhase::WorkspaceReady
+                        | QualificationLocalStartPhase::ScopeAllocating
+                        | QualificationLocalStartPhase::ScopeBound
+                        | QualificationLocalStartPhase::WorkerAttached
+                        | QualificationLocalStartPhase::CleanupUnproved
+                ) && current.workspace_receipt.is_some()
+                    && current.creator_identity.is_some()
+                    && (current.scope_allocation.is_none() || current.scope_recovery.is_some()),
+                "qualification cleanup has no completed original Create receipt"
+            );
+            QualificationLocalCleanupRoute::Created
+        };
+        let now = now_after(&current)?;
+        let mut next = current.clone();
+        next.phase = QualificationLocalStartPhase::CleanupIntent;
+        next.cleanup_reason = None;
+        next.cleanup = Some(QualificationLocalCleanupEvidence {
+            route,
+            prior_failure_reason: current.cleanup_reason.clone(),
+            intent_at_ms: now,
+            scope_retirement_intent_at_ms: None,
+            scope_retired_at_ms: None,
+            view_closed_at_ms: None,
+            destroy_intent_at_ms: None,
+            destroy_receipt: None,
+            workspace_removed_at_ms: None,
+            state_removed_at_ms: None,
+            closed_at_ms: None,
+        });
+        next.updated_at_ms = now;
+        transition(&tx, &current, &next)?;
+        tx.commit()?;
+        Ok(next)
+    }
+
+    /// Commit an exact scope retirement intent before Lillux touches the
+    /// cgroup. No attached Worker or connector may remain live. A missing
+    /// recovery after a possible allocation stays fenced indefinitely.
+    pub(crate) fn reserve_qualification_local_scope_retirement(
+        &self,
+        expected: &QualificationLocalStartRecord,
+    ) -> Result<QualificationLocalStartRecord> {
+        cleanup_cas(
+            &self.conn,
+            expected,
+            QualificationLocalStartPhase::CleanupIntent,
+            QualificationLocalStartPhase::ScopeRetirementPending,
+            |tx, next, now| {
+                ensure!(
+                    next.cleanup.as_ref().is_some_and(
+                        |cleanup| cleanup.route == QualificationLocalCleanupRoute::Created
+                    ),
+                    "qualification scope retirement requires a created workspace"
+                );
+                ensure!(
+                    next.scope_allocation.is_none() || next.scope_recovery.is_some(),
+                    "qualification scope allocation has no exact recovery"
+                );
+                require_local_processes_settled(tx, &next.placement_thread_id)?;
+                next.cleanup.as_mut().unwrap().scope_retirement_intent_at_ms = Some(now);
+                Ok(())
+            },
+        )
+    }
+
+    /// Called only after the retained recovery's idempotent, exact
+    /// `retire_after_settlement` succeeds (or no scope was ever allocated).
+    pub(crate) fn complete_qualification_local_scope_retirement(
+        &self,
+        expected: &QualificationLocalStartRecord,
+    ) -> Result<QualificationLocalStartRecord> {
+        cleanup_cas(
+            &self.conn,
+            expected,
+            QualificationLocalStartPhase::ScopeRetirementPending,
+            QualificationLocalStartPhase::ScopeRetired,
+            |tx, next, now| {
+                ensure!(
+                    next.scope_allocation.is_none() || next.scope_recovery.is_some(),
+                    "qualification scope retirement lost its exact recovery"
+                );
+                require_local_processes_settled(tx, &next.placement_thread_id)?;
+                next.cleanup.as_mut().unwrap().scope_retired_at_ms = Some(now);
+                Ok(())
+            },
+        )
+    }
+
+    /// Physical close is supplied only by the original in-memory guard.
+    pub(crate) fn record_qualification_local_view_closed(
+        &self,
+        expected: &QualificationLocalStartRecord,
+    ) -> Result<QualificationLocalStartRecord> {
+        cleanup_cas(
+            &self.conn,
+            expected,
+            QualificationLocalStartPhase::ScopeRetired,
+            QualificationLocalStartPhase::ViewClosed,
+            |tx, next, now| {
+                require_local_processes_settled(tx, &next.placement_thread_id)?;
+                next.cleanup.as_mut().unwrap().view_closed_at_ms = Some(now);
+                Ok(())
+            },
+        )
+    }
+
+    pub(crate) fn reserve_qualification_workspace_destroy(
+        &self,
+        expected: &QualificationLocalStartRecord,
+    ) -> Result<QualificationLocalStartRecord> {
+        cleanup_cas(
+            &self.conn,
+            expected,
+            QualificationLocalStartPhase::ViewClosed,
+            QualificationLocalStartPhase::DestroyPending,
+            |_, next, now| {
+                next.cleanup.as_mut().unwrap().destroy_intent_at_ms = Some(now);
+                Ok(())
+            },
+        )
+    }
+
+    /// Retain the typed signed adapter's exact Destroy result; a caller flag
+    /// or path absence cannot substitute for this response.
+    pub(crate) fn record_qualification_workspace_destroyed(
+        &self,
+        expected: &QualificationLocalStartRecord,
+        evidence: &ryeos_engine::isolation::WorkspaceLifecycleEvidence,
+    ) -> Result<QualificationLocalStartRecord> {
+        cleanup_cas(
+            &self.conn,
+            expected,
+            QualificationLocalStartPhase::DestroyPending,
+            QualificationLocalStartPhase::Destroyed,
+            |_, next, now| {
+                let original = next
+                    .workspace_receipt
+                    .as_ref()
+                    .context("qualification Destroy lost original Create receipt")?;
+                ensure!(
+                    evidence.operation
+                        == ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy
+                        && evidence.destroyed
+                        && evidence.mutations.is_empty()
+                        && evidence.workspace_id == next.workspace_id
+                        && evidence.launch_owner == next.launch_owner
+                        && evidence.backend_id == original.backend_id
+                        && evidence.backend_version == original.backend_version
+                        && evidence.pinned_root_identities == original.pinned_root_identities
+                        && evidence.mount_identity.as_deref()
+                            == Some(original.mount_identity.as_str()),
+                    "qualification Destroy changed its signed original workspace identity"
+                );
+                next.cleanup.as_mut().unwrap().destroy_receipt =
+                    Some(QualificationWorkspaceDestroyReceipt {
+                        backend_id: evidence.backend_id.clone(),
+                        backend_version: evidence.backend_version.clone(),
+                        pinned_root_identities: evidence.pinned_root_identities.clone(),
+                        mount_identity: original.mount_identity.clone(),
+                        destroyed_at_ms: now,
+                    });
+                Ok(())
+            },
+        )
+    }
+
+    /// The StateStore wrapper removes the original pinned workspace root
+    /// before calling this CAS. No-Create bypasses view/Destroy only because
+    /// the Reserved journal preceded every possible backend Create.
+    pub(crate) fn record_qualification_workspace_removed(
+        &self,
+        expected: &QualificationLocalStartRecord,
+    ) -> Result<QualificationLocalStartRecord> {
+        let route = expected
+            .cleanup
+            .as_ref()
+            .context("Q removal has no cleanup intent")?
+            .route;
+        let from = match route {
+            QualificationLocalCleanupRoute::NoCreate => QualificationLocalStartPhase::CleanupIntent,
+            QualificationLocalCleanupRoute::Created => QualificationLocalStartPhase::Destroyed,
+        };
+        cleanup_cas(
+            &self.conn,
+            expected,
+            from,
+            QualificationLocalStartPhase::WorkspaceRemoved,
+            |_, next, now| {
+                next.cleanup.as_mut().unwrap().workspace_removed_at_ms = Some(now);
+                Ok(())
+            },
+        )
+    }
+
+    pub(crate) fn record_qualification_state_root_removed(
+        &self,
+        expected: &QualificationLocalStartRecord,
+    ) -> Result<QualificationLocalStartRecord> {
+        cleanup_cas(
+            &self.conn,
+            expected,
+            QualificationLocalStartPhase::WorkspaceRemoved,
+            QualificationLocalStartPhase::StateRemoved,
+            |_, next, now| {
+                next.cleanup.as_mut().unwrap().state_removed_at_ms = Some(now);
+                Ok(())
+            },
+        )
+    }
+
+    pub(crate) fn close_qualification_local_start(
+        &self,
+        expected: &QualificationLocalStartRecord,
+    ) -> Result<QualificationLocalStartRecord> {
+        cleanup_cas(
+            &self.conn,
+            expected,
+            QualificationLocalStartPhase::StateRemoved,
+            QualificationLocalStartPhase::Closed,
+            |tx, next, now| {
+                require_local_processes_settled(tx, &next.placement_thread_id)?;
+                next.cleanup.as_mut().unwrap().closed_at_ms = Some(now);
+                Ok(())
+            },
+        )
     }
 }

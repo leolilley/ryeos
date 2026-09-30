@@ -2673,7 +2673,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // signed wire maximum for restartable semantic verification.
 // Epoch 109 retains one possible borrow of the original Q workspace view
 // before its descriptor can be cloned for the held Worker.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 109;
+// Epoch 110 retains exact no-contact Q local cleanup, physical view close,
+// backend Destroy, original pinned-root removal, and scope retirement.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 110;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -6363,6 +6365,19 @@ fn read_scope_lifetime_fence(conn: &Connection) -> Result<Option<lillux::Process
 fn ensure_scope_lifetime_resettable(conn: &Connection, stored_epoch: u32) -> Result<()> {
     // Independent of host lifetime: remote execution can survive its owner.
     external_execution::ensure_resettable(conn, stored_epoch)?;
+    // A Q workspace can exist before any process scope is allocated. The
+    // original local custody is not reconstructible after a schema reset.
+    if stored_epoch >= 107 {
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM external_qualification_local_start WHERE phase!='closed'",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            pending == 0,
+            "execution-history reset retains Q local workspace cleanup"
+        );
+    }
     // The coarse owner starts with the first scope-capable runtime cut. Older
     // owned epochs could not allocate these resources; never decode their
     // execution rows. Every epoch from this cut onward requires the witness,
@@ -16846,8 +16861,7 @@ impl RuntimeDb {
         // protocol proves whole-scope and workspace cleanup.
         let qualification: i64 = if chain_root_id.is_none() {
             self.conn.query_row(
-                "SELECT COUNT(*) FROM external_qualification_local_start
-                 WHERE json_type(record_json,'$.scope_allocation') IS NOT 'null'",
+                "SELECT COUNT(*) FROM external_qualification_local_start WHERE phase!='closed'",
                 [],
                 |row| row.get(0),
             )?
