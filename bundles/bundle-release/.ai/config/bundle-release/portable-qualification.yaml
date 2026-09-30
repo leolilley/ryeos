@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-29T01:29:18Z:34a26c62b442435f5ba3df8284402ebf4c19fa683c39a7e06d14b198d35b85a6:03RUFoXuQJpLXhjyS3iZWNnrAgnJnr/k4vT4U/3ZKWuhQMC9PtTL3EAM4rgZCTGkt/D0so4+eNglyOwLe4jACg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-30T03:49:52Z:8682abf24b47ef778466ed437e174bd9b03bd9eeb772bcfb1a2223ecab1cd022:0GzCOVwLVyNwHIde4rQCserHTBY9EPAI/vjzdlGKatC69KDeze0YzJM6CJyblXx9IE8sEPv8k6yY26jClASxAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.1.0"
 description: Independent release qualification for an exact captured portable bundle tree.
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v2
+  schema: ryeos.product_qualification_policy.v3
   verifier_ref: tool:ryeos/bundle-release/portable-qualify
   subject_declaration_id: subject
   allowed_claims: [portable_bundle_release_checks_v1]

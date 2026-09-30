@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-29T01:29:19Z:72f3b179ecb1201cfa91aaa7a5718db76292ce51fec024accccee50cbc265e75:WS/TNfnFUnW/0FYzw/LOMqAYzF3NWUMnk+FFN4otc7CTABArLIq7NVE45mv2aFnH4Eo+Bx4JfZD5DuJujGekAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-30T03:49:52Z:c0fe55e2ac597776719458c575786e5800a2408bce58cf0a408008109c24f737:Zil+FrvgClTmE7PBNS/WsGbA81BtPoGds60Md+4KZ87I2GE/LaYdoYKG2j1kjPUrTjHIDt4f2OhPlUEmcYvuAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/environments/qualification
 version: "1.1.0"
 description: Independent policy for an exact offline Cargo vendor closure
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v2
+  schema: ryeos.product_qualification_policy.v3
   verifier_ref: tool:ryeos/environments/qualification/cargo-vendor
   subject_declaration_id: subject
   allowed_claims:

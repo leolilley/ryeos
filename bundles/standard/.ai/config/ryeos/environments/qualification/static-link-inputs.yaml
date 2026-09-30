@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-29T03:29:28Z:2e967add94e7516da088ad16439ea83fdfecdefa991f579c52d03a46cba92888:pFhkmgTOOj2SM31ZroYtl7DIAJUW4cdAK5vyN3kf9QB9XS/n+/M4ldZx1BbXOCmApEcD/8IShNb5GO0k8GZlAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-30T03:49:52Z:29f2c832f80d3c0355bc47516a9b1ffc75706a86ee7d5a1535af0f4de4571cc6:sy1pVwi5dF9K+mWVIkiPl9pz5quy/xbaLrrZ1Fscov0DVyp9tbX3DZtqiU7dG/Rlluf7v4P+bXAqS3i5KJsDCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/environments/qualification
 version: "2.0.0"
 description: Admitted supplementary GNU member and checksum profile; no compiler execution claim
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v2
+  schema: ryeos.product_qualification_policy.v3
   verifier_ref: tool:ryeos/environments/qualification/static-link-inputs
   subject_declaration_id: subject
   allowed_claims:
