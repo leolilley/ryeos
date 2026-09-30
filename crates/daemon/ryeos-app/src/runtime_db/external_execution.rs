@@ -12,11 +12,15 @@ use anyhow::ensure;
 mod channel;
 pub use channel::ExternalDirectOutput;
 pub(crate) mod connector;
+mod qualification_command;
 mod qualification_process;
 pub(crate) use channel::{
     ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
     ExternalSupervisorExchange, RetainedExternalCandidateImport,
     RetainedExternalQualificationScopeSettlement,
+};
+pub(crate) use qualification_command::{
+    QualificationWorkerCommandPhase, QualificationWorkerCommandRecord,
 };
 pub(crate) use qualification_process::{
     QualificationWorkerDeathProof, QualificationWorkerProcessPhase,
@@ -209,6 +213,91 @@ WHEN NEW.phase IN ('no_contact','contacted_no_occurrence','terminated')
  AND EXISTS(SELECT 1 FROM external_qualification_worker_process p
     WHERE p.placement_thread_id=OLD.placement_thread_id AND p.phase!='terminal')
 BEGIN SELECT RAISE(ABORT, 'external allocation retains a live qualification Worker process'); END;
+
+-- One possible-contact framed request for the exact Q Worker incarnation.
+-- A Final response and a completed turn are separate facts. Neither alone
+-- grants a positive qualification claim.
+CREATE TABLE external_qualification_worker_command (
+    placement_thread_id TEXT PRIMARY KEY REFERENCES external_qualification_worker_process(placement_thread_id),
+    accepted_root_id TEXT NOT NULL,
+    accepted_capsule_hash TEXT NOT NULL,
+    qualification_operation_id TEXT NOT NULL,
+    qualification_occurrence_id TEXT NOT NULL,
+    channel_binding_digest TEXT NOT NULL,
+    process_incarnation_digest TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('reserved','possible_contact','turn_completed','outcome_unknown')),
+    turn_id TEXT,
+    turn_started_at_ms INTEGER,
+    turn_start_digest TEXT,
+    turn_completed_at_ms INTEGER,
+    turn_completion_digest TEXT,
+    final_response_digest TEXT,
+    reserved_at_ms INTEGER NOT NULL,
+    contacted_at_ms INTEGER,
+    completed_at_ms INTEGER,
+    CHECK ((turn_id IS NULL AND turn_started_at_ms IS NULL AND turn_start_digest IS NULL
+            AND turn_completed_at_ms IS NULL AND turn_completion_digest IS NULL)
+        OR (turn_id IS NOT NULL AND turn_started_at_ms IS NOT NULL
+            AND turn_start_digest IS NOT NULL
+            AND ((turn_completed_at_ms IS NULL AND turn_completion_digest IS NULL)
+              OR (turn_completed_at_ms >= turn_started_at_ms
+                  AND turn_completion_digest IS NOT NULL)))),
+    CHECK ((state='reserved' AND contacted_at_ms IS NULL AND turn_id IS NULL
+            AND final_response_digest IS NULL AND completed_at_ms IS NULL)
+        OR (state='possible_contact' AND contacted_at_ms IS NOT NULL
+            AND completed_at_ms IS NULL)
+        OR (state='turn_completed' AND contacted_at_ms IS NOT NULL
+            AND turn_completed_at_ms IS NOT NULL AND final_response_digest IS NOT NULL
+            AND completed_at_ms IS NOT NULL)
+        OR (state='outcome_unknown' AND contacted_at_ms IS NOT NULL
+            AND completed_at_ms IS NULL
+            AND (turn_completed_at_ms IS NULL OR final_response_digest IS NULL)))
+);
+CREATE TRIGGER external_qualification_worker_command_insert_guard
+BEFORE INSERT ON external_qualification_worker_command
+WHEN NEW.state!='reserved'
+ OR NOT EXISTS(SELECT 1 FROM external_qualification_worker_process p
+    WHERE p.placement_thread_id=NEW.placement_thread_id AND p.phase='attached'
+      AND p.accepted_root_id=NEW.accepted_root_id
+      AND p.accepted_capsule_hash=NEW.accepted_capsule_hash
+      AND p.qualification_operation_id=NEW.qualification_operation_id
+      AND p.qualification_occurrence_id=NEW.qualification_occurrence_id
+      AND p.channel_binding_digest=NEW.channel_binding_digest)
+BEGIN SELECT RAISE(ABORT, 'qualification command changed its attached Worker owner'); END;
+CREATE TRIGGER external_qualification_worker_command_transition_guard
+BEFORE UPDATE ON external_qualification_worker_command
+WHEN NEW.placement_thread_id!=OLD.placement_thread_id
+ OR NEW.accepted_root_id!=OLD.accepted_root_id
+ OR NEW.accepted_capsule_hash!=OLD.accepted_capsule_hash
+ OR NEW.qualification_operation_id!=OLD.qualification_operation_id
+ OR NEW.qualification_occurrence_id!=OLD.qualification_occurrence_id
+ OR NEW.channel_binding_digest!=OLD.channel_binding_digest
+ OR NEW.process_incarnation_digest!=OLD.process_incarnation_digest
+ OR NEW.request_digest!=OLD.request_digest
+ OR NEW.reserved_at_ms!=OLD.reserved_at_ms
+ OR NEW.contacted_at_ms IS NOT OLD.contacted_at_ms
+    AND OLD.contacted_at_ms IS NOT NULL
+ OR NEW.turn_id IS NOT OLD.turn_id AND OLD.turn_id IS NOT NULL
+ OR NEW.turn_started_at_ms IS NOT OLD.turn_started_at_ms
+    AND OLD.turn_started_at_ms IS NOT NULL
+ OR NEW.turn_start_digest IS NOT OLD.turn_start_digest
+    AND OLD.turn_start_digest IS NOT NULL
+ OR NEW.turn_completed_at_ms IS NOT OLD.turn_completed_at_ms
+    AND OLD.turn_completed_at_ms IS NOT NULL
+ OR NEW.turn_completion_digest IS NOT OLD.turn_completion_digest
+    AND OLD.turn_completion_digest IS NOT NULL
+ OR NEW.final_response_digest IS NOT OLD.final_response_digest
+    AND OLD.final_response_digest IS NOT NULL
+ OR NEW.completed_at_ms IS NOT OLD.completed_at_ms
+    AND OLD.completed_at_ms IS NOT NULL
+ OR NOT ((OLD.state='reserved' AND NEW.state IN ('possible_contact','outcome_unknown'))
+      OR (OLD.state='possible_contact' AND NEW.state IN
+          ('possible_contact','turn_completed','outcome_unknown')))
+BEGIN SELECT RAISE(ABORT, 'qualification command transition changed retained authority'); END;
+CREATE TRIGGER external_qualification_worker_command_no_delete
+BEFORE DELETE ON external_qualification_worker_command
+BEGIN SELECT RAISE(ABORT, 'qualification Worker request occurrence is retained'); END;
 
 CREATE TABLE external_execution_no_occurrence (
     placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
@@ -1580,6 +1669,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     channel::validate_channels(conn)?;
     connector::validate_connectors(conn)?;
     qualification_process::validate_processes(conn)?;
+    qualification_command::validate_commands(conn)?;
     Ok(())
 }
 

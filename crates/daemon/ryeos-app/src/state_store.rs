@@ -15590,6 +15590,78 @@ impl StateStore {
             .settle_qualification_worker_process(proof)
     }
 
+    /// Read one exact Q framed request and observed turn. This projection is
+    /// evidence only; it does not authorize a qualification claim.
+    pub(crate) fn qualification_worker_command(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::QualificationWorkerCommandRecord>> {
+        self.lock()?
+            .runtime_db
+            .qualification_worker_command(placement)
+    }
+
+    pub(crate) fn reserve_qualification_worker_command(
+        &self,
+        placement: &str,
+        request_digest: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .reserve_qualification_worker_command(placement, request_digest)
+    }
+
+    /// This is the one-use pre-send boundary. A caller may send one framed
+    /// Request only after this transaction succeeds, and may never resend it.
+    pub(crate) fn mark_qualification_worker_command_possible_contact(
+        &self,
+        placement: &str,
+        request_digest: &str,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .mark_qualification_worker_command_possible_contact(placement, request_digest)
+    }
+
+    /// Persist an exact Q turn transition before acknowledging a pushed batch.
+    pub(crate) fn record_qualification_worker_turn_observation(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        observation: &serde_json::Value,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_worker_turn_observation(placement, request_digest, observation)
+    }
+
+    pub(crate) fn record_qualification_worker_final(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        response: &serde_json::Value,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.record_qualification_worker_final(
+            placement,
+            request_digest,
+            response,
+        )
+    }
+
+    pub(crate) fn mark_qualification_worker_command_outcome_unknown(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .mark_qualification_worker_command_outcome_unknown(placement)
+    }
+
     pub(crate) fn finish_external_protocol_output(
         &self,
         placement: &str,
