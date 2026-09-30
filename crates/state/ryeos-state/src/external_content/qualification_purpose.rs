@@ -19,7 +19,7 @@ use super::products::{validate_canonical_unsuffixed_ref, validate_hash, validate
 use super::qualification_execution::QualificationExecutionPurposeView;
 use super::qualification_subject::ContentQualificationSubject;
 
-pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v1";
+pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v2";
 
 /// These sources have different authentication and CAS retention rules. An
 /// activation receipt is never a producer witness or product relationship.
@@ -121,6 +121,33 @@ impl QualificationLaunchPurpose {
             (Some(context), Some(definitions), Some(content)) => {
                 definitions.validate_for(context)?;
                 content.validate_for(context, definitions)?;
+                use super::products::qualification::QualificationConsumerDeclarationAuthority;
+                match (&self.subject, &content.declaration_authority) {
+                    (
+                        QualificationSubject::CapturedProduct { .. },
+                        QualificationConsumerDeclarationAuthority::CapturedProduct { .. },
+                    ) => {}
+                    (
+                        QualificationSubject::ActivatedContent { content: subject },
+                        QualificationConsumerDeclarationAuthority::ActivatedContent {
+                            declaration_id,
+                            allowance,
+                            ..
+                        },
+                    ) => {
+                        allowance.validate_policy_source(&self.policy_source)?;
+                        if subject.consumer_ref != definitions.worker.canonical_ref
+                            || subject.declaration_id != *declaration_id
+                            || context.product_declaration_id != *declaration_id
+                            || allowance.required_claims != self.required_claims
+                        {
+                            bail!(
+                                "activated consumer declaration differs from qualification purpose"
+                            );
+                        }
+                    }
+                    _ => bail!("consumer declaration authority differs from qualification subject"),
+                }
                 if self.policy_source.policy.producer_scenarios.is_empty() {
                     bail!("consumer qualification has no signed direct producer scenario");
                 }

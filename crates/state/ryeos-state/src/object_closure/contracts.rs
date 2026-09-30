@@ -1689,7 +1689,9 @@ mod tests {
                 environment: definition("config:codex/environment"),
                 worker_execution: definition("worker_execution:codex/bounded-turn"),
             },
-            relationship_definition: definition("config:codex/products"),
+            declaration_authority: crate::external_content::products::qualification::QualificationConsumerDeclarationAuthority::CapturedProduct {
+                relationship_definition: definition("config:codex/products"),
+            },
             worker_source: EffectiveSourceClosureProjection {
                 schema: crate::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
                 binding_hash: source_binding.clone(),

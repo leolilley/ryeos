@@ -26,7 +26,7 @@ use crate::objects::{
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v2";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
-pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v9";
+pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v10";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
 pub const PRODUCT_QUALIFICATION_CLAIM: &str = "retained_product_qualified";
 pub const MAX_PRODUCT_QUALIFICATION_CLAIMS: usize = 32;
@@ -155,7 +155,7 @@ impl ProductQualificationConsumerDefinitionIdentity {
 #[serde(deny_unknown_fields)]
 pub struct ProductQualificationConsumerContentIdentity {
     pub definitions: ProductQualificationConsumerDefinitionIdentity,
-    pub relationship_definition: ProductQualificationBundleDefinitionIdentity,
+    pub declaration_authority: QualificationConsumerDeclarationAuthority,
     pub worker_source: EffectiveSourceClosureProjection,
     pub worker_profile_hash: String,
     pub worker_preselection_effective_definition_digest: String,
@@ -165,6 +165,61 @@ pub struct ProductQualificationConsumerContentIdentity {
     pub executable_search: Vec<ExecutableSearchPathEntry>,
     pub process_environment: BTreeMap<String, SessionProcessEnvironmentValue>,
     pub runtime_member: ProductQualificationConsumerRuntimeMemberIdentity,
+}
+
+/// Source-specific signed declaration selection. Authentication belongs to
+/// admission; this retained value cannot grant qualification by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QualificationConsumerDeclarationAuthority {
+    CapturedProduct {
+        relationship_definition: ProductQualificationBundleDefinitionIdentity,
+    },
+    ActivatedContent {
+        activation_definition: ProductQualificationBundleDefinitionIdentity,
+        declaration_id: String,
+        allowance: super::super::qualification_allowance::ContentQualificationAllowance,
+    },
+}
+
+impl QualificationConsumerDeclarationAuthority {
+    pub fn captured_relationship(
+        &self,
+    ) -> anyhow::Result<&ProductQualificationBundleDefinitionIdentity> {
+        match self {
+            Self::CapturedProduct {
+                relationship_definition,
+            } => Ok(relationship_definition),
+            Self::ActivatedContent { .. } => {
+                bail!("activated consumer authority is not a product relationship")
+            }
+        }
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        let definition = match self {
+            Self::CapturedProduct {
+                relationship_definition,
+            } => relationship_definition,
+            Self::ActivatedContent {
+                activation_definition,
+                declaration_id,
+                allowance,
+            } => {
+                validate_name(declaration_id)?;
+                allowance.validate()?;
+                if activation_definition.canonical_ref != allowance.activation_ref {
+                    bail!("consumer activation definition differs from its allowance");
+                }
+                activation_definition
+            }
+        };
+        definition.validate()?;
+        if !definition.canonical_ref.starts_with("config:") {
+            bail!("qualification declaration authority must be a Config");
+        }
+        Ok(())
+    }
 }
 
 /// Exact product member selected by both the signed consumer runtime route
@@ -205,14 +260,7 @@ impl ProductQualificationConsumerContentIdentity {
         if &self.definitions != definitions {
             bail!("qualification consumer content differs from retained definitions");
         }
-        self.relationship_definition.validate()?;
-        if !self
-            .relationship_definition
-            .canonical_ref
-            .starts_with("config:")
-        {
-            bail!("qualification relationship definition must be a Config");
-        }
+        self.declaration_authority.validate()?;
         self.worker_source.validate()?;
         for (label, hash) in [
             ("qualification Worker profile", &self.worker_profile_hash),
@@ -884,7 +932,8 @@ impl ProductQualificationEvidence {
             &self.consumer_content,
         ) {
             (Some(context), Some(content)) => {
-                content.validate_for(context, &content.definitions)?
+                content.validate_for(context, &content.definitions)?;
+                content.declaration_authority.captured_relationship()?;
             }
             (None, None) => {}
             _ => bail!("qualification evidence consumer content differs from signed policy"),

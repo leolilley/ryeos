@@ -1181,7 +1181,9 @@ impl PreparedBundleConsumerContentInputs {
             .context("prepared consumer content has no signed context")?;
         let identity = ProductQualificationConsumerContentIdentity {
             definitions: self.definitions.clone(),
-            relationship_definition: self.relationship_definition.clone(),
+            declaration_authority: ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority::CapturedProduct {
+                relationship_definition: self.relationship_definition.clone(),
+            },
             worker_source: self.worker_source.source.clone(),
             worker_profile_hash: self.worker_source.profile.profile_hash.clone(),
             worker_preselection_effective_definition_digest: self
@@ -1405,7 +1407,10 @@ pub(in crate::operator_external_content) fn require_current_consumer_content_for
         state,
         policy_source,
         relationship,
-        &retained.relationship_definition.canonical_ref,
+        &retained
+            .declaration_authority
+            .captured_relationship()?
+            .canonical_ref,
     )?
     .context("current signed consumer content is absent")?;
     current.require_external_runtime_member_alignment(
