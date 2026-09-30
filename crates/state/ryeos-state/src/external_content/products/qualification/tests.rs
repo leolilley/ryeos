@@ -148,7 +148,9 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
     assert!(purpose.validate().is_err());
     purpose.consumer_content = Some(ProductQualificationConsumerContentIdentity {
         definitions: purpose.consumer_definitions.as_ref().unwrap().clone(),
-        relationship_definition: definition("config:codex/guest-runtime-products"),
+        declaration_authority: QualificationConsumerDeclarationAuthority::CapturedProduct {
+            relationship_definition: definition("config:codex/guest-runtime-products"),
+        },
         worker_source: EffectiveSourceClosureProjection {
             schema: crate::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
             binding_hash: "1".repeat(64),
@@ -198,6 +200,38 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
         },
     });
     purpose.validate().unwrap();
+    let captured_authority = purpose
+        .consumer_content
+        .as_ref()
+        .unwrap()
+        .declaration_authority
+        .clone();
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .declaration_authority = QualificationConsumerDeclarationAuthority::ActivatedContent {
+        activation_definition: definition("config:codex/runtime-activation"),
+        declaration_id: "guest-runtime".into(),
+        allowance:
+            crate::external_content::qualification_allowance::ContentQualificationAllowance {
+                activation_ref: "config:codex/runtime-activation".into(),
+                policy_ref: purpose.policy_source.canonical_ref.clone(),
+                required_claims: purpose.required_claims.clone(),
+            },
+    };
+    assert!(
+        purpose
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("declaration authority differs")
+    );
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .declaration_authority = captured_authority;
     purpose
         .consumer_content
         .as_mut()
