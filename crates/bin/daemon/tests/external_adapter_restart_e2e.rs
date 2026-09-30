@@ -1923,7 +1923,55 @@ async fn host_backed_signed_direct_codex_diagnostic() -> anyhow::Result<()> {
         )
         .await?;
     }
+    require_completed_producer_root_refused_as_direct_verifier(&host, &captured_subject).await?;
     verify_direct_codex_diagnostic(&host, &scenario, &captured_subject).await
+}
+
+/// The same signed product, relationship and admitted Bundle policy must not
+/// turn its completed producer into a verifier. This is a real retained root,
+/// so the refusal exercises the sealed qualification-purpose join rather than
+/// merely rejecting a nonexistent thread ID.
+#[cfg(all(unix, feature = "handoff-test-support"))]
+async fn require_completed_producer_root_refused_as_direct_verifier(
+    host: &host_backed_qualification::HostBackedQualificationEndpoint,
+    captured_subject: &Value,
+) -> anyhow::Result<()> {
+    use anyhow::{Context as _, ensure};
+
+    let captured: ProductCaptureEvidence =
+        serde_json::from_value(captured_subject["evidence"].clone())
+            .context("host diagnostic has no typed captured product evidence")?;
+    ensure!(
+        captured.chain_root_id == captured.thread_id
+            && captured_subject["witness_hash"]
+                .as_str()
+                .is_some_and(lillux::valid_hash),
+        "negative diagnostic lacks an exact completed producer root"
+    );
+    let (status, response) = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        host.post_execute(
+            "service:external-content/qualify-product",
+            json!({
+                "witness_hash":captured_subject["witness_hash"],
+                "witness_source":{"kind":"local_capture"},
+                "relationship_name":"runtime_to_external_authoring_worker",
+                "verifier_chain_root_id":captured.chain_root_id,
+                "verifier_thread_id":captured.thread_id,
+            }),
+        ),
+    )
+    .await
+    .context("completed producer-root refusal timed out; retain state, do not retry")??;
+    ensure!(
+        !status.is_success()
+            && response.get("qualification_hash").is_none()
+            && response
+                .to_string()
+                .contains("qualification verifier has no admitted launch purpose"),
+        "completed product producer was accepted as a direct verifier, or refusal missed its sealed purpose: {status}: {response}"
+    );
+    Ok(())
 }
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
