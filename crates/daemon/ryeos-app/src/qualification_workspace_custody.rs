@@ -372,6 +372,29 @@ impl QualificationWorkspaceCustodyRegistry {
         Ok(entry)
     }
 
+    pub(crate) fn release_closed_guest_scratch(
+        &self,
+        record: &QualificationGuestScratchRecord,
+    ) -> Result<()> {
+        ensure!(
+            record.phase == QualificationGuestScratchPhase::Closed,
+            "Q guest scratch custody release has no durable Closed receipt"
+        );
+        let mut entries = self
+            .guest_scratch
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q guest scratch custody registry is poisoned"))?;
+        if let Some(entry) = entries.get(&record.placement_thread_id) {
+            ensure!(
+                entry.matches_record(record),
+                "Q guest scratch Closed receipt changed original custody"
+            );
+            entry.guard.prove_owned_scratch_removed()?;
+            entries.remove(&record.placement_thread_id);
+        }
+        Ok(())
+    }
+
     /// A no-Create rollback may remove only roots that were never transferred
     /// into this registry. Refuse poisoned ownership state as well as an
     /// existing original custody entry.

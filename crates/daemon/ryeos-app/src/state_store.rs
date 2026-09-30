@@ -15667,6 +15667,72 @@ impl StateStore {
             .mark_qualification_guest_scratch_created(expected)
     }
 
+    pub(crate) fn begin_qualification_guest_scratch_cleanup(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+        custody: &std::sync::Arc<
+            crate::qualification_workspace_custody::QualificationGuestScratchCustody,
+        >,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_guest_scratch(expected)?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(&retained, custody)
+                && custody.pinned_root()?.path() == std::path::Path::new(&expected.scratch_root),
+            "Q scratch cleanup lost its original descriptor"
+        );
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .begin_qualification_guest_scratch_cleanup(expected)
+    }
+
+    pub(crate) fn record_qualification_guest_scratch_removed(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+        custody: &std::sync::Arc<
+            crate::qualification_workspace_custody::QualificationGuestScratchCustody,
+        >,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_guest_scratch(expected)?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(&retained, custody),
+            "Q scratch removal changed original custody"
+        );
+        custody.guard().prove_owned_scratch_removed()?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_guest_scratch_removed(expected)
+    }
+
+    pub(crate) fn close_qualification_guest_scratch(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+        custody: &std::sync::Arc<
+            crate::qualification_workspace_custody::QualificationGuestScratchCustody,
+        >,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_guest_scratch(expected)?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(&retained, custody),
+            "Q scratch close changed original custody"
+        );
+        custody.guard().prove_owned_scratch_removed()?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .close_qualification_guest_scratch(expected)
+    }
+
     /// A read-only check for the original Q scope immediately before an
     /// owner-gated view borrow and held Worker spawn.
     pub(crate) fn authorize_qualification_local_spawn(

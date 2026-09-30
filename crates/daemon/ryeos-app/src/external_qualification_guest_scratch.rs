@@ -11,6 +11,9 @@ use ryeos_state::object_closure::ObjectClosureLimits;
 
 use crate::handler_context::HandlerContext;
 use crate::qualification_workspace_custody::QualificationGuestScratchCustody;
+use crate::runtime_db::external_execution::{
+    QualificationGuestScratchPhase, QualificationGuestScratchRecord,
+};
 use crate::state::AppState;
 use crate::temp_dir_guard::TempDirGuard;
 
@@ -21,6 +24,70 @@ use crate::temp_dir_guard::TempDirGuard;
 pub struct PreparedQualificationGuestScratch {
     placement_thread_id: String,
     custody: Arc<QualificationGuestScratchCustody>,
+}
+
+/// Retire one exact original Q input tree. The journal first proves that no
+/// allocation was ever made, or that the exact provider allocation and any
+/// local Worker/connector are durably settled. It then records cleanup intent,
+/// removes through the original pinned guard, and commits Closed. Missing
+/// process-local custody after restart is an explicit unresolved fence.
+pub(crate) fn cleanup_original_qualification_guest_scratch(
+    state: &AppState,
+    placement: &str,
+) -> Result<QualificationGuestScratchRecord> {
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let initial = state
+        .state_store
+        .qualification_guest_scratch(placement)?
+        .context("Q guest scratch cleanup has no original intent")?;
+    crate::hosted_operation::with_qualification_occurrence_contact(
+        &initial.qualification_operation_id,
+        || {
+            let mut current = state
+                .state_store
+                .qualification_guest_scratch(placement)?
+                .context("Q guest scratch cleanup lost its original intent")?;
+            ensure!(
+                current == initial,
+                "Q guest scratch cleanup changed its original row before contact gate"
+            );
+            if current.phase == QualificationGuestScratchPhase::Closed {
+                state
+                    .qualification_workspace_custody
+                    .release_closed_guest_scratch(&current)?;
+                return Ok(current);
+            }
+            let custody = state
+                .qualification_workspace_custody
+                .borrow_guest_scratch(&current)?;
+            loop {
+                current = match current.phase {
+                    QualificationGuestScratchPhase::Reserved
+                    | QualificationGuestScratchPhase::Created => state
+                        .state_store
+                        .begin_qualification_guest_scratch_cleanup(state, &current, &custody)?,
+                    QualificationGuestScratchPhase::CleanupIntent => {
+                        custody.guard().remove_now()?;
+                        custody.guard().prove_owned_scratch_removed()?;
+                        state
+                            .state_store
+                            .record_qualification_guest_scratch_removed(state, &current, &custody)?
+                    }
+                    QualificationGuestScratchPhase::Removed => state
+                        .state_store
+                        .close_qualification_guest_scratch(state, &current, &custody)?,
+                    QualificationGuestScratchPhase::Closed => {
+                        state
+                            .qualification_workspace_custody
+                            .release_closed_guest_scratch(&current)?;
+                        return Ok(current);
+                    }
+                };
+            }
+        },
+    )
 }
 
 impl PreparedQualificationGuestScratch {

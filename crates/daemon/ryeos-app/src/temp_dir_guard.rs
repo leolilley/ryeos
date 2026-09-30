@@ -476,6 +476,31 @@ impl TempDirGuard {
         Ok(())
     }
 
+    /// Prove an original pinned scratch child is absent after `remove_now()`.
+    /// The retained parent and child descriptors, not a reopened diagnostic
+    /// pathname, identify what this process physically removed. This permits
+    /// a lost post-unlink journal ACK to retry without reminting custody.
+    pub fn prove_owned_scratch_removed(&self) -> anyhow::Result<()> {
+        let pinned = self
+            .pinned_removal
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("scratch has no original pinned removal owner"))?;
+        if !self.owns_removal
+            || self.workspace_view.lock().unwrap().is_some()
+            || self.inner.lock().unwrap().is_some()
+        {
+            anyhow::bail!("scratch has no original physical removal proof");
+        }
+        pinned.parent.ensure_path_binding()?;
+        if pinned.root.path().parent() != Some(pinned.parent.path())
+            || pinned.root.path().file_name() != Some(pinned.name.as_os_str())
+            || pinned.parent.open_child_directory(&pinned.name)?.is_some()
+        {
+            anyhow::bail!("scratch reappeared or changed its pinned parent");
+        }
+        Ok(())
+    }
+
     fn remove_owned_directory_now(&self) -> anyhow::Result<()> {
         let mut path_slot = self.inner.lock().unwrap();
         let Some(path) = path_slot.as_ref() else {
