@@ -16264,6 +16264,38 @@ impl StateStore {
             .mark_qualification_worker_command_outcome_unknown(placement)
     }
 
+    /// Retain one complete pushed Q Worker batch before returning its
+    /// transport ACK. This local receipt is not a portable signed claim.
+    pub(crate) fn record_qualification_worker_observation_batch(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        batch: &serde_json::Value,
+        signed_wire_max_bytes: u32,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerBatchAck> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_worker_observation_batch(
+                placement,
+                request_digest,
+                batch,
+                signed_wire_max_bytes,
+            )
+    }
+
+    /// Full local batches for a later semantic verifier; this grants no
+    /// transport or qualification permit.
+    pub(crate) fn qualification_worker_observation_batches(
+        &self,
+        placement: &str,
+    ) -> Result<Vec<runtime_db::external_execution::QualificationWorkerObservationBatchRecord>>
+    {
+        self.lock()?
+            .runtime_db
+            .qualification_worker_observation_batches(placement)
+    }
+
     pub(crate) fn finish_external_protocol_output(
         &self,
         placement: &str,

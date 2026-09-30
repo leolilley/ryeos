@@ -174,7 +174,7 @@ impl QualificationWorkerCommandRecord {
     }
 }
 
-fn read_command(
+pub(super) fn read_command(
     conn: &Connection,
     placement: &str,
 ) -> Result<Option<QualificationWorkerCommandRecord>> {
@@ -258,7 +258,10 @@ fn read_command(
     .transpose()
 }
 
-fn require_owner(conn: &Connection, record: &QualificationWorkerCommandRecord) -> Result<()> {
+pub(super) fn require_owner(
+    conn: &Connection,
+    record: &QualificationWorkerCommandRecord,
+) -> Result<()> {
     let allocation = read(conn, &record.placement_thread_id)?
         .context("qualification Worker command lost its allocation")?;
     let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner

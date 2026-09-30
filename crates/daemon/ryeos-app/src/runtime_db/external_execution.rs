@@ -12,6 +12,7 @@ use anyhow::ensure;
 mod channel;
 pub use channel::ExternalDirectOutput;
 pub(crate) mod connector;
+mod qualification_batch;
 mod qualification_command;
 mod qualification_local_start;
 mod qualification_process;
@@ -19,6 +20,9 @@ pub(crate) use channel::{
     ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
     ExternalSupervisorExchange, RetainedExternalCandidateImport,
     RetainedExternalQualificationScopeSettlement,
+};
+pub(crate) use qualification_batch::{
+    QualificationWorkerBatchAck, QualificationWorkerObservationBatchRecord,
 };
 pub(crate) use qualification_command::{
     QualificationWorkerCommandPhase, QualificationWorkerCommandRecord,
@@ -315,6 +319,43 @@ BEGIN SELECT RAISE(ABORT, 'qualification command transition changed retained aut
 CREATE TRIGGER external_qualification_worker_command_no_delete
 BEFORE DELETE ON external_qualification_worker_command
 BEGIN SELECT RAISE(ABORT, 'qualification Worker request occurrence is retained'); END;
+
+-- Exact pushed Worker batches are independent from the request-correlated
+-- Delta/Final turn journal. Their events and sequence chain remain available
+-- for restartable semantic verification; an ACK is returned only after commit.
+CREATE TABLE external_qualification_worker_observation_batch (
+    placement_thread_id TEXT NOT NULL REFERENCES external_qualification_worker_command(placement_thread_id),
+    process_incarnation_digest TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    first_sequence INTEGER NOT NULL CHECK (first_sequence > 0),
+    through_sequence INTEGER NOT NULL CHECK (through_sequence >= first_sequence),
+    previous_digest TEXT,
+    batch_digest TEXT NOT NULL,
+    canonical_batch_json TEXT NOT NULL,
+    wire_max_bytes INTEGER NOT NULL CHECK (wire_max_bytes BETWEEN 1 AND 16777216),
+    retained_at_ms INTEGER NOT NULL CHECK (retained_at_ms > 0),
+    PRIMARY KEY (placement_thread_id, first_sequence),
+    CHECK (through_sequence - first_sequence < 128),
+    CHECK (length(CAST(canonical_batch_json AS BLOB)) <= 393216),
+    CHECK (length(CAST(canonical_batch_json AS BLOB)) <= wire_max_bytes)
+);
+CREATE TRIGGER external_qualification_worker_observation_batch_insert_guard
+BEFORE INSERT ON external_qualification_worker_observation_batch
+WHEN NOT EXISTS(SELECT 1 FROM external_qualification_worker_command c
+    JOIN external_qualification_worker_process p
+      ON p.placement_thread_id=c.placement_thread_id
+    WHERE c.placement_thread_id=NEW.placement_thread_id
+      AND c.state IN ('possible_contact','turn_completed')
+      AND c.request_digest=NEW.request_digest
+      AND c.process_incarnation_digest=NEW.process_incarnation_digest
+      AND p.phase='attached')
+BEGIN SELECT RAISE(ABORT, 'qualification observation lost its contacted Worker'); END;
+CREATE TRIGGER external_qualification_worker_observation_batch_no_update
+BEFORE UPDATE ON external_qualification_worker_observation_batch
+BEGIN SELECT RAISE(ABORT, 'qualification observation batch is immutable'); END;
+CREATE TRIGGER external_qualification_worker_observation_batch_no_delete
+BEFORE DELETE ON external_qualification_worker_observation_batch
+BEGIN SELECT RAISE(ABORT, 'qualification observation batch is retained'); END;
 
 CREATE TABLE external_execution_no_occurrence (
     placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
@@ -1688,6 +1729,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     qualification_local_start::validate_local_starts(conn)?;
     qualification_process::validate_processes(conn)?;
     qualification_command::validate_commands(conn)?;
+    qualification_batch::validate_batches(conn)?;
     Ok(())
 }
 

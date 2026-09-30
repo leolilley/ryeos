@@ -2675,7 +2675,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // before its descriptor can be cloned for the held Worker.
 // Epoch 110 retains exact no-contact Q local cleanup, physical view close,
 // backend Destroy, original pinned-root removal, and scope retirement.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 110;
+// Epoch 111 retains bounded, request-bound Q Worker pushed batches in their
+// exact local sequence chain. This local transport receipt is not a portable
+// signed qualification fact or a semantic success permit.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 111;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -3799,6 +3802,71 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_qualification_worker_observation_batch",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_incarnation_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "request_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "first_sequence",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "through_sequence",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "previous_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "batch_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "canonical_batch_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "wire_max_bytes",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "retained_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
                     },
                 ],
             },
