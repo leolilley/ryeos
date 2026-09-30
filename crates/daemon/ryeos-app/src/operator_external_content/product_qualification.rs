@@ -1172,7 +1172,9 @@ pub(super) struct PreparedBundleConsumerContentInputs {
 }
 
 impl PreparedBundleConsumerContentInputs {
-    fn retained_identity(&self) -> anyhow::Result<ProductQualificationConsumerContentIdentity> {
+    pub(in crate::operator_external_content) fn retained_identity(
+        &self,
+    ) -> anyhow::Result<ProductQualificationConsumerContentIdentity> {
         let context = self
             .policy_source
             .policy
@@ -1205,7 +1207,9 @@ impl PreparedBundleConsumerContentInputs {
         Ok(identity)
     }
 
-    fn into_publication(self) -> anyhow::Result<ryeos_state::PendingCasPublication> {
+    pub(in crate::operator_external_content) fn into_publication(
+        self,
+    ) -> anyhow::Result<ryeos_state::PendingCasPublication> {
         self.publication
             .context("prepared consumer content has no staged CAS publication")
     }

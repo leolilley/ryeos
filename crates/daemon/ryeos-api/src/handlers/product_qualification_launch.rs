@@ -439,7 +439,12 @@ async fn handle_source(
             .map_err(|error| HandlerError::BadRequest(format!(
                 "qualification producer recipe admission refused: {error:#}"
             )))?;
-    let (subject, required_claims, consumer_content) = match &prepared {
+    let consumer_content = prepared.consumer_content_identity().map_err(|error| {
+        HandlerError::BadRequest(format!(
+            "qualification consumer content identity refused: {error:#}"
+        ))
+    })?;
+    let (subject, required_claims) = match &prepared {
         PreparedQualificationLaunch::CapturedProduct(product) => (
             QualificationSubject::CapturedProduct {
                 product_witness_hash: product.product_witness_hash.clone(),
@@ -447,18 +452,12 @@ async fn handle_source(
                 relationship_name: product.relationship.name.clone(),
             },
             product.relationship.qualification.required_claims.clone(),
-            product.consumer_content_identity().map_err(|error| {
-                HandlerError::BadRequest(format!(
-                    "qualification consumer content identity refused: {error:#}"
-                ))
-            })?,
         ),
         PreparedQualificationLaunch::ActivatedContent { source, .. } => (
             QualificationSubject::ActivatedContent {
                 content: source.subject.clone(),
             },
             source.allowance.required_claims.clone(),
-            None,
         ),
     };
     let consumer_definitions = consumer_content
@@ -498,9 +497,9 @@ async fn handle_source(
         let state = Arc::clone(&state);
         let context = ctx.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            prepared.require_current(&state, &context)?;
             let root_admission = match &prepared {
                 PreparedQualificationLaunch::CapturedProduct(_) => {
-                    prepared.require_current(&state, &context)?;
                     root_admission.for_qualification(purpose)
                 }
                 PreparedQualificationLaunch::ActivatedContent {
@@ -538,15 +537,11 @@ async fn handle_source(
     .map_err(|error| {
         HandlerError::Internal(format!("qualification dispatch admission: {error:#}"))
     })?;
-    let consumer_publication = match &mut prepared {
-        PreparedQualificationLaunch::CapturedProduct(product) => {
-            product.take_consumer_content_publication()
-        }
-        PreparedQualificationLaunch::ActivatedContent { .. } => Ok(None),
-    }
-    .map_err(|error| {
-        HandlerError::Internal(format!("qualification consumer content staging: {error:#}"))
-    })?;
+    let consumer_publication = prepared
+        .take_consumer_content_publication()
+        .map_err(|error| {
+            HandlerError::Internal(format!("qualification consumer content staging: {error:#}"))
+        })?;
     let thread_id = reservation.reserved_thread_id.clone();
     let (mut task, handoff) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
         &state,
