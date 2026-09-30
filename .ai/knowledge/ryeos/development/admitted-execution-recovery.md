@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T01:57:54Z:0e94adceb0ae39b0786a89726d454bfd3564c8bd97d2c12fcd6f4ad106c0b718:JcMGugMEUQGpLbN6PzZztGzBQJxHqdsmUUXPlSIIbpzSiCCJBtxI8jb6naLzFMFydcvYqDOzNba8WiYY5ffOAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T02:00:04Z:8233eca636827732e3c3a22471b5f6b7f60debfde2489ce36a704f4e3ce8b7a6:I4k4A0YuvJijAEf+0NiVCVOkC31LKrENFSOzAEdBvHkCbpe0TGhspSN0Dl/u7kkPkbmZbuwdgQZTK3xhRfYXCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.2"
+version: "1.1.3"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -100,6 +100,17 @@ admission. The consumer-context product claim still needs an independently
 authorized hosted lifecycle and its exact runtime parity evidence. These
 source paths require an installed acceptance run before they can be reported
 as operational qualification.
+
+An external structured-session binding selects acquired runtime compatibility
+through its separate, required-nullable `runtime_content_qualification` slot.
+The selection names an exact activation, immutable qualification coordinate
+and attestation, owner, and finite required claims; fresh placement must rejoin
+that testimony to the session runtime manifest. This is separate from the
+guest-owner snapshot `runtime_qualification` and from the Worker product slot.
+Current source checks the selection before fresh placement, but retaining it
+in the admitted session and checking it during historical recovery remain open
+implementation gates. A binding without that proof cannot obtain fresh
+structured-session contact from this source generation.
 
 ## Qualification schema cut
 
