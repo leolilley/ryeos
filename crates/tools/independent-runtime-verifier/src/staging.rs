@@ -152,7 +152,7 @@ pub struct ScriptedCanaryCommands {
     pub guest_read: String,
 }
 
-pub(crate) const COMMAND_ENVIRONMENT_TEMPLATE: &str = r#"default = "ryeos-external-candidate"
+pub const COMMAND_ENVIRONMENT_TEMPLATE: &str = r#"default = "ryeos-external-candidate"
 include_local = false
 [[environments]]
 id = "ryeos-external-candidate"

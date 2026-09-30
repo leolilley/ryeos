@@ -424,7 +424,7 @@ fn validate_scripted_baseline(
     Ok(bytes)
 }
 
-pub(crate) fn expected_scripted_baseline(origin: &str) -> String {
+pub fn expected_scripted_baseline(origin: &str) -> String {
     r#"model = "gpt-5.5"
 model_provider = "routing-fixture"
 approval_policy = "never"

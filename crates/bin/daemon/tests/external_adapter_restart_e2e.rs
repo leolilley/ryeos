@@ -1091,17 +1091,14 @@ fn stage_independent_verifier_inputs(
         64 * 1024 * 1024,
         Some("e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849"),
     )?;
-    let scripted = include_str!(
-        "../../../../tests/e2e/external-execution/fixtures/independent-scripted-config.toml.template"
-    )
-    .replace("{ORIGIN}", &configuration.responses_origin);
+    let scripted = ryeos_independent_runtime_verifier::expected_scripted_baseline(
+        &configuration.responses_origin,
+    );
     ensure!(
         lillux::sha256_hex(scripted.as_bytes()) == configuration.scripted_baseline_sha256,
         "credential-free scripted baseline differs from authored configuration"
     );
-    let template = include_str!(
-        "../../../../tests/e2e/external-execution/fixtures/independent-environments.toml.template"
-    );
+    let template = ryeos_independent_runtime_verifier::staging::COMMAND_ENVIRONMENT_TEMPLATE;
     ensure!(
         lillux::sha256_hex(template.as_bytes())
             == configuration.command_environment_template_sha256,
@@ -1153,18 +1150,12 @@ fn native_unsigned_direct_configuration()
     let origin = value["responses_origin"]
         .as_str()
         .context("direct fixture has no scripted origin")?;
-    let scripted = include_str!(
-        "../../../../tests/e2e/external-execution/fixtures/independent-scripted-config.toml.template"
-    )
-    .replace("{ORIGIN}", origin);
+    let scripted = ryeos_independent_runtime_verifier::expected_scripted_baseline(origin);
     value["scripted_baseline_sha256"] = json!(lillux::sha256_hex(scripted.as_bytes()));
     value["expected_producer_recipe"]["prepared_immutable_files"][0]["expected_sha256"] =
         value["scripted_baseline_sha256"].clone();
     value["command_environment_template_sha256"] = json!(lillux::sha256_hex(
-        include_str!(
-            "../../../../tests/e2e/external-execution/fixtures/independent-environments.toml.template"
-        )
-        .as_bytes()
+        ryeos_independent_runtime_verifier::staging::COMMAND_ENVIRONMENT_TEMPLATE.as_bytes()
     ));
     value["codex_sha256"] =
         json!("cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40");
