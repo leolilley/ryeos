@@ -20,6 +20,168 @@ use ryeos_state::objects::ExternalContentKind;
 
 use crate::QualificationExecutionEnvironment;
 
+/// Prepared request with live descriptor custody, not a launched attempt.
+/// The upstream staging owner must additionally retain its immutable content
+/// leases and private-workspace writer authority through whole-scope settlement.
+pub struct PreparedProductionNativeRequest<'a> {
+    request: lillux::LinuxSandboxRequest,
+    _content_descriptors: &'a BTreeMap<u32, lillux::InheritedDescriptorAuthority>,
+    _private_descriptors: Vec<lillux::InheritedDescriptorAuthority>,
+}
+
+impl PreparedProductionNativeRequest<'_> {
+    pub fn request(&self) -> &lillux::LinuxSandboxRequest {
+        &self.request
+    }
+}
+
+/// Fresh, verifier-private scratch layout, not a Worker candidate generation.
+/// Sibling directories are created through the held unique occurrence root;
+/// callers cannot substitute an immutable input as a writable view. The normal
+/// verifier execution owner still supplies the private scratch authority and
+/// must settle all writers before accepting outputs.
+pub struct ProductionPrivateStaging {
+    occurrence: lillux::PinnedDirectory,
+    candidate: lillux::PinnedDirectory,
+    runtime_views: BTreeMap<String, lillux::PinnedDirectory>,
+}
+
+impl ProductionPrivateStaging {
+    pub fn create(
+        private_scratch: &lillux::PinnedDirectory,
+        content: &ProductQualificationConsumerContentIdentity,
+        consumer: &ProductQualificationConsumerExecutionContext,
+    ) -> Result<Self> {
+        QualificationExecutionEnvironment::from_retained_production_consumer(content, consumer)?;
+        let (_, occurrence) = private_scratch.create_unique_child("production-verifier", 0o700)?;
+        let candidate = occurrence.create_child(std::ffi::OsStr::new("candidate"), 0o700)?;
+        let views = occurrence.create_child(std::ffi::OsStr::new("runtime-views"), 0o700)?;
+        let mut runtime_views = BTreeMap::new();
+        for (name, value) in &content.process_environment {
+            if matches!(
+                value,
+                ryeos_state::objects::SessionProcessEnvironmentValue::RuntimeViewDirectory { .. }
+            ) {
+                runtime_views.insert(
+                    name.clone(),
+                    views.create_child(std::ffi::OsStr::new(name), 0o700)?,
+                );
+            }
+        }
+        Ok(Self {
+            occurrence,
+            candidate,
+            runtime_views,
+        })
+    }
+
+    fn recheck_bindings(&self) -> Result<()> {
+        self.occurrence.ensure_path_binding()?;
+        self.candidate.ensure_path_binding()?;
+        for directory in self.runtime_views.values() {
+            directory.ensure_path_binding()?;
+        }
+        Ok(())
+    }
+}
+
+/// Build the complete native mount request from verified production delivery.
+/// Fresh private directories come from the verifier staging owner. Content is
+/// reverified after scratch creation, so scratch inserted beneath an immutable
+/// input cannot silently alter that input's exact manifest.
+pub fn prepare_production_native_request<'a>(
+    content: &ProductQualificationConsumerContentIdentity,
+    consumer: &ProductQualificationConsumerExecutionContext,
+    requirement: &ExternalCandidateRequirement,
+    inputs: &[GuestMountInput],
+    descriptors: &'a BTreeMap<u32, lillux::InheritedDescriptorAuthority>,
+    private: &ProductionPrivateStaging,
+) -> Result<PreparedProductionNativeRequest<'a>> {
+    private.recheck_bindings()?;
+    let candidate = &private.candidate;
+    let runtime_views = &private.runtime_views;
+    let environment =
+        verify_production_descriptor_inputs(content, consumer, requirement, inputs, descriptors)?;
+    let effective = environment.expected_guest_environment(requirement)?;
+    let expected_views: BTreeSet<_> = content
+        .process_environment
+        .iter()
+        .filter_map(|(name, value)| {
+            matches!(
+                value,
+                ryeos_state::objects::SessionProcessEnvironmentValue::RuntimeViewDirectory { .. }
+            )
+            .then_some(name.as_str())
+        })
+        .collect();
+    ensure!(
+        runtime_views
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+            == expected_views,
+        "production native runtime views differ from admitted environment"
+    );
+    let mut mounts: Vec<_> = inputs
+        .iter()
+        .map(|input| lillux::LinuxSandboxMount {
+            source_fd: input.descriptor,
+            destination: input.destination.clone().into(),
+            access: lillux::LinuxSandboxMountAccess::ReadOnly,
+            layer: 0,
+        })
+        .collect();
+    let mut private_descriptors = Vec::new();
+    let candidate_descriptor = candidate.inherited_descriptor_authority()?;
+    mounts.push(lillux::LinuxSandboxMount {
+        source_fd: candidate_descriptor
+            .inherited_descriptor()
+            .map_err(anyhow::Error::msg)?,
+        destination: "/workspace".into(),
+        access: lillux::LinuxSandboxMountAccess::Writable,
+        layer: 0,
+    });
+    private_descriptors.push(candidate_descriptor);
+    for (name, directory) in runtime_views {
+        let descriptor = directory.inherited_descriptor_authority()?;
+        mounts.push(lillux::LinuxSandboxMount {
+            source_fd: descriptor
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?,
+            destination: ryeos_state::objects::runtime_view_mount_destination(name)?,
+            access: lillux::LinuxSandboxMountAccess::Writable,
+            layer: 0,
+        });
+        private_descriptors.push(descriptor);
+    }
+    // Obvious backing-object aliases are refused here. Distinct directory
+    // identities do not prove absence of ancestor/descendant overlap; that
+    // stronger fact still belongs to the private staging owner.
+    for (index, private) in private_descriptors.iter().enumerate() {
+        for other in private_descriptors
+            .iter()
+            .skip(index + 1)
+            .chain(descriptors.values())
+        {
+            ensure!(
+                !private.same_file_identity(other)?,
+                "production private mount aliases another retained input"
+            );
+        }
+    }
+    let request = crate::native_guest::native_request(
+        &requirement.runtime_recipe,
+        effective.environment,
+        mounts,
+    )?;
+    private.recheck_bindings()?;
+    Ok(PreparedProductionNativeRequest {
+        request,
+        _content_descriptors: descriptors,
+        _private_descriptors: private_descriptors,
+    })
+}
+
 /// Recheck a complete production input inventory before native staging.
 /// Authorities are borrowed: the existing transport/staging owner must retain
 /// their custody through execution and settlement. This return value establishes
@@ -334,7 +496,12 @@ mod tests {
             realization_id: "authoring-tools".into(),
             relative_directory: "bin".into(),
         }];
-        let process_environment = BTreeMap::new();
+        let process_environment = BTreeMap::from([(
+            "TMPDIR".into(),
+            ryeos_state::objects::SessionProcessEnvironmentValue::RuntimeViewDirectory {
+                relative_path: "scratch".into(),
+            },
+        )]);
         let content = ProductQualificationConsumerContentIdentity {
             qualification_use: Some(ryeos_state::external_execution::admission::ExternalCandidateQualificationUse {
                 schema: ryeos_state::external_execution::admission::QUALIFICATION_CONTEXT_SCHEMA.into(),
@@ -379,6 +546,80 @@ mod tests {
             &f.inputs,
             &f.descriptors,
         )
+    }
+
+    #[test]
+    fn native_request_preserves_every_production_mount_and_private_view() {
+        let f = fixture(true);
+        let mut private =
+            ProductionPrivateStaging::create(&f.root, &f.content, &f.consumer).unwrap();
+        let prepared = prepare_production_native_request(
+            &f.content,
+            &f.consumer,
+            &f.requirement,
+            &f.inputs,
+            &f.descriptors,
+            &private,
+        )
+        .unwrap();
+        let request = prepared.request();
+        assert_eq!(request.mounts.len(), 9);
+        for input in &f.inputs {
+            let mount = request
+                .mounts
+                .iter()
+                .find(|mount| mount.destination == std::path::Path::new(&input.destination))
+                .unwrap();
+            assert_eq!(mount.source_fd, input.descriptor);
+            assert_eq!(mount.access, lillux::LinuxSandboxMountAccess::ReadOnly);
+        }
+        assert_eq!(
+            request.executable,
+            std::path::Path::new("/runtime/bin/codex")
+        );
+        assert_eq!(
+            request.environment.get(OsStr::new("PATH")).unwrap(),
+            OsStr::new("/ryeos/realizations/authoring-tools/bin")
+        );
+        assert_eq!(
+            request.environment.get(OsStr::new("TMPDIR")).unwrap(),
+            OsStr::new("/ryeos/runtime-views/TMPDIR")
+        );
+        private.runtime_views.clear();
+        assert!(
+            prepare_production_native_request(
+                &f.content,
+                &f.consumer,
+                &f.requirement,
+                &f.inputs,
+                &f.descriptors,
+                &private,
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("runtime views")
+        );
+        let tools = f
+            .root
+            .open_child_directory(OsStr::new("authoring-tools"))
+            .unwrap()
+            .unwrap();
+        let private = ProductionPrivateStaging::create(&tools, &f.content, &f.consumer).unwrap();
+        assert!(
+            prepare_production_native_request(
+                &f.content,
+                &f.consumer,
+                &f.requirement,
+                &f.inputs,
+                &f.descriptors,
+                &private,
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("undeclared entry")
+        );
     }
 
     #[test]

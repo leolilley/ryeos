@@ -113,6 +113,50 @@ fn validate_effective_environment(environment: &BTreeMap<String, String>) -> Res
     Ok(())
 }
 
+/// Shared native request construction for fixture and production probes.
+/// The caller supplies already verified, retained mount descriptors. Lillux
+/// remains responsible for applying and corroborating the sandbox; constructing
+/// this request grants no execution or settlement evidence.
+pub(crate) fn native_request(
+    recipe: &ExternalCandidateRuntimeRecipe,
+    environment: BTreeMap<String, String>,
+    mounts: Vec<lillux::LinuxSandboxMount>,
+) -> Result<lillux::LinuxSandboxRequest> {
+    recipe.validate()?;
+    validate_effective_environment(&environment)?;
+    Ok(lillux::LinuxSandboxRequest {
+        executable: recipe.namespace_executable()?.into(),
+        argv0: recipe.argv0.clone().into(),
+        arguments: recipe.arguments.iter().cloned().map(Into::into).collect(),
+        cwd: recipe.cwd.clone().into(),
+        environment: environment
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect(),
+        mounts,
+        fixed_parent_views: vec![],
+        overlay: None,
+        network: lillux::LinuxSandboxNetwork::Isolated,
+        private_tmp: true,
+        proc_filesystem: match recipe.proc_filesystem {
+            ExternalCandidateProcFilesystem::Empty => lillux::LinuxSandboxProcFilesystem::Empty,
+            ExternalCandidateProcFilesystem::PidNamespace => {
+                lillux::LinuxSandboxProcFilesystem::PidNamespace
+            }
+            ExternalCandidateProcFilesystem::PidNamespaceNested => {
+                lillux::LinuxSandboxProcFilesystem::PidNamespaceNested
+            }
+        },
+        minimal_devices: true,
+        character_devices: vec![],
+        target_channels: vec![],
+        lifecycle: lillux::LinuxSandboxLifecycle::Run,
+        contain_process_group: recipe.contain_process_group,
+        nested_sandbox: recipe.nested_sandbox,
+        aggregate_limits: None,
+    })
+}
+
 pub fn run_probe_entrypoint() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -385,39 +429,7 @@ fn run_in_directory(
     // and checks its exact hash. This still proves only what was requested;
     // actual guest argv, environment and containment require independent
     // applied-launch evidence before qualification claims are possible.
-    let recipe = &request.recipe;
-    let native = lillux::LinuxSandboxRequest {
-        executable: recipe.namespace_executable()?.into(),
-        argv0: recipe.argv0.clone().into(),
-        arguments: recipe.arguments.iter().cloned().map(Into::into).collect(),
-        cwd: recipe.cwd.clone().into(),
-        environment: request
-            .effective_environment
-            .into_iter()
-            .map(|(name, value)| (name.into(), value.into()))
-            .collect(),
-        mounts,
-        fixed_parent_views: vec![],
-        overlay: None,
-        network: lillux::LinuxSandboxNetwork::Isolated,
-        private_tmp: true,
-        proc_filesystem: match recipe.proc_filesystem {
-            ExternalCandidateProcFilesystem::Empty => lillux::LinuxSandboxProcFilesystem::Empty,
-            ExternalCandidateProcFilesystem::PidNamespace => {
-                lillux::LinuxSandboxProcFilesystem::PidNamespace
-            }
-            ExternalCandidateProcFilesystem::PidNamespaceNested => {
-                lillux::LinuxSandboxProcFilesystem::PidNamespaceNested
-            }
-        },
-        minimal_devices: true,
-        character_devices: vec![],
-        target_channels: vec![],
-        lifecycle: lillux::LinuxSandboxLifecycle::Run,
-        contain_process_group: recipe.contain_process_group,
-        nested_sandbox: recipe.nested_sandbox,
-        aggregate_limits: None,
-    };
+    let native = native_request(&request.recipe, request.effective_environment, mounts)?;
     ensure!(
         !active.has_elapsed(),
         "staging exhausted execution allowance"

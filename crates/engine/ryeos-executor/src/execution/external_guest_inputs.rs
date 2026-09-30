@@ -39,6 +39,30 @@ pub(crate) fn prepare_product_inputs(
 ) -> Result<PreparedProductInputs> {
     let bound = super::external_content::bind_external_guest_realizations(state, resolution)?
         .context("external guest has no exact product realization inventory")?;
+    prepare_bound_product_inputs(state, bound, project_root, runtime_override)
+}
+
+/// Redeem an authenticated retained execution inventory without synthesizing
+/// a live ResolutionOutput or a Worker bootstrap. The caller remains the
+/// admitted execution owner; this helper grants no placement/contact authority.
+pub(crate) fn prepare_retained_product_inputs(
+    state: &ryeos_app::state::AppState,
+    realizations: &ryeos_state::objects::ExternalContentRealizationSet,
+    project_root: &Path,
+    runtime_override: Option<RuntimeDestinationOverride<'_>>,
+) -> Result<PreparedProductInputs> {
+    let bound =
+        super::external_content::bind_retained_external_guest_realizations(state, realizations)?
+            .context("retained guest inputs have no exact realization inventory")?;
+    prepare_bound_product_inputs(state, bound, project_root, runtime_override)
+}
+
+fn prepare_bound_product_inputs(
+    state: &ryeos_app::state::AppState,
+    bound: super::external_content::BoundExternalRealizations,
+    project_root: &Path,
+    runtime_override: Option<RuntimeDestinationOverride<'_>>,
+) -> Result<PreparedProductInputs> {
     let (realized, sources, leases) = bound.into_external_guest_parts();
     let entries = realized.iter().cloned().collect::<Vec<_>>();
     ensure!(
