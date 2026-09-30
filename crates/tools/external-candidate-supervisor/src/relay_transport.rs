@@ -72,10 +72,21 @@ impl MailboxFiles {
                 Err(error) => return Err(error).context("publish exact external relay request"),
             }
         }
+        self.require_existing_exact(name, bytes)
+    }
+
+    /// Recovery may verify the original request slot, but must never recreate
+    /// it after a journaled attachment has already made controller contact.
+    fn require_existing_exact(&self, name: &OsStr, bytes: &[u8]) -> Result<()> {
+        ensure!(
+            !bytes.is_empty() && u64::try_from(bytes.len())? <= self.maximum_file_bytes,
+            "external relay request exceeds its signed file bound"
+        );
+        self.root.ensure_path_binding()?;
         let incumbent = self
             .root
             .open_pinned_regular(name, false)?
-            .context("external relay request disappeared after publication")?;
+            .context("retained external relay request slot is absent")?;
         let observation = incumbent.observation()?;
         ensure!(
             incumbent.read_stable_bounded(&observation, self.maximum_file_bytes)? == bytes,
@@ -304,7 +315,8 @@ impl OriginalRelayMailbox {
     ) -> Result<AttachedFileRelayChannel> {
         request.validate_for_bootstrap(&self.bootstrap)?;
         let request_bytes = request.canonical_bytes()?;
-        self.files.publish_exact(ATTACH_REQUEST, &request_bytes)?;
+        self.files
+            .require_existing_exact(OsStr::new(ATTACH_REQUEST), &request_bytes)?;
         let response: ExternalChannelAttachResponse = self.files.wait_verified(
             ATTACH_RESPONSE,
             &self.bootstrap,
@@ -503,6 +515,24 @@ mod tests {
         assert!(
             mailbox
                 .read_complete_envelope_candidate("attach.response.json")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn retained_request_verification_never_publishes_an_absent_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let mailbox = files(&root);
+        assert!(
+            mailbox
+                .require_existing_exact(OsStr::new(ATTACH_REQUEST), b"{\"a\":1}")
+                .is_err()
+        );
+        assert!(
+            mailbox
+                .root
+                .open_pinned_regular(OsStr::new(ATTACH_REQUEST), false)
                 .unwrap()
                 .is_none()
         );
