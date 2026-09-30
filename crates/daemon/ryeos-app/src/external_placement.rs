@@ -462,6 +462,19 @@ pub struct ExternalChannelOutboundFrame {
     canonical_wire: Vec<u8>,
 }
 
+/// Controller-applied Q native evidence. This carries no process, provider or
+/// product-qualification permission; a final claim must rejoin every owner and
+/// terminal record under its own writer transaction.
+pub struct ExternalQualificationNativeSettlement {
+    pub placement_thread_id: String,
+    pub binding_digest: String,
+    pub completion_frame_digest: String,
+    pub runtime_applied_frame_digest: String,
+    pub protocol_eof_frame_digest: String,
+    pub settlement_frame_digest: String,
+    pub observation: ryeos_state::external_execution::NativeQualificationScopeSettlementObservation,
+}
+
 pub struct ExternalChannelExchangeResult {
     incoming_new: bool,
     acknowledgement_digest: Option<String>,
@@ -2463,6 +2476,56 @@ pub fn request_external_qualification_native_completion(
             frame_digest: frame.digest().to_owned(),
             canonical_wire: frame.canonical().as_bytes().to_vec(),
         })
+    })
+}
+
+/// Reconcile only the exact signed Q scope observation and mark its local
+/// no-effect application. Missing evidence remains pending; cancellation or
+/// changed frame identities are errors, never normal settlement.
+pub fn apply_external_qualification_native_settlement(
+    state: &AppState,
+    placement: &str,
+) -> Result<Option<ExternalQualificationNativeSettlement>> {
+    use crate::runtime_db::external_execution::ExternalAllocationOwner;
+    use ryeos_state::external_execution::ExecutionChannelPayload;
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("Q native settlement has no retained allocation")?;
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+    else {
+        bail!("Q native settlement requires a qualification candidate")
+    };
+    let operation_id = owner.qualification_operation_id.clone();
+    crate::hosted_operation::with_qualification_occurrence_contact(&operation_id, || {
+        let Some(retained) = state
+            .state_store
+            .apply_external_qualification_scope_settlement(placement)?
+        else {
+            return Ok(None);
+        };
+        let ExecutionChannelPayload::QualificationScopeSettled { observation } =
+            &retained.settlement.frame().payload
+        else {
+            bail!("applied Q native settlement lost its signed observation")
+        };
+        ensure!(
+            retained.binding.placement_thread_id == placement
+                && retained.binding.execution_binding_hash == allocation.reservation.binding_hash,
+            "applied Q native settlement changed its original allocation"
+        );
+        Ok(Some(ExternalQualificationNativeSettlement {
+            placement_thread_id: placement.to_owned(),
+            binding_digest: retained.binding.digest()?,
+            completion_frame_digest: retained.completion.digest().to_owned(),
+            runtime_applied_frame_digest: retained.runtime_applied.digest().to_owned(),
+            protocol_eof_frame_digest: retained.protocol_eof.digest().to_owned(),
+            settlement_frame_digest: retained.settlement.digest().to_owned(),
+            observation: observation.clone(),
+        }))
     })
 }
 
