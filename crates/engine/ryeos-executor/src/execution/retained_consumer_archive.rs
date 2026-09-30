@@ -49,6 +49,7 @@ impl PreparedRetainedConsumerArchive {
 pub(crate) fn prepare_retained_consumer_archive(
     state: &ryeos_app::state::AppState,
     admitted: &PreparedRetainedConsumerVerifier,
+    record: &ConsumerInputRecord,
     private_parent: &lillux::PinnedDirectory,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<PreparedRetainedConsumerArchive> {
@@ -68,14 +69,15 @@ pub(crate) fn prepare_retained_consumer_archive(
         requirement.qualification_requirement_digest()? == qualified_use.requirement_digest,
         "retained Worker requirement differs from admitted consumer use"
     );
-    let record = ConsumerInputRecord {
-        schema: 1,
-        purpose: purpose.clone(),
-        coordinate: admitted.coordinate().clone(),
-        selection: admitted.selection().clone(),
-        requirement: requirement.clone(),
-    };
     record.validate()?;
+    ensure!(
+        record.purpose == *purpose
+            && record.coordinate == *admitted.coordinate()
+            && record.selection == *admitted.selection()
+            && record.requirement == requirement,
+        "consumer record differs from authenticated retained use"
+    );
+    record.canonical_bytes()?;
 
     // Accepted consumer content has already excluded overlapping realization
     // identities. The set constructor gives the guest the same sorted order.
@@ -103,17 +105,17 @@ pub(crate) fn prepare_retained_consumer_archive(
         products.destinations == destinations,
         "retained consumer product destinations differ from admitted recipe"
     );
-    let records = prepare_consumer_delivery_records(&record, admitted.payload())?;
+    let records = prepare_consumer_delivery_records(record, admitted.payload())?;
     let archive = products.prepare_consumer_archive(
         private_parent,
         records,
         &record.selection.archive_budget,
         deadline,
     )?;
-    archive.require_consumer_input_record(&record)?;
+    archive.require_consumer_input_record(record)?;
     archive.require_verifier_selection(&record.selection)?;
     Ok(PreparedRetainedConsumerArchive {
-        record,
+        record: record.clone(),
         archive,
         _products: products,
     })

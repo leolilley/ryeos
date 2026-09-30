@@ -923,6 +923,14 @@ impl ImportedConsumerInputs {
 #[serde(transparent)]
 pub struct ConsumerInputRecord(StateConsumerInputRecord);
 
+/// The signed Codex verifier interprets this field of the generic input
+/// envelope. Other verifiers can use their own bounded scenario object.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CodexConsumerScenarioInput {
+    canary_value: String,
+}
+
 impl std::ops::Deref for ConsumerInputRecord {
     type Target = StateConsumerInputRecord;
 
@@ -932,6 +940,51 @@ impl std::ops::Deref for ConsumerInputRecord {
 }
 
 impl ConsumerInputRecord {
+    /// Render fresh product-owned challenge data over the authenticated
+    /// callback inputs. Recovery must retain and reopen these exact bytes.
+    pub fn from_callback_inputs(
+        mut inputs: serde_json::Value,
+        expected: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<Self> {
+        expected.validate()?;
+        ensure!(
+            serde_json::to_vec(&inputs)?.len() <= MAX_CONSUMER_INPUT_RECORD_BYTES,
+            "consumer callback inputs exceed record bound"
+        );
+        let object = inputs
+            .as_object_mut()
+            .context("consumer callback inputs are not an object")?;
+        ensure!(
+            !object.contains_key("schema") && !object.contains_key("scenario_input"),
+            "consumer callback inputs cannot supply record schema or scenario challenge"
+        );
+        object.insert("schema".into(), 2.into());
+        object.insert(
+            "scenario_input".into(),
+            serde_json::to_value(CodexConsumerScenarioInput {
+                canary_value: lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
+            })?,
+        );
+        let record = Self(serde_json::from_value(inputs)?);
+        ensure!(
+            &record.coordinate == expected,
+            "consumer callback inputs differ from requested exact coordinate"
+        );
+        record.validate()?;
+        record.canonical_bytes()?;
+        Ok(record)
+    }
+
+    pub(crate) fn canary_value(&self) -> Result<String> {
+        let scenario: CodexConsumerScenarioInput =
+            serde_json::from_value(self.scenario_input.clone())?;
+        ensure!(
+            lillux::valid_hash(&scenario.canary_value),
+            "Codex consumer canary is not canonical"
+        );
+        Ok(scenario.canary_value)
+    }
+
     /// Decode only the retained signed policy's finite protocol parameters.
     /// Mandatory use context is compared with admission-derived retained use;
     /// no fixture paths, caller hashes or ambient configuration are consulted.
@@ -1222,6 +1275,7 @@ impl ConsumerInputRecord {
 
     pub fn validate(&self) -> Result<QualificationExecutionEnvironment> {
         self.0.validate()?;
+        self.canary_value()?;
         let content = self
             .purpose
             .consumer_content

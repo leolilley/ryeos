@@ -25,6 +25,9 @@ pub struct ConsumerInputRecord {
     pub coordinate: ConsumerRuntimeVerificationCoordinate,
     pub selection: ConsumerRuntimeVerifierSelection,
     pub requirement: ExternalCandidateRequirement,
+    /// Product-owned challenge data. RyeOS retains it verbatim and never uses
+    /// it to select a product, executable, provider, or contact operation.
+    pub scenario_input: serde_json::Value,
 }
 
 impl ConsumerInputRecord {
@@ -75,7 +78,13 @@ impl ConsumerInputRecord {
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 1, "unsupported consumer input record schema");
+        ensure!(self.schema == 2, "unsupported consumer input record schema");
+        ensure!(
+            self.scenario_input.is_object()
+                && serde_json::to_vec(&self.scenario_input)?.len()
+                    <= MAX_CONSUMER_INPUT_RECORD_BYTES,
+            "consumer scenario input must be a bounded object"
+        );
         self.purpose
             .validate_remote_consumer_coordinate(&self.coordinate, &self.selection)?;
         self.requirement.validate()?;

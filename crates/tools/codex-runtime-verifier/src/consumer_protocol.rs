@@ -40,8 +40,9 @@ impl ConsumerScriptedExpectation {
         private_parent.require_owner_private_directory()?;
         private_parent.ensure_path_binding()?;
         let (_, canary_directory) = private_parent.create_unique_child("consumer-canary", 0o700)?;
-        let (canary_value, canary_observation) =
-            crate::staging::create_controller_canary(&canary_directory)?;
+        let canary_value = record.canary_value()?;
+        let canary_observation =
+            crate::staging::create_preselected_controller_canary(&canary_directory, &canary_value)?;
         let commands =
             crate::staging::scripted_canary_commands(&canary_directory.path().join("canary"))?;
         let expected = Self {

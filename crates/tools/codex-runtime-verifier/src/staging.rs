@@ -638,12 +638,26 @@ pub(crate) fn create_controller_canary(
     // Hashing fresh OS randomness produces a printable, shell-safe probe
     // value without turning a deterministic fixture string into a secret.
     let value = lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>());
+    let observation = create_preselected_controller_canary(controller, &value)?;
+    Ok((value, observation))
+}
+
+/// A consumer controller records this value before contact. The exact value
+/// must be reused after recovery; a second canary would change the attempt.
+pub(crate) fn create_preselected_controller_canary(
+    controller: &PinnedDirectory,
+    value: &str,
+) -> Result<lillux::OpenRegularFileObservation> {
+    ensure!(
+        lillux::valid_hash(value),
+        "controller canary identity invalid"
+    );
     let file = controller
         .atomic_create_pinned_regular(OsStr::new("canary"), format!("{value}\n").as_bytes(), 0o600)?
         .context("controller canary already exists")?;
     let observation = file.observation()?;
     check_controller_canary(controller, &value, &observation)?;
-    Ok((value, observation))
+    Ok(observation)
 }
 
 pub(crate) fn check_controller_canary(
@@ -1554,6 +1568,18 @@ mod tests {
             .unwrap();
         }
         assert!(check_controller_canary(&controller, &value, &original).is_err());
+    }
+
+    #[test]
+    fn retained_consumer_canary_refuses_regeneration_or_substitution() {
+        let temp = tempfile::tempdir().unwrap();
+        let controller = PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let value = "a".repeat(64);
+        let original = create_preselected_controller_canary(&controller, &value).unwrap();
+        check_controller_canary(&controller, &value, &original).unwrap();
+        assert!(create_preselected_controller_canary(&controller, &value).is_err());
+        assert!(create_preselected_controller_canary(&controller, &"b".repeat(64)).is_err());
+        check_controller_canary(&controller, &value, &original).unwrap();
     }
 
     #[test]
