@@ -14758,6 +14758,19 @@ impl StateStore {
         owner
             .program
             .validate_against_purpose(admission.purpose())?;
+        let mut installed = state
+            .node_config
+            .external_execution
+            .iter()
+            .filter(|candidate| candidate.digest() == binding.digest());
+        let current = installed
+            .next()
+            .context("external qualification placement binding is no longer installed")?;
+        anyhow::ensure!(
+            installed.next().is_none(),
+            "external qualification placement binding is installed more than once"
+        );
+        current.check_qualification_program(&owner.program, admission.purpose())?;
         binding.check_qualification_program(&owner.program, admission.purpose())?;
         anyhow::ensure!(
             binding.digest() == reservation.binding_hash
