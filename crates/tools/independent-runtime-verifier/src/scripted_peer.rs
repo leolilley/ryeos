@@ -4,10 +4,10 @@
 //! Its request log is secondary evidence: loopback transport does not prove
 //! that the connected process was the selected Codex executable.
 
-use crate::scripted_provider::{REQUEST_COUNT, response_sse};
-use anyhow::{Context as _, Result, ensure};
+use crate::scripted_provider::{response_sse, REQUEST_COUNT};
+use anyhow::{ensure, Context as _, Result};
 use lillux::loopback::{BoundedLoopbackStream, ExactLoopbackListener, LoopbackInterrupt};
-use lillux::task::{HostTask, spawn_host_task};
+use lillux::task::{spawn_host_task, HostTask};
 use lillux::time::MonotonicDeadline;
 use lillux::{LocalDuplexStream, OwnerPrivateLocalDuplexListener, PinnedDirectory};
 use serde_json::Value;
@@ -15,8 +15,8 @@ use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::net::SocketAddr;
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
 const HEADER_LIMIT: usize = 16 * 1024;
@@ -161,6 +161,19 @@ pub struct RunningScriptedPeer {
     task: Option<HostTask<Result<Vec<Value>>>>,
 }
 
+/// Bounded observations through listener closure, not a producer-death fence.
+/// Later provider termination cannot prove absence of attempts in the interval
+/// after closure. This value must never stand in for lifetime-wide testimony.
+pub struct SealedScriptedObservation {
+    requests: Vec<Value>,
+}
+
+impl SealedScriptedObservation {
+    pub fn requests(&self) -> &[Value] {
+        &self.requests
+    }
+}
+
 impl Drop for RunningScriptedPeer {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
@@ -178,6 +191,19 @@ impl Drop for RunningScriptedPeer {
 }
 
 impl RunningScriptedPeer {
+    /// Close and join the finite observation interval for export before the
+    /// enclosing provider lifetime is destroyed. Pending/sixth-request and
+    /// accepted-connection checks remain intact. No producer settlement is
+    /// inferred, and uncertainty returns this same live task owner.
+    pub fn seal_observation_for_later_settlement(
+        self,
+        deadline: MonotonicDeadline,
+    ) -> std::result::Result<Result<SealedScriptedObservation>, Self> {
+        self.finish.store(true, Ordering::Release);
+        self.join_until(deadline)
+            .map(|result| result.map(|requests| SealedScriptedObservation { requests }))
+    }
+
     /// A completed task returns its exact result, including provider refusal.
     /// Expiry returns the unchanged owner rather than detaching a live peer.
     pub fn join_until(
@@ -329,15 +355,15 @@ impl ScriptedPeer {
         })
     }
 
-    /// Serve the finite script and retain the listener until the producer
-    /// settlement fence. Five accepted requests alone do not prove there was
-    /// no sixth or late attempt; the caller must settle the exact Codex/guest
-    /// occurrence before signalling the finish fence.
+    /// Serve the finite script and retain the listener until the owner's
+    /// closure signal. The strong finish API requires prior producer settlement;
+    /// raw sealing reports only the interval through closure. Five accepted
+    /// requests alone never prove absence of later lifetime-wide attempts.
     /// A write failure is ambiguous because a response prefix may have gone
     /// out. The caller owns this task and must join it on every path.
     fn serve(self, finish: Arc<AtomicBool>, interrupted: Arc<AtomicBool>) -> Result<Vec<Value>> {
         let mut requests = Vec::with_capacity(REQUEST_COUNT);
-        // Retain every accepted connection until the producer is proven dead.
+        // Retain every accepted connection until the observation interval ends.
         // Dropping a socket after its first response would hide a later
         // pipelined sixth request on that same connection.
         let mut connections = Vec::with_capacity(REQUEST_COUNT);
@@ -540,16 +566,14 @@ mod tests {
             "http://0.0.0.0:1234",
             "https://127.0.0.1:1234",
         ] {
-            assert!(
-                ScriptedPeer::bind_exact(
-                    origin,
-                    deadline,
-                    "local".into(),
-                    "secret".into(),
-                    "private-controller-canary".into(),
-                )
-                .is_err()
-            );
+            assert!(ScriptedPeer::bind_exact(
+                origin,
+                deadline,
+                "local".into(),
+                "secret".into(),
+                "private-controller-canary".into(),
+            )
+            .is_err());
         }
     }
 
@@ -591,6 +615,16 @@ mod tests {
     #[test]
     #[ignore = "requires native Unix socket authority"]
     fn pinned_peer_serves_exact_five_bounded_responses() {
+        assert_pinned_peer_five_responses(false);
+    }
+
+    #[test]
+    #[ignore = "requires native Unix socket authority"]
+    fn pinned_peer_raw_seal_retains_exact_observation_without_settlement_claim() {
+        assert_pinned_peer_five_responses(true);
+    }
+
+    fn assert_pinned_peer_five_responses(raw_seal: bool) {
         let temporary = tempfile::tempdir().unwrap();
         let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
         let address = "127.0.0.1:18765";
@@ -619,16 +653,37 @@ mod tests {
             assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
             assert!(response.contains("response.completed"));
         }
-        let requests = server
-            .finish_after_producer_settlement(deadline)
-            .unwrap_or_else(|_| panic!("pinned scripted peer did not settle"))
-            .unwrap();
-        assert_eq!(requests.len(), REQUEST_COUNT);
+        if raw_seal {
+            let observation = server
+                .seal_observation_for_later_settlement(deadline)
+                .unwrap_or_else(|_| panic!("pinned scripted peer did not seal"))
+                .unwrap();
+            assert_eq!(observation.requests().len(), REQUEST_COUNT);
+            for (number, request) in observation.requests().iter().enumerate() {
+                assert_eq!(request["number"], number);
+            }
+        } else {
+            let requests = server
+                .finish_after_producer_settlement(deadline)
+                .unwrap_or_else(|_| panic!("pinned scripted peer did not settle"))
+                .unwrap();
+            assert_eq!(requests.len(), REQUEST_COUNT);
+        }
     }
 
     #[test]
     #[ignore = "requires native Unix socket authority"]
     fn pinned_peer_refuses_late_pipelined_sixth_request() {
+        assert_pinned_peer_refuses_sixth_request(false);
+    }
+
+    #[test]
+    #[ignore = "requires native Unix socket authority"]
+    fn pinned_peer_raw_seal_refuses_late_pipelined_sixth_request() {
+        assert_pinned_peer_refuses_sixth_request(true);
+    }
+
+    fn assert_pinned_peer_refuses_sixth_request(raw_seal: bool) {
         let temporary = tempfile::tempdir().unwrap();
         let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
         let address = "127.0.0.1:18765";
@@ -658,10 +713,17 @@ mod tests {
             client.read_to_end(&mut response).unwrap();
             assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
         }
-        let result = server
-            .finish_after_producer_settlement(deadline)
-            .unwrap_or_else(|_| panic!("pinned scripted peer did not settle"));
-        assert!(result.is_err());
+        if raw_seal {
+            let result = server
+                .seal_observation_for_later_settlement(deadline)
+                .unwrap_or_else(|_| panic!("pinned scripted peer did not seal"));
+            assert!(result.is_err());
+        } else {
+            let result = server
+                .finish_after_producer_settlement(deadline)
+                .unwrap_or_else(|_| panic!("pinned scripted peer did not settle"));
+            assert!(result.is_err());
+        }
     }
 
     #[test]

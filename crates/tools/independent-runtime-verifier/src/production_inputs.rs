@@ -47,6 +47,46 @@ pub struct ProductionPrivateStaging {
 }
 
 impl ProductionPrivateStaging {
+    /// Reuse bounded project capture for verifier-private output after the
+    /// native owner has settled its namespace and excluded all candidate writers.
+    /// This method does not establish that prerequisite or publish a candidate.
+    pub(crate) fn capture_candidate_after_settlement(
+        &self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ryeos_state::objects::ProjectTree> {
+        self.recheck_bindings()?;
+        ensure!(
+            !deadline.has_elapsed(),
+            "consumer candidate capture deadline expired"
+        );
+        let state_root = self
+            .occurrence
+            .create_child(std::ffi::OsStr::new("capture-state"), 0o700)?;
+        let state = ryeos_state::StateDb::open(
+            state_root.path(),
+            std::sync::Arc::new(ryeos_state::TrustStore::new()),
+        )?;
+        let authority = state.pinned_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        drop(state);
+        let policy = ryeos_state::objects::ProjectSnapshotPolicy::new(
+            ryeos_state::project_sync::ProjectSyncScope::FullProject,
+            vec![],
+            vec![],
+            BTreeMap::new(),
+        )?;
+        ryeos_project_capture::ingest_project_tree_bounded(
+            &authority,
+            &guard,
+            &self.candidate,
+            &policy,
+            ryeos_project_capture::ProjectCaptureBudget {
+                max_bytes: 1024 * 1024,
+                deadline,
+            },
+        )
+    }
+
     pub fn create(
         private_scratch: &lillux::PinnedDirectory,
         content: &ProductQualificationConsumerContentIdentity,
@@ -548,6 +588,57 @@ mod tests {
             &f.inputs,
             &f.descriptors,
         )
+    }
+
+    #[test]
+    fn private_candidate_capture_is_bounded_and_keeps_product_inputs_unchanged() {
+        let f = fixture(false);
+        let scratch = f
+            .root
+            .create_child(OsStr::new("capture-scratch"), 0o700)
+            .unwrap();
+        let private = ProductionPrivateStaging::create(&scratch, &f.content, &f.consumer).unwrap();
+        private
+            .candidate
+            .atomic_create_pinned_regular(
+                OsStr::new("candidate-strategy.txt"),
+                b"candidate\n",
+                0o644,
+            )
+            .unwrap()
+            .unwrap();
+        let before = private.occurrence.entries_no_follow_bounded(8).unwrap();
+        assert!(
+            private
+                .capture_candidate_after_settlement(lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::ZERO
+                ),)
+                .is_err()
+        );
+        assert_eq!(
+            private.occurrence.entries_no_follow_bounded(8).unwrap(),
+            before
+        );
+        // Synthetic byte-capture fixture only: it provides no native execution
+        // or settlement proof and cannot qualify the runtime.
+        let captured = private
+            .capture_candidate_after_settlement(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(10),
+            ))
+            .unwrap();
+        let file = ryeos_state::objects::ProjectFile {
+            blob_hash: lillux::sha256_hex(b"candidate\n"),
+            size: 10,
+            normalized_mode: 0o644,
+        };
+        assert_eq!(
+            captured.files,
+            BTreeMap::from([(
+                "candidate-strategy.txt".into(),
+                ryeos_state::objects::canonical_value_digest(&file.to_value()).unwrap()
+            )])
+        );
+        verify(&f).unwrap();
     }
 
     #[test]

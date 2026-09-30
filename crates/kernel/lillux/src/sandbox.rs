@@ -624,6 +624,41 @@ pub struct LinuxSandboxPipes {
     pub stderr: std::fs::File,
 }
 
+/// Exclusively borrowed protocol ends under one absolute deadline. These are
+/// byte channels, never process or namespace-settlement testimony.
+pub struct LinuxSandboxProtocolStreams<'a> {
+    pub input: crate::exec::DeadlinePipeStream<'a>,
+    pub output: crate::exec::DeadlinePipeStream<'a>,
+    pub diagnostics: crate::exec::DeadlinePipeStream<'a>,
+}
+
+impl LinuxSandboxPipes {
+    /// Borrow the already-owned nonblocking sandbox pipes for synchronous
+    /// protocol multiplexing. No threads, new descriptors or launch occur.
+    pub fn protocol_streams_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> std::io::Result<LinuxSandboxProtocolStreams<'_>> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsFd as _;
+            Ok(LinuxSandboxProtocolStreams {
+                input: crate::exec::DeadlinePipeStream::new(self.stdin.as_fd(), deadline)?,
+                output: crate::exec::DeadlinePipeStream::new(self.stdout.as_fd(), deadline)?,
+                diagnostics: crate::exec::DeadlinePipeStream::new(self.stderr.as_fd(), deadline)?,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = deadline;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "sandbox protocol pipes require Linux",
+            ))
+        }
+    }
+}
+
 pub fn prepare_linux_sandbox_piped(
     request: LinuxSandboxRequest,
 ) -> Result<(HeldLinuxSandboxProcess, LinuxSandboxPipes), String> {

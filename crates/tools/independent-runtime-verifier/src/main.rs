@@ -31,10 +31,13 @@ use std::{
 };
 
 fn main() -> Result<()> {
-    let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() == Some(OsStr::new("--consumer-native-probe")) {
-        let encoded = args.next().context("consumer challenge absent")?;
-        ensure!(args.next().is_none(), "unexpected consumer probe arguments");
+    if let Some(encoded) = std::env::var_os(
+        ryeos_independent_runtime_verifier::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV,
+    ) {
+        ensure!(
+            std::env::args_os().skip(1).next().is_none(),
+            "consumer native environment conflicts with CLI arguments"
+        );
         return native_guest::run_production_probe(
             encoded
                 .to_str()

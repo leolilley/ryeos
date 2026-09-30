@@ -4,6 +4,7 @@
 //! still needs to own the native guest and real app-server observations.
 
 pub mod app_server;
+pub mod consumer_protocol;
 pub mod consumer_record;
 pub mod guest_observation;
 pub mod native_guest;
@@ -421,7 +422,7 @@ fn validate_scripted_baseline(
     Ok(bytes)
 }
 
-fn expected_scripted_baseline(origin: &str) -> String {
+pub(crate) fn expected_scripted_baseline(origin: &str) -> String {
     r#"model = "gpt-5.5"
 model_provider = "routing-fixture"
 approval_policy = "never"
@@ -776,28 +777,10 @@ impl Parameters {
             (1..=1024 * 1024).contains(&self.configuration.capture_limit_bytes),
             "invalid capture limit"
         );
-        ensure!(
-            self.configuration.expected_command_output.len() <= 8192
-                && self
-                    .configuration
-                    .expected_command_output
-                    .starts_with("/workspace\nripgrep ")
-                && self.configuration.expected_command_output.ends_with('\n')
-                && !self.configuration.expected_command_output.contains('\0'),
-            "invalid authored command output"
-        );
-        let origin = self
-            .configuration
-            .responses_origin
-            .strip_prefix("http://")
-            .context("scripted peer origin is not explicit HTTP")?;
-        let address: std::net::SocketAddr = origin.parse()?;
-        ensure!(
-            address.ip().is_loopback()
-                && address.port() != 0
-                && self.configuration.responses_origin == format!("http://{address}"),
-            "scripted peer origin is not canonical loopback"
-        );
+        scripted_provider::validate_configuration(
+            &self.configuration.expected_command_output,
+            &self.configuration.responses_origin,
+        )?;
         self.configuration.requirement.validate()?;
         self.configuration.expected_producer_recipe.validate()?;
         let direct = &self.configuration.expected_producer_recipe;

@@ -16,6 +16,29 @@ pub const CANDIDATE_URI: &str = "file:///workspace/candidate-strategy.txt";
 pub const CANDIDATE_CONTENT: &str = "composed external candidate C\n";
 pub const GUEST_SHELL: &str = "/ryeos/realizations/authoring-tools/bin/zsh";
 
+/// Finite scripted-peer routing and authored outcome constraints shared by
+/// fixture and production consumers. Loopback syntax is not peer authentication.
+pub fn validate_configuration(expected_command_output: &str, responses_origin: &str) -> Result<()> {
+    ensure!(
+        expected_command_output.len() <= 8192
+            && expected_command_output.starts_with("/workspace\nripgrep ")
+            && expected_command_output.ends_with('\n')
+            && !expected_command_output.contains('\0'),
+        "invalid authored command output"
+    );
+    let origin = responses_origin
+        .strip_prefix("http://")
+        .ok_or_else(|| anyhow::anyhow!("scripted peer origin is not explicit HTTP"))?;
+    let address: std::net::SocketAddr = origin.parse()?;
+    ensure!(
+        address.ip().is_loopback()
+            && address.port() != 0
+            && responses_origin == format!("http://{address}"),
+        "scripted peer origin is not canonical loopback"
+    );
+    Ok(())
+}
+
 pub fn response_item(
     number: usize,
     forbidden_local_command: &str,
@@ -188,6 +211,32 @@ pub fn check_requests(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn finite_configuration_refuses_ambient_routes_and_unplanned_outcomes() {
+        let expected = "/workspace\nripgrep fixture\n";
+        super::validate_configuration(expected, "http://127.0.0.1:1234").unwrap();
+        super::validate_configuration(expected, "http://[::1]:1234").unwrap();
+        for origin in [
+            "https://example.com",
+            "http://example.com:1234",
+            "http://0.0.0.0:1234",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:1234/",
+            "http://127.0.0.1:01234",
+        ] {
+            assert!(
+                super::validate_configuration(expected, origin).is_err(),
+                "{origin}"
+            );
+        }
+        for output in [
+            "observed output",
+            "/workspace\nripgrep fixture",
+            "/workspace\nripgrep \0\n",
+        ] {
+            assert!(super::validate_configuration(output, "http://127.0.0.1:1234").is_err());
+        }
+    }
     use super::*;
 
     #[test]

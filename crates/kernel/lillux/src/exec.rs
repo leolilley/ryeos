@@ -14,7 +14,7 @@ use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd};
 use clap::Subcommand;
 
 pub(crate) mod duplex_deadline;
-pub use duplex_deadline::{DeadlineDuplexStream, DuplexReadiness};
+pub use duplex_deadline::{DeadlineDuplexStream, DeadlinePipeStream, DuplexReadiness};
 
 #[cfg(target_os = "linux")]
 mod descriptor_transfer;

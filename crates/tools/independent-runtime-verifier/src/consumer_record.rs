@@ -18,6 +18,35 @@ use crate::QualificationExecutionEnvironment;
 
 pub const CONSUMER_INPUT_RECORD_NAME: &str = "consumer-input.json";
 pub const MAX_CONSUMER_INPUT_RECORD_BYTES: usize = 96 * 1024;
+/// Dedicated command-environment startup input, never an admission credential.
+pub const CONSUMER_NATIVE_CHALLENGE_ENV: &str = "RYEOS_CONSUMER_NATIVE_CHALLENGE_B64";
+
+/// Codex-specific finite scenario parameters, not another runtime recipe.
+/// Executable, guest recipe and input identities come from the accepted record.
+/// Scripted-provider success does not qualify arbitrary live model settings.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerVerifierConfiguration {
+    pub schema: String,
+    pub expected_command_output: String,
+    pub responses_origin: String,
+    pub external_candidate_qualification_context:
+        ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+}
+
+impl ConsumerVerifierConfiguration {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == "ryeos.codex.consumer_verifier.v1",
+            "unsupported consumer verifier configuration"
+        );
+        self.external_candidate_qualification_context.validate()?;
+        crate::scripted_provider::validate_configuration(
+            &self.expected_command_output,
+            &self.responses_origin,
+        )
+    }
+}
 
 /// Product-edge canonical record plus exact foreign-target verifier payload.
 /// This is byte custody and semantic agreement, not root admission, provider
@@ -40,6 +69,276 @@ pub struct ImportedConsumerInputs {
 }
 
 impl ImportedConsumerInputs {
+    /// Deliver the one-way finish signal after the scripted turn is complete,
+    /// while Codex's command transport is still alive. This requests settlement;
+    /// it is not an acknowledgment that writers are excluded or output is frozen.
+    pub fn request_native_capture(
+        &self,
+        record: &ConsumerInputRecord,
+        challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        self.require_record_challenge(record, challenge)?;
+        ensure!(!deadline.has_elapsed(), "consumer finish deadline expired");
+        let started = self
+            .root
+            .open_pinned_regular(std::ffi::OsStr::new("native-started"), false)?
+            .context("consumer native execution has not started")?;
+        ensure!(
+            started.permission_mode()? == 0o400
+                && started.read_stable_bounded(&started.observation()?, 64)?
+                    == self.record_sha256.as_bytes(),
+            "consumer native start marker differs from accepted input"
+        );
+        ensure!(
+            !deadline.has_elapsed(),
+            "consumer finish delivery deadline expired"
+        );
+        if self
+            .root
+            .atomic_create_pinned_regular(std::ffi::OsStr::new("finish"), b"capture", 0o400)?
+            .is_none()
+        {
+            let existing = self
+                .root
+                .open_pinned_regular(std::ffi::OsStr::new("finish"), false)?
+                .context("consumer finish marker disappeared")?;
+            ensure!(
+                existing.permission_mode()? == 0o400
+                    && existing.read_stable_bounded(&existing.observation()?, 7)? == b"capture",
+                "consumer finish request was changed"
+            );
+        }
+        self.root.ensure_path_binding()?;
+        ensure!(
+            !deadline.has_elapsed(),
+            "consumer finish acknowledgment exceeded deadline"
+        );
+        Ok(())
+    }
+
+    /// Point-read an exact native observation; None means no observation yet,
+    /// not terminal failure. Caller uses its existing finite observation loop.
+    /// Coordinate agreement is not semantic qualification or whole guest death.
+    pub fn read_native_observation(
+        &self,
+        record: &ConsumerInputRecord,
+        challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Option<Vec<u8>>> {
+        self.require_record_challenge(record, challenge)?;
+        ensure!(
+            !deadline.has_elapsed(),
+            "consumer observation deadline expired"
+        );
+        let Some(file) = self
+            .root
+            .open_pinned_regular(std::ffi::OsStr::new("guest-observation.json"), false)?
+        else {
+            self.root.ensure_path_binding()?;
+            ensure!(
+                !deadline.has_elapsed(),
+                "consumer observation lookup exceeded deadline"
+            );
+            return Ok(None);
+        };
+        ensure!(
+            file.permission_mode()? == 0o400,
+            "consumer native observation mode changed"
+        );
+        let bytes = file.read_stable_bounded(&file.observation()?,
+            ryeos_external_execution_contract::restored_runtime_measurement::MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        ensure!(
+            lillux::canonical_json(&value)?.as_bytes() == bytes
+                && value["schema"] == "ryeos.consumer-native-observation.v1"
+                && value["operation_id"] == challenge.intent.operation_id
+                && value["challenge_digest"] == challenge.intent.consumer_challenge_digest()?
+                && value["input_record_sha256"] == self.record_sha256,
+            "consumer native observation differs from exact attempt"
+        );
+        self.root.ensure_path_binding()?;
+        ensure!(
+            !deadline.has_elapsed(),
+            "consumer observation read exceeded deadline"
+        );
+        Ok(Some(bytes))
+    }
+
+    pub(crate) fn require_record_challenge(
+        &self,
+        record: &ConsumerInputRecord,
+        challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+    ) -> Result<()> {
+        self.root.ensure_path_binding()?;
+        challenge.validate()?;
+        record.validate_attempt(&challenge.intent)?;
+        ensure!(
+            record.selection == challenge.selection
+                && lillux::sha256_hex(&record.canonical_bytes()?) == self.record_sha256,
+            "consumer control request substituted imported authority"
+        );
+        Ok(())
+    }
+
+    /// Prepare the existing pinned app-server launch without spawning it.
+    /// The enclosing verifier owns this fresh home, scripted peer, protocol,
+    /// descendant settlement and output acceptance. Native guest execution
+    /// remains the command environment, not a second Worker/session workflow.
+    pub fn prepare_codex_app_server(
+        &self,
+        record: &ConsumerInputRecord,
+        challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+        fresh_home: &lillux::PinnedDirectory,
+    ) -> Result<lillux::PinnedSubordinateProcessRequest> {
+        challenge.validate()?;
+        record.validate_attempt(&challenge.intent)?;
+        ensure!(
+            record.selection == challenge.selection,
+            "app-server challenge substituted protected selection"
+        );
+        let configuration = record.scripted_configuration()?;
+        fresh_home.require_owner_private_directory()?;
+        fresh_home.ensure_path_binding()?;
+        ensure!(
+            fresh_home.entries_no_follow_bounded(1)?.is_empty(),
+            "consumer Codex home is not fresh"
+        );
+        let home_identity = fresh_home.inherited_descriptor_authority()?;
+        ensure!(
+            !home_identity.same_file_identity(&self.root.inherited_descriptor_authority()?)?,
+            "consumer Codex home aliases the imported root"
+        );
+        for descriptor in self.descriptors.values() {
+            ensure!(
+                !home_identity.same_file_identity(descriptor)?,
+                "consumer Codex home aliases a product input"
+            );
+        }
+        // Selection before writes prevents invalid delivery from causing home
+        // mutation; selection afterward rejects contamination beneath products.
+        let _ = self.controller_codex_executable(record)?;
+        let root = self.root.try_clone()?.into_inherited_descriptor_path()?;
+        let verifier = self._verifier.clone();
+        let commands = crate::staging::render_consumer_command_environment(
+            verifier.path(),
+            root.path(),
+            challenge,
+        )?;
+        let baseline = crate::expected_scripted_baseline(&configuration.responses_origin);
+        for (name, bytes) in [
+            ("config.toml", baseline.as_bytes()),
+            ("environments.toml", commands.as_slice()),
+        ] {
+            ensure!(
+                bytes.len() <= 64 * 1024,
+                "consumer Codex configuration exceeds bound"
+            );
+            fresh_home
+                .atomic_create_pinned_regular(std::ffi::OsStr::new(name), bytes, 0o400)?
+                .context("consumer Codex configuration already exists")?;
+        }
+        let executable = self.controller_codex_executable(record)?;
+        fresh_home.ensure_path_binding()?;
+        let home = fresh_home.try_clone()?.into_inherited_descriptor_path()?;
+        let home_path = home
+            .path()
+            .to_str()
+            .context("consumer Codex home is not UTF-8")?
+            .to_owned();
+        Ok(lillux::PinnedSubordinateProcessRequest {
+            executable,
+            cwd: self.root.try_clone()?,
+            argv0: Some("codex".into()),
+            args: vec![
+                "--strict-config".into(),
+                "-c".into(),
+                "check_for_update_on_startup=false".into(),
+                "app-server".into(),
+            ],
+            envs: vec![
+                ("CODEX_HOME".into(), home_path.clone()),
+                ("HOME".into(), home_path),
+                ("PATH".into(), String::new()),
+                ("LANG".into(), "C".into()),
+                ("LC_ALL".into(), "C".into()),
+            ],
+            limits: None,
+            inherited_fds: vec![home, verifier, root],
+        })
+    }
+
+    /// Select the controller app-server executable from the imported worker
+    /// literal, not the guest runtime member. Reopening is descriptor-relative
+    /// and must select the same inode as the retained, verified input FD.
+    /// The enclosing private-generation owner still excludes writers.
+    pub fn controller_codex_executable(
+        &self,
+        record: &ConsumerInputRecord,
+    ) -> Result<lillux::PinnedRegularFile> {
+        self.root.ensure_path_binding()?;
+        ensure!(
+            lillux::sha256_hex(&record.canonical_bytes()?) == self.record_sha256,
+            "controller Codex selection substituted the imported record"
+        );
+        let content = record
+            .purpose
+            .consumer_content
+            .as_ref()
+            .context("consumer content is missing")?;
+        let consumer = record
+            .purpose
+            .policy_source
+            .policy
+            .consumer_execution_context
+            .as_ref()
+            .context("consumer context is missing")?;
+        crate::production_inputs::verify_production_descriptor_inputs(
+            content,
+            consumer,
+            &record.requirement,
+            &self.inputs,
+            &self.descriptors,
+        )?;
+        let index = record
+            .production_realizations()?
+            .iter()
+            .position(|entry| entry.id == "codex")
+            .context("production consumer has no controller Codex literal")?;
+        let input = self
+            .inputs
+            .get(index)
+            .context("controller Codex input is missing")?;
+        ensure!(
+            input.authority_id == "codex"
+                && input.kind == ryeos_external_execution_contract::GuestMountKind::RegularFile
+                && input.access == ryeos_external_execution_contract::GuestMountAccess::ReadOnly,
+            "controller Codex input differs from admitted worker literal"
+        );
+        let executable = self
+            .root
+            .open_pinned_regular(std::ffi::OsStr::new(&format!("product-{index:02}")), false)?
+            .context("imported controller Codex executable is missing")?;
+        let retained = self
+            .descriptors
+            .get(&input.descriptor)
+            .context("controller Codex descriptor is missing")?;
+        ensure!(
+            executable
+                .inherited_descriptor_authority()?
+                .same_file_identity(retained)?,
+            "controller Codex path no longer selects its retained input descriptor"
+        );
+        let observation = executable.observation()?;
+        ensure!(
+            observation.portable_mode()? == 0o755
+                && observation.size() == input.bytes
+                && (1..=268_435_456).contains(&observation.size()),
+            "controller Codex executable mode or size changed"
+        );
+        Ok(executable)
+    }
+
     /// One subordinate native execution in a dedicated single-threaded guest
     /// verifier process. The enclosing owner controls pipes and finish delivery.
     /// A create-only private marker refuses repeated execution/reconnection;
@@ -125,6 +424,30 @@ pub struct ConsumerInputRecord {
 }
 
 impl ConsumerInputRecord {
+    /// Decode only the retained signed policy's finite protocol parameters.
+    /// Mandatory use context is compared with admission-derived retained use;
+    /// no fixture paths, caller hashes or ambient configuration are consulted.
+    pub fn scripted_configuration(&self) -> Result<ConsumerVerifierConfiguration> {
+        self.validate()?;
+        let parameters = &self.purpose.policy_source.policy.verifier_parameters;
+        ensure!(
+            serde_json::to_vec(parameters)?.len() <= crate::INPUT_LIMIT,
+            "consumer verifier parameters exceed bound"
+        );
+        self.purpose
+            .consumer_content
+            .as_ref()
+            .context("consumer content is missing")?
+            .qualification_use
+            .as_ref()
+            .context("consumer admitted use is missing")?
+            .require_qualified_use(parameters)?;
+        let configuration: ConsumerVerifierConfiguration =
+            serde_json::from_value(parameters.clone())?;
+        configuration.validate()?;
+        Ok(configuration)
+    }
+
     /// Open a dedicated privately extracted consumer archive. The caller must
     /// authenticate the run channel and bind the archive hash before extraction;
     /// no tar entry may be followed during extraction. Ordinary upload success

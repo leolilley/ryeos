@@ -6,11 +6,11 @@
 //! carries exec-server bytes; observations remain in the pinned controller cwd.
 //! No worker identities, qualification claims or completion fence are minted.
 
-use anyhow::{Context as _, Result, ensure};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use anyhow::{ensure, Context as _, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use lillux::{
-    PinnedDirectory,
     time::{Duration, MonotonicDeadline},
+    PinnedDirectory,
 };
 use ryeos_state::external_execution::admission::{
     ExternalCandidateProcFilesystem, ExternalCandidateRuntimeRecipe,
@@ -26,6 +26,24 @@ use std::{
 
 const CHUNK: usize = 16 * 1024;
 const TRANSCRIPT_LIMIT: usize = 1024 * 1024;
+
+/// Convert the retained wall-clock contact bound once at native startup.
+/// Cleanup is a separate finite settlement allowance, never more work time.
+fn production_deadlines(
+    attempt_deadline_ms: i64,
+    now_ms: i64,
+) -> Result<(MonotonicDeadline, MonotonicDeadline)> {
+    let remaining_ms = attempt_deadline_ms.saturating_sub(now_ms);
+    ensure!(
+        attempt_deadline_ms > 0 && remaining_ms > 0,
+        "consumer native attempt deadline expired"
+    );
+    let active_ms = u64::try_from(remaining_ms)?.min(90_000);
+    Ok((
+        MonotonicDeadline::after(Duration::from_millis(active_ms)),
+        MonotonicDeadline::after(Duration::from_millis(active_ms + 15_000)),
+    ))
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,6 +131,56 @@ fn validate_effective_environment(environment: &BTreeMap<String, String>) -> Res
     Ok(())
 }
 
+/// Reconstruct the production target independently from retained admission,
+/// not a fixture request or receipt-reported expected fields. This compares
+/// target commitments only; mount/source custody and settlement still require
+/// the native owner's evidence and the enclosing authenticated attempt join.
+pub(crate) fn check_production_applied_receipt(
+    observation: &serde_json::Value,
+    record: &crate::consumer_record::ConsumerInputRecord,
+) -> Result<()> {
+    let selected = record.validate()?;
+    let effective = selected.expected_guest_environment(&record.requirement)?;
+    let recipe = &record.requirement.runtime_recipe;
+    let receipt: lillux::LinuxSandboxAppliedLaunchReceipt = serde_json::from_value(
+        observation
+            .get("applied_receipt")
+            .context("production applied receipt absent")?
+            .clone(),
+    )?;
+    let executable = PathBuf::from(recipe.namespace_executable()?);
+    let argv0 = OsString::from(&recipe.argv0);
+    let arguments: Vec<_> = recipe.arguments.iter().map(OsString::from).collect();
+    let cwd = PathBuf::from(&recipe.cwd);
+    let environment = effective
+        .environment
+        .into_iter()
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+        .collect();
+    ensure!(
+        receipt
+            .matches_target(lillux::LinuxSandboxAppliedLaunchTarget {
+                executable: &executable,
+                argv0: &argv0,
+                arguments: &arguments,
+                cwd: &cwd,
+                environment: &environment,
+            })
+            .map_err(anyhow::Error::msg)?,
+        "production applied receipt differs from admitted target"
+    );
+    ensure!(
+        receipt.owned_child_pid > 0
+            && receipt.namespace_pid == 1
+            && receipt.effective_uid == 1
+            && receipt.effective_gid == 1
+            && receipt.no_new_privs
+            && receipt.seccomp_mode == 2,
+        "production applied receipt lacks native controls"
+    );
+    Ok(())
+}
+
 /// Shared native request construction for fixture and production probes.
 /// The caller supplies already verified, retained mount descriptors. Lillux
 /// remains responsible for applying and corroborating the sandbox; constructing
@@ -171,7 +239,7 @@ pub fn run_probe_entrypoint() -> std::process::ExitCode {
 /// credentials, Worker identity or qualification claims are manufactured.
 pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
     use crate::consumer_record::{
-        CONSUMER_INPUT_RECORD_NAME, ConsumerInputRecord, MAX_CONSUMER_INPUT_RECORD_BYTES,
+        ConsumerInputRecord, CONSUMER_INPUT_RECORD_NAME, MAX_CONSUMER_INPUT_RECORD_BYTES,
     };
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         ConsumerRuntimeChallenge, MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
@@ -182,8 +250,10 @@ pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
     );
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded_challenge)?;
     let challenge = ConsumerRuntimeChallenge::parse(&bytes)?;
-    let active = MonotonicDeadline::after(Duration::from_secs(90));
-    let cleanup = MonotonicDeadline::after(Duration::from_secs(105));
+    let (active, cleanup) = production_deadlines(
+        challenge.intent.attempt_deadline_ms,
+        lillux::time::timestamp_millis(),
+    )?;
     // SAFETY: dedicated synchronous executable startup before any stdio
     // wrappers or helper threads; opposite protocol pipe ends are inherited.
     let pair = unsafe {
@@ -221,6 +291,9 @@ pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
         active,
         cleanup,
     )?;
+    // The native owner has settled the whole namespace before any capture.
+    // This is verifier-private evidence, not Worker C retention/publication.
+    let captured = private.capture_candidate_after_settlement(cleanup)?;
     let observation = serde_json::json!({
         "schema": "ryeos.consumer-native-observation.v1",
         "operation_id": challenge.intent.operation_id,
@@ -233,6 +306,7 @@ pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
         "guest_stderr_sha256": lillux::sha256_hex(&observed.diagnostics),
         "guest_stderr_bytes": observed.diagnostics.len(),
         "namespace_exit": observed.namespace_exit,
+        "captured_files": captured.files,
     });
     let bytes = lillux::canonical_json(&observation)?.into_bytes();
     ensure!(
@@ -747,6 +821,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn production_deadlines_refuse_expiry_and_never_renew_work_time() {
+        for (deadline, now) in [(0, 0), (-1, -2), (1000, 1000), (999, 1000)] {
+            assert!(production_deadlines(deadline, now).is_err());
+        }
+        let (active, cleanup) = production_deadlines(1250, 1000).unwrap();
+        assert!(active.remaining() <= Duration::from_millis(250));
+        assert!(cleanup.remaining() <= Duration::from_millis(15_250));
+        let (active, cleanup) = production_deadlines(i64::MAX, 1000).unwrap();
+        assert!(active.remaining() <= Duration::from_secs(90));
+        assert!(cleanup.remaining() <= Duration::from_secs(105));
+    }
+
+    #[test]
     fn signed_expected_target_rejects_applied_command_environment_and_identity_drift() {
         fn digest(bytes: &[u8]) -> [u8; 32] {
             let encoded = lillux::sha256_hex(bytes);
@@ -801,13 +888,11 @@ mod tests {
         assert!(check_applied_receipt_against_signed_request(&observation, &expected).is_ok());
         let mut changed_request: serde_json::Value = serde_json::from_slice(&expected).unwrap();
         changed_request["effective_environment"]["TZ"] = serde_json::json!("Pacific/Auckland");
-        assert!(
-            check_applied_receipt_against_signed_request(
-                &observation,
-                &serde_json::to_vec(&changed_request).unwrap()
-            )
-            .is_err()
-        );
+        assert!(check_applied_receipt_against_signed_request(
+            &observation,
+            &serde_json::to_vec(&changed_request).unwrap()
+        )
+        .is_err());
         for field in [
             "executable_sha256",
             "argv_sha256",

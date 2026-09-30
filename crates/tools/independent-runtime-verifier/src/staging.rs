@@ -204,6 +204,39 @@ fn materialize_command_environment(
 }
 
 fn render_command_environment(controller_executable: &Path, guest_cwd: &Path) -> Result<Vec<u8>> {
+    render_command_environment_with_env(controller_executable, guest_cwd, BTreeMap::new())
+}
+
+/// Product-owned serializer for the existing command-environment protocol.
+/// Executable/cwd selection and inherited descriptor custody remain with the
+/// enclosing owner. Challenge bytes grant neither admission nor contact.
+pub fn render_consumer_command_environment(
+    verifier_executable: &Path,
+    imported_root: &Path,
+    challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+) -> Result<Vec<u8>> {
+    use base64::Engine as _;
+    let encoded =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge.canonical_bytes()?);
+    ensure!(
+        encoded.len() <= 8192,
+        "consumer challenge encoding exceeds bound"
+    );
+    render_command_environment_with_env(
+        verifier_executable,
+        imported_root,
+        BTreeMap::from([(
+            crate::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV.into(),
+            encoded,
+        )]),
+    )
+}
+
+fn render_command_environment_with_env(
+    controller_executable: &Path,
+    guest_cwd: &Path,
+    env: BTreeMap<String, String>,
+) -> Result<Vec<u8>> {
     ensure!(
         controller_executable.is_absolute() && guest_cwd.is_absolute(),
         "verifier command environment paths must be absolute"
@@ -219,7 +252,7 @@ fn render_command_environment(controller_executable: &Path, guest_cwd: &Path) ->
             id: "ryeos-external-candidate",
             program,
             cwd,
-            env: BTreeMap::new(),
+            env,
         }],
     })?
     .into_bytes();
@@ -557,7 +590,7 @@ impl StagedNativeProbe {
     }
 }
 
-fn scripted_canary_commands(path: &Path) -> Result<ScriptedCanaryCommands> {
+pub(crate) fn scripted_canary_commands(path: &Path) -> Result<ScriptedCanaryCommands> {
     let path = path.to_str().context("non-UTF8 controller canary path")?;
     ensure!(
         path.starts_with('/')
@@ -577,7 +610,7 @@ fn scripted_canary_commands(path: &Path) -> Result<ScriptedCanaryCommands> {
     })
 }
 
-fn create_controller_canary(
+pub(crate) fn create_controller_canary(
     controller: &PinnedDirectory,
 ) -> Result<(String, lillux::OpenRegularFileObservation)> {
     // Hashing fresh OS randomness produces a printable, shell-safe probe
@@ -591,7 +624,7 @@ fn create_controller_canary(
     Ok((value, observation))
 }
 
-fn check_controller_canary(
+pub(crate) fn check_controller_canary(
     controller: &PinnedDirectory,
     expected: &str,
     original: &lillux::OpenRegularFileObservation,
@@ -1251,6 +1284,38 @@ fn stage_selected_probe_with_challenge(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_environment_preserves_explicit_input_without_local_fallback() {
+        let bytes = super::render_command_environment_with_env(
+            std::path::Path::new("/private/verifier"),
+            std::path::Path::new("/private/import"),
+            std::collections::BTreeMap::from([(
+                crate::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV.into(),
+                "bounded-input".into(),
+            )]),
+        )
+        .unwrap();
+        let value: toml::Value = std::str::from_utf8(&bytes).unwrap().parse().unwrap();
+        assert_eq!(value["include_local"].as_bool(), Some(false));
+        let entries = value["environments"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["program"].as_str(), Some("/private/verifier"));
+        assert_eq!(entries[0]["cwd"].as_str(), Some("/private/import"));
+        let env = entries[0]["env"].as_table().unwrap();
+        assert_eq!(env.len(), 1);
+        assert_eq!(
+            env[crate::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV].as_str(),
+            Some("bounded-input")
+        );
+        assert!(
+            super::render_command_environment_with_env(
+                std::path::Path::new("relative-verifier"),
+                std::path::Path::new("/private/import"),
+                std::collections::BTreeMap::new(),
+            )
+            .is_err()
+        );
+    }
     use super::*;
 
     #[test]
