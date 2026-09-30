@@ -1505,13 +1505,15 @@ fn require_current_runtime_qualification_for_start(
 fn require_current_runtime_content_qualification(
     state: &AppState,
     contract: &ExternalPlacementBackendContract,
-) -> Result<()> {
+) -> Result<
+    Option<ryeos_state::external_content::qualification_publication::PublishedContentQualification>,
+> {
     let session = match &contract.workload {
         crate::node_config::sections::external_execution::ExternalWorkloadBinding::StructuredSession(session) => session,
         crate::node_config::sections::external_execution::ExternalWorkloadBinding::DirectCommand {} => {
             ensure!(contract.runtime_content_qualification.is_none(),
                 "direct workload cannot inherit structured-session compatibility testimony");
-            return Ok(());
+            return Ok(None);
         }
     };
     let selected = contract
@@ -1536,7 +1538,7 @@ fn require_current_runtime_content_qualification(
         &qualified.evidence.purpose.policy_source.policy,
         &selected.required_claims,
     )?;
-    Ok(())
+    Ok(Some(qualified))
 }
 
 fn admit_current_runtime_qualification(
@@ -1589,6 +1591,29 @@ fn require_retained_session_runtime_qualification(
     binding: &RetainedExternalExecutionBinding,
 ) -> Result<()> {
     let contract = binding.backend_contract();
+    let content = capsule
+        .retained_external_runtime_content_qualification
+        .as_ref()
+        .context("external session has no retained content qualification")?;
+    let selected = contract
+        .runtime_content_qualification
+        .as_ref()
+        .context("external session binding has no content qualification selection")?;
+    let session = contract.workload.structured_session()?;
+    ensure!(
+        content.binding_hash == binding.digest()
+            && content.activation_ref == selected.activation_ref
+            && content.coordinate_id == selected.coordinate_id
+            && content.attestation_hash == selected.attestation_hash
+            && content.runtime_manifest_hash == session.runtime_manifest_hash
+            && content.evidence.purpose.owner_fingerprint == selected.owner_principal,
+        "retained content testimony differs from signed session binding"
+    );
+    content.evidence.result.validate_claims_for(
+        &content.evidence.purpose.policy_source.policy,
+        &selected.required_claims,
+    )?;
+    verify_retained_runtime_content(state, content)?;
     let Some(retained) = match_retained_session_runtime_qualification(
         capsule.retained_external_runtime_qualification.as_ref(),
         &contract,
@@ -1624,9 +1649,52 @@ pub fn verify_retained_external_candidate_capsule(
         bail!("retained external candidate verification requires its admitted program");
     };
     program.verify_selections(capsule.retained_product_selections.as_ref())?;
+    let content = capsule
+        .retained_external_runtime_content_qualification
+        .as_ref()
+        .context("external candidate capsule has no retained content testimony")?;
+    ensure!(
+        content.runtime_manifest_hash == program.runtime_manifest_hash,
+        "external candidate content proof differs from admitted runtime"
+    );
+    verify_retained_runtime_content(state, content)?;
     if let Some(retained) = capsule.retained_external_runtime_qualification.as_ref() {
         verify_retained_runtime_proof(state, retained)?;
     }
+    Ok(())
+}
+
+fn verify_retained_runtime_content(
+    state: &AppState,
+    retained: &ryeos_state::objects::RetainedExternalRuntimeContentQualification,
+) -> Result<()> {
+    retained.validate()?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let limits = state
+        .node_policy
+        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        &authority.cas_store()?,
+        &retained.attestation_hash,
+        limits.max_object_bytes,
+    )?;
+    let attestation = ryeos_state::objects::Attestation::from_value(&value)?;
+    let verified = ryeos_state::external_content::qualification_publication::verify_retained(
+        &authority,
+        &attestation,
+        &retained.evidence.purpose.owner_fingerprint,
+        &retained.coordinate_id,
+        state.identity.verifying_key(),
+        limits,
+        &guard,
+    )?;
+    ensure!(
+        verified.attestation_hash == retained.attestation_hash
+            && verified.evidence == retained.evidence,
+        "retained session content differs from authenticated historical testimony"
+    );
     Ok(())
 }
 
@@ -1758,10 +1826,28 @@ fn preflight_external_direct_dependencies(
 pub fn preflight_external_candidate_program(
     state: &AppState,
     program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-) -> Result<Option<ryeos_state::objects::RetainedExternalRuntimeQualification>> {
+) -> Result<(
+    Option<ryeos_state::objects::RetainedExternalRuntimeQualification>,
+    ryeos_state::objects::RetainedExternalRuntimeContentQualification,
+)> {
     let binding = select_binding(&state.node_config.external_execution, program)?;
     let contract = binding.backend_contract();
     let runtime_proof = admit_current_runtime_qualification(state, &contract, binding.digest())?;
+    let content = require_current_runtime_content_qualification(state, &contract)?
+        .context("external candidate has no authenticated runtime content")?;
+    let selected = contract
+        .runtime_content_qualification
+        .as_ref()
+        .context("external candidate has no signed content selection")?;
+    let retained_content = ryeos_state::objects::RetainedExternalRuntimeContentQualification {
+        binding_hash: binding.digest().to_owned(),
+        runtime_manifest_hash: program.runtime_manifest_hash.clone(),
+        activation_ref: selected.activation_ref.clone(),
+        coordinate_id: content.coordinate_id,
+        attestation_hash: content.attestation_hash,
+        evidence: content.evidence,
+    };
+    retained_content.validate()?;
     preflight_external_candidate_dependencies(
         &state.node_config.external_execution,
         &state.external_candidate_connectors,
@@ -1779,7 +1865,7 @@ pub fn preflight_external_candidate_program(
             )
         },
     )?;
-    Ok(runtime_proof)
+    Ok((runtime_proof, retained_content))
 }
 
 fn preflight_external_candidate_dependencies(
