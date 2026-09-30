@@ -419,8 +419,10 @@ impl BindingDocument {
                 "structured-session placement export budgets exceed bounds"
             ),
             ExternalWorkloadBinding::QualificationStructuredSession(_) => ensure!(
-                self.max_export_bytes == 0 && self.runtime_content_qualification.is_none(),
-                "qualification-only placement cannot authorize candidate export or borrow runtime compatibility"
+                self.max_export_bytes == 0
+                    && self.runtime_qualification.is_none()
+                    && self.runtime_content_qualification.is_none(),
+                "qualification-only placement cannot authorize export or borrow ordinary runtime qualification"
             ),
             ExternalWorkloadBinding::DirectCommand {} => ensure!(
                 self.max_export_bytes == 0,
@@ -1348,6 +1350,20 @@ mod workload_binding_tests {
             required_claims: vec!["runtime_compatible".into()],
         });
         assert!(document.validate().is_err());
+        document.runtime_content_qualification = None;
+        document.runtime_qualification = Some(ExternalRuntimeQualificationBinding {
+            attestation_hash: "4".repeat(64),
+            owner_principal: format!("fp:{}", "5".repeat(64)),
+            qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                policy_ref: Some("config:render/snapshot-qualification".into()),
+                required_claims: vec!["render_snapshot_v1".into()],
+            },
+        });
+        assert!(document.validate().is_err());
+        let mut ordinary_binding = document.clone();
+        ordinary_binding.workload = ExternalWorkloadBinding::StructuredSession(ordinary);
+        ordinary_binding.max_export_bytes = 1;
+        ordinary_binding.validate().unwrap();
     }
 
     #[test]
