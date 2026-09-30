@@ -674,6 +674,74 @@ fn push_qualification_consumer_content_edges(
     Ok(())
 }
 
+fn push_qualification_purpose_edges(
+    value: &Value,
+    links: &mut ContractLinks,
+) -> Result<(), String> {
+    use crate::external_content::qualification_purpose::QualificationSubject;
+    let subject: QualificationSubject = serde_json::from_value(
+        value
+            .get("subject")
+            .cloned()
+            .ok_or_else(|| "qualification purpose has no explicit subject".to_string())?,
+    )
+    .map_err(|error| format!("invalid qualification subject: {error}"))?;
+    subject.validate().map_err(|error| error.to_string())?;
+    match subject {
+        QualificationSubject::CapturedProduct {
+            product_witness_hash,
+            witness_source,
+            ..
+        } => {
+            super::push_typed_hash(
+                &product_witness_hash,
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?;
+            if let crate::external_content::products::transfer::ProductWitnessSource::Received {
+                acceptance_hash,
+            } = witness_source
+            {
+                super::push_typed_hash(
+                    &acceptance_hash,
+                    ExpectedObject::Kind("attestation"),
+                    None,
+                    &mut links.object_edges,
+                )?;
+            }
+        }
+        QualificationSubject::ActivatedContent { content } => {
+            for (hash, expected) in [
+                (
+                    &content.activation_receipt_hash,
+                    ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_ACTIVATION_KIND),
+                ),
+                (
+                    &content.binding_hash,
+                    ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_BINDING_KIND),
+                ),
+                (
+                    &content.manifest_hash,
+                    ExpectedObject::OneOf(EXTERNAL_MANIFEST_KINDS),
+                ),
+            ] {
+                super::push_typed_hash(hash, expected, None, &mut links.object_edges)?;
+            }
+        }
+    }
+    if let Some(content) = value
+        .get("consumer_content")
+        .filter(|content| !content.is_null())
+    {
+        let content: crate::external_content::products::qualification::ProductQualificationConsumerContentIdentity =
+            serde_json::from_value(content.clone())
+                .map_err(|error| format!("invalid retained qualification consumer content: {error}"))?;
+        push_qualification_consumer_content_edges(&content, links)?;
+    }
+    Ok(())
+}
+
 fn links_placement_runtime_seed(value: &Value) -> Result<ContractLinks, String> {
     let seed = crate::objects::PlacementRuntimeSeed::from_current_value(value.clone())
         .map_err(|error| error.to_string())?;
@@ -865,14 +933,11 @@ fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String>
         value.pointer("/sealed_invocation/resolution_output"),
         &mut links,
     )?;
-    if let Some(content) = value
-        .pointer("/sealed_invocation/product_qualification/consumer_content")
-        .filter(|content| !content.is_null())
+    if let Some(purpose) = value
+        .pointer("/sealed_invocation/qualification")
+        .filter(|purpose| !purpose.is_null())
     {
-        let content: crate::external_content::products::qualification::ProductQualificationConsumerContentIdentity =
-            serde_json::from_value(content.clone())
-                .map_err(|error| format!("invalid retained qualification consumer content: {error}"))?;
-        push_qualification_consumer_content_edges(&content, &mut links)?;
+        push_qualification_purpose_edges(purpose, &mut links)?;
     }
 
     let execution_closure = value
@@ -1484,6 +1549,72 @@ mod tests {
     use super::*;
 
     #[test]
+    fn activated_qualification_retains_its_own_provenance() {
+        use crate::external_content::qualification_purpose::{
+            QualificationSubject, tests::content_subject,
+        };
+        let content = content_subject(&"e".repeat(64));
+        let purpose = serde_json::json!({
+            "subject": QualificationSubject::ActivatedContent { content: content.clone() }
+        });
+        let mut links = ContractLinks::leaf();
+        push_qualification_purpose_edges(&purpose, &mut links).unwrap();
+        assert_eq!(links.object_edges.len(), 3);
+        for hash in [
+            &content.activation_receipt_hash,
+            &content.binding_hash,
+            &content.manifest_hash,
+        ] {
+            assert!(links.object_edges.iter().any(|edge| &edge.hash == hash));
+        }
+        assert!(
+            !links
+                .object_edges
+                .iter()
+                .any(|edge| matches!(edge.expected, ExpectedObject::Kind("attestation")))
+        );
+    }
+
+    #[test]
+    fn qualification_retention_refuses_ambiguous_source() {
+        let mut links = ContractLinks::leaf();
+        assert!(push_qualification_purpose_edges(&serde_json::json!({}), &mut links).is_err());
+        let mixed = serde_json::json!({"subject": {
+            "kind": "captured_product",
+            "product_witness_hash": "a".repeat(64),
+            "witness_source": {"kind": "local_capture"},
+            "relationship_name": "runtime",
+            "content": {}
+        }});
+        assert!(push_qualification_purpose_edges(&mixed, &mut links).is_err());
+        assert!(links.object_edges.is_empty());
+    }
+
+    #[test]
+    fn received_product_qualification_retains_acceptance_and_witness() {
+        let witness = "a".repeat(64);
+        let acceptance = "b".repeat(64);
+        let purpose = serde_json::json!({"subject": {
+            "kind": "captured_product",
+            "product_witness_hash": witness,
+            "witness_source": {"kind": "received", "acceptance_hash": acceptance},
+            "relationship_name": "runtime"
+        }});
+        let mut links = ContractLinks::leaf();
+        push_qualification_purpose_edges(&purpose, &mut links).unwrap();
+        assert_eq!(links.object_edges.len(), 2);
+        for hash in [&witness, &acceptance] {
+            assert!(links.object_edges.iter().any(|edge| &edge.hash == hash));
+        }
+        assert!(
+            links
+                .object_edges
+                .iter()
+                .all(|edge| matches!(edge.expected, ExpectedObject::Kind("attestation")))
+        );
+    }
+
+    #[test]
     fn qualification_launch_capsule_roots_exact_consumer_source_and_manifests() {
         use crate::external_content::products::qualification::{
             ProductQualificationBundleDefinitionIdentity,
@@ -1555,7 +1686,10 @@ mod tests {
         let capsule = serde_json::json!({
             "project_authority": {"kind":"projectless"},
             "execution_realization_hash": "9".repeat(64),
-            "sealed_invocation": {"product_qualification": {"consumer_content": content}},
+            "sealed_invocation": {"qualification": {
+                "subject": {"kind":"captured_product", "product_witness_hash":"a".repeat(64), "witness_source":{"kind":"local_capture"}, "relationship_name":"runtime"},
+                "consumer_content": content
+            }},
             "execution_closure": {"driver":"other"},
         });
         let links = links_admitted_launch_capsule(&capsule).unwrap();
@@ -1570,7 +1704,7 @@ mod tests {
                     .any(|edge| &edge.hash == hash)
             );
         }
-        assert_eq!(links.object_edges.len(), 4);
+        assert_eq!(links.object_edges.len(), 5);
     }
 
     #[test]

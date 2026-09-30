@@ -2625,6 +2625,10 @@ mod tests {
                 expected_manifest_kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND
                     .to_owned(),
                 declaration_kind: ryeos_engine::external_content::ExternalContentKind::File,
+                declaration_mount_root:
+                    ryeos_engine::external_content::ExternalContentMountRoot::ExecutionRuntime,
+                declaration_mount: "runtime".into(),
+                qualification_allowance: None,
                 capture_bounds: ManagedActivationComponentBounds {
                     maximum_entries: 1,
                     maximum_depth: 1,
@@ -2716,6 +2720,10 @@ mod tests {
                 expected_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND
                     .to_owned(),
                 declaration_kind: ryeos_engine::external_content::ExternalContentKind::Tree,
+                declaration_mount_root:
+                    ryeos_engine::external_content::ExternalContentMountRoot::ExecutionRuntime,
+                declaration_mount: "runtime".into(),
+                qualification_allowance: None,
                 capture_bounds: bounds,
                 expected_file_sha256: None,
             }],

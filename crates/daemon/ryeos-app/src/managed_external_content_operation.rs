@@ -347,6 +347,17 @@ pub fn load_current_activation_receipt(
         activation_ref,
         acquisition_mode,
     )?;
+    load_activation_receipt_for_resolution(state, activation)
+}
+
+fn load_activation_receipt_for_resolution(
+    state: &crate::state::AppState,
+    activation: ResolvedManagedExternalContentActivation,
+) -> anyhow::Result<(
+    ResolvedManagedExternalContentActivation,
+    String,
+    ryeos_state::objects::ExternalContentActivationReceipt,
+)> {
     let activation_id =
         ryeos_state::objects::ExternalContentActivationReceipt::derive_activation_id(
             &activation.activation_program_digest,
@@ -389,11 +400,95 @@ pub fn load_current_runtime_content_record(
 ) -> anyhow::Result<ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin> {
     let (activation, receipt_hash, receipt) =
         load_current_activation_receipt(state, activation_ref, acquisition_mode)?;
-    let component = activation
-        .components
-        .iter()
-        .find(|component| component.recipe.id == realization.id)
-        .ok_or_else(|| anyhow::anyhow!("runtime realization has no signed activation component"))?;
+    join_current_runtime_content_record(state, &activation, &receipt_hash, &receipt, realization)
+}
+
+/// Resolve the signed consumer selection and authenticate current source
+/// records from one activation resolution. The selected policy is resolved in
+/// that same checked generation. Exact manifest entries are checked against
+/// resident payload bytes. This does not approve qualification or authorize
+/// execution; recipe and applied-launch evidence remain independent checks.
+pub fn load_current_runtime_qualification_inputs(
+    state: &crate::state::AppState,
+    activation_ref: &str,
+    acquisition_mode: AcquisitionMode,
+    realization: &ryeos_state::objects::ExternalContentRealization,
+) -> anyhow::Result<(
+    ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance,
+    ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
+    ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin,
+)> {
+    let (activation, policy) =
+        crate::managed_external_content::resolve_activation_for_qualification(
+            state,
+            activation_ref,
+            acquisition_mode,
+            &realization.id,
+        )?;
+    let (activation, receipt_hash, receipt) =
+        load_activation_receipt_for_resolution(state, activation)?;
+    let allowance = activation.qualification_allowance(&realization.id)?.clone();
+    let authority = state.state_store.pinned_state_authority()?;
+    let _guard = authority.acquire_shared_guard()?;
+    let records = join_current_runtime_content_record(
+        state,
+        &activation,
+        &receipt_hash,
+        &receipt,
+        realization,
+    )?;
+    let limits = state
+        .node_policy
+        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let cas = authority.cas_store()?;
+    let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        &cas,
+        &realization.manifest_hash,
+        (ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64)
+            .min(limits.max_object_bytes),
+    )?;
+    let manifest = ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&value)?;
+    ryeos_state::external_content::payload::verify_large_manifest_payload(
+        &authority, &manifest, limits,
+    )?;
+    Ok((allowance, policy, records))
+}
+
+/// Recheck source and signed selection at a later admission cut. Callers must
+/// retain all three prepared coordinates; a matching manifest alone does not
+/// preserve the activation, binding grant, policy or required claims.
+pub fn require_current_runtime_qualification_inputs(
+    state: &crate::state::AppState,
+    acquisition_mode: AcquisitionMode,
+    allowance: &ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance,
+    policy: &ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
+    subject: &ryeos_state::external_content::qualification_subject::ContentQualificationSubject,
+) -> anyhow::Result<()> {
+    allowance.validate_policy_source(policy)?;
+    subject.validate()?;
+    let (current_allowance, current_policy, current_records) =
+        load_current_runtime_qualification_inputs(
+            state,
+            &allowance.activation_ref,
+            acquisition_mode,
+            &subject.realization,
+        )?;
+    anyhow::ensure!(
+        &current_allowance == allowance && &current_policy == policy,
+        "runtime qualification signed selection changed after preparation"
+    );
+    current_records.verify_retained_subject(subject)
+}
+
+fn join_current_runtime_content_record(
+    state: &crate::state::AppState,
+    activation: &ResolvedManagedExternalContentActivation,
+    receipt_hash: &str,
+    receipt: &ryeos_state::objects::ExternalContentActivationReceipt,
+    realization: &ryeos_state::objects::ExternalContentRealization,
+) -> anyhow::Result<ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin> {
+    let component = activation.component(&realization.id)?;
     if component.declaration_kind != ryeos_engine::external_content::ExternalContentKind::Tree
         || component.declaration_mount_root
             != ryeos_engine::external_content::ExternalContentMountRoot::ExecutionRuntime
@@ -433,8 +528,8 @@ pub fn load_current_runtime_content_record(
     let manifest =
         ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&manifest_value)?;
     ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin::verify(
-        &receipt_hash,
-        &receipt,
+        receipt_hash,
+        receipt,
         &binding_hash,
         &binding,
         &manifest,
@@ -573,6 +668,7 @@ mod tests {
                 declaration_mount_root:
                     ryeos_engine::external_content::ExternalContentMountRoot::ExecutionRuntime,
                 declaration_mount: "runtime".to_owned(),
+                qualification_allowance: None,
                 capture_bounds: ManagedActivationComponentBounds {
                     maximum_entries: 1,
                     maximum_depth: 1,
@@ -582,6 +678,32 @@ mod tests {
                 expected_file_sha256: None,
             }],
         }
+    }
+
+    #[test]
+    fn qualification_selection_requires_the_signed_consumer_allowance() {
+        use ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance;
+        let mut activation = resolved_receipt_fixture();
+        assert!(activation.qualification_allowance("runtime").is_err());
+        activation.components[0].qualification_allowance = Some(ContentQualificationAllowance {
+            activation_ref: activation.activation_ref.clone(),
+            policy_ref: "config:fixture/qualification-policy".into(),
+            required_claims: vec!["settled".into()],
+        });
+        assert_eq!(
+            activation
+                .qualification_allowance("runtime")
+                .unwrap()
+                .required_claims,
+            ["settled"]
+        );
+        activation.components[0]
+            .qualification_allowance
+            .as_mut()
+            .unwrap()
+            .activation_ref = "config:fixture/other".into();
+        assert!(activation.qualification_allowance("runtime").is_err());
+        assert!(activation.qualification_allowance("missing").is_err());
     }
 
     #[test]

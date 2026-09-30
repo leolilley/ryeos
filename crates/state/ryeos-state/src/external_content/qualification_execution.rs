@@ -12,8 +12,9 @@ use anyhow::Result;
 
 use super::products::qualification::{
     ProductProducerRecipeSourceIdentity, ProductQualificationConsumerContentIdentity,
-    ProductQualificationLaunchPurpose, ProductQualificationPolicySource,
+    ProductQualificationPolicySource,
 };
+use super::qualification_purpose::QualificationLaunchPurpose;
 use crate::objects::canonical_value_digest;
 
 /// Validated immutable data for execution and evidence projection. It is
@@ -29,7 +30,7 @@ pub struct QualificationExecutionPurposeView<'a> {
 }
 
 impl<'a> QualificationExecutionPurposeView<'a> {
-    pub(crate) fn from_product(purpose: &'a ProductQualificationLaunchPurpose) -> Result<Self> {
+    pub(crate) fn from_purpose(purpose: &'a QualificationLaunchPurpose) -> Result<Self> {
         purpose.validate()?;
         Ok(Self {
             enclosing_purpose_digest: canonical_value_digest(&serde_json::to_value(purpose)?)?,

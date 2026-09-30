@@ -256,6 +256,9 @@ fn seed_auxiliary_qualification_in_context(
     pinned: Option<&QualificationPinnedAdmissionContext<'_>>,
 ) -> Result<(String, ProductQualificationEvidence)> {
     use ryeos_state::external_content::products::qualification::*;
+    use ryeos_state::external_content::qualification_purpose::{
+        QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, QualificationLaunchPurpose, QualificationSubject,
+    };
     let logical_project_root = pinned.map(|_| Path::new(ADMITTED_DIRECT_PROJECT_ROOT));
     let verifier_ref = if pinned.is_some() {
         AUX_PINNED_VERIFIER
@@ -339,13 +342,15 @@ fn seed_auxiliary_qualification_in_context(
     .context("reconstruct current auxiliary checker")?;
     let finalized =
         finalized_current(fixture, &current).context("relock finalized auxiliary checker")?;
-    let purpose = ProductQualificationLaunchPurpose {
-        schema: PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
+    let purpose = QualificationLaunchPurpose {
+        schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
         launch_id: format!("L-{}", "1".repeat(32)),
         owner_fingerprint: fixture.context.fingerprint.clone(),
-        product_witness_hash: witness_hash.clone(),
-        witness_source: ProductWitnessSource::LocalCapture {},
-        relationship_name: "auxiliary_to_consumer".into(),
+        subject: QualificationSubject::CapturedProduct {
+            product_witness_hash: witness_hash.clone(),
+            witness_source: ProductWitnessSource::LocalCapture {},
+            relationship_name: "auxiliary_to_consumer".into(),
+        },
         policy_source: policy_source.clone(),
         consumer_definitions: None,
         consumer_content: None,
@@ -359,7 +364,7 @@ fn seed_auxiliary_qualification_in_context(
         verifier_realized_definition_digest: current.effective_definition_digest.clone(),
     };
     let admission = admission
-        .for_product_qualification(purpose)
+        .for_qualification(purpose)
         .context("attach exact auxiliary qualification purpose")?;
     let request = admission
         .execution_request(
@@ -1326,8 +1331,8 @@ fn seal_complete_launch(
     pinned: &PinnedFixture,
     prepared: &launch::PreparedProductQualificationLaunch,
 ) -> Result<crate::thread_lifecycle::SealedRootExecutionRequest> {
-    use ryeos_state::external_content::products::qualification::{
-        PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, ProductQualificationLaunchPurpose,
+    use ryeos_state::external_content::qualification_purpose::{
+        QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, QualificationLaunchPurpose, QualificationSubject,
     };
     let admission = preflight_pinned(fixture, pinned, prepared)
         .context("preflight complete launch for sealing")?;
@@ -1379,13 +1384,15 @@ fn seal_complete_launch(
     let finalized =
         finalized_current(fixture, &current).context("relock complete verifier for sealing")?;
     let consumer_content = prepared.consumer_content_identity()?;
-    let purpose = ProductQualificationLaunchPurpose {
-        schema: PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
+    let purpose = QualificationLaunchPurpose {
+        schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
         launch_id: prepared.launch_id.clone(),
         owner_fingerprint: prepared.owner_fingerprint.clone(),
-        product_witness_hash: prepared.product_witness_hash.clone(),
-        witness_source: prepared.witness_source.clone(),
-        relationship_name: prepared.relationship.name.clone(),
+        subject: QualificationSubject::CapturedProduct {
+            product_witness_hash: prepared.product_witness_hash.clone(),
+            witness_source: prepared.witness_source.clone(),
+            relationship_name: prepared.relationship.name.clone(),
+        },
         policy_source: prepared.policy_source.clone(),
         consumer_definitions: consumer_content
             .as_ref()
@@ -1405,7 +1412,7 @@ fn seal_complete_launch(
         verifier_realized_definition_digest: current.effective_definition_digest,
     };
     let admission = admission
-        .for_product_qualification(purpose)
+        .for_qualification(purpose)
         .context("attach complete two-input qualification purpose")?;
     let request = admission
         .execution_request(
@@ -1448,7 +1455,7 @@ fn pinned_finalizer_admits_subject_and_current_qualified_auxiliary() -> Result<(
     let prepared = finalize_pinned(&fixture, &pinned, &pinned.request)?;
     let sealed = seal_complete_launch(&fixture, &pinned, &prepared)?;
     assert_eq!(
-        sealed.product_qualification_purpose().unwrap().launch_id,
+        sealed.qualification_purpose().unwrap().launch_id,
         prepared.launch_id
     );
     assert!(

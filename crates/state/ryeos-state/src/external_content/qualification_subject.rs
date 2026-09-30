@@ -30,6 +30,34 @@ pub struct ContentQualificationSubject {
 }
 
 impl ContentQualificationSubject {
+    /// Check the verifier-side slot against this exact content coordinate.
+    /// The verifier slot ID can differ from the consuming declaration ID;
+    /// kind, pin, manifest and metrics must still describe the same bytes.
+    /// Neither this comparison nor a coordinate authorizes a verifier launch.
+    pub fn verify_verifier_realizations(
+        &self,
+        realizations: &ExternalContentRealizationSet,
+        verifier_declaration_id: &str,
+    ) -> Result<()> {
+        self.validate()?;
+        realizations.validate()?;
+        let actual = realizations
+            .iter()
+            .find(|entry| entry.id == verifier_declaration_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("verifier has no admitted qualification subject slot")
+            })?;
+        ensure!(
+            actual.mode == crate::objects::ExternalContentMode::Pinned
+                && actual.kind == self.realization.kind
+                && actual.manifest_hash == self.manifest_hash
+                && actual.entry_count == self.realization.entry_count
+                && actual.total_bytes == self.realization.total_bytes,
+            "verifier subject slot differs from activated qualification bytes"
+        );
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.schema == CONTENT_QUALIFICATION_SUBJECT_SCHEMA,
@@ -106,6 +134,30 @@ mod tests {
                 total_bytes: 42,
             },
         }
+    }
+
+    #[test]
+    fn verifier_slot_can_be_renamed_but_not_change_the_subject_bytes() {
+        let subject = subject();
+        let mut verifier = subject.realization.clone();
+        verifier.id = "qualification-input".into();
+        verifier.mount = "probe-input".into();
+        let set = ExternalContentRealizationSet::new(vec![verifier.clone()]).unwrap();
+        subject
+            .verify_verifier_realizations(&set, "qualification-input")
+            .unwrap();
+        assert!(
+            subject
+                .verify_verifier_realizations(&set, "runtime")
+                .is_err()
+        );
+        verifier.total_bytes += 1;
+        let set = ExternalContentRealizationSet::new(vec![verifier]).unwrap();
+        assert!(
+            subject
+                .verify_verifier_realizations(&set, "qualification-input")
+                .is_err()
+        );
     }
 
     #[test]

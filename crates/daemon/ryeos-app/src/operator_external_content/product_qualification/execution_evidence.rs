@@ -791,11 +791,15 @@ pub(in crate::operator_external_content) fn verify_current(
                 &capsule,
             )?;
         let purpose = sealed
-            .product_qualification_purpose()
+            .qualification_purpose()
             .context("scoped qualification verifier lost its sealed launch purpose")?;
+        let (subject_witness_hash, subject_witness_source, _) = purpose
+            .subject
+            .captured_product()
+            .context("scoped qualification verifier has no captured product subject")?;
         if purpose.policy_source != evidence.policy_source
-            || purpose.product_witness_hash != evidence.product_witness_hash
-            || purpose.witness_source != evidence.witness_source
+            || subject_witness_hash != evidence.product_witness_hash.as_str()
+            || subject_witness_source != &evidence.witness_source
             || purpose.subject_manifest_hash != evidence.result.subject_manifest_hash
             || purpose.subject_declaration_id
                 != evidence.policy_source.policy.subject_declaration_id

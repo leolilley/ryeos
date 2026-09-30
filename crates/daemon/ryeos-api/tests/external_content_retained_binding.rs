@@ -464,6 +464,10 @@ async fn bind_through_managed_activation_owner(
                     expected_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND
                         .to_owned(),
                     declaration_kind: ryeos_engine::external_content::ExternalContentKind::Tree,
+                    declaration_mount_root:
+                        ryeos_engine::external_content::ExternalContentMountRoot::ExecutionRuntime,
+                    declaration_mount: "runtime".into(),
+                    qualification_allowance: None,
                     capture_bounds:
                         ryeos_app::managed_external_content::ManagedActivationComponentBounds {
                             maximum_entries: 16,

@@ -1,4 +1,7 @@
 use super::*;
+use crate::external_content::qualification_purpose::{
+    QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, QualificationLaunchPurpose, QualificationSubject,
+};
 use std::collections::BTreeMap;
 
 use super::super::composition::{
@@ -326,15 +329,17 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
 }
 
 #[cfg(test)]
-fn launch_purpose() -> ProductQualificationLaunchPurpose {
+pub(crate) fn launch_purpose() -> QualificationLaunchPurpose {
     let policy = policy();
-    ProductQualificationLaunchPurpose {
-        schema: PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
+    QualificationLaunchPurpose {
+        schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
         launch_id: format!("L-{}", "a".repeat(32)),
         owner_fingerprint: "fp:operator".into(),
-        product_witness_hash: "b".repeat(64),
-        witness_source: ProductWitnessSource::LocalCapture {},
-        relationship_name: "runtime_to_worker".into(),
+        subject: QualificationSubject::CapturedProduct {
+            product_witness_hash: "b".repeat(64),
+            witness_source: ProductWitnessSource::LocalCapture {},
+            relationship_name: "runtime_to_worker".into(),
+        },
         policy_source: ProductQualificationPolicySource {
             canonical_ref: "config:fixtures/qualification_policy".into(),
             raw_content_digest: "c".repeat(64),
@@ -352,6 +357,19 @@ fn launch_purpose() -> ProductQualificationLaunchPurpose {
         verifier_ref: policy.verifier_ref.clone(),
         verifier_effective_definition_digest: "1".repeat(64),
         verifier_realized_definition_digest: "2".repeat(64),
+    }
+}
+
+fn product_subject_mut(
+    purpose: &mut QualificationLaunchPurpose,
+) -> (&mut String, &mut ProductWitnessSource, &mut String) {
+    match &mut purpose.subject {
+        QualificationSubject::CapturedProduct {
+            product_witness_hash,
+            witness_source,
+            relationship_name,
+        } => (product_witness_hash, witness_source, relationship_name),
+        QualificationSubject::ActivatedContent { .. } => panic!("fixture is not a product"),
     }
 }
 
@@ -391,13 +409,16 @@ fn launch_purpose_requires_exact_signed_policy_subject_parameters_and_owner_coor
     let purpose = launch_purpose();
     purpose.validate().unwrap();
     let mut wire = serde_json::to_value(&purpose).unwrap();
-    wire.as_object_mut().unwrap().remove("witness_source");
-    assert!(serde_json::from_value::<ProductQualificationLaunchPurpose>(wire).is_err());
+    wire["subject"]
+        .as_object_mut()
+        .unwrap()
+        .remove("witness_source");
+    assert!(serde_json::from_value::<QualificationLaunchPurpose>(wire).is_err());
     for mutate in [
-        (|p: &mut ProductQualificationLaunchPurpose| p.launch_id = "L-bad".into())
-            as fn(&mut ProductQualificationLaunchPurpose),
+        (|p: &mut QualificationLaunchPurpose| p.launch_id = "L-bad".into())
+            as fn(&mut QualificationLaunchPurpose),
         |p| p.owner_fingerprint = "".into(),
-        |p| p.product_witness_hash = "bad".into(),
+        |p| *product_subject_mut(p).0 = "bad".into(),
         |p| p.subject_declaration_id = "other".into(),
         |p| p.subject_manifest_hash = "bad".into(),
         |p| p.required_claims = vec!["unapproved".into()],
@@ -420,13 +441,13 @@ fn execution_view_binds_the_entire_enclosing_purpose() {
     // Each change leaves the execution inputs identical, but selects a
     // different owner, source provenance, reservation, or verifier identity.
     for mutate in [
-        (|p: &mut ProductQualificationLaunchPurpose| p.product_witness_hash = "9".repeat(64))
-            as fn(&mut ProductQualificationLaunchPurpose),
+        (|p: &mut QualificationLaunchPurpose| *product_subject_mut(p).0 = "9".repeat(64))
+            as fn(&mut QualificationLaunchPurpose),
         |p| p.owner_fingerprint = "fp:another-operator".into(),
         |p| p.launch_id = format!("L-{}", "9".repeat(32)),
-        |p| p.relationship_name = "another_relationship".into(),
+        |p| *product_subject_mut(p).2 = "another_relationship".into(),
         |p| {
-            p.witness_source = ProductWitnessSource::Received {
+            *product_subject_mut(p).1 = ProductWitnessSource::Received {
                 acceptance_hash: "9".repeat(64),
             }
         },
@@ -439,7 +460,7 @@ fn execution_view_binds_the_entire_enclosing_purpose() {
         assert!(!view.has_same_enclosing_purpose(&changed.execution_view().unwrap()));
     }
     let mut changed = original.clone();
-    changed.product_witness_hash = "bad".into();
+    *product_subject_mut(&mut changed).0 = "bad".into();
     assert!(changed.execution_view().is_err());
 }
 

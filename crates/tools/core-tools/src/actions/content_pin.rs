@@ -899,6 +899,7 @@ mod tests {
             digest: digest.map(str::to_owned),
             exclude: Vec::new(),
             metadata_hint: None,
+            qualification_allowance: None,
             mount_root: ryeos_engine::external_content::ExternalContentMountRoot::Project,
             mount: format!("vendor/{id}"),
         }
