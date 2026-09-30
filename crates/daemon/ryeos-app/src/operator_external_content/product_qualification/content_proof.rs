@@ -54,6 +54,149 @@ pub async fn prove(
         .context("content qualification proof task stopped")?
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ContentQualificationResponse {
+    pub qualification_hash: String,
+    pub coordinate_id: String,
+    pub idempotent: bool,
+}
+
+/// Fresh, read-only eligibility for a protected runtime binding. This does not
+/// authorize provider contact or qualify a restored guest-owner snapshot.
+pub(crate) fn load_current_qualified_content(
+    state: &AppState,
+    context: &HandlerContext,
+    activation_ref: &str,
+    coordinate: &str,
+    qualification_hash: &str,
+    expected_manifest_hash: &str,
+) -> anyhow::Result<
+    ryeos_state::external_content::qualification_publication::PublishedContentQualification,
+> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let limits = state
+        .node_policy
+        .require::<NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let published = ryeos_state::external_content::qualification_publication::lookup_exact(
+        &authority,
+        coordinate,
+        qualification_hash,
+        &context.fingerprint,
+        state.identity.verifying_key(),
+        limits,
+        &guard,
+    )?
+    .context("content qualification is not published at the exact coordinate")?;
+    if published
+        .attestation
+        .is_expired_at(&lillux::time::iso8601_now())?
+    {
+        bail!("content qualification is expired");
+    }
+    let purpose = &published.evidence.purpose;
+    let QualificationSubject::ActivatedContent { content } = &purpose.subject else {
+        bail!("content qualification has no acquired subject");
+    };
+    if content.manifest_hash != expected_manifest_hash {
+        bail!("content qualification differs from the protected runtime manifest");
+    }
+    let prepared = prepare_source(
+        state,
+        context,
+        activation_ref,
+        AcquisitionMode::Offline,
+        &content.realization,
+    )?;
+    prepared.validate_purpose(purpose)?;
+    let current = resolve_current_bundle_verifier_identity_against_admitted(
+        state,
+        &authority,
+        &guard,
+        context,
+        &purpose.verifier_ref,
+        &purpose.policy_source.policy.verifier_parameters,
+        CurrentVerifierContext {
+            content: CurrentVerifierContent::Root(None),
+            logical_project_root: None,
+            binding_subject_authority: None,
+            sealed_request: None,
+            project_context_resolver: None,
+            pinned_admission: None,
+        },
+        None,
+    )?;
+    if current.artifact_identity != published.evidence.verifier.artifact_identity
+        || current.effective_definition_digest != purpose.verifier_realized_definition_digest
+        || current.admitted_definition_digest != purpose.verifier_effective_definition_digest
+    {
+        bail!("content qualification no longer matches the exact current verifier runtime");
+    }
+    content.verify_verifier_realizations(&current.realizations, &purpose.subject_declaration_id)?;
+    // The current verifier lookup is another checked-generation observation.
+    // Rejoin source/policy rather than treating the first preparation as a lock.
+    prepared.require_current(state, context, AcquisitionMode::Offline)?;
+    Ok(published)
+}
+
+/// Publish only daemon-corroborated testimony. Callers cannot supply evidence,
+/// claims, issue time, expiry, or a replacement source coordinate.
+pub async fn qualify(
+    state: Arc<AppState>,
+    context: HandlerContext,
+    request: ContentQualificationProofRequest,
+) -> anyhow::Result<ContentQualificationResponse> {
+    crate::operator_authority::require_admitted_operator(&state, &context)?;
+    request.validate()?;
+    tokio::task::spawn_blocking(move || {
+        let evidence = prove_blocking(&state, &context, &request)?;
+        let authority = state.state_store.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let limits = state
+            .node_policy
+            .require::<NodeObjectClosurePolicy>()?
+            .closure_limits()?;
+        let QualificationSubject::ActivatedContent { content } = &evidence.purpose.subject else {
+            bail!("content publication requires acquired-source testimony");
+        };
+        // Proof construction and publication are separate cuts. Rejoin signed
+        // source eligibility rather than relying on the earlier observation.
+        prepare_source(
+            &state,
+            &context,
+            &request.launch.activation_ref,
+            AcquisitionMode::Offline,
+            &content.realization,
+        )?
+        .validate_purpose(&evidence.purpose)?;
+        let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
+        let attestation = evidence.sign_attestation(&signer, lillux::time::iso8601_now(), None)?;
+        let _permit = state
+            .write_barrier
+            .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+            .map_err(|error| {
+                anyhow::anyhow!("cannot acquire content qualification publication permit: {error}")
+            })?;
+        let (published, idempotent) =
+            ryeos_state::external_content::qualification_publication::publish(
+                &authority,
+                &attestation,
+                &signer,
+                limits,
+                &guard,
+            )?;
+        Ok(ContentQualificationResponse {
+            qualification_hash: published.attestation_hash,
+            coordinate_id: published.coordinate_id,
+            idempotent,
+        })
+    })
+    .await
+    .context("content qualification publication task stopped")?
+}
+
 fn prove_blocking(
     state: &AppState,
     context: &HandlerContext,

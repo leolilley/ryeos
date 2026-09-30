@@ -375,6 +375,17 @@ pub async fn qualify(
     )?)
 }
 
+pub async fn qualify_content(
+    req: ryeos_app::operator_external_content::content_qualification::ContentQualificationProofRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    Ok(serde_json::to_value(
+        ryeos_app::operator_external_content::content_qualification::qualify(state, ctx, req)
+            .await?,
+    )?)
+}
+
 pub async fn compose(
     req: ryeos_app::operator_external_content::product_composition::ComposeRetainedProductsRequest,
     ctx: HandlerContext,
@@ -880,3 +891,40 @@ pub const QUALIFY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         )
     },
 };
+
+pub const QUALIFY_CONTENT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/qualify-content",
+    endpoint: "external-content.qualify-content",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/qualify-content"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            qualify_content(crate::handler_error::parse_request(params)?, ctx, state).await
+        })
+    },
+};
+
+#[cfg(test)]
+mod content_qualification_service_tests {
+    use super::{QUALIFY_CONTENT_DESCRIPTOR, QUALIFY_DESCRIPTOR};
+
+    #[test]
+    fn acquired_content_publication_has_no_product_capability_alias() {
+        assert_eq!(
+            QUALIFY_CONTENT_DESCRIPTOR.service_ref,
+            "service:external-content/qualify-content"
+        );
+        assert_eq!(
+            QUALIFY_CONTENT_DESCRIPTOR.endpoint,
+            "external-content.qualify-content"
+        );
+        assert_eq!(
+            QUALIFY_CONTENT_DESCRIPTOR.required_caps,
+            &["ryeos.execute.service.external-content/qualify-content"]
+        );
+        assert_ne!(
+            QUALIFY_CONTENT_DESCRIPTOR.required_caps,
+            QUALIFY_DESCRIPTOR.required_caps
+        );
+    }
+}

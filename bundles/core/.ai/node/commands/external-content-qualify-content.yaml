@@ -1,0 +1,12 @@
+tokens: [external-content, qualify-content]
+description: Qualify acquired content using its accepted source launch and completed verifier
+forms:
+  - slots:
+      - field: launch
+      - field: verifier_chain_root_id
+      - field: verifier_thread_id
+help:
+  usage: ryeos external-content qualify-content <launch-coordinates-json> <verifier-chain-root-id> <verifier-thread-id>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/qualify-content

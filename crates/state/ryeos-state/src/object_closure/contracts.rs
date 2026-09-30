@@ -646,6 +646,29 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
             )?;
         }
     }
+    if attestation.claim
+        == crate::external_content::qualification_evidence::CONTENT_QUALIFICATION_CLAIM
+        && attestation.policy
+            == crate::external_content::qualification_evidence::CONTENT_QUALIFICATION_ATTESTATION_POLICY
+    {
+        let evidence = crate::external_content::qualification_evidence::ContentQualificationEvidence
+            ::from_attestation(&attestation)
+            .map_err(|error| format!("invalid content qualification evidence links: {error}"))?;
+        push_qualification_purpose_edges(
+            &serde_json::to_value(&evidence.purpose).map_err(|error| error.to_string())?,
+            &mut links,
+        )?;
+        for verifier in std::iter::once(&evidence.verifier).chain(
+            evidence.execution_proof.participants.iter().map(|participant| &participant.verifier),
+        ) {
+            super::push_typed_hash(
+                &verifier.execution_realization_hash,
+                ExpectedObject::Kind(crate::objects::ADMITTED_EXECUTION_REALIZATION_KIND),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
     Ok(links)
 }
 
