@@ -1306,11 +1306,8 @@ impl PreparedBundleConsumerContentInputs {
                 bail!("external runtime alignment changed Bundle generation");
             }
             for scenario in self.policy_source.policy.producer_scenarios.values() {
-                let recipe = resolve_bundle_producer_recipe_in_generation(
-                    state,
-                    generation.request_engine_generation_identity(),
-                    &scenario.recipe_ref,
-                )?;
+                let recipe =
+                    resolve_bundle_producer_recipe_in_generation(generation, &scenario.recipe_ref)?;
                 require_direct_consumer_target(
                     &self.policy_source,
                     &recipe,
@@ -2055,57 +2052,67 @@ pub fn resolve_current_bundle_producer_recipe_for_purpose(
     scenario_id: &str,
 ) -> anyhow::Result<CurrentBundleProducerRecipe> {
     state.engine.with_checked_bundle_generation(|generation| {
-        let current_policy = resolve_current_bundle_qualification_policy(
+        resolve_current_bundle_producer_recipe_for_purpose_in_generation(
             state,
-            &purpose.policy_source().canonical_ref,
-        )?;
-        if &current_policy != purpose.policy_source() {
-            bail!("qualification producer policy changed after root admission");
-        }
-        let scenario = current_policy
-            .policy
-            .producer_scenarios
-            .get(scenario_id)
-            .context("qualification producer scenario is not signed in the admitted policy")?;
-        let current = resolve_bundle_producer_recipe_in_generation(
-            state,
-            generation.request_engine_generation_identity(),
-            &scenario.recipe_ref,
-        )?;
-        require_direct_consumer_target(&current_policy, &current, purpose.subject_manifest_hash())?;
-        if let Some(content) = purpose.consumer_content() {
-            if generation.request_engine_generation_identity()
-                != content.definitions.bundle_generation_identity
-            {
-                bail!("qualification consumer Bundle generation changed before direct probe");
-            }
-            let ProducerExecutableSource::AdmittedRealizationMember {
-                relative_path,
-                executable_sha256,
-                ..
-            } = &current.recipe.executable_source
-            else {
-                bail!("qualification direct probe no longer selects a product member");
-            };
-            if relative_path != &content.runtime_member.relative_path
-                || executable_sha256 != &content.runtime_member.executable_sha256
-            {
-                bail!("qualification direct probe differs from retained consumer runtime member");
-            }
-        }
-        state
-            .node_policy
-            .require::<NodeExecutionAdmissionPolicy>()?
-            .admit_producer_bounds(&current.recipe.bounds)?;
-        let admitted = purpose
-            .producer_recipe_sources()
-            .get(scenario_id)
-            .context("qualification purpose did not admit the selected producer scenario")?;
-        if current.source_identity()? != *admitted {
-            bail!("qualification producer recipe changed after root admission");
-        }
-        Ok(current)
+            generation,
+            purpose,
+            scenario_id,
+        )
     })
+}
+
+fn resolve_current_bundle_producer_recipe_for_purpose_in_generation(
+    state: &AppState,
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+    purpose: &ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView<'_>,
+    scenario_id: &str,
+) -> anyhow::Result<CurrentBundleProducerRecipe> {
+    let current_policy = resolve_current_bundle_qualification_policy_in_generation(
+        generation,
+        &purpose.policy_source().canonical_ref,
+    )?;
+    if &current_policy != purpose.policy_source() {
+        bail!("qualification producer policy changed after root admission");
+    }
+    let scenario = current_policy
+        .policy
+        .producer_scenarios
+        .get(scenario_id)
+        .context("qualification producer scenario is not signed in the admitted policy")?;
+    let current = resolve_bundle_producer_recipe_in_generation(generation, &scenario.recipe_ref)?;
+    require_direct_consumer_target(&current_policy, &current, purpose.subject_manifest_hash())?;
+    if let Some(content) = purpose.consumer_content() {
+        if generation.request_engine_generation_identity()
+            != content.definitions.bundle_generation_identity
+        {
+            bail!("qualification consumer Bundle generation changed before direct probe");
+        }
+        let ProducerExecutableSource::AdmittedRealizationMember {
+            relative_path,
+            executable_sha256,
+            ..
+        } = &current.recipe.executable_source
+        else {
+            bail!("qualification direct probe no longer selects a product member");
+        };
+        if relative_path != &content.runtime_member.relative_path
+            || executable_sha256 != &content.runtime_member.executable_sha256
+        {
+            bail!("qualification direct probe differs from retained consumer runtime member");
+        }
+    }
+    state
+        .node_policy
+        .require::<NodeExecutionAdmissionPolicy>()?
+        .admit_producer_bounds(&current.recipe.bounds)?;
+    let admitted = purpose
+        .producer_recipe_sources()
+        .get(scenario_id)
+        .context("qualification purpose did not admit the selected producer scenario")?;
+    if current.source_identity()? != *admitted {
+        bail!("qualification producer recipe changed after root admission");
+    }
+    Ok(current)
 }
 
 /// Exact current preflight data, not a remote-contact or publication grant.
@@ -2134,7 +2141,9 @@ pub fn prepare_remote_consumer_verifier_for_purpose(
 ) -> anyhow::Result<PreparedRemoteConsumerVerifier> {
     protected_selection.validate()?;
     state.engine.with_checked_bundle_generation(|generation| {
-        let current = resolve_current_bundle_producer_recipe_for_purpose(state, purpose, scenario_id)?;
+        let current = resolve_current_bundle_producer_recipe_for_purpose_in_generation(
+            state, generation, purpose, scenario_id,
+        )?;
         let producer_source = current.source_identity()?;
         let scenario = purpose.policy_source().policy.producer_scenarios.get(scenario_id)
             .context("remote consumer verifier scenario was not admitted")?;
@@ -2261,18 +2270,17 @@ pub fn resolve_current_bundle_producer_recipes_for_policy(
     policy_source.validate()?;
     require_canonical_hash("qualification subject manifest", subject_manifest_hash)?;
     state.engine.with_checked_bundle_generation(|generation| {
-        let current =
-            resolve_current_bundle_qualification_policy(state, &policy_source.canonical_ref)?;
+        let current = resolve_current_bundle_qualification_policy_in_generation(
+            generation,
+            &policy_source.canonical_ref,
+        )?;
         if current != *policy_source {
             bail!("qualification producer policy changed before root admission");
         }
         let mut sources = BTreeMap::new();
         for (scenario_id, scenario) in &current.policy.producer_scenarios {
-            let recipe = resolve_bundle_producer_recipe_in_generation(
-                state,
-                generation.request_engine_generation_identity(),
-                &scenario.recipe_ref,
-            )?;
+            let recipe =
+                resolve_bundle_producer_recipe_in_generation(generation, &scenario.recipe_ref)?;
             require_direct_consumer_target(&current, &recipe, subject_manifest_hash)?;
             state
                 .node_policy
@@ -2309,11 +2317,10 @@ fn require_direct_consumer_target(
 }
 
 fn resolve_bundle_producer_recipe_in_generation(
-    state: &AppState,
-    generation_identity: &str,
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     recipe_ref: &str,
 ) -> anyhow::Result<CurrentBundleProducerRecipe> {
-    let resolution = resolve_current_trusted_bundle(state, recipe_ref, Some("config"))?;
+    let resolution = resolve_consumer_definition_in_generation(generation, recipe_ref, "config")?;
     let recipe = ryeos_state::external_content::products::producer_recipe::ProductProducerRecipe::from_value(
         resolution
             .composed
@@ -2323,7 +2330,7 @@ fn resolve_bundle_producer_recipe_in_generation(
             .clone(),
     )?;
     Ok(CurrentBundleProducerRecipe {
-        bundle_generation_identity: generation_identity.to_owned(),
+        bundle_generation_identity: generation.request_engine_generation_identity().to_owned(),
         canonical_ref: resolution.root.resolved_ref.clone(),
         raw_content_digest: resolution.root.raw_content_digest.clone(),
         effective_definition_digest: resolution
@@ -3049,39 +3056,6 @@ fn selected_verifier_preview_policy(
             }),
         },
     )
-}
-
-fn resolve_current_trusted_bundle(
-    state: &AppState,
-    item_ref: &str,
-    required_kind: Option<&str>,
-) -> anyhow::Result<ResolutionOutput> {
-    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)?;
-    if canonical.to_string() != item_ref
-        || canonical.suffix.is_some()
-        || required_kind.is_some_and(|kind| canonical.kind != kind)
-    {
-        bail!("qualification source must be an exact canonical ref of the required kind");
-    }
-    let expected_kind = canonical.kind.clone();
-    let resolution =
-        state
-            .engine
-            .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
-                item_ref: canonical,
-                expected_kind: Some(expected_kind),
-                project_root: None,
-                subject_resolution_authority: SubjectResolutionAuthority::Projectless,
-            })?;
-    if resolution.root.resolved_ref != item_ref
-        || resolution.effective_trust_class != TrustClass::TrustedBundle
-        || resolution.root.source_space != ItemSpace::Bundle
-        || !matches!(resolution.root.source_root, ItemSourceRoot::Bundle { .. })
-        || resolution.root.signer_fingerprint.is_none()
-    {
-        bail!("qualification source must resolve from a current trusted Bundle");
-    }
-    Ok(resolution)
 }
 
 /// Fresh consumption requires the exact current published qualification and
