@@ -348,10 +348,21 @@ pub fn verify_retained_verifier_realization(
     guard: &CasMutationGuard,
 ) -> anyhow::Result<()> {
     evidence.validate()?;
+    let mut consumer_roots = Vec::new();
+    if let Some(consumer) = &evidence.consumer_content {
+        consumer_roots.push(consumer.worker_source.binding_hash.clone());
+        consumer_roots.extend(
+            consumer
+                .worker_literals
+                .iter()
+                .chain(consumer.environment_realizations.iter())
+                .map(|realized| realized.manifest_hash.clone()),
+        );
+    }
     verify_retained_execution_verifiers(
         authority,
         &evidence.execution_verifiers().collect::<Vec<_>>(),
-        &[],
+        &consumer_roots,
         limits,
         guard,
     )
@@ -388,7 +399,7 @@ pub(crate) fn verify_retained_execution_verifiers(
         limits,
     )?;
     if !closure.is_complete() {
-        bail!("qualification verifier execution realization closure is incomplete");
+        bail!("qualification retained source or execution closure is incomplete");
     }
     for verifier in verifiers {
         let value = load_exact_cas_object_with_cas(

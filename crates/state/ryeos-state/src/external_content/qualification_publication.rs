@@ -7,9 +7,7 @@ use anyhow::{Context as _, bail};
 use super::products::qualification_publication::verify_retained_execution_verifiers;
 use super::qualification_evidence::ContentQualificationEvidence;
 use super::qualification_purpose::QualificationSubject;
-use crate::object_closure::{
-    ObjectClosureLimits, collect_object_closure_with_cas_and_limits, load_exact_cas_object_with_cas,
-};
+use crate::object_closure::{ObjectClosureLimits, load_exact_cas_object_with_cas};
 use crate::objects::{Attestation, canonical_value_digest};
 use crate::{CasMutationGuard, PinnedStateAuthority, Signer};
 
@@ -153,19 +151,20 @@ fn verify(
     let QualificationSubject::ActivatedContent { content } = &evidence.purpose.subject else {
         bail!("content qualification has no activated source");
     };
+    let mut source_roots = vec![
+        content.activation_receipt_hash.clone(),
+        content.binding_hash.clone(),
+        content.manifest_hash.clone(),
+    ];
     if let Some(consumer) = &evidence.purpose.consumer_content {
-        let roots = std::iter::once(consumer.worker_source.binding_hash.clone()).chain(
+        source_roots.push(consumer.worker_source.binding_hash.clone());
+        source_roots.extend(
             consumer
                 .worker_literals
                 .iter()
                 .chain(consumer.environment_realizations.iter())
                 .map(|realized| realized.manifest_hash.clone()),
         );
-        let closure =
-            collect_object_closure_with_cas_and_limits(&authority.cas_store()?, roots, limits)?;
-        if !closure.is_complete() {
-            bail!("content qualification retained consumer closure is incomplete");
-        }
     }
     verify_retained_execution_verifiers(
         authority,
@@ -178,11 +177,7 @@ fn verify(
                     .map(|participant| &participant.verifier),
             )
             .collect::<Vec<_>>(),
-        &[
-            content.activation_receipt_hash.clone(),
-            content.binding_hash.clone(),
-            content.manifest_hash.clone(),
-        ],
+        &source_roots,
         limits,
         guard,
     )
