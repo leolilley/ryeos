@@ -246,7 +246,7 @@ const BATCH_COLUMNS: &str = "placement_thread_id,process_incarnation_digest,requ
     first_sequence,through_sequence,previous_digest,batch_digest,canonical_batch_json,
     wire_max_bytes,retained_at_ms";
 
-fn read_batches(
+pub(super) fn read_batches(
     conn: &Connection,
     placement: &str,
 ) -> Result<Vec<QualificationWorkerObservationBatchRecord>> {

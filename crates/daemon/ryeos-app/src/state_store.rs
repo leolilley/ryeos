@@ -16325,6 +16325,60 @@ impl StateStore {
             .qualification_worker_observation_batches(placement)
     }
 
+    /// Freeze the exact death-settled Q Worker command and pushed batches as
+    /// CAS objects, then bind the manifest as an immutable operator root.
+    /// The returned row is structural evidence, never a qualification permit.
+    pub(crate) fn retain_qualification_worker_transcript(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerTranscriptRecord> {
+        let permit = self.acquire_write_permit()?;
+        let source = self
+            .lock()?
+            .runtime_db
+            .qualification_worker_transcript_source(placement)?;
+        let prepared =
+            crate::external_qualification_transcript::prepare_qualification_worker_transcript(
+                &source.owner_principal,
+                &source.command,
+                &source.batches,
+            )?;
+        let authority = self.pinned_state_authority()?;
+        authority.ensure_guard(permit.cas_guard())?;
+        let cas = authority.cas_store()?;
+        let mut stage = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(
+                permit.cas_guard(),
+                "qualification-worker-transcript",
+            )?;
+        for (chunk, declared) in prepared.chunks.iter().zip(&prepared.manifest.chunks) {
+            let hash = stage.store_blob_admitted(permit.cas_guard(), &cas, chunk)?;
+            anyhow::ensure!(
+                hash == declared.blob_hash,
+                "Q transcript CAS chunk differs from its verified manifest"
+            );
+        }
+        let manifest_hash = stage.store_object_admitted(
+            permit.cas_guard(),
+            &cas,
+            &prepared.manifest.to_value()?,
+        )?;
+        anyhow::ensure!(
+            manifest_hash == prepared.manifest_hash,
+            "Q transcript CAS manifest differs from its canonical source"
+        );
+        stage.protect_object_hash_admitted(permit.cas_guard(), &manifest_hash)?;
+        let record = self
+            .lock()?
+            .runtime_db
+            .bind_qualification_worker_transcript(&source, &prepared.manifest, &manifest_hash)?;
+        if let Err(error) = stage.finish_admitted(permit.cas_guard()) {
+            tracing::warn!(%error, placement, "Q transcript retained while temporary CAS roots remain recoverable");
+        }
+        Ok(record)
+    }
+
     pub(crate) fn finish_external_protocol_output(
         &self,
         placement: &str,

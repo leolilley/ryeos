@@ -16,6 +16,7 @@ mod qualification_batch;
 mod qualification_command;
 mod qualification_local_start;
 mod qualification_process;
+mod qualification_transcript;
 pub(crate) use channel::{
     ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
     ExternalSupervisorExchange, RetainedExternalCandidateImport,
@@ -35,6 +36,9 @@ pub use qualification_local_start::{
 pub(crate) use qualification_process::{
     QualificationWorkerDeathProof, QualificationWorkerProcessPhase,
     QualificationWorkerProcessRecord,
+};
+pub(crate) use qualification_transcript::{
+    QualificationWorkerTranscriptRecord, QualificationWorkerTranscriptSource,
 };
 
 pub(super) const FIRST_EPOCH: u32 = 40;
@@ -331,6 +335,9 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
     AND OLD.completed_at_ms IS NOT NULL
  OR NEW.owner_send_settled_at_ms IS NOT OLD.owner_send_settled_at_ms
     AND OLD.owner_send_settled_at_ms IS NOT NULL
+ OR (OLD.state='turn_completed' AND NEW.state='outcome_unknown'
+    AND EXISTS(SELECT 1 FROM external_qualification_worker_transcript t
+      WHERE t.placement_thread_id=OLD.placement_thread_id))
  OR NOT ((OLD.state='reserved' AND NEW.state IN ('possible_contact','outcome_unknown'))
       OR (OLD.state='possible_contact' AND NEW.state IN
           ('possible_contact','turn_completed','outcome_unknown'))
@@ -376,6 +383,31 @@ BEGIN SELECT RAISE(ABORT, 'qualification observation batch is immutable'); END;
 CREATE TRIGGER external_qualification_worker_observation_batch_no_delete
 BEFORE DELETE ON external_qualification_worker_observation_batch
 BEGIN SELECT RAISE(ABORT, 'qualification observation batch is retained'); END;
+
+-- A structural CAS root retained only after the exact Q Worker died and the
+-- one-send owner succeeded. This does not confer semantic success.
+CREATE TABLE external_qualification_worker_transcript (
+    placement_thread_id TEXT PRIMARY KEY REFERENCES external_qualification_worker_command(placement_thread_id),
+    owner_principal TEXT NOT NULL,
+    manifest_hash TEXT NOT NULL,
+    manifest_json TEXT NOT NULL CHECK (length(CAST(manifest_json AS BLOB)) <= 1048576),
+    retained_at_ms INTEGER NOT NULL CHECK (retained_at_ms > 0)
+);
+CREATE TRIGGER external_qualification_worker_transcript_insert_guard
+BEFORE INSERT ON external_qualification_worker_transcript
+WHEN NOT EXISTS(SELECT 1 FROM external_qualification_worker_command c
+    JOIN external_qualification_worker_process p
+      ON p.placement_thread_id=c.placement_thread_id
+    WHERE c.placement_thread_id=NEW.placement_thread_id
+      AND c.state='turn_completed' AND c.owner_send_settled_at_ms IS NOT NULL
+      AND p.phase='terminal' AND p.channel_binding_digest=c.channel_binding_digest)
+BEGIN SELECT RAISE(ABORT, 'qualification transcript lacks a terminal successful Worker'); END;
+CREATE TRIGGER external_qualification_worker_transcript_no_update
+BEFORE UPDATE ON external_qualification_worker_transcript
+BEGIN SELECT RAISE(ABORT, 'qualification transcript is immutable'); END;
+CREATE TRIGGER external_qualification_worker_transcript_no_delete
+BEFORE DELETE ON external_qualification_worker_transcript
+BEGIN SELECT RAISE(ABORT, 'qualification transcript CAS root is retained'); END;
 
 CREATE TABLE external_execution_no_occurrence (
     placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
@@ -1750,6 +1782,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     qualification_process::validate_processes(conn)?;
     qualification_command::validate_commands(conn)?;
     qualification_batch::validate_batches(conn)?;
+    qualification_transcript::validate_transcripts(conn)?;
     Ok(())
 }
 
@@ -2738,6 +2771,12 @@ impl RuntimeDb {
         let mut statement = self
             .conn
             .prepare("SELECT snapshot_hash FROM external_execution_import")?;
+        for root in statement.query_map([], |row| row.get::<_, String>(0))? {
+            roots.insert(root?);
+        }
+        let mut statement = self
+            .conn
+            .prepare("SELECT manifest_hash FROM external_qualification_worker_transcript")?;
         for root in statement.query_map([], |row| row.get::<_, String>(0))? {
             roots.insert(root?);
         }

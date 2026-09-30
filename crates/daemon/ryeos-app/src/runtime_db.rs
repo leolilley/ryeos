@@ -2680,7 +2680,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // signed qualification fact or a semantic success permit.
 // Epoch 112 retains the exact request-correlated Delta and a one-way send
 // settlement marker, separately from observation-driven turn completion.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 112;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 113;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
