@@ -1209,6 +1209,24 @@ impl RuntimeDb {
         &self,
         expected: &QualificationLocalStartRecord,
     ) -> Result<QualificationLocalStartRecord> {
+        self.begin_qualification_local_cleanup_inner(expected, false)
+    }
+
+    /// The pre-registration rollback owns both original roots but has never
+    /// authorized backend Create, a local Worker, or a connector. This strict
+    /// absence check is atomic with the no-contact cleanup intent.
+    pub(crate) fn begin_unregistered_qualification_precreate_rollback(
+        &self,
+        expected: &QualificationLocalStartRecord,
+    ) -> Result<QualificationLocalStartRecord> {
+        self.begin_qualification_local_cleanup_inner(expected, true)
+    }
+
+    fn begin_qualification_local_cleanup_inner(
+        &self,
+        expected: &QualificationLocalStartRecord,
+        require_unregistered_precreate: bool,
+    ) -> Result<QualificationLocalStartRecord> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let current = read_local_start(&tx, &expected.placement_thread_id)?
             .context("qualification cleanup lost its retained start")?;
@@ -1216,6 +1234,26 @@ impl RuntimeDb {
             current == *expected,
             "qualification cleanup changed its original custody row"
         );
+        if require_unregistered_precreate {
+            ensure!(
+                current.phase == QualificationLocalStartPhase::Reserved,
+                "unregistered Q rollback requires its pre-Create reservation"
+            );
+            for table in [
+                "external_qualification_worker_process",
+                "external_execution_connector",
+            ] {
+                let exists: bool = tx.query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE placement_thread_id=?1)"),
+                    [&current.placement_thread_id],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    !exists,
+                    "unregistered Q rollback has local process or connector contact"
+                );
+            }
+        }
         let route = if current.phase == QualificationLocalStartPhase::Reserved
             || (current.phase == QualificationLocalStartPhase::CleanupUnproved
                 && current.backend_id.is_none()

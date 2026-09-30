@@ -15770,6 +15770,102 @@ impl StateStore {
             .begin_qualification_local_cleanup(&record)
     }
 
+    /// Close a fully created pair of original Q roots if custody registration
+    /// failed before backend Create. The facade holds the Q occurrence contact
+    /// gate for this entire call. No descriptor is reconstructed from a path.
+    /// Each physical removal follows a durable no-contact intent and precedes
+    /// its corresponding retained receipt; interruption leaves an explicit
+    /// cleanup phase rather than a reusable Reserved row.
+    pub(crate) fn rollback_unregistered_qualification_roots(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+        workspace: &Arc<crate::temp_dir_guard::TempDirGuard>,
+        state_root_parent: &lillux::PinnedDirectory,
+        state_root: &lillux::PinnedDirectory,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        use std::ffi::OsStr;
+
+        anyhow::ensure!(
+            std::ptr::eq(self, Arc::as_ptr(&state.state_store))
+                && expected.phase
+                    == runtime_db::external_execution::QualificationLocalStartPhase::Reserved,
+            "Q unregistered rollback requires its original StateStore reservation"
+        );
+        let current = self
+            .qualification_local_start(&expected.placement_thread_id)?
+            .context("Q unregistered rollback lost its start")?;
+        anyhow::ensure!(
+            current == *expected,
+            "Q unregistered rollback changed its exact Reserved row"
+        );
+        let coordinate =
+            crate::qualification_workspace_custody::QualificationWorkspaceCustodyCoordinate::from_start(&current)?;
+        state
+            .qualification_workspace_custody
+            .ensure_unregistered(&current.placement_thread_id)?;
+        let workspace_root = Path::new(&current.workspace_root);
+        let project = workspace_root.join("project");
+        let state_path = Path::new(&current.state_root);
+        let state_parent_path = state_path.parent().context("Q state root has no parent")?;
+        let expected_state_parent = self
+            .state_authority
+            .runtime_directory()
+            .path()
+            .join("cache")
+            .join("qualification-local");
+        anyhow::ensure!(
+            coordinate.placement() == current.placement_thread_id
+                && workspace.path().as_deref() == Some(workspace_root)
+                && workspace.owns_effective_path(&project)
+                && workspace.owns_workspace_project_path(&project)
+                && workspace.owned_scratch_root()?.path() == workspace_root
+                && state_root.path() == state_path
+                && state_root_parent.path() == state_parent_path
+                && state_parent_path == expected_state_parent,
+            "Q unregistered rollback changed its original pinned roots"
+        );
+        workspace.owned_scratch_root()?.ensure_path_binding()?;
+        state_root_parent.ensure_path_binding()?;
+        state_root.ensure_path_binding()?;
+        let name = OsStr::new(&current.workspace_id);
+        let child = state_root_parent
+            .open_child_directory(name)?
+            .context("Q original state root disappeared before rollback")?;
+        anyhow::ensure!(
+            child.is_same_directory(state_root)?,
+            "Q unregistered state root was replaced before rollback"
+        );
+
+        let intent = {
+            let _permit = self.acquire_write_permit()?;
+            self.lock()?
+                .runtime_db
+                .begin_unregistered_qualification_precreate_rollback(&current)?
+        };
+        workspace.remove_uncreated_workspace_now()?;
+        let workspace_removed = {
+            let _permit = self.acquire_write_permit()?;
+            self.lock()?
+                .runtime_db
+                .record_qualification_workspace_removed(&intent)?
+        };
+        anyhow::ensure!(
+            state_root_parent.remove_empty_child_if_same(name, state_root)?,
+            "Q original state root was not empty or changed during rollback"
+        );
+        let state_removed = {
+            let _permit = self.acquire_write_permit()?;
+            self.lock()?
+                .runtime_db
+                .record_qualification_state_root_removed(&workspace_removed)?
+        };
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .close_qualification_local_start(&state_removed)
+    }
+
     pub(crate) fn reserve_qualification_local_scope_retirement(
         &self,
         expected: &runtime_db::external_execution::QualificationLocalStartRecord,
