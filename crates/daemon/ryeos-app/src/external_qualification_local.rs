@@ -297,13 +297,9 @@ impl QualificationLocalOwner<'_> {
         guard: &TempDirGuard,
     ) -> Result<lillux::InheritedDescriptorAuthority> {
         let current = self.require_original(record)?;
-        let authorized = self
-            .state
-            .state_store
-            .authorize_qualification_local_spawn(self.placement)?;
         ensure!(
-            current == authorized
-                && current.phase == QualificationLocalStartPhase::ScopeBound
+            current.phase == QualificationLocalStartPhase::ScopeBound
+                && current.view_borrow_intent.is_none()
                 && guard.path().as_deref() == Some(Path::new(&current.workspace_root)),
             "Q workspace view has no scope-bound original owner"
         );
@@ -322,6 +318,17 @@ impl QualificationLocalOwner<'_> {
             guard.workspace_view_identity()?.as_ref()
                 == Some(&(current.workspace_id.clone(), receipt.view_identity.clone())),
             "Q workspace view differs from its retained receipt"
+        );
+        let admitted = self
+            .state
+            .state_store
+            .reserve_qualification_workspace_view_borrow(self.placement)?;
+        ensure!(
+            admitted.view_borrow_intent.as_ref().is_some_and(|intent| {
+                intent.workspace_id == current.workspace_id
+                    && intent.view_identity == receipt.view_identity
+            }),
+            "Q workspace view borrow changed its original intent"
         );
         guard
             .borrow_workspace_view(&current.workspace_id, &receipt.view_identity)?
