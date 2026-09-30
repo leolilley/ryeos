@@ -6,16 +6,15 @@
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent;
-use ryeos_external_execution_contract::staging_package::GuestStagingEntry;
 use ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord as StateConsumerInputRecord;
 use serde::{Deserialize, Serialize};
 
 use crate::QualificationExecutionEnvironment;
 
-pub const CONSUMER_INPUT_RECORD_NAME: &str = "consumer-input.json";
-pub use ryeos_state::external_content::qualification_consumer_record::MAX_CONSUMER_INPUT_RECORD_BYTES;
+pub use ryeos_external_execution::restoration_verifier_delivery::CONSUMER_INPUT_RECORD_NAME;
 /// Exact archive mode shared by publication, import and subordinate selection.
-const CONSUMER_VERIFIER_MODE: u32 = 0o500;
+use ryeos_external_execution::restoration_verifier_delivery::CONSUMER_VERIFIER_MODE;
+pub use ryeos_state::external_content::qualification_consumer_record::MAX_CONSUMER_INPUT_RECORD_BYTES;
 /// Dedicated command-environment startup input, never an admission credential.
 pub const CONSUMER_NATIVE_CHALLENGE_ENV: &str = "RYEOS_CONSUMER_NATIVE_CHALLENGE_B64";
 pub const CONSUMER_INPUT_ROOT_ENV: &str = "RYEOS_CONSUMER_INPUT_ROOT";
@@ -219,10 +218,8 @@ impl ConsumerVerifierConfiguration {
 /// Product-edge canonical record plus exact foreign-target verifier payload.
 /// This is byte custody and semantic agreement, not root admission, provider
 /// permission or a controller-local executable authorization.
-pub struct ConsumerDeliveryRecords {
-    pub entries: Vec<GuestStagingEntry>,
-    pub descriptors: std::collections::BTreeMap<String, lillux::InheritedDescriptorAuthority>,
-}
+pub type ConsumerDeliveryRecords =
+    ryeos_external_execution::restoration_verifier_delivery::ConsumerProductInventory;
 
 /// Exact opened production inputs after private archive extraction. The outer
 /// guest owner must retain the private generation, exclude writers and settle
@@ -1167,39 +1164,10 @@ impl ConsumerInputRecord {
         &self,
         verifier: &lillux::InheritedDescriptorAuthority,
     ) -> Result<ConsumerDeliveryRecords> {
-        use ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_VERIFIER_REMOTE_NAME;
-        let bytes = self.canonical_bytes()?;
-        let payload_bytes = self.verify_verifier_payload(verifier)?;
-        ensure!(
-            self.selection.archive_budget.maximum_entries >= 2
-                && payload_bytes.checked_add(bytes.len() as u64).is_some_and(
-                    |total| total <= self.selection.archive_budget.maximum_regular_bytes
-                ),
-            "consumer delivery records exceed protected archive budget"
-        );
-        let record_hash = lillux::sha256_hex(&bytes);
-        let record =
-            lillux::sealed_memfd(c"consumer-accepted-input", &bytes).map_err(anyhow::Error::msg)?;
-        Ok(ConsumerDeliveryRecords {
-            entries: vec![
-                GuestStagingEntry::RegularFile {
-                    path: CONSUMER_INPUT_RECORD_NAME.into(),
-                    mode: 0o400,
-                    bytes: bytes.len() as u64,
-                    sha256: record_hash,
-                },
-                GuestStagingEntry::RegularFile {
-                    path: CONSUMER_VERIFIER_REMOTE_NAME.into(),
-                    mode: CONSUMER_VERIFIER_MODE,
-                    bytes: payload_bytes,
-                    sha256: self.selection.verifier_artifact_hash.clone(),
-                },
-            ],
-            descriptors: std::collections::BTreeMap::from([
-                (CONSUMER_INPUT_RECORD_NAME.into(), record),
-                (CONSUMER_VERIFIER_REMOTE_NAME.into(), verifier.clone()),
-            ]),
-        })
+        self.validate()?;
+        ryeos_external_execution::restoration_verifier_delivery::prepare_consumer_delivery_records(
+            &self.0, verifier,
+        )
     }
 
     fn verify_verifier_payload(

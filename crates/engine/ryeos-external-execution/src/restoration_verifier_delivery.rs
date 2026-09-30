@@ -7,6 +7,68 @@ use anyhow::{Result, ensure};
 use ryeos_external_execution_contract::staging_package::GuestStagingEntry;
 use std::io::{Read, Write};
 
+pub const CONSUMER_INPUT_RECORD_NAME: &str = "consumer-input.json";
+pub const CONSUMER_INPUT_RECORD_MODE: u32 = 0o400;
+pub const CONSUMER_VERIFIER_MODE: u32 = 0o500;
+
+/// Render the protocol-neutral accepted input and selected executable as two
+/// exact archive members. The caller adds the retained product inventory and
+/// remains responsible for root admission, leases and contact authority.
+pub fn prepare_consumer_delivery_records(
+    record: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
+    verifier: &lillux::InheritedDescriptorAuthority,
+) -> Result<ConsumerProductInventory> {
+    use ryeos_external_execution_contract::restored_runtime_measurement::{
+        CONSUMER_VERIFIER_REMOTE_NAME, MAX_RESTORATION_VERIFIER_BYTES,
+    };
+    let bytes = record.canonical_bytes()?;
+    let selected = record
+        .purpose
+        .remote_verifier_sources
+        .get(&record.coordinate.scenario_id)
+        .ok_or_else(|| anyhow::anyhow!("consumer delivery has no retained verifier source"))?;
+    let observation = verifier.regular_file_observation()?;
+    ensure!(
+        observation.size() > 0
+            && observation.size() == selected.payload_bytes
+            && observation.size() <= MAX_RESTORATION_VERIFIER_BYTES
+            && verifier.digest_regular_file_stable_exact(&observation)?
+                == record.selection.verifier_artifact_hash,
+        "consumer verifier payload differs from accepted selection"
+    );
+    ensure!(
+        record.selection.archive_budget.maximum_entries >= 2
+            && observation
+                .size()
+                .checked_add(bytes.len() as u64)
+                .is_some_and(|total| total <= record.selection.archive_budget.maximum_regular_bytes),
+        "consumer delivery records exceed protected archive budget"
+    );
+    let record_hash = lillux::sha256_hex(&bytes);
+    let sealed =
+        lillux::sealed_memfd(c"consumer-accepted-input", &bytes).map_err(anyhow::Error::msg)?;
+    Ok(ConsumerProductInventory {
+        entries: vec![
+            GuestStagingEntry::RegularFile {
+                path: CONSUMER_INPUT_RECORD_NAME.into(),
+                mode: CONSUMER_INPUT_RECORD_MODE,
+                bytes: bytes.len() as u64,
+                sha256: record_hash,
+            },
+            GuestStagingEntry::RegularFile {
+                path: CONSUMER_VERIFIER_REMOTE_NAME.into(),
+                mode: CONSUMER_VERIFIER_MODE,
+                bytes: observation.size(),
+                sha256: record.selection.verifier_artifact_hash.clone(),
+            },
+        ],
+        descriptors: std::collections::BTreeMap::from([
+            (CONSUMER_INPUT_RECORD_NAME.into(), sealed),
+            (CONSUMER_VERIFIER_REMOTE_NAME.into(), verifier.clone()),
+        ]),
+    })
+}
+
 /// Point-verified product bytes and manifests for consumer packaging. Source
 /// materialization leases stay with the executor until the private copy has
 /// finished. This inventory is not admission or workspace writer exclusion.
@@ -218,10 +280,28 @@ pub struct PreparedConsumerArchive {
     sha256: String,
     // Captured only after the archive writer has verified member bytes.
     verifier_member: Option<GuestStagingEntry>,
+    input_record_member: Option<GuestStagingEntry>,
     discarded: bool,
 }
 
 impl PreparedConsumerArchive {
+    /// Confirm that the uploaded archive carries the same canonical accepted
+    /// input the daemon authenticated before its one-shot contact claim.
+    pub fn require_consumer_input_record(
+        &self,
+        record: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
+    ) -> Result<()> {
+        let bytes = record.canonical_bytes()?;
+        let hash = lillux::sha256_hex(&bytes);
+        ensure!(
+            matches!(&self.input_record_member,
+                Some(GuestStagingEntry::RegularFile { path, mode, bytes: member_bytes, sha256 })
+                if path == CONSUMER_INPUT_RECORD_NAME && *mode == CONSUMER_INPUT_RECORD_MODE
+                    && *member_bytes == bytes.len() as u64 && sha256 == &hash),
+            "consumer archive does not contain the exact accepted input record"
+        );
+        Ok(())
+    }
     /// Bind transported executable bytes to the authenticated product-edge
     /// selection. A matching whole-archive digest alone cannot establish this.
     pub fn require_verifier_selection(
@@ -232,7 +312,7 @@ impl PreparedConsumerArchive {
         ensure!(
             matches!(&self.verifier_member,
                 Some(GuestStagingEntry::RegularFile { path, mode, bytes, sha256 })
-                if path == CONSUMER_VERIFIER_REMOTE_NAME && *mode == 0o500
+                if path == CONSUMER_VERIFIER_REMOTE_NAME && *mode == CONSUMER_VERIFIER_MODE
                     && *bytes > 0 && *bytes <= MAX_RESTORATION_VERIFIER_BYTES
                     && sha256 == &selection.verifier_artifact_hash),
             "consumer archive does not contain the exact selected verifier"
@@ -364,6 +444,10 @@ pub fn prepare_private_consumer_archive(
             verifier_member: entries
                 .iter()
                 .find(|entry| entry.path() == CONSUMER_VERIFIER_REMOTE_NAME)
+                .cloned(),
+            input_record_member: entries
+                .iter()
+                .find(|entry| entry.path() == CONSUMER_INPUT_RECORD_NAME)
                 .cloned(),
             discarded: false,
         }),
