@@ -6,6 +6,7 @@
 
 pub mod entrypoint;
 mod http_transport;
+pub mod relay_transport;
 pub mod runtime;
 
 use anyhow::{Context as _, Result, ensure};

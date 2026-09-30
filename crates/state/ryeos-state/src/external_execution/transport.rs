@@ -7,6 +7,7 @@
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use url::Url;
 
 use super::admission::AdmittedExternalExecutionProgram;
@@ -19,6 +20,7 @@ pub const MAX_PLACEMENT_ID_BYTES: usize = 256;
 pub const MAX_OCCURRENCE_ID_BYTES: usize = 512;
 pub const EXTERNAL_CHANNEL_ROUTE_CONTRACT: &str = "ryeos.external-channel.http-json.v1";
 pub const EXTERNAL_CHANNEL_RELAY_CONTRACT: &str = "ryeos.external-channel.controller-file-relay.v1";
+pub const EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA: u32 = 1;
 pub const EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA: u32 = 8;
 pub const EXTERNAL_CHANNEL_ATTACH_PATH: &str = "/external-execution/channel/attach";
 pub const EXTERNAL_CHANNEL_EXCHANGE_PATH: &str = "/external-execution/channel/exchange";
@@ -290,7 +292,8 @@ impl ExternalControllerFileRelayContract {
             "external relay mailbox parent is not a lexical absolute path"
         );
         ensure!(
-            (MAX_FRAME_BYTES as u64..=2 * 1024 * 1024).contains(&self.maximum_file_bytes)
+            (((MAX_FRAME_BYTES.div_ceil(3) * 4 + 4_096) as u64)..=2 * 1024 * 1024)
+                .contains(&self.maximum_file_bytes)
                 && (64..=65_536).contains(&self.maximum_frames)
                 && (250..=10_000).contains(&self.poll_interval_ms)
                 && (1_000..=300_000).contains(&self.poll_deadline_ms)
@@ -912,6 +915,154 @@ impl ExternalChannelExchangeResponse {
     }
 }
 
+/// The controller signs the complete file-relay response, including transport
+/// metadata that is not covered by the signed channel frames. This envelope
+/// is distinct from the HTTP response: an uploaded file has no TLS peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalRelayResponseKind {
+    Attach,
+    Exchange,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalRelayResponsePayload {
+    pub schema: u32,
+    pub kind: ExternalRelayResponseKind,
+    pub bootstrap_digest: String,
+    pub placement_thread_id: String,
+    pub occurrence_id: String,
+    pub request_digest: String,
+    pub binding_digest: Option<String>,
+    pub response: Value,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalRelayResponseEnvelope {
+    pub payload: ExternalRelayResponsePayload,
+    pub signature: String,
+}
+
+impl ExternalRelayResponseEnvelope {
+    fn signing_bytes(payload: &ExternalRelayResponsePayload) -> Result<Vec<u8>> {
+        Ok(lillux::canonical_json(&serde_json::json!({
+            "domain": "ryeos.external-controller-file-relay-response.v1",
+            "payload": payload,
+        }))?
+        .into_bytes())
+    }
+
+    /// Controller-side constructor for an exact authenticated response file.
+    /// It grants no channel state; the consumer still validates the typed
+    /// attachment or exchange response against the active binding.
+    pub fn sign(
+        bootstrap: &ExternalSupervisorBootstrap,
+        kind: ExternalRelayResponseKind,
+        request_digest: &str,
+        binding_digest: Option<&str>,
+        response: &impl Serialize,
+        owner_signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<Self> {
+        use lillux::crypto::Signer as _;
+
+        bootstrap.controller.relay()?;
+        ensure!(
+            super::encode_channel_public_key(&owner_signing_key.verifying_key())?
+                == bootstrap.owner_public_key,
+            "external relay response signer differs from sealed owner"
+        );
+        hash(request_digest)?;
+        ensure!(
+            matches!(kind, ExternalRelayResponseKind::Attach) == binding_digest.is_none(),
+            "external relay response kind has the wrong binding coordinate"
+        );
+        if let Some(digest) = binding_digest {
+            hash(digest)?;
+        }
+        let payload = ExternalRelayResponsePayload {
+            schema: EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA,
+            kind,
+            bootstrap_digest: bootstrap.digest()?,
+            placement_thread_id: bootstrap.placement_thread_id.clone(),
+            occurrence_id: bootstrap.occurrence_id.clone(),
+            request_digest: request_digest.to_owned(),
+            binding_digest: binding_digest.map(str::to_owned),
+            response: serde_json::to_value(response)?,
+        };
+        let signature = STANDARD.encode(
+            owner_signing_key
+                .sign(&Self::signing_bytes(&payload)?)
+                .to_bytes(),
+        );
+        let envelope = Self { payload, signature };
+        ensure!(
+            u64::try_from(envelope.canonical_bytes()?.len())?
+                <= bootstrap.controller.relay()?.maximum_file_bytes,
+            "external relay response exceeds its signed file bound"
+        );
+        Ok(envelope)
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        Ok(lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes())
+    }
+
+    /// Reject noncanonical, replayed, mismatched, and unsigned uploaded files
+    /// before interpreting any response field as controller output.
+    pub fn decode_verified<T: serde::de::DeserializeOwned>(
+        bytes: &[u8],
+        bootstrap: &ExternalSupervisorBootstrap,
+        expected_kind: ExternalRelayResponseKind,
+        request_digest: &str,
+        binding_digest: Option<&str>,
+    ) -> Result<T> {
+        use lillux::crypto::Verifier as _;
+
+        bootstrap.controller.relay()?;
+        ensure!(
+            u64::try_from(bytes.len())? <= bootstrap.controller.relay()?.maximum_file_bytes,
+            "external relay response exceeds its signed file bound"
+        );
+        hash(request_digest)?;
+        if let Some(digest) = binding_digest {
+            hash(digest)?;
+        }
+        let envelope: Self =
+            serde_json::from_slice(bytes).context("decode external relay response envelope")?;
+        ensure!(
+            envelope.canonical_bytes()? == bytes,
+            "external relay response envelope is not canonical"
+        );
+        let payload = &envelope.payload;
+        ensure!(
+            payload.schema == EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA
+                && payload.kind == expected_kind
+                && payload.bootstrap_digest == bootstrap.digest()?
+                && payload.placement_thread_id == bootstrap.placement_thread_id
+                && payload.occurrence_id == bootstrap.occurrence_id
+                && payload.request_digest == request_digest
+                && payload.binding_digest.as_deref() == binding_digest
+                && (matches!(expected_kind, ExternalRelayResponseKind::Attach)
+                    == binding_digest.is_none()),
+            "external relay response changed its sealed request coordinate"
+        );
+        let signature_bytes = STANDARD
+            .decode(&envelope.signature)
+            .context("external relay response signature is invalid base64")?;
+        ensure!(
+            STANDARD.encode(&signature_bytes) == envelope.signature,
+            "external relay response signature is not canonical"
+        );
+        let signature = lillux::crypto::Signature::from_slice(&signature_bytes)?;
+        super::public_key(&bootstrap.owner_public_key)?
+            .verify_strict(&Self::signing_bytes(payload)?, &signature)?;
+        serde_json::from_value(payload.response.clone())
+            .context("decode authenticated external relay response")
+    }
+}
+
 fn bounded_text(value: &str, maximum: usize, label: &str) -> Result<()> {
     ensure!(
         !value.is_empty() && value.len() <= maximum,
@@ -925,10 +1076,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::external_content::products::qualification::ProductQualificationConsumerRuntimeMemberIdentity;
     use crate::external_execution::admission::{
-        AdmittedExternalCandidateProgram, ExternalCandidateProcFilesystem,
-        ExternalCandidateRequirement, ExternalCandidateRuntimeRecipe, PROTOCOL,
+        AdmittedExternalCandidateProgram, AdmittedExternalExecutionProgram,
+        ExternalCandidateProcFilesystem, ExternalCandidateRequirement,
+        ExternalCandidateRuntimeRecipe, PROTOCOL,
     };
+    use crate::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram;
+    use crate::objects::ExternalContentKind;
 
     fn controller(roots: &[String]) -> ExternalControllerTransportContract {
         ExternalControllerTransportContract {
@@ -1060,6 +1215,172 @@ mod tests {
                 max_bytes: 65536,
             },
         }
+    }
+
+    fn relay_bootstrap() -> ExternalSupervisorBootstrap {
+        let mut value = bootstrap();
+        let ordinary = match value.candidate_program {
+            AdmittedExternalExecutionProgram::StructuredSession(program) => program,
+            _ => unreachable!(),
+        };
+        let member = ProductQualificationConsumerRuntimeMemberIdentity {
+            product_declaration_id: ordinary.requirement.runtime_product_declaration_id.clone(),
+            relative_path: ordinary
+                .requirement
+                .runtime_recipe
+                .executable_relative_path
+                .clone(),
+            executable_sha256: "6".repeat(64),
+        };
+        value.candidate_program = AdmittedExternalExecutionProgram::QualificationStructuredSession(
+            AdmittedExternalQualificationSessionProgram {
+                schema: 1,
+                qualification_purpose_digest: "7".repeat(64),
+                consumer_content_digest: "8".repeat(64),
+                requirement: ordinary.requirement.clone(),
+                qualification_use: ordinary.qualification_use,
+                runtime_manifest_kind: ordinary.runtime_manifest_kind,
+                runtime_content_kind: ExternalContentKind::Tree,
+                runtime_manifest_hash: ordinary.runtime_manifest_hash,
+                runtime_member: member,
+                runtime_recipe_digest: ordinary.runtime_recipe_digest,
+            },
+        );
+        value.schema = EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA;
+        value.controller = ExternalControllerTransportSelection::ControllerFileRelay(
+            ExternalControllerFileRelayContract {
+                schema: 3,
+                route_contract: EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
+                owner_workspace_id: "render-owner".into(),
+                private_mailbox_parent: "/run/ryeos/private-relay".into(),
+                maximum_file_bytes: 1024 * 1024,
+                maximum_frames: 1024,
+                poll_interval_ms: 1000,
+                poll_deadline_ms: 30_000,
+            },
+        );
+        value.tls_root_certificates_der_base64.clear();
+        value.candidate_export_max_bytes = 0;
+        value.validate().unwrap();
+        value
+    }
+
+    #[test]
+    fn relay_response_envelope_authenticates_exact_request_and_full_response() {
+        let bootstrap = relay_bootstrap();
+        let owner = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+        let request_digest = lillux::sha256_hex(b"canonical attach request");
+        let envelope = ExternalRelayResponseEnvelope::sign(
+            &bootstrap,
+            ExternalRelayResponseKind::Attach,
+            &request_digest,
+            None,
+            &serde_json::json!({"binding":"fixture"}),
+            &owner,
+        )
+        .unwrap();
+        let bytes = envelope.canonical_bytes().unwrap();
+        let accepted: Value = ExternalRelayResponseEnvelope::decode_verified(
+            &bytes,
+            &bootstrap,
+            ExternalRelayResponseKind::Attach,
+            &request_digest,
+            None,
+        )
+        .unwrap();
+        assert_eq!(accepted, serde_json::json!({"binding":"fixture"}));
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &bytes,
+                &bootstrap,
+                ExternalRelayResponseKind::Attach,
+                &lillux::sha256_hex(b"different request"),
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &bytes,
+                &bootstrap,
+                ExternalRelayResponseKind::Exchange,
+                &request_digest,
+                Some(&"9".repeat(64)),
+            )
+            .is_err()
+        );
+        let mut wrong_owner: ExternalSupervisorBootstrap =
+            serde_json::from_slice(&bootstrap.canonical_bytes().unwrap()).unwrap();
+        wrong_owner.owner_public_key = super::super::encode_channel_public_key(
+            &lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key(),
+        )
+        .unwrap();
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &bytes,
+                &wrong_owner,
+                ExternalRelayResponseKind::Attach,
+                &request_digest,
+                None,
+            )
+            .is_err()
+        );
+        let binding_digest = "9".repeat(64);
+        let exchange = ExternalRelayResponseEnvelope::sign(
+            &bootstrap,
+            ExternalRelayResponseKind::Exchange,
+            &request_digest,
+            Some(&binding_digest),
+            &serde_json::json!({"incoming_new":false}),
+            &owner,
+        )
+        .unwrap();
+        let exchange_bytes = exchange.canonical_bytes().unwrap();
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &exchange_bytes,
+                &bootstrap,
+                ExternalRelayResponseKind::Exchange,
+                &request_digest,
+                Some(&binding_digest),
+            )
+            .is_ok()
+        );
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &exchange_bytes,
+                &bootstrap,
+                ExternalRelayResponseKind::Exchange,
+                &request_digest,
+                Some(&"0".repeat(64)),
+            )
+            .is_err()
+        );
+        let mut changed: Value = serde_json::from_slice(&bytes).unwrap();
+        changed["payload"]["response"]["binding"] = serde_json::json!("substituted");
+        let changed = lillux::canonical_json(&changed).unwrap();
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                changed.as_bytes(),
+                &bootstrap,
+                ExternalRelayResponseKind::Attach,
+                &request_digest,
+                None,
+            )
+            .is_err()
+        );
+        let mut noncanonical = bytes.clone();
+        noncanonical.push(b' ');
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &noncanonical,
+                &bootstrap,
+                ExternalRelayResponseKind::Attach,
+                &request_digest,
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]
