@@ -1096,6 +1096,179 @@ fn verify_qualification_occurrence_under_contact_gate(
     }
 }
 
+/// Contact the consumer verifier below an existing born qualification root.
+/// The caller retains delivery custody; the existing attempt journal owns
+/// one-shot contact. This returns observation only, never qualification or
+/// provider-death authority. No public service enables this entry yet.
+pub(crate) fn verify_consumer_qualification_occurrence(
+    state: &AppState,
+    context: &HandlerContext,
+    intent: &RestoredVerifierAttemptIntent,
+    archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+) -> Result<RestoredVerifierAttemptRecord> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    crate::hosted_operation::with_qualification_occurrence_contact(
+        &intent.qualification_operation_id,
+        || {
+            use crate::operator_external_content::product_qualification::authenticate_consumer_root;
+            use ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose;
+            let RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &intent.purpose
+            else {
+                anyhow::bail!("consumer contact cannot run owner measurement");
+            };
+            let authority = state.state_store.pinned_state_authority()?;
+            let guard = authority.acquire_shared_guard()?;
+            let admission = authenticate_consumer_root(
+                state,
+                &authority,
+                &guard,
+                limits,
+                context,
+                coordinate,
+                &intent.qualification_operation_id,
+            )?;
+            let selection = admission.selection().clone();
+            archive.require_verifier_selection(&selection)?;
+            let qualified = state
+                .state_store
+                .snapshot_qualification_operation(&intent.qualification_operation_id)?
+                .context("consumer qualification disappeared")?;
+            let occurrence = qualified
+                .occurrence
+                .clone()
+                .context("consumer occurrence absent")?;
+            let source = get_operation(state, context, &qualified.intent.snapshot_operation_id)?;
+            let locator = source
+                .locator
+                .clone()
+                .context("consumer snapshot locator absent")?;
+            let readiness = source
+                .readiness
+                .clone()
+                .context("consumer snapshot readiness absent")?;
+            let qualification = state
+                .node_config
+                .runtime_snapshot_qualification
+                .iter()
+                .find(|binding| binding.digest() == qualified.intent.qualification_profile_digest)
+                .context("consumer signed qualification absent")?;
+            let producer = state
+                .node_config
+                .runtime_snapshot_production
+                .iter()
+                .find(|binding| {
+                    binding.id() == qualification.production_binding_id()
+                        && binding.digest() == qualification.production_binding_digest()
+                })
+                .context("consumer signed producer absent")?;
+            let challenge = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge {
+                schema: 1, intent: intent.clone(), selection: selection.clone(),
+            };
+            let upload = archive.delivery_descriptor_for_challenge(&challenge)?;
+            let request = RestoredVerifierAdapterRequest {
+                protocol: RESTORED_VERIFIER_ADAPTER_PROTOCOL.into(),
+                provider_spec_digest: qualification.provider_spec_digest().into(),
+                intent: intent.clone(),
+                consumer_selection: Some(selection),
+                source_intent: source.intent,
+                locator,
+                readiness,
+                qualification_intent: qualified.intent,
+                occurrence,
+                upload_descriptor: upload.inherited_descriptor().map_err(anyhow::Error::msg)?,
+                upload_bytes: archive.bytes(),
+                upload_sha256: archive.sha256().into(),
+            };
+            request.validate()?;
+            let access = producer.credential_access()?;
+            let credential = access.decode(state.vault.placement_credential(&access)?)?;
+            state
+                .external_placement_backends
+                .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
+            state
+                .state_store
+                .reserve_consumer_verifier_attempt(intent, admission)?;
+            // Root authentication is intentionally repeated and consumed, not
+            // cloned from reservation. The transaction checks live occurrence
+            // and same-occurrence prerequisite immediately before first contact.
+            let claim_admission = authenticate_consumer_root(
+                state,
+                &authority,
+                &guard,
+                limits,
+                context,
+                coordinate,
+                &intent.qualification_operation_id,
+            )?;
+            let claim = state
+                .state_store
+                .claim_consumer_verifier_attempt(&intent.operation_id, claim_admission)?;
+            let RestoredVerifierAttemptClaim::StartAttempt(_) = claim else {
+                return Ok(match claim {
+                    RestoredVerifierAttemptClaim::Reconcile(record)
+                    | RestoredVerifierAttemptClaim::Observed(record) => record,
+                    RestoredVerifierAttemptClaim::StartAttempt(_) => unreachable!(),
+                });
+            };
+            let deadline =
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
+                    u64::from(qualification.contact_timeout_seconds()),
+                ));
+            let attempted = state
+                .external_placement_backends
+                .verify_restored_snapshot_once(
+                    producer,
+                    qualification,
+                    &credential,
+                    &request,
+                    &upload,
+                    deadline,
+                );
+            match attempted {
+                Ok(output) => match output.value {
+                    RestoredVerifierAdapterResponse::ConsumerObserved {
+                        mut observation,
+                        evidence,
+                    } => {
+                        observation.contact_deadline_exceeded = output.deadline_exceeded;
+                        let retained = ryeos_external_execution_contract::canonical_json(&evidence)
+                            .and_then(|bytes| {
+                                state
+                                    .state_store
+                                    .bind_consumer_verifier_observation(&observation, &bytes)
+                            });
+                        match retained {
+                            Ok(record) => Ok(record),
+                            Err(error) => {
+                                state
+                                    .state_store
+                                    .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                                Err(error)
+                            }
+                        }
+                    }
+                    RestoredVerifierAdapterResponse::Uncertain { .. } => state
+                        .state_store
+                        .quarantine_restored_verifier_attempt(&intent.operation_id),
+                    RestoredVerifierAdapterResponse::Observed { .. } => {
+                        state
+                            .state_store
+                            .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                        anyhow::bail!("consumer contact returned owner measurement")
+                    }
+                },
+                Err(error) => {
+                    state
+                        .state_store
+                        .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                    Err(error)
+                }
+            }
+        },
+    )
+}
+
 /// Terminate one exact restored qualification Sandbox. A replayed or
 /// uncertain first contact can only observe the retained occurrence; it
 /// cannot repeat the POST. Provider terminal status is not writer exclusion.

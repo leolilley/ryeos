@@ -34,8 +34,10 @@ pub struct ContentQualificationProofRequest {
 impl ContentQualificationProofRequest {
     pub fn validate(&self) -> anyhow::Result<()> {
         self.launch.validate()?;
-        ryeos_runtime::validate_runtime_thread_id(&self.verifier_chain_root_id)?;
-        ryeos_runtime::validate_runtime_thread_id(&self.verifier_thread_id)?;
+        ryeos_runtime::validate_runtime_thread_id(&self.verifier_chain_root_id)
+            .map_err(anyhow::Error::msg)?;
+        ryeos_runtime::validate_runtime_thread_id(&self.verifier_thread_id)
+            .map_err(anyhow::Error::msg)?;
         Ok(())
     }
 }

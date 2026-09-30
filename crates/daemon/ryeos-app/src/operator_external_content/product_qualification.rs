@@ -11,7 +11,7 @@ mod consumer_definition_tests;
 pub(super) mod content_proof;
 pub mod launch;
 mod retained_verifier;
-pub(crate) use execution_evidence::AuthenticatedConsumerRoot;
+pub(crate) use execution_evidence::{AuthenticatedConsumerRoot, authenticate_consumer_root};
 pub(super) mod runtime_identity;
 
 use std::collections::BTreeMap;

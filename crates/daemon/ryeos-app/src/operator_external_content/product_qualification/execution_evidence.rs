@@ -91,7 +91,7 @@ impl AuthenticatedConsumerRoot {
 /// Load a born accepted qualification root at its exact coordinate. This
 /// authenticates root/purpose/artifact and installed-profile agreement only;
 /// it grants no contact, liveness or prerequisite-measurement permission.
-pub(super) fn authenticate_consumer_root(
+pub(crate) fn authenticate_consumer_root(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
