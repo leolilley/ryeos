@@ -547,8 +547,9 @@ impl RuntimeDb {
         let record = read_local_start(&self.conn, placement)?
             .context("qualification local spawn has no original start")?;
         ensure!(
-            record.phase == QualificationLocalStartPhase::ScopeBound,
-            "qualification local spawn requires original scope-bound attempt"
+            record.phase == QualificationLocalStartPhase::ScopeBound
+                && record.view_borrow_intent.is_some(),
+            "qualification local spawn requires its one-use original view borrow"
         );
         require_current_start(&self.conn, &record)?;
         Ok(record)
