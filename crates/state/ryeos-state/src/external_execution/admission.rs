@@ -1621,6 +1621,138 @@ pub mod test_support {
             .external_candidate
             .expect("qualified fixture capsule retains its external program"))
     }
+
+    /// Synthetic state fixture only: these hashes are not signed testimony,
+    /// authenticated activation records or installed runtime qualification.
+    pub fn content_candidate_capsule(
+        runtime_manifest_hash: &str,
+    ) -> anyhow::Result<AdmittedPersistentSessionCapsule> {
+        use crate::external_content::qualification_evidence::{
+            CONTENT_QUALIFICATION_EVIDENCE_SCHEMA, ContentQualificationEvidence,
+        };
+        use crate::external_content::qualification_purpose::{
+            QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, QualificationLaunchPurpose, QualificationSubject,
+        };
+        use crate::external_content::qualification_subject::{
+            CONTENT_QUALIFICATION_SUBJECT_SCHEMA, ContentQualificationSubject,
+        };
+        let mut requirement = fixture_requirement();
+        let mut capsule =
+            qualified_external_candidate_capsule(requirement.clone(), runtime_manifest_hash)?;
+        requirement.runtime_authority = super::ExternalCandidateRuntimeAuthority::ActivatedContent;
+        let profile = fixture_profile(&requirement)?;
+        let runtime = ExternalContentRealization {
+            id: requirement.runtime_product_declaration_id.clone(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: runtime_manifest_hash.into(),
+            entry_count: 1,
+            total_bytes: 1,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "candidate-runtime".into(),
+        };
+        let mut entries = fixture_provider_realizations()?
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        entries.push(runtime.clone());
+        let realizations = ExternalContentRealizationSet::new(entries)?;
+        let source = fixture_source_projection();
+        let use_context = ExternalCandidateQualificationUse::from_admitted_inputs(
+            &requirement,
+            &profile,
+            &source,
+            &realizations,
+            &[],
+            &BTreeMap::new(),
+        )?;
+        let selections = qualified_external_candidate_selections(
+            runtime_manifest_hash,
+            &requirement,
+            &use_context,
+        )?;
+        let product = &selections
+            .get(&requirement.runtime_product_declaration_id)
+            .ok_or_else(|| anyhow::anyhow!("synthetic runtime fixture is absent"))?
+            .qualification
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("synthetic proof is absent"))?
+            .evidence;
+        let evidence = ContentQualificationEvidence {
+            schema: CONTENT_QUALIFICATION_EVIDENCE_SCHEMA.into(),
+            purpose: QualificationLaunchPurpose {
+                schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
+                launch_id: format!("L-{}", "1".repeat(32)),
+                owner_fingerprint: product.product_coordinate.owner_principal.clone(),
+                subject: QualificationSubject::ActivatedContent {
+                    content: ContentQualificationSubject {
+                        schema: CONTENT_QUALIFICATION_SUBJECT_SCHEMA,
+                        activation_receipt_hash: "2".repeat(64),
+                        activation_program_digest: "3".repeat(64),
+                        binding_hash: "4".repeat(64),
+                        consumer_ref: "worker:fixtures/content-candidate".into(),
+                        declaration_id: requirement.runtime_product_declaration_id.clone(),
+                        manifest_hash: runtime_manifest_hash.into(),
+                        manifest_kind: crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.into(),
+                        target_node_fingerprint: "5".repeat(64),
+                        realization: runtime,
+                    },
+                },
+                policy_source: product.policy_source.clone(),
+                consumer_definitions: None,
+                consumer_content: None,
+                producer_recipe_sources: BTreeMap::new(),
+                subject_declaration_id: product.verifier.subject_declaration_id.clone(),
+                subject_manifest_hash: runtime_manifest_hash.into(),
+                required_claims: super::REQUIRED_CLAIMS
+                    .iter()
+                    .map(|claim| (*claim).into())
+                    .collect(),
+                admitted_parameters_digest: product.verifier.admitted_parameters_digest.clone(),
+                verifier_ref: product.verifier.canonical_ref.clone(),
+                verifier_effective_definition_digest: product
+                    .verifier
+                    .effective_definition_digest
+                    .clone(),
+                verifier_realized_definition_digest: product
+                    .verifier
+                    .effective_definition_digest
+                    .clone(),
+            },
+            verifier: product.verifier.clone(),
+            execution_proof: product.execution_proof.clone(),
+            result: product.result.clone(),
+        };
+        evidence.validate()?;
+        let retained = crate::objects::RetainedExternalRuntimeContentQualification {
+            binding_hash: "6".repeat(64),
+            runtime_manifest_hash: runtime_manifest_hash.into(),
+            activation_ref: "config:fixtures/runtime-activation".into(),
+            coordinate_id: crate::external_content::qualification_publication::coordinate_id(
+                &evidence,
+            )?,
+            attestation_hash: "7".repeat(64),
+            evidence,
+        };
+        capsule.external_candidate =
+            Some(requirement.resolve_for_content(&retained, &use_context)?);
+        capsule.retained_external_runtime_content_qualification = Some(retained);
+        capsule.retained_product_selections = None;
+        capsule.structured_session_profile = Some(profile);
+        let derived = capsule
+            .exact_program
+            .pointer_mut("/resolution_output/composed/derived")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| anyhow::anyhow!("synthetic capsule has no derived inventory"))?;
+        derived.remove(EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY);
+        derived.insert(
+            EXTERNAL_REALIZATIONS_DERIVED_KEY.into(),
+            realizations.to_value()?,
+        );
+        capsule.exact_program_hash = canonical_value_digest(&capsule.exact_program)?;
+        capsule.validate()?;
+        Ok(capsule)
+    }
 }
 
 #[cfg(test)]
@@ -2022,6 +2154,62 @@ mod tests {
         proof.result.claims = claims;
         proof.verifier.result_digest = proof.result.digest().unwrap();
         ResolvedExternalProductSelections::new(selections).unwrap()
+    }
+
+    #[test]
+    fn activated_capsule_reconstructs_without_product_runtime_authority() {
+        let capsule = test_support::content_candidate_capsule(&"a".repeat(64)).unwrap();
+        capsule.validate().unwrap();
+        assert!(capsule.retained_product_selections.is_none());
+        let program = capsule.external_candidate.as_ref().unwrap();
+        assert!(matches!(
+            program.runtime_source,
+            ExternalCandidateRuntimeSource::ActivatedContent { .. }
+        ));
+        program
+            .verify_runtime_authority(
+                None,
+                capsule
+                    .retained_external_runtime_content_qualification
+                    .as_ref(),
+            )
+            .unwrap();
+        assert!(program.verify_selections(None).is_err());
+        let overlap_error = program
+            .verify_runtime_authority(
+                Some(&selections()),
+                capsule
+                    .retained_external_runtime_content_qualification
+                    .as_ref(),
+            )
+            .unwrap_err();
+        assert!(
+            overlap_error
+                .to_string()
+                .contains("also carries product authority")
+        );
+        let mut missing = capsule.clone();
+        missing.retained_external_runtime_content_qualification = None;
+        assert!(missing.validate().is_err());
+        let mut overlap = capsule.clone();
+        overlap.retained_product_selections = Some(selections());
+        assert!(overlap.validate().is_err());
+        let mut changed = capsule.clone();
+        changed
+            .retained_external_runtime_content_qualification
+            .as_mut()
+            .unwrap()
+            .evidence
+            .purpose
+            .verifier_realized_definition_digest = "b".repeat(64);
+        assert!(changed.validate().is_err());
+        let mut wrong_subject = capsule.clone();
+        wrong_subject
+            .external_candidate
+            .as_mut()
+            .unwrap()
+            .runtime_manifest_hash = "c".repeat(64);
+        assert!(wrong_subject.validate().is_err());
     }
 
     #[test]
