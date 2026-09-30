@@ -23,6 +23,7 @@ pub struct ExternalExecutionSection;
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ExternalWorkloadBinding {
     StructuredSession(ExternalStructuredSessionBinding),
+    QualificationStructuredSession(ExternalQualificationStructuredSessionBinding),
     DirectCommand {},
 }
 
@@ -40,40 +41,108 @@ pub(crate) struct ExternalStructuredSessionBinding {
     pub(crate) connector_artifact_bytes: u64,
 }
 
+/// A signed, zero-export placement choice for proving one captured runtime
+/// through its Worker recipe before that runtime has a qualification. The
+/// accepted root and current occurrence supply the use and contact authority;
+/// this binding only selects exact executable and Worker identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalQualificationStructuredSessionBinding {
+    pub(crate) provider_declaration_id: String,
+    pub(crate) provider_configuration_destination: String,
+    pub(crate) requirement_digest: String,
+    pub(crate) worker_profile_hash: String,
+    pub(crate) runtime_manifest_hash: String,
+    pub(crate) runtime_member_sha256: String,
+    pub(crate) configuration_adapter_artifact_hash: String,
+    pub(crate) configuration_adapter_artifact_bytes: u64,
+    pub(crate) connector_protocol: String,
+    pub(crate) connector_artifact_hash: String,
+    pub(crate) connector_artifact_bytes: u64,
+}
+
 impl ExternalWorkloadBinding {
     pub(crate) fn structured_session(&self) -> Result<&ExternalStructuredSessionBinding> {
         match self {
             Self::StructuredSession(session) => Ok(session),
+            Self::QualificationStructuredSession(_) => anyhow::bail!(
+                "qualification-only binding cannot authorize an ordinary structured session"
+            ),
             Self::DirectCommand {} => anyhow::bail!(
                 "external direct-command binding cannot authorize a structured session"
             ),
         }
     }
 
+    pub(crate) fn qualification_structured_session(
+        &self,
+    ) -> Result<&ExternalQualificationStructuredSessionBinding> {
+        match self {
+            Self::QualificationStructuredSession(session) => Ok(session),
+            _ => anyhow::bail!("external binding has no qualification-only session authority"),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
-        let Self::StructuredSession(session) = self else {
-            return Ok(());
+        let (
+            provider_declaration_id,
+            provider_configuration_destination,
+            runtime_manifest_hash,
+            configuration_adapter_artifact_hash,
+            configuration_adapter_artifact_bytes,
+            connector_protocol,
+            connector_artifact_hash,
+            connector_artifact_bytes,
+        ) = match self {
+            Self::StructuredSession(session) => (
+                &session.provider_declaration_id,
+                &session.provider_configuration_destination,
+                &session.runtime_manifest_hash,
+                &session.configuration_adapter_artifact_hash,
+                session.configuration_adapter_artifact_bytes,
+                &session.connector_protocol,
+                &session.connector_artifact_hash,
+                session.connector_artifact_bytes,
+            ),
+            Self::QualificationStructuredSession(session) => {
+                validate_content_identity(&session.requirement_digest)?;
+                validate_content_identity(&session.worker_profile_hash)?;
+                validate_content_identity(&session.runtime_member_sha256)?;
+                (
+                    &session.provider_declaration_id,
+                    &session.provider_configuration_destination,
+                    &session.runtime_manifest_hash,
+                    &session.configuration_adapter_artifact_hash,
+                    session.configuration_adapter_artifact_bytes,
+                    &session.connector_protocol,
+                    &session.connector_artifact_hash,
+                    session.connector_artifact_bytes,
+                )
+            }
+            Self::DirectCommand {} => return Ok(()),
         };
-        ryeos_state::external_content::products::validate_name(&session.provider_declaration_id)?;
+        ryeos_state::external_content::products::validate_name(provider_declaration_id)?;
         ryeos_state::objects::validate_session_configuration_destination(
-            &session.provider_configuration_destination,
+            provider_configuration_destination,
         )?;
         for value in [
-            &session.runtime_manifest_hash,
-            &session.runtime_selection_identity,
-            &session.configuration_adapter_artifact_hash,
-            &session.connector_artifact_hash,
+            runtime_manifest_hash,
+            configuration_adapter_artifact_hash,
+            connector_artifact_hash,
         ] {
             validate_content_identity(value)?;
         }
+        if let Self::StructuredSession(session) = self {
+            validate_content_identity(&session.runtime_selection_identity)?;
+        }
         for bytes in [
-            session.configuration_adapter_artifact_bytes,
-            session.connector_artifact_bytes,
+            configuration_adapter_artifact_bytes,
+            connector_artifact_bytes,
         ] {
             validate_artifact_bytes(bytes)?;
         }
         ensure!(
-            session.connector_protocol
+            connector_protocol.as_str()
                 == ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
             "placement binding requires the exact bounded connector contract"
         );
@@ -308,6 +377,10 @@ impl BindingDocument {
                 (1..=self.max_workspace_bytes).contains(&self.max_export_bytes)
                     && self.max_transfer_bytes >= self.max_export_bytes,
                 "structured-session placement export budgets exceed bounds"
+            ),
+            ExternalWorkloadBinding::QualificationStructuredSession(_) => ensure!(
+                self.max_export_bytes == 0 && self.runtime_content_qualification.is_none(),
+                "qualification-only placement cannot authorize candidate export or borrow runtime compatibility"
             ),
             ExternalWorkloadBinding::DirectCommand {} => ensure!(
                 self.max_export_bytes == 0,
@@ -560,6 +633,15 @@ impl RetainedExternalExecutionBinding {
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
     ) -> Result<()> {
         check_program(&self.document, program)
+    }
+    /// Signed selection only. The accepted root, bound occurrence and current
+    /// launch owner must be checked again before any provider contact.
+    pub(crate) fn check_qualification_program(
+        &self,
+        program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+    ) -> Result<()> {
+        self.validate()?;
+        check_qualification_program(&self.document, program)
     }
     /// Rejoin a compiled ordinary command to this exact retained generation.
     /// This is a content/limit check, not guest capability evidence or contact
@@ -987,6 +1069,13 @@ impl InstalledExternalExecutionBinding {
         check_program(&self.document, program)
     }
 
+    pub(crate) fn check_qualification_program(
+        &self,
+        program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+    ) -> Result<()> {
+        check_qualification_program(&self.document, program)
+    }
+
     #[cfg(test)]
     pub(crate) fn test_fixture() -> Self {
         let retained = RetainedExternalExecutionBinding::test_fixture();
@@ -1075,6 +1164,30 @@ fn check_program(
     Ok(())
 }
 
+fn check_qualification_program(
+    document: &BindingDocument,
+    program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+) -> Result<()> {
+    let session = document.workload.qualification_structured_session()?;
+    program.validate()?;
+    ensure!(
+        document.max_export_bytes == 0
+            && document.runtime_content_qualification.is_none()
+            && program.requirement.protocol == document.protocol
+            && program.requirement.provider_declaration_id == session.provider_declaration_id
+            && program.requirement.provider_configuration_destination
+                == session.provider_configuration_destination
+            && program.requirement.connector_protocol == session.connector_protocol
+            && program.requirement.qualification_requirement_digest()?
+                == session.requirement_digest
+            && program.qualification_use.profile_hash == session.worker_profile_hash
+            && program.runtime_manifest_hash == session.runtime_manifest_hash
+            && program.runtime_member.executable_sha256 == session.runtime_member_sha256,
+        "qualification-only program contradicts its signed zero-export placement binding"
+    );
+    Ok(())
+}
+
 struct ParsedBinding {
     id: String,
     document: BindingDocument,
@@ -1151,6 +1264,47 @@ mod workload_binding_tests {
 
     fn document() -> BindingDocument {
         RetainedExternalExecutionBinding::test_fixture().document
+    }
+
+    #[test]
+    fn qualification_binding_has_exact_identity_and_no_export_or_ordinary_session_authority() {
+        let mut document = document();
+        let ExternalWorkloadBinding::StructuredSession(ordinary) = &document.workload else {
+            unreachable!("fixture has an ordinary session")
+        };
+        let ordinary = ordinary.clone();
+        document.workload = ExternalWorkloadBinding::QualificationStructuredSession(
+            ExternalQualificationStructuredSessionBinding {
+                provider_declaration_id: ordinary.provider_declaration_id.clone(),
+                provider_configuration_destination: ordinary
+                    .provider_configuration_destination
+                    .clone(),
+                requirement_digest: "a".repeat(64),
+                worker_profile_hash: "b".repeat(64),
+                runtime_manifest_hash: ordinary.runtime_manifest_hash.clone(),
+                runtime_member_sha256: "c".repeat(64),
+                configuration_adapter_artifact_hash: ordinary
+                    .configuration_adapter_artifact_hash
+                    .clone(),
+                configuration_adapter_artifact_bytes: ordinary.configuration_adapter_artifact_bytes,
+                connector_protocol: ordinary.connector_protocol.clone(),
+                connector_artifact_hash: ordinary.connector_artifact_hash.clone(),
+                connector_artifact_bytes: ordinary.connector_artifact_bytes,
+            },
+        );
+        assert!(document.validate().is_err());
+        document.max_export_bytes = 0;
+        document.validate().unwrap();
+        assert!(document.workload.structured_session().is_err());
+        assert!(document.workload.qualification_structured_session().is_ok());
+        document.runtime_content_qualification = Some(ExternalRuntimeContentQualificationBinding {
+            activation_ref: "config:codex/runtime-activation".into(),
+            coordinate_id: "1".repeat(64),
+            attestation_hash: "2".repeat(64),
+            owner_principal: format!("fp:{}", "3".repeat(64)),
+            required_claims: vec!["runtime_compatible".into()],
+        });
+        assert!(document.validate().is_err());
     }
 
     #[test]

@@ -1513,6 +1513,11 @@ fn require_current_runtime_content_qualification(
 > {
     let session = match &contract.workload {
         crate::node_config::sections::external_execution::ExternalWorkloadBinding::StructuredSession(session) => session,
+        crate::node_config::sections::external_execution::ExternalWorkloadBinding::QualificationStructuredSession(_) => {
+            ensure!(contract.runtime_content_qualification.is_none(),
+                "qualification-only workload cannot inherit ordinary runtime compatibility testimony");
+            return Ok(None);
+        }
         crate::node_config::sections::external_execution::ExternalWorkloadBinding::DirectCommand {} => {
             ensure!(contract.runtime_content_qualification.is_none(),
                 "direct workload cannot inherit structured-session compatibility testimony");
