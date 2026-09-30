@@ -16,14 +16,14 @@ use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
 const OPERATIONAL_SCHEMA_VERSION: i32 = 6;
-// Dispatch-effect records retain complete launch and caller authority. Epoch 12
-// is the clean-cut activation for launch-capsule schema 31 and its explicit
-// qualification subject. Predecessor dispatch rows cannot prove that authority
-// and must be retired under the supported explicit replay-index reset.
+// Dispatch-effect records retain complete launch and caller authority. Epoch 13
+// is the clean-cut activation for launch-capsule schema 32 and its retained
+// remote-verifier source inventory. Predecessor dispatch rows cannot prove that
+// authority and must be retired under the supported explicit replay-index reset.
 // Provider-call records do not carry that dependency and remain current.
-const REPLAY_INDEX_EPOCH: i32 = 12;
+const REPLAY_INDEX_EPOCH: i32 = 13;
 #[cfg(test)]
-const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 31;
+const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 32;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
@@ -132,7 +132,7 @@ CREATE TABLE replay_index_epoch (
     epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
 
-INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 12);
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 13);
 
 CREATE TABLE credential_profiles (
     profile_id TEXT PRIMARY KEY,
@@ -293,9 +293,9 @@ CREATE TABLE replay_index_epoch (
 INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 4);
 "#;
 
-/// Exact immediate-predecessor cut. Dispatch effects from epoch 11 predate the
-/// schema-31 qualification subject; provider-call evidence is independent of
-/// that launch authority and remains current.
+/// Exact immediate-predecessor cut. Dispatch effects from epoch 12 predate the
+/// schema-32 remote-verifier source inventory; provider-call evidence is
+/// independent of that launch authority and remains current.
 const REPLAY_INDEX_RESET_DDL: &str = r#"
 DELETE FROM replay_records WHERE namespace = 'dispatch.effect';
 "#;
@@ -4644,14 +4644,14 @@ mod tests {
     #[test]
     fn fresh_schema_declares_only_the_current_replay_epoch() {
         assert!(SCHEMA_SQL.contains("answer_digest TEXT NOT NULL"));
-        assert!(SCHEMA_SQL.contains("VALUES (1, 12)"));
-        assert!(!SCHEMA_SQL.contains("VALUES (1, 11)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 13)"));
+        assert!(!SCHEMA_SQL.contains("VALUES (1, 12)"));
     }
 
     #[test]
     fn replay_epoch_fences_the_current_dispatch_effect_capsule_contract() {
-        assert_eq!(REPLAY_INDEX_EPOCH, 12);
-        assert_eq!(DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA, 31);
+        assert_eq!(REPLAY_INDEX_EPOCH, 13);
+        assert_eq!(DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA, 32);
         assert_eq!(
             DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA,
             crate::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
