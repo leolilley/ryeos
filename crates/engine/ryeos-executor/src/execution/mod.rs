@@ -25,6 +25,7 @@ pub(crate) mod prepared_content_identity;
 pub(crate) mod prepared_launch_cache;
 pub(crate) mod process_attachment;
 pub mod project_source;
+pub(crate) mod retained_consumer_archive;
 pub mod runner;
 pub mod runtime_dispatch;
 pub(crate) mod source_closure;
