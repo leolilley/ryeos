@@ -35,6 +35,8 @@ struct ReleasedQualificationWorker {
     state_root: lillux::PinnedDirectory,
     custody: Arc<QualificationWorkspaceCustody>,
     boot_identity: String,
+    observation_sink: PersistentSessionObservationSink,
+    wire_max_bytes: u32,
 }
 
 enum LaunchOutcome {
@@ -102,6 +104,7 @@ pub(crate) struct ExternalQualificationLocalWorker {
     _custody: Arc<QualificationWorkspaceCustody>,
     process_identity: ryeos_app::process::ExecutionProcessIdentity,
     boot_identity: String,
+    wire_max_bytes: u32,
     retired: bool,
 }
 
@@ -116,6 +119,10 @@ impl ExternalQualificationLocalWorker {
 
     pub(crate) fn boot_identity(&self) -> &str {
         &self.boot_identity
+    }
+
+    pub(crate) fn wire_max_bytes(&self) -> u32 {
+        self.wire_max_bytes
     }
 
     pub(crate) fn original_workspace(&self) -> &Arc<TempDirGuard> {
@@ -180,7 +187,7 @@ pub(crate) fn start_external_qualification_local_worker(
     state: &ryeos_app::state::AppState,
     coordinate: &ConsumerRuntimeVerificationCoordinate,
     ready: ExternalQualificationReady,
-    observation_sink: PersistentSessionObservationSink,
+    make_observation_sink: impl FnOnce(u32) -> Result<PersistentSessionObservationSink>,
 ) -> Result<ExternalQualificationLocalWorker> {
     let placement = ready.placement().to_owned();
     let binding_digest = ready.binding().digest()?;
@@ -247,6 +254,8 @@ pub(crate) fn start_external_qualification_local_worker(
             )?;
                 let (mut plan, session, mut mounts, mut lifelines, workspace_path, state_root_path) =
                     materials.into_spawn_parts();
+                let wire_max_bytes = session.wire.max_frame_bytes;
+                let observation_sink = make_observation_sink(wire_max_bytes)?;
                 ensure!(
                     workspace_path == project && state_root_path == state_root.path(),
                     "Q prepared material changed its original runtime roots"
@@ -428,6 +437,8 @@ pub(crate) fn start_external_qualification_local_worker(
                         state_root,
                         custody,
                         boot_identity,
+                        observation_sink,
+                        wire_max_bytes,
                     }))
                 })
             })();
@@ -491,6 +502,8 @@ pub(crate) fn start_external_qualification_local_worker(
         state_root,
         custody,
         boot_identity,
+        observation_sink,
+        wire_max_bytes,
     } = prepared;
     let settlement_state = state.clone();
     let settlement_placement = placement.clone();
@@ -528,6 +541,7 @@ pub(crate) fn start_external_qualification_local_worker(
         _custody: custody,
         process_identity,
         boot_identity,
+        wire_max_bytes,
         retired: false,
     })
 }
