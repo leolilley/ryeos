@@ -331,9 +331,7 @@ impl ExecutableExternalPlacementBackend {
         // cannot queue behind a new exclusive fork after budget admission.
         let descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)?;
         self.qualify_offline(contract, credential)?;
-        let network_inputs = capture_lifecycle_network_inputs(
-            &contract.controller_transport.http()?.network_inputs,
-        )?;
+        let network_inputs = capture_lifecycle_network_inputs(&contract.provider_network_inputs)?;
         let request_handle = lillux::sealed_memfd(
             c"ryeos-lifecycle-operation-request",
             &request.canonical_bytes()?,

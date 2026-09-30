@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, ensure};
 use ryeos_state::external_execution::transport::{
     ExternalControllerTransportContract, ExternalControllerTransportSelection,
+    ExternalNetworkInputPolicy,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -311,6 +312,9 @@ struct BindingDocument {
     network_policy: String,
     storage_policy: String,
     cleanup_proof: String,
+    /// Host adapter contact inputs are signed independently of the guest's
+    /// controller transport. A file-relay guest has no network authority.
+    provider_network_inputs: ExternalNetworkInputPolicy,
     controller_transport: ExternalControllerTransportSelection,
     controller_tls_root_certificates_der_base64: Vec<String>,
     max_active: u16,
@@ -339,8 +343,8 @@ impl BindingDocument {
             self.kind == "node"
                 && self.schema
                     == match &self.controller_transport {
-                        ExternalControllerTransportSelection::HttpJson(_) => 15,
-                        ExternalControllerTransportSelection::ControllerFileRelay(_) => 16,
+                        ExternalControllerTransportSelection::HttpJson(_) => 17,
+                        ExternalControllerTransportSelection::ControllerFileRelay(_) => 18,
                     },
             "unsupported external placement binding schema for selected transport"
         );
@@ -436,6 +440,7 @@ impl BindingDocument {
             ),
         }
         self.controller_transport.validate()?;
+        self.provider_network_inputs.validate()?;
         match &self.controller_transport {
             ExternalControllerTransportSelection::HttpJson(http) => ensure!(
                 self.network_policy == "supervisor_pinned_owner_only_candidate_denied_v1"
@@ -480,6 +485,7 @@ impl BindingDocument {
             network_policy: self.network_policy.clone(),
             storage_policy: self.storage_policy.clone(),
             cleanup_proof: self.cleanup_proof.clone(),
+            provider_network_inputs: self.provider_network_inputs.clone(),
             controller_transport: self.controller_transport.clone(),
             controller_tls_root_certificates_der_base64: self
                 .controller_tls_root_certificates_der_base64
@@ -521,6 +527,7 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) network_policy: String,
     pub(crate) storage_policy: String,
     pub(crate) cleanup_proof: String,
+    pub(crate) provider_network_inputs: ExternalNetworkInputPolicy,
     pub(crate) controller_transport: ExternalControllerTransportSelection,
     pub(crate) controller_tls_root_certificates_der_base64: Vec<String>,
     pub(crate) max_active: u16,
@@ -740,21 +747,34 @@ impl RetainedExternalExecutionBinding {
 
         let controller_tls_root_certificates_der_base64 =
             vec![STANDARD.encode(b"fixture controller TLS root")];
+        let provider_network_inputs = ExternalNetworkInputPolicy {
+            resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                source: "/etc/resolv.conf".into(),
+                max_bytes: 64 * 1024,
+            },
+            hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                source: "/etc/hosts".into(),
+                max_bytes: 64 * 1024,
+            },
+        };
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 15,
+            schema: 17,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
-            workload: ExternalWorkloadBinding::StructuredSession(ExternalStructuredSessionBinding {
-                provider_declaration_id: "codex-hosted".into(),
-                provider_configuration_destination: "environments.toml".into(),
-                runtime_manifest_hash: "b".repeat(64),
-                runtime_selection_identity: "c".repeat(64),
-                configuration_adapter_artifact_hash: "2".repeat(64),
-                configuration_adapter_artifact_bytes: 4096,
-                connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
-                connector_artifact_hash: "f".repeat(64),
-                connector_artifact_bytes: 4096,
-            }),
+            workload: ExternalWorkloadBinding::StructuredSession(
+                ExternalStructuredSessionBinding {
+                    provider_declaration_id: "codex-hosted".into(),
+                    provider_configuration_destination: "environments.toml".into(),
+                    runtime_manifest_hash: "b".repeat(64),
+                    runtime_selection_identity: "c".repeat(64),
+                    configuration_adapter_artifact_hash: "2".repeat(64),
+                    configuration_adapter_artifact_bytes: 4096,
+                    connector_protocol:
+                        ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                    connector_artifact_hash: "f".repeat(64),
+                    connector_artifact_bytes: 4096,
+                },
+            ),
             backend: "fixture".into(),
             account: "account".into(),
             capacity_group: "candidate-workers".into(),
@@ -779,31 +799,25 @@ impl RetainedExternalExecutionBinding {
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
             storage_policy: "ephemeral_private_candidate_v1".into(),
             cleanup_proof: "provider_terminal_occurrence_v1".into(),
-            controller_transport: ExternalControllerTransportSelection::HttpJson(ExternalControllerTransportContract {
-                schema: 2,
-                https_origin: "https://controller.example:7443".into(),
-                route_contract:
-                    ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
-                        .into(),
-                tls_root_bundle_digest:
-                    ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
-                        &controller_tls_root_certificates_der_base64,
-                    )
-                    .unwrap(),
-                connect_timeout_ms: 5_000,
-                request_timeout_ms: 10_000,
-                maximum_response_bytes: 1024 * 1024,
-                network_inputs: ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
-                    resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                        source: "/etc/resolv.conf".into(),
-                        max_bytes: 64 * 1024,
-                    },
-                    hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                        source: "/etc/hosts".into(),
-                        max_bytes: 64 * 1024,
-                    },
+            provider_network_inputs: provider_network_inputs.clone(),
+            controller_transport: ExternalControllerTransportSelection::HttpJson(
+                ExternalControllerTransportContract {
+                    schema: 2,
+                    https_origin: "https://controller.example:7443".into(),
+                    route_contract:
+                        ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
+                            .into(),
+                    tls_root_bundle_digest:
+                        ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                            &controller_tls_root_certificates_der_base64,
+                        )
+                        .unwrap(),
+                    connect_timeout_ms: 5_000,
+                    request_timeout_ms: 10_000,
+                    maximum_response_bytes: 1024 * 1024,
+                    network_inputs: provider_network_inputs,
                 },
-            }),
+            ),
             controller_tls_root_certificates_der_base64,
             max_active: 1,
             timeout_seconds: 60,
@@ -895,6 +909,7 @@ impl RetainedExternalExecutionBinding {
     ) -> Result<Self> {
         program.validate()?;
         controller_transport.validate()?;
+        let provider_network_inputs = controller_transport.network_inputs.clone();
         ensure!(
             ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
                 &controller_tls_root_certificates_der_base64,
@@ -903,7 +918,7 @@ impl RetainedExternalExecutionBinding {
         );
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 15,
+            schema: 17,
             protocol: program.requirement.protocol.clone(),
             workload: ExternalWorkloadBinding::StructuredSession(
                 ExternalStructuredSessionBinding {
@@ -940,6 +955,7 @@ impl RetainedExternalExecutionBinding {
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
             storage_policy: "ephemeral_private_candidate_v1".into(),
             cleanup_proof: "provider_terminal_occurrence_v1".into(),
+            provider_network_inputs,
             controller_transport: controller_transport.into(),
             controller_tls_root_certificates_der_base64,
             max_active: 1,
@@ -1611,12 +1627,28 @@ mod workload_binding_tests {
         let session = document();
         session.validate().unwrap();
         let value = serde_json::to_value(&session).unwrap();
-        assert_eq!(value["schema"], 15);
+        assert_eq!(value["schema"], 17);
         assert_eq!(value["workload"]["kind"], "structured_session");
         assert!(value.get("provider_declaration_id").is_none());
         assert!(value.get("runtime_selection_identity").is_none());
         let decoded: BindingDocument = serde_json::from_value(value.clone()).unwrap();
         assert!(decoded == session);
+        let mut independent_host_policy = session.clone();
+        independent_host_policy
+            .provider_network_inputs
+            .resolver
+            .source = "/etc/ryeos-provider-resolver".into();
+        independent_host_policy.validate().unwrap();
+        assert_eq!(
+            independent_host_policy
+                .backend_contract()
+                .provider_network_inputs,
+            independent_host_policy.provider_network_inputs
+        );
+        assert_eq!(
+            independent_host_policy.controller_transport, session.controller_transport,
+            "host provider network inputs must not change guest controller transport"
+        );
 
         let mut direct = session.clone();
         direct.workload = ExternalWorkloadBinding::DirectCommand {};
@@ -1632,6 +1664,22 @@ mod workload_binding_tests {
         assert!(direct.workload.structured_session().is_err());
 
         for original in [value, direct_value] {
+            let mut missing_provider_inputs = original.clone();
+            missing_provider_inputs
+                .as_object_mut()
+                .unwrap()
+                .remove("provider_network_inputs");
+            assert!(serde_json::from_value::<BindingDocument>(missing_provider_inputs).is_err());
+            for predecessor_schema in [15, 16] {
+                let mut predecessor = original.clone();
+                predecessor["schema"] = serde_json::json!(predecessor_schema);
+                assert!(
+                    serde_json::from_value::<BindingDocument>(predecessor)
+                        .unwrap()
+                        .validate()
+                        .is_err()
+                );
+            }
             let mut unknown = original.clone();
             unknown["workload"]["unexpected"] = serde_json::json!(true);
             assert!(serde_json::from_value::<BindingDocument>(unknown).is_err());
