@@ -2289,16 +2289,20 @@ fn admit_session_capsule(
                 || supports_private_descriptor_realizations(session),
         )?;
     }
-    let retained_external_runtime_qualification = if let Some(program) = external_candidate.as_ref()
-    {
-        // This capsule is never booted under the controller's local process
-        // scope. Its signed connector route and external placement
-        // incarnation own start, cleanup, and death proof instead.
-        ryeos_app::external_placement::preflight_external_candidate_program(state, program)?
-    } else {
-        validate_session_process_control(state, session)?;
-        None
-    };
+    let (retained_external_runtime_qualification, retained_external_runtime_content_qualification) =
+        if let Some(program) = external_candidate.as_ref() {
+            // This capsule is never booted under the controller's local process
+            // scope. Its signed connector route and external placement
+            // incarnation own start, cleanup, and death proof instead.
+            let (guest, content) =
+                ryeos_app::external_placement::preflight_external_candidate_program(
+                    state, program,
+                )?;
+            (guest, Some(content))
+        } else {
+            validate_session_process_control(state, session)?;
+            (None, None)
+        };
     let execution_closure = {
         let _permit = state
             .write_barrier
@@ -2347,6 +2351,7 @@ fn admit_session_capsule(
         exact_program_hash,
         retained_product_selections,
         retained_external_runtime_qualification,
+        retained_external_runtime_content_qualification,
         lifecycle,
         wire,
         artifact_identity,
@@ -5396,6 +5401,7 @@ session:
             exact_program_hash,
             retained_product_selections: None,
             retained_external_runtime_qualification: None,
+            retained_external_runtime_content_qualification: None,
             lifecycle: PersistentSessionLifecycleContract {
                 max_processes: 1,
                 max_inflight_per_process: 1,

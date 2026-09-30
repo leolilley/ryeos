@@ -1321,6 +1321,7 @@ pub mod test_support {
             exact_program,
             retained_product_selections: Some(selections),
             retained_external_runtime_qualification: None,
+            retained_external_runtime_content_qualification: None,
             lifecycle: PersistentSessionLifecycleContract {
                 max_processes: 1,
                 max_inflight_per_process: 1,
@@ -2568,6 +2569,7 @@ mod tests {
             exact_program,
             retained_product_selections: Some(selections),
             retained_external_runtime_qualification: None,
+            retained_external_runtime_content_qualification: None,
             lifecycle: PersistentSessionLifecycleContract {
                 max_processes: 1,
                 max_inflight_per_process: 1,

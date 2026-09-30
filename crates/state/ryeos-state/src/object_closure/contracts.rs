@@ -1105,6 +1105,19 @@ fn links_persistent_session_capsule(value: &Value) -> Result<ContractLinks, Stri
             return Err("persistent-session capsule missing external runtime qualification".into());
         }
     }
+    match value.get("retained_external_runtime_content_qualification") {
+        Some(Value::Null) => {}
+        Some(proof) => super::push_required_object_edge(
+            proof,
+            "attestation_hash",
+            ExpectedObject::Kind("attestation"),
+            None,
+            &mut links.object_edges,
+        )?,
+        None => {
+            return Err("persistent-session capsule missing runtime content qualification".into());
+        }
+    }
     push_evidence_attachment_event_edges(
         value.pointer("/exact_program/evidence_attachments"),
         &mut links,

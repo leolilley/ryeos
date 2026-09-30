@@ -35,7 +35,7 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // executable product selection is not a substitute for placement qualification.
 // v18 also binds the published product owner's principal, so retained proof
 // authentication never guesses the owner from a later node configuration.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 18;
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 19;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES: usize = 4_096;
@@ -723,6 +723,44 @@ impl RetainedExternalRuntimeQualification {
     }
 }
 
+/// Historical session-runtime compatibility testimony, not guest-owner
+/// snapshot qualification or a renewed permission for provider contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedExternalRuntimeContentQualification {
+    pub binding_hash: String,
+    pub runtime_manifest_hash: String,
+    pub activation_ref: String,
+    pub coordinate_id: String,
+    pub attestation_hash: String,
+    pub evidence: crate::external_content::qualification_evidence::ContentQualificationEvidence,
+}
+
+impl RetainedExternalRuntimeContentQualification {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (label, hash) in [
+            ("runtime content binding", &self.binding_hash),
+            ("runtime content manifest", &self.runtime_manifest_hash),
+            ("runtime content coordinate", &self.coordinate_id),
+            ("runtime content attestation", &self.attestation_hash),
+        ] {
+            super::thread_snapshot::validate_canonical_hash(label, hash)?;
+        }
+        crate::external_content::products::validate_canonical_unsuffixed_ref(&self.activation_ref)?;
+        if !self.activation_ref.starts_with("config:") {
+            anyhow::bail!("retained runtime content requires an activation config ref");
+        }
+        self.evidence.validate()?;
+        if self.evidence.result.subject_manifest_hash != self.runtime_manifest_hash
+            || crate::external_content::qualification_publication::coordinate_id(&self.evidence)?
+                != self.coordinate_id
+        {
+            anyhow::bail!("retained session-runtime content differs from its exact testimony");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedPersistentSessionCapsule {
@@ -741,6 +779,9 @@ pub struct AdmittedPersistentSessionCapsule {
     /// Separate CAS-owned proof of the placement guest runtime, if applicable.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub retained_external_runtime_qualification: Option<RetainedExternalRuntimeQualification>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub retained_external_runtime_content_qualification:
+        Option<RetainedExternalRuntimeContentQualification>,
     pub lifecycle: PersistentSessionLifecycleContract,
     pub wire: PersistentSessionWireContract,
     pub artifact_identity: AdmittedLaunchArtifactIdentity,
@@ -843,6 +884,23 @@ impl AdmittedPersistentSessionCapsule {
                 anyhow::bail!("external runtime proof has no external candidate");
             }
             proof.validate()?;
+        }
+        match (
+            &self.external_candidate,
+            &self.retained_external_runtime_content_qualification,
+        ) {
+            (Some(program), Some(proof)) => {
+                proof.validate()?;
+                if proof.runtime_manifest_hash != program.runtime_manifest_hash {
+                    anyhow::bail!(
+                        "retained content qualification differs from admitted session runtime"
+                    );
+                }
+            }
+            (_, None) => {}
+            _ => anyhow::bail!(
+                "session-runtime content proof presence differs from external candidate"
+            ),
         }
         super::thread_snapshot::validate_canonical_hash(
             "persistent-session execution realization hash",

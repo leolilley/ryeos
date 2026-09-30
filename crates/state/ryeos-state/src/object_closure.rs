@@ -2202,7 +2202,8 @@ mod tests {
             "execution_closure":{"command":{"authority":"runtime_path"}},
             "exact_program":{"resolution_output":semantic},
             "retained_product_selections":resolution["composed"]["derived"]["effective_external_product_selections"],
-            "retained_external_runtime_qualification":null
+            "retained_external_runtime_qualification":null,
+            "retained_external_runtime_content_qualification":null
         });
         for capsule in [&outer, &dependency, &persistent] {
             let edges = typed_object_edges(capsule).unwrap();
@@ -2229,6 +2230,17 @@ mod tests {
         }));
         qualified["retained_external_runtime_qualification"] = json!({"proof": {}});
         assert!(typed_object_edges(&qualified).is_err());
+        let mut content_qualified = persistent.clone();
+        content_qualified["retained_external_runtime_content_qualification"] =
+            json!({"attestation_hash": h("ab")});
+        let edges = typed_object_edges(&content_qualified).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("ab") && edge.expected == ExpectedObject::Kind("attestation")
+        }));
+        // The two owning slots cannot borrow one another's field shape.
+        content_qualified["retained_external_runtime_content_qualification"] =
+            json!({"proof": {"attestation_hash": h("aa")}});
+        assert!(typed_object_edges(&content_qualified).is_err());
     }
 
     #[test]

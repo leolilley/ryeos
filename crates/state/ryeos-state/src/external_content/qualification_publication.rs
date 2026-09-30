@@ -178,3 +178,25 @@ fn verify(
         evidence,
     })
 }
+
+/// Historical capsule authentication only. No current-head, current-source or
+/// expiry eligibility is established, and this does not authorize fresh contact.
+pub fn verify_retained(
+    authority: &PinnedStateAuthority,
+    attestation: &Attestation,
+    owner: &str,
+    coordinate: &str,
+    node_key: &lillux::crypto::VerifyingKey,
+    limits: ObjectClosureLimits,
+    guard: &CasMutationGuard,
+) -> anyhow::Result<PublishedContentQualification> {
+    verify(
+        authority,
+        attestation,
+        owner,
+        coordinate,
+        node_key,
+        limits,
+        guard,
+    )
+}
