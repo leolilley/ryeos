@@ -153,19 +153,23 @@ impl ExternalQualificationLocalWorker {
                 .persistent_sessions
                 .retire_exclusive(self.ready.placement())?;
             ensure!(
-                outcome == ExclusiveRetirementOutcome::Reaped,
+                matches!(
+                    outcome,
+                    ExclusiveRetirementOutcome::Reaped | ExclusiveRetirementOutcome::Absent
+                ),
                 "Q exclusive Worker retirement has no whole-process proof: {outcome:?}"
             );
-            // Reaped removes the one-shot pool entry. A later read-side error
-            // must retry the exact death and terminal checks, not ask the
-            // already retired pool to repeat its transition.
-            self.retired = true;
+            // A failed request may already have retired and removed this
+            // exact pool entry. `Absent` carries no death proof by itself;
+            // the attached process identity and terminal journal must still
+            // independently verify its whole-group reap below.
             ryeos_app::process::assert_reaped_process_group_absent(&self.process_identity)?;
             ryeos_app::external_qualification_local::ensure_qualification_worker_terminal(
                 state,
                 self.ready.placement(),
                 &self.process_identity,
             )?;
+            self.retired = true;
             Ok(())
         })();
         if result.is_err() {
