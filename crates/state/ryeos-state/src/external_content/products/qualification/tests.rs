@@ -1,6 +1,8 @@
 use super::*;
+#[cfg(test)]
+use crate::external_content::qualification_purpose::QUALIFICATION_LAUNCH_PURPOSE_SCHEMA;
 use crate::external_content::qualification_purpose::{
-    QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, QualificationLaunchPurpose, QualificationSubject,
+    QualificationLaunchPurpose, QualificationSubject,
 };
 use std::collections::BTreeMap;
 
@@ -104,6 +106,7 @@ fn consumer_execution_context_requires_typed_canonical_refs() {
     assert!(policy.validate().is_err());
 }
 
+#[cfg(test)]
 fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
     let mut purpose = launch_purpose();
     let context = ProductQualificationConsumerExecutionContext {

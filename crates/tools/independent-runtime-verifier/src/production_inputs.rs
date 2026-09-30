@@ -455,12 +455,13 @@ mod tests {
                     .open_inherited_regular(OsStr::new(id), false)
                     .unwrap()
                     .unwrap();
-                let manifest = ryeos_state::single_file_manifest_from_verified_blob(
-                    &lillux::sha256_hex(b"fixture-executable"),
-                    18,
-                    0o755,
-                )
-                .unwrap();
+                let manifest =
+                    ryeos_state::external_content::single_file_manifest_from_verified_blob(
+                        &lillux::sha256_hex(b"fixture-executable"),
+                        18,
+                        0o755,
+                    )
+                    .unwrap();
                 (source, manifest)
             };
             let mut value = serde_json::to_value(&manifest).unwrap();

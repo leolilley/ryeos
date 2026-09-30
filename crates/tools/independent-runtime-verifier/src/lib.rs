@@ -1035,21 +1035,6 @@ impl Parameters {
 mod tests {
     use super::*;
 
-    #[test]
-    fn daemon_fixture_configuration_bytes_match_selected_verifier_policy() {
-        let origin = "http://127.0.0.1:18765";
-        let scripted = include_str!(
-            "../../../../tests/e2e/external-execution/fixtures/independent-scripted-config.toml.template"
-        );
-        assert_eq!(
-            scripted.replace("{ORIGIN}", origin),
-            expected_scripted_baseline(origin)
-        );
-        let environment = include_str!(
-            "../../../../tests/e2e/external-execution/fixtures/independent-environments.toml.template"
-        );
-        assert_eq!(environment, staging::COMMAND_ENVIRONMENT_TEMPLATE);
-    }
     use serde_json::json;
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;

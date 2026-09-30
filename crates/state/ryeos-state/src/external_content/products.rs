@@ -610,7 +610,7 @@ pub fn validate_binding_name(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_hash(label: &str, value: &str) -> anyhow::Result<()> {
+pub(super) fn validate_hash(label: &str, value: &str) -> anyhow::Result<()> {
     if !lillux::valid_hash(value) || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
         bail!("{label} must be a canonical digest");
     }
