@@ -4,7 +4,8 @@
 use super::*;
 use anyhow::{Context as _, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::{
-    RestoredVerifierAdapterObservation, RestoredVerifierAttemptIntent,
+    ConsumerRuntimeVerificationCoordinate, RestoredVerifierAdapterObservation,
+    RestoredVerifierAttemptIntent,
 };
 
 pub(super) const JOURNAL_SQL: &str = r#"
@@ -185,6 +186,82 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
 }
 
 impl RuntimeDb {
+    /// Load authenticated prerequisite evidence without granting contact.
+    /// The consumer reservation/claim must repeat these checks in its own
+    /// transaction; this read cannot exclude a later termination. Accepted-root,
+    /// signed scenario and current provider authority remain operator checks.
+    pub fn observed_consumer_verification_prerequisite(
+        &self,
+        qualification_operation_id: &str,
+        owner_principal: &str,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<RestoredVerifierAttemptRecord> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read(&tx, &coordinate.prerequisite_measurement_attempt_id)?
+            .context("consumer verification prerequisite is absent")?;
+        ensure!(
+            record.phase == RestoredVerifierAttemptPhase::Observed
+                && record.intent.qualification_operation_id == qualification_operation_id,
+            "consumer verification requires an observed same-occurrence prerequisite"
+        );
+        let qualification =
+            super::runtime_snapshot_qualification::read(&tx, qualification_operation_id)?
+                .context("consumer verification qualification is absent")?;
+        ensure!(
+            qualification.intent.owner_principal == owner_principal,
+            "consumer verification prerequisite belongs to another operator"
+        );
+        let termination_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_snapshot_qualification_termination
+             WHERE qualification_operation_id=?1)",
+            [qualification_operation_id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            !termination_exists,
+            "consumer verification occurrence has a retained termination intent"
+        );
+        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        // Reservation predates provider creation, so this is a conservative
+        // upper bound, not a fresh lease minted from observation time.
+        let expires_at = qualification
+            .created_at_ms
+            .checked_add(i64::from(qualification.intent.maximum_lifetime_seconds) * 1000)
+            .context("consumer verification occurrence lifetime overflow")?;
+        ensure!(
+            now >= qualification.created_at_ms && now < expires_at,
+            "consumer verification occurrence is outside its retained lifetime"
+        );
+        let occurrence = qualification
+            .occurrence
+            .as_ref()
+            .context("consumer verification occurrence is absent")?;
+        let source =
+            super::runtime_snapshot::read(&tx, &qualification.intent.snapshot_operation_id)?
+                .context("consumer verification snapshot is absent")?;
+        record
+            .observation
+            .as_ref()
+            .context("consumer prerequisite observation is absent")?
+            .validate_consumer_prerequisite(
+                &record.intent,
+                coordinate,
+                &source.intent,
+                source
+                    .locator
+                    .as_ref()
+                    .context("consumer snapshot locator is absent")?,
+                source
+                    .readiness
+                    .as_ref()
+                    .context("consumer snapshot readiness is absent")?,
+                &qualification.intent,
+                occurrence,
+            )?;
+        tx.commit()?;
+        Ok(record)
+    }
+
     pub fn restored_verifier_attempt(
         &self,
         operation_id: &str,

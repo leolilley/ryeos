@@ -318,14 +318,16 @@ impl RuntimeDb {
 mod tests {
     use super::*;
     use ryeos_external_execution_contract::restored_runtime_measurement::{
-        RESTORED_OWNER_MEASUREMENT_PROTOCOL, RestoredOwnerChallenge, RestoredOwnerMeasurement,
-        RestoredVerifierAdapterObservation, RestoredVerifierAttemptIntent,
+        ConsumerRuntimeVerificationCoordinate, RESTORED_OWNER_MEASUREMENT_PROTOCOL,
+        RestoredOwnerChallenge, RestoredOwnerMeasurement, RestoredVerifierAdapterObservation,
+        RestoredVerifierAttemptIntent,
     };
     use ryeos_external_execution_contract::runtime_snapshot::{
         RUNTIME_SNAPSHOT_INTENT_SCHEMA, RUNTIME_SNAPSHOT_RESULT_SCHEMA, RuntimeSnapshotIntent,
         RuntimeSnapshotLocator, RuntimeSnapshotQualificationTerminalObservation,
         RuntimeSnapshotQualificationTerminationIntent, RuntimeSnapshotReadinessObservation,
     };
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn qualified_sandbox_create_has_one_durable_contact_attempt() {
@@ -493,7 +495,7 @@ mod tests {
             "UPDATE runtime_snapshot_qualification_termination SET phase='attempt_pending',observation_json=NULL WHERE operation_id=?1",
             [&termination.operation_id],
         ).is_err());
-        let mut changed = occurrence;
+        let mut changed = occurrence.clone();
         changed.occurrence_id = "sbx-other".into();
         assert!(db.bind_snapshot_qualification_occurrence(&changed).is_err());
 
@@ -535,7 +537,8 @@ mod tests {
             super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::Reconcile(_)
         ));
         let mut reminted = verifier.clone();
-        reminted.challenge.nonce_hex = "6".repeat(64);
+        let ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { challenge } = &mut reminted.purpose else { unreachable!() };
+        challenge.nonce_hex = "6".repeat(64);
         assert_eq!(
             reminted.derived_operation_id().unwrap(),
             verifier.operation_id
@@ -552,7 +555,7 @@ mod tests {
             measurement: RestoredOwnerMeasurement {
                 schema: 1,
                 protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
-                challenge_digest: verifier.challenge.digest().unwrap(),
+                challenge_digest: verifier.owner_challenge().unwrap().digest().unwrap(),
                 manifest_hash: source.guest_runtime_manifest_hash.clone(),
                 owner_executable_sha256: source.owner_executable_sha256.clone(),
                 controller_public_root: source.controller_public_root.clone(),
@@ -560,6 +563,62 @@ mod tests {
             contact_deadline_exceeded: false,
         };
         db.bind_restored_verifier_observation(&observation).unwrap();
+        // This checks retained evidence content only. The occurrence above has
+        // already been terminated: this helper must not authorize new contact.
+        let coordinate = ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-consumer-fixture".into(),
+            accepted_capsule_hash: "a".repeat(64),
+            qualification_purpose_digest: "b".repeat(64),
+            scenario_id: "codex-runtime".into(),
+            scenario_source_digest: "c".repeat(64),
+            subject_digest: "d".repeat(64),
+            use_digest: "e".repeat(64),
+            prerequisite_measurement_attempt_id: verifier.operation_id.clone(),
+            prerequisite_measurement_observation_digest: hex::encode(Sha256::digest(
+                ryeos_external_execution_contract::canonical_json(&observation).unwrap(),
+            )),
+        };
+        let check_prerequisite =
+            |observed: &RestoredVerifierAdapterObservation,
+             proposed: &ConsumerRuntimeVerificationCoordinate| {
+                observed.validate_consumer_prerequisite(
+                    &verifier,
+                    proposed,
+                    &source,
+                    &locator,
+                    &readiness,
+                    &intent,
+                    &occurrence,
+                )
+            };
+        check_prerequisite(&observation, &coordinate).unwrap();
+        // Unlike the content-only validator, the journal-owned read refuses
+        // this occurrence because termination has already been retained.
+        let refusal = db
+            .observed_consumer_verification_prerequisite(
+                &intent.operation_id,
+                &intent.owner_principal,
+                &coordinate,
+            )
+            .unwrap_err();
+        assert!(refusal.to_string().contains("retained termination intent"));
+        let mut wrong_attempt = coordinate.clone();
+        wrong_attempt.prerequisite_measurement_attempt_id = "f".repeat(64);
+        assert!(check_prerequisite(&observation, &wrong_attempt).is_err());
+        let mut wrong_digest = coordinate.clone();
+        wrong_digest.prerequisite_measurement_observation_digest = "f".repeat(64);
+        assert!(check_prerequisite(&observation, &wrong_digest).is_err());
+        let mut altered_observation = observation.clone();
+        altered_observation.run_stream_sha256 = "f".repeat(64);
+        assert!(check_prerequisite(&altered_observation, &coordinate).is_err());
+        let mut late_observation = observation.clone();
+        late_observation.contact_deadline_exceeded = true;
+        let mut late_coordinate = coordinate.clone();
+        late_coordinate.prerequisite_measurement_observation_digest = hex::encode(Sha256::digest(
+            ryeos_external_execution_contract::canonical_json(&late_observation).unwrap(),
+        ));
+        assert!(check_prerequisite(&late_observation, &late_coordinate).is_err());
         assert!(matches!(
             db.claim_restored_verifier_attempt(&verifier.operation_id)
                 .unwrap(),

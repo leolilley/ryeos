@@ -199,6 +199,39 @@ pub struct RestoredVerifierAdapterObservation {
 }
 
 impl RestoredVerifierAdapterObservation {
+    /// Bind a prerequisite observation to a proposed consumer coordinate.
+    /// The caller must load the observed journal row and independently admit
+    /// the accepted root and current occurrence; deserialized data is not
+    /// evidence of either ownership or liveness.
+    pub fn validate_consumer_prerequisite(
+        &self,
+        intent: &RestoredVerifierAttemptIntent,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+        source: &RuntimeSnapshotIntent,
+        locator: &RuntimeSnapshotLocator,
+        readiness: &RuntimeSnapshotReadinessObservation,
+        qualification: &RuntimeSnapshotQualificationIntent,
+        occurrence: &RuntimeSnapshotQualificationOccurrence,
+    ) -> Result<()> {
+        coordinate.validate()?;
+        self.validate_for_retained(
+            intent,
+            source,
+            locator,
+            readiness,
+            qualification,
+            occurrence,
+        )?;
+        ensure!(
+            !self.contact_deadline_exceeded
+                && coordinate.prerequisite_measurement_attempt_id == intent.operation_id
+                && coordinate.prerequisite_measurement_observation_digest
+                    == hex::encode(Sha256::digest(canonical_json(self)?)),
+            "consumer prerequisite differs from timely same-occurrence owner measurement"
+        );
+        Ok(())
+    }
+
     pub fn validate_for(&self, request: &RestoredVerifierAdapterRequest) -> Result<()> {
         request.validate()?;
         self.validate_for_retained(
