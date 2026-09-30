@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-30T00:31:37Z:c8d5d7fb016b311592c87897c85016075689c31eab25cf127c92a6fdfb193757:SAcT6latJe55epJwB4e9uvBwNpcVM4+NwqVw/geakhr3vT2WzssW7DRkYRzh5bo7b5WTgLv8qOueVc9h0i47Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T01:04:16Z:a25b8fd9e1013f661b55749ee70ff02d868a86a939137fd6baf3cfa9c0bc82bd:u7sEKM1AT9Ki2jk7DVZo4adY90ZGMH9La/1mj+FB45OI0I8rkiOK9vNKbgiMjZ5POJMP/IV2RR/EhNXVgeoMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -225,6 +225,25 @@ consumer evidence coordinates in the X1 source worktree are structural only;
 the daemon does not issue them, and issuance, claim validation and fresh
 selection remain closed. Do not promote that structure or a direct diagnostic
 run into Worker activation evidence.
+
+Hosted qualification has an ordering constraint. Ordinary external-candidate
+admission requires a selected runtime product with admitted qualification and
+the claims required by its signed relationship. External-placement preflight
+also rechecks a declared runtime qualification before fresh contact. The
+currently disabled Codex Worker relationship cannot launch an ordinary Worker
+to create its own first hosted-runtime proof. The direct-Codex diagnostic
+cannot supply that proof either: it observes a different execution context.
+
+Before enabling the Worker relationship, provide an independently authorized,
+bounded qualification operation (or an equivalent signed nonordinary admission
+contract) that exercises the exact admitted runtime in the hosted guest without
+granting normal Worker authoring or export authority. Its evidence must join
+the signed consumer policy and exact product/placement binding to the guest's
+authenticated applied-runtime report, native receipt and occurrence, terminal
+settlement, and writer exclusion. Only then may a stronger consumer-context
+claim be issued and required by the Worker relationship. This is a required
+proof boundary, not an implemented operation or an accepted claim; the X1
+structural coordinates and current direct diagnostic leave selection closed.
 
 Retained-observation source cut, 2026-09-30: the daemon read path now compares
 the post-release applied executable-path, argv, environment and CWD commitments
