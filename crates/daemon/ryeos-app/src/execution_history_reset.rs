@@ -908,6 +908,39 @@ mod tests {
         drop(ryeos_state::StateDb::open(&config.runtime_state_dir(), trust.clone()).unwrap());
         drop(RuntimeDb::open(&config.db_path).unwrap());
         drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
+        // Raw imports are durable CAS staging authority, outside the retired
+        // thread/runtime rows. A/B qualification recovery relies on reopening
+        // these exact uploads under the new source generation.
+        let import_owner = identity.fingerprint().to_owned();
+        let import_key =
+            ryeos_state::DurableCasPublicationKey::external_content_import(&"a".repeat(64))
+                .unwrap();
+        let (import_stage_id, import_object_hash) = {
+            let state =
+                ryeos_state::StateDb::open(&config.runtime_state_dir(), trust.clone()).unwrap();
+            let authority = state.pinned_authority().unwrap();
+            let guard = authority.acquire_shared_guard().unwrap();
+            let object_hash = authority
+                .cas_store()
+                .unwrap()
+                .store_object(&serde_json::json!({"kind": "raw-import-reset-fixture"}))
+                .unwrap();
+            let mut stage = authority
+                .require_recovery()
+                .unwrap()
+                .begin_durable_cas_upload_admitted(
+                    &guard,
+                    &import_owner,
+                    "external-content-import",
+                    &import_key,
+                    None,
+                )
+                .unwrap();
+            stage
+                .protect_cas_closure(&guard, [object_hash.as_str()], std::iter::empty())
+                .unwrap();
+            (stage.staging_id().to_owned(), object_hash)
+        };
         let operational_path = config
             .runtime_state_dir()
             .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME);
@@ -1028,7 +1061,22 @@ mod tests {
         assert!(retired.sanitized_account.is_none());
         drop(db);
         drop(RuntimeDb::open(&config.db_path).unwrap());
-        drop(ryeos_state::StateDb::open(&config.runtime_state_dir(), trust).unwrap());
+        let state = ryeos_state::StateDb::open(&config.runtime_state_dir(), trust).unwrap();
+        let authority = state.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let stage = authority
+            .require_recovery()
+            .unwrap()
+            .open_durable_cas_upload_admitted(&guard, &import_stage_id, &import_owner)
+            .unwrap();
+        stage
+            .ensure_publication_contract(&import_key, None)
+            .unwrap();
+        stage.ensure_protects_object(&import_object_hash).unwrap();
+        drop(stage);
+        drop(guard);
+        drop(authority);
+        drop(state);
         let repeated = run_execution_history_reset(&options).unwrap();
         assert!(!repeated.performed);
         assert!(!repeated.dry_run);
