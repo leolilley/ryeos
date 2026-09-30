@@ -504,6 +504,14 @@ mod tests {
             contact_deadline_exceeded: false,
         };
         db.bind_restored_verifier_observation(&observation).unwrap();
+        assert!(db.restored_verifier_blob_roots().unwrap().is_empty());
+        assert!(
+            db.restored_verifier_attempt(&verifier.operation_id)
+                .unwrap()
+                .unwrap()
+                .consumer_input_blob_hash
+                .is_none()
+        );
         // A verifier reservation is not permission to contact after a
         // termination intent is retained, even if its own deadline is live.
         let mut racing_qualification = intent.clone();
@@ -653,6 +661,10 @@ mod tests {
             "UPDATE restored_verifier_attempt SET consumer_selection_json=?2 WHERE operation_id=?1",
             params![verifier.operation_id, serde_json::to_string(&selection).unwrap()],
         ).is_err());
+        assert!(db.conn.execute(
+            "UPDATE restored_verifier_attempt SET consumer_input_blob_hash=?2 WHERE operation_id=?1",
+            params![verifier.operation_id, "f".repeat(64)],
+        ).is_err());
         consumer
             .validate_consumer_for(
                 &source,
@@ -667,14 +679,42 @@ mod tests {
         // admission and does not authorize provider contact or qualification.
         // The already terminated occurrence must remain readable as evidence.
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
-        db.conn.execute(
+        let consumer_input_blob_hash = "f".repeat(64);
+        assert!(db.conn.execute(
             "INSERT INTO restored_verifier_attempt
-             (operation_id,qualification_operation_id,intent_json,consumer_selection_json,phase,observation_json,created_at_ms,updated_at_ms)
-             VALUES(?1,?2,?3,?4,'attempt_pending',NULL,?5,?5)",
+             (operation_id,qualification_operation_id,intent_json,consumer_selection_json,consumer_input_blob_hash,phase,observation_json,created_at_ms,updated_at_ms)
+             VALUES(?1,?2,?3,?4,NULL,'reserved',NULL,?5,?5)",
             params![consumer.operation_id, consumer.qualification_operation_id,
                 String::from_utf8(ryeos_external_execution_contract::canonical_json(&consumer).unwrap()).unwrap(),
                 String::from_utf8(ryeos_external_execution_contract::canonical_json(&selection).unwrap()).unwrap(), now],
+        ).is_err());
+        db.conn.execute(
+            "INSERT INTO restored_verifier_attempt
+             (operation_id,qualification_operation_id,intent_json,consumer_selection_json,consumer_input_blob_hash,phase,observation_json,created_at_ms,updated_at_ms)
+             VALUES(?1,?2,?3,?4,?5,'reserved',NULL,?6,?6)",
+            params![consumer.operation_id, consumer.qualification_operation_id,
+                String::from_utf8(ryeos_external_execution_contract::canonical_json(&consumer).unwrap()).unwrap(),
+                String::from_utf8(ryeos_external_execution_contract::canonical_json(&selection).unwrap()).unwrap(), consumer_input_blob_hash, now],
         ).unwrap();
+        assert_eq!(
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![consumer_input_blob_hash.clone()]
+        );
+        db.conn.execute("UPDATE restored_verifier_attempt SET phase='attempt_pending' WHERE operation_id=?1", [&consumer.operation_id]).unwrap();
+        assert_eq!(
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![consumer_input_blob_hash.clone()]
+        );
+        db.quarantine_restored_verifier_attempt(&consumer.operation_id)
+            .unwrap();
+        assert_eq!(
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![consumer_input_blob_hash.clone()]
+        );
+        assert!(db.conn.execute(
+            "UPDATE restored_verifier_attempt SET consumer_input_blob_hash=?2 WHERE operation_id=?1",
+            params![consumer.operation_id, "e".repeat(64)],
+        ).is_err());
         let evidence = b"{}";
         let observed_consumer = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerifierAdapterObservation {
             schema: 1,
@@ -691,11 +731,6 @@ mod tests {
             contact_deadline_exceeded: false,
         };
         assert!(
-            db.restored_verifier_evidence_blob_roots()
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
             db.bind_consumer_verifier_observation(&observed_consumer, b"{\"changed\":true}")
                 .is_err()
         );
@@ -708,8 +743,11 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            db.restored_verifier_evidence_blob_roots().unwrap(),
-            vec![observed_consumer.evidence_sha256.clone()]
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![
+                observed_consumer.evidence_sha256.clone(),
+                consumer_input_blob_hash
+            ]
         );
         assert!(
             db.claim_restored_verifier_attempt(&consumer.operation_id)

@@ -2660,7 +2660,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 103 binds consumer attempts to the retained installed guest runtime
 // manifest. Predecessor purposes cannot acquire an account/profile identity
 // from an uploaded archive or mutable settings during recovery.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 103;
+// Epoch 104 retains the exact canonical consumer input before the contact
+// claim. Earlier consumer attempts had no durable input-byte commitment.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 104;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -3586,6 +3588,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "consumer_selection_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "consumer_input_blob_hash",
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,

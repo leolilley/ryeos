@@ -1104,6 +1104,7 @@ pub(crate) fn verify_consumer_qualification_occurrence(
     state: &AppState,
     context: &HandlerContext,
     intent: &RestoredVerifierAttemptIntent,
+    input: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
     archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
 ) -> Result<RestoredVerifierAttemptRecord> {
@@ -1188,7 +1189,7 @@ pub(crate) fn verify_consumer_qualification_occurrence(
                 .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
             state
                 .state_store
-                .reserve_consumer_verifier_attempt(intent, admission)?;
+                .reserve_consumer_verifier_attempt(intent, input, admission)?;
             // Root authentication is intentionally repeated and consumed, not
             // cloned from reservation. The transaction checks live occurrence
             // and same-occurrence prerequisite immediately before first contact.
@@ -2820,6 +2821,7 @@ mod tests {
         let mut verifier = RestoredVerifierAttemptRecord {
             intent: verifier_intent,
             consumer_selection: None,
+            consumer_input_blob_hash: None,
             phase: RestoredVerifierAttemptPhase::Observed,
             observation: Some(RestoredVerifierObservation::OwnerMeasurement { observation }),
             created_at_ms: 5,

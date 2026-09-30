@@ -15101,12 +15101,34 @@ impl StateStore {
     pub(crate) fn reserve_consumer_verifier_attempt(
         &self,
         intent: &ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent,
+        input: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
         admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
     ) -> Result<runtime_db::restored_verifier_attempt::RestoredVerifierAttemptRecord> {
-        let _permit = self.acquire_write_permit()?;
-        self.lock()?
+        input.validate_attempt(intent)?;
+        anyhow::ensure!(
+            input.purpose == *admission.purpose()
+                && input.coordinate == *admission.coordinate()
+                && input.selection == *admission.selection(),
+            "consumer input differs from authenticated accepted root"
+        );
+        let bytes = input.canonical_bytes()?;
+        let permit = self.acquire_write_permit()?;
+        let authority = self.pinned_state_authority()?;
+        authority.ensure_guard(permit.cas_guard())?;
+        let cas = authority.cas_store()?;
+        let mut stage = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(permit.cas_guard(), "consumer-verifier-input")?;
+        let hash = stage.store_blob_admitted(permit.cas_guard(), &cas, &bytes)?;
+        let record = self
+            .lock()?
             .runtime_db
-            .reserve_consumer_verifier_attempt(intent, admission)
+            .reserve_consumer_verifier_attempt(intent, &hash, admission)?;
+        if let Err(error) = stage.finish_admitted(permit.cas_guard()) {
+            tracing::warn!(%error, operation_id = %intent.operation_id,
+                "consumer input retained while temporary roots remain recoverable");
+        }
+        Ok(record)
     }
 
     /// Consumes a separate root authentication; ambiguous claims reconcile
@@ -15978,7 +16000,7 @@ impl StateStore {
     pub fn external_execution_blob_roots(&self) -> Result<Vec<String>> {
         let state = self.lock()?;
         let mut roots = state.runtime_db.external_execution_blob_roots()?;
-        roots.extend(state.runtime_db.restored_verifier_evidence_blob_roots()?);
+        roots.extend(state.runtime_db.restored_verifier_blob_roots()?);
         roots.sort();
         roots.dedup();
         Ok(roots)
