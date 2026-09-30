@@ -710,6 +710,17 @@ pub(crate) fn qualification_scoped_attempt_proof(
         .context("settled scoped observation CAS object is missing")?;
     let observation: ScopedProducerObservation = serde_json::from_value(value)?;
     observation.validate_against(&record)?;
+    if purpose
+        .policy_source()
+        .policy
+        .consumer_execution_context
+        .is_some()
+    {
+        require_applied_consumer_executable(
+            &current.recipe.executable_source,
+            &observation.applied_launch.executable_sha256,
+        )?;
+    }
     ensure!(
         observation.producer_exit_clean
             && observation.producer_source == *source
@@ -760,6 +771,52 @@ pub(crate) fn qualification_scoped_attempt_proof(
     };
     proof.validate()?;
     Ok(proof)
+}
+
+/// Corroborate the recipe's admitted executable member against the owned
+/// target's pre-exec observation. This is one parity check, not proof of
+/// protocol, route, environment, guest execution or runtime qualification.
+fn require_applied_consumer_executable(
+    source: &ryeos_state::external_content::products::producer_recipe::ProducerExecutableSource,
+    observed_sha256: &[u8; 32],
+) -> Result<()> {
+    use ryeos_state::external_content::products::producer_recipe::ProducerExecutableSource;
+    let ProducerExecutableSource::AdmittedRealizationMember {
+        executable_sha256, ..
+    } = source
+    else {
+        bail!("consumer qualification observation has no admitted subject executable");
+    };
+    ensure!(
+        hex::encode(observed_sha256) == *executable_sha256,
+        "applied consumer executable differs from signed subject member"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod consumer_executable_tests {
+    use super::*;
+    use ryeos_state::external_content::products::producer_recipe::ProducerExecutableSource;
+
+    #[test]
+    fn applied_member_must_match_and_verifier_target_cannot_substitute() {
+        let member = ProducerExecutableSource::AdmittedRealizationMember {
+            realization_id: "runtime".into(),
+            manifest_hash: "a".repeat(64),
+            relative_path: "bin/codex".into(),
+            executable_sha256: "bb".repeat(32),
+        };
+        require_applied_consumer_executable(&member, &[0xbb; 32]).unwrap();
+        assert!(require_applied_consumer_executable(&member, &[0xcc; 32]).is_err());
+        assert!(
+            require_applied_consumer_executable(
+                &ProducerExecutableSource::AdmittedVerifierExecutable,
+                &[0xbb; 32]
+            )
+            .is_err()
+        );
+    }
 }
 
 fn digest_json(value: &impl Serialize) -> Result<String> {
