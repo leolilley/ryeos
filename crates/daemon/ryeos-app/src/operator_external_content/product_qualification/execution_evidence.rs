@@ -7,11 +7,11 @@
 use anyhow::{Context as _, bail};
 use ryeos_engine::resolution::{ResolutionOutput, TrustClass};
 use ryeos_handler_protocol::{
-    ExecutionEvidenceCandidateCallWire, ExecutionEvidenceDescribeRequest,
-    ExecutionEvidenceDescribeResponse, ExecutionEvidenceEventWire, ExecutionEvidenceLimitsWire,
-    ExecutionEvidenceProgramWire, ExecutionEvidenceProjectRequest,
-    ExecutionEvidenceProjectResponse, ExecutionEvidenceRequiredCallWire,
-    ExecutionEvidenceTerminalWire,
+    ExecutionEvidenceCandidateCallWire, ExecutionEvidenceCandidateScopedAttemptWire,
+    ExecutionEvidenceDescribeRequest, ExecutionEvidenceDescribeResponse,
+    ExecutionEvidenceEventWire, ExecutionEvidenceLimitsWire, ExecutionEvidenceProgramWire,
+    ExecutionEvidenceProjectRequest, ExecutionEvidenceProjectResponse,
+    ExecutionEvidenceRequiredCallWire, ExecutionEvidenceTerminalWire,
 };
 use ryeos_state::external_content::products::qualification::{
     ProductQualificationEvidence, ProductQualificationExecutionProof,
@@ -768,6 +768,77 @@ pub(in crate::operator_external_content) fn verify_current(
             &current_recipe,
             &evidence.result.subject_manifest_hash,
         )?;
+
+        // The signed qualification carries the daemon's historical proof, but
+        // fresh admission must still find the exact settled local attempt and
+        // committed observation. Reuse issuance corroboration so a copied
+        // proof cannot stand in for a missing or different journal record.
+        let limits = state
+            .node_policy
+            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .closure_limits()?;
+        let capsule = AdmittedLaunchCapsule::from_current_value(
+            ryeos_state::object_closure::load_exact_cas_object_with_cas(
+                &authority.cas_store()?,
+                &evidence.verifier.admitted_launch_capsule_hash,
+                limits.max_object_bytes,
+            )?,
+        )?;
+        let sealed =
+            crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+                &capsule,
+            )?;
+        let purpose = sealed
+            .product_qualification_purpose()
+            .context("scoped qualification verifier lost its sealed launch purpose")?;
+        if purpose.policy_source != evidence.policy_source
+            || purpose.product_witness_hash != evidence.product_witness_hash
+            || purpose.witness_source != evidence.witness_source
+            || purpose.subject_manifest_hash != evidence.result.subject_manifest_hash
+            || purpose.subject_declaration_id
+                != evidence.policy_source.policy.subject_declaration_id
+            || purpose.consumer_content != evidence.consumer_content
+            || purpose.verifier_ref != evidence.verifier.canonical_ref
+            || purpose.verifier_realized_definition_digest
+                != evidence.verifier.effective_definition_digest
+            || purpose.admitted_parameters_digest != evidence.verifier.admitted_parameters_digest
+        {
+            bail!("scoped qualification evidence differs from sealed launch purpose");
+        }
+        let settlement = state
+            .state_store
+            .latest_thread_process_settlement(&evidence.verifier.thread_id)?
+            .context("scoped qualification verifier lost its exact process settlement")?;
+        let settlement_digest = settlement.digest()?;
+        if settlement.thread_id != evidence.verifier.thread_id
+            || Some(settlement_digest.as_str())
+                != evidence
+                    .verifier
+                    .process_settlement_witness_digest
+                    .as_deref()
+            || matches!(
+                settlement.kind,
+                crate::runtime_db::ThreadProcessSettlementKind::RecoveryDeath
+            )
+        {
+            bail!("scoped qualification verifier settlement differs from retained proof");
+        }
+        let candidate = ExecutionEvidenceCandidateScopedAttemptWire {
+            attempt_id: scoped.attempt_id.clone(),
+            scenario_id: scoped.scenario_id.clone(),
+            observation_object_hash: scoped.observation_object_hash.clone(),
+        };
+        let observed = crate::scoped_producer_observe::qualification_scoped_attempt_proof(
+            state,
+            authority,
+            guard,
+            &settlement.launch_owner,
+            purpose,
+            &candidate,
+        )?;
+        if observed != *scoped {
+            bail!("scoped qualification proof differs from settled daemon observation");
+        }
     }
     for required in required {
         let retained = proof
