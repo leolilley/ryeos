@@ -247,7 +247,7 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
             &binding_digest,
             ready.root(),
         )?;
-    let sink_state = state.clone();
+    let sink_state = (*state).clone();
     let sink_placement = placement.clone();
     let sink_digest = selected.digest.clone();
     let selected_wire_max_bytes = selected.wire_max_bytes;
