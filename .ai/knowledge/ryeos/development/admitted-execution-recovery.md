@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T02:05:42Z:7fb509c1de1bd5e09a5ddba6afa29d655a252965dc3106a24f9ac93e6cff051e:SB2N9CAqOQvIifyAXd8DeIwJgeab7CBOzjcsVrMjEPPWgStZlYokGgsH2hJgQ4tQ7pPuPfX1BiQ6LFz6bBZ/CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T02:13:32Z:cda7a1cd5aeaabce4812044bd1562dc7d7a9ca9a9ba3097c3c3868e399f0322b:mb2Nao1Inghu6YsRgxf7sXMSIhcMefasTQNVhkRVThAJ+3olcyGIhiv5k33lCIq592oyouxZ9L1Vh6koQHXpDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.4"
+version: "1.1.5"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -114,6 +114,16 @@ select a newer head or renew contact permission. A binding without the fresh
 proof cannot obtain structured-session contact from this source generation.
 These source joins have not yet passed the final build or hosted acceptance
 run.
+
+The admitted external-candidate program now tags its runtime source as
+`CapturedProduct` or `ActivatedContent`. An activated source retains the exact
+content subject and qualification coordinate; it cannot be reconstructed as
+a product witness or satisfied by a product selector for the same runtime slot.
+Persistent-session recovery reconstructs that program from its retained
+content testimony and checks the exact source-specific program identity.
+The current source type and readback do not by themselves prove that an
+activated runtime was admitted, transferred into a guest, or used by a hosted
+Worker. Those are separate operational gates.
 
 ## Qualification schema cut
 
