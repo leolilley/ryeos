@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-28T10:36:03Z:51dd38b196c19ba5645fe752d8fff6ba637b35adfb5217eab5bd801fa93fe760:G/Z/LNew4InIeAiEmyGxmfWxVa8qVpvhgT4OSTB0lBlRPJ+knDGLI47zLd44DL04A4lFWJi8Mp2qI/BMupofDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-30T11:47:50Z:97abbe3ce4d4e3ce270c04648c74dfbeab91f56470b6d42233e8a54c23b81d1c:qVxZSRpAo+I1RwHr1kwfwcXb4oMl5lHbBcNcuF5U2buhNe5TQbnH77iFyBtwjOO6CyR4tSWKZq+yuve3JnMsDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Exact publisher-authored ownership of native payloads by RyeOS bundle.
@@ -15,6 +15,9 @@ payload_ownership:
     - bundle_name: codex
       bundle_sets: [full, hosted-workflow, release-artifacts, release-authority]
       payloads:
+        - binary: codex-runtime-verifier
+          cargo_package: ryeos-codex-runtime-verifier
+          build_class: static
         - binary: ryeos-codex-external-configuration
           cargo_package: ryeos-codex-external-configuration
           build_class: static
