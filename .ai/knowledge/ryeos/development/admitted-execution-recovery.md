@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-30T01:24:31Z:898a26aab1b26321980e16909379fbe7692ac5f490c341dffb48b7260f6fdfb2:A7p6zZqjWN9kSLKhN79yWvBy9rBfPlVTQ6qCX32mpTXcXWt/F/fj6eqL+SGL7mDVP9DvROiATxpass4MK76wDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T01:38:01Z:886243d5ec89871b94bf8305283ebd45405035a91907976d9ded2511f823f648:77QJUm6h1TuHkf3ycz+03WwO7ouiXWQ0o2YVDsWmAR1jwVHBEeCVO0LX3mKA5oO+Xe5aiiXcyt6PIlS7JohBCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
@@ -104,6 +104,15 @@ rows and preserves independent provider-call rows from the immediate prior
 epoch. This source decision does not reset a node. Recovery must use the exact
 final binary's guarded dry-run and account for every authority it would retire;
 affected products and consumer proofs require current qualification afterward.
+
+When the runtime operator epoch is incompatible, the explicit history reset
+replaces the entire daemon-owned runtime SQLite schema with the current empty
+schema. It does not migrate selected predecessor tables. Its dry-run reports
+runtime row counts as unavailable for that predecessor layout, so the operator
+must review a separate read-only inventory of nonempty tables and retained
+chain/project heads before confirming the cut. The reset also requires settled
+process-scope lifetimes and a stopped node; an incompatible capsule alone is
+not permission to discard live execution authority.
 
 ## What recovery must NOT do
 
