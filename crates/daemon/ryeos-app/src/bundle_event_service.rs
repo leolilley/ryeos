@@ -494,6 +494,7 @@ mod tests {
             accounting_scope: None,
             workload_client_grant: None,
             scoped_producer_grant: None,
+            remote_consumer_grant: None,
         }
     }
 
