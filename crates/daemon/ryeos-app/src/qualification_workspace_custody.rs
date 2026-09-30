@@ -147,6 +147,20 @@ impl QualificationWorkspaceCustody {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push((evidence, authority));
     }
+
+    /// Ordinary receipt-based closure cannot account for a Create descriptor
+    /// which failed installation into the original guard.
+    pub fn ensure_no_uninstalled_view(&self) -> Result<()> {
+        let views = self
+            .uninstalled_views
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q uninstalled view custody is poisoned"))?;
+        ensure!(
+            views.is_empty(),
+            "Q original workspace has an uninstalled Create view requiring recovery"
+        );
+        Ok(())
+    }
 }
 
 /// One entry per Q placement, empty after restart. A cold process may read the
