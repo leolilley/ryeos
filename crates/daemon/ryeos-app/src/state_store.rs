@@ -14745,6 +14745,7 @@ impl StateStore {
         let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
             snapshot_hash,
             realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            workspace_outputs: None,
             environment: ryeos_state::objects::EnvironmentAuthority::None,
             ..
         } = admission.accepted_project_authority()
