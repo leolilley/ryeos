@@ -3055,21 +3055,43 @@ fn prepare_session_process_environment(
     ryeos_state::objects::PreparedSessionProcessEnvironment,
     Vec<ryeos_engine::isolation::IsolationWritableRuntimeViewMountAuthority>,
 )> {
+    prepare_retained_session_process_environment(
+        &capsule.process_environment,
+        workspace,
+        workspace_view,
+        workspace_authority,
+        enforced,
+    )
+}
+
+/// Materialize an already-admitted process environment against the original
+/// workspace view. Q has no ordinary persistent-session capsule, but its
+/// accepted root carries the same signed environment values. The caller must
+/// first prove the view's durable ownership and keep its original lifeline.
+pub(crate) fn prepare_retained_session_process_environment(
+    process_environment: &BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>,
+    workspace: &Path,
+    workspace_view: Option<&lillux::InheritedDescriptorAuthority>,
+    workspace_authority: ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority,
+    enforced: bool,
+) -> Result<(
+    ryeos_state::objects::PreparedSessionProcessEnvironment,
+    Vec<ryeos_engine::isolation::IsolationWritableRuntimeViewMountAuthority>,
+)> {
     use ryeos_state::objects::{
         PreparedSessionProcessEnvironment, SessionProcessEnvironmentValue,
         SessionRuntimeViewDelivery, runtime_view_mount_destination,
     };
-    ryeos_state::objects::validate_session_process_environment(&capsule.process_environment)?;
+    ryeos_state::objects::validate_session_process_environment(process_environment)?;
     let mut prepared = PreparedSessionProcessEnvironment {
-        bindings: capsule.process_environment.clone(),
+        bindings: process_environment.clone(),
         runtime_view_delivery: SessionRuntimeViewDelivery::DescriptorWorkspace,
     };
     if !enforced {
         prepared.validate()?;
         return Ok((prepared, Vec::new()));
     }
-    let runtime_views = capsule
-        .process_environment
+    let runtime_views = process_environment
         .iter()
         .filter_map(|(name, value)| match value {
             SessionProcessEnvironmentValue::RuntimeViewDirectory { relative_path } => {
