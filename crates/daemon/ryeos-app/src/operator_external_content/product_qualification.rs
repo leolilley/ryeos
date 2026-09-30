@@ -1345,6 +1345,20 @@ pub(super) fn prepare_current_bundle_consumer_content_inputs(
     else {
         return Ok(None);
     };
+    Ok(Some(prepare_bundle_consumer_content_from_worker(
+        state,
+        policy_source,
+        worker,
+    )?))
+}
+
+/// Assemble source and environment into the same pending publication. The
+/// source-specific preparer remains responsible for declaration authority.
+fn prepare_bundle_consumer_content_from_worker(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+    worker: PreparedBundleConsumerWorkerLiterals,
+) -> anyhow::Result<PreparedBundleConsumerContentInputs> {
     let PreparedBundleConsumerWorkerLiterals {
         definitions,
         declaration_authority,
@@ -1369,7 +1383,7 @@ pub(super) fn prepare_current_bundle_consumer_content_inputs(
             &environment_definition.declarations,
             &mut publication,
         )?;
-    Ok(Some(PreparedBundleConsumerContentInputs {
+    Ok(PreparedBundleConsumerContentInputs {
         definitions,
         declaration_authority,
         policy_source: policy_source.clone(),
@@ -1382,7 +1396,48 @@ pub(super) fn prepare_current_bundle_consumer_content_inputs(
         },
         runtime_member: None,
         publication,
-    }))
+    })
+}
+
+/// Complete activated consumer inputs for an accepted verifier owner. This
+/// joins exact content only; no ordinary Worker or qualification is admitted.
+pub(super) fn prepare_activated_bundle_consumer_content_inputs(
+    state: &AppState,
+    operator: &crate::handler_context::HandlerContext,
+    prepared: &super::content_qualification::PreparedContentQualificationSource,
+    acquisition_mode: crate::managed_external_content_operation::AcquisitionMode,
+) -> anyhow::Result<PreparedBundleConsumerContentInputs> {
+    let worker = prepare_activated_bundle_consumer_worker_literals(
+        state,
+        operator,
+        prepared,
+        acquisition_mode,
+    )?;
+    let requirement = worker
+        .source
+        .profile
+        .external_candidate_requirement()?
+        .context("activated consumer has no external candidate requirement")?;
+    if requirement.runtime_authority != ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::ActivatedContent {
+        bail!("activated consumer runtime profile selects product authority");
+    }
+    let mut result = prepare_bundle_consumer_content_from_worker(state, &prepared.policy, worker)?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let limits = state
+        .node_policy
+        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    result.require_external_runtime_member_alignment(
+        state,
+        &authority,
+        &guard,
+        limits,
+        &prepared.subject.manifest_hash,
+    )?;
+    prepared.require_current(state, operator, acquisition_mode)?;
+    result.retained_identity()?;
+    Ok(result)
 }
 
 /// Fresh selection must use today's signed consumer definitions and exact
