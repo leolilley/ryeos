@@ -1,6 +1,8 @@
 use super::*;
+#[cfg(test)]
+use crate::external_content::qualification_purpose::QUALIFICATION_LAUNCH_PURPOSE_SCHEMA;
 use crate::external_content::qualification_purpose::{
-    QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, QualificationLaunchPurpose, QualificationSubject,
+    QualificationLaunchPurpose, QualificationSubject,
 };
 use std::collections::BTreeMap;
 
@@ -126,6 +128,7 @@ fn consumer_execution_requires_scoped_producer_proof() {
     assert!(error.to_string().contains("no scoped producer attempt"));
 }
 
+#[cfg(test)]
 fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
     let mut purpose = launch_purpose();
     let context = ProductQualificationConsumerExecutionContext {

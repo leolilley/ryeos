@@ -259,8 +259,12 @@ impl ImportedConsumerInputs {
     /// Corroborate the currently executing consumer image against the retained
     /// delivery descriptor. This is image identity, not run-channel authority.
     pub(crate) fn require_current_verifier_image(&self) -> Result<()> {
-        lillux::validate_current_executable_descriptor(self._verifier.inherited_descriptor()?)
-            .map_err(anyhow::Error::msg)
+        lillux::validate_current_executable_descriptor(
+            self._verifier
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?,
+        )
+        .map_err(anyhow::Error::msg)
     }
 
     /// Transfer only private delivery records to the exact retained runtime's
