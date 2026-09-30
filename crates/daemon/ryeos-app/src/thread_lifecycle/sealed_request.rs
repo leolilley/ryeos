@@ -141,7 +141,7 @@ where
 /// v20 requires the exact local-or-received product witness source proof.
 /// v21 seals the daemon-derived product-qualification launch purpose. Absent
 /// remains meaningful for ordinary execution; it cannot be inferred on replay.
-pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 21;
+pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 22;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -568,7 +568,7 @@ pub struct SealedRootExecutionRequest {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     candidate_evaluation: Option<CandidateEvaluationAuthority>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
-    product_qualification: Option<ProductQualificationLaunchPurpose>,
+    qualification: Option<QualificationLaunchPurpose>,
     execution_hints: HashMap<String, Value>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     scheduled_fire: Option<ryeos_engine::contracts::ScheduledFireContext>,
@@ -601,7 +601,7 @@ impl SealedRootExecutionRequest {
                 .validate()
                 .context("validate sealed candidate-evaluation authority")?;
         }
-        sealed.validate_product_qualification_purpose()?;
+        sealed.validate_qualification_purpose()?;
         sealed.validate_handler_context()?;
         sealed.validate_executor_route_against_capsule(capsule)?;
         if sealed.admitted_program_value()? != capsule.exact_program
@@ -789,7 +789,7 @@ impl SealedRootExecutionRequest {
             candidate_evaluation: admission
                 .candidate_evaluation_scope()
                 .map(|scope| scope.authority().clone()),
-            product_qualification: admission.product_qualification_purpose().cloned(),
+            qualification: admission.qualification_purpose().cloned(),
             execution_hints: admission.plan_context.execution_hints.values.clone(),
             scheduled_fire: admission.plan_context.scheduled_fire.clone(),
             validate_only: admission.plan_context.validate_only,
@@ -797,7 +797,7 @@ impl SealedRootExecutionRequest {
             resolved_result_policy: admission.resolved_result_policy.clone(),
             captured_history_policy: admission.captured_history_policy.clone(),
         };
-        sealed.validate_product_qualification_purpose()?;
+        sealed.validate_qualification_purpose()?;
         Ok(sealed)
     }
 
@@ -809,8 +809,8 @@ impl SealedRootExecutionRequest {
         &self.executor_ref
     }
 
-    pub fn product_qualification_purpose(&self) -> Option<&ProductQualificationLaunchPurpose> {
-        self.product_qualification.as_ref()
+    pub fn qualification_purpose(&self) -> Option<&QualificationLaunchPurpose> {
+        self.qualification.as_ref()
     }
 
     /// A claim-bearing verifier must get an actual process scope when its
@@ -818,18 +818,19 @@ impl SealedRootExecutionRequest {
     /// This is read from the sealed root, never a later policy lookup or an
     /// executor-selected optional resource.
     pub fn requires_process_scope_for_qualification(&self) -> Result<bool> {
-        self.validate_product_qualification_purpose()?;
-        Ok(self.product_qualification.as_ref().is_some_and(|purpose| {
+        self.validate_qualification_purpose()?;
+        Ok(self.qualification.as_ref().is_some_and(|purpose| {
             purpose.policy_source.policy.minimum_verifier_process_settlement
                 == ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority::ScopeEmpty
         }))
     }
 
-    fn validate_product_qualification_purpose(&self) -> Result<()> {
-        let Some(purpose) = &self.product_qualification else {
+    fn validate_qualification_purpose(&self) -> Result<()> {
+        let Some(purpose) = &self.qualification else {
             return Ok(());
         };
         purpose.validate()?;
+        let (product_witness_hash, witness_source, _) = purpose.subject.captured_product()?;
         let SealedPrincipal::Local { fingerprint, .. } = &self.planning_principal else {
             bail!("qualification verifier cannot use delegated principal authority");
         };
@@ -926,8 +927,8 @@ impl SealedRootExecutionRequest {
                 selected.target,
                 ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
             ) && selected.selection.declaration_id == purpose.subject_declaration_id
-                && selected.selection.witness_hash == purpose.product_witness_hash
-                && selected.selection.witness_source == purpose.witness_source
+                && selected.selection.witness_hash == product_witness_hash
+                && &selected.selection.witness_source == witness_source
                 && selected.selection.qualification_hash.is_none()
         };
         match (pinned_lane, self.product_selections.as_slice()) {
@@ -1052,9 +1053,9 @@ impl SealedRootExecutionRequest {
         &self,
         expected: &ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView<'_>,
     ) -> Result<()> {
-        self.validate_product_qualification_purpose()?;
+        self.validate_qualification_purpose()?;
         let sealed = self
-            .product_qualification
+            .qualification
             .as_ref()
             .context("execution has no admitted qualification purpose")?
             .execution_view()?;
@@ -1282,7 +1283,7 @@ impl SealedRootExecutionRequest {
         resume: &crate::launch_metadata::ResumeContext,
         handler_context: Option<crate::handler_context::HandlerContext>,
     ) -> Result<Self> {
-        if self.product_qualification.is_some() {
+        if self.qualification.is_some() {
             bail!("qualification verifier purpose cannot continue into a new invocation");
         }
         if !self.product_selections.is_empty() || !resume.product_selections.is_empty() {
@@ -1549,7 +1550,7 @@ impl SealedRootExecutionRequest {
             resolution_subject_authority:
                 ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
             candidate_evaluation: None,
-            product_qualification: None,
+            qualification: None,
             execution_hints: HashMap::new(),
             scheduled_fire: None,
             validate_only: false,
@@ -1624,7 +1625,7 @@ impl SealedRootExecutionRequest {
                 SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION
             );
         }
-        self.validate_product_qualification_purpose()?;
+        self.validate_qualification_purpose()?;
         if self.validate_only {
             bail!("persisted root execution request cannot be validate-only");
         }
@@ -1718,7 +1719,7 @@ impl SealedRootExecutionRequest {
             captured_history_policy: self.captured_history_policy.clone(),
             project_binding,
             candidate_evaluation: None,
-            product_qualification: self.product_qualification.clone(),
+            qualification: self.qualification.clone(),
             admitted_request_snapshot: None,
             selected_executor_route: None,
         };
@@ -1835,7 +1836,7 @@ impl SealedRootExecutionRequest {
         let protected_qualification = request
             .root_admission
             .as_ref()
-            .is_some_and(|admission| admission.product_qualification_purpose().is_some());
+            .is_some_and(|admission| admission.qualification_purpose().is_some());
         let rebound_project_context = match provenance {
             crate::execution_provenance::ExecutionProvenance::Projectless { .. } => {
                 ProjectContext::None
@@ -2309,24 +2310,24 @@ mod authority_tests {
     #[test]
     fn sealed_qualification_purpose_is_explicit_and_cannot_upgrade_ordinary_root() {
         let fixture = SealedRootExecutionRequest::storage_test_fixture();
-        assert!(fixture.product_qualification_purpose().is_none());
+        assert!(fixture.qualification_purpose().is_none());
         assert!(!fixture.requires_process_scope_for_qualification().unwrap());
         let mut missing = serde_json::to_value(&fixture).unwrap();
-        missing
-            .as_object_mut()
-            .unwrap()
-            .remove("product_qualification");
+        missing.as_object_mut().unwrap().remove("qualification");
         assert!(serde_json::from_value::<SealedRootExecutionRequest>(missing).is_err());
 
         let parameters_digest = fixture.admitted_parameters_digest().unwrap();
         let mut injected = serde_json::to_value(&fixture).unwrap();
-        injected["product_qualification"] = json!({
-            "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
+        injected["qualification"] = json!({
+            "schema": ryeos_state::external_content::qualification_purpose::QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
             "launch_id": format!("L-{}", "a".repeat(32)),
             "owner_fingerprint": "session:test",
-            "product_witness_hash": "b".repeat(64),
-            "witness_source": {"kind":"local_capture"},
-            "relationship_name": "runtime_to_worker",
+            "subject": {
+                "kind": "captured_product",
+                "product_witness_hash": "b".repeat(64),
+                "witness_source": {"kind":"local_capture"},
+                "relationship_name": "runtime_to_worker"
+            },
             "consumer_content": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
@@ -2351,16 +2352,10 @@ mod authority_tests {
             "verifier_realized_definition_digest": "2".repeat(64)
         });
         let sealed: SealedRootExecutionRequest = serde_json::from_value(injected).unwrap();
-        assert!(
-            sealed
-                .product_qualification_purpose()
-                .unwrap()
-                .validate()
-                .is_ok()
-        );
-        assert!(sealed.validate_product_qualification_purpose().is_err());
+        assert!(sealed.qualification_purpose().unwrap().validate().is_ok());
+        assert!(sealed.validate_qualification_purpose().is_err());
         let view = sealed
-            .product_qualification_purpose()
+            .qualification_purpose()
             .unwrap()
             .execution_view()
             .unwrap();
@@ -2401,13 +2396,16 @@ mod authority_tests {
         let admitted = "1".repeat(64);
         assert_ne!(admitted, realized.as_str());
         let parameters_digest = sealed.admitted_parameters_digest().unwrap();
-        sealed.product_qualification = Some(serde_json::from_value(json!({
-            "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
+        sealed.qualification = Some(serde_json::from_value(json!({
+            "schema": ryeos_state::external_content::qualification_purpose::QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
             "launch_id": format!("L-{}", "a".repeat(32)),
             "owner_fingerprint": "session:test",
-            "product_witness_hash": "b".repeat(64),
-            "witness_source": {"kind":"local_capture"},
-            "relationship_name": "runtime_to_worker",
+            "subject": {
+                "kind": "captured_product",
+                "product_witness_hash": "b".repeat(64),
+                "witness_source": {"kind":"local_capture"},
+                "relationship_name": "runtime_to_worker"
+            },
             "consumer_content": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
@@ -2431,9 +2429,9 @@ mod authority_tests {
             "verifier_effective_definition_digest": admitted,
             "verifier_realized_definition_digest": realized.as_str()
         })).unwrap());
-        sealed.validate_product_qualification_purpose().unwrap();
+        sealed.validate_qualification_purpose().unwrap();
 
-        let purpose = sealed.product_qualification_purpose().unwrap().clone();
+        let purpose = sealed.qualification_purpose().unwrap().clone();
         let view = purpose.execution_view().unwrap();
         sealed
             .require_qualification_execution_purpose(&view)
@@ -2443,7 +2441,10 @@ mod authority_tests {
             "{}"
         );
         let mut different_source = purpose;
-        different_source.product_witness_hash = "9".repeat(64);
+        match &mut different_source.subject {
+            ryeos_state::external_content::qualification_purpose::QualificationSubject::CapturedProduct { product_witness_hash, .. } => *product_witness_hash = "9".repeat(64),
+            _ => panic!("fixture is not a captured product"),
+        }
         let different_view = different_source.execution_view().unwrap();
         assert!(
             sealed
@@ -2457,13 +2458,13 @@ mod authority_tests {
         );
 
         sealed
-            .product_qualification
+            .qualification
             .as_mut()
             .unwrap()
             .verifier_realized_definition_digest = "2".repeat(64);
         assert!(
             sealed
-                .validate_product_qualification_purpose()
+                .validate_qualification_purpose()
                 .unwrap_err()
                 .to_string()
                 .contains("verifier definition")
@@ -2524,13 +2525,16 @@ mod authority_tests {
             .unwrap()
             .as_str()
             .to_owned();
-        sealed.product_qualification = Some(serde_json::from_value(json!({
-            "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
+        sealed.qualification = Some(serde_json::from_value(json!({
+            "schema": ryeos_state::external_content::qualification_purpose::QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
             "launch_id": format!("L-{}", "a".repeat(32)),
             "owner_fingerprint": "session:test",
-            "product_witness_hash": "b".repeat(64),
-            "witness_source": {"kind":"local_capture"},
-            "relationship_name": "runtime_to_qualified_runtime",
+            "subject": {
+                "kind": "captured_product",
+                "product_witness_hash": "b".repeat(64),
+                "witness_source": {"kind":"local_capture"},
+                "relationship_name": "runtime_to_qualified_runtime"
+            },
             "consumer_content": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
@@ -2566,11 +2570,11 @@ mod authority_tests {
             },
         ];
 
-        sealed.validate_product_qualification_purpose().unwrap();
+        sealed.validate_qualification_purpose().unwrap();
 
         let mut empty = sealed.clone();
         empty.product_selections.clear();
-        assert!(empty.validate_product_qualification_purpose().is_err());
+        assert!(empty.validate_qualification_purpose().is_err());
 
         let mut mismatched_snapshot = sealed.clone();
         mismatched_snapshot.project_context = ProjectContext::SnapshotHash {
@@ -2578,7 +2582,7 @@ mod authority_tests {
         };
         assert!(
             mismatched_snapshot
-                .validate_product_qualification_purpose()
+                .validate_qualification_purpose()
                 .is_err()
         );
 
@@ -2586,7 +2590,7 @@ mod authority_tests {
         live.project_context = ProjectContext::LocalPath {
             path: PathBuf::from("/project"),
         };
-        assert!(live.validate_product_qualification_purpose().is_err());
+        assert!(live.validate_qualification_purpose().is_err());
 
         let mut cow = sealed.clone();
         cow.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
@@ -2600,20 +2604,20 @@ mod authority_tests {
             Vec::new(),
         )
         .unwrap();
-        assert!(cow.validate_product_qualification_purpose().is_err());
+        assert!(cow.validate_qualification_purpose().is_err());
 
         let mut extra = sealed.clone();
         extra
             .product_selections
             .push(extra.product_selections[0].clone());
-        assert!(extra.validate_product_qualification_purpose().is_err());
+        assert!(extra.validate_qualification_purpose().is_err());
 
         let mut non_root = sealed.clone();
         non_root.product_selections[0].target =
             ryeos_state::external_content::products::composition::ProductSelectionTarget::ContentDependency {
                 binding: "subject".to_owned(),
             };
-        assert!(non_root.validate_product_qualification_purpose().is_err());
+        assert!(non_root.validate_qualification_purpose().is_err());
 
         let mut output_bearing = sealed;
         let mut authority = serde_json::to_value(&output_bearing.project_authority).unwrap();
@@ -2633,11 +2637,7 @@ mod authority_tests {
             "capture_hash": null
         });
         output_bearing.project_authority = serde_json::from_value(authority).unwrap();
-        assert!(
-            output_bearing
-                .validate_product_qualification_purpose()
-                .is_err()
-        );
+        assert!(output_bearing.validate_qualification_purpose().is_err());
     }
 
     #[test]

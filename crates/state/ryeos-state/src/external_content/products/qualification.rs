@@ -25,8 +25,6 @@ use crate::objects::{
 };
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v2";
-pub const PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str =
-    "ryeos.product_qualification_launch_purpose.v3";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
 pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v9";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
@@ -392,47 +390,6 @@ pub struct ProductQualificationPolicySource {
     pub policy: ProductQualificationPolicy,
 }
 
-/// Daemon-derived intent for one independently admitted verifier root. This
-/// is not a caller-authored declaration or qualification result: the launch
-/// owner must derive it from the exact product witness and signed relationship
-/// before attaching it to root admission. Recovery retains it unchanged.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProductQualificationLaunchPurpose {
-    pub schema: String,
-    pub launch_id: String,
-    pub owner_fingerprint: String,
-    pub product_witness_hash: String,
-    pub witness_source: ProductWitnessSource,
-    pub relationship_name: String,
-    pub policy_source: ProductQualificationPolicySource,
-    /// Exact pre-selection definitions resolved from one checked installed
-    /// Bundle generation. Still not source-closure or execution testimony.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub consumer_definitions: Option<ProductQualificationConsumerDefinitionIdentity>,
-    /// Required nullable: content remains non-authorizing until a daemon
-    /// purpose owns its exact CAS closure and execution parity is proved.
-    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
-    pub consumer_content: Option<ProductQualificationConsumerContentIdentity>,
-    /// Exact signed source for every scenario the verifier may later select.
-    /// A Config ref alone cannot prevent recipe drift after root admission.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub producer_recipe_sources: BTreeMap<String, ProductProducerRecipeSourceIdentity>,
-    pub subject_declaration_id: String,
-    pub subject_manifest_hash: String,
-    pub required_claims: Vec<String>,
-    pub admitted_parameters_digest: String,
-    pub verifier_ref: String,
-    /// Pre-realization effective definition admitted for the verifier root.
-    /// The capsule's realized D2 remains separately authoritative.
-    pub verifier_effective_definition_digest: String,
-    /// Exact current post-realization definition independently resolved from
-    /// the signed Bundle before launch. It must match the retained capsule's
-    /// realized definition at qualification; it is not interchangeable with
-    /// the root admission's pre-realization definition above.
-    pub verifier_realized_definition_digest: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProductProducerRecipeSourceIdentity {
@@ -461,105 +418,6 @@ impl ProductProducerRecipeSourceIdentity {
         )?;
         validate_hash("producer recipe publisher", &self.publisher_fingerprint)?;
         validate_hash("producer recipe contents", &self.recipe_digest)
-    }
-}
-
-impl ProductQualificationLaunchPurpose {
-    /// Execution inputs borrow this validated purpose without lending its
-    /// product witness authority to the execution interpreter.
-    pub fn execution_view(
-        &self,
-    ) -> anyhow::Result<super::super::qualification_execution::QualificationExecutionPurposeView<'_>>
-    {
-        super::super::qualification_execution::QualificationExecutionPurposeView::from_product(self)
-    }
-
-    pub fn validate(&self) -> anyhow::Result<()> {
-        if self.schema != PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA {
-            bail!("unsupported product qualification launch purpose schema");
-        }
-        if self.launch_id.len() != 34
-            || !self.launch_id.starts_with("L-")
-            || !self.launch_id[2..]
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            bail!("qualification launch id is not canonical");
-        }
-        exact_coordinate("qualification launch owner", &self.owner_fingerprint)?;
-        validate_hash("qualification product witness", &self.product_witness_hash)?;
-        self.witness_source.validate()?;
-        validate_name(&self.relationship_name)?;
-        self.policy_source.validate()?;
-        match (
-            &self.policy_source.policy.consumer_execution_context,
-            &self.consumer_definitions,
-            &self.consumer_content,
-        ) {
-            (Some(context), Some(definitions), Some(content)) => {
-                definitions.validate_for(context)?;
-                content.validate_for(context, definitions)?;
-                if self.policy_source.policy.producer_scenarios.is_empty() {
-                    bail!("consumer qualification has no signed direct producer scenario");
-                }
-            }
-            (None, None, None) => {}
-            _ => bail!("qualification purpose consumer definitions differ from signed policy"),
-        }
-        if self.producer_recipe_sources.len() != self.policy_source.policy.producer_scenarios.len()
-        {
-            bail!("qualification purpose does not pin every signed producer scenario");
-        }
-        for (name, scenario) in &self.policy_source.policy.producer_scenarios {
-            let source = self
-                .producer_recipe_sources
-                .get(name)
-                .context("qualification purpose has no producer source for signed scenario")?;
-            source.validate()?;
-            if source.canonical_ref != scenario.recipe_ref {
-                bail!("qualification purpose producer source differs from signed scenario");
-            }
-            if let Some(definitions) = &self.consumer_definitions
-                && source.bundle_generation_identity != definitions.bundle_generation_identity
-            {
-                bail!("qualification producer and consumer use different Bundle generations");
-            }
-        }
-        validate_name(&self.subject_declaration_id)?;
-        validate_hash(
-            "qualification subject manifest",
-            &self.subject_manifest_hash,
-        )?;
-        validate_claims(&self.required_claims)?;
-        validate_hash(
-            "qualification admitted parameters",
-            &self.admitted_parameters_digest,
-        )?;
-        validate_canonical_unsuffixed_ref("qualification verifier", &self.verifier_ref)?;
-        validate_hash(
-            "qualification verifier definition",
-            &self.verifier_effective_definition_digest,
-        )?;
-        validate_hash(
-            "qualification realized verifier definition",
-            &self.verifier_realized_definition_digest,
-        )?;
-        let policy = &self.policy_source.policy;
-        if self.subject_declaration_id != policy.subject_declaration_id
-            || self.verifier_ref != policy.verifier_ref
-            || self.admitted_parameters_digest != policy.admitted_parameters_digest()?
-            || self
-                .required_claims
-                .iter()
-                .any(|claim| policy.allowed_claims.binary_search(claim).is_err())
-        {
-            bail!("qualification launch purpose contradicts its signed policy");
-        }
-        bounded(
-            self,
-            MAX_PRODUCT_QUALIFICATION_EVIDENCE_BYTES,
-            "qualification launch purpose",
-        )
     }
 }
 
@@ -984,7 +842,7 @@ impl ProductQualificationExecutionProof {
 pub struct ProductQualificationEvidence {
     pub schema: String,
     pub product_witness_hash: String,
-    pub witness_source: super::transfer::ProductWitnessSource,
+    pub witness_source: ProductWitnessSource,
     pub product_coordinate: ProductCaptureCoordinate,
     pub policy_source: ProductQualificationPolicySource,
     /// Required nullable: copied from the exact owner-bound verifier purpose,
@@ -1298,7 +1156,7 @@ impl ProductQualificationEvidence {
     }
 }
 
-fn validate_claims(claims: &[String]) -> anyhow::Result<()> {
+pub(crate) fn validate_claims(claims: &[String]) -> anyhow::Result<()> {
     if claims.is_empty() {
         bail!("qualification claims must not be empty");
     }
@@ -1324,7 +1182,7 @@ fn bounded_object(value: &Value, label: &str) -> anyhow::Result<()> {
     bounded(value, MAX_PROBE_VALUE_BYTES, label)
 }
 
-fn bounded(value: &impl Serialize, maximum: usize, label: &str) -> anyhow::Result<()> {
+pub(crate) fn bounded(value: &impl Serialize, maximum: usize, label: &str) -> anyhow::Result<()> {
     let value = serde_json::to_value(value)?;
     if lillux::canonical_json(&value)?.len() > maximum {
         bail!("{label} exceeds its bounded wire contract");
@@ -1332,7 +1190,7 @@ fn bounded(value: &impl Serialize, maximum: usize, label: &str) -> anyhow::Resul
     Ok(())
 }
 
-fn exact_coordinate(label: &str, value: &str) -> anyhow::Result<()> {
+pub(crate) fn exact_coordinate(label: &str, value: &str) -> anyhow::Result<()> {
     if value.is_empty()
         || value.len() > 2048
         || value.trim() != value

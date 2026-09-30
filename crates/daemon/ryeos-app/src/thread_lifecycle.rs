@@ -37,7 +37,7 @@ use ryeos_engine::history_policy::{
 };
 use ryeos_engine::resolution::TrustClass as ResolutionTrustClass;
 use ryeos_state::UsageSubject;
-use ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose;
+use ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose;
 use ryeos_state::objects::ThreadStatus;
 
 /// Re-export so daemon crates that depend only on `ryeos-app` (e.g. `ryeos-ui`)
@@ -2138,7 +2138,7 @@ pub struct RootExecutionAdmission {
     captured_history_policy: ryeos_state::objects::CapturedThreadHistoryPolicy,
     project_binding: AdmittedProjectBinding,
     candidate_evaluation: Option<Arc<CandidateEvaluationExecutionScope>>,
-    product_qualification: Option<ProductQualificationLaunchPurpose>,
+    qualification: Option<QualificationLaunchPurpose>,
     admitted_request_snapshot: Option<Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
     selected_executor_route: Option<AdmittedExecutorRoute>,
 }
@@ -2208,22 +2208,19 @@ impl RootExecutionAdmission {
         self.candidate_evaluation.as_ref()
     }
 
-    pub fn product_qualification_purpose(&self) -> Option<&ProductQualificationLaunchPurpose> {
-        self.product_qualification.as_ref()
+    pub fn qualification_purpose(&self) -> Option<&QualificationLaunchPurpose> {
+        self.qualification.as_ref()
     }
 
     /// Attach only a daemon-derived, exact product-qualification purpose to a
     /// fresh root. Public execution has no path to manufacture this field.
-    pub fn for_product_qualification(
-        mut self,
-        purpose: ProductQualificationLaunchPurpose,
-    ) -> Result<Self> {
-        if self.product_qualification.is_some() {
+    pub fn for_qualification(mut self, purpose: QualificationLaunchPurpose) -> Result<Self> {
+        if self.qualification.is_some() {
             bail!("root admission already has product qualification purpose");
         }
         self.validate()?;
         purpose.validate()?;
-        self.product_qualification = Some(purpose);
+        self.qualification = Some(purpose);
         self.validate()?;
         Ok(self)
     }
@@ -2446,7 +2443,7 @@ impl RootExecutionAdmission {
         candidate_provenance: &crate::execution_provenance::ExecutionProvenance,
         scope: Arc<CandidateEvaluationExecutionScope>,
     ) -> Result<Self> {
-        if self.candidate_evaluation.is_some() || self.product_qualification.is_some() {
+        if self.candidate_evaluation.is_some() || self.qualification.is_some() {
             bail!("candidate evaluator admission is already rebound");
         }
         if candidate_provenance
@@ -2763,8 +2760,11 @@ impl RootExecutionAdmission {
         ryeos_state::external_content::products::composition::validate_product_selection_inputs(
             &self.product_selections,
         )?;
-        if let Some(purpose) = &self.product_qualification {
+        if let Some(purpose) = &self.qualification {
             purpose.validate()?;
+            // The content adapter must authenticate and seal its provenance
+            // before this admission path can accept that source.
+            let (product_witness_hash, witness_source, _) = purpose.subject.captured_product()?;
             let projectless_lane = matches!(
                 (
                     &self.plan_context.project_context,
@@ -2827,8 +2827,8 @@ impl RootExecutionAdmission {
                         selected.target,
                         ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
                     ) && selected.selection.declaration_id == purpose.subject_declaration_id
-                        && selected.selection.witness_hash == purpose.product_witness_hash
-                        && selected.selection.witness_source == purpose.witness_source
+                        && selected.selection.witness_hash == product_witness_hash
+                        && &selected.selection.witness_source == witness_source
                         && selected.selection.qualification_hash.is_none() => {}
                 _ => bail!("qualification purpose differs from admitted unqualified subject selection"),
             }
@@ -3056,7 +3056,7 @@ impl RootExecutionAdmission {
 
     pub fn ensure_matches_request(&self, request: &ResolvedExecutionRequest) -> Result<()> {
         self.validate()?;
-        if let Some(purpose) = &self.product_qualification {
+        if let Some(purpose) = &self.qualification {
             if ryeos_state::objects::canonical_value_digest(&request.parameters)?
                 != purpose.admitted_parameters_digest
                 || request.target_site_id.is_some()
@@ -7329,7 +7329,7 @@ fn admit_verified_root_execution_inner(
         resolved_result_policy: launch_policy.result,
         project_binding,
         candidate_evaluation: None,
-        product_qualification: None,
+        qualification: None,
         admitted_request_snapshot,
         selected_executor_route: None,
     };

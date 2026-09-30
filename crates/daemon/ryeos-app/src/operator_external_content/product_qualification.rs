@@ -546,8 +546,10 @@ fn prove_with_guard(
     // the planning row binds its caller-retained launch coordinate to the
     // exact root that produced the terminal being considered here.
     let purpose = sealed
-        .product_qualification_purpose()
+        .qualification_purpose()
         .context("qualification verifier has no admitted launch purpose")?;
+    let (product_witness_hash, witness_source, relationship_name) =
+        purpose.subject.captured_product()?;
     let planning = state
         .state_store
         .launch_planning_record_for_owner(&purpose.launch_id, &context.fingerprint)?
@@ -556,9 +558,9 @@ fn prove_with_guard(
         || planning.reserved_thread_id != root.thread_id
         || planning.bound_thread_id.as_deref() != Some(root.thread_id.as_str())
         || purpose.owner_fingerprint != context.fingerprint
-        || purpose.product_witness_hash != product.attestation_hash
-        || purpose.witness_source != request.witness_source
-        || purpose.relationship_name != request.relationship_name
+        || product_witness_hash != product.attestation_hash
+        || witness_source != &request.witness_source
+        || relationship_name != request.relationship_name
         || purpose.policy_source != policy_source
         || purpose.subject_declaration_id != policy_source.policy.subject_declaration_id
         || purpose.subject_manifest_hash != product.evidence.manifest_hash
@@ -910,6 +912,47 @@ fn require_exact_pinned_subject(
     Ok(())
 }
 
+/// Existing verifier identity owner, reused by the activated-content source
+/// adapter. No product witness or selection is synthesized for a fixed pin.
+/// This returns definition coordinates only; accepted-root admission must
+/// independently compare them and seal the complete qualification purpose.
+pub(crate) fn resolve_content_fixed_pin_verifier(
+    state: &AppState,
+    context: &HandlerContext,
+    policy: &ProductQualificationPolicySource,
+    subject: &ryeos_state::external_content::qualification_subject::ContentQualificationSubject,
+) -> anyhow::Result<(String, String)> {
+    policy.validate()?;
+    subject.validate()?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let current = resolve_current_bundle_verifier_identity_against_admitted(
+        state,
+        &authority,
+        &guard,
+        context,
+        &policy.policy.verifier_ref,
+        &policy.policy.verifier_parameters,
+        CurrentVerifierContext {
+            content: CurrentVerifierContent::Root(None),
+            logical_project_root: None,
+            binding_subject_authority: None,
+            sealed_request: None,
+            project_context_resolver: None,
+            pinned_admission: None,
+        },
+        None,
+    )?;
+    subject.verify_verifier_realizations(
+        &current.realizations,
+        &policy.policy.subject_declaration_id,
+    )?;
+    Ok((
+        current.admitted_definition_digest,
+        current.effective_definition_digest,
+    ))
+}
+
 /// Resolve the current signed policy in the deliberately narrow projectless
 /// Bundle lane. Project Config policy needs an exact retained context owner and
 /// is refused here rather than falling back to live source.
@@ -922,7 +965,7 @@ pub(super) fn resolve_current_bundle_qualification_policy(
     })
 }
 
-fn resolve_current_bundle_qualification_policy_in_generation(
+pub(crate) fn resolve_current_bundle_qualification_policy_in_generation(
     generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     policy_ref: &str,
 ) -> anyhow::Result<ProductQualificationPolicySource> {
@@ -1958,13 +2001,16 @@ pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
     let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
         &capsule,
     )?;
-    if sealed
-        .product_qualification_purpose()
-        .context("qualification evidence verifier has no sealed purpose")?
-        .consumer_content
-        != evidence.consumer_content
+    let purpose = sealed
+        .qualification_purpose()
+        .context("qualification evidence verifier has no sealed purpose")?;
+    let (witness_hash, witness_source, _) = purpose.subject.captured_product()?;
+    if purpose.consumer_content != evidence.consumer_content
+        || witness_hash != evidence.product_witness_hash
+        || witness_source != &evidence.witness_source
+        || purpose.policy_source != evidence.policy_source
     {
-        bail!("qualification evidence consumer content differs from sealed verifier purpose");
+        bail!("qualification evidence differs from sealed verifier purpose");
     }
     let admitted_resolution = sealed.admitted_effective_resolution()?;
     if sealed.item_ref() != evidence.verifier.canonical_ref

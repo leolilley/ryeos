@@ -13,8 +13,8 @@ use ryeos_app::state::AppState;
 use ryeos_executor::execution::project_source::ProjectSource;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_runtime::authorizer::AuthorizationPolicy;
-use ryeos_state::external_content::products::qualification::{
-    PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, ProductQualificationLaunchPurpose,
+use ryeos_state::external_content::qualification_purpose::{
+    QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, QualificationLaunchPurpose, QualificationSubject,
 };
 use serde_json::{Value, json};
 
@@ -420,13 +420,15 @@ pub async fn handle(
     let consumer_definitions = consumer_content
         .as_ref()
         .map(|content| content.definitions.clone());
-    let purpose = ProductQualificationLaunchPurpose {
-        schema: PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.to_string(),
+    let purpose = QualificationLaunchPurpose {
+        schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.to_string(),
         launch_id: prepared.launch_id.clone(),
         owner_fingerprint: prepared.owner_fingerprint.clone(),
-        product_witness_hash: prepared.product_witness_hash.clone(),
-        witness_source: prepared.witness_source.clone(),
-        relationship_name: prepared.relationship.name.clone(),
+        subject: QualificationSubject::CapturedProduct {
+            product_witness_hash: prepared.product_witness_hash.clone(),
+            witness_source: prepared.witness_source.clone(),
+            relationship_name: prepared.relationship.name.clone(),
+        },
         policy_source: prepared.policy_source.clone(),
         consumer_definitions,
         consumer_content,
@@ -450,11 +452,9 @@ pub async fn handle(
             HandlerError::Internal("verifier D2 was not finalized".to_string())
         })?,
     };
-    let root_admission = root_admission
-        .for_product_qualification(purpose)
-        .map_err(|error| {
-            HandlerError::BadRequest(format!("qualification root refused: {error:#}"))
-        })?;
+    let root_admission = root_admission.for_qualification(purpose).map_err(|error| {
+        HandlerError::BadRequest(format!("qualification root refused: {error:#}"))
+    })?;
     let options = DispatchLaunchOptions::admitted(
         root_admission,
         preflight.root_dispatch_evidence,

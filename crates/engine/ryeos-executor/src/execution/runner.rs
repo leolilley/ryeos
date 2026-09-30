@@ -3017,7 +3017,7 @@ fn admitted_scoped_producer_grant(
     let Some(sealed) = metadata.sealed_root_request.as_ref() else {
         return Ok(None);
     };
-    let Some(purpose) = sealed.product_qualification_purpose() else {
+    let Some(purpose) = sealed.qualification_purpose() else {
         return Ok(None);
     };
     if purpose.policy_source.policy.producer_scenarios.is_empty() {
@@ -3073,7 +3073,7 @@ fn admitted_scoped_producer_grant(
 /// materialization. The callback may select a scenario, never its command.
 fn promoted_scoped_producer_commands(
     state: &AppState,
-    purpose: &ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose,
+    purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
     external: Option<&super::external_content::BoundExternalRealizations>,
 ) -> Result<(
     BTreeMap<
@@ -6710,7 +6710,7 @@ async fn dispatch_detached_bg_task(
         admitted_launch_metadata
             .sealed_root_request
             .as_ref()
-            .and_then(|sealed| sealed.product_qualification_purpose())
+            .and_then(|sealed| sealed.qualification_purpose())
     {
         use ryeos_app::scoped_producer_authority::{
             ScopedProducerAuthorityKey, ScopedProducerLiveAuthority,
@@ -8699,7 +8699,7 @@ async fn run_existing_recovered_thread(
             .resolved
             .root_admission
             .as_ref()
-            .is_some_and(|admission| admission.product_qualification_purpose().is_some())
+            .is_some_and(|admission| admission.qualification_purpose().is_some())
     {
         params.resolved.plan_context.project_context = ProjectContext::LocalPath {
             path: effective_path.clone(),

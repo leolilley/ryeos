@@ -1448,6 +1448,9 @@ fn captured_target_content_declarations(
                 digest: Some(entry.manifest_hash.clone()),
                 exclude: Vec::new(),
                 metadata_hint: None,
+                // A retained mount does not reconstruct signed qualification
+                // authority. Admission resolves that from the consumer item.
+                qualification_allowance: None,
                 mount_root: entry.mount_root,
                 mount: entry.mount.clone(),
             },

@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::execution_provenance::ExecutionProvenance;
-use ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose;
+use ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose;
 
 /// Protected root intent for one daemon-owned producer. This is a live bearer
 /// projection of the sealed qualification purpose, not permission to launch
@@ -15,7 +15,7 @@ use ryeos_state::external_content::products::qualification::ProductQualification
 /// recheck the durable owner and signed recipe before its irreversible cut.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedScopedProducerGrant {
-    pub purpose: ProductQualificationLaunchPurpose,
+    pub purpose: QualificationLaunchPurpose,
     pub root_thread_id: String,
     pub launch_owner: String,
     /// Node isolation class captured before this root may launch a producer.

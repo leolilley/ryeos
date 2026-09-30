@@ -420,35 +420,9 @@ fn verify_product_subject(
                     .map(|entry| (entry.path.as_str(), entry.kind, entry.size)),
                 None,
             )?;
-            let large_store = authority.large_object_store()?;
-            for entry in &manifest.entries {
-                if let Some(file_sha256) = entry.file_sha256.as_deref() {
-                    large_store
-                        .verify_manifest_commitment(entry)
-                        .with_context(|| {
-                            format!("verify retained large product entry {}", entry.path)
-                        })?;
-                    let findings = large_store.scrub_object(file_sha256)?;
-                    if !findings.is_empty() {
-                        bail!(
-                            "retained large product entry {} failed byte integrity: {findings:?}",
-                            entry.path
-                        );
-                    }
-                } else if let Some(blob_hash) = entry.blob_hash.as_deref() {
-                    let bytes = crate::object_closure::load_exact_cas_blob_with_cas(
-                        &cas,
-                        blob_hash,
-                        crate::objects::MAX_EXTERNAL_CONTENT_FILE_BYTES.min(limits.max_blob_bytes),
-                    )?;
-                    if entry.size != Some(bytes.len() as u64) {
-                        bail!(
-                            "retained large product blob {} size contradicts its manifest",
-                            entry.path
-                        );
-                    }
-                }
-            }
+            crate::external_content::payload::verify_large_manifest_payload(
+                authority, &manifest, limits,
+            )?;
         }
         other => bail!("unsupported product manifest kind {other}"),
     }

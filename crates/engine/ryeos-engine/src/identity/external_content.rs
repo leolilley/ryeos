@@ -203,6 +203,12 @@ pub struct ExternalContentDeclaration {
     pub exclude: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_hint: Option<String>,
+    /// Signed selection for producing finite qualification evidence. This
+    /// does not itself qualify content or impose readiness on ordinary pins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualification_allowance: Option<
+        ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance,
+    >,
     pub mount_root: ExternalContentMountRoot,
     pub mount: String,
 }
@@ -228,6 +234,15 @@ impl ExternalContentDeclaration {
         allow_missing_pinned_digest: bool,
     ) -> anyhow::Result<()> {
         validate_declaration_id(&self.id)?;
+        if let Some(allowance) = &self.qualification_allowance {
+            allowance.validate()?;
+            if self.mode != ExternalContentMode::Pinned
+                || self.locator.is_some()
+                || self.bundle_binary.is_some()
+            {
+                anyhow::bail!("qualification allowance requires exact locator-free pinned content");
+            }
+        }
         validate_relative_path("external content mount target", &self.mount)?;
         if let Some(binary_ref) = &self.bundle_binary {
             if self.locator.is_some() {
@@ -503,6 +518,7 @@ pub fn effective_external_content_declarations(
             digest: Some(selection.manifest_hash.clone()),
             exclude: Vec::new(),
             metadata_hint: None,
+            qualification_allowance: None,
             mount_root: slot.mount_root,
             mount: slot.mount,
         });
@@ -843,6 +859,42 @@ fn path_contains(parent: &str, child: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qualification_allowance_requires_exact_pinned_source() {
+        let value = serde_json::json!({
+            "id": "runtime", "kind": "tree", "mode": "pinned",
+            "digest": "a".repeat(64), "mount_root": "execution_runtime", "mount": "runtime",
+            "qualification_allowance": {
+                "activation_ref": "config:fixture/activation",
+                "policy_ref": "config:fixture/policy",
+                "required_claims": ["settled"]
+            }
+        });
+        let declaration: super::ExternalContentDeclaration =
+            serde_json::from_value(value.clone()).unwrap();
+        declaration
+            .validate(super::DeclaringAuthority::Bundle("fixture"))
+            .unwrap();
+        let mut located = value.clone();
+        located["locator"] = serde_json::json!({"root": "bundle:fixture", "path": "runtime"});
+        let declaration: super::ExternalContentDeclaration =
+            serde_json::from_value(located).unwrap();
+        assert!(
+            declaration
+                .validate(super::DeclaringAuthority::Bundle("fixture"))
+                .is_err()
+        );
+        let mut unbounded = value;
+        unbounded["qualification_allowance"]["required_claims"] = serde_json::json!([]);
+        let declaration: super::ExternalContentDeclaration =
+            serde_json::from_value(unbounded).unwrap();
+        assert!(
+            declaration
+                .validate(super::DeclaringAuthority::Bundle("fixture"))
+                .is_err()
+        );
+    }
+
     use super::*;
 
     #[test]
