@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-29T23:03:59Z:aaaf0d52f24eb6125966bd1ddd6481523de1e30613889c524d0fd584994dc8a0:usx+fpdaQyQbghRBYTfvq/8KgrkMa1dfFOFloNBzJlKYnIqYuH4QnA34QCaG0SOlp5FZ/xdeW2yiTRs5v4RnCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T00:31:37Z:c8d5d7fb016b311592c87897c85016075689c31eab25cf127c92a6fdfb193757:SAcT6latJe55epJwB4e9uvBwNpcVM4+NwqVw/geakhr3vT2WzssW7DRkYRzh5bo7b5WTgLv8qOueVc9h0i47Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -236,6 +236,22 @@ new mutation test has been type checked but not executed. This closes two
 retained-evidence consistency gaps, not the consumer runtime claim: issuance,
 claim validation and fresh selection still refuse consumer-context evidence
 until the complete applied runtime and lifecycle joins are authenticated.
+
+Fresh-admission source cut, 2026-09-30: scoped qualification readback now
+reloads the verifier's sealed launch purpose and exact process settlement,
+then reruns the issuance scoped-attempt corroboration against the retired
+owner-keyed journal and committed CAS observation. The reconstructed proof
+must equal the signed proof. A missing local settlement, attempt or admitted
+root capsule now makes fresh selection fail closed; retained recovery still
+uses its distinct attestation and closure path. The source also shares a
+validated borrowed qualification-execution purpose view across launch and
+evidence owners, checking that view against the complete sealed purpose
+before process authority is consumed. Exact runtime-member identity was moved
+to a shared state helper. These changes passed formatting and diff checks in
+the isolated rehearsal branch at `4d8112c5e`; they have not been compiled or
+run together. The direct proof still has no typed applied-launch digest for
+hosted Worker parity. Its consumer-context issuance, claim validation and
+fresh-selection refusals remain active.
 
 The signed fixture now selects the exact retained Codex executable as its
 direct scoped target. The daemon-side listener transfer, READY wait, prepared
