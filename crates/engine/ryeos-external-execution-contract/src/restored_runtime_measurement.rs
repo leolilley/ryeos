@@ -360,6 +360,16 @@ impl ConsumerRuntimeChallenge {
 }
 
 impl RestoredVerifierAdapterRequest {
+    /// Exact private archive staging mode for this closed protocol lane.
+    /// Consumer delivery is frozen before contact; prerequisite owner uploads
+    /// retain their existing private staging contract. No permissive fallback.
+    pub fn required_upload_mode(&self) -> u32 {
+        match &self.intent.purpose {
+            RemoteVerificationPurpose::OwnerMeasurement { .. } => 0o600,
+            RemoteVerificationPurpose::ConsumerRuntime { .. } => 0o400,
+        }
+    }
+
     pub fn consumer_challenge(&self) -> Result<ConsumerRuntimeChallenge> {
         self.validate()?;
         let challenge = ConsumerRuntimeChallenge {

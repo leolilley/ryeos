@@ -333,7 +333,8 @@ impl<T: AppServerTransport> AppServerProtocol<T> {
     /// Drain the remaining wire output after an explicit outer settlement
     /// request, without closing input (EOF cannot substitute for that request).
     /// The enclosing owner must still join exact-child and namespace evidence.
-    /// Tail bytes are retained, not silently discarded or called notifications.
+    /// Tail bytes are retained. Only shape-checked notifications are accepted;
+    /// the enclosing semantic checker must then examine the complete collection.
     pub fn drain_wire_until_eof(&mut self, deadline: MonotonicDeadline) -> Result<()> {
         self.require_completed_scripted_turn()?;
         let deadline = self.tighten_deadline(deadline);
@@ -363,6 +364,21 @@ impl<T: AppServerTransport> AppServerProtocol<T> {
                 frame.last() == Some(&b'\n'),
                 "app-server tail ended mid-protocol"
             );
+            ensure!(
+                self.frames < MAX_EVENTS + 16,
+                "app-server tail frame count bound"
+            );
+            let message: Value = serde_json::from_slice(&frame)?;
+            ensure!(
+                message.is_object()
+                    && message.get("id").is_none()
+                    && message["method"].is_string()
+                    && message["params"].is_object(),
+                "unexpected response, request or malformed notification after completed turn"
+            );
+            self.frames += 1;
+            self.bytes = self.received_wire.len();
+            self.notifications.push(message);
         }
     }
 
@@ -637,9 +653,13 @@ impl AppServerObservation {
                 .context("app-server exact-child settlement uncertain")?;
             Ok(AppServerStopOutcome::Forced(exit))
         })();
-        let reader_settled = self.diagnostics.cancel_until(MonotonicDeadline::after(
-            lillux::time::Duration::from_secs(5),
-        ));
+        // Joining diagnostics is part of the same bounded cleanup obligation,
+        // not permission to extend a caller's expired force deadline.
+        let reader_settled =
+            self.diagnostics
+                .cancel_until(force_deadline.min(MonotonicDeadline::after(
+                    lillux::time::Duration::from_secs(5),
+                )));
         let reader_ok = matches!(
             reader_settled,
             Some(SubordinateDiagnosticDrainEnd::Eof | SubordinateDiagnosticDrainEnd::Cancelled)
@@ -716,7 +736,7 @@ mod tests {
         protocol.scripted_phase = ScriptedPhase::TurnCompleted;
         protocol.drain_wire_until_eof(deadline).unwrap();
         assert_eq!(protocol.wire_transcript().1, tail);
-        assert!(protocol.notifications().is_empty());
+        assert_eq!(protocol.notifications().len(), 1);
         let mut truncated = AppServerProtocol::new(
             MemoryTransport {
                 frames: [b"partial".to_vec()].into(),
@@ -726,6 +746,21 @@ mod tests {
         );
         truncated.scripted_phase = ScriptedPhase::TurnCompleted;
         assert!(truncated.drain_wire_until_eof(deadline).is_err());
+        for frame in [
+            b"{\"id\":1,\"result\":{}}\n".as_slice(),
+            b"{\"id\":2,\"method\":\"permission\",\"params\":{}}\n".as_slice(),
+            b"not-json\n".as_slice(),
+        ] {
+            let mut invalid = AppServerProtocol::new(
+                MemoryTransport {
+                    frames: [frame.to_vec()].into(),
+                    writes: Vec::new(),
+                },
+                deadline,
+            );
+            invalid.scripted_phase = ScriptedPhase::TurnCompleted;
+            assert!(invalid.drain_wire_until_eof(deadline).is_err());
+        }
     }
 
     #[test]

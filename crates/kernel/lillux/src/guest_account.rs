@@ -27,8 +27,25 @@ impl GuestRuntimeAccount {
             .grant_private_directory(directory)
     }
 
+    /// Permit traversal of an exact administrator-owned, non-secret parent
+    /// without giving the guest account mutation authority over that parent.
+    /// Private per-attempt children require their own explicit grants.
+    pub fn grant_readonly_host_directory(&self, directory: &PinnedDirectory) -> Result<()> {
+        self.controller_account()?
+            .grant_readonly_host_directory(directory)
+    }
+
     pub fn grant_private_file(&self, file: &PinnedRegularFile) -> Result<()> {
         self.controller_account()?.grant_private_file(file)
+    }
+
+    pub fn grant_private_readonly_file(
+        &self,
+        file: &PinnedRegularFile,
+        expected_mode: u32,
+    ) -> Result<()> {
+        self.controller_account()?
+            .grant_private_readonly_file(file, expected_mode)
     }
 
     pub fn require_current_process(&self) -> Result<()> {

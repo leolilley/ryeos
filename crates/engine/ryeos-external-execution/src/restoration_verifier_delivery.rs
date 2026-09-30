@@ -187,6 +187,13 @@ pub fn inventory_consumer_product(
         maximum_regular_bytes,
         deadline,
     )?;
+    // A manifest is a private delivery record, not a runtime file whose source
+    // mode is part of its executable contract. Author its immutable archive mode
+    // here, before upload; never repair permissions on an extracted guest tree.
+    let Some(GuestStagingEntry::RegularFile { mode, .. }) = entries.last_mut() else {
+        anyhow::bail!("consumer manifest inventory did not produce a regular file");
+    };
+    *mode = 0o400;
     descriptors.insert(record, manifest.clone());
     verify()?;
     ensure!(

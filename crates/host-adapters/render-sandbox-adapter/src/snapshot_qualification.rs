@@ -488,10 +488,7 @@ fn preflight_verifier_upload_and_routes(
     request.validate()?;
     upload.require_owned_regular()?;
     let observation = upload.regular_file_observation()?;
-    let expected_mode = match &request.intent.purpose {
-        ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { .. } => 0o600,
-        ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime { .. } => 0o400,
-    };
+    let expected_mode = request.required_upload_mode();
     ensure!(
         observation.full_permission_mode()? == expected_mode
             && observation.size() == request.upload_bytes
@@ -567,19 +564,120 @@ pub(crate) fn parse_restored_verifier_stream(
     locator: &RuntimeSnapshotLocator,
     readiness: &RuntimeSnapshotReadinessObservation,
 ) -> Result<RestoredVerifierStreamObservation> {
+    let bytes = parse_verifier_stdout(
+        body,
+        MAX_RESTORED_RUN_STREAM_BYTES,
+        16 * 1024,
+        32,
+        MAX_RESTORED_OWNER_RESULT_BYTES,
+        None,
+    )?;
+    let measurement: RestoredOwnerMeasurement =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &bytes,
+            MAX_RESTORED_OWNER_RESULT_BYTES,
+        )?;
     ensure!(
-        !body.is_empty() && body.len() <= MAX_RESTORED_RUN_STREAM_BYTES,
+        ryeos_external_execution_contract::canonical_json(&measurement)? == bytes,
+        "restored verifier output is noncanonical"
+    );
+    measurement.validate_content_for_bound_snapshot(challenge, intent, locator, readiness)?;
+    Ok(RestoredVerifierStreamObservation {
+        measurement,
+        response_sha256: lillux::sha256_hex(body),
+    })
+}
+
+/// Consumer transport can be JSON-escaped again inside SSE output events.
+/// Bound the wire representation separately from the canonical evidence, while
+/// retaining the prerequisite measurement lane's original tighter limits.
+pub(crate) const MAX_CONSUMER_RUN_STREAM_BYTES: usize = 32 * 1024 * 1024;
+
+pub(crate) struct ConsumerVerifierStreamObservation {
+    pub evidence: serde_json::Value,
+    pub evidence_sha256: String,
+    pub evidence_bytes: u64,
+    pub response_sha256: String,
+}
+
+/// Provider framing only: canonical evidence is opaque to this adapter.
+/// Product semantics, executable provenance and death proof belong to their
+/// existing owners. A clean exit event is not a qualification witness.
+pub(crate) fn parse_consumer_verifier_stream(
+    body: &[u8],
+    challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+    deadline: lillux::time::MonotonicDeadline,
+    cancellation: &lillux::network::NetworkCancellation,
+) -> Result<ConsumerVerifierStreamObservation> {
+    use ryeos_external_execution_contract::restored_runtime_measurement::MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES;
+    ensure!(
+        !deadline.has_elapsed() && !cancellation.is_cancelled(),
+        "consumer stream parsing expired or cancelled"
+    );
+    challenge.validate()?;
+    let maximum = usize::try_from(MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES)?;
+    let bytes = parse_verifier_stdout(
+        body,
+        MAX_CONSUMER_RUN_STREAM_BYTES,
+        1024 * 1024,
+        16 * 1024,
+        maximum,
+        Some((cancellation, deadline)),
+    )?;
+    let evidence: serde_json::Value =
+        ryeos_external_execution_contract::from_json_slice_strict(&bytes, maximum)?;
+    ensure!(
+        evidence.is_object()
+            && ryeos_external_execution_contract::canonical_json(&evidence)? == bytes,
+        "consumer verifier evidence is not an exact canonical object"
+    );
+    ensure!(
+        !deadline.has_elapsed() && !cancellation.is_cancelled(),
+        "consumer evidence parsing expired or cancelled"
+    );
+    let observation = ConsumerVerifierStreamObservation {
+        evidence,
+        evidence_sha256: lillux::sha256_hex(&bytes),
+        evidence_bytes: bytes.len() as u64,
+        response_sha256: lillux::sha256_hex(body),
+    };
+    ensure!(
+        !deadline.has_elapsed() && !cancellation.is_cancelled(),
+        "consumer stream hashing expired or cancelled"
+    );
+    Ok(observation)
+}
+
+fn parse_verifier_stdout(
+    body: &[u8],
+    maximum_wire: usize,
+    maximum_event: usize,
+    maximum_events: u64,
+    maximum_output: usize,
+    operation: Option<(
+        &lillux::network::NetworkCancellation,
+        lillux::time::MonotonicDeadline,
+    )>,
+) -> Result<Vec<u8>> {
+    ensure!(
+        !body.is_empty() && body.len() <= maximum_wire,
         "restored verifier stream exceeds its bound"
     );
-    let mut events = SseReader::new(
-        Cursor::new(body),
-        SseLimits {
-            line_bytes: 16 * 1024,
-            event_bytes: 16 * 1024,
-            total_bytes: MAX_RESTORED_RUN_STREAM_BYTES as u64,
-            events: 32,
-        },
-    )?;
+    let limits = SseLimits {
+        line_bytes: maximum_event.min(64 * 1024),
+        event_bytes: maximum_event,
+        total_bytes: maximum_wire as u64,
+        events: maximum_events,
+    };
+    let mut events = match operation {
+        Some((cancellation, deadline)) => SseReader::with_operation_policy(
+            Cursor::new(body),
+            limits,
+            cancellation.clone(),
+            deadline,
+        )?,
+        None => SseReader::new(Cursor::new(body), limits)?,
+    };
     let mut stdout = String::new();
     let mut exited = false;
     while let Some(event) = events.next_event()? {
@@ -592,17 +690,20 @@ pub(crate) fn parse_restored_verifier_stream(
                 let output: VerifierOutputEvent =
                     ryeos_external_execution_contract::from_json_slice_strict(
                         event.data.as_bytes(),
-                        16 * 1024,
+                        maximum_event,
                     )?;
                 ensure!(
                     output.stream == "stdout" && !output.data.is_empty(),
                     "restored verifier emitted non-measurement output"
                 );
-                stdout.push_str(&output.data);
                 ensure!(
-                    stdout.len() <= MAX_RESTORED_OWNER_RESULT_BYTES + 1,
+                    stdout
+                        .len()
+                        .checked_add(output.data.len())
+                        .is_some_and(|count| count <= maximum_output + 1),
                     "restored verifier output exceeds its bound"
                 );
+                stdout.push_str(&output.data);
             }
             Some("exit") => {
                 let exit: VerifierExitEvent =
@@ -624,20 +725,11 @@ pub(crate) fn parse_restored_verifier_stream(
         .strip_suffix('\n')
         .context("restored verifier output lacks its single terminator")?
         .as_bytes();
-    let measurement: RestoredOwnerMeasurement =
-        ryeos_external_execution_contract::from_json_slice_strict(
-            bytes,
-            MAX_RESTORED_OWNER_RESULT_BYTES,
-        )?;
     ensure!(
-        ryeos_external_execution_contract::canonical_json(&measurement)? == bytes,
-        "restored verifier output is noncanonical"
+        !bytes.is_empty() && bytes.len() <= maximum_output,
+        "verifier output is empty or exceeds its evidence bound"
     );
-    measurement.validate_content_for_bound_snapshot(challenge, intent, locator, readiness)?;
-    Ok(RestoredVerifierStreamObservation {
-        measurement,
-        response_sha256: lillux::sha256_hex(body),
-    })
+    Ok(bytes.to_vec())
 }
 
 pub(crate) fn interpret_authenticated_request(
@@ -1027,6 +1119,7 @@ mod tests {
             upload_sha256,
         };
         request.validate().unwrap();
+        assert_eq!(request.required_upload_mode(), 0o600);
         let spec = ProviderSpec::parse(
             include_bytes!("../fixtures/provider-spec.json"),
             &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
@@ -1102,6 +1195,15 @@ mod tests {
         };
         consumer.intent.operation_id = consumer.intent.derived_operation_id().unwrap();
         consumer.validate().unwrap();
+        assert_eq!(consumer.required_upload_mode(), 0o400);
+        // The prerequisite upload's private staging mode is not a permissive
+        // fallback for frozen consumer delivery, even when its bytes match.
+        assert!(
+            preflight_verifier_upload_and_routes(&consumer, &upload, &spec, &settings).is_err()
+        );
+        upload.set_regular_file_mode(0o400).unwrap();
+        preflight_verifier_upload_and_routes(&consumer, &upload, &spec, &settings).unwrap();
+        assert!(preflight_verifier_upload_and_routes(&request, &upload, &spec, &settings).is_err());
         let mut substituted_runtime = consumer.clone();
         let RemoteVerificationPurpose::ConsumerRuntime {
             guest_runtime_manifest_hash,
@@ -1123,6 +1225,74 @@ mod tests {
         );
         assert!(request.consumer_challenge().is_err());
         assert!(response.validate_for(&consumer).is_err());
+        // Transport fixtures, not runtime qualification: larger canonical
+        // evidence is chunked through the same finite provider SSE framing.
+        let encode_stream = |output: &str, exit_code: i32| {
+            let mut stream = String::new();
+            for chunk in output.as_bytes().chunks(4096) {
+                let chunk = std::str::from_utf8(chunk).unwrap(); // ASCII fixture.
+                let event = serde_json::json!({"stream":"stdout", "data":chunk});
+                stream.push_str(&format!("event: output\ndata: {event}\n\n"));
+            }
+            stream.push_str(&format!(
+                "event: exit\ndata: {{\"exit_code\":{exit_code}}}\n\n"
+            ));
+            stream.into_bytes()
+        };
+        let transport_evidence =
+            serde_json::json!({"opaque_product_evidence":"x".repeat(128 * 1024)});
+        let canonical =
+            ryeos_external_execution_contract::canonical_json(&transport_evidence).unwrap();
+        let consumer_stream = encode_stream(
+            &format!("{}\n", std::str::from_utf8(&canonical).unwrap()),
+            0,
+        );
+        let deadline =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30));
+        let cancellation = lillux::network::NetworkCancellation::default();
+        let parsed =
+            parse_consumer_verifier_stream(&consumer_stream, &challenge, deadline, &cancellation)
+                .unwrap();
+        assert_eq!(parsed.evidence, transport_evidence);
+        assert_eq!(parsed.evidence_sha256, lillux::sha256_hex(&canonical));
+        assert_eq!(parsed.evidence_bytes, canonical.len() as u64);
+        assert_eq!(parsed.response_sha256, lillux::sha256_hex(&consumer_stream));
+        for output in ["{}", "{}\n\n", " {}\n", "[]\n", "{\"x\":1,\"x\":2}\n"] {
+            assert!(
+                parse_consumer_verifier_stream(
+                    &encode_stream(output, 0),
+                    &challenge,
+                    deadline,
+                    &cancellation
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            parse_consumer_verifier_stream(
+                &encode_stream("{}\n", 1),
+                &challenge,
+                deadline,
+                &cancellation
+            )
+            .is_err()
+        );
+        let mut after_exit = encode_stream("{}\n", 0);
+        after_exit.extend_from_slice(b"event: exit\ndata: {\"exit_code\":0}\n\n");
+        assert!(
+            parse_consumer_verifier_stream(&after_exit, &challenge, deadline, &cancellation)
+                .is_err()
+        );
+        let missing_exit = b"event: output\ndata: {\"stream\":\"stdout\",\"data\":\"{}\\n\"}\n\n";
+        assert!(
+            parse_consumer_verifier_stream(missing_exit, &challenge, deadline, &cancellation)
+                .is_err()
+        );
+        cancellation.cancel();
+        assert!(
+            parse_consumer_verifier_stream(&consumer_stream, &challenge, deadline, &cancellation)
+                .is_err()
+        );
         let evidence = serde_json::json!({"fixture_only": true});
         let bytes = ryeos_external_execution_contract::canonical_json(&evidence).unwrap();
         let consumer_response = RestoredVerifierAdapterResponse::ConsumerObserved {

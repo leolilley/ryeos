@@ -114,6 +114,60 @@ impl ControllerAccount {
         anyhow::bail!("host file grants are unavailable on this OS")
     }
 
+    /// Transfer one exact, single-link read-only delivery file to the admitted
+    /// account without changing its content-bearing mode. Unlike mutable intent
+    /// grants this accepts only private read/read-execute modes, not writable
+    /// files or trees. The caller owns admission and parent-directory custody.
+    pub fn grant_private_readonly_file(
+        &self,
+        file: &crate::PinnedRegularFile,
+        expected_mode: u32,
+    ) -> anyhow::Result<()> {
+        self.validate().map_err(anyhow::Error::msg)?;
+        if !matches!(expected_mode, 0o400 | 0o500) {
+            anyhow::bail!("private read-only grant requires exact delivery mode");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            use std::os::unix::fs::MetadataExt as _;
+            let descriptor = file.try_clone_descriptor()?;
+            let before = descriptor.metadata()?;
+            let AccountBackend::Unix { uid, gid } = self.0;
+            if unsafe { libc::geteuid() } != 0
+                || (before.uid() != 0 && before.uid() != uid)
+                || !before.is_file()
+                || before.nlink() != 1
+                || before.mode() & 0o7777 != expected_mode
+            {
+                anyhow::bail!(
+                    "read-only delivery grant requires administrator authority and exact safe file"
+                );
+            }
+            if unsafe { libc::fchown(descriptor.as_raw_fd(), uid, gid) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let after = descriptor.metadata()?;
+            if after.uid() != uid
+                || after.gid() != gid
+                || after.mode() & 0o7777 != expected_mode
+                || after.dev() != before.dev()
+                || after.ino() != before.ino()
+                || after.nlink() != 1
+                || after.len() != before.len()
+            {
+                anyhow::bail!("read-only delivery grant changed retained file identity or mode");
+            }
+            descriptor.sync_all()?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = file;
+            anyhow::bail!("read-only delivery grants are unavailable on this OS")
+        }
+    }
+
     /// Give the selected account read/traversal access to an exact
     /// administrator-owned host-state directory without granting mutation.
     ///
@@ -2368,4 +2422,48 @@ fn host_lifetime_witness_is_strict_and_does_not_claim_same_boot_cleanup() {
     };
     assert_ne!(ended, current);
     assert!(ended.has_ended().unwrap());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn readonly_delivery_grant_refuses_writable_modes_without_mutation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = crate::PinnedDirectory::open(temporary.path())
+        .unwrap()
+        .unwrap();
+    let file = directory
+        .atomic_create_pinned_regular(std::ffi::OsStr::new("input"), b"exact", 0o400)
+        .unwrap()
+        .unwrap();
+    let account = ControllerAccount::unix(65534, 65534);
+    for mode in [0o600, 0o700, 0o444, 0o755, 0o4500] {
+        assert!(account.grant_private_readonly_file(&file, mode).is_err());
+        assert_eq!(file.permission_mode().unwrap(), 0o400);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "installed administrator qualification: requires root; never grants live project files"]
+fn readonly_delivery_grant_preserves_read_and_executable_modes() {
+    assert_eq!(unsafe { libc::geteuid() }, 0);
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = crate::PinnedDirectory::open(temporary.path())
+        .unwrap()
+        .unwrap();
+    let account = ControllerAccount::unix(65534, 65534);
+    for (name, mode) in [("record", 0o400), ("verifier", 0o500)] {
+        let file = directory
+            .atomic_create_pinned_regular(std::ffi::OsStr::new(name), b"exact", mode)
+            .unwrap()
+            .unwrap();
+        account.grant_private_readonly_file(&file, mode).unwrap();
+        file.require_owner(65534).unwrap();
+        assert_eq!(file.permission_mode().unwrap(), mode);
+        assert_eq!(
+            file.read_stable_bounded(&file.observation().unwrap(), 5)
+                .unwrap(),
+            b"exact"
+        );
+    }
 }
