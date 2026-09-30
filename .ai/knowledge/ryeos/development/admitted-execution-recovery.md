@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T02:37:43Z:89b4284b7e194352c75c8a4606c909d8f68378e94870a0230e26c5a1ee5f7452:CCLkJe9pez3BHmZFdqj0xQw9OpHoxUH8F6B8u9hx1tF+xeYSXDwIjhESuY1kMXCv/jzFg09ZB47cbrhCnM3GCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T03:09:39Z:a5414a79ee01f2ef05b630e30f80f9ee3649e87d484c5d5ab0e4b3ec2070a568:CLv1wbtwSS4M6sTC5SR2kNhUMRxS20uSs9/9vSZUuI109KVVEwzpBdIWKonLUrPNOHcYKawIJUdsUsAcJV8jCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.7"
+version: "1.1.8"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -142,6 +142,21 @@ activated-content evidence reader still refuses consumer execution context.
 The new retained shape therefore does not enable hosted Worker claims by
 itself; that requires the separate applied-runtime and lifecycle proof.
 
+For activated content, the signed Worker's pinned runtime declaration is also
+its qualification subject. The retained Worker realization set must contain
+that declaration and match the activated subject's complete realization;
+missing or swapped subject bytes are refused. A captured-product subject is
+selected separately and cannot reappear as a Worker literal. Both lanes retain
+their other exact Worker and environment realizations without inventing a
+different source authority. Consumer-context testimony structurally requires
+a daemon-owned scoped producer attempt. Activated-content publication checks
+the retained consumer source-binding and realization CAS closure, while fresh
+proof, publication and protected-runtime selection rederive the current signed
+consumer and compare it with the sealed identity. These checks remain source
+and read-side prerequisites: the result claim gate, content-evidence reader
+and product proof/selection gates still refuse consumer-context claims until
+the applied runtime and hosted lifecycle joins are complete and tested.
+
 ## Qualification schema cut
 
 The current qualification purpose is a tagged source: a captured product and
@@ -176,6 +191,10 @@ must review a separate read-only inventory of nonempty tables and retained
 chain/project heads before confirming the cut. The reset also requires settled
 process-scope lifetimes and a stopped node; an incompatible capsule alone is
 not permission to discard live execution authority.
+The current source has runtime operator epoch 95 because scoped mount evidence
+now retains executable, argv, environment and cwd commitments before target
+release. A later observation must match that journaled target and the relay
+handoff, so predecessor runtime rows cannot silently supply those facts.
 
 ## What recovery must NOT do
 
