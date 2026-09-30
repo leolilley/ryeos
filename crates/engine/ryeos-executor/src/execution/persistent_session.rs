@@ -3187,7 +3187,12 @@ fn prepare_external_guest_inputs(
         .map_or((None, None), |(input, descriptor)| {
             (Some(input), Some(descriptor))
         });
-    program.verify_selections(capsule.retained_product_selections.as_ref())?;
+    program.verify_runtime_authority(
+        capsule.retained_product_selections.as_ref(),
+        capsule
+            .retained_external_runtime_content_qualification
+            .as_ref(),
+    )?;
     let resolution = exact.resolution_output.restore();
     let runtime_id = &program.requirement.runtime_product_declaration_id;
     let super::external_guest_inputs::PreparedProductInputs {
@@ -5883,7 +5888,7 @@ session:
             qualification_use,
             runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
             runtime_manifest_hash: "1".repeat(64),
-            runtime_witness_hash: "2".repeat(64),
+            runtime_source: ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "2".repeat(64) },
             qualification_attestation_hash: "3".repeat(64),
             selection_identity_digest: "4".repeat(64),
             runtime_recipe_digest,

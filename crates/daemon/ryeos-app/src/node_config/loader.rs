@@ -962,7 +962,7 @@ mod tests {
                 qualification_use,
                 runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
                 runtime_manifest_hash: "b".repeat(64),
-                runtime_witness_hash: "1".repeat(64),
+                runtime_source: ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "1".repeat(64) },
                 qualification_attestation_hash: "2".repeat(64),
                 selection_identity_digest: "c".repeat(64),
                 runtime_recipe_digest,
@@ -987,7 +987,7 @@ mod tests {
                     changed.requirement.provider_configuration_destination = "other.toml".into()
                 }
                 "requirement_schema" => changed.requirement.schema = 2,
-                _ => changed.runtime_witness_hash = "not-a-hash".into(),
+                _ => changed.runtime_source = ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "not-a-hash".into() },
             }
             assert!(binding.check_program(&changed).is_err());
         }
