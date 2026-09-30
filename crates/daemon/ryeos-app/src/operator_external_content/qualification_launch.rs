@@ -48,15 +48,27 @@ impl QualificationLaunchSourceRequest {
                     request,
                     acquisition_mode,
                 )?;
-                anyhow::ensure!(
-                    source.policy.policy.consumer_execution_context.is_none(),
-                    "content qualification consumer context has no authenticated preparation"
-                );
+                let consumer_content = source
+                    .policy
+                    .policy
+                    .consumer_execution_context
+                    .as_ref()
+                    .map(|_| {
+                        content_qualification::PreparedContentQualificationConsumer::prepare(
+                            state,
+                            context,
+                            &source,
+                            acquisition_mode,
+                        )
+                    })
+                    .transpose()?
+                    .map(Box::new);
                 Ok(PreparedQualificationLaunch::ActivatedContent {
                     launch_id: request.launch_id.clone(),
                     owner_fingerprint: context.fingerprint.clone(),
                     acquisition_mode,
                     source: Box::new(source),
+                    consumer_content,
                 })
             }
         }
@@ -70,10 +82,36 @@ pub enum PreparedQualificationLaunch {
         owner_fingerprint: String,
         acquisition_mode: AcquisitionMode,
         source: Box<content_qualification::PreparedContentQualificationSource>,
+        consumer_content: Option<Box<content_qualification::PreparedContentQualificationConsumer>>,
     },
 }
 
 impl PreparedQualificationLaunch {
+    pub fn consumer_content_identity(&self) -> Result<Option<ryeos_state::external_content::products::qualification::ProductQualificationConsumerContentIdentity>>{
+        match self {
+            Self::CapturedProduct(source) => source.consumer_content_identity(),
+            Self::ActivatedContent {
+                consumer_content, ..
+            } => consumer_content
+                .as_ref()
+                .map(|content| content.retained_identity())
+                .transpose(),
+        }
+    }
+
+    pub fn take_consumer_content_publication(
+        &mut self,
+    ) -> Result<Option<ryeos_state::PendingCasPublication>> {
+        match self {
+            Self::CapturedProduct(source) => source.take_consumer_content_publication(),
+            Self::ActivatedContent {
+                consumer_content, ..
+            } => consumer_content
+                .take()
+                .map(|content| (*content).into_publication())
+                .transpose(),
+        }
+    }
     pub fn launch_id(&self) -> &str {
         match self {
             Self::CapturedProduct(source) => &source.launch_id,
@@ -145,13 +183,18 @@ impl PreparedQualificationLaunch {
                 source,
                 acquisition_mode,
                 owner_fingerprint,
+                consumer_content,
                 ..
             } => {
                 anyhow::ensure!(
                     owner_fingerprint == &context.fingerprint,
                     "content preparation differs from authenticated launch owner"
                 );
-                source.require_current(state, context, *acquisition_mode)
+                source.require_current(state, context, *acquisition_mode)?;
+                if let Some(consumer) = consumer_content {
+                    consumer.require_current(state, context, source, *acquisition_mode)?;
+                }
+                Ok(())
             }
         }
     }

@@ -70,6 +70,53 @@ pub struct PreparedContentQualificationSource {
     pub producer_recipe_sources: BTreeMap<String, ProductProducerRecipeSourceIdentity>,
 }
 
+/// Opaque staged consumer inputs. Only the accepted launch owner may transfer
+/// their publication after retaining the complete identity in its capsule.
+pub struct PreparedContentQualificationConsumer {
+    inputs: super::product_qualification::PreparedBundleConsumerContentInputs,
+}
+
+impl PreparedContentQualificationConsumer {
+    pub fn prepare(
+        state: &AppState,
+        operator: &HandlerContext,
+        source: &PreparedContentQualificationSource,
+        acquisition_mode: AcquisitionMode,
+    ) -> Result<Self> {
+        Ok(Self {
+            inputs: super::product_qualification::prepare_activated_bundle_consumer_content_inputs(
+                state,
+                operator,
+                source,
+                acquisition_mode,
+            )?,
+        })
+    }
+
+    pub fn retained_identity(&self) -> Result<ryeos_state::external_content::products::qualification::ProductQualificationConsumerContentIdentity>{
+        self.inputs.retained_identity()
+    }
+
+    pub fn into_publication(self) -> Result<ryeos_state::PendingCasPublication> {
+        self.inputs.into_publication()
+    }
+
+    pub fn require_current(
+        &self,
+        state: &AppState,
+        operator: &HandlerContext,
+        source: &PreparedContentQualificationSource,
+        acquisition_mode: AcquisitionMode,
+    ) -> Result<()> {
+        let current = Self::prepare(state, operator, source, acquisition_mode)?;
+        anyhow::ensure!(
+            current.retained_identity()? == self.retained_identity()?,
+            "activated consumer inputs changed before accepted launch"
+        );
+        Ok(())
+    }
+}
+
 impl PreparedContentQualificationSource {
     /// Compare only after a fresh authenticated preparation. This pure check
     /// binds retained intent to preparation; it cannot authenticate either
