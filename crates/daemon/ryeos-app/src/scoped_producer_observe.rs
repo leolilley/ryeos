@@ -158,6 +158,14 @@ impl ScopedProducerObservation {
             &self.prepared_immutable_sha256,
             &mount_evidence.prepared_immutable_sha256,
         )?;
+        mount_evidence.validate_applied_launch(&self.applied_launch)?;
+        if let Some(handoff) = &self.relay_handoff {
+            ensure!(
+                handoff.expected_applied_launch_digest
+                    == digest_json(&mount_evidence.expected_launch)?,
+                "scoped relay handoff differs from journaled target commitments"
+            );
+        }
         ensure!(
             self.applied_launch
                 .matches_post_release_mounts(&mount_evidence.expected),

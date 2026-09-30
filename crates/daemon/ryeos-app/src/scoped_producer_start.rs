@@ -383,12 +383,13 @@ pub fn start_scoped_producer(
                 &attempt_id,
                 &identity,
                 &crate::runtime_db::scoped_child_attempt::ScopedChildMountPreparationEvidence {
-                    schema: 3,
+                    schema: 4,
                     plan_digest: provenance
                         .plan_digest
                         .clone()
                         .context("compiled scoped producer has no exact plan digest")?,
                     expected: expected_mount_preparation.clone(),
+                    expected_launch: expected_applied_launch.clone(),
                     observed: mount_preparation.clone(),
                     prepared_directory_sources: prepared_directory_sources.clone(),
                     prepared_immutable_sha256: prepared_immutable_sha256.clone(),
