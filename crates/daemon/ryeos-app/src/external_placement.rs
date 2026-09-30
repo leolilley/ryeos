@@ -2507,6 +2507,7 @@ fn retained_external_channel_program(
                 snapshot_hash,
                 realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
                 environment: ryeos_state::objects::EnvironmentAuthority::None,
+                workspace_outputs: None,
                 ..
             } = &capsule.project_authority
             else {

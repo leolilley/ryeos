@@ -14789,6 +14789,15 @@ impl StateStore {
                 && qualified.occurrence.as_ref() == Some(&owner.qualification_occurrence),
             "external qualification candidate changed its operator-owned occurrence"
         );
+        let snapshot = inner
+            .runtime_db
+            .runtime_snapshot_operation(&qualified.intent.snapshot_operation_id)?
+            .context("external qualification candidate lost its measured snapshot source")?;
+        anyhow::ensure!(
+            snapshot.intent.guest_runtime_manifest_hash
+                == binding.backend_contract().guest_runtime_manifest_hash,
+            "external qualification placement changed the measured guest-owner runtime"
+        );
         inner
             .runtime_db
             .observed_consumer_verification_prerequisite(
