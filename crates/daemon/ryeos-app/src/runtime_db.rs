@@ -2678,7 +2678,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 111 retains bounded, request-bound Q Worker pushed batches in their
 // exact local sequence chain. This local transport receipt is not a portable
 // signed qualification fact or a semantic success permit.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 111;
+// Epoch 112 retains the exact request-correlated Delta and a one-way send
+// settlement marker, separately from observation-driven turn completion.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 112;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -3958,6 +3960,24 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "delta_response_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "delta_response_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "delta_wire_max_bytes",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "final_response_digest",
                         col_type: "TEXT",
                         pk: false,
@@ -3989,6 +4009,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "completed_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_send_settled_at_ms",
                         col_type: "INTEGER",
                         pk: false,
                         not_null: false,

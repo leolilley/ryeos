@@ -2,15 +2,15 @@
 //!
 //! These are daemon-observed I/O facts. A Final frame does not establish a
 //! completed turn, and even both facts do not grant a qualification claim.
-//! The exact bounded, canonical Final body is retained for restartable
-//! semantic verification. This journal itself still grants no claim.
+//! The exact bounded, canonical Delta and Final bodies are retained for
+//! restartable semantic verification. This journal itself still grants no claim.
 
 use super::*;
 use ryeos_state::external_execution::journal::load_binding;
 use serde::Deserialize;
 
 // The signed persistent-session wire contract allows at most this many bytes
-// in one frame; Q retains only the request-correlated Final body.
+// in one frame; Q retains the request-correlated Delta and Final bodies.
 const MAX_QUALIFICATION_WORKER_FINAL_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,12 +51,18 @@ pub(crate) struct QualificationWorkerCommandRecord {
     pub turn_start_digest: Option<String>,
     pub turn_completed_at_ms: Option<i64>,
     pub turn_completion_digest: Option<String>,
+    pub delta_response_digest: Option<String>,
+    pub delta_response: Option<serde_json::Value>,
+    pub delta_wire_max_bytes: Option<u32>,
     pub final_response_digest: Option<String>,
     pub final_response: Option<serde_json::Value>,
     pub final_wire_max_bytes: Option<u32>,
     pub reserved_at_ms: i64,
     pub contacted_at_ms: Option<i64>,
     pub completed_at_ms: Option<i64>,
+    /// Written only after the one-send owner received an Ok result and
+    /// durably retained Final. Observation-driven completion cannot set it.
+    pub owner_send_settled_at_ms: Option<i64>,
 }
 
 impl QualificationWorkerCommandRecord {
@@ -88,9 +94,36 @@ impl QualificationWorkerCommandRecord {
         if let Some(hash) = &self.final_response_digest {
             validate_sha256("qualification Worker Final response", hash)?;
         }
+        if let Some(hash) = &self.delta_response_digest {
+            validate_sha256("qualification Worker Delta response", hash)?;
+        }
+        ensure!(
+            self.delta_response_digest.is_some() == self.delta_response.is_some()
+                && self.delta_response_digest.is_some() == self.delta_wire_max_bytes.is_some(),
+            "qualification Worker Delta content, digest, and wire bound differ in presence"
+        );
+        if let Some(response) = &self.delta_response {
+            let wire_max_bytes = self.delta_wire_max_bytes.expect("presence checked");
+            let (canonical, digest, observation) =
+                prepare_progress_delta(response, wire_max_bytes)?;
+            let observation_digest = ryeos_state::objects::canonical_value_digest(observation)?;
+            ensure!(
+                !canonical.is_empty()
+                    && self.delta_response_digest.as_deref() == Some(digest.as_str())
+                    && self
+                        .turn_start_digest
+                        .as_deref()
+                        .is_none_or(|start| observation_digest == start),
+                "qualification Worker Delta content contradicts its retained digest"
+            );
+        }
         ensure!(
             self.final_response_digest.is_some() == self.final_response.is_some()
-                && self.final_response_digest.is_some() == self.final_wire_max_bytes.is_some(),
+                && self.final_response_digest.is_some() == self.final_wire_max_bytes.is_some()
+                && self
+                    .delta_wire_max_bytes
+                    .zip(self.final_wire_max_bytes)
+                    .is_none_or(|(delta, final_wire)| delta == final_wire),
             "qualification Worker Final content, digest, and wire bound differ in presence"
         );
         if let Some(response) = &self.final_response {
@@ -135,6 +168,12 @@ impl QualificationWorkerCommandRecord {
                 && self.completed_at_ms.is_none_or(|at| {
                     self.contacted_at_ms
                         .is_some_and(|contacted| at >= contacted)
+                })
+                && self.owner_send_settled_at_ms.is_none_or(|at| {
+                    self.final_response_digest.is_some()
+                        && self
+                            .contacted_at_ms
+                            .is_some_and(|contacted| at >= contacted)
                 }),
             "qualification Worker command times contradict contact order"
         );
@@ -146,8 +185,10 @@ impl QualificationWorkerCommandRecord {
                     QualificationWorkerCommandPhase::Reserved => {
                         self.contacted_at_ms.is_none()
                             && self.turn_id.is_none()
+                            && self.delta_response_digest.is_none()
                             && self.final_response_digest.is_none()
                             && self.completed_at_ms.is_none()
+                            && self.owner_send_settled_at_ms.is_none()
                     }
                     QualificationWorkerCommandPhase::PossibleContact => {
                         self.contacted_at_ms.is_some()
@@ -163,9 +204,6 @@ impl QualificationWorkerCommandRecord {
                     }
                     QualificationWorkerCommandPhase::OutcomeUnknown => {
                         self.contacted_at_ms.is_some()
-                            && self.completed_at_ms.is_none()
-                            && !(self.turn_completed_at_ms.is_some()
-                                && self.final_response_digest.is_some())
                     }
                 },
             "qualification Worker command result is not current"
@@ -182,9 +220,10 @@ pub(super) fn read_command(
         "SELECT accepted_root_id,accepted_capsule_hash,qualification_operation_id,
                 qualification_occurrence_id,channel_binding_digest,process_incarnation_digest,
                 request_digest,state,turn_id,turn_started_at_ms,turn_start_digest,
-                turn_completed_at_ms,turn_completion_digest,final_response_digest,
+                turn_completed_at_ms,turn_completion_digest,delta_response_digest,
+                delta_response_json,delta_wire_max_bytes,final_response_digest,
                 final_response_json,final_wire_max_bytes,reserved_at_ms,
-                contacted_at_ms,completed_at_ms
+                contacted_at_ms,completed_at_ms,owner_send_settled_at_ms
          FROM external_qualification_worker_command WHERE placement_thread_id=?1",
         [placement],
         |row| {
@@ -205,31 +244,36 @@ pub(super) fn read_command(
                 row.get::<_, Option<String>>(13)?,
                 row.get::<_, Option<String>>(14)?,
                 row.get::<_, Option<i64>>(15)?,
-                row.get::<_, i64>(16)?,
-                row.get::<_, Option<i64>>(17)?,
+                row.get::<_, Option<String>>(16)?,
+                row.get::<_, Option<String>>(17)?,
                 row.get::<_, Option<i64>>(18)?,
+                row.get::<_, i64>(19)?,
+                row.get::<_, Option<i64>>(20)?,
+                row.get::<_, Option<i64>>(21)?,
+                row.get::<_, Option<i64>>(22)?,
             ))
         },
     )
     .optional()?
     .map(|row| {
-        let final_response = row
-            .14
-            .as_deref()
-            .map(|raw| -> Result<serde_json::Value> {
+        let decode_body = |raw: Option<&str>, label: &str| -> Result<Option<serde_json::Value>> {
+            raw.map(|raw| -> Result<serde_json::Value> {
                 ensure!(
                     raw.len() <= MAX_QUALIFICATION_WORKER_FINAL_BYTES,
-                    "qualification Worker Final exceeds retained bound"
+                    "qualification Worker {label} exceeds retained bound"
                 );
                 let response = serde_json::from_str(raw)
-                    .context("decode retained qualification Worker Final")?;
+                    .with_context(|| format!("decode retained qualification Worker {label}"))?;
                 ensure!(
                     lillux::canonical_json(&response)? == raw,
-                    "qualification Worker Final is not exact canonical JSON"
+                    "qualification Worker {label} is not exact canonical JSON"
                 );
                 Ok(response)
             })
-            .transpose()?;
+            .transpose()
+        };
+        let delta_response = decode_body(row.14.as_deref(), "Delta")?;
+        let final_response = decode_body(row.17.as_deref(), "Final")?;
         let record = QualificationWorkerCommandRecord {
             placement_thread_id: placement.to_owned(),
             accepted_root_id: row.0,
@@ -245,12 +289,16 @@ pub(super) fn read_command(
             turn_start_digest: row.10,
             turn_completed_at_ms: row.11,
             turn_completion_digest: row.12,
-            final_response_digest: row.13,
+            delta_response_digest: row.13,
+            delta_response,
+            delta_wire_max_bytes: row.15.map(u32::try_from).transpose()?,
+            final_response_digest: row.16,
             final_response,
-            final_wire_max_bytes: row.15.map(u32::try_from).transpose()?,
-            reserved_at_ms: row.16,
-            contacted_at_ms: row.17,
-            completed_at_ms: row.18,
+            final_wire_max_bytes: row.18.map(u32::try_from).transpose()?,
+            reserved_at_ms: row.19,
+            contacted_at_ms: row.20,
+            completed_at_ms: row.21,
+            owner_send_settled_at_ms: row.22,
         };
         record.validate()?;
         Ok(record)
@@ -342,6 +390,79 @@ enum TurnObservation {
         #[serde(default)]
         completed_turn_id: Option<String>,
     },
+}
+
+fn prepare_progress_delta<'a>(
+    raw: &'a serde_json::Value,
+    wire_max_bytes: u32,
+) -> Result<(String, String, &'a serde_json::Value)> {
+    ensure!(
+        (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&wire_max_bytes),
+        "Q Worker Delta has no selected signed wire maximum"
+    );
+    let object = raw
+        .as_object()
+        .context("Q Worker Delta is not a command progress object")?;
+    ensure!(
+        object.len() == 2
+            && object.contains_key("events")
+            && object.contains_key("session_observations")
+            && raw
+                .get("events")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|events| events.is_empty()),
+        "Q Worker Delta changed its exact command-progress fields"
+    );
+    let observations = raw
+        .get("session_observations")
+        .and_then(serde_json::Value::as_array)
+        .context("Q Worker Delta has no bounded session observations")?;
+    ensure!(
+        observations.len() == 1,
+        "Q Worker Delta is not one turn-start observation"
+    );
+    let observation = &observations[0];
+    let TurnObservation::State {
+        expected,
+        next,
+        turn_id,
+        completed_turn_id,
+    } = serde_json::from_value(observation.clone())?;
+    ensure!(
+        expected == "idle"
+            && next == "turn_running"
+            && turn_id.is_some()
+            && completed_turn_id.is_none(),
+        "Q Worker Delta did not start its one turn"
+    );
+    let canonical = lillux::canonical_json(raw)?;
+    ensure!(
+        canonical.len() <= wire_max_bytes as usize,
+        "Q Worker Delta exceeds selected signed wire maximum"
+    );
+    let digest = lillux::sha256_hex(canonical.as_bytes());
+    Ok((canonical, digest, observation))
+}
+
+fn turn_start_is_exact_replay(
+    prior_turn: Option<&str>,
+    prior_digest: Option<&str>,
+    completed_at_ms: Option<i64>,
+    observed_turn: &str,
+    observation_digest: &str,
+) -> Result<bool> {
+    if let Some(prior_turn) = prior_turn {
+        ensure!(
+            prior_turn == observed_turn && prior_digest == Some(observation_digest),
+            "Q Worker repeated a different turn-start observation"
+        );
+        return Ok(true);
+    }
+    ensure!(
+        completed_at_ms.is_none(),
+        "Q Worker cannot start a turn after completion"
+    );
+    Ok(false)
 }
 
 pub(super) fn validate_commands(conn: &Connection) -> Result<()> {
@@ -461,8 +582,12 @@ impl RuntimeDb {
         }
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         tx.execute(
-            "INSERT INTO external_qualification_worker_command VALUES
-             (?1,?2,?3,?4,?5,?6,?7,?8,'reserved',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?9,NULL,NULL)",
+            "INSERT INTO external_qualification_worker_command
+             (placement_thread_id,accepted_root_id,accepted_capsule_hash,
+              qualification_operation_id,qualification_occurrence_id,
+              channel_binding_digest,process_incarnation_digest,request_digest,
+              state,reserved_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'reserved',?9)",
             params![
                 placement,
                 &owner.coordinate.accepted_root_id,
@@ -543,6 +668,58 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Retain the exact request-correlated command-progress Delta before its
+    /// ACK. Only one bounded, canonical turn-start progress frame is admitted;
+    /// exact replay after a lost ACK returns the same retained evidence.
+    pub(crate) fn record_qualification_worker_progress_delta(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        delta: &serde_json::Value,
+        max_frame_bytes: u32,
+    ) -> Result<QualificationWorkerCommandRecord> {
+        let (canonical, digest, _) = prepare_progress_delta(delta, max_frame_bytes)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read_command(&tx, placement)?.context("Q Worker Delta has no command")?;
+        require_owner(&tx, &record)?;
+        let process_state: String = tx.query_row(
+            "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+            [placement],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            record.request_digest == request_digest && process_state == "attached",
+            "Q Worker Delta changed its contacted attached process"
+        );
+        if let Some(prior) = &record.delta_response_digest {
+            ensure!(
+                prior == &digest
+                    && record.delta_response.as_ref() == Some(delta)
+                    && record.delta_wire_max_bytes == Some(max_frame_bytes),
+                "Q Worker repeated a different command-progress Delta"
+            );
+            tx.commit()?;
+            return Ok(record);
+        }
+        ensure!(
+            record.phase == QualificationWorkerCommandPhase::PossibleContact,
+            "Q Worker Delta is outside its one possible-contact request"
+        );
+        ensure!(
+            tx.execute(
+                "UPDATE external_qualification_worker_command
+                 SET delta_response_digest=?2,delta_response_json=?3,delta_wire_max_bytes=?4
+                 WHERE placement_thread_id=?1 AND state='possible_contact'
+                   AND delta_response_digest IS NULL",
+                params![placement, &digest, &canonical, max_frame_bytes],
+            )? == 1,
+            "Q Worker Delta CAS did not retain one progress frame"
+        );
+        let updated = read_command(&tx, placement)?.context("Q Worker Delta disappeared")?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
     /// Persist only a strict state transition observed through the framed
     /// Request/Delta/Final or pushed observation sink. Callers must ACK pushed
     /// observations only after this transaction commits.
@@ -600,15 +777,13 @@ impl RuntimeDb {
         );
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         if start {
-            ensure!(
-                record
-                    .turn_id
-                    .as_deref()
-                    .is_none_or(|prior| prior == observed_turn)
-                    && record.turn_completed_at_ms.is_none(),
-                "Q Worker started another turn"
-            );
-            if record.turn_id.is_none() {
+            if !turn_start_is_exact_replay(
+                record.turn_id.as_deref(),
+                record.turn_start_digest.as_deref(),
+                record.turn_completed_at_ms,
+                &observed_turn,
+                &observation_digest,
+            )? {
                 ensure!(
                     tx.execute(
                         "UPDATE external_qualification_worker_command
@@ -622,11 +797,6 @@ impl RuntimeDb {
                         ],
                     )? == 1,
                     "Q Worker turn-start CAS did not update one command"
-                );
-            } else {
-                ensure!(
-                    record.turn_start_digest.as_deref() == Some(observation_digest.as_str()),
-                    "Q Worker repeated a different turn-start observation"
                 );
             }
         } else {
@@ -754,6 +924,48 @@ impl RuntimeDb {
         Ok(updated)
     }
 
+    /// Set the one-way owner return fence after the pool send returned Ok and
+    /// the exact Final was committed. A turn may complete later through the
+    /// pushed sink. No observation path can write this marker.
+    pub(crate) fn mark_qualification_worker_send_settled_success(
+        &self,
+        placement: &str,
+        request_digest: &str,
+    ) -> Result<QualificationWorkerCommandRecord> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read_command(&tx, placement)?.context("Q Worker send has no command")?;
+        require_owner(&tx, &record)?;
+        ensure!(
+            record.request_digest == request_digest
+                && record.final_response_digest.is_some()
+                && matches!(
+                    record.phase,
+                    QualificationWorkerCommandPhase::PossibleContact
+                        | QualificationWorkerCommandPhase::TurnCompleted
+                ),
+            "Q Worker send has no exact successful Final to settle"
+        );
+        if record.owner_send_settled_at_ms.is_none() {
+            let at = i64::try_from(lillux::time::timestamp_millis())?
+                .max(record.contacted_at_ms.expect("possible contact checked"));
+            ensure!(
+                tx.execute(
+                    "UPDATE external_qualification_worker_command
+                     SET owner_send_settled_at_ms=?2
+                     WHERE placement_thread_id=?1
+                       AND state IN ('possible_contact','turn_completed')
+                       AND final_response_digest IS NOT NULL
+                       AND owner_send_settled_at_ms IS NULL",
+                    params![placement, at],
+                )? == 1,
+                "Q Worker send settlement CAS did not update its exact command"
+            );
+        }
+        let updated = read_command(&tx, placement)?.context("Q Worker send disappeared")?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
     /// A crash or I/O failure after possible contact consumes the one request.
     pub(crate) fn mark_qualification_worker_command_outcome_unknown(
         &self,
@@ -766,15 +978,16 @@ impl RuntimeDb {
             matches!(
                 record.phase,
                 QualificationWorkerCommandPhase::PossibleContact
+                    | QualificationWorkerCommandPhase::TurnCompleted
                     | QualificationWorkerCommandPhase::OutcomeUnknown
             ),
             "Q Worker command is not an uncertain contacted request"
         );
-        if record.phase == QualificationWorkerCommandPhase::PossibleContact {
+        if record.phase != QualificationWorkerCommandPhase::OutcomeUnknown {
             ensure!(
                 tx.execute(
                     "UPDATE external_qualification_worker_command SET state='outcome_unknown'
-                 WHERE placement_thread_id=?1 AND state='possible_contact'",
+                 WHERE placement_thread_id=?1 AND state IN ('possible_contact','turn_completed')",
                     [placement],
                 )? == 1,
                 "Q Worker unknown-outcome CAS did not update one command"
@@ -783,5 +996,91 @@ impl RuntimeDb {
         let updated = read_command(&tx, placement)?.context("Q Worker command disappeared")?;
         tx.commit()?;
         Ok(updated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        QualificationWorkerCommandPhase, QualificationWorkerCommandRecord, prepare_progress_delta,
+        turn_start_is_exact_replay,
+    };
+
+    #[test]
+    fn failed_owner_return_can_fence_completed_observations() {
+        let hash = "a".repeat(64);
+        let final_body = serde_json::json!({});
+        let final_json = lillux::canonical_json(&final_body).unwrap();
+        let final_digest = lillux::sha256_hex(final_json.as_bytes());
+        let record = QualificationWorkerCommandRecord {
+            placement_thread_id: format!("Q-{hash}"),
+            accepted_root_id: "root".into(),
+            accepted_capsule_hash: hash.clone(),
+            qualification_operation_id: hash.clone(),
+            qualification_occurrence_id: "occurrence".into(),
+            channel_binding_digest: hash.clone(),
+            process_incarnation_digest: hash.clone(),
+            request_digest: hash.clone(),
+            phase: QualificationWorkerCommandPhase::OutcomeUnknown,
+            turn_id: Some("turn-one".into()),
+            turn_started_at_ms: Some(3),
+            turn_start_digest: Some(hash.clone()),
+            turn_completed_at_ms: Some(4),
+            turn_completion_digest: Some(hash),
+            delta_response_digest: None,
+            delta_response: None,
+            delta_wire_max_bytes: None,
+            final_response_digest: Some(final_digest),
+            final_response: Some(final_body),
+            final_wire_max_bytes: Some(4096),
+            reserved_at_ms: 1,
+            contacted_at_ms: Some(2),
+            completed_at_ms: Some(5),
+            owner_send_settled_at_ms: None,
+        };
+        record.validate().unwrap();
+    }
+
+    #[test]
+    fn completed_turn_accepts_only_its_exact_start_replay() {
+        assert!(
+            turn_start_is_exact_replay(
+                Some("turn-one"),
+                Some("digest-one"),
+                Some(5),
+                "turn-one",
+                "digest-one"
+            )
+            .unwrap()
+        );
+        assert!(
+            turn_start_is_exact_replay(
+                Some("turn-one"),
+                Some("digest-one"),
+                Some(5),
+                "turn-two",
+                "digest-one"
+            )
+            .is_err()
+        );
+        assert!(turn_start_is_exact_replay(None, None, Some(5), "turn-two", "digest-two").is_err());
+    }
+
+    #[test]
+    fn progress_delta_requires_exact_bounded_turn_start_shape() {
+        let progress = serde_json::json!({
+            "events": [],
+            "session_observations": [{
+                "kind": "state",
+                "expected": "idle",
+                "next": "turn_running",
+                "turn_id": "turn-one"
+            }]
+        });
+        assert!(prepare_progress_delta(&progress, 4096).is_ok());
+        let mut extra = progress.clone();
+        extra["debug"] = serde_json::json!(true);
+        assert!(prepare_progress_delta(&extra, 4096).is_err());
+        assert!(prepare_progress_delta(&progress, 1).is_err());
     }
 }

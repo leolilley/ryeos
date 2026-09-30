@@ -16238,6 +16238,24 @@ impl StateStore {
             .record_qualification_worker_turn_observation(placement, request_digest, observation)
     }
 
+    pub(crate) fn record_qualification_worker_progress_delta(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        delta: &serde_json::Value,
+        max_frame_bytes: u32,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_worker_progress_delta(
+                placement,
+                request_digest,
+                delta,
+                max_frame_bytes,
+            )
+    }
+
     pub(crate) fn record_qualification_worker_final(
         &self,
         placement: &str,
@@ -16252,6 +16270,17 @@ impl StateStore {
             response,
             max_frame_bytes,
         )
+    }
+
+    pub(crate) fn mark_qualification_worker_send_settled_success(
+        &self,
+        placement: &str,
+        request_digest: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .mark_qualification_worker_send_settled_success(placement, request_digest)
     }
 
     pub(crate) fn mark_qualification_worker_command_outcome_unknown(
