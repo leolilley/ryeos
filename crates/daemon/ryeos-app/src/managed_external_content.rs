@@ -722,16 +722,37 @@ pub fn resolve_activation_for_qualification(
     ResolvedManagedExternalContentActivation,
     ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
 )> {
-    let (activation, policy) = resolve_activation_with_policy(
+    let (activation, policy, _) = resolve_activation_qualification_authority(
+        state,
+        activation_ref,
+        acquisition_mode,
+        declaration_id,
+    )?;
+    Ok((activation, policy))
+}
+
+/// Retain the exact signed activation definition from the same generation as
+/// its consumer-selected policy. The caller must still authenticate the
+/// activation receipt and content binding before using this declaration.
+pub fn resolve_activation_qualification_authority(
+    state: &crate::state::AppState,
+    activation_ref: &str,
+    acquisition_mode: AcquisitionMode,
+    declaration_id: &str,
+) -> anyhow::Result<(
+    ResolvedManagedExternalContentActivation,
+    ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
+    ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
+)>{
+    let (activation, selection) = resolve_activation_with_policy(
         state,
         activation_ref,
         acquisition_mode,
         Some(declaration_id),
     )?;
-    Ok((
-        activation,
-        policy.ok_or_else(|| anyhow::anyhow!("qualification resolution has no selected policy"))?,
-    ))
+    let (policy, authority) = selection
+        .ok_or_else(|| anyhow::anyhow!("qualification resolution has no selected policy"))?;
+    Ok((activation, policy, authority))
 }
 
 fn resolve_activation_with_policy(
@@ -741,10 +762,11 @@ fn resolve_activation_with_policy(
     qualification_declaration_id: Option<&str>,
 ) -> anyhow::Result<(
     ResolvedManagedExternalContentActivation,
-    Option<
+    Option<(
         ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
-    >,
-)> {
+        ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
+    )>,
+)>{
     let import_policy = state.node_policy.require::<
         crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
     >()?;
@@ -796,7 +818,19 @@ fn resolve_activation_with_policy(
                     "qualification consumer selected a different activation");
                 let source = crate::operator_external_content::product_qualification::resolve_current_bundle_qualification_policy_in_generation(generation, &allowance.policy_ref)?;
                 allowance.validate_policy_source(&source)?;
-                Some(source)
+                let activation_definition = ryeos_state::external_content::products::qualification::ProductQualificationBundleDefinitionIdentity {
+                    canonical_ref: effective.canonical_ref.clone(),
+                    raw_content_digest: effective.source.content_hash.clone(),
+                    effective_definition_digest: effective.effective_definition_digest.as_str().into(),
+                    publisher_fingerprint: publisher_fingerprint.clone(),
+                };
+                activation_definition.validate()?;
+                let authority = ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority::ActivatedContent {
+                    activation_definition,
+                    declaration_id: id.into(),
+                    allowance: allowance.clone(),
+                };
+                Some((source, authority))
             } else { None };
             Ok::<_, anyhow::Error>((effective, consumer, document, publisher_fingerprint, qualification_policy))
         })?;

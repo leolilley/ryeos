@@ -61,6 +61,7 @@ impl ContentQualificationLaunchRequest {
 /// source and seal the shared purpose before a callback can start execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedContentQualificationSource {
+    pub declaration_authority: ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
     pub allowance: ContentQualificationAllowance,
     pub policy: ProductQualificationPolicySource,
     pub subject: ContentQualificationSubject,
@@ -77,6 +78,12 @@ impl PreparedContentQualificationSource {
         purpose.validate()?;
         self.allowance.validate_policy_source(&self.policy)?;
         self.subject.validate()?;
+        if let Some(consumer) = &purpose.consumer_content {
+            anyhow::ensure!(
+                consumer.declaration_authority == self.declaration_authority,
+                "qualification consumer differs from authenticated activation definition"
+            );
+        }
         let QualificationSubject::ActivatedContent { content } = &purpose.subject else {
             anyhow::bail!("content qualification cannot attach a product subject");
         };
@@ -125,12 +132,13 @@ pub fn prepare_source(
     admitted_realization: &ExternalContentRealization,
 ) -> Result<PreparedContentQualificationSource> {
     crate::operator_authority::require_admitted_operator(state, context)?;
-    let (allowance, policy, records) = load_current_runtime_qualification_inputs(
-        state,
-        activation_ref,
-        acquisition_mode,
-        admitted_realization,
-    )?;
+    let (allowance, policy, records, declaration_authority) =
+        load_current_runtime_qualification_inputs(
+            state,
+            activation_ref,
+            acquisition_mode,
+            admitted_realization,
+        )?;
     let subject = records.retained_subject()?;
     let (d1, d2) = super::product_qualification::resolve_content_fixed_pin_verifier(
         state, context, &policy, &subject,
@@ -150,8 +158,10 @@ pub fn prepare_source(
         &allowance,
         &policy,
         &subject,
+        &declaration_authority,
     )?;
     Ok(PreparedContentQualificationSource {
+        declaration_authority,
         allowance,
         policy,
         subject,

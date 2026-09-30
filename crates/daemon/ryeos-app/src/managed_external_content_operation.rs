@@ -417,9 +417,10 @@ pub fn load_current_runtime_qualification_inputs(
     ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance,
     ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
     ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin,
-)> {
-    let (activation, policy) =
-        crate::managed_external_content::resolve_activation_for_qualification(
+    ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
+)>{
+    let (activation, policy, declaration_authority) =
+        crate::managed_external_content::resolve_activation_qualification_authority(
             state,
             activation_ref,
             acquisition_mode,
@@ -452,7 +453,7 @@ pub fn load_current_runtime_qualification_inputs(
     ryeos_state::external_content::payload::verify_large_manifest_payload(
         &authority, &manifest, limits,
     )?;
-    Ok((allowance, policy, records))
+    Ok((allowance, policy, records, declaration_authority))
 }
 
 /// Recheck source and signed selection at a later admission cut. Callers must
@@ -464,10 +465,11 @@ pub fn require_current_runtime_qualification_inputs(
     allowance: &ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance,
     policy: &ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
     subject: &ryeos_state::external_content::qualification_subject::ContentQualificationSubject,
+    declaration_authority: &ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
 ) -> anyhow::Result<()> {
     allowance.validate_policy_source(policy)?;
     subject.validate()?;
-    let (current_allowance, current_policy, current_records) =
+    let (current_allowance, current_policy, current_records, current_authority) =
         load_current_runtime_qualification_inputs(
             state,
             &allowance.activation_ref,
@@ -475,7 +477,9 @@ pub fn require_current_runtime_qualification_inputs(
             &subject.realization,
         )?;
     anyhow::ensure!(
-        &current_allowance == allowance && &current_policy == policy,
+        &current_allowance == allowance
+            && &current_policy == policy
+            && &current_authority == declaration_authority,
         "runtime qualification signed selection changed after preparation"
     );
     current_records.verify_retained_subject(subject)
