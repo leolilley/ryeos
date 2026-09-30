@@ -18,7 +18,15 @@ use super::StateDb;
 use crate::recovery::CasMutationGuard;
 
 const NAMESPACE: &str = "retained-product-qualifications";
-const RETIRED_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v5";
+// The release authority retains v5 heads; the two disposable A/B nodes retain
+// v9 heads. These are exact offline retirement targets, not accepted evidence
+// for current qualification. Every other predecessor or current schema stays
+// outside this operation's reviewed scope.
+const RETIRED_EVIDENCE_SCHEMA_V5: &str = "ryeos.product_qualification_evidence.v5";
+const RETIRED_EVIDENCE_SCHEMA_V9: &str = "ryeos.product_qualification_evidence.v9";
+fn reviewed_retired_evidence_schema(schema: &str) -> bool {
+    schema == RETIRED_EVIDENCE_SCHEMA_V5 || schema == RETIRED_EVIDENCE_SCHEMA_V9
+}
 // v2 retains each moved signed head in an exact recovery slot. v1 unlink
 // intents cannot be interpreted as move outcomes on retry.
 const INTENT_SCHEMA: u32 = 2;
@@ -98,7 +106,7 @@ impl RetirementIntent {
         let mut previous = None::<&str>;
         for head in &self.heads {
             ensure!(
-                head.evidence_schema == RETIRED_EVIDENCE_SCHEMA
+                reviewed_retired_evidence_schema(&head.evidence_schema)
                     && head.coordinate.len() == 64
                     && head
                         .coordinate
@@ -251,7 +259,7 @@ impl StateDb {
                 .and_then(serde_json::Value::as_str)
                 .context("retired qualification evidence has no structural schema")?;
             ensure!(
-                schema == RETIRED_EVIDENCE_SCHEMA,
+                reviewed_retired_evidence_schema(schema),
                 "qualification head has an unreviewed evidence schema"
             );
             rows.push(LegacyQualificationHead {
@@ -796,7 +804,7 @@ mod tests {
             head_sha256: "a".repeat(64),
             target_hash: "b".repeat(64),
             signer: "c".repeat(64),
-            evidence_schema: RETIRED_EVIDENCE_SCHEMA.into(),
+            evidence_schema: RETIRED_EVIDENCE_SCHEMA_V5.into(),
         }
     }
 
@@ -827,14 +835,31 @@ mod tests {
         assert!(intent.validate().is_err());
         intent.heads.reverse();
         intent.plan_sha256 = plan_hash(&intent.heads).unwrap();
+        intent.heads[0].evidence_schema = RETIRED_EVIDENCE_SCHEMA_V9.into();
+        intent.plan_sha256 = plan_hash(&intent.heads).unwrap();
+        intent.validate().unwrap();
         intent.heads[0].evidence_schema = "ryeos.product_qualification_evidence.v13".into();
         intent.plan_sha256 = plan_hash(&intent.heads).unwrap();
         assert!(intent.validate().is_err());
-        intent.heads[0].evidence_schema = RETIRED_EVIDENCE_SCHEMA.into();
+        intent.heads[0].evidence_schema = RETIRED_EVIDENCE_SCHEMA_V5.into();
         intent.plan_sha256 = plan_hash(&intent.heads).unwrap();
         intent.next_row = intent.heads.len();
         intent.row_phase = RowPhase::Removing;
         assert!(intent.validate().is_err());
+    }
+
+    #[test]
+    fn retirement_schema_allowlist_excludes_unreviewed_predecessors_and_current() {
+        assert!(reviewed_retired_evidence_schema(RETIRED_EVIDENCE_SCHEMA_V5));
+        assert!(reviewed_retired_evidence_schema(RETIRED_EVIDENCE_SCHEMA_V9));
+        for schema in [
+            "ryeos.product_qualification_evidence.v4",
+            "ryeos.product_qualification_evidence.v8",
+            "ryeos.product_qualification_evidence.v10",
+            "ryeos.product_qualification_evidence.v13",
+        ] {
+            assert!(!reviewed_retired_evidence_schema(schema));
+        }
     }
 
     #[test]
