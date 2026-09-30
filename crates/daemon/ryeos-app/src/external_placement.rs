@@ -4640,6 +4640,87 @@ pub fn advance_external_direct_settlement(
     })
 }
 
+/// Advance the original Q provider occurrence toward exact terminal proof
+/// after its immutable transcript, local teardown and signed native whole
+/// scope death have been retained. The allocation writer rechecks those facts
+/// in the same transaction that grants the one provider termination contact.
+/// This settles capacity and grants no Worker semantic or qualification claim.
+pub fn advance_external_qualification_normal_settlement(
+    state: &AppState,
+    placement: &str,
+) -> Result<ExternalCandidateCleanupProgress> {
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let initial = state
+        .state_store
+        .external_allocation(placement)?
+        .context("Q normal settlement has no retained allocation")?;
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &initial.reservation.owner else {
+        bail!("Q normal settlement changed its accepted owner");
+    };
+    let operation_id = owner.qualification_operation_id.clone();
+    crate::hosted_operation::with_qualification_occurrence_contact(&operation_id, || {
+        let current = state
+            .state_store
+            .external_allocation(placement)?
+            .context("Q normal settlement lost its original allocation")?;
+        ensure!(
+            current.reservation == initial.reservation
+                && matches!(
+                    current.phase,
+                    ExternalAllocationPhase::Bound
+                        | ExternalAllocationPhase::Quarantined
+                        | ExternalAllocationPhase::Terminated
+                ),
+            "Q normal settlement changed its exact occurrence"
+        );
+        let channel = state.state_store.external_execution_channel(placement)?;
+        ensure!(
+            channel.execution_binding_hash == current.reservation.binding_hash
+                && matches!(
+                    channel.execution_mode,
+                    ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+                )
+                && channel.candidate_export_max_bytes == 0
+                && !state.state_store.external_execution_revoked(placement)?,
+            "Q normal settlement lost its unrevoked zero-export channel"
+        );
+        if current.phase == ExternalAllocationPhase::Terminated {
+            state
+                .state_store
+                .ensure_external_qualification_normal_terminal(placement)?;
+            return Ok(ExternalCandidateCleanupProgress::Proved);
+        }
+        let prepared = ExternalPlacementOwner::new(state)
+            .prepare_retained_qualification_for_cleanup(placement)?;
+        let reconciliation = match prepared.claim()? {
+            ExternalPlacementContactDecision::Reconcile(reconciliation) => reconciliation,
+            ExternalPlacementContactDecision::Settled(_) => {
+                bail!("Q normal settlement changed phase before its provider observation")
+            }
+            ExternalPlacementContactDecision::Contact(_) => {
+                bail!("Q normal settlement cannot allocate a replacement occurrence")
+            }
+        };
+        let after = reconciliation.terminate_or_reconcile()?;
+        ensure!(
+            !state.state_store.external_execution_revoked(placement)?,
+            "Q normal settlement was cancelled during provider termination"
+        );
+        if after.phase == ExternalAllocationPhase::Terminated {
+            state
+                .state_store
+                .ensure_external_qualification_normal_terminal(placement)?;
+        }
+        Ok(if after.phase == ExternalAllocationPhase::Terminated {
+            ExternalCandidateCleanupProgress::Proved
+        } else {
+            ExternalCandidateCleanupProgress::Pending
+        })
+    })
+}
+
 /// Historical predicate for automatic recovery only. Explicit operator/task
 /// cancellation must bypass this exception and retain sticky revocation.
 fn preserves_external_direct_settlement(state: &AppState, placement: &str) -> Result<bool> {
@@ -4658,8 +4739,22 @@ fn preserves_external_direct_settlement(state: &AppState, placement: &str) -> Re
         .is_some())
 }
 
+/// A first Q provider termination contact may have lost its response. Only
+/// its durable normal intent and the same immutable local/native prerequisites
+/// preserve reconciliation across owner drop or controller restart.
+fn preserves_external_qualification_normal_settlement(
+    state: &AppState,
+    placement: &str,
+) -> Result<bool> {
+    state
+        .state_store
+        .has_external_qualification_normal_termination_intent(placement)
+}
+
 fn fence_external_candidate_automatically(state: &AppState, placement: &str) -> Result<bool> {
-    if preserves_external_direct_settlement(state, placement)? {
+    if preserves_external_direct_settlement(state, placement)?
+        || preserves_external_qualification_normal_settlement(state, placement)?
+    {
         return Ok(false);
     }
     request_external_candidate_cleanup(state, placement)?;
@@ -4768,6 +4863,7 @@ pub fn request_external_candidate_cleanup(state: &AppState, placement: &str) -> 
 pub struct ExternalCandidateCleanupLifeline {
     state: AppState,
     placement: String,
+    disarmed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -4813,6 +4909,8 @@ pub fn recover_external_candidate_cleanups(
         let result = (|| {
             if preserves_external_direct_settlement(state, &placement)? {
                 advance_external_direct_settlement(state, &placement)
+            } else if preserves_external_qualification_normal_settlement(state, &placement)? {
+                advance_external_qualification_normal_settlement(state, &placement)
             } else {
                 advance_external_candidate_cleanup(state, &placement)
             }
@@ -4831,12 +4929,27 @@ impl ExternalCandidateCleanupLifeline {
         Self {
             state: state.clone(),
             placement: placement.to_owned(),
+            disarmed: false,
         }
+    }
+
+    /// Consume this exact Q cleanup owner only after immutable local and
+    /// signed native evidence joins an independently observed provider
+    /// terminal. A failed check leaves Drop's sticky cancellation armed.
+    pub fn disarm_after_qualification_normal_terminal(mut self) -> Result<()> {
+        self.state
+            .state_store
+            .ensure_external_qualification_normal_terminal(&self.placement)?;
+        self.disarmed = true;
+        Ok(())
     }
 }
 
 impl Drop for ExternalCandidateCleanupLifeline {
     fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
         if let Err(error) = fence_external_candidate_automatically(&self.state, &self.placement) {
             tracing::error!(
                 placement = %self.placement,

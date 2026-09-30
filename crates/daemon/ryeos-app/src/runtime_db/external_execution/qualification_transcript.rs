@@ -116,7 +116,7 @@ fn require_manifest_source(
     Ok(())
 }
 
-fn read_record(
+pub(super) fn read_record(
     conn: &Connection,
     placement: &str,
 ) -> Result<Option<QualificationWorkerTranscriptRecord>> {

@@ -510,7 +510,7 @@ fn canonical(record: &QualificationLocalStartRecord) -> Result<String> {
     Ok(json)
 }
 
-fn read_local_start(
+pub(super) fn read_local_start(
     conn: &Connection,
     placement: &str,
 ) -> Result<Option<QualificationLocalStartRecord>> {

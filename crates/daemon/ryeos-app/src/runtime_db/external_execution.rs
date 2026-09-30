@@ -2631,6 +2631,16 @@ impl RuntimeDb {
                 |row| row.get(0),
             )
             .optional()?;
+        if matches!(
+            &record.reservation.owner,
+            ExternalAllocationOwner::QualificationCandidate(_)
+        ) && channel.is_none()
+        {
+            ensure!(
+                record.phase == ExternalAllocationPhase::Quarantined,
+                "bound Q normal termination lost its required channel"
+            );
+        }
         if let Some(binding_digest) = channel {
             let revoked: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM external_execution_revocation
@@ -2643,18 +2653,24 @@ impl RuntimeDb {
                     record.phase == ExternalAllocationPhase::Bound,
                     "quarantined external execution cannot acquire a new normal settlement intent"
                 );
-                ensure!(
-                    matches!(
-                        record.reservation.owner,
-                        ExternalAllocationOwner::DirectThread { .. }
-                    ),
-                    "external termination requires durable channel revocation"
-                );
-                require_contactable_direct_owner(&tx, &record.reservation)?;
-                ensure!(
-                    channel::complete_applied_direct_output_tx(&tx, placement)?.is_some(),
-                    "normal external termination requires complete applied target observations"
-                );
+                match &record.reservation.owner {
+                    ExternalAllocationOwner::DirectThread { .. } => {
+                        require_contactable_direct_owner(&tx, &record.reservation)?;
+                        ensure!(
+                            channel::complete_applied_direct_output_tx(&tx, placement)?.is_some(),
+                            "normal external termination requires complete applied target observations"
+                        );
+                    }
+                    ExternalAllocationOwner::QualificationCandidate(_) => {
+                        channel::require_applied_qualification_normal_settlement_tx(
+                            &tx,
+                            &record.reservation,
+                        )?;
+                    }
+                    ExternalAllocationOwner::DedicatedSession(_) => {
+                        bail!("external termination requires durable channel revocation")
+                    }
+                }
             }
         }
         tx.execute(
@@ -2696,6 +2712,33 @@ impl RuntimeDb {
         )?
         .context("external terminal observation has no durable termination intent")?;
         observation.validate(&record.reservation, occurrence, &intent)?;
+        if matches!(
+            &record.reservation.owner,
+            ExternalAllocationOwner::QualificationCandidate(_)
+        ) {
+            let channel_digest: Option<String> = tx
+                .query_row(
+                    "SELECT binding_digest FROM external_execution_channel
+                     WHERE placement_thread_id=?1",
+                    [placement],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(channel_digest) = channel_digest {
+                if !ryeos_state::external_execution::journal::revoked(&tx, &channel_digest)? {
+                    channel::require_applied_qualification_normal_settlement_tx(
+                        &tx,
+                        &record.reservation,
+                    )?;
+                }
+            } else {
+                ensure!(
+                    record.phase == ExternalAllocationPhase::Quarantined
+                        || record.phase == ExternalAllocationPhase::Terminated,
+                    "bound Q provider terminal lost its required channel"
+                );
+            }
+        }
         if record.phase == ExternalAllocationPhase::Terminated {
             let prior: Option<ExternalTerminalObservation> = read_canonical_evidence(
                 &tx,

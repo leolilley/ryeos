@@ -16631,6 +16631,24 @@ impl StateStore {
             .settle_external_terminal(placement, observation)
     }
 
+    pub(crate) fn ensure_external_qualification_normal_terminal(
+        &self,
+        placement: &str,
+    ) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .ensure_external_qualification_normal_terminal(placement)
+    }
+
+    pub(crate) fn has_external_qualification_normal_termination_intent(
+        &self,
+        placement: &str,
+    ) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .has_external_qualification_normal_termination_intent(placement)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn install_external_placement_test_fixture(
         &self,
