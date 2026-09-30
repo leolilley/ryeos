@@ -409,6 +409,12 @@ impl RuntimeDb {
                 record.attached_at_ms,
             ],
         )?;
+        qualification_local_start::attach_local_worker_tx(
+            &tx,
+            placement,
+            process_identity,
+            daemon_generation_id,
+        )?;
         tx.commit()?;
         Ok(record)
     }

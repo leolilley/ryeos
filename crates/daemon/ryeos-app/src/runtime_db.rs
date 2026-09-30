@@ -1881,10 +1881,11 @@ const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence 
 
 fn runtime_schema_sql() -> String {
     format!(
-        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         external_execution::GUARD_SQL,
         ryeos_state::external_execution::journal::CHANNEL_SQL,
         external_execution::JOURNAL_SQL,
+        external_execution::QUALIFICATION_LOCAL_START_SQL,
         scoped_child_attempt::JOURNAL_SQL,
         runtime_snapshot_bootstrap::JOURNAL_SQL,
         runtime_snapshot_bootstrap_termination::JOURNAL_SQL,
@@ -2666,7 +2667,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // exact process death proof before its allocation can settle.
 // Epoch 106 retains one Q framed request, its possible-contact boundary,
 // request-correlated Final and separately observed completed turn.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 106;
+// Epoch 107 retains one Q-local workspace Create and process-scope attempt,
+// including exact held creator, view, recovery, and Worker attachment joins.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 107;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -16822,6 +16825,19 @@ impl RuntimeDb {
                 |row| row.get(0),
             )?
         };
+        // Q has no ordinary chain owner. Its one-use local scope remains a
+        // global host-lifetime obligation until a separate exact retirement
+        // protocol proves whole-scope and workspace cleanup.
+        let qualification: i64 = if chain_root_id.is_none() {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM external_qualification_local_start
+                 WHERE json_type(record_json,'$.scope_allocation') IS NOT 'null'",
+                [],
+                |row| row.get(0),
+            )?
+        } else {
+            0
+        };
         u64::try_from(
             dedicated
                 .checked_add(reservations)
@@ -16829,6 +16845,7 @@ impl RuntimeDb {
                 .and_then(|v| v.checked_add(attached_threads))
                 .and_then(|v| v.checked_add(owners))
                 .and_then(|v| v.checked_add(scoped_children))
+                .and_then(|v| v.checked_add(qualification))
                 .context("process-scope obligation count overflow")?,
         )
         .context("negative process-scope obligation count")

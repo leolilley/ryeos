@@ -15556,6 +15556,134 @@ impl StateStore {
             .qualification_worker_process(placement)
     }
 
+    pub(crate) fn qualification_local_start(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::QualificationLocalStartRecord>> {
+        self.lock()?.runtime_db.qualification_local_start(placement)
+    }
+
+    /// The cache path comes from the pinned runtime state authority. The
+    /// returned workspace coordinate must be journaled before directory Create.
+    pub(crate) fn reserve_qualification_local_start(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let cache = self
+            .state_authority
+            .runtime_directory()
+            .open_or_create_child(std::ffi::OsStr::new("cache"), 0o700)?;
+        cache.require_owner_private_directory()?;
+        let g = self.lock()?;
+        anyhow::ensure!(
+            self.process_attachment_admission_open
+                .load(Ordering::Acquire),
+            "qualification local start is fenced during daemon shutdown"
+        );
+        g.runtime_db
+            .reserve_qualification_local_start(placement, cache.path())
+    }
+
+    pub(crate) fn begin_qualification_workspace_create(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        anyhow::ensure!(
+            state.isolation.is_enforced(),
+            "qualification workspace requires enforced signed isolation"
+        );
+        let (backend_id, backend_version) = state
+            .isolation
+            .workspace_backend_identity()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        anyhow::ensure!(
+            self.process_attachment_admission_open
+                .load(Ordering::Acquire),
+            "qualification workspace Create is fenced during daemon shutdown"
+        );
+        g.runtime_db
+            .begin_qualification_workspace_create(placement, backend_id, backend_version)
+    }
+
+    pub(crate) fn attach_qualification_workspace_creator(
+        &self,
+        placement: &str,
+        identity: &crate::process::ExecutionProcessIdentity,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        anyhow::ensure!(
+            self.process_attachment_admission_open
+                .load(Ordering::Acquire),
+            "qualification workspace creator is fenced during daemon shutdown"
+        );
+        g.runtime_db
+            .attach_qualification_workspace_creator(placement, identity)
+    }
+
+    pub(crate) fn complete_qualification_workspace_create(
+        &self,
+        placement: &str,
+        evidence: &ryeos_engine::isolation::WorkspaceLifecycleEvidence,
+        guard: &crate::temp_dir_guard::TempDirGuard,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        anyhow::ensure!(
+            self.process_attachment_admission_open
+                .load(Ordering::Acquire),
+            "qualification workspace binding is fenced during daemon shutdown"
+        );
+        g.runtime_db
+            .complete_qualification_workspace_create(placement, evidence, guard)
+    }
+
+    pub(crate) fn begin_qualification_scope_allocation(
+        &self,
+        placement: &str,
+        allocation: &lillux::ProcessScopeAllocation,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        anyhow::ensure!(
+            self.process_attachment_admission_open
+                .load(Ordering::Acquire),
+            "qualification scope allocation is fenced during daemon shutdown"
+        );
+        g.runtime_db
+            .begin_qualification_scope_allocation(placement, allocation)
+    }
+
+    pub(crate) fn bind_qualification_scope(
+        &self,
+        placement: &str,
+        recovery: &lillux::ProcessScopeRecovery,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        anyhow::ensure!(
+            self.process_attachment_admission_open
+                .load(Ordering::Acquire),
+            "qualification scope binding is fenced during daemon shutdown"
+        );
+        g.runtime_db.bind_qualification_scope(placement, recovery)
+    }
+
+    pub(crate) fn mark_qualification_local_cleanup_unproved(
+        &self,
+        placement: &str,
+        reason: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .mark_qualification_local_cleanup_unproved(placement, reason)
+    }
+
     /// Attach the one Q local Worker while Lillux still holds it before
     /// release. This does not grant an ordinary dedicated session or new
     /// provider contact.

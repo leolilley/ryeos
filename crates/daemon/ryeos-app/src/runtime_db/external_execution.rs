@@ -13,6 +13,7 @@ mod channel;
 pub use channel::ExternalDirectOutput;
 pub(crate) mod connector;
 mod qualification_command;
+mod qualification_local_start;
 mod qualification_process;
 pub(crate) use channel::{
     ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
@@ -21,6 +22,10 @@ pub(crate) use channel::{
 };
 pub(crate) use qualification_command::{
     QualificationWorkerCommandPhase, QualificationWorkerCommandRecord,
+};
+pub(super) use qualification_local_start::JOURNAL_SQL as QUALIFICATION_LOCAL_START_SQL;
+pub use qualification_local_start::{
+    QualificationLocalStartPhase, QualificationLocalStartRecord, QualificationWorkspaceReceipt,
 };
 pub(crate) use qualification_process::{
     QualificationWorkerDeathProof, QualificationWorkerProcessPhase,
@@ -1668,6 +1673,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     }
     channel::validate_channels(conn)?;
     connector::validate_connectors(conn)?;
+    qualification_local_start::validate_local_starts(conn)?;
     qualification_process::validate_processes(conn)?;
     qualification_command::validate_commands(conn)?;
     Ok(())
