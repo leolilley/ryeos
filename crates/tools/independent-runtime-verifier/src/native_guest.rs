@@ -6,11 +6,11 @@
 //! carries exec-server bytes; observations remain in the pinned controller cwd.
 //! No worker identities, qualification claims or completion fence are minted.
 
-use anyhow::{ensure, Context as _, Result};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use anyhow::{Context as _, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use lillux::{
-    time::{Duration, MonotonicDeadline},
     PinnedDirectory,
+    time::{Duration, MonotonicDeadline},
 };
 use ryeos_state::external_execution::admission::{
     ExternalCandidateProcFilesystem, ExternalCandidateRuntimeRecipe,
@@ -29,7 +29,7 @@ const TRANSCRIPT_LIMIT: usize = 1024 * 1024;
 
 /// Convert the retained wall-clock contact bound once at native startup.
 /// Cleanup is a separate finite settlement allowance, never more work time.
-fn production_deadlines(
+pub(crate) fn production_deadlines(
     attempt_deadline_ms: i64,
     now_ms: i64,
 ) -> Result<(MonotonicDeadline, MonotonicDeadline)> {
@@ -239,7 +239,8 @@ pub fn run_probe_entrypoint() -> std::process::ExitCode {
 /// credentials, Worker identity or qualification claims are manufactured.
 pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
     use crate::consumer_record::{
-        ConsumerInputRecord, CONSUMER_INPUT_RECORD_NAME, MAX_CONSUMER_INPUT_RECORD_BYTES,
+        CONSUMER_INPUT_RECORD_NAME, CONSUMER_INPUT_ROOT_ENV, ConsumerInputRecord,
+        MAX_CONSUMER_INPUT_RECORD_BYTES,
     };
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         ConsumerRuntimeChallenge, MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
@@ -260,14 +261,24 @@ pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
         lillux::inherited_pipes::InheritedPipePair::take_inherited_pipes(0, 1, CHUNK, active)
     }?;
     let (input, mut output, interrupt) = pair.split();
-    let root = PinnedDirectory::open(Path::new("."))?.context("consumer private cwd absent")?;
+    let root =
+        PinnedDirectory::open(Path::new("."))?.context("consumer private control cwd absent")?;
+    let imported_path = std::env::var_os(CONSUMER_INPUT_ROOT_ENV)
+        .context("consumer imported source root absent")?;
+    ensure!(
+        Path::new(&imported_path).is_absolute(),
+        "consumer imported root is not absolute"
+    );
+    let imported_root = PinnedDirectory::open(Path::new(&imported_path))?
+        .context("consumer imported source root absent")?;
     let record_bytes = read_fixed(
-        &root,
+        &imported_root,
         CONSUMER_INPUT_RECORD_NAME,
         MAX_CONSUMER_INPUT_RECORD_BYTES as u64,
     )?;
     let record = ConsumerInputRecord::parse(&record_bytes)?;
-    let imported = record.open_imported_products(&root, &challenge)?;
+    let imported = record.open_imported_products(&imported_root, &challenge)?;
+    imported.require_control_root(&root)?;
     let content = record
         .purpose
         .consumer_content
@@ -285,6 +296,7 @@ pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
     let observed = imported.run_native_protocol(
         &record,
         &private,
+        &root,
         input,
         &mut output,
         interrupt,
@@ -583,7 +595,15 @@ fn run_in_directory(
     // actual guest argv, environment and containment require independent
     // applied-launch evidence before qualification claims are possible.
     let native = native_request(&request.recipe, request.effective_environment, mounts)?;
-    let observed = run_prepared_protocol(root, native, input, output, interrupt, active, cleanup)?;
+    let observed = run_prepared_protocol(
+        || capture_requested(root),
+        native,
+        input,
+        output,
+        interrupt,
+        active,
+        cleanup,
+    )?;
     let policy = ryeos_state::objects::ProjectSnapshotPolicy::new(
         ryeos_state::project_sync::ProjectSyncScope::FullProject,
         vec![],
@@ -629,13 +649,26 @@ pub(crate) struct NativeProtocolObservation {
     pub namespace_exit: String,
 }
 
+/// Existing inner-probe signal. The enclosing occurrence owner controls its
+/// delivery; presence is a request, not an acknowledgment or settlement proof.
+pub(crate) fn capture_requested(root: &PinnedDirectory) -> Result<bool> {
+    let Some(finish) = root.open_pinned_regular(OsStr::new("finish"), false)? else {
+        return Ok(false);
+    };
+    ensure!(
+        finish.read_stable_bounded(&finish.observation()?, 7)? == b"capture",
+        "invalid finish"
+    );
+    Ok(true)
+}
+
 /// Drive an already constructed native request in this dedicated, single-
 /// threaded verifier process. Namespace preparation and whole-namespace
 /// settlement remain Lillux-owned. Caller retains mount descriptors and writer
 /// authority through this call and independently checks the raw observation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_prepared_protocol(
-    root: &PinnedDirectory,
+    mut completion_requested: impl FnMut() -> Result<bool>,
     native: lillux::LinuxSandboxRequest,
     mut input: lillux::inherited_pipes::InheritedPipeInput,
     output: &mut lillux::inherited_pipes::InheritedPipeOutput,
@@ -661,11 +694,14 @@ pub(crate) fn run_prepared_protocol(
     let mut received = Vec::new();
     let mut diagnostics = Vec::new();
     let mut applied_launch = None;
+    let mut forwarded_output_bytes = 0usize;
     let observed = (|| -> Result<()> {
         held.release_once().map_err(anyhow::Error::msg)?;
         let mut pending = Vec::new();
         let mut offset = 0;
         let mut input_eof = false;
+        let mut pending_output = Vec::new();
+        let mut output_offset = 0;
         loop {
             ensure!(!active.has_elapsed(), "guest scenario expired");
             if applied_launch.is_none() {
@@ -701,6 +737,9 @@ pub(crate) fn run_prepared_protocol(
                     Err(e) => return Err(e).context("read controller protocol"),
                 }
             }
+            // A simultaneous completion file cannot turn lost parent pipes
+            // into success. Refuse before consulting the completion predicate.
+            ensure!(!input_eof, "controller input ended before completion");
             if !pending.is_empty() {
                 // Lillux created these pipes nonblocking. A failed prefix is
                 // terminal. Rust executable startup ignores SIGPIPE; no claim
@@ -729,25 +768,48 @@ pub(crate) fn run_prepared_protocol(
                     pending.clear();
                 }
             }
-            if input_eof && pending.is_empty() {
-                guest_input = None;
-            }
             let mut bytes = [0; CHUNK];
-            match guest_output.read(&mut bytes) {
-                Ok(0) => anyhow::bail!("guest output ended before verifier finish"),
-                Ok(n) => {
-                    append_bounded(&mut received, &bytes[..n])?;
-                    output.write_all(&bytes[..n], active)?;
+            if pending_output.is_empty() {
+                match guest_output.read(&mut bytes) {
+                    Ok(0) => anyhow::bail!("guest output ended before verifier finish"),
+                    Ok(n) => {
+                        append_bounded(&mut received, &bytes[..n])?;
+                        pending_output.extend_from_slice(&bytes[..n]);
+                        output_offset = 0;
+                    }
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        ()
+                    }
+                    Err(e) => return Err(e.into()),
                 }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    ()
+            }
+            if !pending_output.is_empty() {
+                match output.try_write_chunk(&pending_output[output_offset..], active) {
+                    Ok(0) => anyhow::bail!("controller output made no progress"),
+                    Ok(n) => {
+                        output_offset += n;
+                        forwarded_output_bytes = forwarded_output_bytes
+                            .checked_add(n)
+                            .context("forwarded output count overflow")?;
+                        if output_offset == pending_output.len() {
+                            pending_output.clear();
+                        }
+                    }
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        ()
+                    }
+                    Err(e) => return Err(e).context("write controller protocol"),
                 }
-                Err(e) => return Err(e.into()),
             }
             match guest_error.read(&mut bytes) {
                 Ok(n) => append_bounded(&mut diagnostics, &bytes[..n])?,
@@ -767,11 +829,7 @@ pub(crate) fn run_prepared_protocol(
                     .is_none(),
                 "guest exited before verifier finish"
             );
-            if let Some(finish) = root.open_pinned_regular(OsStr::new("finish"), false)? {
-                ensure!(
-                    finish.read_stable_bounded(&finish.observation()?, 7)? == b"capture",
-                    "invalid finish"
-                );
+            if completion_requested()? {
                 ensure!(
                     pending.is_empty()
                         && !sent.is_empty()
@@ -802,7 +860,6 @@ pub(crate) fn run_prepared_protocol(
     observed.context("relay guest protocol")?;
     // Reaping the namespace proves settlement, not that the last buffered
     // diagnostic/output bytes have already been observed.
-    let forwarded_output_bytes = received.len();
     drain_settled(&mut guest_output, &mut received, cleanup)?;
     drain_settled(&mut guest_error, &mut diagnostics, cleanup)?;
     let applied_launch = applied_launch.context("native guest has no applied-launch receipt")?;
@@ -819,6 +876,25 @@ pub(crate) fn run_prepared_protocol(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_signal_is_explicit_and_invalid_content_is_not_completion() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        assert!(!capture_requested(&root).unwrap());
+        root.atomic_create_pinned_regular(OsStr::new("finish"), b"capture", 0o400)
+            .unwrap()
+            .unwrap();
+        assert!(capture_requested(&root).unwrap());
+
+        let other = tempfile::tempdir().unwrap();
+        let invalid = PinnedDirectory::open(other.path()).unwrap().unwrap();
+        invalid
+            .atomic_create_pinned_regular(OsStr::new("finish"), b"done", 0o400)
+            .unwrap()
+            .unwrap();
+        assert!(capture_requested(&invalid).is_err());
+    }
 
     #[test]
     fn production_deadlines_refuse_expiry_and_never_renew_work_time() {
@@ -888,11 +964,13 @@ mod tests {
         assert!(check_applied_receipt_against_signed_request(&observation, &expected).is_ok());
         let mut changed_request: serde_json::Value = serde_json::from_slice(&expected).unwrap();
         changed_request["effective_environment"]["TZ"] = serde_json::json!("Pacific/Auckland");
-        assert!(check_applied_receipt_against_signed_request(
-            &observation,
-            &serde_json::to_vec(&changed_request).unwrap()
-        )
-        .is_err());
+        assert!(
+            check_applied_receipt_against_signed_request(
+                &observation,
+                &serde_json::to_vec(&changed_request).unwrap()
+            )
+            .is_err()
+        );
         for field in [
             "executable_sha256",
             "argv_sha256",

@@ -45,6 +45,8 @@ pub struct AppServerProtocol<T: AppServerTransport> {
     bytes: usize,
     deadline: MonotonicDeadline,
     scripted_phase: ScriptedPhase,
+    sent_wire: Vec<u8>,
+    received_wire: Vec<u8>,
 }
 
 pub struct SubordinateAppServerTransport {
@@ -305,11 +307,63 @@ impl<T: AppServerTransport> AppServerProtocol<T> {
             bytes: 0,
             deadline,
             scripted_phase: ScriptedPhase::Fresh,
+            sent_wire: Vec::new(),
+            received_wire: Vec::new(),
         }
     }
 
     pub fn notifications(&self) -> &[Value] {
         &self.notifications
+    }
+
+    /// Exact successfully delivered request bytes and observed output bytes.
+    /// These are transcript inputs, not process or namespace-settlement proof.
+    pub fn wire_transcript(&self) -> (&[u8], &[u8]) {
+        (&self.sent_wire, &self.received_wire)
+    }
+
+    pub(crate) fn require_completed_scripted_turn(&self) -> Result<()> {
+        ensure!(
+            matches!(self.scripted_phase, ScriptedPhase::TurnCompleted),
+            "app-server requires completed scripted turn"
+        );
+        Ok(())
+    }
+
+    /// Drain the remaining wire output after an explicit outer settlement
+    /// request, without closing input (EOF cannot substitute for that request).
+    /// The enclosing owner must still join exact-child and namespace evidence.
+    /// Tail bytes are retained, not silently discarded or called notifications.
+    pub fn drain_wire_until_eof(&mut self, deadline: MonotonicDeadline) -> Result<()> {
+        self.require_completed_scripted_turn()?;
+        let deadline = self.tighten_deadline(deadline);
+        loop {
+            ensure!(!deadline.has_elapsed(), "app-server tail drain expired");
+            let frame = self
+                .transport
+                .read_frame_until(b'\n', MAX_EVENT_BYTES, deadline)?;
+            ensure!(
+                !deadline.has_elapsed(),
+                "app-server tail drain exceeded deadline"
+            );
+            if frame.is_empty() {
+                return Ok(());
+            }
+            ensure!(
+                frame.len() <= MAX_EVENT_BYTES
+                    && self
+                        .received_wire
+                        .len()
+                        .checked_add(frame.len())
+                        .is_some_and(|n| n <= MAX_TOTAL_BYTES),
+                "app-server tail byte bound"
+            );
+            self.received_wire.extend_from_slice(&frame);
+            ensure!(
+                frame.last() == Some(&b'\n'),
+                "app-server tail ended mid-protocol"
+            );
+        }
     }
 
     /// Narrow an enclosing collector's ceiling without renewing this owner's
@@ -327,11 +381,19 @@ impl<T: AppServerTransport> AppServerProtocol<T> {
         let mut bytes = serde_json::to_vec(&message)?;
         bytes.push(b'\n');
         ensure!(bytes.len() <= MAX_EVENT_BYTES, "request frame bound");
+        ensure!(
+            self.sent_wire
+                .len()
+                .checked_add(bytes.len())
+                .is_some_and(|n| n <= MAX_TOTAL_BYTES),
+            "app-server request transcript bound"
+        );
         self.transport.write_all_until(&bytes, self.deadline)?;
         ensure!(
             !self.deadline.has_elapsed(),
             "app-server write exceeded deadline"
         );
+        self.sent_wire.extend_from_slice(&bytes);
         Ok(())
     }
 
@@ -365,6 +427,7 @@ impl<T: AppServerTransport> AppServerProtocol<T> {
             .checked_add(frame.len())
             .context("frame accounting overflow")?;
         ensure!(self.bytes <= MAX_TOTAL_BYTES, "app-server total byte bound");
+        self.received_wire.extend_from_slice(&frame);
         let message: Value = serde_json::from_slice(&frame)?;
         ensure!(message.is_object(), "non-object app-server message");
         if message.get("id").is_none() {
@@ -636,6 +699,33 @@ mod tests {
             },
             MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
         )
+    }
+
+    #[test]
+    fn wire_tail_drain_retains_trailing_frames_and_rejects_truncation() {
+        let deadline = MonotonicDeadline::after(lillux::time::Duration::from_secs(2));
+        let tail = b"{\"method\":\"trailing\",\"params\":{}}\n".to_vec();
+        let mut protocol = AppServerProtocol::new(
+            MemoryTransport {
+                frames: [tail.clone(), Vec::new()].into(),
+                writes: Vec::new(),
+            },
+            deadline,
+        );
+        assert!(protocol.drain_wire_until_eof(deadline).is_err());
+        protocol.scripted_phase = ScriptedPhase::TurnCompleted;
+        protocol.drain_wire_until_eof(deadline).unwrap();
+        assert_eq!(protocol.wire_transcript().1, tail);
+        assert!(protocol.notifications().is_empty());
+        let mut truncated = AppServerProtocol::new(
+            MemoryTransport {
+                frames: [b"partial".to_vec()].into(),
+                writes: Vec::new(),
+            },
+            deadline,
+        );
+        truncated.scripted_phase = ScriptedPhase::TurnCompleted;
+        assert!(truncated.drain_wire_until_eof(deadline).is_err());
     }
 
     #[test]

@@ -797,6 +797,7 @@ mod tests {
                     prerequisite_measurement_observation_digest: "3".repeat(64),
                 },
                 nonce_hex: "4".repeat(64),
+                guest_runtime_manifest_hash: "5".repeat(64),
             },
         };
         intent.operation_id = intent.derived_operation_id().unwrap();

@@ -31,9 +31,26 @@ use std::{
 };
 
 fn main() -> Result<()> {
-    if let Some(encoded) = std::env::var_os(
+    let native_challenge = std::env::var_os(
         ryeos_independent_runtime_verifier::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV,
-    ) {
+    );
+    let outer_challenge = std::env::var_os(
+        ryeos_independent_runtime_verifier::consumer_outer_owner::OUTER_CHALLENGE_ENV,
+    );
+    ensure!(
+        native_challenge.is_none() || outer_challenge.is_none(),
+        "consumer native and outer startup roles conflict"
+    );
+    if let Some(encoded) = outer_challenge {
+        ensure!(
+            std::env::args_os().skip(1).next().is_none(),
+            "consumer outer environment conflicts with CLI arguments"
+        );
+        return ryeos_independent_runtime_verifier::consumer_outer_owner::run_startup(
+            encoded.to_str().context("outer challenge is not UTF-8")?,
+        );
+    }
+    if let Some(encoded) = native_challenge {
         ensure!(
             std::env::args_os().skip(1).next().is_none(),
             "consumer native environment conflicts with CLI arguments"

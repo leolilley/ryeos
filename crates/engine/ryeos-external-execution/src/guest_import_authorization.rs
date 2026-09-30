@@ -163,6 +163,26 @@ impl ObservedGuestRuntime {
         &self.profile
     }
 
+    /// Recheck retained installed identity immediately before an operation.
+    /// This is point-in-time content agreement, not writer exclusion or provider
+    /// lifetime qualification. All account grants require separate authority.
+    pub fn recheck(&self) -> Result<()> {
+        self.root.ensure_path_binding()?;
+        ensure!(
+            self.root.identity()? == self.root_identity,
+            "installed guest runtime root changed identity"
+        );
+        let current = Self::observe(&self.root)?;
+        ensure!(
+            current.manifest_hash == self.manifest_hash
+                && current.controller_root == self.controller_root
+                && current.profile == self.profile,
+            "installed guest runtime drifted before operation"
+        );
+        self.root.ensure_path_binding()?;
+        Ok(())
+    }
+
     /// A mutable occurrence journal or source may not become an ambient
     /// entry beneath the exact runtime tree used as the controller-root anchor.
     pub fn require_disjoint_directory_tree(&self, other: &lillux::PinnedDirectory) -> Result<()> {
@@ -178,17 +198,7 @@ impl ObservedGuestRuntime {
         signed_import_bytes: &[u8],
         signed_assignment_bytes: &[u8],
     ) -> Result<VerifiedGuestImportAuthorization> {
-        ensure!(
-            self.root.identity()? == self.root_identity,
-            "installed guest runtime root changed identity"
-        );
-        let current = Self::observe(&self.root)?;
-        ensure!(
-            current.manifest_hash == self.manifest_hash
-                && current.controller_root == self.controller_root
-                && current.profile == self.profile,
-            "installed guest runtime drifted before import admission"
-        );
+        self.recheck()?;
         verify_guest_import_documents(
             signed_import_bytes,
             &self.controller_root,
@@ -497,6 +507,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let observed = ObservedGuestRuntime::observe(&runtime).unwrap();
+        observed.recheck().unwrap();
         assert!(observed.measure_exact_owner_product().is_err());
         let separate = tempfile::tempdir().unwrap();
         let separate = lillux::PinnedDirectory::open(separate.path())
@@ -550,6 +561,7 @@ mod tests {
             "occ-1"
         );
         std::fs::write(directory.path().join("ambient-entry"), b"drift").unwrap();
+        assert!(observed.recheck().is_err());
         assert!(
             observed
                 .verify_import_documents(&import_bytes, &assignment_bytes)

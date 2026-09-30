@@ -3207,6 +3207,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "lillux",
+ "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "ryeos-project-capture",
  "ryeos-runtime",

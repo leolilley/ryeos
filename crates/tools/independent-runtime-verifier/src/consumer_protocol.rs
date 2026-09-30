@@ -4,7 +4,7 @@
 //! and failure. This module neither launches another Worker nor settles the
 //! whole provider guest, authenticates delivery, or emits qualification claims.
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use lillux::time::{Duration, MonotonicDeadline};
 use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge;
 
@@ -184,6 +184,64 @@ pub struct ConsumerCollectedTurn {
     pub native_observation: Vec<u8>,
 }
 
+/// Join a completed scripted turn to its independently retained outer owner's
+/// launch and complete forwarded wire transcript. All owners stay borrowed on
+/// error: callers must settle/quarantine, never relaunch to recreate pipes.
+/// This raw join does not authenticate the owner launch, qualify tail semantics
+/// or establish provider death, and therefore emits no qualification claim.
+#[allow(clippy::too_many_arguments)]
+pub fn collect_outer_settlement<T: AppServerTransport>(
+    app: &mut AppServerProtocol<T>,
+    imported: &ImportedConsumerInputs,
+    record: &ConsumerInputRecord,
+    challenge: &ConsumerRuntimeChallenge,
+    fresh_home: &lillux::PinnedDirectory,
+    native_control: &lillux::PinnedDirectory,
+    protected_owner: &lillux::PinnedDirectory,
+    expected_request: &lillux::LinuxSandboxRequest,
+    deadline: MonotonicDeadline,
+) -> Result<crate::consumer_outer_owner::ConsumerOuterObservation> {
+    app.require_completed_scripted_turn()?;
+    let deadline = app.tighten_deadline(deadline);
+    crate::consumer_outer_owner::request_outer_settlement(
+        imported,
+        record,
+        challenge,
+        fresh_home,
+        native_control,
+        protected_owner,
+        deadline,
+    )?;
+    // Keep input alive throughout: EOF is a refusal, not a finish request.
+    // Draining also removes parent output backpressure while the owner settles.
+    app.drain_wire_until_eof(deadline)?;
+    let observation = loop {
+        if let Some(observation) = crate::consumer_outer_owner::read_outer_observation(
+            imported,
+            record,
+            challenge,
+            fresh_home,
+            native_control,
+            protected_owner,
+            deadline,
+        )? {
+            break observation;
+        }
+        ensure!(
+            !deadline.has_elapsed(),
+            "outer observation remained pending at deadline"
+        );
+        lillux::time::sleep(Duration::from_millis(10));
+    };
+    let (sent, output) = app.wire_transcript();
+    observation.check_launch_and_transcript(expected_request, sent, output)?;
+    ensure!(
+        !deadline.has_elapsed(),
+        "outer observation join exceeded deadline"
+    );
+    Ok(observation)
+}
+
 /// Caller first prepares the exact launch and binds its finite scripted peer.
 /// Starting the turn contacts that peer. Any failure leaves `app` borrowed by
 /// the caller, which must settle/cancel its owned processes and quarantine
@@ -194,9 +252,11 @@ pub fn collect_scripted_turn<T: AppServerTransport>(
     record: &ConsumerInputRecord,
     challenge: &ConsumerRuntimeChallenge,
     expectation: &ConsumerScriptedExpectation,
+    native_control: &lillux::PinnedDirectory,
     deadline: MonotonicDeadline,
 ) -> Result<ConsumerCollectedTurn> {
     imported.require_record_challenge(record, challenge)?;
+    imported.require_control_root(native_control)?;
     record.scripted_configuration()?;
     expectation.recheck(record, challenge)?;
     ensure!(
@@ -218,9 +278,11 @@ pub fn collect_scripted_turn<T: AppServerTransport>(
     app.await_scripted_turn_completed(&thread, &turn_id)?;
     // Do not close app-server stdin first: EOF cannot substitute for the
     // explicit native finish signal or whole-namespace settlement.
-    imported.request_native_capture(record, challenge, deadline)?;
+    imported.request_native_capture(record, challenge, native_control, deadline)?;
     let native_observation = loop {
-        if let Some(bytes) = imported.read_native_observation(record, challenge, deadline)? {
+        if let Some(bytes) =
+            imported.read_native_observation(record, challenge, native_control, deadline)?
+        {
             break bytes;
         }
         ensure!(

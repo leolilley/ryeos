@@ -213,6 +213,7 @@ fn render_command_environment(controller_executable: &Path, guest_cwd: &Path) ->
 pub fn render_consumer_command_environment(
     verifier_executable: &Path,
     imported_root: &Path,
+    native_control: &Path,
     challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
 ) -> Result<Vec<u8>> {
     use base64::Engine as _;
@@ -222,13 +223,26 @@ pub fn render_consumer_command_environment(
         encoded.len() <= 8192,
         "consumer challenge encoding exceeds bound"
     );
+    ensure!(
+        imported_root.is_absolute(),
+        "consumer imported root must be absolute"
+    );
+    let imported_root = imported_root
+        .to_str()
+        .context("consumer imported root is not UTF-8")?;
     render_command_environment_with_env(
         verifier_executable,
-        imported_root,
-        BTreeMap::from([(
-            crate::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV.into(),
-            encoded,
-        )]),
+        native_control,
+        BTreeMap::from([
+            (
+                crate::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV.into(),
+                encoded,
+            ),
+            (
+                crate::consumer_record::CONSUMER_INPUT_ROOT_ENV.into(),
+                imported_root.into(),
+            ),
+        ]),
     )
 }
 
@@ -1288,11 +1302,17 @@ mod tests {
     fn command_environment_preserves_explicit_input_without_local_fallback() {
         let bytes = super::render_command_environment_with_env(
             std::path::Path::new("/private/verifier"),
-            std::path::Path::new("/private/import"),
-            std::collections::BTreeMap::from([(
-                crate::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV.into(),
-                "bounded-input".into(),
-            )]),
+            std::path::Path::new("/private/control"),
+            std::collections::BTreeMap::from([
+                (
+                    crate::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV.into(),
+                    "bounded-input".into(),
+                ),
+                (
+                    crate::consumer_record::CONSUMER_INPUT_ROOT_ENV.into(),
+                    "/private/import".into(),
+                ),
+            ]),
         )
         .unwrap();
         let value: toml::Value = std::str::from_utf8(&bytes).unwrap().parse().unwrap();
@@ -1300,12 +1320,16 @@ mod tests {
         let entries = value["environments"].as_array().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["program"].as_str(), Some("/private/verifier"));
-        assert_eq!(entries[0]["cwd"].as_str(), Some("/private/import"));
+        assert_eq!(entries[0]["cwd"].as_str(), Some("/private/control"));
         let env = entries[0]["env"].as_table().unwrap();
-        assert_eq!(env.len(), 1);
+        assert_eq!(env.len(), 2);
         assert_eq!(
             env[crate::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV].as_str(),
             Some("bounded-input")
+        );
+        assert_eq!(
+            env[crate::consumer_record::CONSUMER_INPUT_ROOT_ENV].as_str(),
+            Some("/private/import")
         );
         assert!(
             super::render_command_environment_with_env(
