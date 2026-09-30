@@ -2242,6 +2242,7 @@ fn admit_session_capsule(
     } else {
         None
     };
+    let mut prepared_runtime_content = None;
     let external_candidate = match structured_session_profile.as_ref() {
         Some(profile) => match profile.external_candidate_requirement()? {
             Some(requirement) => {
@@ -2264,12 +2265,19 @@ fn admit_session_capsule(
                     executable_search,
                     environment,
                 )?;
-                Some(
-                    requirement.resolve_for_use(
-                        retained_product_selections.as_ref(),
-                        &qualification_use,
-                    )?,
-                )
+                let program = match requirement.runtime_authority {
+                    ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct =>
+                        requirement.resolve_for_use(retained_product_selections.as_ref(), &qualification_use)?,
+                    ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::ActivatedContent => {
+                        let (program, content) = ryeos_app::external_placement::prepare_content_candidate_program(
+                            state, &requirement, &qualification_use, &realized,
+                        )?;
+                        program.verify_runtime_authority(retained_product_selections.as_ref(), Some(&content))?;
+                        prepared_runtime_content = Some(content);
+                        program
+                    }
+                };
+                Some(program)
             }
             None => None,
         },
@@ -2298,6 +2306,12 @@ fn admit_session_capsule(
                 ryeos_app::external_placement::preflight_external_candidate_program(
                     state, program,
                 )?;
+            if let Some(prepared) = &prepared_runtime_content {
+                ensure!(
+                    prepared == &content,
+                    "activated runtime testimony changed between program preparation and capsule admission"
+                );
+            }
             (guest, Some(content))
         } else {
             validate_session_process_control(state, session)?;
@@ -5867,7 +5881,7 @@ session:
         };
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         let requirement = ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             required_lifecycle_capabilities: Default::default(),
             protocol: PROTOCOL.into(),
             connector_protocol:
@@ -5876,6 +5890,7 @@ session:
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "candidate_runtime".into(),
+            runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe,
         };
         let qualification_use =

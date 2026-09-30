@@ -956,7 +956,7 @@ mod tests {
         };
         let guest_input_identity = guest_inputs.identity_digest().unwrap();
         let requirement = ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             protocol: PROTOCOL.into(),
             connector_protocol: crate::external_execution::admission::CONNECTOR_PROTOCOL.into(),
             execution_route:
@@ -965,6 +965,7 @@ mod tests {
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "runtime".into(),
+            runtime_authority: crate::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe: recipe,
         };
         let qualification_use =

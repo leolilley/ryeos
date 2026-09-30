@@ -2616,7 +2616,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
         nested_sandbox: true,
     };
     let requirement = ExternalCandidateRequirement {
-        schema: 6,
+        schema: 7,
         required_lifecycle_capabilities: Default::default(),
         protocol: PROTOCOL.into(),
         connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
@@ -2624,6 +2624,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
         provider_declaration_id: "codex-hosted".into(),
         provider_configuration_destination: "environments.toml".into(),
         runtime_product_declaration_id: "auxiliary".into(),
+        runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
         runtime_recipe: recipe,
     };
     let capsule = ryeos_state::external_execution::admission::test_support::qualified_external_candidate_capsule(
@@ -5585,7 +5586,7 @@ fn exercise_activation_fault(fault: &str) {
         vec![ryeos_external_candidate_supervisor::test_support::TEST_CA_DER_BASE64.to_owned()];
     let now = lillux::time::timestamp_millis();
     let requirement = ExternalCandidateRequirement {
-        schema: 6,
+        schema: 7,
         required_lifecycle_capabilities: Default::default(),
         protocol: PROTOCOL.into(),
         connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
@@ -5593,6 +5594,7 @@ fn exercise_activation_fault(fault: &str) {
         provider_declaration_id: "synthetic-provider".into(),
         provider_configuration_destination: "environments.toml".into(),
         runtime_product_declaration_id: "runtime".into(),
+        runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
         runtime_recipe: recipe,
     };
     let qualification_use =

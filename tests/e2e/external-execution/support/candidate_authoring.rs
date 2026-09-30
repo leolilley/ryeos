@@ -957,7 +957,7 @@ pub fn real_codex_requirement() -> ExternalCandidateRequirement {
 
 pub fn joined_external_candidate_requirement() -> ExternalCandidateRequirement {
     ExternalCandidateRequirement {
-        schema: 6,
+        schema: 7,
         required_lifecycle_capabilities: Default::default(),
         protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
         connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
@@ -965,6 +965,7 @@ pub fn joined_external_candidate_requirement() -> ExternalCandidateRequirement {
         provider_declaration_id: "codex-hosted".into(),
         provider_configuration_destination: "environments.toml".into(),
         runtime_product_declaration_id: "auxiliary".into(),
+        runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
         runtime_recipe: ExternalCandidateRuntimeRecipe {
             schema: 2,
             runtime_mount_destination: "/runtime".into(),

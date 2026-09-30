@@ -1875,6 +1875,68 @@ pub fn preflight_external_candidate_program(
     Ok((runtime_proof, retained_content))
 }
 
+/// Resolve one explicitly content-backed requirement against uniquely matching
+/// signed placement configuration. No credential access or provider operation.
+pub fn prepare_content_candidate_program(
+    state: &AppState,
+    requirement: &ryeos_state::external_execution::admission::ExternalCandidateRequirement,
+    qualification_use: &ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+    realizations: &ryeos_state::objects::ExternalContentRealizationSet,
+) -> Result<(
+    ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+    ryeos_state::objects::RetainedExternalRuntimeContentQualification,
+)> {
+    requirement.validate()?;
+    ensure!(requirement.runtime_authority == ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::ActivatedContent,
+        "content preparation requires the signed acquired-runtime lane");
+    realizations.validate()?;
+    let runtime = realizations
+        .iter()
+        .find(|entry| entry.id == requirement.runtime_product_declaration_id)
+        .context("activated candidate runtime has no admitted realization")?;
+    let eligible = state.node_config.external_execution.iter().filter(|binding| {
+        let contract = binding.backend_contract();
+        match &contract.workload {
+            crate::node_config::sections::external_execution::ExternalWorkloadBinding::StructuredSession(session) =>
+                session.provider_declaration_id == requirement.provider_declaration_id
+                && session.provider_configuration_destination == requirement.provider_configuration_destination
+                && session.connector_protocol == requirement.connector_protocol
+                && session.runtime_manifest_hash == runtime.manifest_hash,
+            _ => false,
+        }
+    }).collect::<Vec<_>>();
+    // Refuse ambiguous configuration before resolving testimony. A failing
+    // qualification cannot cause selection of another apparently convenient
+    // binding; there is no fallback after an authority failure.
+    let binding = match eligible.as_slice() {
+        [binding] => *binding,
+        [] => bail!("no signed placement binding selects this activated runtime"),
+        _ => bail!("multiple signed placement bindings select this activated runtime"),
+    };
+    let contract = binding.backend_contract();
+    let qualified = require_current_runtime_content_qualification(state, &contract)?
+        .context("signed activated-runtime binding has no authenticated content proof")?;
+    let selected = contract
+        .runtime_content_qualification
+        .as_ref()
+        .context("signed activated-runtime binding has no content selection")?;
+    let retained = ryeos_state::objects::RetainedExternalRuntimeContentQualification {
+        binding_hash: binding.digest().to_owned(),
+        runtime_manifest_hash: runtime.manifest_hash.clone(),
+        activation_ref: selected.activation_ref.clone(),
+        coordinate_id: qualified.coordinate_id,
+        attestation_hash: qualified.attestation_hash,
+        evidence: qualified.evidence,
+    };
+    let ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { content } =
+        &retained.evidence.purpose.subject else { bail!("runtime content proof lost its activated source"); };
+    content
+        .verify_verifier_realizations(realizations, &requirement.runtime_product_declaration_id)?;
+    let program = requirement.resolve_for_content(&retained, qualification_use)?;
+    binding.check_program(&program)?;
+    Ok((program, retained))
+}
+
 fn preflight_external_candidate_dependencies(
     bindings: &[InstalledExternalExecutionBinding],
     connectors: &ExternalCandidateConnectorRegistry,
@@ -6506,7 +6568,7 @@ mod tests {
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         let requirement =
             ryeos_state::external_execution::admission::ExternalCandidateRequirement {
-                schema: 6,
+                schema: 7,
                 protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
                 required_lifecycle_capabilities: BTreeSet::new(),
                 connector_protocol:
@@ -6515,6 +6577,7 @@ mod tests {
                 provider_declaration_id: "codex-hosted".into(),
                 provider_configuration_destination: "environments.toml".into(),
                 runtime_product_declaration_id: "runtime".into(),
+                runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
                 runtime_recipe,
             };
         let qualification_use =

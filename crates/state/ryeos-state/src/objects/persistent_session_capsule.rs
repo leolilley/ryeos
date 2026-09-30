@@ -35,7 +35,7 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // executable product selection is not a substitute for placement qualification.
 // v18 also binds the published product owner's principal, so retained proof
 // authentication never guesses the owner from a later node configuration.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 19;
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 20;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES: usize = 4_096;

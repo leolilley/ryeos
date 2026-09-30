@@ -536,6 +536,7 @@ pub struct ExternalCandidateRequirement {
     /// with the installed signed declaration before any contact.
     pub provider_configuration_destination: String,
     pub runtime_product_declaration_id: String,
+    pub runtime_authority: ExternalCandidateRuntimeAuthority,
     pub runtime_recipe: ExternalCandidateRuntimeRecipe,
 }
 
@@ -548,10 +549,19 @@ pub enum ExternalCandidateExecutionRoute {
     ConnectorOnly,
 }
 
+/// Signed choice of authority lane. Missing/unqualified product authority
+/// must never implicitly switch to acquired content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCandidateRuntimeAuthority {
+    CapturedProduct,
+    ActivatedContent,
+}
+
 impl ExternalCandidateRequirement {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 6
+            self.schema == 7
                 && self.protocol == PROTOCOL
                 && self.connector_protocol == CONNECTOR_PROTOCOL
                 && self.execution_route == ExternalCandidateExecutionRoute::ConnectorOnly,
@@ -579,6 +589,10 @@ impl ExternalCandidateRequirement {
         qualification_use: &ExternalCandidateQualificationUse,
     ) -> Result<AdmittedExternalCandidateProgram> {
         self.validate()?;
+        ensure!(
+            self.runtime_authority == ExternalCandidateRuntimeAuthority::CapturedProduct,
+            "activated runtime requirement cannot resolve from product selections"
+        );
         qualification_use.validate()?;
         ensure!(
             qualification_use.requirement_digest == self.qualification_requirement_digest()?,
@@ -643,6 +657,10 @@ impl ExternalCandidateRequirement {
         qualification_use: &ExternalCandidateQualificationUse,
     ) -> Result<AdmittedExternalCandidateProgram> {
         self.validate()?;
+        ensure!(
+            self.runtime_authority == ExternalCandidateRuntimeAuthority::ActivatedContent,
+            "product runtime requirement cannot resolve from acquired content"
+        );
         content.validate()?;
         qualification_use.validate()?;
         ensure!(
@@ -799,6 +817,19 @@ impl AdmittedExternalCandidateProgram {
 
     pub fn validate(&self) -> Result<()> {
         self.requirement.validate()?;
+        ensure!(
+            matches!(
+                (&self.runtime_source, self.requirement.runtime_authority),
+                (
+                    ExternalCandidateRuntimeSource::CapturedProduct { .. },
+                    ExternalCandidateRuntimeAuthority::CapturedProduct
+                ) | (
+                    ExternalCandidateRuntimeSource::ActivatedContent { .. },
+                    ExternalCandidateRuntimeAuthority::ActivatedContent
+                )
+            ),
+            "candidate runtime source differs from signed authority lane"
+        );
         self.qualification_use.validate()?;
         ensure!(
             self.qualification_use.requirement_digest
@@ -1366,7 +1397,7 @@ pub mod test_support {
 
     pub fn fixture_requirement() -> ExternalCandidateRequirement {
         ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             protocol: PROTOCOL.into(),
             connector_protocol: CONNECTOR_PROTOCOL.into(),
             execution_route: ExternalCandidateExecutionRoute::ConnectorOnly,
@@ -1374,6 +1405,7 @@ pub mod test_support {
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "auxiliary".into(),
+            runtime_authority: crate::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe: ExternalCandidateRuntimeRecipe {
                 schema: 2,
                 runtime_mount_destination: "/runtime".into(),
@@ -1573,7 +1605,7 @@ pub mod test_support {
         runtime_manifest_hash: &str,
     ) -> anyhow::Result<super::AdmittedExternalCandidateProgram> {
         let requirement = ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             protocol: super::PROTOCOL.into(),
             connector_protocol: super::CONNECTOR_PROTOCOL.into(),
             execution_route: super::ExternalCandidateExecutionRoute::ConnectorOnly,
@@ -1581,6 +1613,7 @@ pub mod test_support {
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "auxiliary".into(),
+            runtime_authority: crate::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe,
         };
         let capsule = qualified_external_candidate_capsule(requirement, runtime_manifest_hash)?;
@@ -1952,7 +1985,7 @@ mod tests {
 
     fn requirement() -> ExternalCandidateRequirement {
         ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             protocol: PROTOCOL.into(),
             connector_protocol: CONNECTOR_PROTOCOL.into(),
             execution_route: ExternalCandidateExecutionRoute::ConnectorOnly,
@@ -1960,6 +1993,7 @@ mod tests {
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "auxiliary".into(),
+            runtime_authority: crate::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe: runtime_recipe(),
         }
     }
@@ -1988,6 +2022,32 @@ mod tests {
         proof.result.claims = claims;
         proof.verifier.result_digest = proof.result.digest().unwrap();
         ResolvedExternalProductSelections::new(selections).unwrap()
+    }
+
+    #[test]
+    fn runtime_authority_lane_is_signed_explicit_and_has_no_fallback() {
+        let requirement = requirement();
+        let mut missing = serde_json::to_value(&requirement).unwrap();
+        missing.as_object_mut().unwrap().remove("runtime_authority");
+        assert!(serde_json::from_value::<ExternalCandidateRequirement>(missing).is_err());
+        let mut activated = requirement.clone();
+        activated.runtime_authority = ExternalCandidateRuntimeAuthority::ActivatedContent;
+        let use_context = test_support::fixture_qualification_use(&activated).unwrap();
+        let error = activated
+            .resolve_for_use(Some(&selections()), &use_context)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resolve from product selections")
+        );
+        let mut predecessor = requirement.clone();
+        predecessor.schema = 6;
+        assert!(predecessor.validate().is_err());
+        assert_ne!(
+            activated.qualification_requirement_digest().unwrap(),
+            requirement.qualification_requirement_digest().unwrap()
+        );
     }
 
     #[test]

@@ -113,7 +113,7 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
     };
     let guest_input_identity = guest_inputs.identity_digest().unwrap();
     let requirement = ExternalCandidateRequirement {
-        schema: 6,
+        schema: 7,
         required_lifecycle_capabilities: Default::default(),
         protocol: PROTOCOL.into(),
         connector_protocol:
@@ -122,6 +122,7 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
         provider_declaration_id: "codex-hosted".into(),
         provider_configuration_destination: "environments.toml".into(),
         runtime_product_declaration_id: "runtime".into(),
+        runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
         runtime_recipe: recipe,
     };
     let qualification_use =

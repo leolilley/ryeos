@@ -4636,7 +4636,7 @@ mod tests {
         let mut profile = gating_approval_profile();
         profile.external_candidate = Some(
             ryeos_state::external_execution::admission::ExternalCandidateRequirement {
-                schema: 6,
+                schema: 7,
                 required_lifecycle_capabilities: Default::default(),
                 protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
                 connector_protocol:
@@ -4645,6 +4645,7 @@ mod tests {
                 provider_declaration_id: "codex-hosted".into(),
                 provider_configuration_destination: "environments.toml".into(),
                 runtime_product_declaration_id: "candidate_runtime".into(),
+                runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
                 runtime_recipe: ryeos_state::external_execution::admission::ExternalCandidateRuntimeRecipe {
                     schema: 2,
                     runtime_mount_destination: "/runtime".into(),
