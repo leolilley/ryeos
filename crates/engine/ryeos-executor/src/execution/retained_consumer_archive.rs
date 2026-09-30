@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, ensure};
 use ryeos_app::operator_external_content::product_qualification::PreparedRetainedConsumerVerifier;
 use ryeos_external_execution::restoration_verifier_delivery::{
     PreparedConsumerArchive, prepare_consumer_delivery_records,
@@ -77,20 +77,17 @@ pub(crate) fn prepare_retained_consumer_archive(
     };
     record.validate()?;
 
-    // Match the accepted-use constructor: an environment may inherit an
-    // already selected product with the same identity, but a conflicting
-    // realization must fail before any materialization or archive copy.
-    let mut entries: Vec<_> = content.worker_literals.iter().cloned().collect();
-    for inherited in
-        std::iter::once(&content.runtime_realization).chain(content.environment_realizations.iter())
-    {
-        match entries.iter().find(|entry| entry.id == inherited.id) {
-            Some(entry) if entry == inherited => {}
-            Some(_) => bail!("retained consumer realization conflicts with accepted use"),
-            None => entries.push(inherited.clone()),
-        }
-    }
-    let realizations = ExternalContentRealizationSet::new(entries)?;
+    // Accepted consumer content has already excluded overlapping realization
+    // identities. The set constructor gives the guest the same sorted order.
+    let realizations = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .chain(content.environment_realizations.iter())
+            .chain(std::iter::once(&content.runtime_realization))
+            .cloned()
+            .collect(),
+    )?;
     let destinations =
         ExternalCandidateGuestEnvironment::expected_destinations(&requirement, &realizations)?;
     let products = prepare_retained_product_inputs(
