@@ -8,6 +8,7 @@
 //! its receipt does not establish request-correlated semantic success.
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate;
 use ryeos_state::objects::{
     MAX_QUALIFICATION_WORKER_TRANSCRIPT_BYTES, MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES,
     QUALIFICATION_WORKER_TRANSCRIPT_KIND, QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
@@ -15,10 +16,53 @@ use ryeos_state::objects::{
     QualificationWorkerTranscriptManifest, QualificationWorkerTranscriptStream,
 };
 
+use crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot;
+use crate::process::ExecutionProcessIdentity;
 use crate::runtime_db::external_execution::{
     QualificationWorkerCommandPhase, QualificationWorkerCommandRecord,
     QualificationWorkerObservationBatchRecord,
 };
+use crate::state::AppState;
+
+/// Retain the exact death-settled local conversation while the Q allocation
+/// still has its accepted owner and checked Bundle generation. The manifest
+/// is structural evidence only; callers must separately prove its meaning and
+/// the remote occurrence before making a qualification claim.
+pub fn retain_terminal_qualification_worker_transcript(
+    state: &AppState,
+    placement: &str,
+    coordinate: &ConsumerRuntimeVerificationCoordinate,
+    binding_digest: &str,
+    root: &PreparedExternalQualificationRoot,
+    expected_process: &ExecutionProcessIdentity,
+) -> Result<String> {
+    crate::external_qualification_local::with_qualification_local_owner(
+        state,
+        placement,
+        coordinate,
+        binding_digest,
+        root,
+        |_| {
+            state.engine.with_checked_bundle_generation(|generation| {
+                root.current_local_worker_resolution(generation)?;
+                crate::external_qualification_local::ensure_qualification_worker_terminal(
+                    state,
+                    placement,
+                    expected_process,
+                )?;
+                crate::process::assert_reaped_process_group_absent(expected_process)?;
+                let retained = state
+                    .state_store
+                    .retain_qualification_worker_transcript(placement)?;
+                ensure!(
+                    retained.placement_thread_id == placement,
+                    "Q transcript changed its exact retained placement"
+                );
+                Ok(retained.manifest_hash)
+            })
+        },
+    )
+}
 
 pub(crate) struct PreparedQualificationWorkerTranscript {
     pub manifest: QualificationWorkerTranscriptManifest,

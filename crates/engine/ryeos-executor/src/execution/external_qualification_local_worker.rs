@@ -267,6 +267,28 @@ impl ExternalQualificationLocalWorker {
         }
         result
     }
+
+    /// Freeze the exact one-send transcript after the pool has reaped this
+    /// original Worker. The returned CAS root is structural evidence only;
+    /// it cannot stand in for native, provider or semantic settlement.
+    pub(crate) fn retain_terminal_transcript(
+        &self,
+        state: &ryeos_app::state::AppState,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<String> {
+        ensure!(
+            self.retired,
+            "Q Worker transcript requires this owner's terminal retirement"
+        );
+        ryeos_app::external_qualification_transcript::retain_terminal_qualification_worker_transcript(
+            state,
+            self.ready.placement(),
+            coordinate,
+            &self.ready.binding().digest()?,
+            self.ready.root(),
+            &self.process_identity,
+        )
+    }
 }
 
 /// Select the signed Request before Q held start so the pushed-batch sink can
