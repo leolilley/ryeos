@@ -1,8 +1,8 @@
 //! Bounded readiness custody for one qualification-only external guest.
 //!
-//! This driver stops at the authenticated Ready/Release boundary. A local
-//! provider spawn owner must exist before the one-shot connector is prepared;
-//! readiness alone never starts a provider or publishes qualification.
+//! Ready/Release is the handoff to the one-shot local Worker owner. The full
+//! driver below retains that owner through normal settlement; readiness or
+//! transport completion alone never publishes qualification.
 
 use anyhow::{Context as _, Result, bail, ensure};
 use ryeos_app::external_placement::{
@@ -34,6 +34,12 @@ impl ExternalQualificationReady {
     pub(crate) fn root(&self) -> &PreparedExternalQualificationRoot {
         &self.root
     }
+
+    /// Release the process-local cancellation obligation only after the app
+    /// has rejoined exact normal provider terminal evidence in its journal.
+    pub(crate) fn disarm_after_normal_terminal(self) -> Result<()> {
+        self._cleanup.disarm_after_qualification_normal_terminal()
+    }
 }
 
 /// Reserve the prepared Q guest and immediately arm its cleanup lifeline before
@@ -58,6 +64,33 @@ pub(crate) fn reserve_and_await_external_qualification_ready(
         prepared,
     )?;
     await_external_qualification_ready(start)
+}
+
+/// Run one prepared Q occurrence through its only signed Worker command and
+/// exact normal settlement. This is a transport lifecycle result, never a
+/// verifier verdict or portable product qualification claim. The caller must
+/// first provide independently authenticated Q guest inputs; admission still
+/// refuses any signed backend lacking the required offline capabilities.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_prepared_external_qualification_to_normal_terminal(
+    state: &ryeos_app::state::AppState,
+    context: &ryeos_app::handler_context::HandlerContext,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    prepared: PreparedExternalQualificationGuest,
+) -> Result<()> {
+    let ready = reserve_and_await_external_qualification_ready(
+        state,
+        context,
+        coordinate,
+        qualification_operation_id,
+        limits,
+        prepared,
+    )?;
+    super::external_qualification_local_worker::run_external_qualification_to_normal_terminal(
+        state, coordinate, ready,
+    )
 }
 
 /// Consume the one-use start owner and its original guest descriptors until

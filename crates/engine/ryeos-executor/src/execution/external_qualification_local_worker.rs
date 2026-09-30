@@ -27,6 +27,19 @@ use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRun
 
 use super::external_qualification_start::ExternalQualificationReady;
 
+fn remaining_qualification_channel_deadline(
+    binding: &ryeos_state::external_execution::ExecutionChannelBinding,
+) -> Result<lillux::time::MonotonicDeadline> {
+    let remaining_ms = binding
+        .execution_deadline_ms
+        .checked_sub(lillux::time::timestamp_millis())
+        .filter(|remaining| *remaining > 0)
+        .context("Q completion passed its signed channel deadline")?;
+    Ok(lillux::time::MonotonicDeadline::after(
+        lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+    ))
+}
+
 struct ReleasedQualificationWorker {
     running: ryeos_engine::dispatch::RunningExecution,
     process_identity: ryeos_app::process::ExecutionProcessIdentity,
@@ -315,6 +328,96 @@ impl ExternalQualificationLocalWorker {
             ))),
         }
     }
+}
+
+/// Drive one already authenticated Q Ready occurrence through its single
+/// signed Worker turn and independent transport, native, local and provider
+/// settlement. Every transition rechecks its own durable owner. This returns
+/// only after exact provider terminal proof; it makes no verifier verdict or
+/// product qualification claim. A failure drops the original cleanup lifeline,
+/// which retains cancellation unless a normal provider intent already owns
+/// reconciliation after a lost response.
+pub(crate) fn run_external_qualification_to_normal_terminal(
+    state: &ryeos_app::state::AppState,
+    coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ready: ExternalQualificationReady,
+) -> Result<()> {
+    use ryeos_app::external_placement::ExternalCandidateCleanupProgress;
+
+    let (mut worker, selected) =
+        start_external_qualification_local_worker_for_signed_request(state, coordinate, ready)?;
+    let placement = worker.ready().placement().to_owned();
+    let binding_digest = worker.ready().binding().digest()?;
+    worker.run_signed_turn_and_retain_transcript(state, coordinate, &selected)?;
+
+    // The signed frame is durably queued for the existing channel transport;
+    // its return is not evidence that the guest processed the command.
+    ryeos_app::external_placement::request_external_qualification_native_completion(
+        state, &placement,
+    )?;
+    let native_deadline = remaining_qualification_channel_deadline(worker.ready().binding())?;
+    let native = loop {
+        if let Some(native) =
+            ryeos_app::external_placement::apply_external_qualification_native_settlement(
+                state, &placement,
+            )?
+        {
+            break native;
+        }
+        ensure!(
+            !native_deadline.has_elapsed(),
+            "Q native whole-scope settlement was not applied before channel expiry"
+        );
+        lillux::time::sleep(
+            native_deadline
+                .remaining()
+                .min(lillux::time::Duration::from_millis(50)),
+        );
+    };
+    ensure!(
+        native.placement_thread_id == placement && native.binding_digest == binding_digest,
+        "Q native settlement changed its exact channel"
+    );
+
+    // Physical view closure is local cleanup, independent of the expired
+    // guest protocol deadline. It retains original descriptors and has its
+    // own bounded close attempt.
+    let local = ryeos_app::external_qualification_local::cleanup_qualification_local_worker(
+        state,
+        &placement,
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+    )?;
+    ensure!(
+        local.phase
+            == ryeos_app::runtime_db::external_execution::QualificationLocalStartPhase::Closed,
+        "Q original local workspace and scope remain unclosed"
+    );
+
+    // The first provider call commits its intent before contact. A Pending
+    // response remains recoverable under that exact intent after this owner
+    // drops; the process-local polling window is bounded independently of
+    // the guest protocol deadline because this is historical cleanup.
+    let provider_deadline =
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30));
+    loop {
+        match ryeos_app::external_placement::advance_external_qualification_normal_settlement(
+            state, &placement,
+        )? {
+            ExternalCandidateCleanupProgress::Proved => break,
+            ExternalCandidateCleanupProgress::Pending => {
+                ensure!(
+                    !provider_deadline.has_elapsed(),
+                    "Q provider terminal remains pending under its durable normal intent"
+                );
+                lillux::time::sleep(
+                    provider_deadline
+                        .remaining()
+                        .min(lillux::time::Duration::from_millis(50)),
+                );
+            }
+        }
+    }
+    worker.ready.disarm_after_normal_terminal()
 }
 
 /// Select the signed Request before Q held start so the pushed-batch sink can
