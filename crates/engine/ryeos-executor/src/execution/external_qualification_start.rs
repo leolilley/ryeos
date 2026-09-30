@@ -13,6 +13,71 @@ use ryeos_state::external_execution::ExecutionChannelBinding;
 
 use super::external_qualification_inputs::PreparedExternalQualificationGuest;
 
+/// One transport-only attempt from retained operation coordinates. The
+/// accepted root, signed Worker program, backend binding, scenario and limits
+/// are selected by the existing authenticated preparers and current policy;
+/// callers cannot supply replacement guest descriptors or a verifier verdict.
+/// Scratch cleanup is attempted after every prepared attempt. If allocation
+/// or native/provider settlement is uncertain, the original descriptor stays
+/// in the daemon registry and this operation returns a cleanup fence.
+pub fn run_consumer_runtime_verification_transport(
+    state: &ryeos_app::state::AppState,
+    context: &ryeos_app::handler_context::HandlerContext,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+) -> Result<()> {
+    let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+        coordinate,
+        qualification_operation_id,
+    )?;
+    let limits = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let scratch = ryeos_app::external_qualification_guest_scratch::prepare_original_qualification_guest_scratch(
+        state,
+        context,
+        coordinate,
+        qualification_operation_id,
+        limits,
+    )?;
+    let transport = (|| {
+        ensure!(
+            scratch.placement() == placement,
+            "Q prepared scratch changed its stable placement"
+        );
+        let prepared = super::external_qualification_inputs::prepare_external_qualification_guest(
+            state,
+            context,
+            coordinate,
+            qualification_operation_id,
+            limits,
+            scratch.pinned_root()?,
+        )?;
+        run_prepared_external_qualification_to_normal_terminal(
+            state,
+            context,
+            coordinate,
+            qualification_operation_id,
+            limits,
+            prepared,
+        )
+    })();
+    let cleanup = ryeos_app::external_qualification_guest_scratch::cleanup_original_qualification_guest_scratch_if_present(
+        state,
+        &placement,
+    );
+    match (transport, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(cleanup_error)) => Err(cleanup_error
+            .context("Q transport settled but original guest scratch remains cleanup-unproved")),
+        (Err(error), Err(cleanup_error)) => Err(error.context(format!(
+            "Q original guest scratch remains cleanup-unproved: {cleanup_error:#}"
+        ))),
+    }
+}
+
 /// The exact released channel and its remote cleanup obligation. Dropping this
 /// value requests cleanup; a future provider owner must retain it throughout
 /// connector use and independently prove eventual settlement.

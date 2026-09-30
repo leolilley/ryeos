@@ -90,6 +90,24 @@ pub(crate) fn cleanup_original_qualification_guest_scratch(
     )
 }
 
+/// Best-effort entry for the transport owner after preparation or execution.
+/// No intent means the signed preflight refused before creating scratch. An
+/// existing row must reach Closed through its original retained descriptor;
+/// uncertainty remains an error and preserves the registry custody.
+pub fn cleanup_original_qualification_guest_scratch_if_present(
+    state: &AppState,
+    placement: &str,
+) -> Result<()> {
+    if state
+        .state_store
+        .qualification_guest_scratch(placement)?
+        .is_some()
+    {
+        cleanup_original_qualification_guest_scratch(state, placement)?;
+    }
+    Ok(())
+}
+
 impl PreparedQualificationGuestScratch {
     pub fn placement(&self) -> &str {
         &self.placement_thread_id
