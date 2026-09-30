@@ -1152,6 +1152,7 @@ pub(crate) fn evidence() -> ProductQualificationEvidence {
             policy,
         },
         consumer_content: None,
+        qualification_worker_transcript_manifest_hash: None,
         verifier_root_selections: None,
         execution_proof: execution_proof(&artifact_identity()),
         result,
@@ -1391,6 +1392,7 @@ fn finite_policy_and_compact_evidence_round_trip() {
     let wire = serde_json::to_value(&evidence).unwrap();
     assert!(wire["verifier_root_selections"].is_null());
     assert!(wire["consumer_content"].is_null());
+    assert!(wire["qualification_worker_transcript_manifest_hash"].is_null());
     assert_eq!(
         ProductQualificationEvidence::from_value(&wire).unwrap(),
         evidence
@@ -1407,6 +1409,15 @@ fn finite_policy_and_compact_evidence_round_trip() {
         .unwrap()
         .remove("consumer_content");
     assert!(ProductQualificationEvidence::from_value(&missing_consumer_content).is_err());
+    let mut missing_transcript = wire.clone();
+    missing_transcript
+        .as_object_mut()
+        .unwrap()
+        .remove("qualification_worker_transcript_manifest_hash");
+    assert!(ProductQualificationEvidence::from_value(&missing_transcript).is_err());
+    let mut unowned_transcript = evidence.clone();
+    unowned_transcript.qualification_worker_transcript_manifest_hash = Some("a".repeat(64));
+    assert!(unowned_transcript.validate().is_err());
     assert_eq!(
         ProductQualificationPolicy::from_value(&serde_json::to_value(policy()).unwrap()).unwrap(),
         policy()
@@ -1676,7 +1687,7 @@ fn product_evidence_refuses_predecessor_use_retention_schema() {
     let current = evidence();
     current.validate().unwrap();
     let mut predecessor = serde_json::to_value(current).unwrap();
-    predecessor["schema"] = json!("ryeos.product_qualification_evidence.v10");
+    predecessor["schema"] = json!("ryeos.product_qualification_evidence.v12");
     assert!(ProductQualificationEvidence::from_value(&predecessor).is_err());
 }
 

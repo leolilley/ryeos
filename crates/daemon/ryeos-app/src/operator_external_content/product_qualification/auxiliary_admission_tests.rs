@@ -548,6 +548,7 @@ fn seed_auxiliary_qualification_in_context(
         },
         policy_source,
         consumer_content: None,
+        qualification_worker_transcript_manifest_hash: None,
         verifier_root_selections: root_selections,
         execution_proof: ProductQualificationExecutionProof {
             projection_contract_ref: protocol_ref.clone(),

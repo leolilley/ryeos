@@ -661,6 +661,14 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
         if let Some(content) = &evidence.consumer_content {
             push_qualification_consumer_content_edges(content, &mut links)?;
         }
+        if let Some(hash) = &evidence.qualification_worker_transcript_manifest_hash {
+            super::push_typed_hash(
+                hash,
+                ExpectedObject::Kind(crate::objects::QUALIFICATION_WORKER_TRANSCRIPT_KIND),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
         for verifier in evidence.execution_verifiers() {
             super::push_typed_hash(
                 &verifier.execution_realization_hash,

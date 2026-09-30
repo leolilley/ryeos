@@ -30,7 +30,11 @@ pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualificati
 pub const PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA: &str =
     "ryeos.qualification_worker_request.v1";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
-pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v12";
+// Current-only cut: an immutable v12 qualification head at the same
+// coordinate cannot be replaced by v13. Reissuance requires a fresh
+// coordinate or separately recovered node state; this decoder does not adopt
+// predecessor testimony.
+pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v13";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
 pub const PRODUCT_QUALIFICATION_CLAIM: &str = "retained_product_qualified";
 pub const MAX_PRODUCT_QUALIFICATION_CLAIMS: usize = 32;
@@ -1071,6 +1075,11 @@ pub struct ProductQualificationEvidence {
     /// never reconstructed from a later Bundle generation as historical proof.
     #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
     pub consumer_content: Option<ProductQualificationConsumerContentIdentity>,
+    /// Required nullable: one portable Q Worker transcript is owned by the
+    /// signed qualification only after the app proves its exact local run.
+    /// A hash alone grants no claim.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub qualification_worker_transcript_manifest_hash: Option<String>,
     pub verifier: ProductQualificationVerifier,
     pub execution_proof: ProductQualificationExecutionProof,
     /// Exact root product selections retained from the admitted verifier.
@@ -1117,6 +1126,18 @@ impl ProductQualificationEvidence {
             }
             (None, None) => {}
             _ => bail!("qualification evidence consumer content differs from signed policy"),
+        }
+        match (
+            &self.consumer_content,
+            &self.qualification_worker_transcript_manifest_hash,
+        ) {
+            (Some(_), Some(hash)) => {
+                validate_hash("qualification Worker transcript manifest", hash)?;
+            }
+            (None, None) | (Some(_), None) => {}
+            (None, Some(_)) => {
+                bail!("qualification Worker transcript has no admitted consumer content")
+            }
         }
         validate_qualification_execution(
             &self.policy_source,
@@ -1220,6 +1241,7 @@ impl ProductQualificationEvidence {
             product_coordinate,
             policy_source,
             consumer_content,
+            qualification_worker_transcript_manifest_hash,
             verifier,
             execution_proof,
             verifier_root_selections,
@@ -1232,6 +1254,7 @@ impl ProductQualificationEvidence {
             product_coordinate: &'a ProductCaptureCoordinate,
             policy_source: &'a ProductQualificationPolicySource,
             consumer_content: &'a Option<ProductQualificationConsumerContentIdentity>,
+            qualification_worker_transcript_manifest_hash: &'a Option<String>,
             verifier: &'a ProductQualificationVerifier,
             execution_proof: &'a ProductQualificationExecutionProof,
             verifier_root_selections: Option<Value>,
@@ -1247,6 +1270,7 @@ impl ProductQualificationEvidence {
             product_coordinate,
             policy_source,
             consumer_content,
+            qualification_worker_transcript_manifest_hash,
             verifier,
             execution_proof,
             verifier_root_selections,
