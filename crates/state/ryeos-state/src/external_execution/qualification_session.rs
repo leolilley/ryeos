@@ -120,7 +120,40 @@ impl AdmittedExternalQualificationSessionProgram {
             runtime_recipe_digest: requirement.runtime_recipe.digest()?,
         };
         program.validate()?;
+        program.validate_against_purpose(purpose)?;
         Ok(program)
+    }
+
+    /// Rejoin a retained program to the exact CAS-authenticated accepted
+    /// purpose before reservation or recovery. This checks data agreement;
+    /// the caller still owns root authentication, product member custody and
+    /// current provider-contact authority.
+    pub fn validate_against_purpose(&self, purpose: &QualificationLaunchPurpose) -> Result<()> {
+        self.validate()?;
+        purpose.validate()?;
+        purpose.subject.captured_product()?;
+        let content = purpose
+            .consumer_content
+            .as_ref()
+            .context("qualification-only accepted purpose has no consumer content")?;
+        let admitted_use = content
+            .qualification_use
+            .as_ref()
+            .context("qualification-only accepted purpose has no admitted use")?;
+        admitted_use.require_qualified_use(&purpose.policy_source.policy.verifier_parameters)?;
+        ensure!(
+            self.qualification_purpose_digest
+                == canonical_value_digest(&serde_json::to_value(purpose)?)?
+                && self.consumer_content_digest
+                    == canonical_value_digest(&serde_json::to_value(content)?)?
+                && self.qualification_use == *admitted_use
+                && self.qualification_use.profile_hash == content.worker_profile_hash
+                && self.runtime_manifest_hash == purpose.subject_manifest_hash
+                && self.runtime_manifest_hash == content.runtime_realization.manifest_hash
+                && self.runtime_member == content.runtime_member,
+            "qualification-only program differs from its accepted purpose"
+        );
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<()> {
