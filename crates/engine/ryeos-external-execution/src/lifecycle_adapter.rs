@@ -44,6 +44,14 @@ pub struct LifecycleAdapterOutput {
 }
 
 impl LifecycleAdapterInvocation {
+    fn maximum_response_bytes(self) -> usize {
+        if self == Self::QualifySnapshotVerify {
+            ryeos_external_execution_contract::restored_runtime_measurement::MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES
+        } else {
+            MAX_LIFECYCLE_RESPONSE_BYTES
+        }
+    }
+
     fn argument(self) -> &'static str {
         match self {
             Self::Inspect => "inspect",
@@ -110,7 +118,7 @@ pub fn run_lifecycle_adapter(
         timeout: deadline.remaining().as_secs_f64(),
         limits: Some(lillux::SubprocessLimits {
             max_open_files: Some(MAX_LIFECYCLE_ADAPTER_OPEN_FILES),
-            max_stdout_bytes: Some(MAX_LIFECYCLE_RESPONSE_BYTES as u64),
+            max_stdout_bytes: Some(invocation.maximum_response_bytes() as u64),
             max_stderr_bytes: Some(MAX_LIFECYCLE_ADAPTER_STDERR_BYTES),
             deny_process_creation: invocation.requires_no_process_creation(),
             ..lillux::SubprocessLimits::default()
@@ -169,7 +177,7 @@ fn lifecycle_adapter_output(
         && result.launcher_refusal.is_none()
         && result.aborted_before_attachment.is_none()
         && !result.stdout.is_empty()
-        && result.stdout.len() <= MAX_LIFECYCLE_RESPONSE_BYTES;
+        && result.stdout.len() <= invocation.maximum_response_bytes();
     ensure!(
         complete
             && ((result.success && !result.timed_out)
@@ -201,6 +209,26 @@ fn lifecycle_adapter_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_verifier_observation_has_the_larger_evidence_envelope() {
+        assert!(
+            LifecycleAdapterInvocation::QualifySnapshotVerify.maximum_response_bytes()
+                > MAX_LIFECYCLE_RESPONSE_BYTES
+        );
+        for invocation in [
+            LifecycleAdapterInvocation::Inspect,
+            LifecycleAdapterInvocation::VerifyRuntimeProbe,
+            LifecycleAdapterInvocation::Operate,
+            LifecycleAdapterInvocation::QualifySnapshotCreate,
+            LifecycleAdapterInvocation::QualifySnapshotTerminate,
+        ] {
+            assert_eq!(
+                invocation.maximum_response_bytes(),
+                MAX_LIFECYCLE_RESPONSE_BYTES
+            );
+        }
+    }
 
     #[test]
     fn no_process_creation_is_scoped_to_snapshot_mutations() {

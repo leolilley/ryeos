@@ -301,7 +301,10 @@ pub(crate) fn run_restored_verifier(adapter: &lillux::InheritedDescriptorAuthori
         operation_id: request.intent.operation_id.clone(),
     });
     result.validate_for(&request)?;
-    crate::write_response(&result)
+    crate::write_response_bounded(
+        &result,
+        ryeos_external_execution_contract::restored_runtime_measurement::MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES,
+    )
 }
 
 /// The mutation entry is called only after a durable first-contact claim.
@@ -1008,6 +1011,7 @@ mod tests {
             protocol: RESTORED_VERIFIER_ADAPTER_PROTOCOL.into(),
             provider_spec_digest: qualification_intent.provider_spec_digest.clone(),
             intent: attempt,
+            consumer_selection: None,
             source_intent,
             locator,
             readiness,
@@ -1054,6 +1058,98 @@ mod tests {
             }),
         };
         response.validate_for(&request).unwrap();
+        let mut omitted = serde_json::to_value(&request).unwrap();
+        omitted
+            .as_object_mut()
+            .unwrap()
+            .remove("consumer_selection");
+        assert!(serde_json::from_value::<RestoredVerifierAdapterRequest>(omitted).is_err());
+        let mut predecessor = request.clone();
+        predecessor.protocol = "ryeos.restored-verifier-adapter.v1".into();
+        assert!(predecessor.validate().is_err());
+        use ryeos_external_execution_contract::restored_runtime_measurement::{
+            ConsumerRuntimeVerificationCoordinate, ConsumerRuntimeVerifierSelection,
+            ConsumerVerifierAdapterObservation, RemoteVerificationPurpose,
+        };
+        let coordinate = ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-consumer-fixture".into(),
+            accepted_capsule_hash: "a".repeat(64),
+            qualification_purpose_digest: "b".repeat(64),
+            scenario_id: "consumer-fixture".into(),
+            scenario_source_digest: "c".repeat(64),
+            subject_digest: "d".repeat(64),
+            use_digest: "e".repeat(64),
+            prerequisite_measurement_attempt_id: request.intent.operation_id.clone(),
+            prerequisite_measurement_observation_digest: "f".repeat(64),
+        };
+        let mut consumer = request.clone();
+        consumer.consumer_selection = Some(ConsumerRuntimeVerifierSelection {
+            scenario_source_digest: coordinate.scenario_source_digest.clone(),
+            verifier_artifact_hash: "9".repeat(64),
+        });
+        consumer.intent.verifier_artifact_hash = "9".repeat(64);
+        consumer.intent.purpose = RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate,
+            nonce_hex: "8".repeat(64),
+        };
+        consumer.intent.operation_id = consumer.intent.derived_operation_id().unwrap();
+        consumer.validate().unwrap();
+        assert!(response.validate_for(&consumer).is_err());
+        let evidence = serde_json::json!({"fixture_only": true});
+        let bytes = ryeos_external_execution_contract::canonical_json(&evidence).unwrap();
+        let consumer_response = RestoredVerifierAdapterResponse::ConsumerObserved {
+            observation: Box::new(ConsumerVerifierAdapterObservation {
+                schema: 1,
+                operation_id: consumer.intent.operation_id.clone(),
+                occurrence_id: consumer.occurrence.occurrence_id.clone(),
+                verifier_artifact_hash: consumer.intent.verifier_artifact_hash.clone(),
+                challenge_digest: consumer.intent.consumer_challenge_digest().unwrap(),
+                upload_token_execution_id: "exe-upload".into(),
+                run_token_execution_id: "exe-run".into(),
+                upload_response_sha256: "5".repeat(64),
+                run_stream_sha256: "6".repeat(64),
+                evidence_sha256: lillux::sha256_hex(&bytes),
+                evidence_bytes: bytes.len() as u64,
+                contact_deadline_exceeded: false,
+            }),
+            evidence,
+        };
+        consumer_response.validate_for(&consumer).unwrap();
+        assert!(consumer_response.validate_for(&request).is_err());
+        let mut changed_evidence = consumer_response.clone();
+        if let RestoredVerifierAdapterResponse::ConsumerObserved { evidence, .. } =
+            &mut changed_evidence
+        {
+            *evidence = serde_json::json!({"fixture_only": false});
+        }
+        assert!(changed_evidence.validate_for(&consumer).is_err());
+        let mut larger = consumer_response.clone();
+        if let RestoredVerifierAdapterResponse::ConsumerObserved {
+            observation,
+            evidence,
+        } = &mut larger
+        {
+            *evidence = serde_json::json!({"fixture_only": "x".repeat(128 * 1024)});
+            let bytes = ryeos_external_execution_contract::canonical_json(evidence).unwrap();
+            observation.evidence_sha256 = lillux::sha256_hex(&bytes);
+            observation.evidence_bytes = bytes.len() as u64;
+        }
+        larger.validate_for(&consumer).unwrap();
+        let mut oversized = consumer_response;
+        if let RestoredVerifierAdapterResponse::ConsumerObserved {
+            observation,
+            evidence,
+        } = &mut oversized
+        {
+            *evidence = serde_json::json!({"fixture_only": "x".repeat(
+                ryeos_external_execution_contract::restored_runtime_measurement::MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES as usize
+            )});
+            let bytes = ryeos_external_execution_contract::canonical_json(evidence).unwrap();
+            observation.evidence_sha256 = lillux::sha256_hex(&bytes);
+            observation.evidence_bytes = bytes.len() as u64;
+        }
+        assert!(oversized.validate_for(&consumer).is_err());
         let mut changed = request.clone();
         changed.occurrence.occurrence_id = "sbx-other".into();
         assert!(response.validate_for(&changed).is_err());

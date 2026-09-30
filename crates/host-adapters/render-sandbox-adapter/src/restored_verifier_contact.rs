@@ -37,6 +37,10 @@ pub(crate) fn first_contact(
     cancellation: &NetworkCancellation,
 ) -> Result<RestoredVerifierAdapterResponse> {
     request.validate()?;
+    // Consumer request decoding is not activation of a guest verifier mode.
+    // Refuse this lane before token minting/upload until its native protocol
+    // and settlement/evidence join are installed.
+    let owner_challenge = request.intent.owner_challenge()?;
     let contact = RenderContact::new(
         network,
         provider_spec,
@@ -76,7 +80,7 @@ pub(crate) fn first_contact(
         "restored verifier upload response exceeds bound"
     );
 
-    let challenge = canonical_json(request.intent.owner_challenge()?)?;
+    let challenge = canonical_json(owner_challenge)?;
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge);
     let command = format!(
         "{RESTORATION_VERIFIER_REMOTE_DIRECTORY}/{RESTORATION_VERIFIER_REMOTE_NAME} --challenge-b64 {encoded}"

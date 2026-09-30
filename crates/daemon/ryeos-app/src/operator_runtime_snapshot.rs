@@ -1042,6 +1042,7 @@ fn verify_qualification_occurrence_under_contact_gate(
         protocol: RESTORED_VERIFIER_ADAPTER_PROTOCOL.into(),
         provider_spec_digest: qualification.provider_spec_digest().into(),
         intent,
+        consumer_selection: None,
         source_intent: source.intent,
         locator,
         readiness,
@@ -1079,6 +1080,12 @@ fn verify_qualification_occurrence_under_contact_gate(
             RestoredVerifierAdapterResponse::Uncertain { .. } => state
                 .state_store
                 .quarantine_restored_verifier_attempt(&request.intent.operation_id),
+            RestoredVerifierAdapterResponse::ConsumerObserved { .. } => {
+                state
+                    .state_store
+                    .quarantine_restored_verifier_attempt(&request.intent.operation_id)?;
+                anyhow::bail!("owner measurement contact returned consumer evidence")
+            }
         },
         Err(error) => {
             state

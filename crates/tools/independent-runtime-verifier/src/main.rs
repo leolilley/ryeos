@@ -1395,9 +1395,9 @@ fn run_scenario_driver(parameters: &Parameters, staged: &staging::StagedNativePr
         "direct_child_exit": {"success": exit.success, "code": exit.code},
         "relay_contacts": relay_contacts,
     });
-    let bytes = serde_json::to_vec(&transcript)?;
+    let bytes = ryeos_external_execution_contract::canonical_json(&transcript)?;
     ensure!(
-        bytes.len() <= 5 * 1024 * 1024,
+        bytes.len() as u64 <= ryeos_external_execution_contract::restored_runtime_measurement::MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
         "driver transcript exceeds bound"
     );
     std::io::Write::write_all(&mut std::io::stdout().lock(), &bytes)?;

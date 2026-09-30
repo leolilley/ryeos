@@ -1608,9 +1608,13 @@ fn read_sealed_env(name: &str, maximum: usize) -> Result<Vec<u8>> {
 }
 
 fn write_response<T: Serialize>(response: &T) -> Result<()> {
+    write_response_bounded(response, MAX_LIFECYCLE_RESPONSE_BYTES)
+}
+
+fn write_response_bounded<T: Serialize>(response: &T, maximum_bytes: usize) -> Result<()> {
     let bytes = canonical_json(response)?;
     ensure!(
-        !bytes.is_empty() && bytes.len() <= MAX_LIFECYCLE_RESPONSE_BYTES,
+        !bytes.is_empty() && bytes.len() <= maximum_bytes,
         "lifecycle response exceeds its byte bound"
     );
     std::io::stdout().write_all(&bytes)?;

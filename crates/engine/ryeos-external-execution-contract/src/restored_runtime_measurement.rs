@@ -22,9 +22,12 @@ pub const CONSUMER_VERIFIER_REMOTE_NAME: &str = "ryeos-external-guest-consumer-v
 pub const MAX_RESTORATION_VERIFIER_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_RESTORED_OWNER_CHALLENGE_BYTES: usize = 4096;
 pub const MAX_RESTORED_OWNER_RESULT_BYTES: usize = 4096;
-pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v1";
+pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v2";
 pub const MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES: usize = 32 * 1024;
-pub const MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES: u64 = 4 * 1024 * 1024;
+// Complete canonical product-verifier evidence, not decoded transcript size.
+pub const MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES: u64 = 5 * 1024 * 1024;
+pub const MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES: usize =
+    MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES as usize + 8 * 1024;
 
 /// Closed observation payload for the existing verifier-attempt journal.
 /// A consumer result cannot serve as prerequisite owner-tree measurement.
@@ -245,6 +248,8 @@ impl ConsumerRuntimeVerificationCoordinate {
 pub struct RestoredVerifierAdapterRequest {
     pub protocol: String,
     pub intent: RestoredVerifierAttemptIntent,
+    #[serde(deserialize_with = "crate::deserialize_required_nullable")]
+    pub consumer_selection: Option<ConsumerRuntimeVerifierSelection>,
     pub source_intent: RuntimeSnapshotIntent,
     pub locator: RuntimeSnapshotLocator,
     pub readiness: RuntimeSnapshotReadinessObservation,
@@ -258,12 +263,27 @@ pub struct RestoredVerifierAdapterRequest {
 
 impl RestoredVerifierAdapterRequest {
     pub fn validate(&self) -> Result<()> {
-        self.intent.validate_for(
-            &self.source_intent,
-            &self.locator,
-            &self.qualification_intent,
-            &self.occurrence,
-        )?;
+        match (&self.intent.purpose, &self.consumer_selection) {
+            (RemoteVerificationPurpose::OwnerMeasurement { .. }, None) => {
+                self.intent.validate_for(
+                    &self.source_intent,
+                    &self.locator,
+                    &self.qualification_intent,
+                    &self.occurrence,
+                )?;
+            }
+            (RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. }, Some(selection)) => {
+                self.intent.validate_consumer_for(
+                    &self.source_intent,
+                    &self.locator,
+                    &self.qualification_intent,
+                    &self.occurrence,
+                    selection,
+                    coordinate,
+                )?;
+            }
+            _ => anyhow::bail!("verifier handoff purpose contradicts selection"),
+        }
         let readiness_request = RuntimeSnapshotReadinessRequest {
             protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
             intent: self.source_intent.clone(),
@@ -408,6 +428,12 @@ pub enum RestoredVerifierAdapterResponse {
     Observed {
         observation: Box<RestoredVerifierAdapterObservation>,
     },
+    /// Exact bounded evidence content, not a semantic qualification claim.
+    /// Other lifecycle and owner-measurement responses keep their smaller cap.
+    ConsumerObserved {
+        observation: Box<ConsumerVerifierAdapterObservation>,
+        evidence: serde_json::Value,
+    },
     Uncertain {
         operation_id: String,
     },
@@ -417,15 +443,31 @@ impl RestoredVerifierAdapterResponse {
     pub fn validate_for(&self, request: &RestoredVerifierAdapterRequest) -> Result<()> {
         request.validate()?;
         match self {
-            Self::Observed { observation } => observation.validate_for(request),
+            Self::Observed { observation } => observation.validate_for(request)?,
+            Self::ConsumerObserved {
+                observation,
+                evidence,
+            } => {
+                observation.validate_for_intent(&request.intent)?;
+                observation.verify_evidence_bytes(&canonical_json(evidence)?)?;
+            }
             Self::Uncertain { operation_id } => {
                 ensure!(
                     operation_id == &request.intent.operation_id,
                     "uncertain verifier result changed its durable attempt"
                 );
-                Ok(())
             }
         }
+        ensure!(
+            canonical_json(self)?.len()
+                <= if matches!(self, Self::ConsumerObserved { .. }) {
+                    MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES
+                } else {
+                    crate::MAX_LIFECYCLE_RESPONSE_BYTES
+                },
+            "verifier response exceeds lifecycle envelope"
+        );
+        Ok(())
     }
 }
 

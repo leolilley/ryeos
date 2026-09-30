@@ -661,6 +661,58 @@ mod tests {
                 &coordinate,
             )
             .unwrap();
+        // Storage-owner fixture only: this deliberately bypasses root
+        // admission and does not authorize provider contact or qualification.
+        // The already terminated occurrence must remain readable as evidence.
+        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        db.conn.execute(
+            "INSERT INTO restored_verifier_attempt
+             (operation_id,qualification_operation_id,intent_json,consumer_selection_json,phase,observation_json,created_at_ms,updated_at_ms)
+             VALUES(?1,?2,?3,?4,'attempt_pending',NULL,?5,?5)",
+            params![consumer.operation_id, consumer.qualification_operation_id,
+                String::from_utf8(ryeos_external_execution_contract::canonical_json(&consumer).unwrap()).unwrap(),
+                String::from_utf8(ryeos_external_execution_contract::canonical_json(&selection).unwrap()).unwrap(), now],
+        ).unwrap();
+        let evidence = b"{}";
+        let observed_consumer = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerifierAdapterObservation {
+            schema: 1,
+            operation_id: consumer.operation_id.clone(),
+            occurrence_id: consumer.restored_occurrence_id.clone(),
+            verifier_artifact_hash: consumer.verifier_artifact_hash.clone(),
+            challenge_digest: consumer.consumer_challenge_digest().unwrap(),
+            upload_token_execution_id: "exe-consumer-upload".into(),
+            run_token_execution_id: "exe-consumer-run".into(),
+            upload_response_sha256: "a".repeat(64),
+            run_stream_sha256: "b".repeat(64),
+            evidence_sha256: hex::encode(Sha256::digest(evidence)),
+            evidence_bytes: evidence.len() as u64,
+            contact_deadline_exceeded: false,
+        };
+        assert!(
+            db.restored_verifier_evidence_blob_roots()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.bind_consumer_verifier_observation(&observed_consumer, b"{\"changed\":true}")
+                .is_err()
+        );
+        let retained_consumer = db
+            .bind_consumer_verifier_observation(&observed_consumer, evidence)
+            .unwrap();
+        assert_eq!(
+            retained_consumer,
+            db.bind_consumer_verifier_observation(&observed_consumer, evidence)
+                .unwrap()
+        );
+        assert_eq!(
+            db.restored_verifier_evidence_blob_roots().unwrap(),
+            vec![observed_consumer.evidence_sha256.clone()]
+        );
+        assert!(
+            db.claim_restored_verifier_attempt(&consumer.operation_id)
+                .is_err()
+        );
         assert!(
             consumer
                 .validate_for(&source, &locator, &intent, &occurrence)

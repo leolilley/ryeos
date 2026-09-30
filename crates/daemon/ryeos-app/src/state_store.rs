@@ -15132,6 +15132,37 @@ impl StateStore {
             .bind_restored_verifier_observation(observation)
     }
 
+    /// Evidence publication and its journal root share the current mutation
+    /// permit. Recovery staging protects the Blob across a crash before bind;
+    /// the immutable attempt owns it after bind, before staging is released.
+    pub(crate) fn bind_consumer_verifier_observation(
+        &self,
+        observation: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerifierAdapterObservation,
+        evidence: &[u8],
+    ) -> Result<runtime_db::restored_verifier_attempt::RestoredVerifierAttemptRecord> {
+        observation.verify_evidence_bytes(evidence)?;
+        let permit = self.acquire_write_permit()?;
+        let authority = self.pinned_state_authority()?;
+        authority.ensure_guard(permit.cas_guard())?;
+        let cas = authority.cas_store()?;
+        let mut stage = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(permit.cas_guard(), "consumer-verifier-evidence")?;
+        let hash = stage.store_blob_admitted(permit.cas_guard(), &cas, evidence)?;
+        if hash != observation.evidence_sha256 {
+            bail!("consumer evidence publication changed its observed digest");
+        }
+        let record = self
+            .lock()?
+            .runtime_db
+            .bind_consumer_verifier_observation(observation, evidence)?;
+        if let Err(error) = stage.finish_admitted(permit.cas_guard()) {
+            tracing::warn!(%error, operation_id = %observation.operation_id,
+                "consumer observation retained while temporary evidence roots remain recoverable");
+        }
+        Ok(record)
+    }
+
     pub(crate) fn quarantine_restored_verifier_attempt(
         &self,
         operation_id: &str,
@@ -15945,7 +15976,12 @@ impl StateStore {
     }
 
     pub fn external_execution_blob_roots(&self) -> Result<Vec<String>> {
-        self.lock()?.runtime_db.external_execution_blob_roots()
+        let state = self.lock()?;
+        let mut roots = state.runtime_db.external_execution_blob_roots()?;
+        roots.extend(state.runtime_db.restored_verifier_evidence_blob_roots()?);
+        roots.sort();
+        roots.dedup();
+        Ok(roots)
     }
 
     pub fn record_external_execution_revocation(

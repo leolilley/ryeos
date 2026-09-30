@@ -6,8 +6,8 @@ use crate::operator_external_content::product_qualification::AuthenticatedConsum
 use anyhow::{Context as _, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     ConsumerRuntimeVerificationCoordinate, ConsumerRuntimeVerifierSelection,
-    RemoteVerificationPurpose, RestoredVerifierAdapterObservation, RestoredVerifierAttemptIntent,
-    RestoredVerifierObservation,
+    ConsumerVerifierAdapterObservation, RemoteVerificationPurpose,
+    RestoredVerifierAdapterObservation, RestoredVerifierAttemptIntent, RestoredVerifierObservation,
 };
 
 pub(super) const JOURNAL_SQL: &str = r#"
@@ -386,6 +386,72 @@ fn read_retained_consumer_prerequisite(
 }
 
 impl RuntimeDb {
+    /// Raw evidence is a Blob root, never an inferred generic CAS Object.
+    /// These bytes are retained by the existing attempt, not another ledger.
+    pub(crate) fn restored_verifier_evidence_blob_roots(&self) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT operation_id FROM restored_verifier_attempt WHERE phase='observed' ORDER BY operation_id",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut roots = BTreeSet::new();
+        for id in ids {
+            let record = read(&self.conn, &id)?.context("verifier evidence root disappeared")?;
+            if let Some(RestoredVerifierObservation::ConsumerRuntime { observation }) =
+                record.observation
+            {
+                roots.insert(observation.evidence_sha256);
+            }
+        }
+        Ok(roots.into_iter().collect())
+    }
+
+    /// Store complete transport observation only. Guest settlement and semantic
+    /// qualification must be joined by their existing owners before banking.
+    /// StateStore must stage these exact evidence bytes before this write.
+    pub(crate) fn bind_consumer_verifier_observation(
+        &self,
+        observation: &ConsumerVerifierAdapterObservation,
+        evidence: &[u8],
+    ) -> Result<RestoredVerifierAttemptRecord> {
+        observation.verify_evidence_bytes(evidence)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read(&tx, &observation.operation_id)?
+            .context("consumer observation has no claimed attempt")?;
+        observation.validate_for_intent(&record.intent)?;
+        let tagged = RestoredVerifierObservation::ConsumerRuntime {
+            observation: observation.clone(),
+        };
+        if record.phase == RestoredVerifierAttemptPhase::Observed {
+            ensure!(
+                record.observation.as_ref() == Some(&tagged),
+                "consumer observation replay changed"
+            );
+            tx.commit()?;
+            return Ok(record);
+        }
+        ensure!(
+            matches!(
+                record.phase,
+                RestoredVerifierAttemptPhase::AttemptPending
+                    | RestoredVerifierAttemptPhase::Quarantined
+            ),
+            "consumer observation did not follow a contact claim"
+        );
+        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        let changed = tx.execute(
+            "UPDATE restored_verifier_attempt SET phase='observed',observation_json=?2,updated_at_ms=?3
+             WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
+            params![observation.operation_id, canonical(&tagged)?, now],
+        )?;
+        ensure!(changed == 1, "consumer observation bind lost durable CAS");
+        let current =
+            read(&tx, &observation.operation_id)?.context("consumer observation vanished")?;
+        tx.commit()?;
+        Ok(current)
+    }
+
     /// Load authenticated prerequisite evidence without granting contact.
     /// The consumer reservation/claim must repeat these checks in its own
     /// transaction; this read cannot exclude a later termination. Accepted-root,
