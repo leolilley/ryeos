@@ -197,6 +197,11 @@ class CodexContractTests(unittest.TestCase):
             "external Codex must use the already-produced closed authoring runtime",
         )
         self.assertEqual(profile["external_candidate"]["execution_route"], "connector_only")
+        self.assertEqual(profile["external_candidate"]["schema"], 7)
+        self.assertEqual(
+            profile["external_candidate"]["runtime_authority"], "captured_product",
+            "the existing signed product slot must not implicitly switch authority lanes",
+        )
         self.assertEqual(profile["external_candidate"]["runtime_product_declaration_id"], "guest-runtime")
         session_start = next(route for route in profile["routes"] if route["id"] == "session.start")
         self.assertEqual(session_start["fixed_params"]["environments"], [{
