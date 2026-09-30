@@ -276,7 +276,7 @@ impl IndependentVerifierScenario {
         });
         let policy = json!({"category":"fixtures/codex-runtime","version":"3.0.0",
             "description":"Finite fixture verifier allowance; no runtime qualification is asserted by authoring",
-            "product_qualification_policy":{"schema":"ryeos.product_qualification_policy.v2",
+            "product_qualification_policy":{"schema":"ryeos.product_qualification_policy.v3",
                 "verifier_ref":TOOL_REF,"subject_declaration_id":"subject",
                 "allowed_claims":CLAIMS,
                 "minimum_verifier_process_settlement":"scope_empty",

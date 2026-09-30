@@ -2,7 +2,7 @@ category: test
 version: "1.0.0"
 description: Independent fixed-pin policy for the captured runtime fixture
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v2
+  schema: ryeos.product_qualification_policy.v3
   verifier_ref: tool:test/verify-runtime
   subject_declaration_id: subject
   allowed_claims: [runtime_program_executed]

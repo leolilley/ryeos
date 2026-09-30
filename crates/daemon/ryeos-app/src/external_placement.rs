@@ -231,7 +231,7 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         _producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
         _qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
     ) -> Result<
-        ryeos_external_execution::restoration_verifier_delivery::SealedRestorationVerifierUpload,
+        ryeos_external_execution::restoration_verifier_delivery::SealedQualificationVerifierUpload,
     > {
         bail!("external placement backend has no admitted restoration verifier")
     }
@@ -1055,7 +1055,7 @@ impl ExternalPlacementBackendRegistry {
         producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
         qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
     ) -> Result<
-        ryeos_external_execution::restoration_verifier_delivery::SealedRestorationVerifierUpload,
+        ryeos_external_execution::restoration_verifier_delivery::SealedQualificationVerifierUpload,
     > {
         let backend = self
             .backends

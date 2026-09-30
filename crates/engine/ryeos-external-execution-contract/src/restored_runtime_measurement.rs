@@ -18,6 +18,7 @@ use crate::runtime_snapshot::{
 pub const RESTORED_OWNER_MEASUREMENT_PROTOCOL: &str = "ryeos.restored-owner-measurement.v1";
 pub const RESTORATION_VERIFIER_REMOTE_DIRECTORY: &str = "/ryeos/qualification";
 pub const RESTORATION_VERIFIER_REMOTE_NAME: &str = "ryeos-external-guest-restoration-verifier";
+pub const CONSUMER_VERIFIER_REMOTE_NAME: &str = "ryeos-external-guest-consumer-verifier";
 pub const MAX_RESTORATION_VERIFIER_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_RESTORED_OWNER_CHALLENGE_BYTES: usize = 4096;
 pub const MAX_RESTORED_OWNER_RESULT_BYTES: usize = 4096;
