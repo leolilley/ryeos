@@ -2164,6 +2164,7 @@ impl RuntimeDb {
             &reservation.owner,
             ExternalAllocationOwner::QualificationCandidate(_)
         ) {
+            qualification_guest_scratch::require_created_for_allocation(&tx, reservation)?;
             reserved_runtime_manifest(reservation, &retained_binding.backend_contract())?;
         }
         if read_guard(&tx)? >= 256 {

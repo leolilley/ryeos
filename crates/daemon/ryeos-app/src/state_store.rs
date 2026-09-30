@@ -14534,6 +14534,21 @@ impl StateStore {
                 .is_none(),
             "qualification first reservation cannot replace retained input lifelines"
         );
+        let scratch = g
+            .runtime_db
+            .qualification_guest_scratch(&reservation.placement_thread_id)?
+            .context("qualification first reservation has no original guest scratch")?;
+        anyhow::ensure!(
+            scratch.phase
+                == runtime_db::external_execution::QualificationGuestScratchPhase::Created,
+            "qualification first reservation has no Created guest scratch"
+        );
+        let original = state
+            .qualification_workspace_custody
+            .borrow_guest_scratch(&scratch)?;
+        let pinned = original.pinned_root()?;
+        pinned.require_owner_private_directory()?;
+        pinned.ensure_path_binding()?;
         let proof =
             self.verify_external_qualification_owner(state, &g, reservation, binding, &admission)?;
         g.runtime_db

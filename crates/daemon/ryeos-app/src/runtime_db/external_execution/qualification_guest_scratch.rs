@@ -268,6 +268,33 @@ pub(super) fn validate_scratches(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// A fresh Q allocation may use only the one Created input tree prepared for
+/// its exact accepted root and live occurrence. This runs in the allocation
+/// transaction, so cleanup cannot move the scratch row between this join and
+/// the allocation INSERT. Process-local descriptor custody is checked by
+/// StateStore before entering the transaction.
+pub(super) fn require_created_for_allocation(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+) -> Result<()> {
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+        anyhow::bail!("Q scratch allocation join requires a qualification owner");
+    };
+    let scratch = read_scratch(conn, &reservation.placement_thread_id)?
+        .context("Q allocation has no original guest scratch intent")?;
+    ensure!(
+        scratch.phase == QualificationGuestScratchPhase::Created
+            && scratch.coordinate == owner.coordinate
+            && scratch.qualification_operation_id == owner.qualification_operation_id
+            && scratch.qualification_occurrence_id == owner.qualification_occurrence.occurrence_id
+            && scratch.owner_principal == owner.operator_principal
+            && scratch.program_digest == owner.program.digest()?
+            && reservation.admitted_capsule_hash == scratch.coordinate.accepted_capsule_hash,
+        "Q allocation changed its Created original guest scratch owner"
+    );
+    Ok(())
+}
+
 fn require_cleanup_basis(
     conn: &Connection,
     record: &QualificationGuestScratchRecord,
