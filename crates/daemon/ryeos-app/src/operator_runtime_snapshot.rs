@@ -909,6 +909,24 @@ pub fn verify_qualification_occurrence(
     qualification_operation_id: &str,
 ) -> Result<RestoredVerifierAttemptRecord> {
     crate::operator_authority::require_admitted_operator(state, context)?;
+    crate::hosted_operation::with_qualification_occurrence_contact(
+        qualification_operation_id,
+        || {
+            verify_qualification_occurrence_under_contact_gate(
+                state,
+                context,
+                qualification_operation_id,
+            )
+        },
+    )
+}
+
+fn verify_qualification_occurrence_under_contact_gate(
+    state: &AppState,
+    context: &HandlerContext,
+    qualification_operation_id: &str,
+) -> Result<RestoredVerifierAttemptRecord> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
     let qualified = state
         .state_store
         .snapshot_qualification_operation(qualification_operation_id)?
@@ -1075,6 +1093,24 @@ pub fn verify_qualification_occurrence(
 /// uncertain first contact can only observe the retained occurrence; it
 /// cannot repeat the POST. Provider terminal status is not writer exclusion.
 pub fn terminate_qualification_occurrence(
+    state: &AppState,
+    context: &HandlerContext,
+    qualification_operation_id: &str,
+) -> Result<QualificationTerminationRecord> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    crate::hosted_operation::with_qualification_occurrence_contact(
+        qualification_operation_id,
+        || {
+            terminate_qualification_occurrence_under_contact_gate(
+                state,
+                context,
+                qualification_operation_id,
+            )
+        },
+    )
+}
+
+fn terminate_qualification_occurrence_under_contact_gate(
     state: &AppState,
     context: &HandlerContext,
     qualification_operation_id: &str,

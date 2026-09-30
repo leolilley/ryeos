@@ -185,6 +185,38 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Called inside the reservation/contact transaction. A prior read cannot
+/// exclude a subsequently retained termination intent or extend guest life.
+fn require_live_occurrence(
+    conn: &Connection,
+    qualification: &super::runtime_snapshot_qualification::SnapshotQualificationRecord,
+    now: i64,
+) -> Result<()> {
+    ensure!(
+        qualification.occurrence.is_some(),
+        "restored verifier occurrence is absent"
+    );
+    let termination_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_snapshot_qualification_termination
+         WHERE qualification_operation_id=?1)",
+        [&qualification.intent.operation_id],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        !termination_exists,
+        "restored verifier occurrence has a retained termination intent"
+    );
+    let expires_at = qualification
+        .created_at_ms
+        .checked_add(i64::from(qualification.intent.maximum_lifetime_seconds) * 1000)
+        .context("restored verifier occurrence lifetime overflow")?;
+    ensure!(
+        now >= qualification.created_at_ms && now < expires_at,
+        "restored verifier occurrence is outside its retained lifetime"
+    );
+    Ok(())
+}
+
 impl RuntimeDb {
     /// Load authenticated prerequisite evidence without granting contact.
     /// The consumer reservation/claim must repeat these checks in its own
@@ -211,27 +243,8 @@ impl RuntimeDb {
             qualification.intent.owner_principal == owner_principal,
             "consumer verification prerequisite belongs to another operator"
         );
-        let termination_exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_snapshot_qualification_termination
-             WHERE qualification_operation_id=?1)",
-            [qualification_operation_id],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            !termination_exists,
-            "consumer verification occurrence has a retained termination intent"
-        );
         let now = i64::try_from(lillux::time::timestamp_millis())?;
-        // Reservation predates provider creation, so this is a conservative
-        // upper bound, not a fresh lease minted from observation time.
-        let expires_at = qualification
-            .created_at_ms
-            .checked_add(i64::from(qualification.intent.maximum_lifetime_seconds) * 1000)
-            .context("consumer verification occurrence lifetime overflow")?;
-        ensure!(
-            now >= qualification.created_at_ms && now < expires_at,
-            "consumer verification occurrence is outside its retained lifetime"
-        );
+        require_live_occurrence(&tx, &qualification, now)?;
         let occurrence = qualification
             .occurrence
             .as_ref()
@@ -302,6 +315,7 @@ impl RuntimeDb {
         );
         intent.validate_for(&source.intent, locator, &qualification.intent, occurrence)?;
         let now = i64::try_from(lillux::time::timestamp_millis())?;
+        require_live_occurrence(&tx, &qualification, now)?;
         ensure!(
             intent.attempt_deadline_ms > now
                 && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
@@ -343,6 +357,12 @@ impl RuntimeDb {
             now < record.intent.attempt_deadline_ms,
             "restored verifier deadline expired"
         );
+        let qualification = super::runtime_snapshot_qualification::read(
+            &tx,
+            &record.intent.qualification_operation_id,
+        )?
+        .context("restored verifier qualification disappeared before contact claim")?;
+        require_live_occurrence(&tx, &qualification, now)?;
         let changed = tx.execute(
             "UPDATE restored_verifier_attempt SET phase='attempt_pending',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='reserved'",

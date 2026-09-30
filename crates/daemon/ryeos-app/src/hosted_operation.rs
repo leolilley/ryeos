@@ -11,6 +11,37 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use anyhow::{Result, bail};
 
+/// Serialize restored-occurrence verification and termination from durable
+/// recheck through provider return. This is process-local coordination, not
+/// restart authority: journals still prohibit replaying uncertain contact.
+pub(crate) fn with_qualification_occurrence_contact<T>(
+    qualification_operation_id: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    static GATES: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+    let gate = {
+        let mut gates = GATES
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| anyhow::anyhow!("qualification contact gate registry poisoned"))?;
+        gates.retain(|_, gate| gate.strong_count() != 0);
+        if let Some(gate) = gates
+            .get(qualification_operation_id)
+            .and_then(Weak::upgrade)
+        {
+            gate
+        } else {
+            let gate = Arc::new(Mutex::new(()));
+            gates.insert(qualification_operation_id.to_owned(), Arc::downgrade(&gate));
+            gate
+        }
+    };
+    let _lease = gate
+        .lock()
+        .map_err(|_| anyhow::anyhow!("qualification occurrence contact gate poisoned"))?;
+    operation()
+}
+
 #[derive(Default)]
 struct ExclusiveState {
     exclusive_held: bool,
@@ -569,6 +600,22 @@ pub async fn begin_hosted_root_handoff_recovery_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualification_contact_gate_releases_after_refusal() {
+        let result: Result<()> =
+            with_qualification_occurrence_contact("qualification-contact-refusal-fixture", || {
+                bail!("fixture refusal")
+            });
+        assert!(result.is_err());
+        assert_eq!(
+            with_qualification_occurrence_contact("qualification-contact-refusal-fixture", || Ok(
+                7
+            ),)
+            .unwrap(),
+            7
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn root_drain_and_late_operation_leave_single_thread_executor_available() {

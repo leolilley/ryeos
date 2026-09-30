@@ -439,65 +439,6 @@ mod tests {
                 .unwrap(),
             SnapshotQualificationAttemptClaim::OccurrenceBound(_)
         ));
-        let mut termination = RuntimeSnapshotQualificationTerminationIntent {
-            schema: 1,
-            operation_id: String::new(),
-            qualification_operation_id: intent.operation_id.clone(),
-            occurrence_id: occurrence.occurrence_id.clone(),
-            owner_principal: intent.owner_principal.clone(),
-            provider_id: intent.provider_id.clone(),
-            provider_spec_digest: intent.provider_spec_digest.clone(),
-            attempt_deadline_ms: now + 60_000,
-        };
-        termination.operation_id = termination.derived_operation_id().unwrap();
-        db.reserve_qualification_termination(&termination).unwrap();
-        assert!(matches!(
-            db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
-            super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::StartAttempt(_)
-        ));
-        assert!(matches!(
-            db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
-            super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::Reconcile(_)
-        ));
-        db.quarantine_qualification_termination_attempt(&termination.operation_id)
-            .unwrap();
-        let mut changed_deadline = termination.clone();
-        changed_deadline.attempt_deadline_ms += 1;
-        assert_eq!(
-            changed_deadline.derived_operation_id().unwrap(),
-            termination.operation_id
-        );
-        assert!(
-            db.reserve_qualification_termination(&changed_deadline)
-                .is_err()
-        );
-        let terminal = RuntimeSnapshotQualificationTerminalObservation {
-            schema: 1,
-            operation_id: termination.operation_id.clone(),
-            occurrence_id: occurrence.occurrence_id.clone(),
-            provider_response_sha256: "a".repeat(64),
-            terminated_at: "2026-09-28T00:02:00Z".into(),
-            contact_deadline_exceeded: false,
-        };
-        db.bind_qualification_terminal_observation(&terminal)
-            .unwrap();
-        assert!(matches!(
-            db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
-            super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::Terminal(_)
-        ));
-        let mut changed_terminal = terminal;
-        changed_terminal.provider_response_sha256 = "b".repeat(64);
-        assert!(
-            db.bind_qualification_terminal_observation(&changed_terminal)
-                .is_err()
-        );
-        assert!(db.conn.execute(
-            "UPDATE runtime_snapshot_qualification_termination SET phase='attempt_pending',observation_json=NULL WHERE operation_id=?1",
-            [&termination.operation_id],
-        ).is_err());
-        let mut changed = occurrence.clone();
-        changed.occurrence_id = "sbx-other".into();
-        assert!(db.bind_snapshot_qualification_occurrence(&changed).is_err());
 
         let mut verifier = RestoredVerifierAttemptIntent {
             schema: 2,
@@ -563,6 +504,113 @@ mod tests {
             contact_deadline_exceeded: false,
         };
         db.bind_restored_verifier_observation(&observation).unwrap();
+        // A verifier reservation is not permission to contact after a
+        // termination intent is retained, even if its own deadline is live.
+        let mut racing_qualification = intent.clone();
+        racing_qualification.qualification_profile_digest = "6".repeat(64);
+        racing_qualification.operation_id = racing_qualification.derived_operation_id().unwrap();
+        db.reserve_snapshot_qualification(&racing_qualification)
+            .unwrap();
+        db.claim_snapshot_qualification_attempt(&racing_qualification.operation_id)
+            .unwrap();
+        let mut racing_occurrence = occurrence.clone();
+        racing_occurrence.operation_id = racing_qualification.operation_id.clone();
+        racing_occurrence.occurrence_id = "sbx-termination-race".into();
+        db.bind_snapshot_qualification_occurrence(&racing_occurrence)
+            .unwrap();
+        let mut racing_verifier = verifier.clone();
+        racing_verifier.qualification_operation_id = racing_qualification.operation_id.clone();
+        racing_verifier.restored_occurrence_id = racing_occurrence.occurrence_id.clone();
+        let ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { challenge } = &mut racing_verifier.purpose else {
+            panic!("fixture requires owner measurement");
+        };
+        challenge.restored_occurrence_id = racing_occurrence.occurrence_id.clone();
+        racing_verifier.operation_id = racing_verifier.derived_operation_id().unwrap();
+        db.reserve_restored_verifier_attempt(&racing_verifier)
+            .unwrap();
+        let mut racing_termination = RuntimeSnapshotQualificationTerminationIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: racing_qualification.operation_id.clone(),
+            occurrence_id: racing_occurrence.occurrence_id.clone(),
+            owner_principal: racing_qualification.owner_principal.clone(),
+            provider_id: racing_qualification.provider_id.clone(),
+            provider_spec_digest: racing_qualification.provider_spec_digest.clone(),
+            attempt_deadline_ms: now + 60_000,
+        };
+        racing_termination.operation_id = racing_termination.derived_operation_id().unwrap();
+        db.reserve_qualification_termination(&racing_termination)
+            .unwrap();
+        let refused = db
+            .claim_restored_verifier_attempt(&racing_verifier.operation_id)
+            .unwrap_err();
+        assert!(refused.to_string().contains("retained termination intent"));
+        assert_eq!(
+            db.restored_verifier_attempt(&racing_verifier.operation_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            super::super::restored_verifier_attempt::RestoredVerifierAttemptPhase::Reserved
+        );
+        let mut termination = RuntimeSnapshotQualificationTerminationIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: intent.operation_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            owner_principal: intent.owner_principal.clone(),
+            provider_id: intent.provider_id.clone(),
+            provider_spec_digest: intent.provider_spec_digest.clone(),
+            attempt_deadline_ms: now + 60_000,
+        };
+        termination.operation_id = termination.derived_operation_id().unwrap();
+        db.reserve_qualification_termination(&termination).unwrap();
+        assert!(matches!(
+            db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
+            super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::StartAttempt(_)
+        ));
+        assert!(matches!(
+            db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
+            super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::Reconcile(_)
+        ));
+        db.quarantine_qualification_termination_attempt(&termination.operation_id)
+            .unwrap();
+        let mut changed_deadline = termination.clone();
+        changed_deadline.attempt_deadline_ms += 1;
+        assert_eq!(
+            changed_deadline.derived_operation_id().unwrap(),
+            termination.operation_id
+        );
+        assert!(
+            db.reserve_qualification_termination(&changed_deadline)
+                .is_err()
+        );
+        let terminal = RuntimeSnapshotQualificationTerminalObservation {
+            schema: 1,
+            operation_id: termination.operation_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            provider_response_sha256: "a".repeat(64),
+            terminated_at: "2026-09-28T00:02:00Z".into(),
+            contact_deadline_exceeded: false,
+        };
+        db.bind_qualification_terminal_observation(&terminal)
+            .unwrap();
+        assert!(matches!(
+            db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
+            super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::Terminal(_)
+        ));
+        let mut changed_terminal = terminal;
+        changed_terminal.provider_response_sha256 = "b".repeat(64);
+        assert!(
+            db.bind_qualification_terminal_observation(&changed_terminal)
+                .is_err()
+        );
+        assert!(db.conn.execute(
+            "UPDATE runtime_snapshot_qualification_termination SET phase='attempt_pending',observation_json=NULL WHERE operation_id=?1",
+            [&termination.operation_id],
+        ).is_err());
+        let mut changed = occurrence.clone();
+        changed.occurrence_id = "sbx-other".into();
+        assert!(db.bind_snapshot_qualification_occurrence(&changed).is_err());
         // This checks retained evidence content only. The occurrence above has
         // already been terminated: this helper must not authorize new contact.
         let coordinate = ConsumerRuntimeVerificationCoordinate {
@@ -579,6 +627,81 @@ mod tests {
                 ryeos_external_execution_contract::canonical_json(&observation).unwrap(),
             )),
         };
+        // Consumer validation is a data join, not contact permission. This
+        // occurrence is already terminated; journal admission still refuses.
+        let selection = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection {
+            scenario_source_digest: coordinate.scenario_source_digest.clone(),
+            verifier_artifact_hash: "9".repeat(64),
+        };
+        let mut consumer = verifier.clone();
+        consumer.verifier_artifact_hash = selection.verifier_artifact_hash.clone();
+        consumer.purpose = ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate: coordinate.clone(), nonce_hex: "8".repeat(64),
+        };
+        consumer.operation_id = consumer.derived_operation_id().unwrap();
+        consumer
+            .validate_consumer_for(
+                &source,
+                &locator,
+                &intent,
+                &occurrence,
+                &selection,
+                &coordinate,
+            )
+            .unwrap();
+        assert!(
+            consumer
+                .validate_for(&source, &locator, &intent, &occurrence)
+                .is_err()
+        );
+        assert!(
+            verifier
+                .validate_consumer_for(
+                    &source,
+                    &locator,
+                    &intent,
+                    &occurrence,
+                    &selection,
+                    &coordinate
+                )
+                .is_err()
+        );
+        let mut wrong_selection = selection.clone();
+        wrong_selection.verifier_artifact_hash = "a".repeat(64);
+        assert!(
+            consumer
+                .validate_consumer_for(
+                    &source,
+                    &locator,
+                    &intent,
+                    &occurrence,
+                    &wrong_selection,
+                    &coordinate
+                )
+                .is_err()
+        );
+        let mut wrong_coordinate = coordinate.clone();
+        wrong_coordinate.accepted_capsule_hash = "f".repeat(64);
+        assert!(
+            consumer
+                .validate_consumer_for(
+                    &source,
+                    &locator,
+                    &intent,
+                    &occurrence,
+                    &selection,
+                    &wrong_coordinate
+                )
+                .is_err()
+        );
+        let mut reminted_consumer = consumer.clone();
+        reminted_consumer.attempt_deadline_ms += 1;
+        reminted_consumer.upload_sha256 = "7".repeat(64);
+        assert_eq!(
+            reminted_consumer.derived_operation_id().unwrap(),
+            consumer.operation_id
+        );
+        assert_ne!(reminted_consumer, consumer);
         let check_prerequisite =
             |observed: &RestoredVerifierAdapterObservation,
              proposed: &ConsumerRuntimeVerificationCoordinate| {

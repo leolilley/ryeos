@@ -376,6 +376,53 @@ impl RemoteVerificationPurpose {
 }
 
 impl RestoredVerifierAttemptIntent {
+    /// Consumer-specific data join. This does not grant contact: the journal
+    /// must authenticate the prerequisite on the same live occurrence and the
+    /// application must bind the coordinate to its accepted root and purpose.
+    pub fn validate_consumer_for(
+        &self,
+        source: &RuntimeSnapshotIntent,
+        locator: &RuntimeSnapshotLocator,
+        qualification: &RuntimeSnapshotQualificationIntent,
+        occurrence: &RuntimeSnapshotQualificationOccurrence,
+        selection: &ConsumerRuntimeVerifierSelection,
+        expected_coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<()> {
+        qualification.validate_for(source, locator)?;
+        occurrence.validate_for(qualification)?;
+        selection.validate_coordinate(expected_coordinate)?;
+        let RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate,
+            nonce_hex,
+        } = &self.purpose
+        else {
+            anyhow::bail!("owner measurement cannot use consumer verification admission");
+        };
+        require_hash(nonce_hex, "consumer challenge nonce")?;
+        require_hash(&self.upload_sha256, "consumer upload")?;
+        ensure!(
+            coordinate == expected_coordinate
+                && self.schema == 2
+                && self.qualification_operation_id == qualification.operation_id
+                && self.restored_occurrence_id == occurrence.occurrence_id
+                && self.verifier_artifact_hash == selection.verifier_artifact_hash
+                && !occurrence.contact_deadline_exceeded
+                && self.upload_bytes > 0
+                && self.upload_bytes <= MAX_RESTORATION_VERIFIER_BYTES + 16 * 1024
+                && self.attempt_deadline_ms > 0,
+            "consumer verifier attempt differs from protected occurrence or accepted coordinate"
+        );
+        ensure!(
+            self.operation_id == self.derived_operation_id()?,
+            "consumer verifier attempt changed its durable identity"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= MAX_RESTORED_OWNER_CHALLENGE_BYTES + 2048,
+            "consumer verifier attempt exceeds its bound"
+        );
+        Ok(())
+    }
+
     pub fn owner_challenge(&self) -> Result<&RestoredOwnerChallenge> {
         match &self.purpose {
             RemoteVerificationPurpose::OwnerMeasurement { challenge } => Ok(challenge),
