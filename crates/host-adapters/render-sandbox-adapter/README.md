@@ -126,8 +126,11 @@ Therefore the Render activation gate remains closed.
 - Allocation reconciliation without a retained provider ID is always pending.
   The adapter does not treat list absence or a GET 404 as proof of no
   occurrence.
-- Activation and activation reconciliation always return `supervisor_pending`;
-  even a successful proxy run is not authenticated supervisor `Ready`. The
+- The currently signed profile refuses first activation before reading the
+  guest package, captured network inputs, or credentials. An explicitly
+  selected one-shot profile can make one contact but still returns
+  `supervisor_pending`; reconciliation is observation-only and returns pending.
+  Even a successful proxy run is not authenticated supervisor `Ready`. The
   currently signed provider spec advertises no
   `supervisor_activation` lifecycle capability. RyeOS requires that capability
   at offline placement admission, before Sandbox allocation or other provider

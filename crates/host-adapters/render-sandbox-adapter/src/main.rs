@@ -480,6 +480,24 @@ fn operate() -> Result<()> {
         request.canonical_bytes()? == request_bytes,
         "operation request is noncanonical"
     );
+    let maximum_provider_spec_bytes = usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?;
+    let provider_spec_bytes =
+        read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, maximum_provider_spec_bytes)?;
+    let provider_spec_sha256 = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
+        .context("missing captured provider spec digest")?;
+    let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
+    let (provider_spec, _provider_spec_sha256) =
+        parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)?;
+    // A disabled signed profile cannot turn an already claimed activation
+    // into a silent pending observation. Reject before reading guest inputs,
+    // network inputs, or credentials. Reconciliation remains observation-only
+    // for an earlier, possibly contacted attempt.
+    if matches!(&request, LifecycleAdapterRequest::ActivateSupervisor { .. }) {
+        ensure!(
+            provider_spec.one_shot_activation_enabled(),
+            "signed Render provider spec does not authorize supervisor activation contact"
+        );
+    }
     let activation_input = if let LifecycleAdapterRequest::ActivateSupervisor {
         guest_package,
         ..
@@ -526,14 +544,6 @@ fn operate() -> Result<()> {
     if let LifecycleAdapterRequest::ActivateSupervisor { activation, .. } = &request {
         deadline = request_deadline(activation.attachment_deadline_ms, deadline)?;
     }
-    let maximum_provider_spec_bytes = usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?;
-    let provider_spec_bytes =
-        read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, maximum_provider_spec_bytes)?;
-    let provider_spec_sha256 = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
-        .context("missing captured provider spec digest")?;
-    let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
-    let (provider_spec, _provider_spec_sha256) =
-        parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)?;
     let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
     ensure!(
         lillux::sha256_hex(&settings_bytes) == request.common().settings_digest,
@@ -575,27 +585,25 @@ fn operate() -> Result<()> {
             activation,
             ..
         } => {
-            if provider_spec.one_shot_activation_enabled() {
-                let input = activation_input
-                    .as_ref()
-                    .context("first Render activation lost its verified sealed inputs")?;
-                // Once this call begins, any stage may have reached Render.
-                // Even a complete run response is not authenticated Ready;
-                // every transport outcome remains Pending for the original
-                // supervisor channel to settle. Reconciliation never calls
-                // this one-shot sequence again.
-                let _ = activation_contact::first_activation_contact(
-                    &network,
-                    &provider_spec,
-                    &settings,
-                    &occurrence.occurrence_id,
-                    &input.delivery,
-                    &input.signed_import,
-                    &input.package,
-                    deadline,
-                    &cancellation,
-                );
-            }
+            let input = activation_input
+                .as_ref()
+                .context("first Render activation lost its verified sealed inputs")?;
+            // Once this call begins, any stage may have reached Render.
+            // Even a complete run response is not authenticated Ready;
+            // every transport outcome remains Pending for the original
+            // supervisor channel to settle. Reconciliation never calls
+            // this one-shot sequence again.
+            let _ = activation_contact::first_activation_contact(
+                &network,
+                &provider_spec,
+                &settings,
+                &occurrence.occurrence_id,
+                &input.delivery,
+                &input.signed_import,
+                &input.package,
+                deadline,
+                &cancellation,
+            );
             LifecycleAdapterResponse::SupervisorPending {
                 operation_id: common.operation_id.clone(),
                 activation_request_digest: activation.activation_request_digest.clone(),
