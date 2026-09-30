@@ -37,6 +37,14 @@ pub(crate) struct RetainedExternalCandidateImport {
     pub seal_digest: String,
 }
 
+/// The controller's exact signed guest observation. This is input to a later
+/// qualification join, not proof that the candidate executed successfully or
+/// that the external occurrence has settled.
+pub(crate) struct RetainedExternalRuntimeApplied {
+    pub binding: ExecutionChannelBinding,
+    pub frame: AuthenticatedExecutionFrame,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExternalCandidateImportTarget {
     pub placement: String,
@@ -70,6 +78,57 @@ pub struct ExternalDirectOutput {
 }
 
 impl RuntimeDb {
+    /// Recover only the single applied, authenticated runtime receipt for this
+    /// retained placement. A caller issuing a claim must recheck this evidence
+    /// with its owner and qualification coordinates in the claim transaction.
+    pub(crate) fn external_runtime_applied_observation(
+        &self,
+        placement: &str,
+    ) -> Result<Option<RetainedExternalRuntimeApplied>> {
+        let binding = load_binding(&self.conn, placement)?;
+        NodeJournalOwner.require_owner(&self.conn, &binding)?;
+        let digest = binding.digest()?;
+        let mut statement = self.conn.prepare(
+            "SELECT sequence,frame_digest,frame_json,application
+             FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+               AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied'
+             ORDER BY sequence LIMIT 2",
+        )?;
+        let mut rows = statement.query([&digest])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let sequence: i64 = row.get(0)?;
+        let stored_digest: String = row.get(1)?;
+        let wire: String = row.get(2)?;
+        let application: String = row.get(3)?;
+        ensure!(
+            rows.next()?.is_none(),
+            "external runtime has multiple applied observations"
+        );
+        ensure!(
+            application == "applied",
+            "external runtime observation has not been applied"
+        );
+        let frame = SignedExecutionFrame::decode_and_verify(
+            wire.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )?;
+        ensure!(
+            frame.digest() == stored_digest
+                && frame.frame().direction == ChannelDirection::SupervisorToOwner
+                && i64::try_from(frame.frame().sequence)? == sequence
+                && matches!(
+                    frame.frame().payload,
+                    ExecutionChannelPayload::RuntimeApplied { .. }
+                ),
+            "retained runtime observation contradicts its signed frame"
+        );
+        Ok(Some(RetainedExternalRuntimeApplied { binding, frame }))
+    }
+
     /// Reconstruct only a complete target observation. Applying these frames
     /// is deterministic local interpretation, not delivery to an external
     /// process: an interrupted claimed reconstruction may be repeated exactly.
@@ -6325,6 +6384,11 @@ pub(super) mod tests {
         db.admit_external_ready_and_author_release(placement, &owner, test_startup_deadline())
             .unwrap()
             .unwrap();
+        assert!(
+            db.external_runtime_applied_observation(placement)
+                .unwrap()
+                .is_none()
+        );
         let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
             owned_child_pid: 101,
             namespace_pid: 1,
@@ -6368,6 +6432,22 @@ pub(super) mod tests {
             )
             .unwrap();
         assert_eq!(applied, "applied");
+        let retained = db
+            .external_runtime_applied_observation(placement)
+            .unwrap()
+            .expect("applied signed runtime observation");
+        assert_eq!(retained.binding, binding);
+        assert_eq!(retained.frame.digest(), digest);
+        assert!(matches!(
+            &retained.frame.frame().payload,
+            ExecutionChannelPayload::RuntimeApplied {
+                launcher_occurrence_digest,
+                candidate_program_digest,
+                receipt: applied_receipt,
+            } if launcher_occurrence_digest == &"a".repeat(64)
+                && candidate_program_digest == &binding.candidate_program_digest
+                && applied_receipt == &receipt
+        ));
         assert!(
             !db.exchange_external_supervisor_frame(placement, &first_wire, &owner, 16, 1024 * 1024)
                 .unwrap()
@@ -6396,6 +6476,17 @@ pub(super) mod tests {
                 .contains("runtime-applied observation was already retained")
         );
         validate_channels(&db.conn).unwrap();
+        drop(db);
+        let reopened = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        assert_eq!(
+            reopened
+                .external_runtime_applied_observation(placement)
+                .unwrap()
+                .expect("recovered signed runtime observation")
+                .frame
+                .digest(),
+            digest
+        );
     }
 
     #[test]
