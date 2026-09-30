@@ -15622,6 +15622,24 @@ impl StateStore {
             )
     }
 
+    /// Read the exact closed Q transport, local cleanup, native settlement,
+    /// provider terminal and structural transcript at one retained DB view.
+    /// The result grants no Worker semantic success or qualification claim.
+    pub(crate) fn qualification_historical_transport_evidence(
+        &self,
+        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+        qualification_operation_id: &str,
+        owner_principal: &str,
+    ) -> Result<runtime_db::external_execution::QualificationHistoricalTransportEvidence> {
+        self.lock()?
+            .runtime_db
+            .qualification_historical_transport_evidence(
+                coordinate,
+                qualification_operation_id,
+                owner_principal,
+            )
+    }
+
     /// No child descriptor is adopted on restart. Only the original
     /// state-owned parent and an absent entry may retire a precreation row.
     pub(crate) fn retire_absent_reserved_qualification_guest_scratch(

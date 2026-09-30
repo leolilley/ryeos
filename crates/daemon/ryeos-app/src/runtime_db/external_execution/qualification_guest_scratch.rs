@@ -392,6 +392,42 @@ fn require_cleanup_basis(
     Ok(())
 }
 
+/// Historical completion of the original guest-input scratch. The same
+/// settlement reader used by transport retry is called under the caller's
+/// transaction; this does not reconstruct a descriptor or admit new contact.
+pub(super) fn require_completed_transport_tx(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+) -> Result<QualificationGuestScratchRecord> {
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+        bail!("Q scratch completion changed its qualification owner");
+    };
+    let scratch = read_scratch(conn, &reservation.placement_thread_id)?
+        .context("Q completed transport has no original guest scratch")?;
+    ensure!(
+        scratch.phase == QualificationGuestScratchPhase::Closed
+            && scratch.coordinate == owner.coordinate
+            && scratch.qualification_operation_id == owner.qualification_operation_id
+            && scratch.qualification_occurrence_id == owner.qualification_occurrence.occurrence_id
+            && scratch.owner_principal == owner.operator_principal
+            && scratch.program_digest == owner.program.digest()?
+            && matches!(
+                scratch.cleanup_basis.as_ref(),
+                Some(QualificationGuestScratchCleanupBasis::SettledAllocation {
+                    settled_phase: ExternalAllocationPhase::Terminated,
+                    ..
+                })
+            ),
+        "Q completed transport has no exact closed original scratch"
+    );
+    require_cleanup_basis(conn, &scratch)?;
+    channel::require_external_qualification_normal_terminal_tx(
+        conn,
+        &reservation.placement_thread_id,
+    )?;
+    Ok(scratch)
+}
+
 fn transition(
     conn: &Connection,
     current: &QualificationGuestScratchRecord,
@@ -488,22 +524,20 @@ impl RuntimeDb {
         if record.phase != QualificationGuestScratchPhase::Closed {
             return Ok(false);
         }
+        let allocation =
+            read(&self.conn, placement)?.context("closed Q scratch lost its settled allocation")?;
+        let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+        else {
+            bail!("closed Q scratch changed its qualification owner");
+        };
         ensure!(
-            record.coordinate == *coordinate
-                && record.qualification_operation_id == qualification_operation_id
-                && record.owner_principal == owner_principal
-                && record.program_digest == program_digest
-                && matches!(
-                    record.cleanup_basis.as_ref(),
-                    Some(QualificationGuestScratchCleanupBasis::SettledAllocation {
-                        settled_phase: ExternalAllocationPhase::Terminated,
-                        ..
-                    })
-                ),
+            owner.coordinate == *coordinate
+                && owner.qualification_operation_id == qualification_operation_id
+                && owner.operator_principal == owner_principal
+                && owner.program.digest()? == program_digest,
             "closed Q scratch does not prove this exact completed transport"
         );
-        require_cleanup_basis(&self.conn, &record)?;
-        self.ensure_external_qualification_normal_terminal(placement)?;
+        require_completed_transport_tx(&self.conn, &allocation.reservation)?;
         Ok(true)
     }
 

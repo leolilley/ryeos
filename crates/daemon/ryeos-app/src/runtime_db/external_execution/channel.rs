@@ -2053,39 +2053,45 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<()> {
-        let allocation =
-            read(&self.conn, placement)?.context("Q lifeline disarm lost its allocation")?;
-        ensure!(
-            allocation.phase == ExternalAllocationPhase::Terminated
-                && matches!(
-                    &allocation.reservation.owner,
-                    ExternalAllocationOwner::QualificationCandidate(_)
-                ),
-            "Q lifeline disarm has no exact terminal qualification owner"
-        );
-        require_applied_qualification_normal_settlement_tx(&self.conn, &allocation.reservation)?;
-        let occurrence = allocation
-            .occurrence
-            .as_ref()
-            .context("Q lifeline disarm lost its provider occurrence")?;
-        let intent: ExternalTerminationIntent = read_canonical_evidence(
-            &self.conn,
-            "external_execution_termination_intent",
-            "intent_json",
-            placement,
-        )?
-        .context("Q lifeline disarm has no provider termination intent")?;
-        let terminal: ExternalTerminalObservation = read_canonical_evidence(
-            &self.conn,
-            "external_execution_terminal_observation",
-            "observation_json",
-            placement,
-        )?
-        .context("Q lifeline disarm has no independent provider terminal observation")?;
-        intent.validate(&allocation.reservation, occurrence)?;
-        terminal.validate(&allocation.reservation, occurrence, &intent)?;
-        Ok(())
+        require_external_qualification_normal_terminal_tx(&self.conn, placement)
     }
+}
+
+pub(super) fn require_external_qualification_normal_terminal_tx(
+    conn: &Connection,
+    placement: &str,
+) -> Result<()> {
+    let allocation = read(conn, placement)?.context("Q lifeline disarm lost its allocation")?;
+    ensure!(
+        allocation.phase == ExternalAllocationPhase::Terminated
+            && matches!(
+                &allocation.reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(_)
+            ),
+        "Q lifeline disarm has no exact terminal qualification owner"
+    );
+    require_applied_qualification_normal_settlement_tx(conn, &allocation.reservation)?;
+    let occurrence = allocation
+        .occurrence
+        .as_ref()
+        .context("Q lifeline disarm lost its provider occurrence")?;
+    let intent: ExternalTerminationIntent = read_canonical_evidence(
+        conn,
+        "external_execution_termination_intent",
+        "intent_json",
+        placement,
+    )?
+    .context("Q lifeline disarm has no provider termination intent")?;
+    let terminal: ExternalTerminalObservation = read_canonical_evidence(
+        conn,
+        "external_execution_terminal_observation",
+        "observation_json",
+        placement,
+    )?
+    .context("Q lifeline disarm has no independent provider terminal observation")?;
+    intent.validate(&allocation.reservation, occurrence)?;
+    terminal.validate(&allocation.reservation, occurrence, &intent)?;
+    Ok(())
 }
 
 fn retained_external_direct_output(

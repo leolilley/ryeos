@@ -14,6 +14,7 @@ pub use channel::ExternalDirectOutput;
 pub(crate) mod connector;
 mod qualification_batch;
 mod qualification_command;
+mod qualification_evidence;
 mod qualification_guest_scratch;
 mod qualification_local_start;
 mod qualification_process;
@@ -30,6 +31,7 @@ pub(crate) use qualification_batch::{
 pub(crate) use qualification_command::{
     QualificationWorkerCommandPhase, QualificationWorkerCommandRecord,
 };
+pub(crate) use qualification_evidence::QualificationHistoricalTransportEvidence;
 pub(super) use qualification_guest_scratch::JOURNAL_SQL as QUALIFICATION_GUEST_SCRATCH_SQL;
 pub(crate) use qualification_guest_scratch::{
     QualificationGuestScratchPhase, QualificationGuestScratchRecord,
