@@ -1151,7 +1151,7 @@ pub(super) struct PreparedBundleConsumerEnvironment {
 /// must retain the complete stage under its exact verifier purpose before use.
 pub(super) struct PreparedBundleConsumerWorkerLiterals {
     pub definitions: ProductQualificationConsumerDefinitionIdentity,
-    pub relationship_definition: ProductQualificationBundleDefinitionIdentity,
+    pub declaration_authority: ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
     pub source: crate::source_closure_admission::AdmittedBundleStructuredWorkerProfile,
     pub literal_realizations: ExternalContentRealizationSet,
     publication: Option<ryeos_state::PendingCasPublication>,
@@ -1162,7 +1162,7 @@ pub(super) struct PreparedBundleConsumerWorkerLiterals {
 /// no product selection or qualification claim is created by this value.
 pub(super) struct PreparedBundleConsumerContentInputs {
     pub definitions: ProductQualificationConsumerDefinitionIdentity,
-    pub relationship_definition: ProductQualificationBundleDefinitionIdentity,
+    pub declaration_authority: ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
     pub policy_source: ProductQualificationPolicySource,
     pub worker_source: crate::source_closure_admission::AdmittedBundleStructuredWorkerProfile,
     pub worker_literals: ExternalContentRealizationSet,
@@ -1181,9 +1181,7 @@ impl PreparedBundleConsumerContentInputs {
             .context("prepared consumer content has no signed context")?;
         let identity = ProductQualificationConsumerContentIdentity {
             definitions: self.definitions.clone(),
-            declaration_authority: ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority::CapturedProduct {
-                relationship_definition: self.relationship_definition.clone(),
-            },
+            declaration_authority: self.declaration_authority.clone(),
             worker_source: self.worker_source.source.clone(),
             worker_profile_hash: self.worker_source.profile.profile_hash.clone(),
             worker_preselection_effective_definition_digest: self
@@ -1349,7 +1347,7 @@ pub(super) fn prepare_current_bundle_consumer_content_inputs(
     };
     let PreparedBundleConsumerWorkerLiterals {
         definitions,
-        relationship_definition,
+        declaration_authority,
         source,
         literal_realizations,
         mut publication,
@@ -1373,7 +1371,7 @@ pub(super) fn prepare_current_bundle_consumer_content_inputs(
         )?;
     Ok(Some(PreparedBundleConsumerContentInputs {
         definitions,
-        relationship_definition,
+        declaration_authority,
         policy_source: policy_source.clone(),
         worker_source: source,
         worker_literals: literal_realizations,
@@ -1439,6 +1437,51 @@ pub(super) fn prepare_current_bundle_consumer_worker_literals(
     else {
         return Ok(None);
     };
+    Ok(Some(prepare_signed_bundle_consumer_worker_literals(
+        state,
+        policy_source,
+        definitions,
+        ConsumerLiteralAuthority::CapturedProduct {
+            relationship,
+            relationship_ref,
+        },
+    )?))
+}
+
+enum ConsumerLiteralAuthority<'a> {
+    CapturedProduct {
+        relationship: &'a ryeos_state::external_content::products::composition::ProductRelationship,
+        relationship_ref: &'a str,
+    },
+    ActivatedContent(&'a super::content_qualification::PreparedContentQualificationSource),
+}
+
+pub(super) fn prepare_activated_bundle_consumer_worker_literals(
+    state: &AppState,
+    operator: &crate::handler_context::HandlerContext,
+    prepared: &super::content_qualification::PreparedContentQualificationSource,
+    acquisition_mode: crate::managed_external_content_operation::AcquisitionMode,
+) -> anyhow::Result<PreparedBundleConsumerWorkerLiterals> {
+    prepared.require_current(state, operator, acquisition_mode)?;
+    let definitions = resolve_current_signed_bundle_consumer_definitions(state, &prepared.policy)?
+        .context("activated consumer has no signed execution context")?;
+    let result = prepare_signed_bundle_consumer_worker_literals(
+        state,
+        &prepared.policy,
+        definitions,
+        ConsumerLiteralAuthority::ActivatedContent(prepared),
+    )?;
+    prepared.require_current(state, operator, acquisition_mode)?;
+    Ok(result)
+}
+
+fn prepare_signed_bundle_consumer_worker_literals(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+    definitions: ProductQualificationConsumerDefinitionIdentity,
+    authority: ConsumerLiteralAuthority<'_>,
+) -> anyhow::Result<PreparedBundleConsumerWorkerLiterals> {
+    let activated = matches!(&authority, ConsumerLiteralAuthority::ActivatedContent(_));
     let context = policy_source
         .policy
         .consumer_execution_context
@@ -1453,7 +1496,7 @@ pub(super) fn prepare_current_bundle_consumer_worker_literals(
     let mut publication = Some(
         source_publication.context("qualification Worker source has no staged CAS publication")?,
     );
-    let (literal_realizations, relationship_definition) =
+    let (literal_realizations, declaration_authority) =
         state.engine.with_checked_bundle_generation(|generation| {
             if generation.request_engine_generation_identity()
                 != definitions.bundle_generation_identity
@@ -1468,6 +1511,8 @@ pub(super) fn prepare_current_bundle_consumer_worker_literals(
             if consumer_definition_identity(&resolution)? != definitions.worker {
                 bail!("qualification Worker changed signed definition before literal admission");
             }
+            let declaration_authority = match authority {
+                ConsumerLiteralAuthority::CapturedProduct { relationship, relationship_ref } => {
             let relationship_definition =
                 resolve_consumer_definition_in_generation(generation, relationship_ref, "config")?;
             let relationship_identity = consumer_definition_identity(&relationship_definition)?;
@@ -1503,6 +1548,45 @@ pub(super) fn prepare_current_bundle_consumer_worker_literals(
             {
                 bail!("qualification Worker product slot differs from signed relationship");
             }
+            ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority::CapturedProduct { relationship_definition: relationship_identity }
+                }
+                ConsumerLiteralAuthority::ActivatedContent(prepared) => {
+                    use ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority;
+                    let contract = state.engine.kinds.get("worker").and_then(|schema| schema.external_content_contract())
+                        .context("activated Worker has no signed content contract")?;
+                    let shape = ryeos_engine::external_content::authored_external_content_shape(
+                        &resolution.composed.composed, Some(contract), ryeos_engine::external_content::declaring_authority(&resolution)?,
+                    )?.context("activated Worker has no signed content shape")?;
+                    if !shape.product_slots.is_empty() {
+                        bail!("activated Worker cannot mix product selection with runtime literals");
+                    }
+                    let QualificationConsumerDeclarationAuthority::ActivatedContent { activation_definition, declaration_id, allowance } = &prepared.declaration_authority else {
+                        bail!("activated consumer preparation has product authority");
+                    };
+                    let activation = resolve_consumer_definition_in_generation(generation, &activation_definition.canonical_ref, "config")?;
+                    if consumer_definition_identity(&activation)? != *activation_definition
+                        || prepared.subject.consumer_ref != definitions.worker.canonical_ref
+                        || prepared.subject.declaration_id != *declaration_id
+                        || context.product_declaration_id != *declaration_id {
+                        bail!("activated consumer definition differs from authenticated preparation");
+                    }
+                    let declarations: Vec<ryeos_engine::external_content::ExternalContentDeclaration> = serde_json::from_value(
+                        resolution.composed.composed.get("external_content").cloned().context("activated Worker has no content declarations")?
+                    )?;
+                    let declaration = declarations.iter().find(|entry| entry.id == *declaration_id)
+                        .context("activated Worker subject declaration is absent")?;
+                    if declaration.qualification_allowance.as_ref() != Some(allowance)
+                        || declaration.digest.as_deref() != Some(prepared.subject.manifest_hash.as_str())
+                        || declaration.kind != prepared.subject.realization.kind
+                        || declaration.mode != prepared.subject.realization.mode
+                        || declaration.mount_root != prepared.subject.realization.mount_root
+                        || declaration.mount != prepared.subject.realization.mount
+                        || declaration.locator.is_some() {
+                        bail!("activated Worker declaration differs from authenticated content");
+                    }
+                    prepared.declaration_authority.clone()
+                }
+            };
             resolution
                 .composed
                 .derived
@@ -1518,6 +1602,22 @@ pub(super) fn prepare_current_bundle_consumer_worker_literals(
                 bail!("qualification Worker source-derived D0 changed before literal admission");
             }
             let roots = state.engine.resolution_roots(None);
+            let declarations = if activated {
+                let contract = state.engine.kinds.get("worker").and_then(|schema| schema.external_content_contract());
+                let declarations = ryeos_engine::external_content::effective_external_content_declarations(
+                    &resolution, contract, ryeos_engine::external_content::declaring_authority(&resolution)?,
+                )?.context("activated Worker has no literal declarations")?;
+                if declarations.is_empty() || declarations.iter().any(|entry|
+                    entry.mode != ryeos_engine::external_content::ExternalContentMode::Pinned
+                        || entry.locator.is_some() || entry.bundle_binary.is_some() || entry.digest.is_none()) {
+                    bail!("activated Worker requires exact pinned literal declarations");
+                }
+                crate::external_content_admission::admit_external_realizations_in_publication(
+                    state, &state.engine, "worker", &mut resolution, &roots,
+                    &SubjectResolutionAuthority::Projectless, None, &mut publication,
+                )?.context("activated Worker produced no exact realizations")?;
+                declarations
+            } else {
             let (_admitted, declarations) = crate::external_content_admission::
                 admit_pending_consumer_literal_realizations_in_publication(
                     state,
@@ -1527,6 +1627,8 @@ pub(super) fn prepare_current_bundle_consumer_worker_literals(
                     &roots,
                     &mut publication,
                 )?;
+                declarations
+            };
             let literals = ExternalContentRealizationSet::from_value(
                 resolution
                     .composed
@@ -1549,15 +1651,15 @@ pub(super) fn prepare_current_bundle_consumer_worker_literals(
             {
                 bail!("qualification Worker literals differ from signed declarations");
             }
-            Ok((literals, relationship_identity))
+            Ok((literals, declaration_authority))
         })?;
-    Ok(Some(PreparedBundleConsumerWorkerLiterals {
+    Ok(PreparedBundleConsumerWorkerLiterals {
         definitions,
-        relationship_definition,
+        declaration_authority,
         source,
         literal_realizations,
         publication,
-    }))
+    })
 }
 
 fn prepare_exact_bundle_consumer_realizations(
