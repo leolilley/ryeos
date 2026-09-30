@@ -5,6 +5,7 @@
 mod activation_contact;
 mod provider_spec;
 mod proxy_route;
+mod relay_contact;
 mod restored_verifier_contact;
 mod snapshot_bootstrap;
 mod snapshot_production;

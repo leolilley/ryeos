@@ -257,7 +257,7 @@ impl RenderContact<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn proxy_request(
+pub(super) fn proxy_request(
     settings: &Settings,
     occurrence_id: &str,
     token: BoundConnectToken,

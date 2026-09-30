@@ -18,6 +18,7 @@ mod qualification_guest_scratch;
 mod qualification_local_start;
 mod qualification_process;
 mod qualification_transcript;
+mod relay_transfer;
 pub(crate) use channel::{
     ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
     ExternalSupervisorExchange, RetainedExternalCandidateImport,
@@ -45,6 +46,8 @@ pub(crate) use qualification_process::{
 pub(crate) use qualification_transcript::{
     QualificationWorkerTranscriptRecord, QualificationWorkerTranscriptSource,
 };
+pub(super) use relay_transfer::JOURNAL_SQL as RELAY_TRANSFER_SQL;
+pub(crate) use relay_transfer::{RelayDirection, RelayKind, RelayTransferIntent, RelayTransferPhase, RelayTransferRecord};
 
 pub(super) const FIRST_EPOCH: u32 = 40;
 pub const EXTERNAL_ALLOCATION_RESERVATION_SCHEMA: u32 = 5;
@@ -1789,6 +1792,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     qualification_command::validate_commands(conn)?;
     qualification_batch::validate_batches(conn)?;
     qualification_transcript::validate_transcripts(conn)?;
+    relay_transfer::validate_transfers(conn)?;
     Ok(())
 }
 

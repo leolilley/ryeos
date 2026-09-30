@@ -1881,12 +1881,13 @@ const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence 
 
 fn runtime_schema_sql() -> String {
     format!(
-        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         external_execution::GUARD_SQL,
         ryeos_state::external_execution::journal::CHANNEL_SQL,
         external_execution::JOURNAL_SQL,
         external_execution::QUALIFICATION_LOCAL_START_SQL,
         external_execution::QUALIFICATION_GUEST_SCRATCH_SQL,
+        external_execution::RELAY_TRANSFER_SQL,
         scoped_child_attempt::JOURNAL_SQL,
         runtime_snapshot_bootstrap::JOURNAL_SQL,
         runtime_snapshot_bootstrap_termination::JOURNAL_SQL,
@@ -2683,7 +2684,8 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // settlement marker, separately from observation-driven turn completion.
 // Epoch 114 retained a one-use Q guest-input scratch intent before Create.
 // Epoch 115 adds exact original-descriptor physical removal and Closed evidence.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 115;
+// Epoch 116 retains one-use Render Q relay transfer intents and exact file bytes.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 116;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -6485,6 +6487,14 @@ fn ensure_scope_lifetime_resettable(conn: &Connection, stored_epoch: u32) -> Res
             pending == 0,
             "execution-history reset retains Q guest-input scratch custody"
         );
+    }
+    if stored_epoch >= 116 {
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM external_execution_relay_transfer WHERE phase!='terminal_closed'",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(pending == 0, "execution-history reset retains an open external relay transfer");
     }
     // The coarse owner starts with the first scope-capable runtime cut. Older
     // owned epochs could not allocate these resources; never decode their
