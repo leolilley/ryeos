@@ -6419,10 +6419,27 @@ pub(super) mod tests {
                 receipt: receipt.clone(),
             },
         );
+        // Model interruption between the exchange's durable retention and
+        // its no-effect application transaction. Retention alone is not an
+        // applied runtime observation; retry must finish the same signed row.
+        let retained_only =
+            Transaction::new_unchecked(&db.conn, TransactionBehavior::Immediate).unwrap();
+        assert!(
+            journal::append_frame(&retained_only, &NodeJournalOwner, placement, &first_wire,)
+                .unwrap()
+        );
+        retained_only.commit().unwrap();
+        assert!(
+            db.external_runtime_applied_observation(placement)
+                .err()
+                .expect("retained-only runtime frame must not count as applied")
+                .to_string()
+                .contains("has not been applied")
+        );
         let first = db
             .exchange_external_supervisor_frame(placement, &first_wire, &owner, 16, 1024 * 1024)
             .unwrap();
-        assert!(first.incoming_new);
+        assert!(!first.incoming_new);
         let applied: String = db
             .conn
             .query_row(
