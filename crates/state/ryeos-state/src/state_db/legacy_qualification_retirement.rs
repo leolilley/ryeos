@@ -19,7 +19,11 @@ use crate::recovery::CasMutationGuard;
 
 const NAMESPACE: &str = "retained-product-qualifications";
 const RETIRED_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v5";
+// v2 retains each moved signed head in an exact recovery slot. v1 unlink
+// intents cannot be interpreted as move outcomes on retry.
+const INTENT_SCHEMA: u32 = 2;
 const MARKER: &str = "legacy-product-qualification-retirement.json";
+const RETIRED_HEADS: &str = "legacy-product-qualification-retired-heads";
 const MAX_MARKER_BYTES: u64 = 256 * 1024;
 const MAX_HEAD_BYTES: u64 = 16 * 1024;
 const MAX_ATTESTATION_BYTES: u64 = 1024 * 1024;
@@ -76,7 +80,7 @@ struct RetirementIntent {
 impl RetirementIntent {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 1,
+            self.schema == INTENT_SCHEMA,
             "unsupported qualification retirement intent"
         );
         ensure!(
@@ -341,7 +345,7 @@ impl StateDb {
             );
             let receipt = digest_tree(&archive, Some(&self._runtime_state_directory))?;
             let intent = RetirementIntent {
-                schema: 1,
+                schema: INTENT_SCHEMA,
                 plan_sha256: preview.plan_sha256,
                 heads: preview.heads,
                 archive: receipt,
@@ -366,6 +370,23 @@ impl StateDb {
                 .all(|row| row.signer == lillux::crypto::fingerprint(node_key)),
             "qualification retirement intent belongs to another node"
         );
+        // The intent precedes this directory and every move into it. A moved
+        // head remains available by exact bytes after a crash, while strict
+        // refs enumeration sees only the original per-head lock anchor.
+        let retired_parent = self
+            ._recovery_directory
+            .open_or_create_child(OsStr::new(RETIRED_HEADS), 0o700)?;
+        let retired_root =
+            retired_parent.open_or_create_child(OsStr::new(&intent.plan_sha256), 0o700)?;
+        for name in retired_root.entry_names()? {
+            let coordinate = name
+                .to_str()
+                .context("retired qualification head has a non-UTF8 coordinate")?;
+            ensure!(
+                intent.heads.iter().any(|row| row.coordinate == coordinate),
+                "unreviewed retired qualification head slot exists"
+            );
+        }
         let current = self.inspect_legacy_product_qualification_heads(node_key)?;
         for row in &current {
             ensure!(
@@ -374,21 +395,30 @@ impl StateDb {
             );
         }
         for (index, row) in intent.heads.iter().enumerate() {
+            let retired = retired_root.open_or_create_child(OsStr::new(&row.coordinate), 0o700)?;
+            let retired_bytes = retired_head(&retired)?;
+            if let Some(bytes) = retired_bytes.as_ref() {
+                ensure!(
+                    lillux::sha256_hex(bytes) == row.head_sha256,
+                    "retired qualification head changed its exact bytes"
+                );
+            }
+            let live = current.contains(row);
             ensure!(
-                index >= intent.next_row || !current.contains(row),
-                "previously retired qualification head reappeared"
+                live != retired_bytes.is_some(),
+                "qualification head has contradictory live and retired locations"
             );
-            if index > intent.next_row
+            if index < intent.next_row {
+                ensure!(!live, "previously retired qualification head reappeared");
+            } else if index > intent.next_row
                 || (index == intent.next_row && intent.row_phase == RowPhase::Ready)
             {
-                ensure!(
-                    current.contains(row),
-                    "qualification head disappeared before its removal intent"
-                );
+                ensure!(live, "qualification head moved before its removal intent");
             }
         }
         while intent.next_row < intent.heads.len() {
             let row = &intent.heads[intent.next_row];
+            let retired = retired_root.open_or_create_child(OsStr::new(&row.coordinate), 0o700)?;
             if intent.row_phase == RowPhase::Ready {
                 ensure!(
                     current.contains(row),
@@ -397,37 +427,45 @@ impl StateDb {
                 intent.row_phase = RowPhase::Removing;
                 write_intent(&self._recovery_directory, &intent)?;
             }
-            let lock = crate::refs::GenericHeadLock::acquire_in_refs_directory(
-                &self._refs_directory,
-                NAMESPACE,
-                &row.coordinate,
-            )?;
-            if let Some(head) = crate::refs::read_verified_generic_head_ref_in_directory(
-                &self._refs_directory,
-                NAMESPACE,
-                &row.coordinate,
-                &self.trust_store,
-            )? {
+            if current.contains(row) {
+                let lock = crate::refs::GenericHeadLock::acquire_in_refs_directory(
+                    &self._refs_directory,
+                    NAMESPACE,
+                    &row.coordinate,
+                )?;
+                let head = crate::refs::read_verified_generic_head_ref_in_directory(
+                    &self._refs_directory,
+                    NAMESPACE,
+                    &row.coordinate,
+                    &self.trust_store,
+                )?
+                .context("qualification head disappeared under retirement lock")?;
                 ensure!(
                     head.target_hash == row.target_hash && head.signer == row.signer,
                     "qualification head changed under retirement lock"
                 );
-                let raw = raw_head(&self._refs_directory, &row.coordinate)?
-                    .context("qualification head disappeared under lock")?;
                 ensure!(
-                    lillux::sha256_hex(&raw) == row.head_sha256,
-                    "qualification signed head bytes changed"
-                );
-                ensure!(
-                    crate::refs::remove_generic_head_ref_in_directory(
+                    crate::refs::move_generic_head_ref_to_retirement_directory(
                         &self._refs_directory,
                         NAMESPACE,
                         &row.coordinate,
-                        &lock
+                        &lock,
+                        &retired,
+                        &row.head_sha256,
+                        MAX_HEAD_BYTES,
                     )?,
-                    "qualification signed head disappeared during exact removal"
+                    "qualification signed head could not move into its exact retirement slot"
+                );
+                ensure!(
+                    raw_head(&self._refs_directory, &row.coordinate)?.is_none(),
+                    "qualification signed head remained live after retirement move"
                 );
             }
+            ensure!(
+                retired_head(&retired)?
+                    .is_some_and(|bytes| lillux::sha256_hex(&bytes) == row.head_sha256),
+                "qualification retirement slot lost its exact signed head"
+            );
             intent.next_row += 1;
             intent.row_phase = RowPhase::Ready;
             write_intent(&self._recovery_directory, &intent)?;
@@ -474,6 +512,19 @@ fn raw_head(refs: &lillux::PinnedDirectory, coordinate: &str) -> Result<Option<V
         return Ok(None);
     };
     head_dir
+        .open_pinned_regular(OsStr::new("head"), false)?
+        .map(|file| file.read_bounded(MAX_HEAD_BYTES))
+        .transpose()
+}
+
+fn retired_head(directory: &lillux::PinnedDirectory) -> Result<Option<Vec<u8>>> {
+    for name in directory.entry_names()? {
+        ensure!(
+            name.as_os_str() == OsStr::new("head"),
+            "retired qualification head slot has an unexpected entry"
+        );
+    }
+    directory
         .open_pinned_regular(OsStr::new("head"), false)?
         .map(|file| file.read_bounded(MAX_HEAD_BYTES))
         .transpose()
@@ -753,7 +804,7 @@ mod tests {
     fn retirement_intent_requires_sorted_exact_retired_rows() {
         let rows = vec![head('1'), head('2')];
         let mut intent = RetirementIntent {
-            schema: 1,
+            schema: INTENT_SCHEMA,
             plan_sha256: plan_hash(&rows).unwrap(),
             heads: rows,
             archive: LegacyQualificationArchiveReceipt {
@@ -768,6 +819,9 @@ mod tests {
             row_phase: RowPhase::Ready,
         };
         intent.validate().unwrap();
+        intent.schema = 1;
+        assert!(intent.validate().is_err());
+        intent.schema = INTENT_SCHEMA;
         intent.heads.reverse();
         intent.plan_sha256 = plan_hash(&intent.heads).unwrap();
         assert!(intent.validate().is_err());
