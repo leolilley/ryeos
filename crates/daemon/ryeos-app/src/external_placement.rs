@@ -30,14 +30,16 @@ use crate::runtime_db::external_execution::{
     ExternalAllocationOccurrence, ExternalAllocationOwner, ExternalAllocationPhase,
     ExternalAllocationRecord, ExternalAllocationReservation, ExternalDedicatedSessionOwner,
     ExternalGuestPackageDeliveryCommitment, ExternalNoOccurrenceEvidence,
-    ExternalObservationTiming, ExternalSupervisorActivationIntent,
-    ExternalSupervisorActivationObservation, ExternalSupervisorActivationRecord,
-    ExternalTerminalObservation, ExternalTerminationIntent,
+    ExternalObservationTiming, ExternalRelayBootstrapCommitment,
+    ExternalSupervisorActivationIntent, ExternalSupervisorActivationObservation,
+    ExternalSupervisorActivationRecord, ExternalTerminalObservation, ExternalTerminationIntent,
 };
 use crate::runtime_db::{WorkspaceRecord, WorkspaceState};
 use crate::state::AppState;
 use crate::state_lock::StateLockLease;
+use crate::vault::NodeVault;
 use crate::vault::external_channel::{ExternalChannelAuthority, ExternalChannelAuthorityAccess};
+use crate::vault::external_relay_bootstrap::ExternalRelayBootstrapAccess;
 use crate::vault::placement::PlacementCredential;
 
 /// Trusted controller adapter metadata and offline contract verification. This
@@ -2712,6 +2714,138 @@ fn retained_external_channel_program(
     Ok(program)
 }
 
+/// Read the exact original sealed bootstrap only for the retained Q relay
+/// occurrence. Its guest descriptor numbers are historical import coordinates:
+/// they must never be reopened to recreate guest inputs or retry activation.
+/// This method performs no provider contact or relay reservation.
+pub(crate) fn recover_original_external_relay_bootstrap(
+    state: &AppState,
+    placement: &str,
+) -> Result<crate::vault::external_relay_bootstrap::ProtectedExternalRelayBootstrap> {
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("original relay bootstrap has no allocation")?;
+    ensure!(
+        allocation.phase == ExternalAllocationPhase::Bound
+            && matches!(
+                &allocation.reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(_)
+            ),
+        "original relay bootstrap requires its live Q owner"
+    );
+    let occurrence = allocation
+        .occurrence
+        .as_ref()
+        .context("original relay bootstrap lost its occurrence")?;
+    let retained = state
+        .state_store
+        .retained_external_binding(&allocation.reservation.binding_hash)?
+        .context("original relay bootstrap lost its signed binding")?;
+    let contract = retained.backend_contract();
+    contract.controller_transport.relay()?;
+    let program = retained_external_channel_program(state, &allocation.reservation, &retained)?;
+    let activation = state
+        .state_store
+        .external_supervisor_activation(placement)?
+        .context("original relay bootstrap has no activation intent")?;
+    ensure!(
+        activation
+            .observation
+            .as_ref()
+            .is_none_or(|observation| observation.activation_state == "started"),
+        "original relay bootstrap has supervisor non-start evidence"
+    );
+    let commitment = activation
+        .relay_bootstrap
+        .as_ref()
+        .context("original relay bootstrap has no immutable activation commitment")?;
+    commitment.validate_for(
+        &allocation.reservation,
+        occurrence,
+        &activation.intent,
+        &contract,
+    )?;
+    let authority_access =
+        ExternalChannelAuthorityAccess::new(&allocation.reservation.channel_authority_generation)?;
+    let channel_authority =
+        authority_access.decode(state.vault.external_channel_authority(&authority_access)?)?;
+    ensure!(
+        channel_authority.owner_public_key() == allocation.reservation.channel_owner_public_key
+            && channel_authority.bootstrap_capability_hash()
+                == allocation.reservation.channel_bootstrap_capability_hash,
+        "original relay bootstrap changed its protected channel authority"
+    );
+    let access =
+        ExternalRelayBootstrapAccess::new(placement, &allocation.reservation.request_digest)?;
+    let sealed = state.vault.external_relay_bootstrap(&access)?;
+    let bootstrap = sealed.bootstrap();
+    let signed_import = sealed.signed_import();
+    let signed_import_bytes = zeroize::Zeroizing::new(lillux::canonical_json(
+        &serde_json::to_value(signed_import)?,
+    )?);
+    let owner_bytes: [u8; 32] = STANDARD
+        .decode(&allocation.reservation.channel_owner_public_key)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("original relay owner key changed length"))?;
+    let owner_key = lillux::crypto::VerifyingKey::from_bytes(&owner_bytes)?;
+    let signature_bytes: [u8; 64] = hex::decode(&signed_import.signature_hex)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("original signed import signature changed length"))?;
+    use lillux::crypto::Verifier as _;
+    let signing_bytes = zeroize::Zeroizing::new(signed_import.authorization.signing_bytes()?);
+    owner_key.verify(
+        &signing_bytes,
+        &lillux::crypto::Signature::from_bytes(&signature_bytes),
+    )?;
+    let ticket = &signed_import.authorization.ticket;
+    ensure!(
+        bootstrap.digest()? == commitment.bootstrap_sha256
+            && lillux::sha256_hex(signed_import_bytes.as_bytes())
+                == commitment.signed_import_sha256
+            && bootstrap.placement_thread_id == allocation.reservation.placement_thread_id
+            && bootstrap.occurrence_id == occurrence.occurrence_id
+            && bootstrap.allocation_request_digest == allocation.reservation.request_digest
+            && bootstrap.admitted_capsule_hash == allocation.reservation.admitted_capsule_hash
+            && bootstrap.base_snapshot_hash == allocation.reservation.base_snapshot_hash
+            && bootstrap.execution_binding_hash == allocation.reservation.binding_hash
+            && bootstrap.supervisor_runtime_hash == activation.intent.supervisor_runtime_hash
+            && bootstrap.launcher_artifact_hash == contract.launcher_artifact_hash
+            && bootstrap.candidate_program == program
+            && bootstrap.guest_input_identity == activation.intent.guest_input_identity
+            && bootstrap.owner_public_key == allocation.reservation.channel_owner_public_key
+            && lillux::sha256_hex(bootstrap.bootstrap_capability.as_bytes())
+                == allocation.reservation.channel_bootstrap_capability_hash
+            && bootstrap.controller == contract.controller_transport
+            && bootstrap.tls_root_certificates_der_base64
+                == contract.controller_tls_root_certificates_der_base64
+            && bootstrap.attachment_deadline_ms == activation.intent.attachment_deadline_ms
+            && bootstrap.execution_timeout_seconds == activation.intent.execution_timeout_seconds
+            && bootstrap.post_execution_timeout_seconds
+                == activation.intent.post_execution_timeout_seconds
+            && bootstrap.channel_max_bytes == activation.intent.channel_max_bytes
+            && bootstrap.candidate_export_max_bytes == 0,
+        "sealed original relay bootstrap contradicts its signed activation"
+    );
+    ensure!(
+        signed_import.authorization.activation_request_digest
+            == activation.intent.activation_request_digest
+            && signed_import.authorization.guest_runtime_manifest_hash
+                == contract.guest_runtime_manifest_hash
+            && ticket.payload_sha256 == activation.intent.delivery.payload_sha256
+            && ticket.manifest_sha256 == activation.intent.delivery.manifest_sha256
+            && ticket.framed_bytes == activation.intent.delivery.framed_bytes
+            && ticket.regular_bytes == activation.intent.delivery.regular_bytes
+            && ticket.supervisor_sha256 == contract.supervisor_artifact_hash
+            && ticket.launcher_sha256 == contract.launcher_artifact_hash,
+        "original signed guest import changed durable package delivery"
+    );
+    Ok(sealed)
+}
+
 fn build_external_execution_channel_binding(
     reservation: &ExternalAllocationReservation,
     occurrence: &ExternalAllocationOccurrence,
@@ -2913,6 +3047,7 @@ impl<'a> ExternalPlacementOwner<'a> {
         );
         Ok(PreparedExternalPlacement {
             state_store: self.state.state_store.clone(),
+            vault: self.state.vault.clone(),
             backend,
             contract,
             credential,
@@ -2982,6 +3117,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             .reserve_external_allocation(&record.reservation, &binding)?;
         Ok(PreparedExternalPlacement {
             state_store: self.state.state_store.clone(),
+            vault: self.state.vault.clone(),
             backend,
             contract,
             credential,
@@ -3091,6 +3227,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             .reserve_external_allocation(&record.reservation, &binding)?;
         Ok(PreparedExternalPlacement {
             state_store: self.state.state_store.clone(),
+            vault: self.state.vault.clone(),
             backend,
             contract,
             credential,
@@ -3304,6 +3441,7 @@ impl<'a> ExternalPlacementOwner<'a> {
         };
         Ok(PreparedExternalPlacement {
             state_store: self.state.state_store.clone(),
+            vault: self.state.vault.clone(),
             backend,
             contract,
             credential,
@@ -3601,6 +3739,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             .reserve_external_allocation(&reservation, &binding)?;
         Ok(PreparedExternalPlacement {
             state_store: self.state.state_store.clone(),
+            vault: self.state.vault.clone(),
             backend,
             contract,
             credential,
@@ -5217,6 +5356,7 @@ fn require_current_contact_binding<'a>(
 
 pub(crate) struct PreparedExternalPlacement {
     state_store: Arc<crate::state_store::StateStore>,
+    vault: Arc<dyn NodeVault>,
     backend: Arc<dyn ExternalPlacementBackend>,
     contract: ExternalPlacementBackendContract,
     credential: PlacementCredential,
@@ -5398,6 +5538,7 @@ impl PreparedExternalPlacement {
                 Ok(ExternalPlacementContactDecision::Reconcile(
                     ExternalPlacementReconciliation {
                         state_store: self.state_store,
+                        vault: self.vault,
                         backend: self.backend,
                         contract: self.contract,
                         credential: self.credential,
@@ -5442,6 +5583,7 @@ pub(crate) struct ExternalPlacementContactPermit {
 /// authority. It deliberately has no conversion into a new contact permit.
 pub(crate) struct ExternalPlacementReconciliation {
     state_store: Arc<crate::state_store::StateStore>,
+    vault: Arc<dyn NodeVault>,
     backend: Arc<dyn ExternalPlacementBackend>,
     contract: ExternalPlacementBackendContract,
     credential: PlacementCredential,
@@ -5737,9 +5879,60 @@ impl ExternalPlacementReconciliation {
                     return Err(error);
                 }
             }
-            let claim = self
-                .state_store
-                .begin_external_supervisor_activation(placement, &intent);
+            let claim = (|| {
+                let relay = if matches!(
+                    &self.contract.controller_transport,
+                    ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_)
+                ) {
+                    let bootstrap = activation.bootstrap();
+                    let signed = activation.signed_import_authorization()?;
+                    signed.validate_shape()?;
+                    let bootstrap_sha256 = bootstrap.digest()?;
+                    ensure!(
+                        signed.authorization.ticket.bootstrap_sha256 == bootstrap_sha256
+                            && signed.authorization.ticket.guest_input_identity
+                                == intent.guest_input_identity
+                            && signed.authorization.ticket.activation_request_digest
+                                == intent.activation_request_digest,
+                        "original signed guest import changed its relay bootstrap"
+                    );
+                    let signed_import_bytes = zeroize::Zeroizing::new(lillux::canonical_json(
+                        &serde_json::to_value(signed)?,
+                    )?);
+                    let commitment = ExternalRelayBootstrapCommitment {
+                        schema: 1,
+                        placement_thread_id: current.reservation.placement_thread_id.clone(),
+                        allocation_request_digest: current.reservation.request_digest.clone(),
+                        occurrence_id: occurrence.occurrence_id.clone(),
+                        activation_request_digest: intent.activation_request_digest.clone(),
+                        guest_input_identity: intent.guest_input_identity.clone(),
+                        bootstrap_sha256,
+                        signed_import_sha256: lillux::sha256_hex(signed_import_bytes.as_bytes()),
+                    };
+                    commitment.validate_for(
+                        &current.reservation,
+                        occurrence,
+                        &intent,
+                        &self.contract,
+                    )?;
+                    let access = ExternalRelayBootstrapAccess::new(
+                        placement,
+                        &current.reservation.request_digest,
+                    )?;
+                    self.vault
+                        .retain_external_relay_bootstrap(&access, bootstrap, signed)?;
+                    Some(commitment)
+                } else {
+                    None
+                };
+                if let Some(commitment) = relay.as_ref() {
+                    self.state_store
+                        .begin_external_relay_supervisor_activation(placement, &intent, commitment)
+                } else {
+                    self.state_store
+                        .begin_external_supervisor_activation(placement, &intent)
+                }
+            })();
             if !matches!(claim.as_ref(), Ok(true)) {
                 let cleanup = activation.discard_guest_package();
                 if let Err(cleanup) = cleanup {
@@ -8400,6 +8593,7 @@ mod tests {
     ) -> PreparedExternalPlacement {
         PreparedExternalPlacement {
             state_store: store.clone(),
+            vault: Arc::new(crate::vault::EmptyVault),
             backend,
             contract: binding.backend_contract(),
             credential: credential(&InstalledExternalExecutionBinding::test_fixture()),

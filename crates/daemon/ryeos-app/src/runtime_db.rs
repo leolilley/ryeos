@@ -1881,7 +1881,7 @@ const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence 
 
 fn runtime_schema_sql() -> String {
     format!(
-        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         external_execution::GUARD_SQL,
         ryeos_state::external_execution::journal::CHANNEL_SQL,
         external_execution::JOURNAL_SQL,
@@ -1896,6 +1896,7 @@ fn runtime_schema_sql() -> String {
         runtime_snapshot_qualification::JOURNAL_SQL,
         restored_verifier_attempt::JOURNAL_SQL,
         runtime_snapshot_qualification_termination::JOURNAL_SQL,
+        external_execution::RELAY_BOOTSTRAP_SQL,
     )
 }
 
@@ -2685,7 +2686,8 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 114 retained a one-use Q guest-input scratch intent before Create.
 // Epoch 115 adds exact original-descriptor physical removal and Closed evidence.
 // Epoch 116 retains one-use Render Q relay transfer intents and exact file bytes.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 116;
+// Epoch 117 binds the original sealed relay bootstrap to its activation.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 117;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2996,6 +2998,23 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "observation_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_relay_bootstrap",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "commitment_json",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
@@ -6494,7 +6513,10 @@ fn ensure_scope_lifetime_resettable(conn: &Connection, stored_epoch: u32) -> Res
             [],
             |row| row.get(0),
         )?;
-        ensure!(pending == 0, "execution-history reset retains an open external relay transfer");
+        ensure!(
+            pending == 0,
+            "execution-history reset retains an open external relay transfer"
+        );
     }
     // The coarse owner starts with the first scope-capable runtime cut. Older
     // owned epochs could not allocate these resources; never decode their

@@ -19,6 +19,7 @@ mod qualification_guest_scratch;
 mod qualification_local_start;
 mod qualification_process;
 mod qualification_transcript;
+mod relay_bootstrap;
 mod relay_transfer;
 pub(crate) use channel::{
     ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
@@ -48,8 +49,12 @@ pub(crate) use qualification_process::{
 pub(crate) use qualification_transcript::{
     QualificationWorkerTranscriptRecord, QualificationWorkerTranscriptSource,
 };
+pub(crate) use relay_bootstrap::ExternalRelayBootstrapCommitment;
+pub(super) use relay_bootstrap::JOURNAL_SQL as RELAY_BOOTSTRAP_SQL;
 pub(super) use relay_transfer::JOURNAL_SQL as RELAY_TRANSFER_SQL;
-pub(crate) use relay_transfer::{RelayDirection, RelayKind, RelayTransferIntent, RelayTransferPhase, RelayTransferRecord};
+pub(crate) use relay_transfer::{
+    RelayDirection, RelayKind, RelayTransferIntent, RelayTransferPhase, RelayTransferRecord,
+};
 
 pub(super) const FIRST_EPOCH: u32 = 40;
 pub const EXTERNAL_ALLOCATION_RESERVATION_SCHEMA: u32 = 5;
@@ -1274,6 +1279,7 @@ impl ExternalSupervisorActivationObservation {
 pub(crate) struct ExternalSupervisorActivationRecord {
     pub intent: ExternalSupervisorActivationIntent,
     pub observation: Option<ExternalSupervisorActivationObservation>,
+    pub relay_bootstrap: Option<ExternalRelayBootstrapCommitment>,
 }
 
 /// Durable request written before the one allowed termination mutation. The
@@ -1783,6 +1789,27 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
                     .context("external supervisor activation lost its occurrence")?,
                 &retained.backend_contract(),
             )?;
+            relay_bootstrap::read_commitment(
+                conn,
+                &record.reservation,
+                record
+                    .occurrence
+                    .as_ref()
+                    .context("relay bootstrap lost its original occurrence")?,
+                &intent,
+                &retained.backend_contract(),
+            )?;
+        } else {
+            ensure!(
+                read_canonical_evidence::<ExternalRelayBootstrapCommitment>(
+                    conn,
+                    "external_execution_relay_bootstrap",
+                    "commitment_json",
+                    &placement,
+                )?
+                .is_none(),
+                "relay bootstrap commitment has no original activation"
+            );
         }
         validate_lifecycle_evidence(conn, &record)?;
     }
@@ -1794,6 +1821,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     qualification_command::validate_commands(conn)?;
     qualification_batch::validate_batches(conn)?;
     qualification_transcript::validate_transcripts(conn)?;
+    relay_bootstrap::validate_no_orphans(conn)?;
     relay_transfer::validate_transfers(conn)?;
     Ok(())
 }
@@ -2434,6 +2462,28 @@ impl RuntimeDb {
         placement: &str,
         intent: &ExternalSupervisorActivationIntent,
     ) -> Result<bool> {
+        self.begin_external_supervisor_activation_with_relay(placement, intent, None)
+    }
+
+    pub(crate) fn begin_external_relay_supervisor_activation(
+        &self,
+        placement: &str,
+        intent: &ExternalSupervisorActivationIntent,
+        relay_bootstrap: &ExternalRelayBootstrapCommitment,
+    ) -> Result<bool> {
+        self.begin_external_supervisor_activation_with_relay(
+            placement,
+            intent,
+            Some(relay_bootstrap),
+        )
+    }
+
+    fn begin_external_supervisor_activation_with_relay(
+        &self,
+        placement: &str,
+        intent: &ExternalSupervisorActivationIntent,
+        relay_bootstrap: Option<&ExternalRelayBootstrapCommitment>,
+    ) -> Result<bool> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read(&tx, placement)?.context("external allocation is absent")?;
         let occurrence = record
@@ -2448,6 +2498,22 @@ impl RuntimeDb {
             occurrence,
             &retained.backend_contract(),
         )?;
+        match (&retained.backend_contract().controller_transport, relay_bootstrap) {
+            (
+                ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_),
+                Some(commitment),
+            ) => commitment.validate_for(
+                &record.reservation,
+                occurrence,
+                intent,
+                &retained.backend_contract(),
+            )?,
+            (
+                ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_),
+                None,
+            ) => {}
+            _ => bail!("external activation changed its original relay bootstrap custody"),
+        }
         let prior: Option<ExternalSupervisorActivationIntent> = read_canonical_evidence(
             &tx,
             "external_execution_supervisor_activation_intent",
@@ -2458,6 +2524,18 @@ impl RuntimeDb {
             ensure!(
                 prior == *intent,
                 "external supervisor activation intent changed"
+            );
+            ensure!(
+                relay_bootstrap::read_commitment(
+                    &tx,
+                    &record.reservation,
+                    occurrence,
+                    &prior,
+                    &retained.backend_contract(),
+                )?
+                .as_ref()
+                    == relay_bootstrap,
+                "external supervisor activation changed its original relay bootstrap"
             );
             tx.commit()?;
             return Ok(false);
@@ -2480,6 +2558,15 @@ impl RuntimeDb {
                 lillux::canonical_json(&serde_json::to_value(intent)?)?
             ],
         )?;
+        if let Some(commitment) = relay_bootstrap {
+            tx.execute(
+                "INSERT INTO external_execution_relay_bootstrap VALUES(?1,?2)",
+                params![
+                    placement,
+                    lillux::canonical_json(&serde_json::to_value(commitment)?)?
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(true)
     }
@@ -2510,6 +2597,13 @@ impl RuntimeDb {
             occurrence,
             &retained.backend_contract(),
         )?;
+        let relay_bootstrap = relay_bootstrap::read_commitment(
+            &self.conn,
+            &record.reservation,
+            occurrence,
+            &intent,
+            &retained.backend_contract(),
+        )?;
         let observation = read_canonical_evidence::<ExternalSupervisorActivationObservation>(
             &self.conn,
             "external_execution_supervisor_activation_observation",
@@ -2522,6 +2616,7 @@ impl RuntimeDb {
         Ok(Some(ExternalSupervisorActivationRecord {
             intent,
             observation,
+            relay_bootstrap,
         }))
     }
 

@@ -16766,6 +16766,17 @@ impl StateStore {
             .begin_external_supervisor_activation(placement, intent)
     }
 
+    pub(crate) fn begin_external_relay_supervisor_activation(
+        &self,
+        placement: &str,
+        intent: &runtime_db::external_execution::ExternalSupervisorActivationIntent,
+        relay_bootstrap: &runtime_db::external_execution::ExternalRelayBootstrapCommitment,
+    ) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .begin_external_relay_supervisor_activation(placement, intent, relay_bootstrap)
+    }
+
     /// Author only the original bound occurrence's guest assignment with the
     /// node identity. The qualified guest must already pin this public root;
     /// signing here does not make a provider snapshot qualified or start it.
