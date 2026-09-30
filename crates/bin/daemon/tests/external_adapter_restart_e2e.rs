@@ -1788,6 +1788,7 @@ async fn signed_independent_verifier_qualifies_direct_codex_diagnostic() -> anyh
             "witness_hash":captured_subject["witness_hash"],
             "witness_source":{"kind":"local_capture"},
             "relationship_name":"runtime_to_external_authoring_worker",
+            "project_context":null,
         }),
     )
     .await?;
@@ -1942,6 +1943,7 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
             "witness_hash":captured_subject["witness_hash"],
             "witness_source":{"kind":"local_capture"},
             "relationship_name":"runtime_to_external_authoring_worker",
+            "project_context":null,
         }),
     )
     .await?;
