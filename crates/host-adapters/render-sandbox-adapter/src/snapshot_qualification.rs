@@ -993,14 +993,14 @@ mod tests {
             contact_deadline_exceeded: false,
         };
         let mut attempt = RestoredVerifierAttemptIntent {
-            schema: 1,
+            schema: 2,
             operation_id: String::new(),
             qualification_operation_id: qualification_intent.operation_id.clone(),
             restored_occurrence_id: occurrence.occurrence_id.clone(),
             verifier_artifact_hash: qualification_intent.verifier_artifact_hash.clone(),
             upload_sha256: upload_sha256.clone(),
             upload_bytes: 11,
-            challenge,
+            purpose: ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { challenge },
             attempt_deadline_ms: 42,
         };
         attempt.operation_id = attempt.derived_operation_id().unwrap();
@@ -1034,7 +1034,7 @@ mod tests {
         preflight_verifier_upload_and_routes(&request, &upload, &spec, &settings).unwrap();
         let parsed = parse_restored_verifier_stream(
             &stream,
-            &request.intent.challenge,
+            request.intent.owner_challenge().unwrap(),
             &request.source_intent,
             &request.locator,
             &request.readiness,

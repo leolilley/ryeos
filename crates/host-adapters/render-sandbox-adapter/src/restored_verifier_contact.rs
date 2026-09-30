@@ -76,7 +76,7 @@ pub(crate) fn first_contact(
         "restored verifier upload response exceeds bound"
     );
 
-    let challenge = canonical_json(&request.intent.challenge)?;
+    let challenge = canonical_json(request.intent.owner_challenge()?)?;
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge);
     let command = format!(
         "{RESTORATION_VERIFIER_REMOTE_DIRECTORY}/{RESTORATION_VERIFIER_REMOTE_NAME} --challenge-b64 {encoded}"
@@ -122,7 +122,7 @@ pub(crate) fn first_contact(
     );
     let parsed = crate::snapshot_qualification::parse_restored_verifier_stream(
         &stream,
-        &request.intent.challenge,
+        request.intent.owner_challenge()?,
         &request.source_intent,
         &request.locator,
         &request.readiness,

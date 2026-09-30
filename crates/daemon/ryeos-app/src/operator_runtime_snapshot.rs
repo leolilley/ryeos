@@ -971,21 +971,21 @@ pub fn verify_qualification_occurrence(
         .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
     let now = lillux::time::timestamp_millis();
     let mut intent = RestoredVerifierAttemptIntent {
-        schema: 1,
+        schema: 2,
         operation_id: String::new(),
         qualification_operation_id: qualified.intent.operation_id.clone(),
         restored_occurrence_id: occurrence.occurrence_id.clone(),
         verifier_artifact_hash: qualification.verifier_artifact_hash().into(),
         upload_sha256: upload.sha256().into(),
         upload_bytes: upload.bytes(),
-        challenge: RestoredOwnerChallenge {
+        purpose: ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { challenge: RestoredOwnerChallenge {
             schema: 1,
             protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
             operation_id: source.intent.operation_id.clone(),
             snapshot_id: locator.snapshot_id.clone(),
             restored_occurrence_id: occurrence.occurrence_id.clone(),
             nonce_hex: hex::encode(lillux::crypto::generate_random_bytes::<32>()),
-        },
+        } },
         attempt_deadline_ms: now
             .checked_add(i64::from(qualification.contact_timeout_seconds()) * 1_000)
             .context("restored verifier deadline overflow")?,
@@ -995,7 +995,7 @@ pub fn verify_qualification_occurrence(
         .state_store
         .restored_verifier_attempt(&intent.operation_id)?
     {
-        intent.challenge = existing.intent.challenge.clone();
+        intent.purpose = existing.intent.purpose.clone();
         intent.attempt_deadline_ms = existing.intent.attempt_deadline_ms;
         ensure!(
             intent == existing.intent,
@@ -1367,8 +1367,8 @@ fn verify_probe_restored_verifier_record(
     ensure!(
         retained.phase == RestoredVerifierAttemptPhase::Observed
             && !observation.contact_deadline_exceeded
-            && retained.intent.challenge.operation_id == snapshot.intent.operation_id
-            && retained.intent.challenge.snapshot_id
+            && retained.intent.owner_challenge()?.operation_id == snapshot.intent.operation_id
+            && retained.intent.owner_challenge()?.snapshot_id
                 == snapshot
                     .locator
                     .as_ref()
@@ -2558,14 +2558,14 @@ mod tests {
             nonce_hex: "7".repeat(64),
         };
         let mut verifier_intent = RestoredVerifierAttemptIntent {
-            schema: 1,
+            schema: 2,
             operation_id: String::new(),
             qualification_operation_id: qualification.intent.operation_id.clone(),
             restored_occurrence_id: occurrence.occurrence_id.clone(),
             verifier_artifact_hash: qualification.intent.verifier_artifact_hash.clone(),
             upload_sha256: "8".repeat(64),
             upload_bytes: 1024,
-            challenge: challenge.clone(),
+            purpose: ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { challenge: challenge.clone() },
             attempt_deadline_ms: 1_200_000,
         };
         verifier_intent.operation_id = verifier_intent.derived_operation_id().unwrap();

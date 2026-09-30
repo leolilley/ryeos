@@ -498,21 +498,21 @@ mod tests {
         assert!(db.bind_snapshot_qualification_occurrence(&changed).is_err());
 
         let mut verifier = RestoredVerifierAttemptIntent {
-            schema: 1,
+            schema: 2,
             operation_id: String::new(),
             qualification_operation_id: intent.operation_id.clone(),
             restored_occurrence_id: "sbx-restored".into(),
             verifier_artifact_hash: intent.verifier_artifact_hash.clone(),
             upload_sha256: "4".repeat(64),
             upload_bytes: 1024,
-            challenge: RestoredOwnerChallenge {
+            purpose: ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { challenge: RestoredOwnerChallenge {
                 schema: 1,
                 protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
                 operation_id: source.operation_id.clone(),
                 snapshot_id: locator.snapshot_id.clone(),
                 restored_occurrence_id: "sbx-restored".into(),
                 nonce_hex: "5".repeat(64),
-            },
+            } },
             attempt_deadline_ms: now + 60_000,
         };
         verifier.operation_id = verifier.derived_operation_id().unwrap();
