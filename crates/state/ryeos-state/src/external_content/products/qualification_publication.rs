@@ -347,6 +347,25 @@ pub fn verify_retained_verifier_realization(
     limits: ObjectClosureLimits,
     guard: &CasMutationGuard,
 ) -> anyhow::Result<()> {
+    evidence.validate()?;
+    verify_retained_execution_verifiers(
+        authority,
+        &evidence.execution_verifiers().collect::<Vec<_>>(),
+        &[],
+        limits,
+        guard,
+    )
+}
+
+/// Shared immutable execution-material check. Source-specific testimony owners
+/// must validate their own evidence and authenticate its issuer separately.
+pub(crate) fn verify_retained_execution_verifiers(
+    authority: &PinnedStateAuthority,
+    verifiers: &[&super::qualification::ProductQualificationVerifier],
+    source_roots: &[String],
+    limits: ObjectClosureLimits,
+    guard: &CasMutationGuard,
+) -> anyhow::Result<()> {
     use crate::object_closure::{
         collect_object_closure_with_cas_and_limits, load_exact_cas_object_with_cas,
     };
@@ -356,21 +375,22 @@ pub fn verify_retained_verifier_realization(
         MAX_EXECUTION_REALIZATION_BYTES,
     };
     authority.ensure_guard(guard)?;
-    evidence.validate()?;
     let cas = authority.cas_store()?;
     // One aggregate closure budget covers root and probe together. Per-node
     // traversal would both repeat shared work and multiply the caller's bound.
     let closure = collect_object_closure_with_cas_and_limits(
         &cas,
-        evidence
-            .execution_verifiers()
-            .map(|verifier| verifier.execution_realization_hash.clone()),
+        source_roots.iter().cloned().chain(
+            verifiers
+                .iter()
+                .map(|verifier| verifier.execution_realization_hash.clone()),
+        ),
         limits,
     )?;
     if !closure.is_complete() {
         bail!("qualification verifier execution realization closure is incomplete");
     }
-    for verifier in evidence.execution_verifiers() {
+    for verifier in verifiers {
         let value = load_exact_cas_object_with_cas(
             &cas,
             &verifier.execution_realization_hash,

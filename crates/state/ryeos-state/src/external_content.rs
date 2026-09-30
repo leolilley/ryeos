@@ -10,6 +10,7 @@ pub mod products;
 pub mod qualification_allowance;
 pub mod qualification_evidence;
 pub mod qualification_execution;
+pub mod qualification_publication;
 pub mod qualification_purpose;
 pub mod qualification_subject;
 pub mod realization_verification;

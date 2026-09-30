@@ -1,0 +1,8 @@
+kind: service
+endpoint: external-content.qualify-content
+required_caps: ["ryeos.execute.service.external-content/qualify-content"]
+schema:
+  launch: object
+  verifier_chain_root_id: string
+  verifier_thread_id: string
+description: Publish exact acquired-content testimony from an accepted and independently settled verifier; caller evidence and claims are forbidden

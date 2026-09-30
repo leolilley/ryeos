@@ -23,7 +23,9 @@ use crate::managed_external_content_operation::{
 };
 use crate::{handler_context::HandlerContext, state::AppState};
 
-pub use super::product_qualification::content_proof::{ContentQualificationProofRequest, prove};
+pub use super::product_qualification::content_proof::{
+    ContentQualificationProofRequest, ContentQualificationResponse, prove, qualify,
+};
 
 /// Caller-owned coordinates only. Policy, parameters, claims, subject bytes
 /// and verifier selection must come from the authenticated consumer source.

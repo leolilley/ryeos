@@ -12,6 +12,8 @@ use super::products::qualification::{
 use super::qualification_purpose::{QualificationLaunchPurpose, QualificationSubject};
 
 pub const CONTENT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.content_qualification_evidence.v1";
+pub const CONTENT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.content_qualification.v1";
+pub const CONTENT_QUALIFICATION_CLAIM: &str = "activated_content_qualified";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +27,55 @@ pub struct ContentQualificationEvidence {
 }
 
 impl ContentQualificationEvidence {
+    /// Signing must be called by the authenticated proof/publication owner.
+    /// This structural helper does not corroborate execution or grant claims.
+    pub fn sign_attestation(
+        &self,
+        signer: &dyn crate::Signer,
+        issued_at: String,
+        expires_at: Option<String>,
+    ) -> anyhow::Result<crate::objects::Attestation> {
+        self.validate()?;
+        crate::objects::Attestation::unsigned(
+            self.result.subject_manifest_hash.clone(),
+            CONTENT_QUALIFICATION_CLAIM.into(),
+            CONTENT_QUALIFICATION_ATTESTATION_POLICY.into(),
+            issued_at,
+            expires_at,
+            serde_json::to_value(self)?,
+        )
+        .sign(signer)
+    }
+
+    pub fn from_attestation(attestation: &crate::objects::Attestation) -> anyhow::Result<Self> {
+        attestation.validate()?;
+        if attestation.claim != CONTENT_QUALIFICATION_CLAIM
+            || attestation.policy != CONTENT_QUALIFICATION_ATTESTATION_POLICY
+        {
+            bail!("attestation is not activated-content qualification testimony");
+        }
+        let evidence = Self::from_value(&attestation.evidence)?;
+        if attestation.subject_hash != evidence.result.subject_manifest_hash {
+            bail!("content qualification attestation contradicts its admitted subject");
+        }
+        Ok(evidence)
+    }
+
+    /// Exact issuer and launch-owner authentication. Expiry, published-head
+    /// authority and current-source eligibility are separate admission checks.
+    pub fn verify_attestation_for_owner(
+        attestation: &crate::objects::Attestation,
+        node_key: &lillux::crypto::VerifyingKey,
+        owner_fingerprint: &str,
+    ) -> anyhow::Result<Self> {
+        attestation.verify_with_key(node_key)?;
+        let evidence = Self::from_attestation(attestation)?;
+        if evidence.purpose.owner_fingerprint != owner_fingerprint {
+            bail!("content qualification belongs to another launch owner");
+        }
+        Ok(evidence)
+    }
+
     pub fn from_value(value: &Value) -> anyhow::Result<Self> {
         if serde_json::to_vec(value)?.len() > MAX_PRODUCT_QUALIFICATION_EVIDENCE_BYTES {
             bail!("content qualification evidence exceeds its bound");
