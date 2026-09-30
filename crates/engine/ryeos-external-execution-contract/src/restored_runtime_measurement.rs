@@ -22,7 +22,7 @@ pub const CONSUMER_VERIFIER_REMOTE_NAME: &str = "ryeos-external-guest-consumer-v
 pub const MAX_RESTORATION_VERIFIER_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_RESTORED_OWNER_CHALLENGE_BYTES: usize = 4096;
 pub const MAX_RESTORED_OWNER_RESULT_BYTES: usize = 4096;
-pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v2";
+pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v3";
 pub const MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES: usize = 32 * 1024;
 // Complete canonical product-verifier evidence, not decoded transcript size.
 pub const MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES: u64 = 5 * 1024 * 1024;
@@ -164,12 +164,55 @@ pub struct ConsumerRuntimeVerificationCoordinate {
 pub struct ConsumerRuntimeVerifierSelection {
     pub scenario_source_digest: String,
     pub verifier_artifact_hash: String,
+    pub archive_budget: ConsumerArchiveBudget,
+}
+
+/// Protected node resource allowance, not a new logical contact coordinate.
+/// Full selection equality is retained and rechecked by the attempt journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerArchiveBudget {
+    pub maximum_entries: usize,
+    pub maximum_regular_bytes: u64,
+    pub maximum_framed_bytes: u64,
+}
+
+impl ConsumerArchiveBudget {
+    pub fn new(
+        maximum_entries: usize,
+        maximum_regular_bytes: u64,
+        maximum_framed_bytes: u64,
+    ) -> Result<Self> {
+        let budget = Self {
+            maximum_entries,
+            maximum_regular_bytes,
+            maximum_framed_bytes,
+        };
+        budget.validate()?;
+        Ok(budget)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.maximum_entries > 0
+                && self.maximum_entries <= crate::staging_package::MAX_GUEST_STAGING_ENTRIES
+                && self.maximum_regular_bytes > 0
+                && self.maximum_framed_bytes <= 4 * 1024 * 1024 * 1024
+                && self
+                    .maximum_regular_bytes
+                    .checked_add(1024)
+                    .is_some_and(|minimum| minimum <= self.maximum_framed_bytes),
+            "consumer archive budget is outside finite staging bounds"
+        );
+        Ok(())
+    }
 }
 
 impl ConsumerRuntimeVerifierSelection {
     pub fn validate(&self) -> Result<()> {
         require_hash(&self.scenario_source_digest, "consumer scenario source")?;
-        require_hash(&self.verifier_artifact_hash, "consumer verifier artifact")
+        require_hash(&self.verifier_artifact_hash, "consumer verifier artifact")?;
+        self.archive_budget.validate()
     }
 
     pub fn validate_coordinate(
@@ -261,7 +304,75 @@ pub struct RestoredVerifierAdapterRequest {
     pub upload_sha256: String,
 }
 
+/// Bounded guest input for the existing consumer attempt. It carries no token,
+/// credential, descriptor coordinate or replacement execution identity. The
+/// transport owner must authenticate delivery; parsing is data agreement only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerRuntimeChallenge {
+    pub schema: u32,
+    pub intent: RestoredVerifierAttemptIntent,
+    pub selection: ConsumerRuntimeVerifierSelection,
+}
+
+impl ConsumerRuntimeChallenge {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(self.schema == 1, "unsupported consumer runtime challenge");
+        let RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &self.intent.purpose
+        else {
+            anyhow::bail!("owner measurement cannot use consumer runtime challenge");
+        };
+        self.selection.validate_coordinate(coordinate)?;
+        self.intent.consumer_challenge_digest()?;
+        require_hash(&self.intent.upload_sha256, "consumer challenge upload")?;
+        ensure!(
+            self.intent.verifier_artifact_hash == self.selection.verifier_artifact_hash
+                && self.intent.upload_bytes > 0
+                && self.intent.upload_bytes <= self.selection.archive_budget.maximum_framed_bytes
+                && self.intent.attempt_deadline_ms > 0,
+            "consumer runtime challenge differs from retained selection or upload budget"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= MAX_RESTORED_OWNER_CHALLENGE_BYTES + 2048,
+            "consumer runtime challenge exceeds its envelope"
+        );
+        Ok(())
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        canonical_json(self)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        ensure!(
+            !bytes.is_empty() && bytes.len() <= MAX_RESTORED_OWNER_CHALLENGE_BYTES + 2048,
+            "consumer runtime challenge exceeds its envelope"
+        );
+        let challenge: Self = serde_json::from_slice(bytes)?;
+        challenge.validate()?;
+        ensure!(
+            canonical_json(&challenge)? == bytes,
+            "consumer runtime challenge is not canonical"
+        );
+        Ok(challenge)
+    }
+}
+
 impl RestoredVerifierAdapterRequest {
+    pub fn consumer_challenge(&self) -> Result<ConsumerRuntimeChallenge> {
+        self.validate()?;
+        let challenge = ConsumerRuntimeChallenge {
+            schema: 1,
+            intent: self.intent.clone(),
+            selection: self
+                .consumer_selection
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("consumer challenge has no protected selection"))?,
+        };
+        challenge.validate()?;
+        Ok(challenge)
+    }
     pub fn validate(&self) -> Result<()> {
         match (&self.intent.purpose, &self.consumer_selection) {
             (RemoteVerificationPurpose::OwnerMeasurement { .. }, None) => {
@@ -525,6 +636,25 @@ impl RemoteVerificationPurpose {
 }
 
 impl RestoredVerifierAttemptIntent {
+    /// Exact remote delivery root. Consumer archives never share a directory
+    /// with prerequisite owner measurement or another retained attempt.
+    /// This is a bounded path commitment, not filesystem/provider authority.
+    pub fn remote_upload_directory(&self) -> Result<String> {
+        require_hash(&self.operation_id, "verifier attempt")?;
+        ensure!(
+            self.operation_id == self.derived_operation_id()?,
+            "verifier upload root has no exact attempt identity"
+        );
+        Ok(match &self.purpose {
+            RemoteVerificationPurpose::OwnerMeasurement { .. } => {
+                RESTORATION_VERIFIER_REMOTE_DIRECTORY.into()
+            }
+            RemoteVerificationPurpose::ConsumerRuntime { .. } => format!(
+                "{RESTORATION_VERIFIER_REMOTE_DIRECTORY}/consumer-{}",
+                self.operation_id
+            ),
+        })
+    }
     /// Fresh result binding, deliberately distinct from logical attempt
     /// identity. A changed nonce cannot mint contact but must invalidate an
     /// old consumer response. This commitment grants no execution authority.
@@ -584,7 +714,7 @@ impl RestoredVerifierAttemptIntent {
                 && self.verifier_artifact_hash == selection.verifier_artifact_hash
                 && !occurrence.contact_deadline_exceeded
                 && self.upload_bytes > 0
-                && self.upload_bytes <= MAX_RESTORATION_VERIFIER_BYTES + 16 * 1024
+                && self.upload_bytes <= selection.archive_budget.maximum_framed_bytes
                 && self.attempt_deadline_ms > 0,
             "consumer verifier attempt differs from protected occurrence or accepted coordinate"
         );
@@ -793,6 +923,32 @@ fn require_hash(value: &str, label: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn consumer_archive_budget_is_required_finite_and_checked() {
+        use super::{ConsumerArchiveBudget, ConsumerRuntimeVerifierSelection};
+        let budget = ConsumerArchiveBudget::new(16, 4096, 8192).unwrap();
+        assert_eq!(budget.maximum_regular_bytes, 4096);
+        for (entries, regular, framed) in [
+            (0, 4096, 8192),
+            (16, 0, 8192),
+            (16, u64::MAX, u64::MAX),
+            (16, 8192, 8192),
+            (16, 4096, 4 * 1024 * 1024 * 1024 + 1),
+            (
+                crate::staging_package::MAX_GUEST_STAGING_ENTRIES + 1,
+                4096,
+                8192,
+            ),
+        ] {
+            assert!(ConsumerArchiveBudget::new(entries, regular, framed).is_err());
+        }
+        assert!(
+            serde_json::from_value::<ConsumerRuntimeVerifierSelection>(serde_json::json!({
+                "scenario_source_digest": "a".repeat(64), "verifier_artifact_hash": "b".repeat(64),
+            }))
+            .is_err()
+        );
+    }
+    #[test]
     fn consumer_coordinate_binds_each_authoritative_identity() {
         let coordinate = super::ConsumerRuntimeVerificationCoordinate {
             schema: 1,
@@ -810,6 +966,7 @@ mod tests {
         let selection = super::ConsumerRuntimeVerifierSelection {
             scenario_source_digest: coordinate.scenario_source_digest.clone(),
             verifier_artifact_hash: "3".repeat(64),
+            archive_budget: super::ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
         };
         selection.validate_coordinate(&coordinate).unwrap();
         let mut mismatched = selection.clone();
@@ -905,6 +1062,33 @@ mod tests {
         };
         let consumer_identity = attempt.derived_operation_id().unwrap();
         attempt.operation_id = consumer_identity.clone();
+        let challenge = ConsumerRuntimeChallenge {
+            schema: 1,
+            intent: attempt.clone(),
+            selection: ConsumerRuntimeVerifierSelection {
+                scenario_source_digest: "c".repeat(64),
+                verifier_artifact_hash: "2".repeat(64),
+                archive_budget: ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
+            },
+        };
+        let encoded = challenge.canonical_bytes().unwrap();
+        assert_eq!(
+            ConsumerRuntimeChallenge::parse(&encoded).unwrap(),
+            challenge
+        );
+        let mut noncanonical = encoded;
+        noncanonical.push(b'\n');
+        assert!(ConsumerRuntimeChallenge::parse(&noncanonical).is_err());
+        let mut substituted = challenge.clone();
+        substituted.selection.verifier_artifact_hash = "9".repeat(64);
+        assert!(substituted.validate().is_err());
+        substituted = challenge;
+        substituted.intent.upload_bytes = 8193;
+        assert!(substituted.validate().is_err());
+        assert_eq!(
+            attempt.remote_upload_directory().unwrap(),
+            format!("{RESTORATION_VERIFIER_REMOTE_DIRECTORY}/consumer-{consumer_identity}")
+        );
         let fresh_challenge = attempt.consumer_challenge_digest().unwrap();
         assert_ne!(consumer_identity, identity);
         assert!(attempt.owner_challenge().is_err());

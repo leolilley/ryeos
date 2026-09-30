@@ -488,20 +488,25 @@ fn preflight_verifier_upload_and_routes(
     request.validate()?;
     upload.require_owned_regular()?;
     let observation = upload.regular_file_observation()?;
+    let expected_mode = match &request.intent.purpose {
+        ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { .. } => 0o600,
+        ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime { .. } => 0o400,
+    };
     ensure!(
-        observation.full_permission_mode()? == 0o600
+        observation.full_permission_mode()? == expected_mode
             && observation.size() == request.upload_bytes
             && upload.digest_regular_file_stable_exact(&observation)? == request.upload_sha256,
         "sealed restored verifier upload differs from retained attempt"
     );
+    let upload_directory = request.intent.remote_upload_directory()?;
     let (upload_route, run_route) = spec.qualification_verifier_routes();
     for (route, operation, path) in [
         (
             upload_route,
             crate::proxy_route::ProxyOperation::UploadFile {
-                remote_path: RESTORATION_VERIFIER_REMOTE_DIRECTORY,
+                remote_path: &upload_directory,
             },
-            Some(RESTORATION_VERIFIER_REMOTE_DIRECTORY),
+            Some(upload_directory.as_str()),
         ),
         (
             run_route,
@@ -1087,6 +1092,7 @@ mod tests {
         consumer.consumer_selection = Some(ConsumerRuntimeVerifierSelection {
             scenario_source_digest: coordinate.scenario_source_digest.clone(),
             verifier_artifact_hash: "9".repeat(64),
+            archive_budget: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
         });
         consumer.intent.verifier_artifact_hash = "9".repeat(64);
         consumer.intent.purpose = RemoteVerificationPurpose::ConsumerRuntime {
@@ -1095,6 +1101,13 @@ mod tests {
         };
         consumer.intent.operation_id = consumer.intent.derived_operation_id().unwrap();
         consumer.validate().unwrap();
+        let challenge = consumer.consumer_challenge().unwrap();
+        assert_eq!(challenge.intent, consumer.intent);
+        assert_eq!(
+            Some(&challenge.selection),
+            consumer.consumer_selection.as_ref()
+        );
+        assert!(request.consumer_challenge().is_err());
         assert!(response.validate_for(&consumer).is_err());
         let evidence = serde_json::json!({"fixture_only": true});
         let bytes = ryeos_external_execution_contract::canonical_json(&evidence).unwrap();

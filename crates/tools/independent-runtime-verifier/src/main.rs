@@ -30,8 +30,26 @@ use std::{
     path::Path,
 };
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(OsStr::new("--consumer-native-probe")) {
+        let encoded = args.next().context("consumer challenge absent")?;
+        ensure!(args.next().is_none(), "unexpected consumer probe arguments");
+        return native_guest::run_production_probe(
+            encoded
+                .to_str()
+                .context("consumer challenge is not UTF-8")?,
+        );
+    }
+    // Native namespace preparation must run before creating async runtime or
+    // helper threads. Ordinary admitted verification retains its prior loop.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(admitted_main())
+}
+
+async fn admitted_main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
     let mode = args.next();
     ensure!(args.next().is_none(), "unexpected verifier arguments");

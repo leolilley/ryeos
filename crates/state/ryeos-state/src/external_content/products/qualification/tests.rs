@@ -1447,6 +1447,46 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
         .unwrap();
     purpose.validate().unwrap();
     let mut missing_use = purpose.clone();
+    let source = &purpose.remote_verifier_sources["remote_codex"];
+    let selection = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection {
+        scenario_source_digest: source.scenario_source_digest.clone(),
+        verifier_artifact_hash: source.executor.payload_blob_hash.clone(),
+        archive_budget: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
+    };
+    let coordinate = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate {
+        schema: 1, accepted_root_id: "T-pure-data-fixture".into(), accepted_capsule_hash: "a".repeat(64),
+        qualification_purpose_digest: canonical_value_digest(&serde_json::to_value(&purpose).unwrap()).unwrap(),
+        scenario_id: "remote_codex".into(), scenario_source_digest: selection.scenario_source_digest.clone(),
+        subject_digest: canonical_value_digest(&serde_json::to_value(&purpose.subject).unwrap()).unwrap(),
+        use_digest: canonical_value_digest(&serde_json::to_value(purpose.consumer_content.as_ref().unwrap().qualification_use.as_ref().unwrap()).unwrap()).unwrap(),
+        prerequisite_measurement_attempt_id: "b".repeat(64), prerequisite_measurement_observation_digest: "c".repeat(64),
+    };
+    // Pure data joins do not prove a born root or prerequisite measurement.
+    purpose
+        .validate_remote_consumer_coordinate(&coordinate, &selection)
+        .unwrap();
+    for field in ["purpose", "subject", "use", "scenario"] {
+        let mut changed = coordinate.clone();
+        match field {
+            "purpose" => changed.qualification_purpose_digest = "d".repeat(64),
+            "subject" => changed.subject_digest = "d".repeat(64),
+            "use" => changed.use_digest = "d".repeat(64),
+            "scenario" => changed.scenario_source_digest = "d".repeat(64),
+            _ => unreachable!(),
+        }
+        assert!(
+            purpose
+                .validate_remote_consumer_coordinate(&changed, &selection)
+                .is_err()
+        );
+    }
+    let mut wrong_artifact = selection.clone();
+    wrong_artifact.verifier_artifact_hash = "d".repeat(64);
+    assert!(
+        purpose
+            .validate_remote_consumer_coordinate(&coordinate, &wrong_artifact)
+            .is_err()
+    );
     missing_use
         .consumer_content
         .as_mut()

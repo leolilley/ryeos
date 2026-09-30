@@ -165,6 +165,85 @@ pub fn run_probe_entrypoint() -> std::process::ExitCode {
     }
 }
 
+/// Dedicated product-native command environment. The trusted enclosing
+/// verifier supplies the challenge over its authenticated run handoff and
+/// owns this private cwd plus finish delivery. No daemon callback, provider
+/// credentials, Worker identity or qualification claims are manufactured.
+pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
+    use crate::consumer_record::{
+        CONSUMER_INPUT_RECORD_NAME, ConsumerInputRecord, MAX_CONSUMER_INPUT_RECORD_BYTES,
+    };
+    use ryeos_external_execution_contract::restored_runtime_measurement::{
+        ConsumerRuntimeChallenge, MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
+    };
+    ensure!(
+        !encoded_challenge.is_empty() && encoded_challenge.len() <= 8192,
+        "consumer challenge encoding exceeds bound"
+    );
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded_challenge)?;
+    let challenge = ConsumerRuntimeChallenge::parse(&bytes)?;
+    let active = MonotonicDeadline::after(Duration::from_secs(90));
+    let cleanup = MonotonicDeadline::after(Duration::from_secs(105));
+    // SAFETY: dedicated synchronous executable startup before any stdio
+    // wrappers or helper threads; opposite protocol pipe ends are inherited.
+    let pair = unsafe {
+        lillux::inherited_pipes::InheritedPipePair::take_inherited_pipes(0, 1, CHUNK, active)
+    }?;
+    let (input, mut output, interrupt) = pair.split();
+    let root = PinnedDirectory::open(Path::new("."))?.context("consumer private cwd absent")?;
+    let record_bytes = read_fixed(
+        &root,
+        CONSUMER_INPUT_RECORD_NAME,
+        MAX_CONSUMER_INPUT_RECORD_BYTES as u64,
+    )?;
+    let record = ConsumerInputRecord::parse(&record_bytes)?;
+    let imported = record.open_imported_products(&root, &challenge)?;
+    let content = record
+        .purpose
+        .consumer_content
+        .as_ref()
+        .context("consumer content absent")?;
+    let context = record
+        .purpose
+        .policy_source
+        .policy
+        .consumer_execution_context
+        .as_ref()
+        .context("consumer context absent")?;
+    let private =
+        crate::production_inputs::ProductionPrivateStaging::create(&root, content, context)?;
+    let observed = imported.run_native_protocol(
+        &record,
+        &private,
+        input,
+        &mut output,
+        interrupt,
+        active,
+        cleanup,
+    )?;
+    let observation = serde_json::json!({
+        "schema": "ryeos.consumer-native-observation.v1",
+        "operation_id": challenge.intent.operation_id,
+        "challenge_digest": challenge.intent.consumer_challenge_digest()?,
+        "input_record_sha256": lillux::sha256_hex(&record_bytes),
+        "applied_receipt": observed.applied_receipt,
+        "guest_input_base64": STANDARD.encode(observed.sent),
+        "guest_output_base64": STANDARD.encode(observed.received),
+        "forwarded_output_bytes": observed.forwarded_output_bytes,
+        "guest_stderr_sha256": lillux::sha256_hex(&observed.diagnostics),
+        "guest_stderr_bytes": observed.diagnostics.len(),
+        "namespace_exit": observed.namespace_exit,
+    });
+    let bytes = lillux::canonical_json(&observation)?.into_bytes();
+    ensure!(
+        bytes.len() as u64 <= MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
+        "consumer native observation exceeds evidence budget"
+    );
+    root.atomic_create_pinned_regular(OsStr::new("guest-observation.json"), &bytes, 0o400)?
+        .context("consumer native observation already exists")?;
+    Ok(())
+}
+
 fn read_fixed(root: &PinnedDirectory, name: &str, limit: u64) -> Result<Vec<u8>> {
     let file = root
         .open_pinned_regular(OsStr::new(name), false)?
@@ -312,7 +391,7 @@ fn run() -> Result<()> {
 
 fn run_in_directory(
     root: &PinnedDirectory,
-    mut input: lillux::inherited_pipes::InheritedPipeInput,
+    input: lillux::inherited_pipes::InheritedPipeInput,
     output: &mut lillux::inherited_pipes::InheritedPipeOutput,
     interrupt: lillux::inherited_pipes::PipeInterrupt,
     active: MonotonicDeadline,
@@ -430,6 +509,66 @@ fn run_in_directory(
     // actual guest argv, environment and containment require independent
     // applied-launch evidence before qualification claims are possible.
     let native = native_request(&request.recipe, request.effective_environment, mounts)?;
+    let observed = run_prepared_protocol(root, native, input, output, interrupt, active, cleanup)?;
+    let policy = ryeos_state::objects::ProjectSnapshotPolicy::new(
+        ryeos_state::project_sync::ProjectSyncScope::FullProject,
+        vec![],
+        vec![],
+        BTreeMap::new(),
+    )?;
+    let captured = ryeos_project_capture::ingest_project_tree_bounded(
+        &authority,
+        &guard,
+        &candidate,
+        &policy,
+        ryeos_project_capture::ProjectCaptureBudget {
+            max_bytes: request.capture_limit,
+            deadline: cleanup,
+        },
+    )?;
+    let observation = serde_json::json!({
+        "schema": "test.routed_guest_observation.v1",
+        "request_sha256": lillux::sha256_hex(&request_bytes),
+        "applied_receipt": observed.applied_receipt,
+        "guest_input_base64": STANDARD.encode(observed.sent), "guest_output_base64": STANDARD.encode(observed.received),
+        "forwarded_output_bytes": observed.forwarded_output_bytes,
+        "guest_stderr_sha256": lillux::sha256_hex(&observed.diagnostics), "guest_stderr_bytes": observed.diagnostics.len(),
+        "namespace_exit": observed.namespace_exit, "captured_files": captured.files,
+    });
+    root.atomic_create_pinned_regular(
+        OsStr::new("guest-observation.json"),
+        &serde_json::to_vec(&observation)?,
+        0o600,
+    )?
+    .context("observation already exists")?;
+    Ok(())
+}
+
+/// Raw execution facts shared by fixture and production verifier probes.
+/// Not a Worker terminal envelope or semantic qualification testimony.
+pub(crate) struct NativeProtocolObservation {
+    pub applied_receipt: lillux::LinuxSandboxAppliedLaunchReceipt,
+    pub sent: Vec<u8>,
+    pub received: Vec<u8>,
+    pub diagnostics: Vec<u8>,
+    pub forwarded_output_bytes: usize,
+    pub namespace_exit: String,
+}
+
+/// Drive an already constructed native request in this dedicated, single-
+/// threaded verifier process. Namespace preparation and whole-namespace
+/// settlement remain Lillux-owned. Caller retains mount descriptors and writer
+/// authority through this call and independently checks the raw observation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_prepared_protocol(
+    root: &PinnedDirectory,
+    native: lillux::LinuxSandboxRequest,
+    mut input: lillux::inherited_pipes::InheritedPipeInput,
+    output: &mut lillux::inherited_pipes::InheritedPipeOutput,
+    interrupt: lillux::inherited_pipes::PipeInterrupt,
+    active: MonotonicDeadline,
+    cleanup: MonotonicDeadline,
+) -> Result<NativeProtocolObservation> {
     ensure!(
         !active.has_elapsed(),
         "staging exhausted execution allowance"
@@ -592,39 +731,15 @@ fn run_in_directory(
     let forwarded_output_bytes = received.len();
     drain_settled(&mut guest_output, &mut received, cleanup)?;
     drain_settled(&mut guest_error, &mut diagnostics, cleanup)?;
-    let policy = ryeos_state::objects::ProjectSnapshotPolicy::new(
-        ryeos_state::project_sync::ProjectSyncScope::FullProject,
-        vec![],
-        vec![],
-        BTreeMap::new(),
-    )?;
-    let captured = ryeos_project_capture::ingest_project_tree_bounded(
-        &authority,
-        &guard,
-        &candidate,
-        &policy,
-        ryeos_project_capture::ProjectCaptureBudget {
-            max_bytes: request.capture_limit,
-            deadline: cleanup,
-        },
-    )?;
     let applied_launch = applied_launch.context("native guest has no applied-launch receipt")?;
-    let observation = serde_json::json!({
-        "schema": "test.routed_guest_observation.v1",
-        "request_sha256": lillux::sha256_hex(&request_bytes),
-        "applied_receipt": applied_launch,
-        "guest_input_base64": STANDARD.encode(sent), "guest_output_base64": STANDARD.encode(received),
-        "forwarded_output_bytes": forwarded_output_bytes,
-        "guest_stderr_sha256": lillux::sha256_hex(&diagnostics), "guest_stderr_bytes": diagnostics.len(),
-        "namespace_exit": format!("{:?}", termination.exit()), "captured_files": captured.files,
-    });
-    root.atomic_create_pinned_regular(
-        OsStr::new("guest-observation.json"),
-        &serde_json::to_vec(&observation)?,
-        0o600,
-    )?
-    .context("observation already exists")?;
-    Ok(())
+    Ok(NativeProtocolObservation {
+        applied_receipt: applied_launch,
+        sent,
+        received,
+        diagnostics,
+        forwarded_output_bytes,
+        namespace_exit: format!("{:?}", termination.exit()),
+    })
 }
 
 #[cfg(test)]

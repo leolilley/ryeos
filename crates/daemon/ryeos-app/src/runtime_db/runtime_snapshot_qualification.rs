@@ -632,6 +632,7 @@ mod tests {
         let selection = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection {
             scenario_source_digest: coordinate.scenario_source_digest.clone(),
             verifier_artifact_hash: "9".repeat(64),
+            archive_budget: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
         };
         let mut consumer = verifier.clone();
         consumer.verifier_artifact_hash = selection.verifier_artifact_hash.clone();

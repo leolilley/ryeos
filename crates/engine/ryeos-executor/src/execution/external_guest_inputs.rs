@@ -31,6 +31,131 @@ pub(crate) struct PreparedProductInputs {
     pub destinations: BTreeMap<String, String>,
 }
 
+impl PreparedProductInputs {
+    /// Copy the complete delivery while realization leases remain borrowed.
+    /// Supplementary records must already have been validated by their product
+    /// owner. This helper owns byte custody, not accepted-root authentication.
+    pub(crate) fn prepare_consumer_archive(
+        &self,
+        parent: &lillux::PinnedDirectory,
+        records: ryeos_external_execution::restoration_verifier_delivery::ConsumerProductInventory,
+        budget: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive>
+    {
+        use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget;
+        use ryeos_external_execution_contract::staging_package::GuestStagingEntry;
+        budget.validate()?;
+        let record_bytes = records.entries.iter().try_fold(0u64, |total, entry| {
+            let GuestStagingEntry::RegularFile { bytes, .. } = entry else {
+                bail!("consumer supplementary records must be regular files");
+            };
+            total
+                .checked_add(*bytes)
+                .context("consumer record byte total overflow")
+        })?;
+        let remaining = ConsumerArchiveBudget::new(
+            budget
+                .maximum_entries
+                .checked_sub(records.entries.len())
+                .context("consumer records exceed entry budget")?,
+            budget
+                .maximum_regular_bytes
+                .checked_sub(record_bytes)
+                .context("consumer records exceed content budget")?,
+            budget.maximum_framed_bytes,
+        )?;
+        let mut inventory = self.consumer_archive_inventory(&remaining, deadline)?;
+        inventory.entries.extend(records.entries);
+        for (path, descriptor) in records.descriptors {
+            ensure!(
+                inventory.descriptors.insert(path, descriptor).is_none(),
+                "consumer record shadows a retained product path"
+            );
+        }
+        let descriptors = inventory
+            .descriptors
+            .iter()
+            .map(|(path, authority)| (path.as_str(), authority))
+            .collect();
+        // self, including every cache-generation lease, remains borrowed until
+        // the stable-reader copy, archive digest and private pin are complete.
+        ryeos_external_execution::restoration_verifier_delivery::prepare_private_consumer_archive(
+            parent,
+            &inventory.entries,
+            &descriptors,
+            budget,
+            deadline,
+        )
+    }
+
+    /// Derive qualification delivery while retaining the same cache-generation
+    /// leases used by ordinary guest execution. No activation/base coordinates
+    /// or provider authority are created here. Caller adds accepted input record
+    /// and exact verifier, then streams the complete bounded private archive.
+    pub(crate) fn consumer_archive_inventory(
+        &self,
+        budget: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ryeos_external_execution::restoration_verifier_delivery::ConsumerProductInventory>
+    {
+        use ryeos_external_execution::restoration_verifier_delivery::{
+            ConsumerProductInventory, inventory_consumer_product,
+        };
+        budget.validate()?;
+        let maximum_regular_bytes = budget.maximum_regular_bytes;
+        ensure!(
+            !self.leases.is_empty()
+                && self.inputs.len() == self.authorities.len()
+                && self.inputs.len() == self.manifest_authorities.len(),
+            "consumer archive lost its retained product custody"
+        );
+        let mut inventory = ConsumerProductInventory {
+            entries: Vec::new(),
+            descriptors: BTreeMap::new(),
+        };
+        let mut total = 0u64;
+        for (index, input) in self.inputs.iter().enumerate() {
+            let remaining = maximum_regular_bytes
+                .checked_sub(total)
+                .context("consumer archive exceeded its content budget")?;
+            let product = inventory_consumer_product(
+                &format!("product-{index:02}"),
+                input,
+                &self.authorities[index],
+                &self.manifest_authorities[index],
+                budget
+                    .maximum_entries
+                    .checked_sub(inventory.entries.len())
+                    .context("consumer archive exceeded its entry budget")?,
+                remaining,
+                deadline,
+            )?;
+            for entry in &product.entries {
+                if let ryeos_external_execution_contract::staging_package::GuestStagingEntry::RegularFile { bytes, .. } = entry {
+                    total = total.checked_add(*bytes).context("consumer archive byte total overflow")?;
+                }
+            }
+            ensure!(
+                total <= maximum_regular_bytes,
+                "consumer archive exceeded its content budget"
+            );
+            ensure!(
+                inventory.entries.len() + product.entries.len() <= budget.maximum_entries,
+                "consumer archive entry count exceeds bound"
+            );
+            inventory.entries.extend(product.entries);
+            for (path, descriptor) in product.descriptors {
+                ensure!(
+                    inventory.descriptors.insert(path, descriptor).is_none(),
+                    "consumer archive product path duplicated"
+                );
+            }
+        }
+        Ok(inventory)
+    }
+}
+
 pub(crate) fn prepare_product_inputs(
     state: &ryeos_app::state::AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,

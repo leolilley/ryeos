@@ -191,31 +191,10 @@ pub(super) fn authenticate_consumer_root(
     {
         bail!("consumer verification root differs from its accepted launch reservation");
     }
-    if canonical_value_digest(&serde_json::to_value(purpose)?)?
-        != coordinate.qualification_purpose_digest
-        || purpose.owner_fingerprint != context.fingerprint
-        || canonical_value_digest(&serde_json::to_value(&purpose.subject)?)?
-            != coordinate.subject_digest
-    {
+    if purpose.owner_fingerprint != context.fingerprint {
         bail!("consumer verification differs from sealed qualification purpose");
     }
-    let source = purpose
-        .remote_verifier_sources
-        .get(&coordinate.scenario_id)
-        .context("sealed qualification purpose has no selected remote verifier")?;
-    let qualified_use = purpose
-        .consumer_content
-        .as_ref()
-        .and_then(|content| content.qualification_use.as_ref())
-        .context("accepted consumer purpose has no admitted use")?;
-    if canonical_value_digest(&serde_json::to_value(qualified_use)?)? != coordinate.use_digest {
-        bail!("consumer verification differs from accepted admitted use");
-    }
-    if source.scenario_source_digest != selection.scenario_source_digest
-        || source.executor.payload_blob_hash != selection.verifier_artifact_hash
-    {
-        bail!("consumer verifier differs from accepted signed source artifact");
-    }
+    purpose.validate_remote_consumer_coordinate(coordinate, selection)?;
     authority.ensure_guard(guard)?;
     Ok(AuthenticatedConsumerRoot {
         qualification_operation_id: qualified.intent.operation_id.clone(),

@@ -53,6 +53,8 @@ impl ProductionPrivateStaging {
         consumer: &ProductQualificationConsumerExecutionContext,
     ) -> Result<Self> {
         QualificationExecutionEnvironment::from_retained_production_consumer(content, consumer)?;
+        private_scratch.require_owner_private_directory()?;
+        private_scratch.ensure_path_binding()?;
         let (_, occurrence) = private_scratch.create_unique_child("production-verifier", 0o700)?;
         let candidate = occurrence.create_child(std::ffi::OsStr::new("candidate"), 0o700)?;
         let views = occurrence.create_child(std::ffi::OsStr::new("runtime-views"), 0o700)?;
@@ -551,8 +553,12 @@ mod tests {
     #[test]
     fn native_request_preserves_every_production_mount_and_private_view() {
         let f = fixture(true);
+        let scratch = f
+            .root
+            .create_child(OsStr::new("private-scratch"), 0o700)
+            .unwrap();
         let mut private =
-            ProductionPrivateStaging::create(&f.root, &f.content, &f.consumer).unwrap();
+            ProductionPrivateStaging::create(&scratch, &f.content, &f.consumer).unwrap();
         let prepared = prepare_production_native_request(
             &f.content,
             &f.consumer,
@@ -605,7 +611,16 @@ mod tests {
             .open_child_directory(OsStr::new("authoring-tools"))
             .unwrap()
             .unwrap();
-        let private = ProductionPrivateStaging::create(&tools, &f.content, &f.consumer).unwrap();
+        let before = tools.entries_no_follow_bounded(8).unwrap();
+        assert!(ProductionPrivateStaging::create(&tools, &f.content, &f.consumer).is_err());
+        assert_eq!(tools.entries_no_follow_bounded(8).unwrap(), before);
+        verify(&f).unwrap();
+        // Privacy alone is not disjointness. A private child under an
+        // immutable product still invalidates the exact product manifest.
+        let nested = tools
+            .create_child(OsStr::new("private-under-product"), 0o700)
+            .unwrap();
+        let private = ProductionPrivateStaging::create(&nested, &f.content, &f.consumer).unwrap();
         assert!(
             prepare_production_native_request(
                 &f.content,

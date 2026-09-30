@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::objects::canonical_value_digest;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -97,6 +98,43 @@ pub struct QualificationLaunchPurpose {
 }
 
 impl QualificationLaunchPurpose {
+    /// Data agreement shared by controller admission and the guest consumer.
+    /// This does not authenticate a born root, signatures, occurrence liveness
+    /// or provider contact. Those remain with the enclosing execution owner.
+    pub fn validate_remote_consumer_coordinate(
+        &self,
+        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+        selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    ) -> Result<()> {
+        self.validate()?;
+        selection.validate_coordinate(coordinate)?;
+        if canonical_value_digest(&serde_json::to_value(self)?)?
+            != coordinate.qualification_purpose_digest
+            || canonical_value_digest(&serde_json::to_value(&self.subject)?)?
+                != coordinate.subject_digest
+        {
+            bail!("consumer coordinate differs from sealed qualification purpose");
+        }
+        let source = self
+            .remote_verifier_sources
+            .get(&coordinate.scenario_id)
+            .context("sealed qualification purpose has no selected remote verifier")?;
+        let qualified_use = self
+            .consumer_content
+            .as_ref()
+            .and_then(|content| content.qualification_use.as_ref())
+            .context("accepted consumer purpose has no admitted use")?;
+        if canonical_value_digest(&serde_json::to_value(qualified_use)?)? != coordinate.use_digest {
+            bail!("consumer coordinate differs from accepted admitted use");
+        }
+        if source.scenario_source_digest != selection.scenario_source_digest
+            || source.executor.payload_blob_hash != selection.verifier_artifact_hash
+        {
+            bail!("consumer verifier differs from accepted signed source artifact");
+        }
+        Ok(())
+    }
+
     pub fn execution_view(&self) -> Result<QualificationExecutionPurposeView<'_>> {
         QualificationExecutionPurposeView::from_purpose(self)
     }
