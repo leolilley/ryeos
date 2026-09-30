@@ -287,7 +287,8 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             )?;
             if !(verified.frame().direction == ChannelDirection::SupervisorToOwner
                 && match self.runtime.binding().execution_mode {
-                    ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {} =>
+                    ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {}
+                    | ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {} =>
                         matches!(verified.frame().payload, ExecutionChannelPayload::RuntimeApplied { .. }
                             | ExecutionChannelPayload::ProtocolBytes { .. }
                             | ExecutionChannelPayload::ProtocolEof),
@@ -516,6 +517,13 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             self.runtime.binding(),
             lillux::time::timestamp_millis(),
         )?;
+        ensure!(
+            !matches!(
+                self.runtime.binding().execution_mode,
+                ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {}
+            ) || !matches!(verified.frame().payload, ExecutionChannelPayload::Quiesce { .. }),
+            "qualification session cannot quiesce or export a candidate"
+        );
         let dispatched = self.runtime.dispatch_owner_frame(wire)?;
         if matches!(&dispatched.outcome, ExternalOwnerFrameOutcome::Capture(_)) {
             self.capture_retained = true;
@@ -640,6 +648,17 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
         ensure!(
             verified.frame().direction == ChannelDirection::SupervisorToOwner,
             "external dispatcher returned a controller-authored frame"
+        );
+        ensure!(
+            !matches!(
+                self.runtime.binding().execution_mode,
+                ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {}
+            ) || !matches!(
+                verified.frame().payload,
+                ExecutionChannelPayload::ExportObjectChunk { .. }
+                    | ExecutionChannelPayload::ExportSealed { .. }
+            ),
+            "qualification session cannot transport a candidate export"
         );
         if matches!(
             verified.frame().payload,
@@ -1458,6 +1477,19 @@ mod tests {
         (binding, owner, supervisor)
     }
 
+    fn qualification_fixture() -> (
+        ExecutionChannelBinding,
+        lillux::crypto::SigningKey,
+        lillux::crypto::SigningKey,
+    ) {
+        let (mut binding, owner, supervisor) = fixture();
+        binding.execution_mode =
+            ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {};
+        binding.candidate_export_max_bytes = 0;
+        binding.validate().unwrap();
+        (binding, owner, supervisor)
+    }
+
     fn direct_terminal(stdout: &[u8], stderr: &[u8]) -> ExecutionChannelPayload {
         use ryeos_state::external_execution::{
             ExternalCommandOutputCommitment, ExternalCommandTermination,
@@ -1919,6 +1951,46 @@ mod tests {
             driver.runtime.protocol_outputs.front().unwrap(),
             b"later-response"
         );
+    }
+
+    #[test]
+    fn qualification_session_transports_protocol_output_without_export_authority() {
+        let (binding, _owner, supervisor) = qualification_fixture();
+        let runtime = FixtureRuntime::new(binding.clone(), supervisor);
+        let ready = SignedExecutionFrame::decode_and_verify(
+            runtime.ready.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        let transport = FixtureTransport::new(vec![TransportAction::Respond(response(
+            &ready,
+            vec![],
+            None,
+        ))]);
+        let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        driver
+            .runtime
+            .protocol_outputs
+            .push_back(b"qualification response".to_vec());
+        driver.transport.actions.push_back(TransportAction::Fail);
+        assert!(matches!(
+            driver.step_classified(),
+            Err(ExternalTransportStepFailure::AmbiguousTransport(_))
+        ));
+        let output = SignedExecutionFrame::decode_and_verify(
+            &driver.transport.calls[1],
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        assert_eq!(
+            output.protocol_bytes().unwrap(),
+            b"qualification response".to_vec()
+        );
+        assert!(!driver.has_sealed_export());
+        assert!(!driver.has_durable_capture());
     }
 
     #[test]

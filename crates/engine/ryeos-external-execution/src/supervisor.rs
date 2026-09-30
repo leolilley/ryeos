@@ -7,6 +7,7 @@
 //! before permitting a later action.
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::ExternalExecutionMode;
 use ryeos_state::external_execution::export::CandidateExportSource;
 use ryeos_state::external_execution::guest_journal::{
     DurableNativeCandidateCapture, GuestApplicationClaim, GuestApplicationToken,
@@ -336,6 +337,10 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
         occurrence_digest: &str,
         bootstrap_digest: &str,
     ) -> Result<SupervisorCaptureOutcome> {
+        ensure!(
+            self.journal.binding().execution_mode == ExternalExecutionMode::StructuredSession {},
+            "qualification session cannot capture or export a candidate"
+        );
         ensure!(
             self.pending_protocol.is_none(),
             "quiescence cannot overtake pending protocol input"

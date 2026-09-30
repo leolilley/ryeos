@@ -368,10 +368,11 @@ fn execution_workspace_access(
         ExternalExecutionMode::StructuredSession {} => {
             Ok(lillux::LinuxSandboxMountAccess::Writable)
         }
-        ExternalExecutionMode::DirectCommand { .. } => {
+        ExternalExecutionMode::QualificationStructuredSession {}
+        | ExternalExecutionMode::DirectCommand { .. } => {
             ensure!(
                 !has_workspace_outputs,
-                "external direct command cannot capture or mutate its frozen execution generation"
+                "external read-only execution cannot capture or mutate its frozen execution generation"
             );
             Ok(lillux::LinuxSandboxMountAccess::ReadOnly)
         }
@@ -705,7 +706,8 @@ impl NativeExternalCandidate {
         let workspace_output_authority =
             load_workspace_output_authority(guest_inputs, &workspace_input_shadows)?;
         let direct_input = match (binding.execution_mode, stdin) {
-            (ExternalExecutionMode::StructuredSession {}, None) => None,
+            (ExternalExecutionMode::StructuredSession {}, None)
+            | (ExternalExecutionMode::QualificationStructuredSession {}, None) => None,
             (ExternalExecutionMode::DirectCommand { .. }, Some(input)) => {
                 Some(DirectCommandInput::from_sealed(input)?)
             }
@@ -942,7 +944,11 @@ impl NativeExternalCandidate {
     pub fn begin_protocol_input(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()> {
         self.require_owner(frame)?;
         ensure!(
-            self.binding.execution_mode == ExternalExecutionMode::StructuredSession {},
+            matches!(
+                self.binding.execution_mode,
+                ExternalExecutionMode::StructuredSession {}
+                    | ExternalExecutionMode::QualificationStructuredSession {}
+            ),
             "external direct command has no structured-session input authority"
         );
         ensure!(
@@ -1207,7 +1213,7 @@ impl NativeExternalCandidate {
         self.require_owner(frame)?;
         ensure!(
             self.binding.execution_mode == ExternalExecutionMode::StructuredSession {},
-            "external direct command cannot produce a candidate export"
+            "external execution mode cannot produce a candidate export"
         );
         let completion = match &frame.frame().payload {
             ExecutionChannelPayload::Quiesce {
@@ -1984,6 +1990,21 @@ mod tests {
         assert_eq!(
             execution_workspace_access(ExternalExecutionMode::StructuredSession {}, true).unwrap(),
             lillux::LinuxSandboxMountAccess::Writable
+        );
+        assert_eq!(
+            execution_workspace_access(
+                ExternalExecutionMode::QualificationStructuredSession {},
+                false,
+            )
+            .unwrap(),
+            lillux::LinuxSandboxMountAccess::ReadOnly
+        );
+        assert!(
+            execution_workspace_access(
+                ExternalExecutionMode::QualificationStructuredSession {},
+                true
+            )
+            .is_err()
         );
         assert!(
             execution_workspace_access(

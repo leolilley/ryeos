@@ -203,6 +203,16 @@ impl LiveInheritedExternalCandidateSupervisor {
         );
         let sequence = verified.frame().sequence;
         let digest = verified.digest().to_owned();
+        ensure!(
+            !matches!(
+                self.binding().execution_mode,
+                ExternalExecutionMode::QualificationStructuredSession {}
+            ) || !matches!(
+                verified.frame().payload,
+                ExecutionChannelPayload::Quiesce { .. }
+            ),
+            "qualification session cannot quiesce or export a candidate"
+        );
         let outcome = match &verified.frame().payload {
             ExecutionChannelPayload::Release => {
                 ExternalOwnerFrameOutcome::Application(self.dispatch_release(wire)?)
@@ -702,11 +712,23 @@ fn decode_execution_output(
                 "dedicated launcher output changed its bounded canonical bytes"
             );
             match (bytes.is_empty(), closed) {
-                (false, false) if mode == (ExternalExecutionMode::StructuredSession {}) => {
+                (false, false)
+                    if matches!(
+                        mode,
+                        ExternalExecutionMode::StructuredSession {}
+                            | ExternalExecutionMode::QualificationStructuredSession {}
+                    ) =>
+                {
                     Ok(CandidateExecutionOutput::Bytes(bytes))
                 }
                 (true, false) => Ok(CandidateExecutionOutput::Idle),
-                (true, true) if mode == (ExternalExecutionMode::StructuredSession {}) => {
+                (true, true)
+                    if matches!(
+                        mode,
+                        ExternalExecutionMode::StructuredSession {}
+                            | ExternalExecutionMode::QualificationStructuredSession {}
+                    ) =>
+                {
                     Ok(CandidateExecutionOutput::Closed)
                 }
                 _ => anyhow::bail!("launcher output changed execution mode or EOF framing"),
@@ -1125,10 +1147,13 @@ pub fn serve_native_candidate_launcher(
     let result = (|| -> Result<()> {
         let stdout = BoundedCandidateExecutionOutput::new(protocol_output, maximum_output_bytes)?;
         let mut output = match expected_binding.execution_mode {
-            ExternalExecutionMode::StructuredSession {} => NativeCandidateOutputOwner::Structured {
-                stdout,
-                stderr: BoundedCandidateStderr::new(candidate_stderr, maximum_stderr_bytes)?,
-            },
+            ExternalExecutionMode::StructuredSession {}
+            | ExternalExecutionMode::QualificationStructuredSession {} => {
+                NativeCandidateOutputOwner::Structured {
+                    stdout,
+                    stderr: BoundedCandidateStderr::new(candidate_stderr, maximum_stderr_bytes)?,
+                }
+            }
             ExternalExecutionMode::DirectCommand {
                 stdout_max_bytes,
                 stderr_max_bytes,
@@ -1207,6 +1232,11 @@ pub fn serve_native_candidate_launcher(
                         decoded.frame().payload,
                         ExecutionChannelPayload::Quiesce { .. }
                     ) {
+                        ensure!(
+                            expected_binding.execution_mode
+                                == ExternalExecutionMode::StructuredSession {},
+                            "qualification session cannot capture or export a candidate"
+                        );
                         let guard = authority.acquire_shared_guard()?;
                         let publication_key =
                             ryeos_state::DurableCasPublicationKey::external_candidate_occurrence(
@@ -1691,6 +1721,7 @@ mod tests {
             stderr_max_bytes: 8,
         };
         let protocol = ExternalExecutionMode::StructuredSession {};
+        let qualification = ExternalExecutionMode::QualificationStructuredSession {};
         let chunk = |offset| LauncherMessage::CommandOutput {
             schema: PROTOCOL_SCHEMA,
             stream: ExternalCommandOutputStream::Stderr,
@@ -1698,7 +1729,32 @@ mod tests {
             bytes_base64: STANDARD.encode(b"err"),
         };
         assert!(decode_execution_output(chunk(0), protocol).is_err());
+        assert!(decode_execution_output(chunk(0), qualification).is_err());
         assert!(decode_execution_output(chunk(6), direct).is_err());
+        assert_eq!(
+            decode_execution_output(
+                LauncherMessage::Output {
+                    schema: PROTOCOL_SCHEMA,
+                    bytes_base64: STANDARD.encode(b"reply"),
+                    closed: false,
+                },
+                qualification,
+            )
+            .unwrap(),
+            CandidateExecutionOutput::Bytes(b"reply".to_vec())
+        );
+        assert_eq!(
+            decode_execution_output(
+                LauncherMessage::Output {
+                    schema: PROTOCOL_SCHEMA,
+                    bytes_base64: String::new(),
+                    closed: true,
+                },
+                qualification,
+            )
+            .unwrap(),
+            CandidateExecutionOutput::Closed
+        );
         assert_eq!(
             decode_execution_output(chunk(5), direct).unwrap(),
             CandidateExecutionOutput::CommandOutput {
