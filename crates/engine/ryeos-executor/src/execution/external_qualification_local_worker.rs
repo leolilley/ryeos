@@ -27,17 +27,17 @@ use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRun
 
 use super::external_qualification_start::ExternalQualificationReady;
 
-fn remaining_qualification_channel_deadline(
+fn remaining_qualification_native_observation_window(
     binding: &ryeos_state::external_execution::ExecutionChannelBinding,
-) -> Result<lillux::time::MonotonicDeadline> {
+) -> Result<lillux::time::Duration> {
     let remaining_ms = binding
-        .execution_deadline_ms
+        .expires_at_ms
         .checked_sub(lillux::time::timestamp_millis())
         .filter(|remaining| *remaining > 0)
-        .context("Q completion passed its signed channel deadline")?;
-    Ok(lillux::time::MonotonicDeadline::after(
-        lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
-    ))
+        .context("Q native whole-scope settlement was not retained before channel expiry")?;
+    Ok(lillux::time::Duration::from_millis(u64::try_from(
+        remaining_ms,
+    )?))
 }
 
 struct ReleasedQualificationWorker {
@@ -355,7 +355,6 @@ pub(crate) fn run_external_qualification_to_normal_terminal(
     ryeos_app::external_placement::request_external_qualification_native_completion(
         state, &placement,
     )?;
-    let native_deadline = remaining_qualification_channel_deadline(worker.ready().binding())?;
     let native = loop {
         if let Some(native) =
             ryeos_app::external_placement::apply_external_qualification_native_settlement(
@@ -364,13 +363,11 @@ pub(crate) fn run_external_qualification_to_normal_terminal(
         {
             break native;
         }
-        ensure!(
-            !native_deadline.has_elapsed(),
-            "Q native whole-scope settlement was not applied before channel expiry"
-        );
+        // Completion must be authored before its execution deadline. The
+        // signed native death observation may arrive later, during the
+        // binding's post-execution observation window.
         lillux::time::sleep(
-            native_deadline
-                .remaining()
+            remaining_qualification_native_observation_window(worker.ready().binding())?
                 .min(lillux::time::Duration::from_millis(50)),
         );
     };
