@@ -45,6 +45,29 @@ impl PreparedExternalQualificationGuest {
     }
 }
 
+/// Transfer the authenticated root and its original descriptor lifelines to
+/// the app's one-use qualification allocation owner. Reservation repeats the
+/// accepted-root and signed-placement checks before writing durable state.
+pub fn reserve_external_qualification_guest<'a>(
+    state: &'a ryeos_app::state::AppState,
+    context: &ryeos_app::handler_context::HandlerContext,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    prepared: PreparedExternalQualificationGuest,
+) -> Result<ryeos_app::external_placement::ExternalQualificationStart<'a>> {
+    let (root, inputs) = prepared.into_parts();
+    ryeos_app::external_placement::prepare_external_qualification_start(
+        state,
+        context,
+        coordinate,
+        qualification_operation_id,
+        limits,
+        root,
+        inputs,
+    )
+}
+
 pub fn prepare_external_qualification_guest(
     state: &ryeos_app::state::AppState,
     context: &ryeos_app::handler_context::HandlerContext,
