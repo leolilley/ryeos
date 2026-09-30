@@ -20,7 +20,7 @@ use super::products::{validate_canonical_unsuffixed_ref, validate_hash, validate
 use super::qualification_execution::QualificationExecutionPurposeView;
 use super::qualification_subject::ContentQualificationSubject;
 
-pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v4";
+pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v5";
 
 /// These sources have different authentication and CAS retention rules. An
 /// activation receipt is never a producer witness or product relationship.
@@ -124,6 +124,9 @@ impl QualificationLaunchPurpose {
             (Some(context), Some(definitions), Some(content)) => {
                 definitions.validate_for(context)?;
                 content.validate_for(context, definitions)?;
+                if content.runtime_realization.manifest_hash != self.subject_manifest_hash {
+                    bail!("consumer runtime manifest differs from qualification subject");
+                }
                 use super::products::qualification::QualificationConsumerDeclarationAuthority;
                 match (&self.subject, &content.declaration_authority) {
                     (
@@ -143,6 +146,7 @@ impl QualificationLaunchPurpose {
                             || subject.declaration_id != *declaration_id
                             || context.product_declaration_id != *declaration_id
                             || allowance.required_claims != self.required_claims
+                            || content.runtime_realization != subject.realization
                         {
                             bail!(
                                 "activated consumer declaration differs from qualification purpose"

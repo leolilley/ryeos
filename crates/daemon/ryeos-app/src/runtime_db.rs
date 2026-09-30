@@ -2655,7 +2655,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 100 retains the exact admitted consumer selection in the existing
 // immutable verifier-attempt row. Absent predecessor selection cannot be
 // reconstructed from mutable installed configuration during recovery.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 100;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 101;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

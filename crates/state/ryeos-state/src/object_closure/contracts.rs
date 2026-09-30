@@ -686,6 +686,7 @@ fn push_qualification_consumer_content_edges(
         .worker_literals
         .iter()
         .chain(content.environment_realizations.iter())
+        .chain(std::iter::once(&content.runtime_realization))
     {
         super::push_typed_hash(
             &realized.manifest_hash,
@@ -1794,6 +1795,7 @@ mod tests {
                 total_bytes: 1,
             },
             worker_profile_hash: "6".repeat(64),
+            runtime_realization: realization("runtime", "b".repeat(64)),
             worker_preselection_effective_definition_digest: "7".repeat(64),
             worker_literals: ExternalContentRealizationSet::new(vec![realization(
                 "codex",
@@ -1826,7 +1828,12 @@ mod tests {
         let links = links_admitted_launch_capsule(&capsule).unwrap();
         let mut evidence_edges = ContractLinks::leaf();
         push_qualification_consumer_content_edges(&content, &mut evidence_edges).unwrap();
-        for hash in [&source_binding, &worker_manifest, &environment_manifest] {
+        for hash in [
+            &source_binding,
+            &worker_manifest,
+            &environment_manifest,
+            &content.runtime_realization.manifest_hash,
+        ] {
             assert!(links.object_edges.iter().any(|edge| &edge.hash == hash));
             assert!(
                 evidence_edges
@@ -1835,7 +1842,7 @@ mod tests {
                     .any(|edge| &edge.hash == hash)
             );
         }
-        assert_eq!(links.object_edges.len(), 5);
+        assert_eq!(links.object_edges.len(), 6);
     }
 
     #[test]

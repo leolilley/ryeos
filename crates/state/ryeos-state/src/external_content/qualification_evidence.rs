@@ -11,7 +11,7 @@ use super::products::qualification::{
 };
 use super::qualification_purpose::{QualificationLaunchPurpose, QualificationSubject};
 
-pub const CONTENT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.content_qualification_evidence.v4";
+pub const CONTENT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.content_qualification_evidence.v5";
 pub const CONTENT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.content_qualification.v1";
 pub const CONTENT_QUALIFICATION_CLAIM: &str = "activated_content_qualified";
 

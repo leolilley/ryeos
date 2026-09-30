@@ -28,7 +28,7 @@ pub mod remote_verifier_source;
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v3";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
-pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v11";
+pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v12";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
 pub const PRODUCT_QUALIFICATION_CLAIM: &str = "retained_product_qualified";
 pub const MAX_PRODUCT_QUALIFICATION_CLAIMS: usize = 32;
@@ -166,6 +166,7 @@ pub struct ProductQualificationConsumerContentIdentity {
     pub worker_profile_hash: String,
     pub worker_preselection_effective_definition_digest: String,
     pub worker_literals: ExternalContentRealizationSet,
+    pub runtime_realization: crate::objects::ExternalContentRealization,
     pub environment_realized_effective_definition_digest: String,
     pub environment_realizations: ExternalContentRealizationSet,
     pub executable_search: Vec<ExecutableSearchPathEntry>,
@@ -282,6 +283,12 @@ impl ProductQualificationConsumerContentIdentity {
             validate_hash(label, hash)?;
         }
         self.worker_literals.validate()?;
+        ExternalContentRealizationSet::new(vec![self.runtime_realization.clone()])?;
+        if self.runtime_realization.id != context.product_declaration_id
+            || self.runtime_realization.mode != ExternalContentMode::Pinned
+        {
+            bail!("qualification runtime realization differs from its subject declaration");
+        }
         self.environment_realizations.validate()?;
         if self.worker_literals.is_empty()
             || self.environment_realizations.is_empty()
@@ -325,17 +332,16 @@ impl ProductQualificationConsumerContentIdentity {
             }
         }
         self.runtime_member.validate_for(context)?;
+        let realizations = ExternalContentRealizationSet::new(
+            self.worker_literals
+                .iter()
+                .chain(self.environment_realizations.iter())
+                .chain(std::iter::once(&self.runtime_realization))
+                .cloned()
+                .collect(),
+        )?;
         if let Some(qualified_use) = &self.qualification_use {
             qualified_use.validate()?;
-            let mut entries: Vec<_> = self.worker_literals.iter().cloned().collect();
-            for inherited in self.environment_realizations.iter() {
-                match entries.iter().find(|entry| entry.id == inherited.id) {
-                    Some(entry) if entry == inherited => {}
-                    Some(_) => bail!("retained use has conflicting environment realizations"),
-                    None => entries.push(inherited.clone()),
-                }
-            }
-            let realizations = ExternalContentRealizationSet::new(entries)?;
             if qualified_use.profile_hash != self.worker_profile_hash
                 || qualified_use.source_binding_hash != self.worker_source.binding_hash
                 || qualified_use.source_content_manifest_hash != self.worker_source.content_manifest_hash
@@ -1061,6 +1067,12 @@ impl ProductQualificationEvidence {
             (Some(context), Some(content)) => {
                 content.validate_for(context, &content.definitions)?;
                 content.declaration_authority.captured_relationship()?;
+                if content.runtime_realization.manifest_hash != self.verifier.subject_manifest_hash
+                    || content.runtime_realization.manifest_hash
+                        != self.result.subject_manifest_hash
+                {
+                    bail!("qualified runtime realization differs from verifier subject");
+                }
             }
             (None, None) => {}
             _ => bail!("qualification evidence consumer content differs from signed policy"),

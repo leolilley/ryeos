@@ -181,6 +181,16 @@ pub(super) fn authenticate_consumer_root(
         .qualification_purpose()
         .context("consumer verification root has no sealed qualification purpose")?;
     purpose.validate()?;
+    let planning = state
+        .state_store
+        .launch_planning_record_for_owner(&purpose.launch_id, &context.fingerprint)?
+        .context("consumer verification root has no owner-bound launch reservation")?;
+    if planning.state != "bound"
+        || planning.reserved_thread_id != root.thread_id
+        || planning.bound_thread_id.as_deref() != Some(root.thread_id.as_str())
+    {
+        bail!("consumer verification root differs from its accepted launch reservation");
+    }
     if canonical_value_digest(&serde_json::to_value(purpose)?)?
         != coordinate.qualification_purpose_digest
         || purpose.owner_fingerprint != context.fingerprint

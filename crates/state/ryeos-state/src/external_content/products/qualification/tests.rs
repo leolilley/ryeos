@@ -161,6 +161,16 @@ fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
             total_bytes: 1,
         },
         worker_profile_hash: "4".repeat(64),
+        runtime_realization: crate::objects::ExternalContentRealization {
+            id: "guest-runtime".into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: purpose.subject_manifest_hash.clone(),
+            entry_count: 1,
+            total_bytes: 1,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "guest-runtime".into(),
+        },
         worker_preselection_effective_definition_digest: "5".repeat(64),
         worker_literals: ExternalContentRealizationSet::new(vec![
             crate::objects::ExternalContentRealization {
@@ -205,6 +215,45 @@ fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
 }
 
 #[test]
+fn consumer_runtime_identity_is_required_and_subject_bound() {
+    let purpose = consumer_launch_purpose_fixture();
+    let content = purpose.consumer_content.as_ref().unwrap();
+    let mut missing = serde_json::to_value(content).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("runtime_realization");
+    assert!(
+        serde_json::from_value::<ProductQualificationConsumerContentIdentity>(missing).is_err()
+    );
+    let mut changed = purpose.clone();
+    changed
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .runtime_realization
+        .manifest_hash = "e".repeat(64);
+    assert!(changed.validate().is_err());
+    let mut duplicated = purpose.clone();
+    let content = duplicated.consumer_content.as_mut().unwrap();
+    content.worker_literals = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .cloned()
+            .chain(std::iter::once(content.runtime_realization.clone()))
+            .collect(),
+    )
+    .unwrap();
+    assert!(duplicated.validate().is_err());
+    let mut overlapping = purpose;
+    let content = overlapping.consumer_content.as_mut().unwrap();
+    content.runtime_realization.mount =
+        content.worker_literals.iter().next().unwrap().mount.clone();
+    assert!(overlapping.validate().is_err());
+}
+
+#[test]
 fn launch_purpose_retains_same_generation_consumer_definitions() {
     let mut purpose = consumer_launch_purpose_fixture();
     let context = purpose
@@ -230,6 +279,7 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
             .worker_literals
             .iter()
             .chain(content.environment_realizations.iter())
+            .chain(std::iter::once(&content.runtime_realization))
             .cloned()
             .collect(),
     )
@@ -248,6 +298,24 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
     changed_use
         .validate_for(&context, purpose.consumer_definitions.as_ref().unwrap())
         .unwrap();
+    let incomplete = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .chain(content.environment_realizations.iter())
+            .cloned()
+            .collect(),
+    )
+    .unwrap();
+    let mut omitted_runtime = changed_use.clone();
+    omitted_runtime.qualification_use.as_mut().unwrap().execution_environment_digest =
+        crate::external_execution::admission::ExternalCandidateQualificationUse::admitted_execution_environment_digest(
+            &incomplete, &content.executable_search, &content.process_environment).unwrap();
+    assert!(
+        omitted_runtime
+            .validate_for(&context, purpose.consumer_definitions.as_ref().unwrap())
+            .is_err()
+    );
     changed_use
         .qualification_use
         .as_mut()
@@ -1356,6 +1424,7 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
             .worker_literals
             .iter()
             .chain(content.environment_realizations.iter())
+            .chain(std::iter::once(&content.runtime_realization))
             .cloned()
             .collect(),
     )

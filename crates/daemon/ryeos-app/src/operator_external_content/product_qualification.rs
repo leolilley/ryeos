@@ -768,6 +768,7 @@ fn require_retained_consumer_content_closure(
             .worker_literals
             .iter()
             .chain(content.environment_realizations.iter())
+            .chain(std::iter::once(&content.runtime_realization))
             .map(|realized| realized.manifest_hash.clone()),
     );
     let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
@@ -1156,6 +1157,8 @@ pub(super) struct PreparedBundleConsumerWorkerLiterals {
     pub declaration_authority: ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
     pub source: crate::source_closure_admission::AdmittedBundleStructuredWorkerProfile,
     pub literal_realizations: ExternalContentRealizationSet,
+    runtime_realization: Option<ryeos_state::objects::ExternalContentRealization>,
+    runtime_slot: Option<ryeos_state::external_content::products::composition::ExternalProductSlotDeclaration>,
     publication: Option<ryeos_state::PendingCasPublication>,
 }
 
@@ -1168,6 +1171,8 @@ pub(super) struct PreparedBundleConsumerContentInputs {
     pub policy_source: ProductQualificationPolicySource,
     pub worker_source: crate::source_closure_admission::AdmittedBundleStructuredWorkerProfile,
     pub worker_literals: ExternalContentRealizationSet,
+    runtime_realization: Option<ryeos_state::objects::ExternalContentRealization>,
+    runtime_slot: Option<ryeos_state::external_content::products::composition::ExternalProductSlotDeclaration>,
     pub environment: AdmittedBundleConsumerEnvironment,
     runtime_member: Option<ProductQualificationConsumerRuntimeMemberIdentity>,
     publication: Option<ryeos_state::PendingCasPublication>,
@@ -1212,6 +1217,11 @@ impl PreparedBundleConsumerContentInputs {
             return Ok(None);
         };
         let mut entries: Vec<_> = self.worker_literals.iter().cloned().collect();
+        entries.push(
+            self.runtime_realization
+                .clone()
+                .context("consumer use has no authenticated runtime realization")?,
+        );
         for inherited in self.environment.realizations.iter() {
             match entries.iter().find(|entry| entry.id == inherited.id) {
                 Some(entry) if entry == inherited => {}
@@ -1252,6 +1262,10 @@ impl PreparedBundleConsumerContentInputs {
                 .preselection_effective_definition_digest
                 .clone(),
             worker_literals: self.worker_literals.clone(),
+            runtime_realization: self
+                .runtime_realization
+                .clone()
+                .context("consumer content has no authenticated runtime realization")?,
             environment_realized_effective_definition_digest: self
                 .environment
                 .realized_effective_definition_digest
@@ -1315,6 +1329,57 @@ impl PreparedBundleConsumerContentInputs {
             &manifest,
             &requirement.runtime_recipe.executable_relative_path,
         )?;
+        let (entry_count, total_bytes) =
+            match manifest.get("kind").and_then(serde_json::Value::as_str) {
+                Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
+                    let manifest =
+                        ryeos_state::objects::ExternalContentManifestObject::from_value(&manifest)?;
+                    (manifest.entry_count, manifest.total_bytes)
+                }
+                Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
+                    let manifest =
+                        ryeos_state::objects::ExternalLargeContentManifestObject::from_value(
+                            &manifest,
+                        )?;
+                    (manifest.entry_count, manifest.total_bytes)
+                }
+                _ => bail!("consumer runtime has no supported exact manifest"),
+            };
+        if let Some(slot) = &self.runtime_slot {
+            if slot.id != context.product_declaration_id {
+                bail!("consumer runtime has conflicting product and literal authority");
+            }
+            let realized = ryeos_state::objects::ExternalContentRealization {
+                id: slot.id.clone(),
+                kind: slot.kind,
+                mode: ExternalContentMode::Pinned,
+                manifest_hash: subject_manifest_hash.to_owned(),
+                entry_count,
+                total_bytes,
+                mount_root: slot.mount_root,
+                mount: slot.mount.clone(),
+            };
+            if self
+                .runtime_realization
+                .as_ref()
+                .is_some_and(|previous| previous != &realized)
+            {
+                bail!("consumer runtime product realization changed during alignment");
+            }
+            self.runtime_realization = Some(realized);
+        }
+        let runtime = self
+            .runtime_realization
+            .as_ref()
+            .context("consumer runtime realization is absent")?;
+        if runtime.id != context.product_declaration_id
+            || runtime.manifest_hash != subject_manifest_hash
+            || runtime.entry_count != entry_count
+            || runtime.total_bytes != total_bytes
+        {
+            bail!("consumer runtime realization differs from authenticated subject manifest");
+        }
+        ExternalContentRealizationSet::new(vec![runtime.clone()])?;
         state.engine.with_checked_bundle_generation(|generation| {
             if generation.request_engine_generation_identity()
                 != self.definitions.bundle_generation_identity
@@ -1429,6 +1494,8 @@ fn prepare_bundle_consumer_content_from_worker(
         declaration_authority,
         source,
         literal_realizations,
+        runtime_realization,
+        runtime_slot,
         mut publication,
     } = worker;
     let environment_definition = resolve_signed_bundle_consumer_environment_definition(
@@ -1454,6 +1521,8 @@ fn prepare_bundle_consumer_content_from_worker(
         policy_source: policy_source.clone(),
         worker_source: source,
         worker_literals: literal_realizations,
+        runtime_realization,
+        runtime_slot,
         environment: AdmittedBundleConsumerEnvironment {
             definition: environment_definition,
             realizations,
@@ -1603,6 +1672,10 @@ fn prepare_signed_bundle_consumer_worker_literals(
     authority: ConsumerLiteralAuthority<'_>,
 ) -> anyhow::Result<PreparedBundleConsumerWorkerLiterals> {
     let activated = matches!(&authority, ConsumerLiteralAuthority::ActivatedContent(_));
+    let activated_subject = match &authority {
+        ConsumerLiteralAuthority::ActivatedContent(prepared) => Some(&prepared.subject.realization),
+        ConsumerLiteralAuthority::CapturedProduct { .. } => None,
+    };
     let context = policy_source
         .policy
         .consumer_execution_context
@@ -1617,7 +1690,7 @@ fn prepare_signed_bundle_consumer_worker_literals(
     let mut publication = Some(
         source_publication.context("qualification Worker source has no staged CAS publication")?,
     );
-    let (literal_realizations, declaration_authority) =
+    let (literal_realizations, runtime_realization, runtime_slot, declaration_authority) =
         state.engine.with_checked_bundle_generation(|generation| {
             if generation.request_engine_generation_identity()
                 != definitions.bundle_generation_identity
@@ -1632,6 +1705,7 @@ fn prepare_signed_bundle_consumer_worker_literals(
             if consumer_definition_identity(&resolution)? != definitions.worker {
                 bail!("qualification Worker changed signed definition before literal admission");
             }
+            let mut runtime_slot = None;
             let declaration_authority = match authority {
                 ConsumerLiteralAuthority::CapturedProduct { relationship, relationship_ref } => {
             let relationship_definition =
@@ -1669,6 +1743,7 @@ fn prepare_signed_bundle_consumer_worker_literals(
             {
                 bail!("qualification Worker product slot differs from signed relationship");
             }
+            runtime_slot = Some(shape.product_slots[0].clone());
             ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority::CapturedProduct { relationship_definition: relationship_identity }
                 }
                 ConsumerLiteralAuthority::ActivatedContent(prepared) => {
@@ -1772,13 +1847,32 @@ fn prepare_signed_bundle_consumer_worker_literals(
             {
                 bail!("qualification Worker literals differ from signed declarations");
             }
-            Ok((literals, declaration_authority))
+            // Admission above checks every signed declaration before separating
+            // the subject. A subject is runtime authority, not a second Worker
+            // literal authority. Captured products are joined later from their
+            // authenticated manifest and signed product slot.
+            let runtime_realization = if let Some(subject) = activated_subject {
+                let realized = literals.iter().find(|entry| entry.id == context.product_declaration_id)
+                    .context("activated consumer runtime realization is absent")?;
+                if realized != subject {
+                    bail!("activated consumer runtime differs from authenticated subject");
+                }
+                Some(realized.clone())
+            } else {
+                None
+            };
+            let literals = ExternalContentRealizationSet::new(literals.iter()
+                .filter(|entry| entry.id != context.product_declaration_id)
+                .cloned().collect())?;
+            Ok((literals, runtime_realization, runtime_slot, declaration_authority))
         })?;
     Ok(PreparedBundleConsumerWorkerLiterals {
         definitions,
         declaration_authority,
         source,
         literal_realizations,
+        runtime_realization,
+        runtime_slot,
         publication,
     })
 }
