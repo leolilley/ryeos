@@ -1354,9 +1354,11 @@ pub(super) fn prepare_current_bundle_consumer_content_inputs(
         literal_realizations,
         mut publication,
     } = worker;
-    let environment_definition =
-        resolve_current_bundle_consumer_environment_definition(state, policy_source, relationship)?
-            .context("qualification consumer has no signed environment definition")?;
+    let environment_definition = resolve_signed_bundle_consumer_environment_definition(
+        state,
+        policy_source,
+        definitions.clone(),
+    )?;
     if environment_definition.definitions != definitions {
         bail!("qualification Worker and environment changed Bundle definitions");
     }
@@ -1632,17 +1634,40 @@ pub(super) fn resolve_current_bundle_consumer_environment_definition(
     else {
         return Ok(None);
     };
+    Ok(Some(resolve_signed_bundle_consumer_environment_definition(
+        state,
+        policy_source,
+        definitions,
+    )?))
+}
+
+/// Admit the environment half against already admitted consumer definitions.
+/// The source owner validates product or activation authority separately;
+/// this shared join cannot manufacture either source or a runtime claim.
+pub(super) fn resolve_signed_bundle_consumer_environment_definition(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+    definitions: ProductQualificationConsumerDefinitionIdentity,
+) -> anyhow::Result<CurrentBundleConsumerEnvironmentDefinition> {
     let context = policy_source
         .policy
         .consumer_execution_context
         .as_ref()
         .context("qualification consumer context is absent")?;
+    definitions.validate_for(context)?;
     let (declarations, executable_search, process_environment) =
         state.engine.with_checked_bundle_generation(|generation| {
             if generation.request_engine_generation_identity()
                 != definitions.bundle_generation_identity
             {
                 bail!("qualification environment changed Bundle generation");
+            }
+            if resolve_current_bundle_qualification_policy_in_generation(
+                generation,
+                &policy_source.canonical_ref,
+            )? != *policy_source
+            {
+                bail!("qualification environment policy changed after admission");
             }
             let environment = resolve_consumer_definition_in_generation(
                 generation,
@@ -1760,12 +1785,12 @@ pub(super) fn resolve_current_bundle_consumer_environment_definition(
             }
             Ok((declarations, executable_search, process_environment))
         })?;
-    Ok(Some(CurrentBundleConsumerEnvironmentDefinition {
+    Ok(CurrentBundleConsumerEnvironmentDefinition {
         definitions,
         declarations,
         executable_search,
         process_environment,
-    }))
+    })
 }
 
 fn resolve_consumer_definition_in_generation(
