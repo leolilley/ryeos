@@ -3516,7 +3516,7 @@ fn prepare_structured_session_configuration_file(
     ))
 }
 
-fn prepare_structured_session_configurations(
+pub(crate) fn prepare_structured_session_configurations(
     profile: &ryeos_state::objects::AdmittedStructuredSessionProfile,
     source_directory: &lillux::PinnedDirectory,
     state_root: &Path,

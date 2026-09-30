@@ -323,6 +323,23 @@ pub(crate) fn bind_source(
     )
 }
 
+/// Redeem the source projection held by an authenticated qualification root.
+/// The caller owns its accepted-root/profile join; this function only verifies
+/// the exact retained CAS binding and materializes its immutable source bytes.
+pub(crate) fn bind_retained_qualification_source(
+    state: &ryeos_app::state::AppState,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    workspace: &Path,
+) -> anyhow::Result<BoundSourceClosure> {
+    bind_source_projection_with(
+        state,
+        projection,
+        workspace,
+        BindingMode::IsolationMount(SourceMountPlacement::ExecutionRuntime),
+        None,
+    )
+}
+
 pub(crate) fn bind_source_in_private_workspace_with_budget(
     state: &ryeos_app::state::AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
@@ -345,13 +362,29 @@ fn bind_source_with(
     mode: BindingMode,
     budget: Option<&super::external_content::PrivateMaterializationBudget>,
 ) -> anyhow::Result<Option<BoundSourceClosure>> {
+    let Some(value) = resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+    else {
+        return Ok(None);
+    };
+    let projection = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)?;
+    bind_source_projection_with(state, &projection, workspace, mode, budget).map(Some)
+}
+
+fn bind_source_projection_with(
+    state: &ryeos_app::state::AppState,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    workspace: &Path,
+    mode: BindingMode,
+    budget: Option<&super::external_content::PrivateMaterializationBudget>,
+) -> anyhow::Result<BoundSourceClosure> {
     let authority = super::pinned_state_authority(state)?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
-    let Some((binding, manifest, projection)) = retained_source_records(&cas, resolution)? else {
-        return Ok(None);
-    };
+    let (binding, manifest) = retained_source_records_for_projection(&cas, projection)?;
     let records =
         ryeos_state::source_verification::VerifiedAdmittedSourceRecords::from_canonical_bytes(
             &projection.binding_hash,
@@ -467,7 +500,7 @@ fn bind_source_with(
         }
     };
     authority.ensure_guard(&guard)?;
-    Ok(Some(BoundSourceClosure {
+    Ok(BoundSourceClosure {
         mounts,
         sealed_identity_env,
         execution_entry_path: destination.join(entry),
@@ -480,7 +513,7 @@ fn bind_source_with(
         source_directory: source,
         records,
         _leases: vec![lease],
-    }))
+    })
 }
 
 fn retained_source_records(
@@ -501,6 +534,18 @@ fn retained_source_records(
         return Ok(None);
     };
     let projection = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)?;
+    let (binding, manifest) = retained_source_records_for_projection(cas, &projection)?;
+    Ok(Some((binding, manifest, projection)))
+}
+
+fn retained_source_records_for_projection(
+    cas: &lillux::CasStore,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+) -> anyhow::Result<(
+    ryeos_state::objects::EffectiveSourceBinding,
+    ryeos_state::objects::SourceClosureManifest,
+)> {
+    projection.validate()?;
     let binding_value = cas
         .get_object(&projection.binding_hash)?
         .ok_or_else(|| anyhow::anyhow!("admitted source binding is missing"))?;
@@ -515,11 +560,7 @@ fn retained_source_records(
             lillux::canonical_json(&manifest_value)?.as_bytes(),
         )?;
     records.validate_projection(&projection)?;
-    Ok(Some((
-        records.binding().clone(),
-        records.manifest().clone(),
-        projection,
-    )))
+    Ok((records.binding().clone(), records.manifest().clone()))
 }
 
 fn logical_mount(binding: &ryeos_state::objects::EffectiveSourceBinding) -> anyhow::Result<String> {
