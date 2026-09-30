@@ -2681,9 +2681,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // signed qualification fact or a semantic success permit.
 // Epoch 112 retains the exact request-correlated Delta and a one-way send
 // settlement marker, separately from observation-driven turn completion.
-// Epoch 114 retains a one-use Q guest-input scratch intent before Create,
-// then exact original-descriptor physical removal and Closed evidence.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 114;
+// Epoch 114 retained a one-use Q guest-input scratch intent before Create.
+// Epoch 115 adds exact original-descriptor physical removal and Closed evidence.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 115;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
