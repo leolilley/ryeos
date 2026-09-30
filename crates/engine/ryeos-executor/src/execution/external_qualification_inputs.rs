@@ -60,6 +60,7 @@ pub fn prepare_external_qualification_guest(
         qualification_operation_id,
         limits,
     )?;
+    ryeos_app::external_placement::preflight_external_qualification_guest(state, &root)?;
     let inputs = prepare_external_qualification_inputs(
         state,
         root.capsule(),
