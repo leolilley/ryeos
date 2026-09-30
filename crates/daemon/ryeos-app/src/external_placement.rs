@@ -2895,6 +2895,103 @@ pub(crate) enum ExternalRelayFileContactProgress {
     PendingHttpNotFound(crate::runtime_db::external_execution::RelayTransferRecord),
 }
 
+/// Read-only transport choice for the exact retained Q activation. `None`
+/// means activation has not yet retained an intent; it is not an HTTP choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalQualificationControllerTransport {
+    Http,
+    Relay {
+        poll_interval_ms: u32,
+        poll_deadline_ms: u32,
+        maximum_frames: u32,
+    },
+}
+
+/// Inspect only the original bound Q occurrence and its currently installed
+/// signed transport. Relay parameters are returned only after the activation
+/// commitment rejoins the sealed bootstrap; this creates no contact permit.
+#[allow(dead_code)]
+pub fn inspect_external_qualification_controller_transport(
+    state: &AppState,
+    placement: &str,
+) -> Result<Option<ExternalQualificationControllerTransport>> {
+    use ryeos_state::external_execution::transport::ExternalControllerTransportSelection;
+
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("Q transport selection has no original allocation")?;
+    ensure!(
+        matches!(
+            &allocation.reservation.owner,
+            ExternalAllocationOwner::QualificationCandidate(_)
+        ),
+        "Q transport selection requires its original qualification owner"
+    );
+    ensure!(
+        matches!(
+            allocation.phase,
+            ExternalAllocationPhase::Reserved
+                | ExternalAllocationPhase::ContactPending
+                | ExternalAllocationPhase::Bound
+        ),
+        "Q transport selection has no live allocation"
+    );
+    if allocation.phase != ExternalAllocationPhase::Bound {
+        return Ok(None);
+    }
+    let Some(activation) = state
+        .state_store
+        .external_supervisor_activation(placement)?
+    else {
+        return Ok(None);
+    };
+    ensure!(
+        activation
+            .observation
+            .as_ref()
+            .is_none_or(|observation| observation.activation_state == "started"),
+        "Q transport selection has supervisor non-start evidence"
+    );
+    let retained = state
+        .state_store
+        .retained_external_binding(&allocation.reservation.binding_hash)?
+        .context("Q transport selection lost its signed binding")?;
+    ensure!(
+        state
+            .node_config
+            .external_execution
+            .iter()
+            .any(|installed| installed.digest() == retained.digest()),
+        "Q transport selection lost its currently installed signed binding"
+    );
+    match &retained.backend_contract().controller_transport {
+        ExternalControllerTransportSelection::HttpJson(_) => {
+            ensure!(
+                activation.relay_bootstrap.is_none(),
+                "HTTP Q activation changed relay bootstrap custody"
+            );
+            Ok(Some(ExternalQualificationControllerTransport::Http))
+        }
+        ExternalControllerTransportSelection::ControllerFileRelay(_) => {
+            ensure!(
+                activation.relay_bootstrap.is_some(),
+                "relay Q activation has no original bootstrap commitment"
+            );
+            let sealed = recover_original_external_relay_bootstrap(state, placement)?;
+            let relay = sealed.bootstrap().controller.relay()?;
+            Ok(Some(ExternalQualificationControllerTransport::Relay {
+                poll_interval_ms: relay.poll_interval_ms,
+                poll_deadline_ms: relay.poll_deadline_ms,
+                maximum_frames: relay.maximum_frames,
+            }))
+        }
+    }
+}
+
 /// The only guest file coordinate a Q relay caller may ask the controller to
 /// advance. Paths, bytes, deadlines and limits come from the sealed bootstrap
 /// and durable journal, never from this request.
