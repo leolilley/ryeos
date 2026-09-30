@@ -891,6 +891,7 @@ impl AdmittedPersistentSessionCapsule {
         ) {
             (Some(program), Some(proof)) => {
                 proof.validate()?;
+                program.require_content_qualification(&proof.evidence)?;
                 if proof.runtime_manifest_hash != program.runtime_manifest_hash {
                     anyhow::bail!(
                         "retained content qualification differs from admitted session runtime"

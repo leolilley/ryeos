@@ -1653,6 +1653,7 @@ pub fn verify_retained_external_candidate_capsule(
         .retained_external_runtime_content_qualification
         .as_ref()
         .context("external candidate capsule has no retained content testimony")?;
+    program.require_content_qualification(&content.evidence)?;
     ensure!(
         content.runtime_manifest_hash == program.runtime_manifest_hash,
         "external candidate content proof differs from admitted runtime"
@@ -1835,6 +1836,7 @@ pub fn preflight_external_candidate_program(
     let runtime_proof = admit_current_runtime_qualification(state, &contract, binding.digest())?;
     let content = require_current_runtime_content_qualification(state, &contract)?
         .context("external candidate has no authenticated runtime content")?;
+    program.require_content_qualification(&content.evidence)?;
     let selected = contract
         .runtime_content_qualification
         .as_ref()
