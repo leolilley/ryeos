@@ -287,7 +287,21 @@ impl ProductQualificationConsumerContentIdentity {
         {
             bail!("qualification consumer content requires exact pinned realizations");
         }
-        let mut realization_ids = BTreeSet::from([context.product_declaration_id.as_str()]);
+        let mut realization_ids = BTreeSet::new();
+        match &self.declaration_authority {
+            QualificationConsumerDeclarationAuthority::CapturedProduct { .. } => {
+                realization_ids.insert(context.product_declaration_id.as_str());
+            }
+            QualificationConsumerDeclarationAuthority::ActivatedContent { .. } => {
+                if !self
+                    .worker_literals
+                    .iter()
+                    .any(|realized| realized.id == context.product_declaration_id)
+                {
+                    bail!("activated qualification Worker omits its subject realization");
+                }
+            }
+        }
         for realized in self
             .worker_literals
             .iter()

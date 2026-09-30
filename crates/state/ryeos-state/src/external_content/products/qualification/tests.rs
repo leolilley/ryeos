@@ -200,6 +200,78 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
         },
     });
     purpose.validate().unwrap();
+    let mut activated = purpose.clone();
+    let mut subject = crate::external_content::qualification_purpose::tests::content_subject(
+        &purpose.subject_manifest_hash,
+    );
+    subject.consumer_ref = context.worker_ref.clone();
+    activated.subject = QualificationSubject::ActivatedContent {
+        content: subject.clone(),
+    };
+    let original_literals = purpose
+        .consumer_content
+        .as_ref()
+        .unwrap()
+        .worker_literals
+        .clone();
+    let mut captured_with_subject_literal = purpose.clone();
+    captured_with_subject_literal
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .worker_literals = ExternalContentRealizationSet::new(
+        original_literals
+            .iter()
+            .cloned()
+            .chain(std::iter::once(subject.realization.clone()))
+            .collect(),
+    )
+    .unwrap();
+    assert!(captured_with_subject_literal.validate().is_err());
+    let activated_content = activated.consumer_content.as_mut().unwrap();
+    activated_content.declaration_authority =
+        QualificationConsumerDeclarationAuthority::ActivatedContent {
+            activation_definition: definition("config:codex/runtime-activation"),
+            declaration_id: context.product_declaration_id.clone(),
+            allowance:
+                crate::external_content::qualification_allowance::ContentQualificationAllowance {
+                    activation_ref: "config:codex/runtime-activation".into(),
+                    policy_ref: purpose.policy_source.canonical_ref.clone(),
+                    required_claims: purpose.required_claims.clone(),
+                },
+        };
+    activated_content.worker_literals = ExternalContentRealizationSet::new(
+        original_literals
+            .iter()
+            .cloned()
+            .chain(std::iter::once(subject.realization.clone()))
+            .collect(),
+    )
+    .unwrap();
+    activated.validate().unwrap();
+    let mut missing_subject = activated.clone();
+    missing_subject
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .worker_literals = original_literals.clone();
+    assert!(missing_subject.validate().is_err());
+    let mut swapped_subject = activated.clone();
+    let mut wrong_realization = subject.realization.clone();
+    wrong_realization.manifest_hash = "0".repeat(64);
+    swapped_subject
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .worker_literals = ExternalContentRealizationSet::new(
+        original_literals
+            .iter()
+            .cloned()
+            .chain(std::iter::once(wrong_realization))
+            .collect(),
+    )
+    .unwrap();
+    assert!(swapped_subject.validate().is_err());
     let captured_authority = purpose
         .consumer_content
         .as_ref()

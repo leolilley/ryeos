@@ -136,9 +136,15 @@ impl QualificationLaunchPurpose {
                         },
                     ) => {
                         allowance.validate_policy_source(&self.policy_source)?;
+                        let realized_subject = content
+                            .worker_literals
+                            .iter()
+                            .find(|realized| realized.id == *declaration_id)
+                            .context("activated qualification Worker omits its subject")?;
                         if subject.consumer_ref != definitions.worker.canonical_ref
                             || subject.declaration_id != *declaration_id
                             || context.product_declaration_id != *declaration_id
+                            || realized_subject != &subject.realization
                             || allowance.required_claims != self.required_claims
                         {
                             bail!(
