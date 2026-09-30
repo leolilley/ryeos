@@ -746,7 +746,10 @@ impl RetainedExternalRuntimeContentQualification {
         ] {
             super::thread_snapshot::validate_canonical_hash(label, hash)?;
         }
-        crate::external_content::products::validate_canonical_unsuffixed_ref(&self.activation_ref)?;
+        crate::external_content::products::validate_canonical_unsuffixed_ref(
+            "retained runtime activation ref",
+            &self.activation_ref,
+        )?;
         if !self.activation_ref.starts_with("config:") {
             anyhow::bail!("retained runtime content requires an activation config ref");
         }
