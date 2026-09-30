@@ -256,6 +256,29 @@ pub(super) fn require_terminal_qualification_worker_process(
     Ok(record)
 }
 
+/// Rejoin the live Q process under the connector's writer transaction after
+/// Lillux has observed the authenticated peer in this process's retained
+/// scope. The original attachment and scope identity cannot be replaced;
+/// only its phase can change between observation and connection CAS.
+pub(super) fn require_attached_qualification_worker_process(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+    channel_binding_digest: &str,
+    peer: &lillux::ExactProcessIdentity,
+) -> Result<QualificationWorkerProcessRecord> {
+    let record = read_process(conn, &reservation.placement_thread_id)?
+        .context("qualification connector lost its attached local Worker")?;
+    require_retained_process_owner(conn, &record)?;
+    ensure!(
+        record.phase == QualificationWorkerProcessPhase::Attached
+            && record.channel_binding_digest == channel_binding_digest
+            && record.process_identity.process_scope.is_some()
+            && record.process_identity.boot_id == peer.boot_id,
+        "qualification connector lost its live exact Worker scope"
+    );
+    Ok(record)
+}
+
 pub(super) fn validate_processes(conn: &Connection) -> Result<()> {
     let mut statement = conn.prepare(
         "SELECT placement_thread_id FROM external_qualification_worker_process

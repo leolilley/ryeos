@@ -574,6 +574,17 @@ impl RuntimeDb {
                 );
                 require_fresh_connector_owner(&tx, &allocation.reservation, &channel, true)?;
                 require_live_released_channel(&tx, placement, &channel)?;
+                if matches!(
+                    &allocation.reservation.owner,
+                    ExternalAllocationOwner::QualificationCandidate(_)
+                ) {
+                    qualification_process::require_attached_qualification_worker_process(
+                        &tx,
+                        &allocation.reservation,
+                        &channel.digest()?,
+                        peer,
+                    )?;
+                }
                 let retained = read_retained_binding(&tx, &allocation.reservation.binding_hash)?
                     .context("external connector lost its placement binding")?;
                 ensure!(
