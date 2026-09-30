@@ -21,9 +21,9 @@ use ryeos_external_execution::guest_runtime_product::{
 };
 use ryeos_state::objects::{
     GUEST_RUNTIME_MATERIALIZATION_SCHEMA, GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
-    GuestRuntimeMaterializationSourceEvidence, MaterializationExecutorSource,
-    MaterializationSignatureEnvelope, MaterializationSignedBundleManifest,
-    MaterializationSignedItem, MaterializationSignerKey,
+    GuestRuntimeMaterializationSourceEvidence, RetainedBundleExecutorSource,
+    RetainedBundleSignerKey, RetainedSignatureEnvelope, RetainedSignedBundleItem,
+    RetainedSignedBundleManifest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -202,7 +202,7 @@ pub struct PreparedGuestOwnerMaterialization {
     source: GuestOwnerMaterializationSource,
     signed_recipe_sources: Vec<CapturedSignedBundleItemSource>,
     signed_bundle_manifests: Vec<CapturedSignedBundleManifest>,
-    signer_keys: Vec<MaterializationSignerKey>,
+    signer_keys: Vec<RetainedBundleSignerKey>,
     executor_source_proof: BundlePayloadSourceProof,
 }
 
@@ -279,7 +279,7 @@ fn build_source_evidence(
     source: &GuestOwnerMaterializationSource,
     recipe_sources: &[CapturedSignedBundleItemSource],
     bundle_manifests: &[CapturedSignedBundleManifest],
-    signer_keys: &[MaterializationSignerKey],
+    signer_keys: &[RetainedBundleSignerKey],
     executor: &BundlePayloadSourceProof,
 ) -> Result<GuestRuntimeMaterializationSourceEvidence> {
     source.coordinate_digest()?;
@@ -339,13 +339,13 @@ fn build_source_evidence(
         let ItemSourceRoot::Bundle { name } = &item.source_root else {
             anyhow::bail!("retained materialization recipe item is not Bundle content");
         };
-        signed_recipe_items.push(MaterializationSignedItem {
+        signed_recipe_items.push(RetainedSignedBundleItem {
             resolved_ref: item.resolved_ref.clone(),
             bundle_name: name.clone(),
             signer_fingerprint: item.signer_fingerprint.clone(),
             signed_blob_hash: lillux::sha256_hex(&item.signed_bytes),
             raw_content_digest: item.raw_content_digest.clone(),
-            signature_envelope: MaterializationSignatureEnvelope {
+            signature_envelope: RetainedSignatureEnvelope {
                 prefix: item.signature_envelope.prefix.clone(),
                 suffix: item.signature_envelope.suffix.clone(),
                 after_shebang: item.signature_envelope.after_shebang,
@@ -357,7 +357,7 @@ fn build_source_evidence(
     });
     let mut signed_bundle_manifests = bundle_manifests
         .iter()
-        .map(|item| MaterializationSignedBundleManifest {
+        .map(|item| RetainedSignedBundleManifest {
             bundle_name: item.identity.name.clone(),
             signer_fingerprint: item.identity.signer_fingerprint.clone(),
             signed_blob_hash: lillux::sha256_hex(&item.signed_bytes),
@@ -371,7 +371,7 @@ fn build_source_evidence(
         signed_recipe_items,
         signed_bundle_manifests,
         signer_keys: signer_keys.to_vec(),
-        executor: MaterializationExecutorSource {
+        executor: RetainedBundleExecutorSource {
             bundle_name: source.bundle_name.clone(),
             item_ref: executor.selected_item_ref.clone(),
             target_triple: source.guest_target_triple.clone(),
@@ -388,8 +388,8 @@ fn build_source_evidence(
 }
 
 fn verify_retained_signed_recipe_item(
-    item: &MaterializationSignedItem,
-    signer: &MaterializationSignerKey,
+    item: &RetainedSignedBundleItem,
+    signer: &RetainedBundleSignerKey,
     signed_bytes: &[u8],
 ) -> Result<()> {
     ensure!(
@@ -410,8 +410,8 @@ fn verify_retained_signed_envelope(
     signed_bytes: &[u8],
     signed_hash: &str,
     body_hash: &str,
-    envelope: &MaterializationSignatureEnvelope,
-    signer: &MaterializationSignerKey,
+    envelope: &RetainedSignatureEnvelope,
+    signer: &RetainedBundleSignerKey,
 ) -> Result<String> {
     ensure!(
         lillux::sha256_hex(signed_bytes) == signed_hash,
@@ -442,8 +442,8 @@ fn verify_retained_signed_envelope(
 }
 
 fn verify_retained_signed_bundle_manifest(
-    manifest: &MaterializationSignedBundleManifest,
-    signer: &MaterializationSignerKey,
+    manifest: &RetainedSignedBundleManifest,
+    signer: &RetainedBundleSignerKey,
     signed_bytes: &[u8],
 ) -> Result<()> {
     ensure!(
@@ -466,7 +466,7 @@ fn verify_retained_signed_bundle_manifest(
     Ok(())
 }
 
-fn retained_verifier(signer: &MaterializationSignerKey) -> Result<lillux::crypto::VerifyingKey> {
+fn retained_verifier(signer: &RetainedBundleSignerKey) -> Result<lillux::crypto::VerifyingKey> {
     let encoded = signer
         .verifying_key
         .strip_prefix("ed25519:")
@@ -549,7 +549,7 @@ fn verify_retained_executor_source(
         signed_sidecar,
         &executor.signed_sidecar_blob_hash,
         &executor.item_source_object_hash,
-        &MaterializationSignatureEnvelope {
+        &RetainedSignatureEnvelope {
             prefix: "#".to_owned(),
             suffix: None,
             after_shebang: false,
@@ -706,7 +706,7 @@ pub fn prepare_current_guest_owner_runtime(
                         && lillux::crypto::fingerprint(&key.verifying_key) == fingerprint,
                     "checked materialization signer verifier differs from fingerprint"
                 );
-                Ok(MaterializationSignerKey {
+                Ok(RetainedBundleSignerKey {
                     signer_fingerprint: fingerprint,
                     verifying_key: format!(
                         "ed25519:{}",
@@ -941,7 +941,7 @@ mod tests {
         let payload = b"exact owner bytes";
         source.owner_executable_sha256 = lillux::sha256_hex(payload);
         source.recipe_publisher_fingerprint = lillux::crypto::fingerprint(&verifier);
-        let signer_keys = vec![MaterializationSignerKey {
+        let signer_keys = vec![RetainedBundleSignerKey {
             signer_fingerprint: source.recipe_publisher_fingerprint.clone(),
             verifying_key: format!(
                 "ed25519:{}",
@@ -1347,20 +1347,20 @@ mod tests {
         let body = "kind: config\nvalue: exact\n";
         let signed =
             lillux::signature::sign_content_at(body, &key, "#", None, "2026-09-29T00:00:00Z");
-        let signer = MaterializationSignerKey {
+        let signer = RetainedBundleSignerKey {
             signer_fingerprint: lillux::crypto::fingerprint(&verifier),
             verifying_key: format!(
                 "ed25519:{}",
                 base64::engine::general_purpose::STANDARD.encode(verifier.to_bytes())
             ),
         };
-        let item = MaterializationSignedItem {
+        let item = RetainedSignedBundleItem {
             resolved_ref: "config:codex/guest-owner-materialization".to_owned(),
             bundle_name: "codex".to_owned(),
             signer_fingerprint: signer.signer_fingerprint.clone(),
             signed_blob_hash: lillux::sha256_hex(signed.as_bytes()),
             raw_content_digest: lillux::sha256_hex(body.as_bytes()),
-            signature_envelope: MaterializationSignatureEnvelope {
+            signature_envelope: RetainedSignatureEnvelope {
                 prefix: "#".to_owned(),
                 suffix: None,
                 after_shebang: false,
@@ -1386,7 +1386,7 @@ mod tests {
             None,
             "2026-09-29T00:00:00Z",
         );
-        let bundle = MaterializationSignedBundleManifest {
+        let bundle = RetainedSignedBundleManifest {
             bundle_name: "codex".to_owned(),
             signer_fingerprint: signer.signer_fingerprint.clone(),
             signed_blob_hash: lillux::sha256_hex(signed_bundle.as_bytes()),
@@ -1431,20 +1431,20 @@ mod tests {
             "2026-09-29T00:00:00Z",
             true,
         );
-        let signer = MaterializationSignerKey {
+        let signer = RetainedBundleSignerKey {
             signer_fingerprint: lillux::crypto::fingerprint(&key.verifying_key()),
             verifying_key: format!(
                 "ed25519:{}",
                 base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes())
             ),
         };
-        let item = MaterializationSignedItem {
+        let item = RetainedSignedBundleItem {
             resolved_ref: "tool:codex/example".to_owned(),
             bundle_name: "codex".to_owned(),
             signer_fingerprint: signer.signer_fingerprint.clone(),
             signed_blob_hash: lillux::sha256_hex(signed.as_bytes()),
             raw_content_digest: lillux::sha256_hex(body.as_bytes()),
-            signature_envelope: MaterializationSignatureEnvelope {
+            signature_envelope: RetainedSignatureEnvelope {
                 prefix: "#".to_owned(),
                 suffix: None,
                 after_shebang: true,

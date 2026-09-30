@@ -1410,6 +1410,15 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
         .producer_scenarios
         .insert("remote_codex".into(), scenario.clone());
     value.validate().unwrap();
+    assert_eq!(
+        scenario
+            .remote_verifier
+            .as_ref()
+            .unwrap()
+            .bundle_payload_ref()
+            .unwrap(),
+        "bin/x86_64-unknown-linux-musl/guest-verifier"
+    );
     let source = ProductProducerRecipeSourceIdentity {
         bundle_generation_identity: "generation-1".into(),
         canonical_ref: scenario.recipe_ref.clone(),
@@ -1449,6 +1458,7 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
         "bin:foreign/verifier",
         "bin:fixtures/verifier@latest",
         "bin:fixtures/../verifier",
+        "bin:fixtures/nested/verifier",
     ] {
         let mut invalid = value.clone();
         invalid

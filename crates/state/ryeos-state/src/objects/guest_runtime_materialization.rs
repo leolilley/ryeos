@@ -8,6 +8,13 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg(test)]
+use super::bundle_source_evidence::RetainedSignatureEnvelope;
+use super::bundle_source_evidence::{
+    RetainedBundleExecutorSource, RetainedBundleSignerKey, RetainedSignedBundleItem,
+    RetainedSignedBundleManifest,
+};
+
 pub const GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND: &str = "guest_runtime_materialization_source";
 pub const GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND: &str =
     "guest_runtime_materialization_subject";
@@ -15,85 +22,13 @@ pub const GUEST_RUNTIME_MATERIALIZATION_SCHEMA: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MaterializationSignedItem {
-    pub resolved_ref: String,
-    pub bundle_name: String,
-    pub signer_fingerprint: String,
-    /// Hash of the whole signed source envelope, retained as a CAS blob.
-    pub signed_blob_hash: String,
-    pub raw_content_digest: String,
-    pub signature_envelope: MaterializationSignatureEnvelope,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaterializationSignatureEnvelope {
-    pub prefix: String,
-    pub suffix: Option<String>,
-    pub after_shebang: bool,
-}
-
-impl MaterializationSignatureEnvelope {
-    fn validate(&self) -> anyhow::Result<()> {
-        let valid = |value: &str| {
-            !value.is_empty()
-                && value.len() <= 16
-                && value.bytes().all(|byte| byte.is_ascii_graphic())
-                && !value.contains("ryeos:signed")
-        };
-        if !valid(&self.prefix) || self.suffix.as_deref().is_some_and(|suffix| !valid(suffix)) {
-            anyhow::bail!("guest-runtime materialization signature envelope is invalid");
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaterializationSignedBundleManifest {
-    pub bundle_name: String,
-    pub signer_fingerprint: String,
-    pub signed_blob_hash: String,
-    pub body_digest: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaterializationExecutorSource {
-    pub bundle_name: String,
-    pub item_ref: String,
-    pub target_triple: String,
-    pub signer_fingerprint: String,
-    pub signed_manifest_ref_blob_hash: String,
-    /// Canonical bytes of the signed-ref-selected source manifest, copied to a
-    /// blob so this one-runtime closure does not retain every unrelated
-    /// executor named by the complete Bundle manifest object.
-    pub manifest_object_blob_hash: String,
-    pub item_source_object_hash: String,
-    pub signed_sidecar_blob_hash: String,
-    /// Exact executable bytes. The output manifest may reach the same blob;
-    /// equality is checked by the materialization publisher/reader.
-    pub payload_blob_hash: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaterializationSignerKey {
-    pub signer_fingerprint: String,
-    /// Exact historical Ed25519 verifier. This is verification data, never
-    /// authority for fresh admission after publisher revocation.
-    pub verifying_key: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GuestRuntimeMaterializationSourceEvidence {
     pub schema: u32,
     pub kind: String,
-    pub signed_recipe_items: Vec<MaterializationSignedItem>,
-    pub signed_bundle_manifests: Vec<MaterializationSignedBundleManifest>,
-    pub signer_keys: Vec<MaterializationSignerKey>,
-    pub executor: MaterializationExecutorSource,
+    pub signed_recipe_items: Vec<RetainedSignedBundleItem>,
+    pub signed_bundle_manifests: Vec<RetainedSignedBundleManifest>,
+    pub signer_keys: Vec<RetainedBundleSignerKey>,
+    pub executor: RetainedBundleExecutorSource,
 }
 
 impl GuestRuntimeMaterializationSourceEvidence {
@@ -385,32 +320,32 @@ mod tests {
         GuestRuntimeMaterializationSourceEvidence {
             schema: GUEST_RUNTIME_MATERIALIZATION_SCHEMA,
             kind: GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND.to_owned(),
-            signed_recipe_items: vec![MaterializationSignedItem {
+            signed_recipe_items: vec![RetainedSignedBundleItem {
                 resolved_ref: "config:codex/guest-owner-materialization".to_owned(),
                 bundle_name: "codex".to_owned(),
                 signer_fingerprint: fingerprint.clone(),
                 signed_blob_hash: hash('b'),
                 raw_content_digest: hash('c'),
-                signature_envelope: MaterializationSignatureEnvelope {
+                signature_envelope: RetainedSignatureEnvelope {
                     prefix: "#".to_owned(),
                     suffix: None,
                     after_shebang: false,
                 },
             }],
-            signed_bundle_manifests: vec![MaterializationSignedBundleManifest {
+            signed_bundle_manifests: vec![RetainedSignedBundleManifest {
                 bundle_name: "codex".to_owned(),
                 signer_fingerprint: fingerprint.clone(),
                 signed_blob_hash: hash('e'),
                 body_digest: hash('f'),
             }],
-            signer_keys: vec![MaterializationSignerKey {
+            signer_keys: vec![RetainedBundleSignerKey {
                 signer_fingerprint: fingerprint.clone(),
                 verifying_key: format!(
                     "ed25519:{}",
                     base64::engine::general_purpose::STANDARD.encode(key.to_bytes())
                 ),
             }],
-            executor: MaterializationExecutorSource {
+            executor: RetainedBundleExecutorSource {
                 bundle_name: "codex".to_owned(),
                 item_ref: "bin/x86_64-unknown-linux-gnu/owner".to_owned(),
                 target_triple: "x86_64-unknown-linux-gnu".to_owned(),
@@ -473,7 +408,7 @@ mod tests {
         let mut unordered = source();
         unordered
             .signed_recipe_items
-            .push(MaterializationSignedItem {
+            .push(RetainedSignedBundleItem {
                 resolved_ref: "config:codex/earlier".to_owned(),
                 ..unordered.signed_recipe_items[0].clone()
             });
@@ -487,7 +422,7 @@ mod tests {
         let mut contradictory = source();
         contradictory
             .signed_recipe_items
-            .push(MaterializationSignedItem {
+            .push(RetainedSignedBundleItem {
                 signed_blob_hash: hash('9'),
                 ..contradictory.signed_recipe_items[0].clone()
             });
@@ -511,7 +446,7 @@ mod tests {
         assert!(substituted.validate().is_err());
         let mut unrelated = source();
         let key = lillux::crypto::SigningKey::from_bytes(&[19u8; 32]).verifying_key();
-        unrelated.signer_keys.push(MaterializationSignerKey {
+        unrelated.signer_keys.push(RetainedBundleSignerKey {
             signer_fingerprint: lillux::crypto::fingerprint(&key),
             verifying_key: format!(
                 "ed25519:{}",
