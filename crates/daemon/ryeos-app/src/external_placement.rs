@@ -3859,9 +3859,25 @@ pub fn prepare_external_qualification_start<'a>(
         authority.ensure_guard(&guard)?;
         admitted
     };
-    state
-        .state_store
-        .reserve_external_qualification_allocation(state, &reservation, &binding, admission)?;
+    let expected_generation = &root
+        .purpose()
+        .consumer_content
+        .as_ref()
+        .context("external qualification reservation lost its accepted Worker content")?
+        .definitions
+        .bundle_generation_identity;
+    state.engine.with_checked_bundle_generation(|generation| {
+        ensure!(
+            generation.request_engine_generation_identity() == expected_generation,
+            "external qualification changed Bundle generation before reservation"
+        );
+        state.state_store.reserve_external_qualification_allocation(
+            state,
+            &reservation,
+            &binding,
+            admission,
+        )
+    })?;
     let cleanup = ExternalCandidateCleanupLifeline::new(state, &placement);
     Ok(ExternalQualificationStart {
         state,
