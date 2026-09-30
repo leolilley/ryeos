@@ -889,38 +889,13 @@ impl ProductQualificationEvidence {
             (None, None) => {}
             _ => bail!("qualification evidence consumer content differs from signed policy"),
         }
-        self.verifier.validate()?;
-        self.execution_proof.validate_for(&self.verifier)?;
-        if let Some(scoped) = &self.execution_proof.scoped_attempt {
-            let scenario = self
-                .policy_source
-                .policy
-                .producer_scenarios
-                .get(&scoped.scenario_id)
-                .context("qualification scoped attempt has no signed producer scenario")?;
-            if scenario.recipe_ref != scoped.producer_source.canonical_ref {
-                bail!("qualification scoped attempt recipe differs from signed scenario");
-            }
-            let expected_coordinate = serde_json::json!({
-                "attempt_id": scoped.attempt_id,
-                "scenario_id": scoped.scenario_id,
-                "observation_object_hash": scoped.observation_object_hash,
-            });
-            if self.result.probe_evidence.get("scoped_attempt") != Some(&expected_coordinate) {
-                bail!("qualification result scoped attempt differs from daemon execution proof");
-            }
-        }
-        for verifier in self.execution_verifiers() {
-            if let Some(actual) = verifier.process_settlement_authority
-                && !actual.satisfies(
-                    self.policy_source
-                        .policy
-                        .minimum_verifier_process_settlement,
-                )
-            {
-                bail!("qualification verifier settlement is weaker than signed policy");
-            }
-        }
+        validate_qualification_execution(
+            &self.policy_source,
+            &self.verifier,
+            &self.execution_proof,
+            &self.result,
+            &[],
+        )?;
         for participant in &self.execution_proof.participants {
             if participant.verifier.chain_root_id == self.product_coordinate.chain_root_id
                 || participant.verifier.thread_id == self.product_coordinate.thread_id
@@ -928,25 +903,11 @@ impl ProductQualificationEvidence {
                 bail!("product producer cannot be its own qualification participant");
             }
         }
-        self.result
-            .validate_claims_for(&self.policy_source.policy, &[])?;
         self.validate_verifier_root_selections()?;
         if self.product_coordinate.chain_root_id == self.verifier.chain_root_id
             || self.product_coordinate.thread_id == self.verifier.thread_id
         {
             bail!("product qualification requires an independent verifier chain");
-        }
-        if self.verifier.canonical_ref != self.policy_source.policy.verifier_ref
-            || self.verifier.subject_declaration_id
-                != self.policy_source.policy.subject_declaration_id
-            || self.verifier.admitted_parameters_digest
-                != self.policy_source.policy.admitted_parameters_digest()?
-            || self.verifier.subject_manifest_hash != self.result.subject_manifest_hash
-            || self.verifier.result_digest != self.result.digest()?
-        {
-            bail!(
-                "qualification testimony contradicts its policy, admitted subject or terminal result"
-            );
         }
         bounded(
             self,
@@ -1162,6 +1123,62 @@ impl ProductQualificationEvidence {
         }
         Ok(evidence)
     }
+}
+
+/// Shared execution facts only. Source authentication and producer independence
+/// remain with their respective testimony owners; this never grants publication.
+pub(crate) fn validate_qualification_execution(
+    policy: &ProductQualificationPolicySource,
+    verifier: &ProductQualificationVerifier,
+    proof: &ProductQualificationExecutionProof,
+    result: &ProductQualificationResult,
+    required_claims: &[String],
+) -> anyhow::Result<()> {
+    policy.validate()?;
+    verifier.validate()?;
+    proof.validate_for(verifier)?;
+    if let Some(scoped) = &proof.scoped_attempt {
+        let scenario = policy
+            .policy
+            .producer_scenarios
+            .get(&scoped.scenario_id)
+            .context("qualification scoped attempt has no signed producer scenario")?;
+        if scenario.recipe_ref != scoped.producer_source.canonical_ref {
+            bail!("qualification scoped attempt recipe differs from signed scenario");
+        }
+        let expected_coordinate = serde_json::json!({
+            "attempt_id": scoped.attempt_id,
+            "scenario_id": scoped.scenario_id,
+            "observation_object_hash": scoped.observation_object_hash,
+        });
+        if result.probe_evidence.get("scoped_attempt") != Some(&expected_coordinate) {
+            bail!("qualification result scoped attempt differs from daemon execution proof");
+        }
+    }
+    for occurrence in std::iter::once(verifier).chain(
+        proof
+            .participants
+            .iter()
+            .map(|participant| &participant.verifier),
+    ) {
+        if let Some(actual) = occurrence.process_settlement_authority
+            && !actual.satisfies(policy.policy.minimum_verifier_process_settlement)
+        {
+            bail!("qualification verifier settlement is weaker than signed policy");
+        }
+    }
+    result.validate_claims_for(&policy.policy, required_claims)?;
+    if verifier.canonical_ref != policy.policy.verifier_ref
+        || verifier.subject_declaration_id != policy.policy.subject_declaration_id
+        || verifier.admitted_parameters_digest != policy.policy.admitted_parameters_digest()?
+        || verifier.subject_manifest_hash != result.subject_manifest_hash
+        || verifier.result_digest != result.digest()?
+    {
+        bail!(
+            "qualification testimony contradicts its policy, admitted subject or terminal result"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_claims(claims: &[String]) -> anyhow::Result<()> {

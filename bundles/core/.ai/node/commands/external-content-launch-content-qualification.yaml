@@ -1,0 +1,12 @@
+tokens: [external-content, launch-content-qualification]
+description: Launch the signed verifier selected by an exact activated-content consumer allowance
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: 'ryeos external-content launch-content-qualification ''{"launch_id":"<retained-launch-id>","activation_ref":"config:<signed-activation>","declaration_id":"<signed-consumer-declaration>"}'''
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/launch-content-qualification
