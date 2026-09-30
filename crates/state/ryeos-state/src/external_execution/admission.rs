@@ -626,17 +626,98 @@ impl ExternalCandidateRequirement {
             qualification_use: qualification_use.clone(),
             runtime_manifest_kind: runtime.manifest_kind.clone(),
             runtime_manifest_hash: runtime.manifest_hash.clone(),
-            runtime_witness_hash: runtime.witness_hash.clone(),
+            runtime_source: ExternalCandidateRuntimeSource::CapturedProduct {
+                witness_hash: runtime.witness_hash.clone(),
+            },
             qualification_attestation_hash: qualification.attestation_hash.clone(),
             selection_identity_digest: runtime.semantic_identity_digest()?,
             runtime_recipe_digest: self.runtime_recipe.digest()?,
         })
+    }
+
+    /// Resolve authenticated acquired bytes through the same admitted program.
+    /// This pure projection cannot authenticate the retained node testimony.
+    pub fn resolve_for_content(
+        &self,
+        content: &crate::objects::RetainedExternalRuntimeContentQualification,
+        qualification_use: &ExternalCandidateQualificationUse,
+    ) -> Result<AdmittedExternalCandidateProgram> {
+        self.validate()?;
+        content.validate()?;
+        qualification_use.validate()?;
+        ensure!(
+            qualification_use.requirement_digest == self.qualification_requirement_digest()?,
+            "content-backed qualification use differs from its requirement"
+        );
+        let crate::external_content::qualification_purpose::QualificationSubject::ActivatedContent { content: subject } =
+            &content.evidence.purpose.subject else {
+                anyhow::bail!("content-backed runtime requires an activated source");
+            };
+        ensure!(
+            subject.declaration_id == self.runtime_product_declaration_id
+                && subject.realization.kind == ExternalContentKind::Tree,
+            "activated runtime declaration differs from admitted runtime slot"
+        );
+        let program = AdmittedExternalCandidateProgram {
+            requirement: self.clone(),
+            qualification_use: qualification_use.clone(),
+            runtime_manifest_kind: subject.manifest_kind.clone(),
+            runtime_manifest_hash: subject.manifest_hash.clone(),
+            runtime_source: ExternalCandidateRuntimeSource::ActivatedContent {
+                subject: subject.clone(),
+                qualification_coordinate_id: content.coordinate_id.clone(),
+            },
+            qualification_attestation_hash: content.attestation_hash.clone(),
+            selection_identity_digest: canonical_value_digest(&serde_json::json!({
+                "domain": "ryeos.external_candidate.content_selection.v1",
+                "activation_ref": content.activation_ref,
+                "purpose": content.evidence.purpose,
+                "coordinate": content.coordinate_id,
+            }))?,
+            runtime_recipe_digest: self.runtime_recipe.digest()?,
+        };
+        program.require_content_qualification(&content.evidence)?;
+        Ok(program)
     }
 }
 
 /// Projection of already retained product authority. All CAS edges remain
 /// owned by the capsule's full product selections, which must be rejoined on
 /// validation. No occurrence, capsule hash or operator credential enters it.
+/// Source coordinate, not source authentication or publication authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalCandidateRuntimeSource {
+    CapturedProduct {
+        witness_hash: String,
+    },
+    ActivatedContent {
+        subject: crate::external_content::qualification_subject::ContentQualificationSubject,
+        qualification_coordinate_id: String,
+    },
+}
+
+impl ExternalCandidateRuntimeSource {
+    fn validate(&self, manifest_hash: &str) -> Result<()> {
+        match self {
+            Self::CapturedProduct { witness_hash } => super::hash(witness_hash),
+            Self::ActivatedContent {
+                subject,
+                qualification_coordinate_id,
+            } => {
+                subject.validate()?;
+                super::hash(qualification_coordinate_id)?;
+                ensure!(
+                    subject.manifest_hash == manifest_hash
+                        && subject.realization.kind == ExternalContentKind::Tree,
+                    "activated candidate runtime source has a different manifest"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedExternalCandidateProgram {
@@ -644,13 +725,47 @@ pub struct AdmittedExternalCandidateProgram {
     pub qualification_use: ExternalCandidateQualificationUse,
     pub runtime_manifest_kind: String,
     pub runtime_manifest_hash: String,
-    pub runtime_witness_hash: String,
+    pub runtime_source: ExternalCandidateRuntimeSource,
     pub qualification_attestation_hash: String,
     pub selection_identity_digest: String,
     pub runtime_recipe_digest: String,
 }
 
 impl AdmittedExternalCandidateProgram {
+    /// Rejoin source-specific retained authority without converting acquired
+    /// bytes into a capture witness or changing the worker/session owner.
+    pub fn verify_runtime_authority(
+        &self,
+        selections: Option<&ResolvedExternalProductSelections>,
+        content: Option<&crate::objects::RetainedExternalRuntimeContentQualification>,
+    ) -> Result<()> {
+        match &self.runtime_source {
+            ExternalCandidateRuntimeSource::CapturedProduct { .. } => {
+                self.verify_selections(selections)
+            }
+            ExternalCandidateRuntimeSource::ActivatedContent { .. } => {
+                let content =
+                    content.context("activated runtime has no retained content authority")?;
+                if let Some(selections) = selections {
+                    selections.validate()?;
+                    ensure!(
+                        selections
+                            .get(&self.requirement.runtime_product_declaration_id)
+                            .is_none(),
+                        "activated runtime slot also carries product authority"
+                    );
+                }
+                ensure!(
+                    self.requirement
+                        .resolve_for_content(content, &self.qualification_use)?
+                        == *self,
+                    "activated runtime program contradicts retained content authority"
+                );
+                Ok(())
+            }
+        }
+    }
+
     /// Domain validation only: the app must independently authenticate this
     /// acquired-source testimony and its current or retained authority.
     pub fn require_content_qualification(
@@ -700,12 +815,20 @@ impl AdmittedExternalCandidateProgram {
         );
         for hash in [
             &self.runtime_manifest_hash,
-            &self.runtime_witness_hash,
             &self.qualification_attestation_hash,
             &self.selection_identity_digest,
             &self.runtime_recipe_digest,
         ] {
             super::hash(hash)?;
+        }
+        self.runtime_source.validate(&self.runtime_manifest_hash)?;
+        if let ExternalCandidateRuntimeSource::ActivatedContent { subject, .. } =
+            &self.runtime_source
+        {
+            ensure!(
+                subject.manifest_kind == self.runtime_manifest_kind,
+                "activated runtime manifest kind differs from admitted source"
+            );
         }
         ensure!(
             self.runtime_recipe_digest == self.requirement.runtime_recipe.digest()?,
@@ -720,6 +843,13 @@ impl AdmittedExternalCandidateProgram {
     ) -> Result<()> {
         self.validate()?;
         ensure!(
+            matches!(
+                self.runtime_source,
+                ExternalCandidateRuntimeSource::CapturedProduct { .. }
+            ),
+            "activated runtime requires retained content authority, not product selections"
+        );
+        ensure!(
             self.requirement
                 .resolve_for_use(selections, &self.qualification_use)?
                 == *self,
@@ -731,7 +861,7 @@ impl AdmittedExternalCandidateProgram {
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         canonical_value_digest(&serde_json::json!({
-            "domain": "ryeos.external-candidate-program.v3",
+            "domain": "ryeos.external-candidate-program.v4",
             "program": self,
         }))
     }
@@ -1861,6 +1991,43 @@ mod tests {
     }
 
     #[test]
+    fn runtime_source_coordinates_are_closed_and_not_interchangeable() {
+        let source = ExternalCandidateRuntimeSource::CapturedProduct {
+            witness_hash: "a".repeat(64),
+        };
+        let value = serde_json::to_value(&source).unwrap();
+        source.validate(&"b".repeat(64)).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ExternalCandidateRuntimeSource>(value.clone()).unwrap(),
+            source
+        );
+        for field in [
+            "subject",
+            "qualification_coordinate_id",
+            "activation_receipt_hash",
+        ] {
+            let mut mixed = value.clone();
+            mixed
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_owned(), serde_json::json!("c".repeat(64)));
+            assert!(serde_json::from_value::<ExternalCandidateRuntimeSource>(mixed).is_err());
+        }
+        assert!(
+            serde_json::from_value::<ExternalCandidateRuntimeSource>(serde_json::json!({
+                "kind":"activated_content", "witness_hash":"a".repeat(64)
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ExternalCandidateRuntimeSource>(serde_json::json!({
+                "witness_hash":"a".repeat(64)
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn external_program_requires_exact_qualified_runtime() {
         let requirement = requirement();
         let selections = selections();
@@ -1913,7 +2080,7 @@ mod tests {
         for field in [
             "runtime_manifest_kind",
             "runtime_manifest_hash",
-            "runtime_witness_hash",
+            "runtime_source",
             "qualification_attestation_hash",
             "selection_identity_digest",
             "runtime_recipe_digest",

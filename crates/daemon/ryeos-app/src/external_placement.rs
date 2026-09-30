@@ -1648,7 +1648,12 @@ pub fn verify_retained_external_candidate_capsule(
     let Some(program) = capsule.external_candidate.as_ref() else {
         bail!("retained external candidate verification requires its admitted program");
     };
-    program.verify_selections(capsule.retained_product_selections.as_ref())?;
+    program.verify_runtime_authority(
+        capsule.retained_product_selections.as_ref(),
+        capsule
+            .retained_external_runtime_content_qualification
+            .as_ref(),
+    )?;
     let content = capsule
         .retained_external_runtime_content_qualification
         .as_ref()
@@ -2347,7 +2352,12 @@ fn retained_external_channel_program(
                 .external_candidate
                 .as_ref()
                 .context("external channel capsule has no admitted candidate program")?;
-            program.verify_selections(capsule.retained_product_selections.as_ref())?;
+            program.verify_runtime_authority(
+                capsule.retained_product_selections.as_ref(),
+                capsule
+                    .retained_external_runtime_content_qualification
+                    .as_ref(),
+            )?;
             require_retained_session_runtime_qualification(state, &capsule, retained)?;
             retained.check_program(program)?;
             AdmittedExternalExecutionProgram::StructuredSession(program.clone())
@@ -2912,7 +2922,12 @@ impl<'a> ExternalPlacementOwner<'a> {
             .external_candidate
             .as_ref()
             .context("dedicated session did not admit external candidate execution")?;
-        program.verify_selections(capsule.retained_product_selections.as_ref())?;
+        program.verify_runtime_authority(
+            capsule.retained_product_selections.as_ref(),
+            capsule
+                .retained_external_runtime_content_qualification
+                .as_ref(),
+        )?;
         let workspace = self
             .state
             .state_store
@@ -5475,7 +5490,12 @@ pub mod test_support {
             .external_candidate
             .clone()
             .context("composed external fixture capsule has no candidate program")?;
-        program.verify_selections(capsule.retained_product_selections.as_ref())?;
+        program.verify_runtime_authority(
+            capsule.retained_product_selections.as_ref(),
+            capsule
+                .retained_external_runtime_content_qualification
+                .as_ref(),
+        )?;
         guest_inputs.validate()?;
         ensure!(
             guest_inputs.base_snapshot.snapshot_hash == base_snapshot_hash,
@@ -6507,7 +6527,7 @@ mod tests {
             qualification_use,
             runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
             runtime_manifest_hash: "b".repeat(64),
-            runtime_witness_hash: "1".repeat(64),
+            runtime_source: ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "1".repeat(64) },
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "c".repeat(64),
             runtime_recipe_digest,

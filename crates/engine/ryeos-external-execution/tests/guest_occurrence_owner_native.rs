@@ -118,7 +118,7 @@ fn supervisor_bootstrap(
             qualification_use,
             runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
             runtime_manifest_hash: "e".repeat(64),
-            runtime_witness_hash: "1".repeat(64),
+            runtime_source: ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "1".repeat(64) },
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "3".repeat(64),
             runtime_recipe_digest: recipe_digest,
