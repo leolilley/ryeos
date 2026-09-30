@@ -2474,6 +2474,41 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
     }
 }
 
+/// Provider cleanup can spend the signed contact timeout on each retained
+/// source. Keep it outside startup readiness and the general recovery pass so
+/// an unavailable provider cannot delay unrelated durable recovery. The
+/// blocking owner records its one-shot contact before any provider mutation;
+/// interruption leaves an inspectable obligation for the next pass or boot.
+async fn run_bootstrap_source_cleanup_recovery(state: AppState) -> Result<()> {
+    if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
+        return Ok(());
+    }
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    let period = Duration::from_secs(120);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now(), period);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return Ok(()),
+            _ = tick.tick() => {}
+        }
+        let recovery = recover_bootstrap_source_cleanups_async(state.clone());
+        tokio::pin!(recovery);
+        tokio::select! {
+            _ = &mut shutdown => return Ok(()),
+            result = &mut recovery => match result {
+                Ok(report) => log_bootstrap_source_cleanup_recovery(report, "background"),
+                Err(error) => tracing::error!(
+                    error = %error,
+                    "bootstrap source cleanup recovery failed; durable obligations remain"
+                ),
+            }
+        }
+    }
+}
+
 /// Settle the predecessor controller generation before Ready can release new
 /// external execution. Import runs first so a sealed result that was already
 /// delivered remains authoritative; fencing then makes every surviving
@@ -2514,12 +2549,9 @@ async fn recover_external_candidates_before_ready(state: &AppState) -> Result<()
             .context("advance startup external candidate cleanup")?,
         "startup",
     );
-    log_bootstrap_source_cleanup_recovery(
-        recover_bootstrap_source_cleanups_async(state.clone())
-            .await
-            .context("advance startup bootstrap source cleanup")?,
-        "startup",
-    );
+    // Bootstrap sources are already durably fenced by their own journal.
+    // Their provider cleanup runs after Ready under a separate supervised
+    // owner, so a provider timeout cannot hold the startup gate.
     Ok(())
 }
 
@@ -2556,12 +2588,6 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
         recover_external_candidate_cleanups_async(state.clone())
             .await
             .context("periodic external candidate cleanup recovery")?,
-        "periodic",
-    );
-    log_bootstrap_source_cleanup_recovery(
-        recover_bootstrap_source_cleanups_async(state.clone())
-            .await
-            .context("periodic bootstrap source cleanup recovery")?,
         "periodic",
     );
     let recovered_activations =
@@ -2853,6 +2879,14 @@ async fn supervise_background_tasks(
         (
             "periodic recovery",
             run_periodic_recovery(periodic_state).await,
+        )
+    });
+
+    let bootstrap_cleanup_state = state.clone();
+    tasks.spawn(async move {
+        (
+            "bootstrap source cleanup recovery",
+            run_bootstrap_source_cleanup_recovery(bootstrap_cleanup_state).await,
         )
     });
 
