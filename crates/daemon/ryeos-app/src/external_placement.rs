@@ -3543,6 +3543,16 @@ impl ExternalQualificationStart<'_> {
         self.deadline
     }
 
+    /// Carry the authenticated accepted root into the local Worker owner after
+    /// startup reaches Ready. This root is retained identity, not a new contact
+    /// permit; the local plan and effectful spawn must recheck current authority.
+    pub fn into_authenticated_root(
+        self,
+    ) -> crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot
+    {
+        self.root
+    }
+
     /// Move the original cleanup owner to the next process-local owner. If it
     /// is never transferred, dropping this start requests durable cleanup.
     pub fn take_cleanup_lifeline(&mut self) -> Result<ExternalCandidateCleanupLifeline> {

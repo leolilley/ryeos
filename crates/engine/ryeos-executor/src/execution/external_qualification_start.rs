@@ -8,6 +8,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use ryeos_app::external_placement::{
     ExternalCandidateCleanupLifeline, ExternalCandidateStartProgress, ExternalQualificationStart,
 };
+use ryeos_app::operator_external_content::product_qualification::PreparedExternalQualificationRoot;
 use ryeos_state::external_execution::ExecutionChannelBinding;
 
 use super::external_qualification_inputs::PreparedExternalQualificationGuest;
@@ -17,6 +18,7 @@ use super::external_qualification_inputs::PreparedExternalQualificationGuest;
 /// connector use and independently prove eventual settlement.
 pub(crate) struct ExternalQualificationReady {
     binding: ExecutionChannelBinding,
+    root: PreparedExternalQualificationRoot,
     _cleanup: ExternalCandidateCleanupLifeline,
 }
 
@@ -27,6 +29,10 @@ impl ExternalQualificationReady {
 
     pub(crate) fn placement(&self) -> &str {
         &self.binding.placement_thread_id
+    }
+
+    pub(crate) fn root(&self) -> &PreparedExternalQualificationRoot {
+        &self.root
     }
 }
 
@@ -103,6 +109,7 @@ fn await_external_qualification_ready(
     match ready {
         Ok(binding) => Ok(ExternalQualificationReady {
             binding,
+            root: start.into_authenticated_root(),
             _cleanup: cleanup,
         }),
         Err(error) => {
