@@ -2671,7 +2671,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // including exact held creator, view, recovery, and Worker attachment joins.
 // Epoch 108 retains the bounded canonical Q Worker Final and the selected
 // signed wire maximum for restartable semantic verification.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 108;
+// Epoch 109 retains one possible borrow of the original Q workspace view
+// before its descriptor can be cloned for the held Worker.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 109;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

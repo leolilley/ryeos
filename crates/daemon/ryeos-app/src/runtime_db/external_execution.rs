@@ -25,7 +25,8 @@ pub(crate) use qualification_command::{
 };
 pub(super) use qualification_local_start::JOURNAL_SQL as QUALIFICATION_LOCAL_START_SQL;
 pub use qualification_local_start::{
-    QualificationLocalStartPhase, QualificationLocalStartRecord, QualificationWorkspaceReceipt,
+    QualificationLocalStartPhase, QualificationLocalStartRecord,
+    QualificationWorkspaceBorrowIntent, QualificationWorkspaceReceipt,
 };
 pub(crate) use qualification_process::{
     QualificationWorkerDeathProof, QualificationWorkerProcessPhase,

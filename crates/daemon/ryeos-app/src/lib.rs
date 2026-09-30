@@ -38,6 +38,7 @@ pub mod external_artifacts;
 pub mod external_candidate_import;
 pub mod external_connector;
 pub mod external_content_admission;
+pub mod external_qualification_local;
 mod external_lifecycle_adapter;
 pub mod external_placement;
 pub mod federated_follow;

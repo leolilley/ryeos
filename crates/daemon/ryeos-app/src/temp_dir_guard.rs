@@ -582,6 +582,30 @@ pub fn create_runtime_workspace(
     let execution_root =
         lillux::PinnedDirectory::open_or_create(&runtime_cache_root.join("executions"))?;
     execution_root.set_mode(0o700)?;
+    create_runtime_workspace_under_execution_root(execution_root, workspace_name)
+}
+
+/// Create the original runtime workspace beneath a retained cache descriptor.
+/// The journaled caller can therefore avoid reopening its reserved parent by
+/// pathname between durable reservation and the first directory side effect.
+pub fn create_runtime_workspace_in_pinned_cache(
+    runtime_cache: &lillux::PinnedDirectory,
+    workspace_name: &str,
+) -> anyhow::Result<(PathBuf, Arc<TempDirGuard>)> {
+    ryeos_engine::execution_workspace::validate_workspace_id(workspace_name)?;
+    runtime_cache.require_owner_private_directory()?;
+    runtime_cache.ensure_path_binding()?;
+    let execution_root =
+        runtime_cache.open_or_create_child(std::ffi::OsStr::new("executions"), 0o700)?;
+    execution_root.require_owner_private_directory()?;
+    create_runtime_workspace_under_execution_root(execution_root, workspace_name)
+}
+
+fn create_runtime_workspace_under_execution_root(
+    execution_root: lillux::PinnedDirectory,
+    workspace_name: &str,
+) -> anyhow::Result<(PathBuf, Arc<TempDirGuard>)> {
+    ryeos_engine::execution_workspace::validate_workspace_id(workspace_name)?;
     let name = std::ffi::OsString::from(workspace_name);
     let workspace = execution_root.create_child(&name, 0o700)?;
     // Own rollback before any fallible initialization below the new root.

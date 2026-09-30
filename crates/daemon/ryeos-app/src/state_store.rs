@@ -15574,6 +15574,23 @@ impl StateStore {
             .authorize_qualification_local_spawn(placement)
     }
 
+    /// One durable possible-borrow intent before the original workspace view
+    /// is cloned for the held Q Worker. No replacement borrow is admitted.
+    pub(crate) fn reserve_qualification_workspace_view_borrow(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        anyhow::ensure!(
+            self.process_attachment_admission_open
+                .load(Ordering::Acquire),
+            "qualification workspace borrow is fenced during daemon shutdown"
+        );
+        g.runtime_db
+            .reserve_qualification_workspace_view_borrow(placement)
+    }
+
     /// The cache path comes from the pinned runtime state authority. The
     /// returned workspace coordinate must be journaled before directory Create.
     pub(crate) fn reserve_qualification_local_start(

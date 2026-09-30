@@ -48,17 +48,23 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
  OR NEW.channel_binding_digest!=OLD.channel_binding_digest
  OR NEW.created_at_ms!=OLD.created_at_ms
  OR (NEW.phase=OLD.phase AND NOT (
-      OLD.phase='workspace_creating'
-      AND json_extract(OLD.record_json,'$.creator_identity') IS NULL
-      AND json_extract(NEW.record_json,'$.creator_identity') IS NOT NULL
-      AND json_remove(NEW.record_json,'$.creator_identity','$.updated_at_ms')
-          = json_remove(OLD.record_json,'$.creator_identity','$.updated_at_ms')))
+      (OLD.phase='workspace_creating'
+       AND json_extract(OLD.record_json,'$.creator_identity') IS NULL
+       AND json_extract(NEW.record_json,'$.creator_identity') IS NOT NULL
+       AND json_remove(NEW.record_json,'$.creator_identity','$.updated_at_ms')
+           = json_remove(OLD.record_json,'$.creator_identity','$.updated_at_ms'))
+      OR (OLD.phase='scope_bound'
+       AND json_extract(OLD.record_json,'$.view_borrow_intent') IS NULL
+       AND json_extract(NEW.record_json,'$.view_borrow_intent') IS NOT NULL
+       AND json_remove(NEW.record_json,'$.view_borrow_intent','$.updated_at_ms')
+           = json_remove(OLD.record_json,'$.view_borrow_intent','$.updated_at_ms'))))
  OR NOT ((OLD.phase='reserved' AND NEW.phase='workspace_creating')
       OR (OLD.phase='workspace_creating' AND NEW.phase='workspace_ready')
       OR (OLD.phase='workspace_ready' AND NEW.phase='scope_allocating')
       OR (OLD.phase='scope_allocating' AND NEW.phase='scope_bound')
       OR (OLD.phase='scope_bound' AND NEW.phase='worker_attached')
       OR (OLD.phase='workspace_creating' AND NEW.phase='workspace_creating')
+      OR (OLD.phase='scope_bound' AND NEW.phase='scope_bound')
       OR (OLD.phase!='cleanup_unproved' AND NEW.phase='cleanup_unproved'))
 BEGIN SELECT RAISE(ABORT, 'qualification local start transition changed its one-use owner'); END;
 CREATE TRIGGER external_qualification_local_start_no_delete
@@ -102,6 +108,16 @@ pub struct QualificationWorkspaceReceipt {
     pub view_identity: String,
 }
 
+/// One durable intent to lend the original, exact Create view to a held
+/// Worker. The intent precedes descriptor cloning and cannot be replayed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationWorkspaceBorrowIntent {
+    pub workspace_id: String,
+    pub view_identity: String,
+    pub reserved_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QualificationLocalStartRecord {
@@ -125,6 +141,7 @@ pub struct QualificationLocalStartRecord {
     pub backend_version: Option<String>,
     pub creator_identity: Option<crate::process::ExecutionProcessIdentity>,
     pub workspace_receipt: Option<QualificationWorkspaceReceipt>,
+    pub view_borrow_intent: Option<QualificationWorkspaceBorrowIntent>,
     pub scope_allocation: Option<lillux::ProcessScopeAllocation>,
     pub scope_recovery: Option<lillux::ProcessScopeRecovery>,
     pub worker_incarnation_digest: Option<String>,
@@ -237,6 +254,19 @@ impl QualificationLocalStartRecord {
                 "qualification local view changed its selected backend or mount"
             );
         }
+        if let Some(intent) = &self.view_borrow_intent {
+            let receipt = self
+                .workspace_receipt
+                .as_ref()
+                .context("qualification view borrow lost its exact Create receipt")?;
+            ensure!(
+                intent.workspace_id == self.workspace_id
+                    && intent.view_identity == receipt.view_identity
+                    && intent.reserved_at_ms >= self.created_at_ms
+                    && intent.reserved_at_ms <= self.updated_at_ms,
+                "qualification view borrow changed its original view or time"
+            );
+        }
         if let Some(digest) = &self.worker_incarnation_digest {
             validate_sha256("local Worker incarnation", digest)?;
         }
@@ -250,6 +280,7 @@ impl QualificationLocalStartRecord {
                         && self.backend_version.is_none()
                         && self.creator_identity.is_none()
                         && self.workspace_receipt.is_none()
+                        && self.view_borrow_intent.is_none()
                         && self.scope_allocation.is_none()
                         && self.scope_recovery.is_none()
                         && self.worker_incarnation_digest.is_none(),
@@ -257,18 +288,21 @@ impl QualificationLocalStartRecord {
                     self.backend_id.is_some()
                         && self.backend_version.is_some()
                         && self.workspace_receipt.is_none()
+                        && self.view_borrow_intent.is_none()
                         && self.scope_allocation.is_none()
                         && self.scope_recovery.is_none()
                         && self.worker_incarnation_digest.is_none(),
                 QualificationLocalStartPhase::WorkspaceReady =>
                     self.workspace_receipt.is_some()
                         && self.creator_identity.is_some()
+                        && self.view_borrow_intent.is_none()
                         && self.scope_allocation.is_none()
                         && self.scope_recovery.is_none()
                         && self.worker_incarnation_digest.is_none(),
                 QualificationLocalStartPhase::ScopeAllocating =>
                     self.workspace_receipt.is_some()
                         && self.creator_identity.is_some()
+                        && self.view_borrow_intent.is_none()
                         && self.scope_allocation.is_some()
                         && self.scope_recovery.is_none()
                         && self.worker_incarnation_digest.is_none(),
@@ -281,6 +315,7 @@ impl QualificationLocalStartRecord {
                 QualificationLocalStartPhase::WorkerAttached =>
                     self.workspace_receipt.is_some()
                         && self.creator_identity.is_some()
+                        && self.view_borrow_intent.is_some()
                         && self.scope_allocation.is_some()
                         && self.scope_recovery.is_some()
                         && self.worker_incarnation_digest.is_some(),
@@ -481,6 +516,7 @@ pub(super) fn attach_local_worker_tx(
         read_local_start(tx, placement)?.context("qualification Worker has no Q local start")?;
     ensure!(
         current.phase == QualificationLocalStartPhase::ScopeBound
+            && current.view_borrow_intent.is_some()
             && current.daemon_generation_id == daemon
             && current.scope_recovery.as_ref() == identity.process_scope.as_ref(),
         "qualification Worker changed its one-use local scope"
@@ -516,6 +552,47 @@ impl RuntimeDb {
         );
         require_current_start(&self.conn, &record)?;
         Ok(record)
+    }
+
+    /// Commit one possible descriptor borrow before cloning the original
+    /// workspace view. A failed clone consumes this attempt and requires
+    /// cleanup; it must never be retried with a replacement view or process.
+    pub(crate) fn reserve_qualification_workspace_view_borrow(
+        &self,
+        placement: &str,
+    ) -> Result<QualificationLocalStartRecord> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current = read_local_start(&tx, placement)?
+            .context("qualification workspace borrow lost its start")?;
+        ensure!(
+            current.phase == QualificationLocalStartPhase::ScopeBound
+                && current.view_borrow_intent.is_none(),
+            "qualification workspace view borrow is one-use"
+        );
+        require_current_start(&tx, &current)?;
+        let receipt = current
+            .workspace_receipt
+            .as_ref()
+            .context("qualification workspace borrow has no original Create receipt")?;
+        let mut next = current.clone();
+        next.updated_at_ms = now_after(&current)?;
+        next.view_borrow_intent = Some(QualificationWorkspaceBorrowIntent {
+            workspace_id: current.workspace_id.clone(),
+            view_identity: receipt.view_identity.clone(),
+            reserved_at_ms: next.updated_at_ms,
+        });
+        let prior = canonical(&current)?;
+        let next_json = canonical(&next)?;
+        ensure!(
+            tx.execute(
+                "UPDATE external_qualification_local_start SET record_json=?3,updated_at_ms=?4
+                 WHERE placement_thread_id=?1 AND record_json=?2 AND phase='scope_bound'",
+                params![placement, prior, next_json, next.updated_at_ms],
+            )? == 1,
+            "qualification workspace borrow lost its one-use CAS"
+        );
+        tx.commit()?;
+        Ok(next)
     }
 
     /// Reserve before creating a directory. Exact replay is refused even when
@@ -604,6 +681,7 @@ impl RuntimeDb {
             backend_version: None,
             creator_identity: None,
             workspace_receipt: None,
+            view_borrow_intent: None,
             scope_allocation: None,
             scope_recovery: None,
             worker_incarnation_digest: None,
