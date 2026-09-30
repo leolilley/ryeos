@@ -242,14 +242,15 @@ fn derive_capability_generation(
     channel: &ryeos_state::external_execution::ExecutionChannelBinding,
     contract: &crate::node_config::sections::external_execution::ExternalPlacementBackendContract,
 ) -> Result<String> {
+    let artifacts = contract.workload.session_artifacts()?;
     ryeos_state::objects::canonical_value_digest(&serde_json::json!({
         "domain": "ryeos.external-connector-capability-generation.v1",
         "placement_thread_id": placement,
         "channel_binding_digest": channel.digest()?,
         "execution_binding_hash": channel.execution_binding_hash,
-        "connector_protocol": contract.workload.structured_session()?.connector_protocol,
-        "connector_artifact_hash": contract.workload.structured_session()?.connector_artifact_hash,
-        "connector_artifact_bytes": contract.workload.structured_session()?.connector_artifact_bytes,
+        "connector_protocol": artifacts.connector_protocol,
+        "connector_artifact_hash": artifacts.connector_artifact_hash,
+        "connector_artifact_bytes": artifacts.connector_artifact_bytes,
     }))
 }
 
@@ -323,6 +324,60 @@ fn require_connecting_session(conn: &Connection, placement: &str) -> Result<()> 
     Ok(())
 }
 
+/// Fresh connector admission is separate from historical connector
+/// validation. Qualification workers have no dedicated-session command row;
+/// their bound, released zero-export channel and live measured occurrence are
+/// the only admitted connection authority.
+fn require_fresh_connector_owner(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+    channel: &ryeos_state::external_execution::ExecutionChannelBinding,
+    connecting: bool,
+) -> Result<()> {
+    require_connector_channel_mode(&reservation.owner, channel)?;
+    match &reservation.owner {
+        ExternalAllocationOwner::DedicatedSession(_) => {
+            require_session_owner(conn, reservation)?;
+            require_contactable_session(conn, &reservation.placement_thread_id)?;
+            if connecting {
+                require_connecting_session(conn, &reservation.placement_thread_id)?;
+            }
+            Ok(())
+        }
+        ExternalAllocationOwner::QualificationCandidate(_) => {
+            require_contactable_qualification_owner(conn, reservation)
+        }
+        ExternalAllocationOwner::DirectThread { .. } => {
+            bail!("external direct command cannot admit a session connector")
+        }
+    }
+}
+
+fn require_connector_channel_mode(
+    owner: &ExternalAllocationOwner,
+    channel: &ryeos_state::external_execution::ExecutionChannelBinding,
+) -> Result<()> {
+    match owner {
+        ExternalAllocationOwner::DedicatedSession(_) => ensure!(
+            matches!(
+                channel.execution_mode,
+                ryeos_state::external_execution::ExternalExecutionMode::StructuredSession {}
+            ),
+            "external session connector has a non-session channel"
+        ),
+        ExternalAllocationOwner::QualificationCandidate(_) => ensure!(
+            matches!(
+                channel.execution_mode,
+                ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+            ) && channel.candidate_export_max_bytes == 0,
+            "qualification connector requires a zero-export qualification channel"
+        ),
+        ExternalAllocationOwner::DirectThread { .. } => {
+            bail!("external direct command cannot admit a session connector")
+        }
+    }
+}
+
 fn expected_connector(
     conn: &Connection,
     placement: &str,
@@ -333,20 +388,20 @@ fn expected_connector(
         allocation.phase == ExternalAllocationPhase::Bound,
         "external connector requires a live bound occurrence"
     );
-    require_session_owner(conn, &allocation.reservation)?;
-    require_contactable_session(conn, placement)?;
     let channel = load_binding(conn, placement)?;
     let channel_binding_digest = channel.digest()?;
     ensure!(
         channel.execution_binding_hash == allocation.reservation.binding_hash,
         "external connector channel changed its placement binding"
     );
+    require_fresh_connector_owner(conn, &allocation.reservation, &channel, false)?;
     require_live_released_channel(conn, placement, &channel)?;
     let retained = read_retained_binding(conn, &allocation.reservation.binding_hash)?
         .context("external connector lost its retained placement binding")?;
     let contract = retained.backend_contract();
+    let artifacts = contract.workload.session_artifacts()?;
     ensure!(
-        contract.workload.structured_session()?.connector_protocol == EXTERNAL_CONNECTOR_PROTOCOL,
+        artifacts.connector_protocol == EXTERNAL_CONNECTOR_PROTOCOL,
         "external connector protocol is unsupported"
     );
     let generation = derive_capability_generation(placement, &channel, &contract)?;
@@ -354,20 +409,9 @@ fn expected_connector(
         placement_thread_id: placement.to_owned(),
         channel_binding_digest,
         execution_binding_hash: channel.execution_binding_hash,
-        connector_protocol: contract
-            .workload
-            .structured_session()?
-            .connector_protocol
-            .clone(),
-        connector_artifact_hash: contract
-            .workload
-            .structured_session()?
-            .connector_artifact_hash
-            .clone(),
-        connector_artifact_bytes: contract
-            .workload
-            .structured_session()?
-            .connector_artifact_bytes,
+        connector_protocol: artifacts.connector_protocol.to_owned(),
+        connector_artifact_hash: artifacts.connector_artifact_hash.to_owned(),
+        connector_artifact_bytes: artifacts.connector_artifact_bytes,
         capability_generation: generation,
         capability_hash: capability_hash.unwrap_or(&"0".repeat(64)).to_owned(),
         phase: ExternalConnectorPhase::Prepared,
@@ -398,22 +442,15 @@ pub(super) fn validate_connectors(conn: &Connection) -> Result<()> {
         let retained = read_retained_binding(conn, &allocation.reservation.binding_hash)?
             .context("external connector lost its placement binding")?;
         let contract = retained.backend_contract();
+        let artifacts = contract.workload.session_artifacts()?;
+        require_connector_channel_mode(&allocation.reservation.owner, &channel)?;
         ensure!(
             record.channel_binding_digest == channel.digest()?
                 && record.execution_binding_hash == channel.execution_binding_hash
                 && record.execution_binding_hash == allocation.reservation.binding_hash
-                && record.connector_protocol
-                    == contract.workload.structured_session()?.connector_protocol
-                && record.connector_artifact_hash
-                    == contract
-                        .workload
-                        .structured_session()?
-                        .connector_artifact_hash
-                && record.connector_artifact_bytes
-                    == contract
-                        .workload
-                        .structured_session()?
-                        .connector_artifact_bytes,
+                && record.connector_protocol == artifacts.connector_protocol
+                && record.connector_artifact_hash == artifacts.connector_artifact_hash
+                && record.connector_artifact_bytes == artifacts.connector_artifact_bytes,
             "external connector changed its retained execution authority"
         );
         ensure!(
@@ -526,9 +563,12 @@ impl RuntimeDb {
                     allocation.phase == ExternalAllocationPhase::Bound,
                     "external connector cannot attach after cleanup begins"
                 );
-                require_session_owner(&tx, &allocation.reservation)?;
-                require_connecting_session(&tx, placement)?;
                 let channel = load_binding(&tx, placement)?;
+                ensure!(
+                    channel.execution_binding_hash == allocation.reservation.binding_hash,
+                    "external connector channel changed its placement binding"
+                );
+                require_fresh_connector_owner(&tx, &allocation.reservation, &channel, true)?;
                 require_live_released_channel(&tx, placement, &channel)?;
                 let retained = read_retained_binding(&tx, &allocation.reservation.binding_hash)?
                     .context("external connector lost its placement binding")?;
