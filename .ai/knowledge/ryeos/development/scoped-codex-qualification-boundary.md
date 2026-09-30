@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-30T01:34:23Z:09bb0df159fe0b2a9e4645cf65b9d6ac9657f8bf00f97a372e7549dec4163936:ZdOPheACRr4RUSJyO9Es1bTDAZw7EAnUyq0Tjo8zIDzWvOl64cHHZhUV6CzgkyGx++qkxWeh7KCx+ImvA4CzDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T02:47:47Z:27c5e373b926e9a80300ab78c4933d5c1afacc619887dda1c0e87df5d020adda:uTZBq6vT5+WhFy+IAwvqHgLb+8M1cvSBmjlI24WYBA/spGuQ8v0FpenK7e7oi8xPrOCb/vCBHTzIBhuzWqvhCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -212,6 +212,16 @@ requirements. Profile changes must never refresh an already admitted running
 root's selection.
 
 ## Current implementation gate
+
+The isolated qualification source repaired a stale signature on the hosted
+Codex baseline Config and repinned all five signed Codex Workers to the exact
+`lib/hosted` source-closure digest
+`e2ca3685444a0eadfd896058b289df5bc67638c48c7852c86826c7131ecdad96`.
+The 53 signed files under the Codex Bundle's `.ai` tree verify against the
+development publisher, and all 23 source contract tests pass. This is source
+integrity evidence for a future candidate publication. It has not been
+installed or used to qualify a hosted Worker; the changed Worker definition
+identities require fresh admission and qualification where selected.
 
 The currently generated direct-Codex fixture is a diagnostic product check.
 Its signed qualification policy has no `consumer_execution_context`, and the
