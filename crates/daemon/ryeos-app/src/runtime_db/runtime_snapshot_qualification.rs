@@ -639,6 +639,18 @@ mod tests {
             coordinate: coordinate.clone(), nonce_hex: "8".repeat(64),
         };
         consumer.operation_id = consumer.derived_operation_id().unwrap();
+        assert!(
+            db.reserve_restored_verifier_attempt(&consumer)
+                .unwrap_err()
+                .to_string()
+                .contains("matching admission lane")
+        );
+        // A null owner selection is immutable, not an empty slot that may
+        // later be converted into consumer placement authority.
+        assert!(db.conn.execute(
+            "UPDATE restored_verifier_attempt SET consumer_selection_json=?2 WHERE operation_id=?1",
+            params![verifier.operation_id, serde_json::to_string(&selection).unwrap()],
+        ).is_err());
         consumer
             .validate_consumer_for(
                 &source,

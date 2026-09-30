@@ -15095,6 +15095,33 @@ impl StateStore {
             .claim_restored_verifier_attempt(operation_id)
     }
 
+    /// The caller must hold the qualification occurrence contact gate and
+    /// authenticate a fresh accepted root under the current protected profile.
+    /// This reservation does not itself authorize provider contact.
+    pub(crate) fn reserve_consumer_verifier_attempt(
+        &self,
+        intent: &ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::restored_verifier_attempt::RestoredVerifierAttemptRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .reserve_consumer_verifier_attempt(intent, admission)
+    }
+
+    /// Consumes a separate root authentication; ambiguous claims reconcile
+    /// the retained attempt instead of opening another contact.
+    pub(crate) fn claim_consumer_verifier_attempt(
+        &self,
+        operation_id: &str,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::restored_verifier_attempt::RestoredVerifierAttemptClaim> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .claim_consumer_verifier_attempt(operation_id, admission)
+    }
+
     pub(crate) fn bind_restored_verifier_observation(
         &self,
         observation: &ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAdapterObservation,

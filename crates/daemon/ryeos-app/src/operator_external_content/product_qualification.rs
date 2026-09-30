@@ -11,6 +11,7 @@ mod consumer_definition_tests;
 pub(super) mod content_proof;
 pub mod launch;
 mod retained_verifier;
+pub(crate) use execution_evidence::AuthenticatedConsumerRoot;
 pub(super) mod runtime_identity;
 
 use std::collections::BTreeMap;
@@ -1184,9 +1185,7 @@ impl PreparedBundleConsumerContentInputs {
     /// Derive the use coordinate from admitted inputs, never from the signed
     /// verifier parameter that it must match. Applied parity remains separate.
     fn require_activated_qualification_use(&self) -> anyhow::Result<()> {
-        use ryeos_state::external_execution::admission::{
-            ExternalCandidateQualificationUse, ExternalCandidateRuntimeAuthority,
-        };
+        use ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority;
         let requirement = self
             .worker_source
             .profile
@@ -1195,6 +1194,23 @@ impl PreparedBundleConsumerContentInputs {
         if requirement.runtime_authority != ExternalCandidateRuntimeAuthority::ActivatedContent {
             bail!("activated qualification use selects product authority");
         }
+        self.qualification_use()?
+            .context("consumer has no external candidate use")?
+            .require_qualified_use(&self.policy_source.policy.verifier_parameters)
+    }
+
+    fn qualification_use(
+        &self,
+    ) -> anyhow::Result<
+        Option<ryeos_state::external_execution::admission::ExternalCandidateQualificationUse>,
+    > {
+        let Some(requirement) = self
+            .worker_source
+            .profile
+            .external_candidate_requirement()?
+        else {
+            return Ok(None);
+        };
         let mut entries: Vec<_> = self.worker_literals.iter().cloned().collect();
         for inherited in self.environment.realizations.iter() {
             match entries.iter().find(|entry| entry.id == inherited.id) {
@@ -1204,7 +1220,7 @@ impl PreparedBundleConsumerContentInputs {
             }
         }
         let realizations = ExternalContentRealizationSet::new(entries)?;
-        let context = ExternalCandidateQualificationUse::from_admitted_inputs(
+        let context = ryeos_state::external_execution::admission::ExternalCandidateQualificationUse::from_admitted_inputs(
             &requirement,
             &self.worker_source.profile,
             &self.worker_source.source,
@@ -1212,7 +1228,8 @@ impl PreparedBundleConsumerContentInputs {
             &self.environment.definition.executable_search,
             &self.environment.definition.process_environment,
         )?;
-        context.require_qualified_use(&self.policy_source.policy.verifier_parameters)
+        context.require_qualified_use(&self.policy_source.policy.verifier_parameters)?;
+        Ok(Some(context))
     }
 
     pub(in crate::operator_external_content) fn retained_identity(
@@ -1225,6 +1242,7 @@ impl PreparedBundleConsumerContentInputs {
             .as_ref()
             .context("prepared consumer content has no signed context")?;
         let identity = ProductQualificationConsumerContentIdentity {
+            qualification_use: self.qualification_use()?,
             definitions: self.definitions.clone(),
             declaration_authority: self.declaration_authority.clone(),
             worker_source: self.worker_source.source.clone(),

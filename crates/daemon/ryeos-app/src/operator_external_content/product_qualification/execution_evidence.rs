@@ -43,6 +43,180 @@ fn projection_owner(artifact: &AdmittedLaunchArtifactIdentity) -> (&str, &str) {
     }
 }
 
+/// Ephemeral accepted-root authentication. Not serializable or clonable;
+/// reservation and contact claim require separately authenticated values.
+/// Occurrence liveness is deliberately left to the journal transaction.
+pub(crate) struct AuthenticatedConsumerRoot {
+    qualification_operation_id: String,
+    qualification_profile_digest: String,
+    owner: String,
+    coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    purpose: ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+}
+
+impl AuthenticatedConsumerRoot {
+    pub(crate) fn require_attempt(
+        &self,
+        intent: &ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent,
+        qualification: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationIntent,
+    ) -> anyhow::Result<()> {
+        use ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose;
+        if qualification.operation_id != self.qualification_operation_id
+            || qualification.qualification_profile_digest != self.qualification_profile_digest
+            || qualification.owner_principal != self.owner
+            || intent.qualification_operation_id != self.qualification_operation_id
+            || !matches!(&intent.purpose, RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } if coordinate == &self.coordinate)
+        {
+            bail!("consumer attempt differs from authenticated root and occurrence authority");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn coordinate(&self) -> &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate{
+        &self.coordinate
+    }
+
+    pub(crate) fn selection(&self) -> &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection{
+        &self.selection
+    }
+
+    pub(crate) fn purpose(
+        &self,
+    ) -> &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose {
+        &self.purpose
+    }
+}
+
+/// Load a born accepted qualification root at its exact coordinate. This
+/// authenticates root/purpose/artifact and installed-profile agreement only;
+/// it grants no contact, liveness or prerequisite-measurement permission.
+pub(super) fn authenticate_consumer_root(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    context: &HandlerContext,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+) -> anyhow::Result<AuthenticatedConsumerRoot> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    authority.ensure_guard(guard)?;
+    let qualified = state
+        .state_store
+        .snapshot_qualification_operation(qualification_operation_id)?
+        .context("consumer verification qualification is absent")?;
+    if qualified.intent.owner_principal != context.fingerprint
+        || qualified.phase
+            != crate::runtime_db::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound
+        || qualified.occurrence.is_none()
+    {
+        bail!("consumer verification has no operator-owned bound occurrence");
+    }
+    let profile = state
+        .node_config
+        .runtime_snapshot_qualification
+        .iter()
+        .find(|binding| binding.digest() == qualified.intent.qualification_profile_digest)
+        .context("consumer verification lost its exact signed qualification profile")?;
+    let producer = state
+        .node_config
+        .runtime_snapshot_production
+        .iter()
+        .find(|binding| {
+            binding.id() == profile.production_binding_id()
+                && binding.digest() == profile.production_binding_digest()
+        })
+        .context("consumer verification lost its exact signed producer binding")?;
+    let source_snapshot = state
+        .state_store
+        .runtime_snapshot_operation(&qualified.intent.snapshot_operation_id)?
+        .context("consumer verification retained snapshot is absent")?;
+    if source_snapshot.intent.production_profile_digest != producer.digest()
+        || source_snapshot.intent.provider_id != producer.backend()
+        || source_snapshot.intent.adapter_artifact_hash != producer.adapter_artifact_hash()
+        || source_snapshot.intent.provider_group_id != producer.provider_group_id()
+    {
+        bail!("consumer verification snapshot differs from its signed producer");
+    }
+    if qualified.intent.adapter_artifact_hash != producer.adapter_artifact_hash()
+        || qualified.intent.provider_spec_digest != profile.provider_spec_digest()
+        || qualified.intent.settings_digest != profile.settings_digest()
+        || qualified.intent.verifier_artifact_hash != profile.verifier_artifact_hash()
+    {
+        bail!("consumer verification differs from exact signed occurrence authority");
+    }
+    let selection = profile.consumer_verifier(coordinate)?;
+    selection.validate_coordinate(coordinate)?;
+    let root = state
+        .state_store
+        .get_authoritative_root_thread_snapshot(&coordinate.accepted_root_id)?
+        .context("consumer verification accepted root is absent")?;
+    if root.thread_id != coordinate.accepted_root_id
+        || root.chain_root_id != coordinate.accepted_root_id
+        || root.requested_by.as_deref() != Some(context.fingerprint.as_str())
+        || root.admitted_launch_capsule_hash.as_deref()
+            != Some(coordinate.accepted_capsule_hash.as_str())
+    {
+        bail!("consumer verification coordinate differs from born operator-owned root");
+    }
+    let cas = authority.cas_store()?;
+    let capsule = AdmittedLaunchCapsule::from_current_value(
+        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            &cas,
+            &coordinate.accepted_capsule_hash,
+            limits.max_object_bytes,
+        )?,
+    )?;
+    require_terminal_invocation(&root, &capsule)?;
+    capsule.verify_retained_execution_realization(
+        &cas,
+        &authority.large_object_store()?,
+        authority.trust_store(),
+    )?;
+    let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+        &capsule,
+    )?;
+    let purpose = sealed
+        .qualification_purpose()
+        .context("consumer verification root has no sealed qualification purpose")?;
+    purpose.validate()?;
+    if canonical_value_digest(&serde_json::to_value(purpose)?)?
+        != coordinate.qualification_purpose_digest
+        || purpose.owner_fingerprint != context.fingerprint
+        || canonical_value_digest(&serde_json::to_value(&purpose.subject)?)?
+            != coordinate.subject_digest
+    {
+        bail!("consumer verification differs from sealed qualification purpose");
+    }
+    let source = purpose
+        .remote_verifier_sources
+        .get(&coordinate.scenario_id)
+        .context("sealed qualification purpose has no selected remote verifier")?;
+    let qualified_use = purpose
+        .consumer_content
+        .as_ref()
+        .and_then(|content| content.qualification_use.as_ref())
+        .context("accepted consumer purpose has no admitted use")?;
+    if canonical_value_digest(&serde_json::to_value(qualified_use)?)? != coordinate.use_digest {
+        bail!("consumer verification differs from accepted admitted use");
+    }
+    if source.scenario_source_digest != selection.scenario_source_digest
+        || source.executor.payload_blob_hash != selection.verifier_artifact_hash
+    {
+        bail!("consumer verifier differs from accepted signed source artifact");
+    }
+    authority.ensure_guard(guard)?;
+    Ok(AuthenticatedConsumerRoot {
+        qualification_operation_id: qualified.intent.operation_id.clone(),
+        qualification_profile_digest: qualified.intent.qualification_profile_digest.clone(),
+        owner: context.fingerprint.clone(),
+        coordinate: coordinate.clone(),
+        selection: selection.clone(),
+        purpose: purpose.clone(),
+    })
+}
+
 fn projector_identity(
     identity: &ryeos_engine::handlers::VerifiedExecutionEvidenceProjectorIdentity,
 ) -> ProductQualificationProjectorIdentity {

@@ -104,8 +104,7 @@ fn consumer_execution_context_requires_typed_canonical_refs() {
     assert!(policy.validate().is_err());
 }
 
-#[test]
-fn launch_purpose_retains_same_generation_consumer_definitions() {
+fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
     let mut purpose = launch_purpose();
     let context = ProductQualificationConsumerExecutionContext {
         worker_ref: "worker:codex/external-hosted-authoring".into(),
@@ -148,6 +147,7 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
     });
     assert!(purpose.validate().is_err());
     purpose.consumer_content = Some(ProductQualificationConsumerContentIdentity {
+        qualification_use: None,
         definitions: purpose.consumer_definitions.as_ref().unwrap().clone(),
         declaration_authority: QualificationConsumerDeclarationAuthority::CapturedProduct {
             relationship_definition: definition("config:codex/guest-runtime-products"),
@@ -201,6 +201,68 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
         },
     });
     purpose.validate().unwrap();
+    purpose
+}
+
+#[test]
+fn launch_purpose_retains_same_generation_consumer_definitions() {
+    let mut purpose = consumer_launch_purpose_fixture();
+    let context = purpose
+        .policy_source
+        .policy
+        .consumer_execution_context
+        .clone()
+        .unwrap();
+    let definition = |reference: &str| ProductQualificationBundleDefinitionIdentity {
+        canonical_ref: reference.into(),
+        raw_content_digest: "a".repeat(64),
+        effective_definition_digest: "b".repeat(64),
+        publisher_fingerprint: "c".repeat(64),
+    };
+    let content = purpose.consumer_content.as_ref().unwrap();
+    let mut wire = serde_json::to_value(content).unwrap();
+    assert!(wire["qualification_use"].is_null());
+    wire.as_object_mut().unwrap().remove("qualification_use");
+    assert!(serde_json::from_value::<ProductQualificationConsumerContentIdentity>(wire).is_err());
+    let mut changed_use = content.clone();
+    let realizations = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .chain(content.environment_realizations.iter())
+            .cloned()
+            .collect(),
+    )
+    .unwrap();
+    let qualified_use = crate::external_execution::admission::ExternalCandidateQualificationUse {
+        schema: crate::external_execution::admission::QUALIFICATION_CONTEXT_SCHEMA.into(),
+        requirement_digest: "1".repeat(64),
+        profile_hash: content.worker_profile_hash.clone(),
+        source_binding_hash: content.worker_source.binding_hash.clone(),
+        source_content_manifest_hash: content.worker_source.content_manifest_hash.clone(),
+        provider_executable_manifest_hash: "2".repeat(64),
+        execution_environment_digest: crate::external_execution::admission::ExternalCandidateQualificationUse::admitted_execution_environment_digest(
+            &realizations, &content.executable_search, &content.process_environment).unwrap(),
+    };
+    changed_use.qualification_use = Some(qualified_use.clone());
+    changed_use
+        .validate_for(&context, purpose.consumer_definitions.as_ref().unwrap())
+        .unwrap();
+    changed_use
+        .qualification_use
+        .as_mut()
+        .unwrap()
+        .execution_environment_digest = "3".repeat(64);
+    assert!(
+        changed_use
+            .validate_for(&context, purpose.consumer_definitions.as_ref().unwrap())
+            .is_err()
+    );
+    assert!(
+        qualified_use
+            .require_qualified_use(&serde_json::json!({}))
+            .is_err()
+    );
     let captured_authority = purpose
         .consumer_content
         .as_ref()
@@ -1276,7 +1338,60 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
     purpose
         .remote_verifier_sources
         .insert("remote_codex".into(), source);
+    assert!(
+        purpose
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("no admitted consumer use")
+    );
+    let local = consumer_launch_purpose_fixture();
+    purpose.policy_source.policy.consumer_execution_context =
+        local.policy_source.policy.consumer_execution_context;
+    purpose.consumer_definitions = local.consumer_definitions;
+    purpose.consumer_content = local.consumer_content;
+    let content = purpose.consumer_content.as_mut().unwrap();
+    let realizations = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .chain(content.environment_realizations.iter())
+            .cloned()
+            .collect(),
+    )
+    .unwrap();
+    let qualified_use = crate::external_execution::admission::ExternalCandidateQualificationUse {
+        schema: crate::external_execution::admission::QUALIFICATION_CONTEXT_SCHEMA.into(),
+        requirement_digest: "1".repeat(64), profile_hash: content.worker_profile_hash.clone(),
+        source_binding_hash: content.worker_source.binding_hash.clone(),
+        source_content_manifest_hash: content.worker_source.content_manifest_hash.clone(),
+        provider_executable_manifest_hash: "2".repeat(64),
+        execution_environment_digest: crate::external_execution::admission::ExternalCandidateQualificationUse::admitted_execution_environment_digest(
+            &realizations, &content.executable_search, &content.process_environment).unwrap(),
+    };
+    purpose.policy_source.policy.verifier_parameters = qualified_use.parameters().unwrap();
+    content.qualification_use = Some(qualified_use);
+    purpose.admitted_parameters_digest = purpose
+        .policy_source
+        .policy
+        .admitted_parameters_digest()
+        .unwrap();
     purpose.validate().unwrap();
+    let mut missing_use = purpose.clone();
+    missing_use
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .qualification_use = None;
+    assert!(missing_use.validate().is_err());
+    let mut wrong_parameters = purpose.clone();
+    wrong_parameters.policy_source.policy.verifier_parameters = json!({});
+    wrong_parameters.admitted_parameters_digest = wrong_parameters
+        .policy_source
+        .policy
+        .admitted_parameters_digest()
+        .unwrap();
+    assert!(wrong_parameters.validate().is_err());
     let mut changed = purpose.clone();
     let source = changed
         .remote_verifier_sources
@@ -1289,6 +1404,15 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
     let mut predecessor = purpose;
     predecessor.schema = "ryeos.qualification_launch_purpose.v2".into();
     assert!(predecessor.validate().is_err());
+}
+
+#[test]
+fn product_evidence_refuses_predecessor_use_retention_schema() {
+    let current = evidence();
+    current.validate().unwrap();
+    let mut predecessor = serde_json::to_value(current).unwrap();
+    predecessor["schema"] = json!("ryeos.product_qualification_evidence.v10");
+    assert!(ProductQualificationEvidence::from_value(&predecessor).is_err());
 }
 
 #[test]

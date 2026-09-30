@@ -20,7 +20,7 @@ use super::products::{validate_canonical_unsuffixed_ref, validate_hash, validate
 use super::qualification_execution::QualificationExecutionPurposeView;
 use super::qualification_subject::ContentQualificationSubject;
 
-pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v3";
+pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v4";
 
 /// These sources have different authentication and CAS retention rules. An
 /// activation receipt is never a producer witness or product relationship.
@@ -186,6 +186,14 @@ impl QualificationLaunchPurpose {
             .count();
         if self.remote_verifier_sources.len() != remote_scenarios {
             bail!("qualification purpose does not retain every signed remote verifier");
+        }
+        if remote_scenarios > 0 {
+            let qualified_use = self
+                .consumer_content
+                .as_ref()
+                .and_then(|content| content.qualification_use.as_ref())
+                .context("remote qualification purpose has no admitted consumer use")?;
+            qualified_use.require_qualified_use(&self.policy_source.policy.verifier_parameters)?;
         }
         for (name, verifier) in &self.remote_verifier_sources {
             verifier.validate_for(&self.policy_source, name)?;

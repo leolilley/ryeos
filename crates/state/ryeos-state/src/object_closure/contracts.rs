@@ -1775,6 +1775,7 @@ mod tests {
             mount: id.into(),
         };
         let content = ProductQualificationConsumerContentIdentity {
+            qualification_use: None,
             definitions: ProductQualificationConsumerDefinitionIdentity {
                 bundle_generation_identity: "generation".into(),
                 worker: definition("worker:codex/authoring"),

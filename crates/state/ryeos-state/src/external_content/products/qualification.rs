@@ -28,7 +28,7 @@ pub mod remote_verifier_source;
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v3";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
-pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v10";
+pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v11";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
 pub const PRODUCT_QUALIFICATION_CLAIM: &str = "retained_product_qualified";
 pub const MAX_PRODUCT_QUALIFICATION_CLAIMS: usize = 32;
@@ -156,6 +156,10 @@ impl ProductQualificationConsumerDefinitionIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProductQualificationConsumerContentIdentity {
+    /// Admission-derived use. Local-only consumers explicitly retain null.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub qualification_use:
+        Option<crate::external_execution::admission::ExternalCandidateQualificationUse>,
     pub definitions: ProductQualificationConsumerDefinitionIdentity,
     pub declaration_authority: QualificationConsumerDeclarationAuthority,
     pub worker_source: EffectiveSourceClosureProjection,
@@ -321,6 +325,27 @@ impl ProductQualificationConsumerContentIdentity {
             }
         }
         self.runtime_member.validate_for(context)?;
+        if let Some(qualified_use) = &self.qualification_use {
+            qualified_use.validate()?;
+            let mut entries: Vec<_> = self.worker_literals.iter().cloned().collect();
+            for inherited in self.environment_realizations.iter() {
+                match entries.iter().find(|entry| entry.id == inherited.id) {
+                    Some(entry) if entry == inherited => {}
+                    Some(_) => bail!("retained use has conflicting environment realizations"),
+                    None => entries.push(inherited.clone()),
+                }
+            }
+            let realizations = ExternalContentRealizationSet::new(entries)?;
+            if qualified_use.profile_hash != self.worker_profile_hash
+                || qualified_use.source_binding_hash != self.worker_source.binding_hash
+                || qualified_use.source_content_manifest_hash != self.worker_source.content_manifest_hash
+                || qualified_use.execution_environment_digest != crate::external_execution::admission::ExternalCandidateQualificationUse::admitted_execution_environment_digest(
+                    &realizations, &self.executable_search, &self.process_environment,
+                )?
+            {
+                bail!("retained qualification use differs from admitted consumer content");
+            }
+        }
         bounded(
             self,
             MAX_PRODUCT_QUALIFICATION_CONSUMER_CONTENT_BYTES,

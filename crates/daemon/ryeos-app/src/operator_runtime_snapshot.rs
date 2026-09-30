@@ -1399,7 +1399,8 @@ fn verify_probe_restored_verifier_record(
     let observation = retained
         .observation
         .as_ref()
-        .context("runtime probe verifier has no complete observation")?;
+        .context("runtime probe verifier has no complete observation")?
+        .owner_measurement()?;
     ensure!(
         retained.phase == RestoredVerifierAttemptPhase::Observed
             && !observation.contact_deadline_exceeded
@@ -1578,7 +1579,8 @@ fn verify_materialized_restoration_journal(
     let observation = verifier
         .observation
         .as_ref()
-        .context("materialized restoration has no verifier observation")?;
+        .context("materialized restoration has no verifier observation")?
+        .owner_measurement()?;
     ensure!(
         !observation.contact_deadline_exceeded,
         "materialized restoration verifier exceeded its deadline"
@@ -2444,13 +2446,25 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use ryeos_external_execution_contract::restored_runtime_measurement::{
-        RestoredOwnerMeasurement, RestoredVerifierAdapterObservation,
+        ConsumerVerifierAdapterObservation, RestoredOwnerMeasurement,
+        RestoredVerifierAdapterObservation, RestoredVerifierObservation,
     };
     use ryeos_external_execution_contract::runtime_snapshot::{
         RUNTIME_SNAPSHOT_RESULT_SCHEMA, RuntimeSnapshotLocator,
         RuntimeSnapshotQualificationOccurrence, RuntimeSnapshotQualificationTerminalObservation,
         RuntimeSnapshotReadinessObservation,
     };
+
+    fn owner_observation_mut(
+        record: &mut RestoredVerifierAttemptRecord,
+    ) -> &mut RestoredVerifierAdapterObservation {
+        match record.observation.as_mut().unwrap() {
+            RestoredVerifierObservation::OwnerMeasurement { observation } => observation,
+            RestoredVerifierObservation::ConsumerRuntime { .. } => {
+                panic!("owner-measurement fixture contains a consumer result")
+            }
+        }
+    }
 
     #[test]
     fn materialized_snapshot_window_ends_at_source_expiry_not_first_contact() {
@@ -2625,8 +2639,9 @@ mod tests {
         };
         let mut verifier = RestoredVerifierAttemptRecord {
             intent: verifier_intent,
+            consumer_selection: None,
             phase: RestoredVerifierAttemptPhase::Observed,
-            observation: Some(observation),
+            observation: Some(RestoredVerifierObservation::OwnerMeasurement { observation }),
             created_at_ms: 5,
             updated_at_ms: 6,
         };
@@ -2671,6 +2686,29 @@ mod tests {
             )
         };
         check(&snapshot, &verifier, &source).unwrap();
+        let mut wrong_lane = verifier.clone();
+        wrong_lane.observation = Some(RestoredVerifierObservation::ConsumerRuntime {
+            observation: ConsumerVerifierAdapterObservation {
+                schema: 1,
+                operation_id: verifier.intent.operation_id.clone(),
+                occurrence_id: occurrence.occurrence_id.clone(),
+                verifier_artifact_hash: verifier.intent.verifier_artifact_hash.clone(),
+                challenge_digest: "1".repeat(64),
+                upload_token_execution_id: "exe-upload".into(),
+                run_token_execution_id: "exe-run".into(),
+                upload_response_sha256: "9".repeat(64),
+                run_stream_sha256: "a".repeat(64),
+                evidence_sha256: "b".repeat(64),
+                evidence_bytes: 2,
+                contact_deadline_exceeded: false,
+            },
+        });
+        assert!(
+            check(&snapshot, &wrong_lane, &source)
+                .unwrap_err()
+                .to_string()
+                .contains("consumer result is not owner measurement")
+        );
         snapshot.intent.source = RuntimeSnapshotSource::CapturedProduct {
             product_witness_hash: "c".repeat(64),
         };
@@ -2688,28 +2726,14 @@ mod tests {
             *materialization_attestation_hash = "e".repeat(64);
         }
         assert!(check(&snapshot, &verifier, &wrong_source).is_err());
-        verifier
-            .observation
-            .as_mut()
-            .unwrap()
-            .contact_deadline_exceeded = true;
+        owner_observation_mut(&mut verifier).contact_deadline_exceeded = true;
         assert!(check(&snapshot, &verifier, &source).is_err());
-        verifier
-            .observation
-            .as_mut()
-            .unwrap()
-            .contact_deadline_exceeded = false;
-        verifier
-            .observation
-            .as_mut()
-            .unwrap()
+        owner_observation_mut(&mut verifier).contact_deadline_exceeded = false;
+        owner_observation_mut(&mut verifier)
             .measurement
             .owner_executable_sha256 = "d".repeat(64);
         assert!(check(&snapshot, &verifier, &source).is_err());
-        verifier
-            .observation
-            .as_mut()
-            .unwrap()
+        owner_observation_mut(&mut verifier)
             .measurement
             .owner_executable_sha256 = identity.owner_executable_sha256.clone();
         let mut late_terminal = termination.clone();
