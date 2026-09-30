@@ -7,6 +7,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_app::operator_external_content::product_qualification::PreparedExternalQualificationRoot;
 use ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority;
 use ryeos_external_execution_contract::{
     EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA, ExternalGuestInputProjection, GuestBaseSnapshotInput,
@@ -24,6 +25,50 @@ use ryeos_state::objects::{
 use super::external_guest_inputs::{
     PreparedProductInputs, RuntimeDestinationOverride, prepare_retained_product_inputs,
 };
+
+/// The authenticated accepted root and its complete one-use guest input
+/// descriptors remain together until the app placement owner consumes them.
+/// This value has no reservation or provider-contact authority.
+pub struct PreparedExternalQualificationGuest {
+    root: PreparedExternalQualificationRoot,
+    inputs: ExternalGuestInputAuthority,
+}
+
+impl PreparedExternalQualificationGuest {
+    pub fn into_parts(
+        self,
+    ) -> (
+        PreparedExternalQualificationRoot,
+        ExternalGuestInputAuthority,
+    ) {
+        (self.root, self.inputs)
+    }
+}
+
+pub fn prepare_external_qualification_guest(
+    state: &ryeos_app::state::AppState,
+    context: &ryeos_app::handler_context::HandlerContext,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    private_parent: &lillux::PinnedDirectory,
+) -> Result<PreparedExternalQualificationGuest> {
+    let root = ryeos_app::operator_external_content::product_qualification::prepare_external_qualification_root(
+        state,
+        context,
+        coordinate,
+        qualification_operation_id,
+        limits,
+    )?;
+    let inputs = prepare_external_qualification_inputs(
+        state,
+        root.capsule(),
+        root.purpose(),
+        root.program(),
+        private_parent,
+    )?;
+    Ok(PreparedExternalQualificationGuest { root, inputs })
+}
 
 /// Caller authenticates the accepted root, sealed purpose, current occurrence,
 /// profile and product witness before supplying them. This function repeats
