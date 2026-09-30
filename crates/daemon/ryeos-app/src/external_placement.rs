@@ -85,6 +85,22 @@ impl RuntimeProbeInput {
 
 pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     fn backend_id(&self) -> &str;
+    /// Transport only. The private claimed contact follows a durable journal
+    /// transition and the original sealed bootstrap is joined again below.
+    fn relay_file_contact(
+        &self,
+        _contract: &ExternalPlacementBackendContract,
+        _credential: &PlacementCredential,
+        _bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        _claim: crate::runtime_db::external_execution::ClaimedRelayFileContact,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ExternalLifecycleObservation<
+            ryeos_external_execution_contract::relay_file::RelayFileAdapterResponse,
+        >,
+    > {
+        bail!("external placement backend has no claimed relay file effect")
+    }
     /// Already-captured signed source for cleanup-only retention. This does
     /// not grant a new allocation or provider operation.
     fn lifecycle_escrow_capture(
@@ -1341,6 +1357,30 @@ impl ExternalPlacementBackendRegistry {
         program: &AdmittedExternalExecutionProgram,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
         self.qualify_for_purpose(contract, credential, program, true)
+    }
+
+    /// Live relay authority is the signed ControllerFileRelay selection plus
+    /// the exact signed provider route spec checked by the adapter. It is
+    /// separate from cleanup qualification, which deliberately relaxes
+    /// startup capabilities and cannot authorize a new channel file contact.
+    fn qualify_for_relay(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        credential: &PlacementCredential,
+        program: &AdmittedExternalExecutionProgram,
+    ) -> Result<Arc<dyn ExternalPlacementBackend>> {
+        contract.controller_transport.relay()?;
+        ensure!(
+            matches!(
+                program,
+                AdmittedExternalExecutionProgram::QualificationStructuredSession(_)
+            ),
+            "external relay file requires a qualification-only session"
+        );
+        // Full live qualification retains SupervisorActivation and every
+        // signed Q workload capability requirement. In particular, today's
+        // unsupported_pending Render profile cannot contact a relay file.
+        self.qualify(contract, credential, program)
     }
 
     fn qualify_for_purpose(
@@ -2844,6 +2884,201 @@ pub(crate) fn recover_original_external_relay_bootstrap(
         "original signed guest import changed durable package delivery"
     );
     Ok(sealed)
+}
+
+/// Contact only an immutable file slot derived from the protected original
+/// bootstrap. This records transport bytes, never Ready, ACK, or settlement.
+/// There is deliberately no live Q loop caller yet. A later channel owner
+/// must apply typed attach/exchange under its durable channel journal and
+/// bind that application to these retained bytes before enabling this path.
+#[allow(dead_code)]
+pub(crate) fn contact_original_external_relay_transfer(
+    state: &AppState,
+    placement: &str,
+    kind: crate::runtime_db::external_execution::RelayKind,
+    sequence: u32,
+    direction: crate::runtime_db::external_execution::RelayDirection,
+    outbound: Option<&ryeos_state::external_execution::transport::ExternalRelayResponseEnvelope>,
+) -> Result<crate::runtime_db::external_execution::RelayTransferRecord> {
+    use crate::runtime_db::external_execution::{
+        RelayDirection, RelayTransferIntent, RelayTransferPhase,
+    };
+    use ryeos_state::external_execution::transport::{
+        ExternalRelayResponseEnvelope, ExternalRelayResponseKind,
+    };
+
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let gate = state.external_placement_backends.contact_gate(placement)?;
+    ensure!(
+        gate.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok(),
+        "external relay file contact is already in progress"
+    );
+    let _lease = ExternalContactLease { gate };
+    let protected = recover_original_external_relay_bootstrap(state, placement)?;
+    let bootstrap = protected.bootstrap();
+    let outbound_bytes = match direction {
+        RelayDirection::GuestToController => {
+            ensure!(
+                outbound.is_none(),
+                "guest relay read cannot carry controller response"
+            );
+            None
+        }
+        RelayDirection::ControllerToGuest => {
+            let bytes = if let Some(envelope) = outbound {
+                envelope.canonical_bytes()?
+            } else {
+                // Recovery after a possible PUT uses only the journal's
+                // precommitted bytes. The caller cannot replace the slot.
+                state
+                    .state_store
+                    .retained_external_relay_outbound(bootstrap, kind, sequence)?
+                    .canonical_bytes
+                    .context("retained relay response lost its exact bytes")?
+            };
+            let envelope: ExternalRelayResponseEnvelope = serde_json::from_slice(&bytes)?;
+            ensure!(
+                envelope.canonical_bytes()? == bytes,
+                "retained relay response envelope is noncanonical"
+            );
+            let predecessor = RelayTransferIntent::from_bootstrap(
+                bootstrap,
+                kind,
+                sequence,
+                RelayDirection::GuestToController,
+                None,
+            )?;
+            let accepted = state
+                .state_store
+                .accepted_external_relay_request(&predecessor)?;
+            let request_digest = accepted
+                .observed_sha256
+                .as_deref()
+                .context("accepted relay request has no exact digest")?;
+            let (response_kind, binding_digest) = match kind {
+                crate::runtime_db::external_execution::RelayKind::Attach => {
+                    (ExternalRelayResponseKind::Attach, None)
+                }
+                crate::runtime_db::external_execution::RelayKind::Exchange => (
+                    ExternalRelayResponseKind::Exchange,
+                    Some(
+                        state
+                            .state_store
+                            .external_execution_channel(placement)?
+                            .digest()?,
+                    ),
+                ),
+            };
+            let _: serde_json::Value = ExternalRelayResponseEnvelope::decode_verified(
+                &bytes,
+                bootstrap,
+                response_kind,
+                request_digest,
+                binding_digest.as_deref(),
+            )?;
+            Some(bytes)
+        }
+    };
+    let intent = RelayTransferIntent::from_bootstrap(
+        bootstrap,
+        kind,
+        sequence,
+        direction,
+        outbound_bytes.as_deref(),
+    )?;
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("external relay lost its exact allocation")?;
+    let retained = state
+        .state_store
+        .retained_external_binding(&allocation.reservation.binding_hash)?
+        .context("external relay lost its exact signed binding")?;
+    let contract = retained.backend_contract();
+    let program = retained_external_channel_program(state, &allocation.reservation, &retained)?;
+    validate_external_placement_program(&program, &allocation.reservation, &contract)?;
+    ensure!(
+        state
+            .node_config
+            .external_execution
+            .iter()
+            .any(|installed| installed.digest() == retained.digest()),
+        "live relay contact requires its exact currently installed signed binding"
+    );
+    let credential_access = retained.credential_access()?;
+    let credential =
+        credential_access.decode(state.vault.placement_credential(&credential_access)?)?;
+    // Live file contact requires the current signed relay selection; terminal
+    // cleanup uses a separate recovery path after this permission is withdrawn.
+    let backend =
+        state
+            .external_placement_backends
+            .qualify_for_relay(&contract, &credential, &program)?;
+    let reserved = state.state_store.reserve_external_relay_transfer(
+        bootstrap,
+        &intent,
+        outbound_bytes.as_deref(),
+    )?;
+    if reserved.phase == RelayTransferPhase::Accepted {
+        return Ok(reserved);
+    }
+    ensure!(
+        matches!(
+            reserved.phase,
+            RelayTransferPhase::Reserved
+                | RelayTransferPhase::Reading
+                | RelayTransferPhase::UploadPossible
+        ),
+        "external relay slot is no longer contactable"
+    );
+    let remaining_ms = intent
+        .deadline_ms
+        .saturating_sub(lillux::time::timestamp_millis());
+    ensure!(
+        remaining_ms > 0,
+        "external relay deadline expired before contact"
+    );
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(
+        u64::try_from(remaining_ms)?,
+    ))
+    .min(lillux::time::MonotonicDeadline::after(
+        lillux::time::Duration::from_secs(u64::from(contract.contact_timeout_seconds)),
+    ));
+
+    if direction == RelayDirection::ControllerToGuest
+        && reserved.phase == RelayTransferPhase::Reserved
+    {
+        let claim = state
+            .state_store
+            .claim_external_relay_upload_contact(&intent)?;
+        // Even a transport error might follow a completed PUT. Never mint a
+        // second upload; only the same-slot bounded GET can reconcile it.
+        let _upload_observation =
+            backend.relay_file_contact(&contract, &credential, bootstrap, claim, deadline);
+    }
+    let claim = state
+        .state_store
+        .claim_external_relay_read_contact(&intent)?;
+    let observed =
+        backend.relay_file_contact(&contract, &credential, bootstrap, claim, deadline)?;
+    ensure!(
+        !observed.deadline_exceeded,
+        "external relay download finished after its contact deadline"
+    );
+    let ryeos_external_execution_contract::relay_file::RelayFileAdapterResponse::Downloaded {
+        bytes_base64,
+        ..
+    } = observed.value
+    else {
+        bail!("external relay read returned a non-read transport observation");
+    };
+    let bytes = STANDARD.decode(bytes_base64)?;
+    state
+        .state_store
+        .accept_external_relay_readback(&intent, &bytes)
 }
 
 fn build_external_execution_channel_binding(

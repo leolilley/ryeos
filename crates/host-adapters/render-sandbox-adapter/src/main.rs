@@ -6,6 +6,7 @@ mod activation_contact;
 mod provider_spec;
 mod proxy_route;
 mod relay_contact;
+mod relay_file;
 mod restored_verifier_contact;
 mod snapshot_bootstrap;
 mod snapshot_production;
@@ -277,6 +278,7 @@ fn run() -> Result<()> {
         Some("inspect") => inspect(&adapter),
         Some("verify-runtime-probe") => verify_runtime_probe(&adapter),
         Some("operate") => operate(),
+        Some("relay-file") => relay_file::operate(),
         Some("produce-snapshot") => snapshot_production::operate(&adapter),
         Some("produce-snapshot-upload") => snapshot_production::operate_upload(&adapter),
         Some("produce-snapshot-create") => snapshot_production::operate_create(&adapter),

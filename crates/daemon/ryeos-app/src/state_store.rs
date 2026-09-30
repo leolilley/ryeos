@@ -16777,6 +16777,79 @@ impl StateStore {
             .begin_external_relay_supervisor_activation(placement, intent, relay_bootstrap)
     }
 
+    pub(crate) fn reserve_external_relay_transfer(
+        &self,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+        outbound: Option<&[u8]>,
+    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .reserve_external_relay_transfer(bootstrap, intent, outbound)
+    }
+
+    pub(crate) fn accepted_external_relay_request(
+        &self,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
+        self.lock()?
+            .runtime_db
+            .accepted_external_relay_request(intent)
+    }
+
+    pub(crate) fn retained_external_relay_outbound(
+        &self,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        kind: runtime_db::external_execution::RelayKind,
+        sequence: u32,
+    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
+        self.lock()?
+            .runtime_db
+            .retained_external_relay_outbound(bootstrap, kind, sequence)
+    }
+
+    pub(crate) fn claim_external_relay_read_contact(
+        &self,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+    ) -> Result<runtime_db::external_execution::ClaimedRelayFileContact> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .claim_external_relay_read_contact(intent)
+    }
+
+    pub(crate) fn claim_external_relay_upload_contact(
+        &self,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+    ) -> Result<runtime_db::external_execution::ClaimedRelayFileContact> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .claim_external_relay_upload_contact(intent)
+    }
+
+    pub(crate) fn accept_external_relay_readback(
+        &self,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+        bytes: &[u8],
+    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .accept_external_relay_readback(intent, bytes)
+    }
+
+    pub(crate) fn quarantine_external_relay_transfer(
+        &self,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .quarantine_external_relay_transfer(intent)
+    }
+
     /// Author only the original bound occurrence's guest assignment with the
     /// node identity. The qualified guest must already pin this public root;
     /// signing here does not make a provider snapshot qualified or start it.

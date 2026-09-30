@@ -3333,6 +3333,7 @@ dependencies = [
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "ryeos-http-transport",
+ "ryeos-state",
  "serde",
  "serde_json",
  "signal-hook",

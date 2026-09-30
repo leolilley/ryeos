@@ -21,6 +21,7 @@ pub enum LifecycleAdapterInvocation {
     Inspect,
     VerifyRuntimeProbe,
     Operate,
+    RelayFile,
     ProduceSnapshot,
     ProduceSnapshotUpload,
     ProduceSnapshotCreate,
@@ -45,7 +46,9 @@ pub struct LifecycleAdapterOutput {
 
 impl LifecycleAdapterInvocation {
     fn maximum_response_bytes(self) -> usize {
-        if self == Self::QualifySnapshotVerify {
+        if self == Self::RelayFile {
+            ryeos_external_execution_contract::relay_file::MAX_RELAY_RESPONSE_BYTES
+        } else if self == Self::QualifySnapshotVerify {
             ryeos_external_execution_contract::restored_runtime_measurement::MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES
         } else {
             MAX_LIFECYCLE_RESPONSE_BYTES
@@ -57,6 +60,7 @@ impl LifecycleAdapterInvocation {
             Self::Inspect => "inspect",
             Self::VerifyRuntimeProbe => "verify-runtime-probe",
             Self::Operate => "operate",
+            Self::RelayFile => "relay-file",
             Self::ProduceSnapshot => "produce-snapshot",
             Self::ProduceSnapshotUpload => "produce-snapshot-upload",
             Self::ProduceSnapshotCreate => "produce-snapshot-create",
@@ -75,7 +79,10 @@ impl LifecycleAdapterInvocation {
     fn requires_no_process_creation(self) -> bool {
         matches!(
             self,
-            Self::ProduceSnapshot | Self::ProduceSnapshotUpload | Self::ProduceSnapshotCreate
+            Self::ProduceSnapshot
+                | Self::ProduceSnapshotUpload
+                | Self::ProduceSnapshotCreate
+                | Self::RelayFile
         )
     }
 }
@@ -185,6 +192,7 @@ fn lifecycle_adapter_output(
                     && matches!(
                         invocation,
                         LifecycleAdapterInvocation::Operate
+                            | LifecycleAdapterInvocation::RelayFile
                             | LifecycleAdapterInvocation::ProduceSnapshot
                             | LifecycleAdapterInvocation::ProduceSnapshotUpload
                             | LifecycleAdapterInvocation::ProduceSnapshotCreate

@@ -7,6 +7,11 @@ use ryeos_engine::binary_resolver::BundlePayloadSourceProof;
 use ryeos_external_execution::lifecycle_adapter::{
     LifecycleAdapterInvocation, run_lifecycle_adapter,
 };
+use ryeos_external_execution_contract::relay_file::{
+    LIFECYCLE_RELAY_UPLOAD_FD_ENV, MAX_RELAY_RESPONSE_BYTES, RELAY_FILE_PROTOCOL,
+    RelayFileAdapterRequest, RelayFileAdapterResponse, RelayFileDirection, RelayFileEffect,
+    RelayFileKind,
+};
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES, MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES,
     RestoredVerifierAdapterRequest, RestoredVerifierAdapterResponse,
@@ -56,9 +61,9 @@ use crate::external_placement::{
 };
 use crate::node_config::sections::external_execution::ExternalPlacementBackendContract;
 use crate::runtime_db::external_execution::{
-    ExternalAllocationOccurrence, ExternalAllocationReservation,
+    ClaimedRelayFileContact, ExternalAllocationOccurrence, ExternalAllocationReservation,
     ExternalGuestPackageDeliveryCommitment, ExternalSupervisorActivationIntent,
-    ExternalTerminationIntent,
+    ExternalTerminationIntent, RelayDirection, RelayKind, RelayTransferPhase,
 };
 use crate::vault::placement::PlacementCredential;
 
@@ -531,6 +536,184 @@ impl ExecutableExternalPlacementBackend {
             deadline_exceeded,
         })
     }
+    fn invoke_relay_file(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        credential: &PlacementCredential,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        claim: ClaimedRelayFileContact,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<RelayFileAdapterResponse>> {
+        let record = claim.record();
+        let intent = &record.intent;
+        bootstrap.validate()?;
+        let relay = bootstrap.controller.relay()?;
+        ensure!(
+            bootstrap.digest()? == intent.bootstrap_digest
+                && bootstrap.placement_thread_id == intent.placement_thread_id
+                && bootstrap.occurrence_id == intent.occurrence_id
+                && bootstrap.allocation_request_digest == intent.allocation_request_digest
+                && bootstrap.relay_mailbox_root()? == intent.mailbox_root
+                && relay.maximum_file_bytes == intent.maximum_file_bytes,
+            "claimed relay differs from original signed placement"
+        );
+        ensure!(
+            match claim.effect() {
+                RelayFileEffect::UploadOnce =>
+                    intent.direction == RelayDirection::ControllerToGuest
+                        && record.phase == RelayTransferPhase::UploadPossible
+                        && record.read_attempts == 0,
+                RelayFileEffect::Download =>
+                    (intent.direction == RelayDirection::GuestToController
+                        && record.phase == RelayTransferPhase::Reading
+                        && record.read_attempts > 0)
+                        || (intent.direction == RelayDirection::ControllerToGuest
+                            && record.phase == RelayTransferPhase::UploadPossible
+                            && record.read_attempts > 0),
+            },
+            "relay adapter received no durable contact claim"
+        );
+        let request = RelayFileAdapterRequest {
+            schema: 1,
+            protocol: RELAY_FILE_PROTOCOL.into(),
+            binding_hash: bootstrap.execution_binding_hash.clone(),
+            settings_digest: contract.settings_digest.clone(),
+            placement_thread_id: intent.placement_thread_id.clone(),
+            occurrence_id: intent.occurrence_id.clone(),
+            allocation_request_digest: intent.allocation_request_digest.clone(),
+            bootstrap_digest: intent.bootstrap_digest.clone(),
+            mailbox_root: intent.mailbox_root.clone(),
+            kind: match intent.kind {
+                RelayKind::Attach => RelayFileKind::Attach,
+                RelayKind::Exchange => RelayFileKind::Exchange,
+            },
+            sequence: intent.sequence,
+            direction: match intent.direction {
+                RelayDirection::GuestToController => RelayFileDirection::GuestToController,
+                RelayDirection::ControllerToGuest => RelayFileDirection::ControllerToGuest,
+            },
+            remote_path: intent.remote_path.clone(),
+            maximum_file_bytes: intent.maximum_file_bytes,
+            deadline_ms: intent.deadline_ms,
+            effect: claim.effect(),
+            expected_sha256: intent.expected_sha256.clone(),
+            expected_bytes: intent.expected_bytes,
+        };
+        let request_bytes = request.canonical_bytes()?;
+        let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
+            lillux::time::Duration::from_secs(u64::from(contract.contact_timeout_seconds)),
+        ));
+        ensure!(!deadline.has_elapsed(), "relay contact deadline expired");
+        let descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)?;
+        self.qualify_offline(contract, credential)?;
+        let network = capture_lifecycle_network_inputs(&contract.provider_network_inputs)?;
+        let request_handle = lillux::sealed_memfd(c"ryeos-relay-file-request", &request_bytes)
+            .map_err(anyhow::Error::msg)?;
+        let bootstrap_handle = lillux::sealed_memfd(
+            c"ryeos-original-relay-bootstrap",
+            &bootstrap.canonical_bytes()?,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let settings_bytes = lillux::canonical_json(&contract.settings)?;
+        ensure!(
+            lillux::sha256_hex(settings_bytes.as_bytes()) == contract.settings_digest,
+            "relay signed settings changed before adapter contact"
+        );
+        let settings_handle =
+            lillux::sealed_memfd(c"ryeos-relay-settings", settings_bytes.as_bytes())
+                .map_err(anyhow::Error::msg)?;
+        let credential_handle =
+            lillux::sealed_memfd(c"ryeos-relay-credential", credential.secret().as_bytes())
+                .map_err(anyhow::Error::msg)?;
+        let fd = |handle: &lillux::InheritedDescriptorAuthority| -> Result<String> {
+            Ok(handle
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?
+                .to_string())
+        };
+        let mut inherited = vec![
+            self.provider_spec.authority.clone(),
+            bootstrap_handle.clone(),
+            settings_handle.clone(),
+            credential_handle.clone(),
+            network.resolver.authority().clone(),
+            network.hosts.authority().clone(),
+        ];
+        let mut envs = vec![
+            (LIFECYCLE_BOOTSTRAP_FD_ENV.into(), fd(&bootstrap_handle)?),
+            (LIFECYCLE_SETTINGS_FD_ENV.into(), fd(&settings_handle)?),
+            (LIFECYCLE_CREDENTIAL_FD_ENV.into(), fd(&credential_handle)?),
+            (
+                LIFECYCLE_PROVIDER_SPEC_FD_ENV.into(),
+                fd(&self.provider_spec.authority)?,
+            ),
+            (
+                LIFECYCLE_PROVIDER_SPEC_SHA256_ENV.into(),
+                self.provider_spec.sha256.clone(),
+            ),
+            (
+                LIFECYCLE_RESOLVER_FD_ENV.into(),
+                fd(network.resolver.authority())?,
+            ),
+            (
+                LIFECYCLE_HOSTS_FD_ENV.into(),
+                fd(network.hosts.authority())?,
+            ),
+            (
+                LIFECYCLE_RESOLVER_SHA256_ENV.into(),
+                network.resolver_sha256,
+            ),
+            (LIFECYCLE_HOSTS_SHA256_ENV.into(), network.hosts_sha256),
+            (
+                LIFECYCLE_NETWORK_POLICY_SHA256_ENV.into(),
+                network.policy_sha256,
+            ),
+        ];
+        if claim.effect() == RelayFileEffect::UploadOnce {
+            let bytes = record
+                .canonical_bytes
+                .as_deref()
+                .context("claimed relay upload lost retained bytes")?;
+            ensure!(
+                intent.expected_sha256.as_deref() == Some(lillux::sha256_hex(bytes).as_str())
+                    && intent.expected_bytes == Some(bytes.len() as u64),
+                "claimed relay upload changed its committed bytes"
+            );
+            let handle =
+                lillux::sealed_memfd(c"ryeos-relay-upload", bytes).map_err(anyhow::Error::msg)?;
+            envs.push((LIFECYCLE_RELAY_UPLOAD_FD_ENV.into(), fd(&handle)?));
+            inherited.push(handle);
+        }
+        let remaining = deadline.remaining().as_millis();
+        ensure!(remaining > 0, "relay contact deadline expired before spawn");
+        envs.push((
+            LIFECYCLE_REMAINING_TIMEOUT_MS_ENV.into(),
+            u64::try_from(remaining)?.to_string(),
+        ));
+        drop(descriptors);
+        let output = run_lifecycle_adapter(
+            &self.adapter,
+            LifecycleAdapterInvocation::RelayFile,
+            &request_handle,
+            inherited,
+            envs,
+            deadline,
+        )?;
+        let response: RelayFileAdapterResponse =
+            from_json_slice_strict(&output.bytes, MAX_RELAY_RESPONSE_BYTES)?;
+        let mut canonical = ryeos_external_execution_contract::canonical_json(&response)?;
+        canonical.push(b'\n');
+        ensure!(
+            output.bytes == canonical,
+            "relay adapter response is not exact canonical protocol output"
+        );
+        response.validate_for(&request, &lillux::sha256_hex(&request_bytes))?;
+        Ok(ExternalLifecycleObservation {
+            value: response,
+            deadline_exceeded: output.deadline_exceeded,
+        })
+    }
+
     fn invoke_snapshot_adapter(
         &self,
         binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
@@ -661,6 +844,17 @@ impl ExecutableExternalPlacementBackend {
 }
 
 impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
+    fn relay_file_contact(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        credential: &PlacementCredential,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        claim: ClaimedRelayFileContact,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<RelayFileAdapterResponse>> {
+        self.invoke_relay_file(contract, credential, bootstrap, claim, deadline)
+    }
+
     fn lifecycle_escrow_capture(&self) -> Result<Option<LifecycleEscrowCapture<'_>>> {
         let mut executables = vec![
             LifecycleEscrowExecutable {

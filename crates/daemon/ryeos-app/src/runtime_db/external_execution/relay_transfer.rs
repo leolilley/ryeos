@@ -287,6 +287,24 @@ pub(crate) struct RelayTransferRecord {
     pub canonical_bytes: Option<Vec<u8>>,
 }
 
+/// Process-local authority returned only after the durable contact transition.
+/// It is consumed by the exact retained adapter; callers cannot construct it
+/// from an occurrence or a remote path.
+pub(crate) struct ClaimedRelayFileContact {
+    record: RelayTransferRecord,
+    effect: ryeos_external_execution_contract::relay_file::RelayFileEffect,
+}
+
+impl ClaimedRelayFileContact {
+    pub(crate) fn record(&self) -> &RelayTransferRecord {
+        &self.record
+    }
+
+    pub(crate) fn effect(&self) -> ryeos_external_execution_contract::relay_file::RelayFileEffect {
+        self.effect
+    }
+}
+
 fn canonical(intent: &RelayTransferIntent) -> Result<String> {
     intent.validate()?;
     Ok(lillux::canonical_json(&serde_json::to_value(intent)?)?)
@@ -445,6 +463,87 @@ fn require_preceding_transfer(conn: &Connection, intent: &RelayTransferIntent) -
 }
 
 impl RuntimeDb {
+    /// Recover precommitted controller bytes without minting a replacement PUT.
+    pub(crate) fn retained_external_relay_outbound(
+        &self,
+        bootstrap: &ExternalSupervisorBootstrap,
+        kind: RelayKind,
+        sequence: u32,
+    ) -> Result<RelayTransferRecord> {
+        bootstrap.validate()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+        let bytes: Vec<u8> = tx
+            .query_row(
+                "SELECT canonical_bytes FROM external_execution_relay_transfer
+             WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3
+               AND direction='controller_to_guest'",
+                params![bootstrap.placement_thread_id, kind.as_str(), sequence],
+                |row| row.get(0),
+            )
+            .context("external relay has no retained controller response")?;
+        let intent = RelayTransferIntent::from_bootstrap(
+            bootstrap,
+            kind,
+            sequence,
+            RelayDirection::ControllerToGuest,
+            Some(&bytes),
+        )?;
+        require_live_q_allocation(&tx, &intent)?;
+        require_placement_bootstrap(&tx, &intent)?;
+        let record = read_transfer(&tx, &intent)?
+            .context("external relay retained controller response disappeared")?;
+        ensure!(
+            record.canonical_bytes.as_deref() == Some(bytes.as_slice()),
+            "external relay retained response changed its exact bytes"
+        );
+        tx.commit()?;
+        Ok(record)
+    }
+
+    pub(crate) fn accepted_external_relay_request(
+        &self,
+        intent: &RelayTransferIntent,
+    ) -> Result<RelayTransferRecord> {
+        ensure!(
+            intent.direction == RelayDirection::GuestToController,
+            "external relay predecessor must be a guest request"
+        );
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+        require_live_q_allocation(&tx, intent)?;
+        let record = read_transfer(&tx, intent)?
+            .context("external relay has no exact predecessor request")?;
+        ensure!(
+            record.phase == RelayTransferPhase::Accepted
+                && record.observed_sha256.is_some()
+                && record.canonical_bytes.is_some(),
+            "external relay predecessor request is not accepted"
+        );
+        tx.commit()?;
+        Ok(record)
+    }
+
+    pub(crate) fn claim_external_relay_read_contact(
+        &self,
+        intent: &RelayTransferIntent,
+    ) -> Result<ClaimedRelayFileContact> {
+        let record = self.claim_external_relay_read(intent)?;
+        Ok(ClaimedRelayFileContact {
+            record,
+            effect: ryeos_external_execution_contract::relay_file::RelayFileEffect::Download,
+        })
+    }
+
+    pub(crate) fn claim_external_relay_upload_contact(
+        &self,
+        intent: &RelayTransferIntent,
+    ) -> Result<ClaimedRelayFileContact> {
+        let record = self.claim_external_relay_upload(intent)?;
+        Ok(ClaimedRelayFileContact {
+            record,
+            effect: ryeos_external_execution_contract::relay_file::RelayFileEffect::UploadOnce,
+        })
+    }
+
     /// Reserve the one file slot before any Render token mint. Exact replay is
     /// read-only; a different digest cannot take the same sequence/path.
     pub(crate) fn reserve_external_relay_transfer(

@@ -53,7 +53,8 @@ pub(crate) use relay_bootstrap::ExternalRelayBootstrapCommitment;
 pub(super) use relay_bootstrap::JOURNAL_SQL as RELAY_BOOTSTRAP_SQL;
 pub(super) use relay_transfer::JOURNAL_SQL as RELAY_TRANSFER_SQL;
 pub(crate) use relay_transfer::{
-    RelayDirection, RelayKind, RelayTransferIntent, RelayTransferPhase, RelayTransferRecord,
+    ClaimedRelayFileContact, RelayDirection, RelayKind, RelayTransferIntent, RelayTransferPhase,
+    RelayTransferRecord,
 };
 
 pub(super) const FIRST_EPOCH: u32 = 40;

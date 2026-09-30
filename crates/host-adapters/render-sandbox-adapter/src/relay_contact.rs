@@ -1,7 +1,7 @@
-//! Detached controller-side Render file transport.
+//! Controller-side Render file transport for a journal-claimed relay slot.
 //!
-//! No shipped adapter operation calls this module. A future caller must first
-//! claim the exact durable relay transfer in the daemon journal. In particular,
+//! The relay-file adapter operation requires a prior durable daemon claim.
+//! In particular,
 //! an ambiguous upload has no second PUT path here: its only possible
 //! reconciliation is a bounded GET of the same immutable file slot. Neither
 //! transfer completion nor a provider token is supervisor channel evidence.
@@ -30,7 +30,6 @@ const MAX_UPLOAD_RESPONSE_BYTES: u64 = 16 * 1024;
 /// An exact provider file path is supplied only by the controller transfer
 /// journal after it has checked the original sealed bootstrap and occurrence.
 /// These fields are private so activation cannot synthesize a relay operation.
-#[allow(dead_code)]
 pub(super) struct RenderRelayFileContact<'a> {
     network: &'a NetworkContext,
     provider_spec: &'a ProviderSpec,
@@ -43,7 +42,6 @@ pub(super) struct RenderRelayFileContact<'a> {
     contacted: bool,
 }
 
-#[allow(dead_code)]
 impl<'a> RenderRelayFileContact<'a> {
     /// Route and byte preflight must precede credential access. Construct one
     /// instance only under a journaled read or one-shot upload contact claim.
