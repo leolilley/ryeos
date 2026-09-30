@@ -15622,6 +15622,30 @@ impl StateStore {
             )
     }
 
+    /// No child descriptor is adopted on restart. Only the original
+    /// state-owned parent and an absent entry may retire a precreation row.
+    pub(crate) fn retire_absent_reserved_qualification_guest_scratch(
+        &self,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+        parent: &lillux::PinnedDirectory,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let _permit = self.acquire_write_permit()?;
+        parent.require_owner_private_directory()?;
+        parent.ensure_path_binding()?;
+        let original_parent = self
+            .state_authority
+            .runtime_directory()
+            .open_child_directory(std::ffi::OsStr::new("qualification-guest-inputs"))?
+            .context("Q absent-child recovery lost its original state-owned parent")?;
+        anyhow::ensure!(
+            parent.is_same_directory(&original_parent)?,
+            "Q absent-child recovery changed its original parent"
+        );
+        self.lock()?
+            .runtime_db
+            .retire_absent_reserved_qualification_guest_scratch(expected, parent)
+    }
+
     /// First Q scratch intent precedes filesystem Create and allocation
     /// reservation. The nonserializable accepted-root proof is checked before
     /// the transaction repeats current occurrence and measurement liveness.

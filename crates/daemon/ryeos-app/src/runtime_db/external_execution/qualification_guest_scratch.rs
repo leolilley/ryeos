@@ -7,6 +7,7 @@
 
 use super::*;
 use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate;
+use std::ffi::OsStr;
 
 pub(super) const JOURNAL_SQL: &str = r#"
 CREATE TABLE external_qualification_guest_scratch (
@@ -418,6 +419,49 @@ fn transition(
         .context("Q guest scratch disappeared after cleanup CAS")
 }
 
+fn retire_absent_reserved(
+    conn: &Connection,
+    expected: &QualificationGuestScratchRecord,
+    original_parent: &lillux::PinnedDirectory,
+) -> Result<QualificationGuestScratchRecord> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let current = read_scratch(&tx, &expected.placement_thread_id)?
+        .context("Q absent-child recovery lost its original reservation")?;
+    ensure!(
+        current == *expected && current.phase == QualificationGuestScratchPhase::Reserved,
+        "Q absent-child recovery changed its one-use Reserved row"
+    );
+    original_parent.require_owner_private_directory()?;
+    original_parent.ensure_path_binding()?;
+    ensure!(
+        std::path::Path::new(&current.scratch_root)
+            == original_parent.path().join(&current.placement_thread_id)
+            && original_parent
+                .open_entry(OsStr::new(current.placement_thread_id.as_str()), false)?
+                .is_none(),
+        "Q absent-child recovery cannot prove the original child absent"
+    );
+    let now = i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
+    let mut intent = current.clone();
+    intent.phase = QualificationGuestScratchPhase::CleanupIntent;
+    intent.cleanup_basis = Some(QualificationGuestScratchCleanupBasis::NoAllocation);
+    intent.updated_at_ms = now;
+    require_cleanup_basis(&tx, &intent)?;
+    let intent = transition(&tx, &current, &intent)?;
+    let mut removed = intent.clone();
+    removed.phase = QualificationGuestScratchPhase::Removed;
+    removed.removed_at_ms = Some(now);
+    require_cleanup_basis(&tx, &removed)?;
+    let removed = transition(&tx, &intent, &removed)?;
+    let mut closed = removed.clone();
+    closed.phase = QualificationGuestScratchPhase::Closed;
+    closed.closed_at_ms = Some(now);
+    require_cleanup_basis(&tx, &closed)?;
+    let closed = transition(&tx, &removed, &closed)?;
+    tx.commit()?;
+    Ok(closed)
+}
+
 impl RuntimeDb {
     pub(crate) fn qualification_guest_scratch(
         &self,
@@ -461,6 +505,18 @@ impl RuntimeDb {
         require_cleanup_basis(&self.conn, &record)?;
         self.ensure_external_qualification_normal_terminal(placement)?;
         Ok(true)
+    }
+
+    /// A Reserved intent may predate physical child creation. After restart,
+    /// the original child descriptor cannot be adopted, but the authenticated
+    /// original parent can prove the child absent. With no allocation or local
+    /// owner, close this one-use attempt in the same writer transaction.
+    pub(crate) fn retire_absent_reserved_qualification_guest_scratch(
+        &self,
+        expected: &QualificationGuestScratchRecord,
+        original_parent: &lillux::PinnedDirectory,
+    ) -> Result<QualificationGuestScratchRecord> {
+        retire_absent_reserved(&self.conn, expected, original_parent)
     }
 
     /// Refuse every replay, including a prior Reserved row whose child may
@@ -753,6 +809,39 @@ mod tests {
                 .borrow_guest_scratch(&record)
                 .is_err(),
             "restart adopted a path as original descriptor custody"
+        );
+        let closed = retire_absent_reserved(&reopened, &record, &parent)?;
+        ensure!(
+            closed.phase == QualificationGuestScratchPhase::Closed
+                && closed.cleanup_basis
+                    == Some(QualificationGuestScratchCleanupBasis::NoAllocation)
+                && read_scratch(&reopened, &record.placement_thread_id)? == Some(closed.clone())
+                && retire_absent_reserved(&reopened, &record, &parent).is_err(),
+            "absent precreation scratch did not close exactly once"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn precreation_recovery_refuses_present_child_or_later_local_owner() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let (conn, parent, record) = fixture(root.path())?;
+        let child = parent.create_child(OsStr::new(&record.placement_thread_id), 0o700)?;
+        ensure!(
+            retire_absent_reserved(&conn, &record, &parent).is_err()
+                && read_scratch(&conn, &record.placement_thread_id)? == Some(record.clone()),
+            "precreation recovery adopted a present child"
+        );
+        drop(child);
+        std::fs::remove_dir(parent.path().join(&record.placement_thread_id))?;
+        conn.execute(
+            "INSERT INTO external_qualification_local_start VALUES (?1)",
+            [&record.placement_thread_id],
+        )?;
+        ensure!(
+            retire_absent_reserved(&conn, &record, &parent).is_err()
+                && read_scratch(&conn, &record.placement_thread_id)? == Some(record),
+            "precreation recovery erased a later local owner"
         );
         Ok(())
     }
