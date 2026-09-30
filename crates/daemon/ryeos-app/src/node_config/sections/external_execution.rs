@@ -679,9 +679,10 @@ impl RetainedExternalExecutionBinding {
     pub(crate) fn check_qualification_program(
         &self,
         program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+        purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
     ) -> Result<()> {
         self.validate()?;
-        check_qualification_program(&self.document, program)
+        check_qualification_program(&self.document, program, purpose)
     }
     /// Rejoin a compiled ordinary command to this exact retained generation.
     /// This is a content/limit check, not guest capability evidence or contact
@@ -1112,8 +1113,9 @@ impl InstalledExternalExecutionBinding {
     pub(crate) fn check_qualification_program(
         &self,
         program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+        purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
     ) -> Result<()> {
-        check_qualification_program(&self.document, program)
+        check_qualification_program(&self.document, program, purpose)
     }
 
     #[cfg(test)]
@@ -1207,9 +1209,10 @@ fn check_program(
 fn check_qualification_program(
     document: &BindingDocument,
     program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+    purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
 ) -> Result<()> {
     let session = document.workload.qualification_structured_session()?;
-    program.validate()?;
+    program.validate_against_purpose(purpose)?;
     ensure!(
         document.max_export_bytes == 0
             && document.runtime_content_qualification.is_none()
