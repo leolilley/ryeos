@@ -127,6 +127,85 @@ pub struct QualificationWorkspaceCustody {
     >,
 }
 
+/// Original descriptors retained when registration failed before backend
+/// Create and the journaled no-contact rollback has not reached Closed. The
+/// cleanup owner may resume only the exact retained Q row; this slot grants no
+/// new workspace borrow, connector, or Worker contact.
+pub struct QualificationUnregisteredRollbackCustody {
+    coordinate: QualificationWorkspaceCustodyCoordinate,
+    workspace: Arc<TempDirGuard>,
+    state_root_parent: lillux::PinnedDirectory,
+    state_root: lillux::PinnedDirectory,
+}
+
+/// A workspace creation returned its original pinned guard but its immediate
+/// rollback failed before the state root existed. This is inert cleanup
+/// custody, never an authority to create a view or contact a Worker.
+pub struct QualificationUnregisteredWorkspaceCustody {
+    coordinate: QualificationWorkspaceCustodyCoordinate,
+    workspace: Arc<TempDirGuard>,
+}
+
+impl QualificationUnregisteredWorkspaceCustody {
+    pub(crate) fn new(
+        record: &QualificationLocalStartRecord,
+        workspace: Arc<TempDirGuard>,
+    ) -> Result<Self> {
+        ensure!(
+            record.phase == QualificationLocalStartPhase::Reserved,
+            "Q partial workspace custody has no original reservation"
+        );
+        ensure!(
+            workspace.path().as_deref() == Some(Path::new(&record.workspace_root)),
+            "Q partial workspace custody changed its original pinned root"
+        );
+        Ok(Self {
+            coordinate: QualificationWorkspaceCustodyCoordinate::from_start(record)?,
+            workspace,
+        })
+    }
+
+    pub fn workspace(&self) -> &Arc<TempDirGuard> {
+        &self.workspace
+    }
+}
+
+impl QualificationUnregisteredRollbackCustody {
+    pub(crate) fn new(
+        record: &QualificationLocalStartRecord,
+        workspace: Arc<TempDirGuard>,
+        state_root_parent: lillux::PinnedDirectory,
+        state_root: lillux::PinnedDirectory,
+    ) -> Result<Self> {
+        ensure!(
+            record.phase == QualificationLocalStartPhase::Reserved,
+            "Q unregistered rollback has no original Reserved row"
+        );
+        Ok(Self {
+            coordinate: QualificationWorkspaceCustodyCoordinate::from_start(record)?,
+            workspace,
+            state_root_parent,
+            state_root,
+        })
+    }
+
+    pub fn coordinate(&self) -> &QualificationWorkspaceCustodyCoordinate {
+        &self.coordinate
+    }
+
+    pub fn workspace(&self) -> &Arc<TempDirGuard> {
+        &self.workspace
+    }
+
+    pub fn state_root_parent(&self) -> &lillux::PinnedDirectory {
+        &self.state_root_parent
+    }
+
+    pub fn state_root(&self) -> &lillux::PinnedDirectory {
+        &self.state_root
+    }
+}
+
 impl QualificationWorkspaceCustody {
     pub fn coordinate(&self) -> &QualificationWorkspaceCustodyCoordinate {
         &self.coordinate
@@ -196,11 +275,144 @@ impl QualificationWorkspaceCustody {
 #[derive(Default)]
 pub struct QualificationWorkspaceCustodyRegistry {
     entries: Mutex<BTreeMap<String, Arc<QualificationWorkspaceCustody>>>,
+    rollback_failures: Mutex<BTreeMap<String, Arc<QualificationUnregisteredRollbackCustody>>>,
+    partial_failures: Mutex<BTreeMap<String, Arc<QualificationUnregisteredWorkspaceCustody>>>,
 }
 
 impl QualificationWorkspaceCustodyRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A no-Create rollback may remove only roots that were never transferred
+    /// into this registry. Refuse poisoned ownership state as well as an
+    /// existing original custody entry.
+    pub(crate) fn ensure_unregistered(&self, placement: &str) -> Result<()> {
+        let entries = self
+            .entries
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q workspace custody registry is poisoned"))?;
+        ensure!(
+            !entries.contains_key(placement),
+            "Q workspace already has registered original custody"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn retain_unregistered_workspace(
+        &self,
+        entry: Arc<QualificationUnregisteredWorkspaceCustody>,
+    ) -> Result<()> {
+        let entries = self
+            .entries
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q workspace custody registry is poisoned"))?;
+        let failures = self
+            .rollback_failures
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q rollback custody registry is poisoned"))?;
+        let mut partial = self
+            .partial_failures
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q partial workspace registry is poisoned"))?;
+        ensure!(
+            !entries.contains_key(entry.coordinate.placement())
+                && !failures.contains_key(entry.coordinate.placement())
+                && !partial.contains_key(entry.coordinate.placement()),
+            "Q partial workspace already has original custody"
+        );
+        partial.insert(entry.coordinate.placement().to_owned(), entry);
+        Ok(())
+    }
+
+    pub fn borrow_unregistered_workspace(
+        &self,
+        coordinate: &QualificationWorkspaceCustodyCoordinate,
+    ) -> Result<Arc<QualificationUnregisteredWorkspaceCustody>> {
+        let entry = self
+            .partial_failures
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q partial workspace registry is poisoned"))?
+            .get(coordinate.placement())
+            .cloned()
+            .context("Q partial workspace lost its original descriptor")?;
+        ensure!(
+            entry.coordinate == *coordinate,
+            "Q partial workspace changed its original coordinate"
+        );
+        Ok(entry)
+    }
+
+    /// Take the original descriptor pair into AppState custody before the
+    /// first durable rollback intent. The caller moves its actual pinned
+    /// handles here, so a failed cleanup can be resumed in this daemon even
+    /// if either directory was already physically unlinked.
+    pub(crate) fn retain_unregistered_rollback(
+        &self,
+        entry: Arc<QualificationUnregisteredRollbackCustody>,
+    ) -> Result<()> {
+        let entries = self
+            .entries
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q workspace custody registry is poisoned"))?;
+        let mut failures = self
+            .rollback_failures
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q rollback custody registry is poisoned"))?;
+        ensure!(
+            !entries.contains_key(entry.coordinate.placement())
+                && !failures.contains_key(entry.coordinate.placement())
+                && !self
+                    .partial_failures
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Q partial workspace registry is poisoned"))?
+                    .contains_key(entry.coordinate.placement()),
+            "Q original root already has process-local custody"
+        );
+        failures.insert(entry.coordinate.placement().to_owned(), Arc::clone(&entry));
+        Ok(())
+    }
+
+    pub(crate) fn borrow_unregistered_rollback(
+        &self,
+        coordinate: &QualificationWorkspaceCustodyCoordinate,
+    ) -> Result<Arc<QualificationUnregisteredRollbackCustody>> {
+        let entry = self
+            .rollback_failures
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q rollback custody registry is poisoned"))?
+            .get(coordinate.placement())
+            .cloned()
+            .context("Q unregistered rollback lost its original descriptors")?;
+        ensure!(
+            entry.coordinate == *coordinate,
+            "Q unregistered rollback changed its original coordinate"
+        );
+        Ok(entry)
+    }
+
+    pub(crate) fn release_closed_unregistered_rollback(
+        &self,
+        record: &QualificationLocalStartRecord,
+    ) -> Result<()> {
+        ensure!(
+            record.phase == QualificationLocalStartPhase::Closed,
+            "Q unregistered rollback has no durable Closed receipt"
+        );
+        let coordinate = QualificationWorkspaceCustodyCoordinate::from_start(record)?;
+        let mut failures = self
+            .rollback_failures
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q rollback custody registry is poisoned"))?;
+        let retained = failures
+            .get(coordinate.placement())
+            .context("Q Closed rollback lost its original descriptor custody")?;
+        ensure!(
+            retained.coordinate == coordinate,
+            "Q Closed rollback changed its original coordinate"
+        );
+        failures.remove(coordinate.placement());
+        Ok(())
     }
 
     /// Register the exact guards returned by original Q workspace and state
@@ -258,8 +470,18 @@ impl QualificationWorkspaceCustodyRegistry {
             .entries
             .lock()
             .map_err(|_| anyhow::anyhow!("Q workspace custody registry is poisoned"))?;
+        let failures = self
+            .rollback_failures
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q rollback custody registry is poisoned"))?;
+        let partial = self
+            .partial_failures
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q partial workspace registry is poisoned"))?;
         ensure!(
-            !entries.contains_key(entry.coordinate.placement()),
+            !entries.contains_key(entry.coordinate.placement())
+                && !failures.contains_key(entry.coordinate.placement())
+                && !partial.contains_key(entry.coordinate.placement()),
             "Q workspace already has original process-local custody"
         );
         entries.insert(entry.coordinate.placement().to_owned(), Arc::clone(&entry));

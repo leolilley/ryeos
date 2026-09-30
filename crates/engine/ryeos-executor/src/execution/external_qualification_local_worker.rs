@@ -193,15 +193,11 @@ pub(crate) fn start_external_qualification_local_worker(
         ready.root(),
         |owner| {
             let reserved = owner.reserve_start()?;
+            let (project, workspace, state_root) =
+                owner.create_original_runtime_roots(&reserved)?;
             reserved_start = true;
             let launch = (|| -> Result<LaunchOutcome> {
-                let (state_root, state_root_parent) = owner.create_state_root(&reserved)?;
                 let runtime_cache = state.config.runtime_root().cache();
-                let (project, workspace) = owner.create_original_workspace_root(
-                    &reserved,
-                    &state_root,
-                    &state_root_parent,
-                )?;
                 let custody_coordinate =
                     QualificationWorkspaceCustodyCoordinate::from_start(&reserved)?;
                 let custody = state

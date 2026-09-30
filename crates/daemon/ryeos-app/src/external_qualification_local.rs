@@ -12,6 +12,7 @@ use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRun
 
 use crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot;
 use crate::qualification_workspace_custody::{
+    QualificationUnregisteredRollbackCustody, QualificationUnregisteredWorkspaceCustody,
     QualificationWorkspaceCustody, QualificationWorkspaceCustodyCoordinate,
 };
 use crate::runtime_db::external_execution::{
@@ -27,6 +28,76 @@ pub struct QualificationLocalOwner<'a> {
     state: &'a AppState,
     placement: &'a str,
     root: &'a PreparedExternalQualificationRoot,
+}
+
+fn fence_precreate_cleanup(
+    owner: &QualificationLocalOwner<'_>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match owner.mark_cleanup_unproved("Q original runtime root creation or rollback is unproved") {
+        Ok(()) => error,
+        Err(fence) => error.context(format!("Q pre-Create cleanup fence failed: {fence:#}")),
+    }
+}
+
+fn rollback_precreate_workspace(
+    owner: &QualificationLocalOwner<'_>,
+    record: &QualificationLocalStartRecord,
+    error: anyhow::Error,
+    workspace: &Arc<TempDirGuard>,
+    uncertain_creation: bool,
+) -> anyhow::Error {
+    let mut error = error;
+    let mut unproved = uncertain_creation;
+    if let Err(fence) =
+        owner.mark_cleanup_unproved("Q original root creation needs no-Create cleanup")
+    {
+        return retain_partial_workspace(
+            owner,
+            record,
+            workspace,
+            error.context(format!("Q pre-Create cleanup fence failed: {fence:#}")),
+        );
+    }
+    if let Err(cleanup) = workspace.remove_uncreated_workspace_now() {
+        unproved = true;
+        error = error.context(format!("new Q workspace rollback failed: {cleanup:#}"));
+        error = retain_partial_workspace(owner, record, workspace, error);
+    }
+    let error = if unproved {
+        error.context("Q original root rollback remains unproved")
+    } else {
+        error.context("Q original roots were removed before backend Create")
+    };
+    error
+}
+
+fn retain_partial_workspace(
+    owner: &QualificationLocalOwner<'_>,
+    record: &QualificationLocalStartRecord,
+    workspace: &Arc<TempDirGuard>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    workspace.preserve_for_explicit_cleanup();
+    let custody =
+        match QualificationUnregisteredWorkspaceCustody::new(record, Arc::clone(workspace)) {
+            Ok(custody) => custody,
+            Err(capture) => {
+                return error.context(format!(
+                    "Q partial workspace custody capture failed: {capture:#}"
+                ));
+            }
+        };
+    match owner
+        .state
+        .qualification_workspace_custody
+        .retain_unregistered_workspace(Arc::new(custody))
+    {
+        Ok(()) => error,
+        Err(retain) => error.context(format!(
+            "Q partial workspace custody retain failed: {retain:#}"
+        )),
+    }
 }
 
 pub fn with_qualification_local_owner<T>(
@@ -103,6 +174,37 @@ pub fn with_qualification_local_owner<T>(
     })
 }
 
+/// Continue only an already journaled no-Create rollback with the same
+/// daemon's retained original descriptor pair. Cleanup does not need a new
+/// current Bundle resolution or permission to contact the provider.
+pub fn resume_unregistered_qualification_roots(
+    state: &AppState,
+    placement: &str,
+) -> Result<QualificationLocalStartRecord> {
+    let initial = state
+        .state_store
+        .qualification_local_start(placement)?
+        .context("Q rollback has no retained original start")?;
+    crate::hosted_operation::with_qualification_occurrence_contact(
+        &initial.qualification_operation_id,
+        || {
+            ensure!(
+                state.state_store.qualification_local_start(placement)? == Some(initial.clone()),
+                "Q rollback changed its original start before contact gate"
+            );
+            let closed = state
+                .state_store
+                .resume_unregistered_qualification_rollback(state, placement)?;
+            if closed.phase == QualificationLocalStartPhase::Closed {
+                state
+                    .qualification_workspace_custody
+                    .release_closed_unregistered_rollback(&closed)?;
+            }
+            Ok(closed)
+        },
+    )
+}
+
 impl QualificationLocalOwner<'_> {
     pub fn reserve_start(&self) -> Result<QualificationLocalStartRecord> {
         self.state
@@ -146,78 +248,154 @@ impl QualificationLocalOwner<'_> {
         Ok(custody)
     }
 
-    /// Create and retain the original runtime workspace only after its Q
-    /// coordinate is durable. Even a failed later checkout leaves the exact
-    /// directory for explicit cleanup instead of dropping it implicitly.
-    pub fn create_original_workspace_root(
+    /// Create both original private roots under pinned parents and register
+    /// their exact descriptors before returning. No backend Create or view
+    /// borrow may follow a partial registration. A failed preparation removes
+    /// only children whose newly created identity is still held here.
+    pub fn create_original_runtime_roots(
         &self,
         record: &QualificationLocalStartRecord,
-        state_root: &lillux::PinnedDirectory,
-        state_root_parent: &lillux::PinnedDirectory,
-    ) -> Result<(std::path::PathBuf, Arc<TempDirGuard>)> {
+    ) -> Result<(
+        std::path::PathBuf,
+        Arc<TempDirGuard>,
+        lillux::PinnedDirectory,
+    )> {
         let current = self.require_original(record)?;
         ensure!(
             current.phase == QualificationLocalStartPhase::Reserved,
-            "Q runtime workspace must follow its original reservation"
+            "Q runtime roots must follow their original reservation"
         );
-        let authority = self.state.state_store.pinned_state_authority()?;
-        let cache = authority
-            .runtime_directory()
-            .open_or_create_child(OsStr::new("cache"), 0o700)?;
-        cache.require_owner_private_directory()?;
-        let (project, guard) = crate::temp_dir_guard::create_runtime_workspace_in_pinned_cache(
-            &cache,
-            &current.workspace_id,
-        )?;
-        ensure!(
-            guard.path().as_deref() == Some(Path::new(&current.workspace_root))
-                && guard.owns_effective_path(&project)
-                && state_root.path() == Path::new(&current.state_root)
-                && state_root_parent.path()
+        let (cache, parent) = (|| -> Result<_> {
+            QualificationWorkspaceCustodyCoordinate::from_start(&current)?;
+            let authority = self.state.state_store.pinned_state_authority()?;
+            let cache = authority
+                .runtime_directory()
+                .open_or_create_child(OsStr::new("cache"), 0o700)?;
+            cache.require_owner_private_directory()?;
+            let parent = cache.open_or_create_child(OsStr::new("qualification-local"), 0o700)?;
+            parent.require_owner_private_directory()?;
+            ensure!(
+                parent.path()
                     == Path::new(&current.state_root)
                         .parent()
                         .context("Q state root has no parent")?,
-            "Q runtime workspace differs from its reserved original"
-        );
-        // The daemon keeps the original view and state-root descriptors from
-        // this point onward. Every later start error can leave a durable
-        // cleanup fence without losing its physical close owner.
-        self.state.qualification_workspace_custody.insert_exact(
-            &current,
-            Arc::clone(&guard),
-            state_root,
-            state_root_parent,
-        )?;
+                "Q state-root parent differs from its reserved coordinate"
+            );
+            Ok((cache, parent))
+        })()
+        .map_err(|error| fence_precreate_cleanup(self, error))?;
+        let (project, guard) = match crate::temp_dir_guard::create_runtime_workspace_in_pinned_cache(
+            &cache,
+            &current.workspace_id,
+        ) {
+            Ok(roots) => roots,
+            Err(failure) => {
+                if let Some(guard) = failure.retained_workspace {
+                    return Err(rollback_precreate_workspace(
+                        self,
+                        &current,
+                        failure.error,
+                        &guard,
+                        false,
+                    ));
+                }
+                return Err(fence_precreate_cleanup(self, failure.error));
+            }
+        };
+        let root = match parent.create_child(OsStr::new(&current.workspace_id), 0o700) {
+            Ok(root) => root,
+            Err(error) => {
+                // EEXIST proves no new child was returned by this call. Any
+                // other low-level failure could follow mkdir but precede the
+                // descriptor return, so leave that child untouched and fence.
+                let uncertain = !error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|cause| cause.kind() == std::io::ErrorKind::AlreadyExists);
+                return Err(rollback_precreate_workspace(
+                    self, &current, error, &guard, uncertain,
+                ));
+            }
+        };
+        let registered = (|| -> Result<()> {
+            root.require_owner_private_directory()?;
+            root.ensure_path_binding()?;
+            ensure!(
+                guard.path().as_deref() == Some(Path::new(&current.workspace_root))
+                    && guard.owns_effective_path(&project)
+                    && root.path() == Path::new(&current.state_root),
+                "Q runtime roots differ from their reserved originals"
+            );
+            self.state.qualification_workspace_custody.insert_exact(
+                &current,
+                Arc::clone(&guard),
+                &root,
+                &parent,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = registered {
+            let rollback = match QualificationUnregisteredRollbackCustody::new(
+                &current,
+                Arc::clone(&guard),
+                parent,
+                root,
+            ) {
+                Ok(custody) => Arc::new(custody),
+                Err(capture) => {
+                    return Err(fence_precreate_cleanup(
+                        self,
+                        error.context(format!(
+                            "Q original rollback custody capture failed: {capture:#}"
+                        )),
+                    ));
+                }
+            };
+            if let Err(retain) = self
+                .state
+                .qualification_workspace_custody
+                .retain_unregistered_rollback(Arc::clone(&rollback))
+            {
+                return Err(fence_precreate_cleanup(
+                    self,
+                    error.context(format!(
+                        "Q original rollback custody retain failed: {retain:#}"
+                    )),
+                ));
+            }
+            let closed = self
+                .state
+                .state_store
+                .rollback_unregistered_qualification_roots(
+                    self.state,
+                    &current,
+                    rollback.workspace(),
+                    rollback.state_root_parent(),
+                    rollback.state_root(),
+                );
+            return Err(match closed {
+                Ok(closed) => {
+                    self.state
+                        .qualification_workspace_custody
+                        .release_closed_unregistered_rollback(&closed)?;
+                    error.context("Q original roots were rolled back before backend Create")
+                }
+                Err(cleanup) => {
+                    let failure = error.context(format!(
+                        "Q original-root rollback remains in protected custody: {cleanup:#}"
+                    ));
+                    match self.start_record() {
+                        Ok(record) if record.phase == QualificationLocalStartPhase::Reserved => {
+                            fence_precreate_cleanup(self, failure)
+                        }
+                        Ok(_) => failure,
+                        Err(read) => failure
+                            .context(format!("Q rollback phase could not be rechecked: {read:#}")),
+                    }
+                }
+            });
+        }
         guard.preserve_for_explicit_cleanup();
-        Ok((project, guard))
-    }
-
-    /// Create the one private provider state directory by a pinned parent and
-    /// the journaled name. An existing child is never adopted for a new start.
-    pub fn create_state_root(
-        &self,
-        record: &QualificationLocalStartRecord,
-    ) -> Result<(lillux::PinnedDirectory, lillux::PinnedDirectory)> {
-        let current = self.require_original(record)?;
-        ensure!(
-            current.phase == QualificationLocalStartPhase::Reserved,
-            "Q provider state root must precede workspace Create"
-        );
-        let authority = self.state.state_store.pinned_state_authority()?;
-        let cache = authority
-            .runtime_directory()
-            .open_or_create_child(OsStr::new("cache"), 0o700)?;
-        cache.require_owner_private_directory()?;
-        let parent = cache.open_or_create_child(OsStr::new("qualification-local"), 0o700)?;
-        parent.require_owner_private_directory()?;
-        let root = parent.create_child(OsStr::new(&current.workspace_id), 0o700)?;
-        root.require_owner_private_directory()?;
-        root.ensure_path_binding()?;
-        ensure!(
-            root.path() == Path::new(&current.state_root),
-            "Q provider state root differs from its reserved coordinate"
-        );
-        Ok((root, parent))
+        Ok((project, guard, root))
     }
 
     /// Backend Create consumes only the retained base snapshot. The pinned
