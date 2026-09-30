@@ -349,7 +349,7 @@ fn handle_blocking(
         // moved Config fails before START; do not derive it from a child row.
         let selected = ryeos_app::operator_external_content::product_qualification::
             resolve_current_bundle_producer_recipe_for_purpose(
-                state, &grant.purpose, &request.scenario_id,
+                state, &grant.purpose.execution_view()?, &request.scenario_id,
             )?;
         let source = selected.source_identity()?;
         let retained = grant
@@ -374,11 +374,11 @@ fn handle_blocking(
         let recipe = ryeos_app::operator_external_content::product_qualification::
             resolve_current_bundle_producer_recipe_for_purpose(
                 state,
-                &grant.purpose,
+                &grant.purpose.execution_view()?,
                 &request.scenario_id,
             )?;
         let admitted_stdin = ryeos_app::operator_external_content::product_qualification::
-            admitted_root_producer_stdin(state, thread_id, &grant.purpose)?;
+            admitted_root_producer_stdin(state, thread_id, &grant.purpose.execution_view()?)?;
         let typed_owner: ryeos_app::runtime_db::LaunchOwner = serde_json::from_str(owner)?;
         let key = ryeos_app::scoped_producer_authority::ScopedProducerAuthorityKey::new(
             thread_id.to_owned(),
@@ -422,7 +422,7 @@ fn handle_blocking(
         let attempt_id = ryeos_app::scoped_producer_start::start_scoped_producer(
             state,
             &key,
-            &grant.purpose,
+            &grant.purpose.execution_view()?,
             &request.scenario_id,
             &recipe,
             &admitted_stdin,

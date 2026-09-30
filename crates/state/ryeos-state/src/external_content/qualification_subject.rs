@@ -50,15 +50,10 @@ impl ContentQualificationSubject {
                 "content qualification subject has a noncanonical identity"
             );
         }
-        ensure!(
-            !self.consumer_ref.is_empty()
-                && self.consumer_ref.len() <= 512
-                && !self
-                    .consumer_ref
-                    .bytes()
-                    .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
-            "content qualification subject consumer is invalid"
-        );
+        super::products::validate_canonical_unsuffixed_ref(
+            "content qualification subject consumer",
+            &self.consumer_ref,
+        )?;
         ensure!(
             matches!(
                 self.manifest_kind.as_str(),
@@ -127,5 +122,28 @@ mod tests {
         changed = subject;
         changed.manifest_hash = "7".repeat(64);
         assert!(changed.validate().is_err());
+    }
+
+    #[test]
+    fn subject_accepts_canonical_consumers_without_a_kind_allowlist() {
+        for consumer in [
+            "worker:fixture/runtime",
+            "tool:fixture/runtime",
+            "custom_kind:fixture/runtime",
+        ] {
+            let mut subject = subject();
+            subject.consumer_ref = consumer.into();
+            subject.validate().unwrap();
+        }
+        for consumer in [
+            "runtime",
+            "worker:fixture/runtime@head",
+            "worker:/runtime",
+            "worker:fixture/../runtime",
+        ] {
+            let mut subject = subject();
+            subject.consumer_ref = consumer.into();
+            assert!(subject.validate().is_err(), "accepted {consumer}");
+        }
     }
 }

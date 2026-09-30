@@ -6,9 +6,11 @@ use std::ffi::OsStr;
 use anyhow::Context as _;
 
 pub mod products;
+pub mod qualification_execution;
 pub mod qualification_subject;
 pub mod realization_verification;
 pub mod retained_project;
+pub mod runtime_member;
 pub mod retained_workspace_output;
 
 use crate::objects::{

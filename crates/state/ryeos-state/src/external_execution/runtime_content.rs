@@ -120,6 +120,42 @@ impl RuntimeContentRecordJoin {
         &self.manifest_hash
     }
 
+    /// Bind the signed probe's executable to the exact joined manifest.
+    /// This is member identity, not payload or execution qualification.
+    pub fn verify_recipe_member(
+        &self,
+        manifest: &ExternalLargeContentManifestObject,
+        source: &crate::external_content::products::producer_recipe::ProducerExecutableSource,
+    ) -> Result<String> {
+        use crate::external_content::products::producer_recipe::ProducerExecutableSource;
+
+        let value = manifest.to_value()?;
+        ensure!(
+            crate::objects::canonical_value_digest(&value)? == self.manifest_hash,
+            "runtime executable manifest differs from authenticated content"
+        );
+        let ProducerExecutableSource::AdmittedRealizationMember {
+            realization_id,
+            manifest_hash,
+            relative_path,
+            executable_sha256,
+        } = source
+        else {
+            anyhow::bail!("runtime probe does not select a retained realization member");
+        };
+        let actual = crate::external_content::runtime_member::exact_runtime_member_hash(
+            &value,
+            relative_path,
+        )?;
+        ensure!(
+            realization_id == &self.declaration_id
+                && manifest_hash == &self.manifest_hash
+                && executable_sha256 == &actual,
+            "runtime probe executable differs from authenticated content"
+        );
+        Ok(actual)
+    }
+
     pub fn retained_subject(
         &self,
     ) -> Result<crate::external_content::qualification_subject::ContentQualificationSubject> {
@@ -280,6 +316,77 @@ mod tests {
         let mut changed = retained;
         changed.activation_receipt_hash = "9".repeat(64);
         assert!(joined.verify_retained_subject(&changed).is_err());
+    }
+
+    #[test]
+    fn runtime_member_joins_recipe_to_authenticated_manifest() {
+        use crate::external_content::products::producer_recipe::ProducerExecutableSource;
+
+        let (receipt_hash, receipt, binding_hash, binding, manifest, realization) = fixture();
+        let joined = RuntimeContentRecordJoin::verify(
+            &receipt_hash,
+            &receipt,
+            &binding_hash,
+            &binding,
+            &manifest,
+            &realization,
+            CONSUMER,
+            DECLARATION,
+            &binding.manifest_hash,
+            DECLARATION,
+            &receipt.node_fingerprint,
+        )
+        .unwrap();
+        let source = ProducerExecutableSource::AdmittedRealizationMember {
+            realization_id: DECLARATION.into(),
+            manifest_hash: binding.manifest_hash.clone(),
+            relative_path: "bin/codex".into(),
+            executable_sha256: "2".repeat(64),
+        };
+        assert_eq!(
+            joined.verify_recipe_member(&manifest, &source).unwrap(),
+            "2".repeat(64)
+        );
+        for (id, hash, path, executable) in [
+            (
+                "other",
+                binding.manifest_hash.clone(),
+                "bin/codex",
+                "2".repeat(64),
+            ),
+            (DECLARATION, "3".repeat(64), "bin/codex", "2".repeat(64)),
+            (
+                DECLARATION,
+                binding.manifest_hash.clone(),
+                "bin/missing",
+                "2".repeat(64),
+            ),
+            (
+                DECLARATION,
+                binding.manifest_hash.clone(),
+                "bin/codex",
+                "3".repeat(64),
+            ),
+        ] {
+            let changed = ProducerExecutableSource::AdmittedRealizationMember {
+                realization_id: id.into(),
+                manifest_hash: hash,
+                relative_path: path.into(),
+                executable_sha256: executable,
+            };
+            assert!(joined.verify_recipe_member(&manifest, &changed).is_err());
+        }
+        assert!(
+            joined
+                .verify_recipe_member(
+                    &manifest,
+                    &ProducerExecutableSource::AdmittedVerifierExecutable
+                )
+                .is_err()
+        );
+        let mut changed = manifest;
+        changed.entries[1].blob_hash = Some("3".repeat(64));
+        assert!(joined.verify_recipe_member(&changed, &source).is_err());
     }
 
     #[test]
