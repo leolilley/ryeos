@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-29T01:29:18Z:881b119837d84709d0f8f160c9d3f67054b0a222c3724c498032a9524fb37c0b:QXAGbjcyiYWtxI8aZLpSAGRUOyjvp3FelTc0DMKw4okpid5DPXafilLeql0sEDCaV1ZgTXQp4fmd7oU0k8yuBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-30T00:54:19Z:f27588a319615398bc4e8d8d116854e13c3fba4654f4f995f3f3a73abe668e2e:gs8XZe27lJ8tASYXWTJ8kFvL4kHEFcS+2q6JmJOYrBy9dnO4tYXj7iANYzqem/uGI0V1IsAbbErbeJ1/ipHsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: authority-calibrate
 version: "1.1.0"
@@ -20,8 +20,8 @@ required_caps:
   - ryeos.execute.config.bundle-release/portable-signed-capture-products
   - ryeos.execute.config.bundle-release/signed-capture-products
   - ryeos.execute.config.bundle-release/substrate-build-products
-  - ryeos.execute.service.external-content/launch-product-qualification
   - ryeos.execute.service.bundle-release/authority-calibrate
+  - ryeos.execute.service.external-content/launch-product-qualification
   - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
   - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
   - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify

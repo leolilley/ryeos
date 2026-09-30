@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-29T01:29:18Z:851cf13acc722d6300a16601a78d32c635ad9016abca264eddb0b534bc1b960f:UR9Ym0FIlAfpbi39wQtkzCmVxmhiVmXjXiONX2Dc/OiE22LmUPMODZnRb20Tpa04ShoXNt47x85vVwZAil+SDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-30T00:54:19Z:58d7d9aed1039e143865a89586904aa93809903fd8543b59b77157242cfcaed8:ol+nanKWKk4PGzy+66CpFslX+NDoA8h37Ol6+zwHy28iQAWcBS1EGME5DI3gbcNqxwx21WJzywCn08oA41U8Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.1.0"
 category: ryeos/bundle-release
 description: Build, qualify, authorize, compose, and publish one exact native bundle generation.
@@ -14,7 +14,6 @@ requires:
       - ryeos.execute.config.bundle-release/portable-qualification
       - ryeos.execute.config.bundle-release/portable-signed-capture-products
       - ryeos.execute.config.bundle-release/signed-capture-products
-      - ryeos.execute.service.external-content/launch-product-qualification
       - ryeos.execute.service.bundle-release/catalog-remote-publish
       - ryeos.execute.service.bundle-release/catalog-request-publication
       - ryeos.execute.service.bundle-release/generation-build
@@ -25,6 +24,7 @@ requires:
       - ryeos.execute.service.bundle-release/request-authorization
       - ryeos.execute.service.bundle-release/request-tree-signing
       - ryeos.execute.service.bundle-release/set-compose
+      - ryeos.execute.service.external-content/launch-product-qualification
       - ryeos.execute.tool.ryeos/bundle-release/native-build
       - ryeos.execute.tool.ryeos/bundle-release/native-qualify
       - ryeos.execute.tool.ryeos/bundle-release/portable-build
