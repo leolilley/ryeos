@@ -76,6 +76,7 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "project_snapshot",
     "project_snapshot_policy",
     "project_tree",
+    "qualification_worker_transcript",
     "retained_lifecycle_artifacts",
     "ryeos.effective_source_binding",
     "ryeos.source_closure_manifest",
@@ -209,6 +210,11 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         links: links_project_tree,
     },
     ObjectContract {
+        kind: crate::objects::QUALIFICATION_WORKER_TRANSCRIPT_KIND,
+        validate: validate_qualification_worker_transcript,
+        links: links_qualification_worker_transcript,
+    },
+    ObjectContract {
         kind: crate::objects::RETAINED_LIFECYCLE_ARTIFACTS_KIND,
         validate: validate_retained_lifecycle_artifacts,
         links: links_retained_lifecycle_artifacts,
@@ -302,6 +308,24 @@ fn validate_admitted_execution_realization(value: &Value) -> anyhow::Result<()> 
 
 fn validate_attestation(value: &Value) -> anyhow::Result<()> {
     crate::objects::Attestation::from_value(value).map(|_| ())
+}
+
+fn validate_qualification_worker_transcript(value: &Value) -> anyhow::Result<()> {
+    crate::objects::QualificationWorkerTranscriptManifest::from_current_value(value).map(|_| ())
+}
+
+fn links_qualification_worker_transcript(value: &Value) -> Result<ContractLinks, String> {
+    let manifest = crate::objects::QualificationWorkerTranscriptManifest::from_current_value(value)
+        .map_err(|error| format!("invalid Q Worker transcript: {error:#}"))?;
+    Ok(ContractLinks {
+        object_edges: Vec::new(),
+        blob_hashes: manifest
+            .chunks
+            .into_iter()
+            .map(|chunk| chunk.blob_hash)
+            .collect(),
+        large_object_hashes: Vec::new(),
+    })
 }
 
 fn validate_bundle_event(value: &Value) -> anyhow::Result<()> {

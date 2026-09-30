@@ -53,6 +53,7 @@ pub mod project_file;
 pub mod project_snapshot;
 pub mod project_snapshot_policy;
 pub mod project_tree;
+pub mod qualification_worker_transcript;
 pub mod retained_lifecycle_artifacts;
 pub mod source_closure;
 pub mod source_manifest;
@@ -184,6 +185,13 @@ pub use project_file::ProjectFile;
 pub use project_snapshot::ProjectSnapshot;
 pub use project_snapshot_policy::ProjectSnapshotPolicy;
 pub use project_tree::ProjectTree;
+pub use qualification_worker_transcript::{
+    MAX_QUALIFICATION_WORKER_BATCH_TOTAL_BYTES, MAX_QUALIFICATION_WORKER_FINAL_BYTES,
+    MAX_QUALIFICATION_WORKER_TRANSCRIPT_BYTES, MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES,
+    QUALIFICATION_WORKER_TRANSCRIPT_KIND, QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
+    QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA, QualificationWorkerTranscriptChunk,
+    QualificationWorkerTranscriptManifest, QualificationWorkerTranscriptStream,
+};
 pub use retained_lifecycle_artifacts::{
     RETAINED_LIFECYCLE_ARTIFACTS_KIND, RETAINED_LIFECYCLE_ARTIFACTS_SCHEMA,
     RetainedLifecycleArtifacts, RetainedLifecycleExecutable, RetainedLifecycleExecutableRole,
