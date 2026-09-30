@@ -26,6 +26,36 @@ const MAX_OWNER_RUN_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_OWNER_COMMAND_BYTES: usize = 8192;
 const MAX_CONSUMER_COMMAND_BYTES: usize = 9 * 1024;
 
+/// Exact provider command framing only. Selection and challenge validation
+/// remain at the shared contract; this grants no contact or qualification.
+pub(crate) fn verifier_command(request: &RestoredVerifierAdapterRequest) -> Result<String> {
+    request.validate()?;
+    let (name, flag, challenge, command_bound) = match &request.intent.purpose {
+        RemoteVerificationPurpose::OwnerMeasurement { .. } => (
+            RESTORATION_VERIFIER_REMOTE_NAME,
+            "--challenge-b64",
+            canonical_json(request.intent.owner_challenge()?)?,
+            MAX_OWNER_COMMAND_BYTES,
+        ),
+        RemoteVerificationPurpose::ConsumerRuntime { .. } => (
+            CONSUMER_VERIFIER_REMOTE_NAME,
+            "--consumer-challenge-b64",
+            request.consumer_challenge()?.canonical_bytes()?,
+            MAX_CONSUMER_COMMAND_BYTES,
+        ),
+    };
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge);
+    let command = format!(
+        "{}/{name} {flag} {encoded}",
+        request.intent.remote_upload_directory()?
+    );
+    ensure!(
+        command.len() <= command_bound,
+        "restored verifier command exceeds bound"
+    );
+    Ok(command)
+}
+
 /// The caller has already preflighted the signed qualifier, exact sealed tar
 /// and finite routes. No failure here permits a second invocation. A complete
 /// stream is merely an observation until the daemon joins execution evidence.
@@ -41,29 +71,14 @@ pub(crate) fn first_contact(
 ) -> Result<RestoredVerifierAdapterResponse> {
     request.validate()?;
     let upload_directory = request.intent.remote_upload_directory()?;
-    let (remote_name, challenge_flag, challenge, command_bound, run_response_bound) =
-        match &request.intent.purpose {
-            RemoteVerificationPurpose::OwnerMeasurement { .. } => (
-                RESTORATION_VERIFIER_REMOTE_NAME,
-                "--challenge-b64",
-                canonical_json(request.intent.owner_challenge()?)?,
-                MAX_OWNER_COMMAND_BYTES,
-                MAX_OWNER_RUN_RESPONSE_BYTES,
-            ),
-            RemoteVerificationPurpose::ConsumerRuntime { .. } => (
-                CONSUMER_VERIFIER_REMOTE_NAME,
-                "--consumer-challenge-b64",
-                request.consumer_challenge()?.canonical_bytes()?,
-                MAX_CONSUMER_COMMAND_BYTES,
-                u64::try_from(crate::snapshot_qualification::MAX_CONSUMER_RUN_STREAM_BYTES)?,
-            ),
-        };
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge);
-    let command = format!("{upload_directory}/{remote_name} {challenge_flag} {encoded}");
-    ensure!(
-        command.len() <= command_bound,
-        "restored verifier command exceeds bound"
-    );
+    let run_response_bound = match &request.intent.purpose {
+        RemoteVerificationPurpose::OwnerMeasurement { .. } => MAX_OWNER_RUN_RESPONSE_BYTES,
+        RemoteVerificationPurpose::ConsumerRuntime { .. } => {
+            u64::try_from(crate::snapshot_qualification::MAX_CONSUMER_RUN_STREAM_BYTES)?
+        }
+    };
+    // Resolve the entire finite command before any provider contact.
+    let command = verifier_command(request)?;
     let contact = RenderContact::new(
         network,
         provider_spec,

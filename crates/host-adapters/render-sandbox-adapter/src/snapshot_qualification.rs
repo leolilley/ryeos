@@ -1218,6 +1218,22 @@ mod tests {
         assert!(substituted_runtime.validate().is_err());
         assert!(substituted_runtime.consumer_challenge().is_err());
         let challenge = consumer.consumer_challenge().unwrap();
+        let command = crate::restored_verifier_contact::verifier_command(&consumer).unwrap();
+        let expected_prefix = format!(
+            "{}/{} --consumer-challenge-b64 ",
+            consumer.intent.remote_upload_directory().unwrap(),
+            ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_VERIFIER_REMOTE_NAME
+        );
+        let encoded = command.strip_prefix(&expected_prefix).unwrap();
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .unwrap();
+        assert_eq!(
+            ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge::parse(&decoded).unwrap(),
+            challenge
+        );
+        assert!(crate::restored_verifier_contact::verifier_command(&substituted_runtime).is_err());
         assert_eq!(challenge.intent, consumer.intent);
         assert_eq!(
             Some(&challenge.selection),
