@@ -153,6 +153,7 @@ impl QualificationLocalOwner<'_> {
         &self,
         record: &QualificationLocalStartRecord,
         state_root: &lillux::PinnedDirectory,
+        state_root_parent: &lillux::PinnedDirectory,
     ) -> Result<(std::path::PathBuf, Arc<TempDirGuard>)> {
         let current = self.require_original(record)?;
         ensure!(
@@ -171,7 +172,11 @@ impl QualificationLocalOwner<'_> {
         ensure!(
             guard.path().as_deref() == Some(Path::new(&current.workspace_root))
                 && guard.owns_effective_path(&project)
-                && state_root.path() == Path::new(&current.state_root),
+                && state_root.path() == Path::new(&current.state_root)
+                && state_root_parent.path()
+                    == Path::new(&current.state_root)
+                        .parent()
+                        .context("Q state root has no parent")?,
             "Q runtime workspace differs from its reserved original"
         );
         // The daemon keeps the original view and state-root descriptors from
@@ -181,6 +186,7 @@ impl QualificationLocalOwner<'_> {
             &current,
             Arc::clone(&guard),
             state_root,
+            state_root_parent,
         )?;
         guard.preserve_for_explicit_cleanup();
         Ok((project, guard))
@@ -191,7 +197,7 @@ impl QualificationLocalOwner<'_> {
     pub fn create_state_root(
         &self,
         record: &QualificationLocalStartRecord,
-    ) -> Result<lillux::PinnedDirectory> {
+    ) -> Result<(lillux::PinnedDirectory, lillux::PinnedDirectory)> {
         let current = self.require_original(record)?;
         ensure!(
             current.phase == QualificationLocalStartPhase::Reserved,
@@ -211,7 +217,7 @@ impl QualificationLocalOwner<'_> {
             root.path() == Path::new(&current.state_root),
             "Q provider state root differs from its reserved coordinate"
         );
-        Ok(root)
+        Ok((root, parent))
     }
 
     /// Backend Create consumes only the retained base snapshot. The pinned

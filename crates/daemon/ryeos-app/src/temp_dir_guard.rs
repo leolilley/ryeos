@@ -429,6 +429,27 @@ impl TempDirGuard {
         {
             anyhow::bail!("workspace removal requires original view physical-close proof");
         }
+        self.remove_owned_directory_now()
+    }
+
+    /// Remove an original pinned Q workspace whose durable start never
+    /// authorized backend Create. Its view slot is still Uncreated, so there
+    /// is no view identity to close or synthesize. The caller must first hold
+    /// the journal's no-Create cleanup intent and exact custody entry.
+    pub fn remove_uncreated_workspace_now(&self) -> anyhow::Result<()> {
+        if !self.owns_removal || self.pinned_removal.is_none() {
+            anyhow::bail!("uncreated workspace has no original pinned removal owner");
+        }
+        let view = self.workspace_view.lock().unwrap();
+        if !matches!(view.as_ref(), Some(WorkspaceViewSlot::Uncreated)) {
+            anyhow::bail!("uncreated workspace removal changed its original view slot");
+        }
+        let removed = self.remove_owned_directory_now();
+        drop(view);
+        removed
+    }
+
+    fn remove_owned_directory_now(&self) -> anyhow::Result<()> {
         let mut path_slot = self.inner.lock().unwrap();
         let Some(path) = path_slot.as_ref() else {
             return Ok(());

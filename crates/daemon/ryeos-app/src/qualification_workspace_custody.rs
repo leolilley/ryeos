@@ -8,6 +8,7 @@
 //! until exact Q close, Destroy, and directory-removal proofs are implemented.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -114,6 +115,8 @@ pub struct QualificationWorkspaceCustody {
     coordinate: QualificationWorkspaceCustodyCoordinate,
     workspace: Arc<TempDirGuard>,
     state_root: lillux::PinnedDirectory,
+    state_root_parent: lillux::PinnedDirectory,
+    state_root_removed: Mutex<bool>,
     /// A Create view that could not be installed remains held in this daemon.
     /// It cannot qualify or be closed by a path-based replacement owner.
     uninstalled_views: Mutex<
@@ -135,6 +138,30 @@ impl QualificationWorkspaceCustody {
 
     pub fn state_root(&self) -> &lillux::PinnedDirectory {
         &self.state_root
+    }
+
+    /// Remove only the original pinned state-root child below its retained
+    /// pinned parent. The caller first commits the Q no-contact cleanup stage
+    /// and proves Worker/scope/view/backend settlement.
+    pub fn remove_state_root_now(&self) -> Result<()> {
+        let mut removed = self
+            .state_root_removed
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q state-root removal owner is poisoned"))?;
+        if *removed {
+            return Ok(());
+        }
+        self.state_root_parent.ensure_path_binding()?;
+        self.state_root.remove_contents_recursive()?;
+        ensure!(
+            self.state_root_parent.remove_empty_child_if_same(
+                OsStr::new(self.coordinate.workspace_id.as_str()),
+                &self.state_root,
+            )?,
+            "Q original state root was replaced before removal"
+        );
+        *removed = true;
+        Ok(())
     }
 
     pub fn retain_uninstalled_view(
@@ -184,6 +211,7 @@ impl QualificationWorkspaceCustodyRegistry {
         record: &QualificationLocalStartRecord,
         workspace: Arc<TempDirGuard>,
         state_root: &lillux::PinnedDirectory,
+        state_root_parent: &lillux::PinnedDirectory,
     ) -> Result<Arc<QualificationWorkspaceCustody>> {
         ensure!(
             record.phase == QualificationLocalStartPhase::Reserved,
@@ -195,11 +223,24 @@ impl QualificationWorkspaceCustodyRegistry {
             workspace.path().as_deref() == Some(Path::new(&record.workspace_root))
                 && workspace.owns_effective_path(&project)
                 && workspace.owns_workspace_project_path(&project)
-                && state_root.path() == Path::new(&record.state_root),
+                && state_root.path() == Path::new(&record.state_root)
+                && state_root_parent.path()
+                    == Path::new(&record.state_root)
+                        .parent()
+                        .context("Q state root lost parent")?,
             "Q workspace custody did not receive its original guards"
         );
         state_root.ensure_path_binding()?;
+        state_root_parent.ensure_path_binding()?;
+        let original_child = state_root_parent
+            .open_child_directory(OsStr::new(record.workspace_id.as_str()))?
+            .context("Q original state root disappeared before custody")?;
+        ensure!(
+            original_child.is_same_directory(state_root)?,
+            "Q state root parent changed its original child"
+        );
         let pinned_state_root = state_root.try_clone()?;
+        let pinned_parent = state_root_parent.try_clone()?;
         pinned_state_root.ensure_path_binding()?;
         ensure!(
             pinned_state_root.is_same_directory(state_root)?,
@@ -209,6 +250,8 @@ impl QualificationWorkspaceCustodyRegistry {
             coordinate,
             workspace,
             state_root: pinned_state_root,
+            state_root_parent: pinned_parent,
+            state_root_removed: Mutex::new(false),
             uninstalled_views: Mutex::new(Vec::new()),
         });
         let mut entries = self
