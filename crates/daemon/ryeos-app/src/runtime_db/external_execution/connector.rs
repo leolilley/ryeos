@@ -338,9 +338,10 @@ fn require_fresh_connector_owner(
     match &reservation.owner {
         ExternalAllocationOwner::DedicatedSession(_) => {
             require_session_owner(conn, reservation)?;
-            require_contactable_session(conn, &reservation.placement_thread_id)?;
             if connecting {
                 require_connecting_session(conn, &reservation.placement_thread_id)?;
+            } else {
+                require_contactable_session(conn, &reservation.placement_thread_id)?;
             }
             Ok(())
         }
