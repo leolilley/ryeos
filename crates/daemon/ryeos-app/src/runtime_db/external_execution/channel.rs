@@ -562,6 +562,8 @@ impl RuntimeDb {
         let connector_peer_incarnation = connector_peer
             .incarnation_digest()
             .map_err(anyhow::Error::msg)?;
+        // Connection admission already proved this peer belongs to the
+        // retained Worker scope. The peer may be a Worker subprocess.
         ensure!(
             connector.channel_binding_digest == binding_digest
                 && connector.phase == connector::ExternalConnectorPhase::Closed
@@ -571,8 +573,6 @@ impl RuntimeDb {
                     .is_some_and(|connected| { connected >= worker.attached_at_ms })
                 && connector.peer_process_identity_digest.as_deref()
                     == Some(connector_peer_incarnation.as_str())
-                && connector_peer_incarnation
-                    == worker.process_identity.owner_incarnation_digest()?
                 && connector_peer.boot_id == worker.process_identity.boot_id,
             "Q completion has no normally retired scoped connector peer"
         );
@@ -1870,6 +1870,8 @@ pub(super) fn require_applied_qualification_normal_settlement_tx(
         .as_ref()
         .context("Q normal settlement connector never authenticated its peer")?;
     let peer_incarnation = peer.incarnation_digest().map_err(anyhow::Error::msg)?;
+    // The durable connection records the source-time scope-membership proof;
+    // its authenticated peer can be a subprocess of the Worker target.
     ensure!(
         connector.channel_binding_digest == binding_digest
             && connector.phase == connector::ExternalConnectorPhase::Closed
@@ -1878,7 +1880,6 @@ pub(super) fn require_applied_qualification_normal_settlement_tx(
                 .connected_at_ms
                 .is_some_and(|at| at >= worker.attached_at_ms)
             && connector.peer_process_identity_digest.as_deref() == Some(peer_incarnation.as_str())
-            && peer_incarnation == worker.process_identity.owner_incarnation_digest()?
             && peer.boot_id == worker.process_identity.boot_id,
         "Q normal settlement has no normally retired scoped connector"
     );
