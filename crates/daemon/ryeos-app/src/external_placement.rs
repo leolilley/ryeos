@@ -48,6 +48,14 @@ pub(crate) struct ExternalLifecycleObservation<T> {
     pub deadline_exceeded: bool,
 }
 
+/// Which independent runtime witness the later contact owner must recheck.
+/// Offline adapter qualification never creates that witness itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuntimeAdmissionBasis {
+    OrdinarySignedRelationship,
+    RestoredOwnerMeasurement,
+}
+
 /// Adapter interpretation input, not a qualification publication or grant.
 /// The caller must independently authenticate the exact source, attestation,
 /// retained journal and policy before constructing this value.
@@ -1328,7 +1336,7 @@ impl ExternalPlacementBackendRegistry {
         cleanup_only: bool,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
         program.validate()?;
-        let required = match program {
+        let (required, runtime_basis) = match program {
             AdmittedExternalExecutionProgram::StructuredSession(program) => {
                 let session = contract.workload.structured_session()?;
                 ensure!(
@@ -1336,23 +1344,29 @@ impl ExternalPlacementBackendRegistry {
                         && program.selection_identity_digest == session.runtime_selection_identity,
                     "external qualification changed its exact session runtime"
                 );
-                program.requirement.required_lifecycle_capabilities.clone()
+                (
+                    program.requirement.required_lifecycle_capabilities.clone(),
+                    RuntimeAdmissionBasis::OrdinarySignedRelationship,
+                )
             }
             AdmittedExternalExecutionProgram::QualificationStructuredSession(program) => {
                 ensure!(
-                    cleanup_only
-                        && contract.max_export_bytes == 0
+                    contract.max_export_bytes == 0
+                        && contract.runtime_qualification.is_none()
                         && contract.runtime_content_qualification.is_none(),
-                    "qualification-only session has no ordinary placement backend authority"
+                    "qualification-only session cannot borrow ordinary runtime or export authority"
                 );
                 let session = contract.workload.qualification_structured_session()?;
                 ensure!(
                     program.requirement.qualification_requirement_digest()?
                         == session.requirement_digest
                         && program.runtime_manifest_hash == session.runtime_manifest_hash,
-                    "qualification cleanup changed its exact signed runtime"
+                    "qualification session changed its exact signed runtime"
                 );
-                BTreeSet::new()
+                (
+                    program.requirement.required_lifecycle_capabilities.clone(),
+                    RuntimeAdmissionBasis::RestoredOwnerMeasurement,
+                )
             }
             AdmittedExternalExecutionProgram::DirectCommand(program) => {
                 ensure!(matches!(contract.workload,
@@ -1366,7 +1380,10 @@ impl ExternalPlacementBackendRegistry {
                 );
                 // This is lifecycle qualification only. Neither controller
                 // isolation nor adapter metadata proves guest-native readiness.
-                BTreeSet::new()
+                (
+                    BTreeSet::new(),
+                    RuntimeAdmissionBasis::OrdinarySignedRelationship,
+                )
             }
         };
         // Retained cleanup must remain possible when startup capability is
@@ -1380,6 +1397,7 @@ impl ExternalPlacementBackendRegistry {
                 required
             },
             !cleanup_only,
+            runtime_basis,
         )
     }
 
@@ -1391,6 +1409,7 @@ impl ExternalPlacementBackendRegistry {
         credential: &PlacementCredential,
         mut required: BTreeSet<LifecycleCapability>,
         require_activation: bool,
+        runtime_basis: RuntimeAdmissionBasis,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
         let backend = self
             .backends
@@ -1420,11 +1439,18 @@ impl ExternalPlacementBackendRegistry {
         required.insert(LifecycleCapability::ExactTerminalObservation);
         let effective = backend.lifecycle_capabilities();
         if require_activation {
-            ensure!(
-                contract.runtime_qualification.is_some()
-                    == effective.contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
-                "external runtime qualification relationship differs from installed adapter admission"
-            );
+            match runtime_basis {
+                RuntimeAdmissionBasis::OrdinarySignedRelationship => ensure!(
+                    contract.runtime_qualification.is_some()
+                        == effective
+                            .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
+                    "external runtime qualification relationship differs from installed adapter admission"
+                ),
+                RuntimeAdmissionBasis::RestoredOwnerMeasurement => ensure!(
+                    !effective.contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
+                    "qualification-only startup cannot satisfy adapter independent guest runtime admission"
+                ),
+            }
         }
         let missing: BTreeSet<_> = required.difference(&effective).copied().collect();
         ensure!(
@@ -1823,7 +1849,13 @@ fn preflight_external_direct_dependencies(
     );
     qualify_runtime(&retained)?;
     let credential = load_credential(binding)?;
-    backends.qualify_dependencies(&contract, &credential, BTreeSet::new(), true)?;
+    backends.qualify_dependencies(
+        &contract,
+        &credential,
+        BTreeSet::new(),
+        true,
+        RuntimeAdmissionBasis::OrdinarySignedRelationship,
+    )?;
     Ok(retained)
 }
 
