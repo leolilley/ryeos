@@ -74,22 +74,7 @@ impl InheritedPipePair {
         maximum: usize,
         deadline: MonotonicDeadline,
     ) -> io::Result<Self> {
-        use std::os::fd::FromRawFd;
-        let lease = crate::exec::retain_fork_sensitive_descriptors_until(deadline)?;
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let wake = crate::exec::InheritedDescriptorAuthority::from_owned_file(
-            unsafe { std::fs::File::from_raw_fd(fd) },
-            &lease,
-        )
-        .map_err(io::Error::other)?;
-        let interrupt = PipeInterrupt(Arc::new(InterruptState {
-            interrupted: false.into(),
-            wake,
-        }));
-        interrupt.check(Some(deadline))?;
+        let interrupt = PipeInterrupt::new(deadline)?;
         Ok(Self {
             input: InheritedPipeInput {
                 pipe: input,
@@ -112,6 +97,26 @@ impl InheritedPipePair {
 }
 
 impl PipeInterrupt {
+    #[cfg(target_os = "linux")]
+    fn new(deadline: MonotonicDeadline) -> io::Result<Self> {
+        use std::os::fd::FromRawFd;
+        let lease = crate::exec::retain_fork_sensitive_descriptors_until(deadline)?;
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let wake = crate::exec::InheritedDescriptorAuthority::from_owned_file(
+            unsafe { std::fs::File::from_raw_fd(fd) },
+            &lease,
+        )
+        .map_err(io::Error::other)?;
+        let interrupt = PipeInterrupt(Arc::new(InterruptState {
+            interrupted: false.into(),
+            wake,
+        }));
+        interrupt.check(Some(deadline))?;
+        Ok(interrupt)
+    }
     /// Sticky broadcast: neither reader nor writer drains the wake descriptor.
     pub fn interrupt(&self) -> io::Result<()> {
         use std::sync::atomic::Ordering;
@@ -310,6 +315,41 @@ impl InheritedPipeInput {
     }
 }
 impl InheritedPipeOutput {
+    /// Adopt one uniquely owned write pipe at exclusive executable startup.
+    /// No stdin requirement is introduced. Invalid bounds/coordinates refuse
+    /// before adoption; later failures consume the selected endpoint.
+    ///
+    /// # Safety
+    /// The process is single-threaded, has not used stdio, and no Rust object
+    /// or other actor aliases this endpoint. The selected FD must be owned by
+    /// this invocation; callers must never reconstruct it after failure.
+    pub unsafe fn take_inherited_output(
+        output_fd: u32,
+        max_chunk_bytes: usize,
+        startup_deadline: MonotonicDeadline,
+    ) -> io::Result<Self> {
+        if max_chunk_bytes == 0 || max_chunk_bytes > isize::MAX as usize {
+            return Err(invalid("invalid inherited output chunk bound"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let pipe =
+                unsafe { crate::invocation::linux::acquire_output(output_fd, startup_deadline) }?;
+            let interrupt = PipeInterrupt::new(startup_deadline)?;
+            Ok(Self {
+                pipe,
+                maximum: max_chunk_bytes,
+                poisoned: false,
+                interrupt,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (output_fd, startup_deadline);
+            Err(unsupported())
+        }
+    }
+
     #[cfg(target_os = "linux")]
     fn finish_written_prefix(
         &mut self,
@@ -502,6 +542,49 @@ mod tests {
             parent_reader,
         )
     }
+    #[test]
+    fn output_only_owner_writes_without_selecting_an_input() {
+        let (mut reader, writer) = pipe();
+        // Test-owned unique endpoint, not adoption of libtest's stdout.
+        let pipe = unsafe {
+            crate::invocation::linux::acquire_output(writer.into_raw_fd() as u32, deadline())
+        }
+        .unwrap();
+        let mut output = InheritedPipeOutput {
+            pipe,
+            maximum: 4,
+            poisoned: false,
+            interrupt: PipeInterrupt::new(deadline()).unwrap(),
+        };
+        assert_eq!(
+            output.write_all(b"extra", deadline()).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        output.write_all(b"done", deadline()).unwrap();
+        drop(output);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"done");
+    }
+
+    #[test]
+    fn output_only_acquisition_refuses_read_endpoint_and_regular_file() {
+        let (reader, _writer) = pipe();
+        assert!(
+            unsafe {
+                crate::invocation::linux::acquire_output(reader.into_raw_fd() as u32, deadline())
+            }
+            .is_err()
+        );
+        let file = tempfile::tempfile().unwrap();
+        assert!(
+            unsafe {
+                crate::invocation::linux::acquire_output(file.into_raw_fd() as u32, deadline())
+            }
+            .is_err()
+        );
+    }
+
     #[test]
     fn delivered_prefix_then_cancellation_is_terminal_and_poisoned() {
         let (pair, _writer, mut reader) = pair(4);

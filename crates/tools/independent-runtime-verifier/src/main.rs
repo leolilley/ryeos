@@ -30,7 +30,84 @@ use std::{
     path::Path,
 };
 
-fn main() -> Result<()> {
+enum VerifierExit {
+    Refused(anyhow::Error),
+    ConsumerUncertain(
+        ryeos_independent_runtime_verifier::consumer_observer::ConsumerObservationFailure,
+    ),
+}
+
+impl From<anyhow::Error> for VerifierExit {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Refused(error)
+    }
+}
+
+impl std::fmt::Debug for VerifierExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(error) => f.debug_tuple("Refused").field(error).finish(),
+            Self::ConsumerUncertain(failure) => {
+                f.debug_tuple("ConsumerUncertain").field(failure).finish()
+            }
+        }
+    }
+}
+
+fn main() -> std::result::Result<(), VerifierExit> {
+    use ryeos_independent_runtime_verifier::consumer_observer::{
+        CONSUMER_STARTUP_FLAG, decode_startup_arguments, prepare_startup,
+    };
+    if std::env::args_os().nth(1).as_deref() != Some(OsStr::new(CONSUMER_STARTUP_FLAG)) {
+        return ordinary_main().map_err(VerifierExit::Refused);
+    }
+    if std::env::var_os(
+        ryeos_independent_runtime_verifier::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV,
+    )
+    .is_some()
+        || std::env::var_os(
+            ryeos_independent_runtime_verifier::consumer_outer_owner::OUTER_CHALLENGE_ENV,
+        )
+        .is_some()
+    {
+        return Err(VerifierExit::Refused(anyhow::anyhow!(
+            "consumer observer conflicts with another startup role"
+        )));
+    }
+    let challenge = decode_startup_arguments(std::env::args_os().skip(1))?;
+    let (deadline, cleanup_deadline) = native_guest::production_deadlines(
+        challenge.intent.attempt_deadline_ms,
+        lillux::time::timestamp_millis(),
+    )?;
+    // SAFETY: exclusive synchronous startup, before stdio, privilege transition,
+    // async runtimes or threads. No Rust owner or other actor aliases stdout.
+    let mut output = unsafe {
+        lillux::inherited_pipes::InheritedPipeOutput::take_inherited_output(1, 4096, deadline)
+    }
+    .context("consumer evidence output is not an owned write pipe")?;
+    let prepared = prepare_startup(&challenge, deadline, cleanup_deadline)?;
+    let bytes = match prepared.observe(&challenge) {
+        Ok(bytes) => bytes,
+        Err(failure) => match failure.settle() {
+            Ok(error) => return Err(VerifierExit::Refused(error)),
+            // Preserve live ownership through terminal refusal. Last-resort
+            // Drop is cleanup, never namespace/provider-death testimony.
+            Err(failure) => return Err(VerifierExit::ConsumerUncertain(failure)),
+        },
+    };
+    let deadline = deadline.min(prepared.active_deadline);
+    for chunk in bytes.chunks(4096) {
+        output
+            .write_all(chunk, deadline)
+            .context("consumer evidence delivery failed; no resend")?;
+    }
+    output
+        .write_all(b"\n", deadline)
+        .context("consumer evidence terminator delivery failed; no resend")?;
+    Ok(())
+}
+
+fn ordinary_main() -> Result<()> {
     let native_challenge = std::env::var_os(
         ryeos_independent_runtime_verifier::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV,
     );
