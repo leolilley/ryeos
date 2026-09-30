@@ -238,6 +238,8 @@ CREATE TABLE external_qualification_worker_command (
     turn_completed_at_ms INTEGER,
     turn_completion_digest TEXT,
     final_response_digest TEXT,
+    final_response_json TEXT,
+    final_wire_max_bytes INTEGER,
     reserved_at_ms INTEGER NOT NULL,
     contacted_at_ms INTEGER,
     completed_at_ms INTEGER,
@@ -248,6 +250,11 @@ CREATE TABLE external_qualification_worker_command (
             AND ((turn_completed_at_ms IS NULL AND turn_completion_digest IS NULL)
               OR (turn_completed_at_ms >= turn_started_at_ms
                   AND turn_completion_digest IS NOT NULL)))),
+    CHECK ((final_response_digest IS NULL AND final_response_json IS NULL
+            AND final_wire_max_bytes IS NULL)
+        OR (final_response_digest IS NOT NULL AND final_response_json IS NOT NULL
+            AND final_wire_max_bytes BETWEEN 1 AND 16777216
+            AND length(CAST(final_response_json AS BLOB)) <= final_wire_max_bytes)),
     CHECK ((state='reserved' AND contacted_at_ms IS NULL AND turn_id IS NULL
             AND final_response_digest IS NULL AND completed_at_ms IS NULL)
         OR (state='possible_contact' AND contacted_at_ms IS NOT NULL
@@ -294,6 +301,10 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
     AND OLD.turn_completion_digest IS NOT NULL
  OR NEW.final_response_digest IS NOT OLD.final_response_digest
     AND OLD.final_response_digest IS NOT NULL
+ OR NEW.final_response_json IS NOT OLD.final_response_json
+    AND OLD.final_response_json IS NOT NULL
+ OR NEW.final_wire_max_bytes IS NOT OLD.final_wire_max_bytes
+    AND OLD.final_wire_max_bytes IS NOT NULL
  OR NEW.completed_at_ms IS NOT OLD.completed_at_ms
     AND OLD.completed_at_ms IS NOT NULL
  OR NOT ((OLD.state='reserved' AND NEW.state IN ('possible_contact','outcome_unknown'))

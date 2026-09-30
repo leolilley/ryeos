@@ -15771,12 +15771,14 @@ impl StateStore {
         placement: &str,
         request_digest: &str,
         response: &serde_json::Value,
+        max_frame_bytes: u32,
     ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
         let _permit = self.acquire_write_permit()?;
         self.lock()?.runtime_db.record_qualification_worker_final(
             placement,
             request_digest,
             response,
+            max_frame_bytes,
         )
     }
 

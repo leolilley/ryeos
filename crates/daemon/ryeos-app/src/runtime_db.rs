@@ -2669,7 +2669,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // request-correlated Final and separately observed completed turn.
 // Epoch 107 retains one Q-local workspace Create and process-scope attempt,
 // including exact held creator, view, recovery, and Worker attachment joins.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 107;
+// Epoch 108 retains the bounded canonical Q Worker Final and the selected
+// signed wire maximum for restartable semantic verification.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 108;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -3886,6 +3888,18 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "final_response_digest",
                         col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "final_response_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "final_wire_max_bytes",
+                        col_type: "INTEGER",
                         pk: false,
                         not_null: false,
                     },

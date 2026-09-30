@@ -2,12 +2,16 @@
 //!
 //! These are daemon-observed I/O facts. A Final frame does not establish a
 //! completed turn, and even both facts do not grant a qualification claim.
-//! Only digests are retained; this is a completion fence, not a restartable
-//! semantic result. A separate Q-owned semantic projection is still required.
+//! The exact bounded, canonical Final body is retained for restartable
+//! semantic verification. This journal itself still grants no claim.
 
 use super::*;
 use ryeos_state::external_execution::journal::load_binding;
 use serde::Deserialize;
+
+// The signed persistent-session wire contract allows at most this many bytes
+// in one frame; Q retains only the request-correlated Final body.
+const MAX_QUALIFICATION_WORKER_FINAL_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QualificationWorkerCommandPhase {
@@ -30,7 +34,7 @@ impl QualificationWorkerCommandPhase {
 }
 
 /// Retained communication evidence, never a standalone semantic success
-/// permit. Digests cannot reconstruct Final content after restart.
+/// permit. Final content is available for a later Q-specific verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QualificationWorkerCommandRecord {
     pub placement_thread_id: String,
@@ -48,6 +52,8 @@ pub(crate) struct QualificationWorkerCommandRecord {
     pub turn_completed_at_ms: Option<i64>,
     pub turn_completion_digest: Option<String>,
     pub final_response_digest: Option<String>,
+    pub final_response: Option<serde_json::Value>,
+    pub final_wire_max_bytes: Option<u32>,
     pub reserved_at_ms: i64,
     pub contacted_at_ms: Option<i64>,
     pub completed_at_ms: Option<i64>,
@@ -81,6 +87,22 @@ impl QualificationWorkerCommandRecord {
         }
         if let Some(hash) = &self.final_response_digest {
             validate_sha256("qualification Worker Final response", hash)?;
+        }
+        ensure!(
+            self.final_response_digest.is_some() == self.final_response.is_some()
+                && self.final_response_digest.is_some() == self.final_wire_max_bytes.is_some(),
+            "qualification Worker Final content, digest, and wire bound differ in presence"
+        );
+        if let Some(response) = &self.final_response {
+            let canonical = lillux::canonical_json(response)?;
+            let digest = lillux::sha256_hex(canonical.as_bytes());
+            let wire_max_bytes = self.final_wire_max_bytes.expect("presence checked");
+            ensure!(
+                (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&wire_max_bytes)
+                    && canonical.len() <= wire_max_bytes as usize
+                    && self.final_response_digest.as_deref() == Some(digest.as_str()),
+                "qualification Worker Final content contradicts its retained digest"
+            );
         }
         for hash in [&self.turn_start_digest, &self.turn_completion_digest]
             .into_iter()
@@ -161,7 +183,8 @@ fn read_command(
                 qualification_occurrence_id,channel_binding_digest,process_incarnation_digest,
                 request_digest,state,turn_id,turn_started_at_ms,turn_start_digest,
                 turn_completed_at_ms,turn_completion_digest,final_response_digest,
-                reserved_at_ms,contacted_at_ms,completed_at_ms
+                final_response_json,final_wire_max_bytes,reserved_at_ms,
+                contacted_at_ms,completed_at_ms
          FROM external_qualification_worker_command WHERE placement_thread_id=?1",
         [placement],
         |row| {
@@ -180,14 +203,33 @@ fn read_command(
                 row.get::<_, Option<i64>>(11)?,
                 row.get::<_, Option<String>>(12)?,
                 row.get::<_, Option<String>>(13)?,
-                row.get::<_, i64>(14)?,
+                row.get::<_, Option<String>>(14)?,
                 row.get::<_, Option<i64>>(15)?,
-                row.get::<_, Option<i64>>(16)?,
+                row.get::<_, i64>(16)?,
+                row.get::<_, Option<i64>>(17)?,
+                row.get::<_, Option<i64>>(18)?,
             ))
         },
     )
     .optional()?
     .map(|row| {
+        let final_response = row
+            .14
+            .as_deref()
+            .map(|raw| -> Result<serde_json::Value> {
+                ensure!(
+                    raw.len() <= MAX_QUALIFICATION_WORKER_FINAL_BYTES,
+                    "qualification Worker Final exceeds retained bound"
+                );
+                let response = serde_json::from_str(raw)
+                    .context("decode retained qualification Worker Final")?;
+                ensure!(
+                    lillux::canonical_json(&response)? == raw,
+                    "qualification Worker Final is not exact canonical JSON"
+                );
+                Ok(response)
+            })
+            .transpose()?;
         let record = QualificationWorkerCommandRecord {
             placement_thread_id: placement.to_owned(),
             accepted_root_id: row.0,
@@ -204,9 +246,11 @@ fn read_command(
             turn_completed_at_ms: row.11,
             turn_completion_digest: row.12,
             final_response_digest: row.13,
-            reserved_at_ms: row.14,
-            contacted_at_ms: row.15,
-            completed_at_ms: row.16,
+            final_response,
+            final_wire_max_bytes: row.15.map(u32::try_from).transpose()?,
+            reserved_at_ms: row.16,
+            contacted_at_ms: row.17,
+            completed_at_ms: row.18,
         };
         record.validate()?;
         Ok(record)
@@ -415,7 +459,7 @@ impl RuntimeDb {
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         tx.execute(
             "INSERT INTO external_qualification_worker_command VALUES
-             (?1,?2,?3,?4,?5,?6,?7,?8,'reserved',NULL,NULL,NULL,NULL,NULL,NULL,?9,NULL,NULL)",
+             (?1,?2,?3,?4,?5,?6,?7,?8,'reserved',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?9,NULL,NULL)",
             params![
                 placement,
                 &owner.coordinate.accepted_root_id,
@@ -625,20 +669,27 @@ impl RuntimeDb {
         Ok(updated)
     }
 
-    /// Record the pool's request-correlated Final body digest. A Final frame
-    /// alone does not complete the Worker turn or prove verifier semantics.
+    /// Retain the pool's exact request-correlated Final body before treating
+    /// it as durable. The caller supplies the admitted, signed Worker wire
+    /// maximum and must authenticate/correlate the frame before this call.
+    /// A Final alone does not prove Worker turn or semantics.
     pub(crate) fn record_qualification_worker_final(
         &self,
         placement: &str,
         request_digest: &str,
         response: &serde_json::Value,
+        max_frame_bytes: u32,
     ) -> Result<QualificationWorkerCommandRecord> {
+        ensure!(
+            (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&max_frame_bytes),
+            "Q Worker selected wire maximum is invalid"
+        );
         let bytes = lillux::canonical_json(response)?;
         ensure!(
-            bytes.len() <= 16 * 1024 * 1024,
-            "Q Worker Final exceeds wire bound"
+            bytes.len() <= max_frame_bytes as usize,
+            "Q Worker Final exceeds selected signed wire bound"
         );
-        let digest = ryeos_state::objects::canonical_value_digest(response)?;
+        let digest = lillux::sha256_hex(bytes.as_bytes());
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read_command(&tx, placement)?.context("Q Worker Final has no command")?;
         require_owner(&tx, &record)?;
@@ -658,7 +709,14 @@ impl RuntimeDb {
                 && record
                     .final_response_digest
                     .as_deref()
-                    .is_none_or(|prior| prior == digest),
+                    .is_none_or(|prior| prior == digest)
+                && record
+                    .final_response
+                    .as_ref()
+                    .is_none_or(|prior| prior == response)
+                && record
+                    .final_wire_max_bytes
+                    .is_none_or(|prior| prior == max_frame_bytes),
             "Q Worker Final differs from its one contacted request"
         );
         if record.final_response_digest.is_none() {
@@ -668,12 +726,15 @@ impl RuntimeDb {
             ensure!(
                 tx.execute(
                     "UPDATE external_qualification_worker_command
-                 SET final_response_digest=?2,state=?3,completed_at_ms=?4
+                 SET final_response_digest=?2,final_response_json=?3,
+                     final_wire_max_bytes=?4,state=?5,completed_at_ms=?6
                  WHERE placement_thread_id=?1 AND state='possible_contact'
                    AND final_response_digest IS NULL",
                     params![
                         placement,
                         &digest,
+                        &bytes,
+                        max_frame_bytes,
                         if done {
                             "turn_completed"
                         } else {
