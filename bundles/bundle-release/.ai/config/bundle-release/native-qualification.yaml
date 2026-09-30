@@ -3,7 +3,7 @@ category: bundle-release
 version: "1.1.0"
 description: Independent release qualification for an exact captured native bundle tree.
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v3
+  schema: ryeos.product_qualification_policy.v4
   verifier_ref: tool:ryeos/bundle-release/native-qualify
   subject_declaration_id: subject
   allowed_claims: [native_bundle_release_checks_v1]

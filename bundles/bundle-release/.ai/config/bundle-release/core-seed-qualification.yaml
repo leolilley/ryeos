@@ -3,7 +3,7 @@ category: bundle-release
 version: "1.1.0"
 description: Independent qualification policy for the exact signed substrate Core seed.
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v3
+  schema: ryeos.product_qualification_policy.v4
   verifier_ref: tool:ryeos/bundle-release/core-seed-qualify
   subject_declaration_id: subject
   allowed_claims: [substrate_core_seed_checks_v1]

@@ -3,7 +3,7 @@ category: ryeos/environments/qualification
 version: "1.1.0"
 description: Independent policy for an exact offline Cargo vendor closure
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v3
+  schema: ryeos.product_qualification_policy.v4
   verifier_ref: tool:ryeos/environments/qualification/cargo-vendor
   subject_declaration_id: subject
   allowed_claims:

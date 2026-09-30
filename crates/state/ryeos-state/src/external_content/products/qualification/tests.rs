@@ -144,6 +144,7 @@ fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
         ProductQualificationProducerScenario {
             recipe_ref: "config:codex/direct-probe".into(),
             remote_verifier: None,
+            consumer_worker_request: None,
         },
     );
     purpose.producer_recipe_sources.insert(
@@ -662,6 +663,7 @@ fn launch_purpose_pins_every_signed_producer_recipe_source() {
         ProductQualificationProducerScenario {
             recipe_ref: recipe_ref.clone(),
             remote_verifier: None,
+            consumer_worker_request: None,
         },
     );
     assert!(purpose.validate().is_err());
@@ -907,6 +909,7 @@ fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
         ProductQualificationProducerScenario {
             recipe_ref: source.canonical_ref.clone(),
             remote_verifier: None,
+            consumer_worker_request: None,
         },
     );
     let scoped = ProductQualificationScopedAttemptProof {
@@ -1686,6 +1689,7 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
             binary_ref: "bin:fixtures/guest-verifier".into(),
             guest_target_triple: "x86_64-unknown-linux-musl".into(),
         }),
+        consumer_worker_request: None,
     };
     value
         .producer_scenarios
@@ -1779,6 +1783,107 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
 }
 
 #[test]
+fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source() {
+    let mut policy = policy();
+    let scenario = ProductQualificationProducerScenario {
+        recipe_ref: "config:fixtures/recipe".into(),
+        remote_verifier: Some(ProductQualificationRemoteVerifierSelection {
+            binary_ref: "bin:fixtures/guest-verifier".into(),
+            guest_target_triple: "x86_64-unknown-linux-musl".into(),
+        }),
+        consumer_worker_request: None,
+    };
+    let source = ProductProducerRecipeSourceIdentity {
+        bundle_generation_identity: "generation-1".into(),
+        canonical_ref: scenario.recipe_ref.clone(),
+        raw_content_digest: "a".repeat(64),
+        effective_definition_digest: "b".repeat(64),
+        publisher_fingerprint: "c".repeat(64),
+        recipe_digest: "d".repeat(64),
+    };
+    policy
+        .producer_scenarios
+        .insert("remote_codex".into(), scenario.clone());
+    policy.validate().unwrap();
+    let before_policy = canonical_value_digest(&serde_json::to_value(&policy).unwrap()).unwrap();
+    let before_source = scenario.remote_verifier_source_digest(&source).unwrap();
+
+    let request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        body: json!({"task":"bounded qualification turn"}),
+    };
+    policy
+        .producer_scenarios
+        .get_mut("remote_codex")
+        .unwrap()
+        .consumer_worker_request = Some(request.clone());
+    policy.validate().unwrap();
+    assert_eq!(
+        ProductQualificationPolicy::from_value(&serde_json::to_value(&policy).unwrap()).unwrap(),
+        policy
+    );
+    assert_ne!(
+        before_policy,
+        canonical_value_digest(&serde_json::to_value(&policy).unwrap()).unwrap()
+    );
+    assert_eq!(
+        before_source,
+        policy.producer_scenarios["remote_codex"]
+            .remote_verifier_source_digest(&source)
+            .unwrap()
+    );
+
+    let mut changed = policy.clone();
+    changed
+        .producer_scenarios
+        .get_mut("remote_codex")
+        .unwrap()
+        .consumer_worker_request
+        .as_mut()
+        .unwrap()
+        .body = json!({"task":"different turn"});
+    changed.validate().unwrap();
+    assert_ne!(
+        canonical_value_digest(&serde_json::to_value(&policy).unwrap()).unwrap(),
+        canonical_value_digest(&serde_json::to_value(&changed).unwrap()).unwrap()
+    );
+    for body in [
+        json!(null),
+        json!([]),
+        json!("text"),
+        json!({"task":"x".repeat(8192)}),
+    ] {
+        let mut invalid = policy.clone();
+        invalid
+            .producer_scenarios
+            .get_mut("remote_codex")
+            .unwrap()
+            .consumer_worker_request
+            .as_mut()
+            .unwrap()
+            .body = body;
+        assert!(invalid.validate().is_err());
+    }
+    let mut invalid = policy.clone();
+    invalid
+        .producer_scenarios
+        .get_mut("remote_codex")
+        .unwrap()
+        .consumer_worker_request
+        .as_mut()
+        .unwrap()
+        .schema = "ryeos.qualification_worker_request.v0".into();
+    assert!(invalid.validate().is_err());
+    let mut wire = serde_json::to_value(&policy).unwrap();
+    wire["producer_scenarios"]["remote_codex"]["consumer_worker_request"]["command"] =
+        json!("/bin/sh");
+    assert!(ProductQualificationPolicy::from_value(&wire).is_err());
+    let mut predecessor = serde_json::to_value(policy).unwrap();
+    predecessor["schema"] = json!("ryeos.product_qualification_policy.v3");
+    assert!(ProductQualificationPolicy::from_value(&predecessor).is_err());
+}
+
+#[test]
 fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
     let mut value = policy();
     value.producer_scenarios.insert(
@@ -1786,6 +1891,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
         ProductQualificationProducerScenario {
             recipe_ref: "config:fixtures/independent-runtime/native-codex-producer".into(),
             remote_verifier: None,
+            consumer_worker_request: None,
         },
     );
     assert!(value.validate().is_ok());
@@ -1803,6 +1909,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
             ProductQualificationProducerScenario {
                 recipe_ref: "config:fixtures/recipe".into(),
                 remote_verifier: None,
+                consumer_worker_request: None,
             },
         );
         assert!(invalid.validate().is_err(), "accepted scenario {name:?}");
@@ -1829,6 +1936,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
             ProductQualificationProducerScenario {
                 recipe_ref: "config:fixtures/recipe".into(),
                 remote_verifier: None,
+                consumer_worker_request: None,
             },
         );
     }

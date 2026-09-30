@@ -3,7 +3,7 @@ category: ryeos/environments/qualification
 version: "2.1.0"
 description: Admitted supplementary GNU member and checksum profile; no compiler execution claim
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v3
+  schema: ryeos.product_qualification_policy.v4
   verifier_ref: tool:ryeos/environments/qualification/static-link-inputs
   subject_declaration_id: subject
   allowed_claims:

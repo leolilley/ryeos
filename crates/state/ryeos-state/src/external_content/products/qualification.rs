@@ -26,7 +26,9 @@ use crate::objects::{
 
 pub mod remote_verifier_source;
 
-pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v3";
+pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v4";
+pub const PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA: &str =
+    "ryeos.qualification_worker_request.v1";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
 pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v12";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
@@ -416,6 +418,27 @@ pub struct ProductQualificationProducerScenario {
     /// selects no remote verifier; the producer target is never a fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_verifier: Option<ProductQualificationRemoteVerifierSelection>,
+    /// One signed, bounded first Request body for the qualification Worker.
+    /// Absence is valid for scenarios that do not use the local Worker; the
+    /// Q command owner must require this for its exact selected scenario.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_worker_request: Option<ProductQualificationConsumerWorkerRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationConsumerWorkerRequest {
+    pub schema: String,
+    pub body: Value,
+}
+
+impl ProductQualificationConsumerWorkerRequest {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA {
+            bail!("unsupported qualification Worker request schema");
+        }
+        bounded_object(&self.body, "qualification Worker request body")
+    }
 }
 
 /// Signed executable selection, not a caller path or executable permission.
@@ -492,6 +515,9 @@ impl ProductQualificationProducerScenario {
                 bail!("remote verifier must belong to its signed scenario recipe Bundle");
             }
         }
+        if let Some(request) = &self.consumer_worker_request {
+            request.validate()?;
+        }
         Ok(())
     }
 
@@ -512,9 +538,15 @@ impl ProductQualificationProducerScenario {
         if source.canonical_ref != self.recipe_ref {
             bail!("remote verifier source differs from signed scenario recipe");
         }
+        // This source identity covers only the selected verifier and recipe.
+        // The full signed policy and accepted purpose separately commit the
+        // optional Worker Request for this scenario.
         canonical_value_digest(&serde_json::json!({
             "domain": "ryeos.remote-consumer-verifier-source.v1",
-            "scenario": self,
+            "scenario": {
+                "recipe_ref": self.recipe_ref,
+                "remote_verifier": verifier,
+            },
             "producer_source": source,
         }))
     }

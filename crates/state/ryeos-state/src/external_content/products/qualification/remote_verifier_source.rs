@@ -52,6 +52,7 @@ impl QualificationRemoteVerifierSource {
         let scenario = ProductQualificationProducerScenario {
             recipe_ref: self.producer_source.canonical_ref.clone(),
             remote_verifier: Some(self.selection.clone()),
+            consumer_worker_request: None,
         };
         ensure!(
             self.scenario_source_digest
@@ -269,6 +270,7 @@ pub(crate) mod tests {
         let scenario = ProductQualificationProducerScenario {
             recipe_ref: producer_source.canonical_ref.clone(),
             remote_verifier: Some(selection.clone()),
+            consumer_worker_request: None,
         };
         let source = QualificationRemoteVerifierSource {
             policy_resolution_blob_hash: "1".repeat(64),
