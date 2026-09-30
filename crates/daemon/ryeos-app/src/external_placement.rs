@@ -1913,7 +1913,7 @@ pub fn preflight_external_candidate_program(
 /// dependencies, but gives no reservation, credential or provider-contact
 /// permit. StateStore reauthenticates the root and binding at each first-contact
 /// transition.
-pub fn preflight_external_qualification_program(
+pub(crate) fn preflight_external_qualification_program(
     state: &AppState,
     program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
     purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
@@ -4333,6 +4333,88 @@ impl PreparedExternalPlacement {
     /// one allowed allocator call. A false claim is reconciliation authority,
     /// never permission to allocate again.
     pub(crate) fn claim(self) -> Result<ExternalPlacementContactDecision> {
+        ensure!(
+            !matches!(
+                &self.record.reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(_)
+            ),
+            "qualification allocation requires its accepted-root contact claim"
+        );
+        self.claim_with(|prepared| {
+            prepared.state_store.claim_external_allocation_contact(
+                &prepared.record.reservation.placement_thread_id,
+                &prepared.record.reservation.request_digest,
+            )
+        })
+    }
+
+    /// Claim first contact for the exact accepted qualification root and
+    /// current signed placement binding. Later phases only recover the retained
+    /// journal obligation. The caller must hold the qualification occurrence
+    /// contact gate throughout this claim and any returned
+    /// `ExternalPlacementContactPermit::contact` call.
+    pub(crate) fn claim_qualification(
+        self,
+        state: &AppState,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+        binding: &RetainedExternalExecutionBinding,
+    ) -> Result<ExternalPlacementContactDecision> {
+        ensure!(
+            matches!(
+                &self.record.reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(_)
+            ),
+            "qualification contact claim requires a qualification allocation"
+        );
+        self.record.reservation.validate()?;
+        binding.validate()?;
+        ensure!(
+            binding.digest() == self.record.reservation.binding_hash
+                && binding.capacity_owner() == self.record.reservation.capacity_owner,
+            "qualification contact claim changed its retained signed binding"
+        );
+        self.claim_with(|prepared| {
+            let reservation = &prepared.record.reservation;
+            let claim = if prepared.record.phase == ExternalAllocationPhase::Reserved {
+                prepared
+                    .state_store
+                    .claim_external_qualification_allocation_contact(
+                        state,
+                        &reservation.placement_thread_id,
+                        &reservation.request_digest,
+                        binding,
+                        admission,
+                    )?
+            } else {
+                // The ordinary journal claim cannot grant first Q contact:
+                // this branch starts from a retained, already-contacted Q owner.
+                prepared.state_store.claim_external_allocation_contact(
+                    &reservation.placement_thread_id,
+                    &reservation.request_digest,
+                )?
+            };
+            let current = match &claim {
+                ExternalAllocationContactClaim::Contact(record)
+                | ExternalAllocationContactClaim::Reconcile(record)
+                | ExternalAllocationContactClaim::Settled(record) => record,
+            };
+            ensure!(
+                current.reservation == *reservation,
+                "qualification contact claim changed its exact reserved request"
+            );
+            ensure!(
+                prepared.record.phase == ExternalAllocationPhase::Reserved
+                    || !matches!(&claim, ExternalAllocationContactClaim::Contact(_)),
+                "qualification recovery cannot create a second provider contact"
+            );
+            Ok(claim)
+        })
+    }
+
+    fn claim_with(
+        self,
+        claim: impl FnOnce(&Self) -> Result<ExternalAllocationContactClaim>,
+    ) -> Result<ExternalPlacementContactDecision> {
         // A Reserved record can be re-entered after daemon restart without
         // passing through fresh preparation. Check the exact retained
         // executable floor at the final pre-contact boundary as well. Never
@@ -4347,10 +4429,7 @@ impl PreparedExternalPlacement {
                 .is_ok(),
             "external placement contact decision is already in progress"
         );
-        let claim = match self.state_store.claim_external_allocation_contact(
-            &self.record.reservation.placement_thread_id,
-            &self.record.reservation.request_digest,
-        ) {
+        let claim = match claim(&self) {
             Ok(claim) => claim,
             Err(error) => {
                 self.contact_gate.store(false, Ordering::Release);
