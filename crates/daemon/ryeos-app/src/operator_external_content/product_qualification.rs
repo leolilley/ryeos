@@ -1172,6 +1172,40 @@ pub(super) struct PreparedBundleConsumerContentInputs {
 }
 
 impl PreparedBundleConsumerContentInputs {
+    /// Derive the use coordinate from admitted inputs, never from the signed
+    /// verifier parameter that it must match. Applied parity remains separate.
+    fn require_activated_qualification_use(&self) -> anyhow::Result<()> {
+        use ryeos_state::external_execution::admission::{
+            ExternalCandidateQualificationUse, ExternalCandidateRuntimeAuthority,
+        };
+        let requirement = self
+            .worker_source
+            .profile
+            .external_candidate_requirement()?
+            .context("consumer has no external candidate requirement")?;
+        if requirement.runtime_authority != ExternalCandidateRuntimeAuthority::ActivatedContent {
+            bail!("activated qualification use selects product authority");
+        }
+        let mut entries: Vec<_> = self.worker_literals.iter().cloned().collect();
+        for inherited in self.environment.realizations.iter() {
+            match entries.iter().find(|entry| entry.id == inherited.id) {
+                Some(entry) if entry == inherited => {}
+                Some(_) => bail!("consumer literal conflicts with inherited environment identity"),
+                None => entries.push(inherited.clone()),
+            }
+        }
+        let realizations = ExternalContentRealizationSet::new(entries)?;
+        let context = ExternalCandidateQualificationUse::from_admitted_inputs(
+            &requirement,
+            &self.worker_source.profile,
+            &self.worker_source.source,
+            &realizations,
+            &self.environment.definition.executable_search,
+            &self.environment.definition.process_environment,
+        )?;
+        context.require_qualified_use(&self.policy_source.policy.verifier_parameters)
+    }
+
     pub(in crate::operator_external_content) fn retained_identity(
         &self,
     ) -> anyhow::Result<ProductQualificationConsumerContentIdentity> {
@@ -1441,6 +1475,7 @@ pub(super) fn prepare_activated_bundle_consumer_content_inputs(
     )?;
     prepared.require_current(state, operator, acquisition_mode)?;
     result.retained_identity()?;
+    result.require_activated_qualification_use()?;
     Ok(result)
 }
 
