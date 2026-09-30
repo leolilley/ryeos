@@ -553,15 +553,17 @@ impl RuntimeDb {
             worker.channel_binding_digest == binding_digest && !revoked(&tx, &binding_digest)?,
             "Q completion lost exact live channel or was cancelled"
         );
-        let connector: (String, Option<String>) = tx.query_row(
-            "SELECT state,close_reason FROM external_execution_connector
-             WHERE placement_thread_id=?1 AND channel_binding_digest=?2",
-            params![placement, &binding_digest],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+        let connector = connector::read_connector(&tx, placement)?
+            .context("Q completion lost its one-shot local connector")?;
+        let worker_incarnation = worker.process_identity.owner_incarnation_digest()?;
         ensure!(
-            connector.0 == "closed" && connector.1.as_deref() == Some("completed"),
-            "Q completion has no normally retired local connector"
+            connector.channel_binding_digest == binding_digest
+                && connector.phase == connector::ExternalConnectorPhase::Closed
+                && connector.close_reason.as_deref() == Some("completed")
+                && connector.connected_at_ms.is_some()
+                && connector.peer_process_identity_digest.as_deref()
+                    == Some(worker_incarnation.as_str()),
+            "Q completion has no normally retired connector for its exact local Worker"
         );
         for kind in ["runtime_applied", "protocol_eof"] {
             let count: i64 = tx.query_row(
@@ -629,6 +631,7 @@ impl RuntimeDb {
                 "qualification_occurrence_id": worker.qualification_occurrence_id,
                 "local_process_identity": worker.process_identity,
                 "local_process_terminal_at_ms": worker.terminal_at_ms,
+                "local_connector_peer_incarnation": worker_incarnation,
                 "runtime_applied_frame_digest": runtime.digest(),
                 "protocol_eof_frame_digest": protocol_eof.digest(),
             }))?;

@@ -140,7 +140,10 @@ impl ExternalConnectorRecord {
     }
 }
 
-fn read_connector(conn: &Connection, placement: &str) -> Result<Option<ExternalConnectorRecord>> {
+pub(super) fn read_connector(
+    conn: &Connection,
+    placement: &str,
+) -> Result<Option<ExternalConnectorRecord>> {
     let row: Option<(
         String,
         String,
