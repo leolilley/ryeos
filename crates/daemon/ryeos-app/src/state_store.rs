@@ -15547,6 +15547,49 @@ impl StateStore {
             }))
     }
 
+    pub(crate) fn qualification_worker_process(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::QualificationWorkerProcessRecord>> {
+        self.lock()?
+            .runtime_db
+            .qualification_worker_process(placement)
+    }
+
+    /// Attach the one Q local Worker while Lillux still holds it before
+    /// release. This does not grant an ordinary dedicated session or new
+    /// provider contact.
+    pub(crate) fn attach_qualification_worker_process(
+        &self,
+        placement: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        daemon_generation_id: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerProcessRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.attach_qualification_worker_process(
+            placement,
+            process_identity,
+            daemon_generation_id,
+        )
+    }
+
+    /// Proof is captured outside the store lock, then the writer transaction
+    /// rejoins it to the immutable attached identity. A failed proof leaves
+    /// the row attached for process recovery.
+    pub(crate) fn settle_qualification_worker_process(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerProcessRecord> {
+        let record = self
+            .qualification_worker_process(placement)?
+            .context("qualification Worker process is not attached")?;
+        let proof = runtime_db::external_execution::QualificationWorkerDeathProof::capture(record)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .settle_qualification_worker_process(proof)
+    }
+
     pub(crate) fn finish_external_protocol_output(
         &self,
         placement: &str,

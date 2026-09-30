@@ -12,9 +12,14 @@ use anyhow::ensure;
 mod channel;
 pub use channel::ExternalDirectOutput;
 pub(crate) mod connector;
+mod qualification_process;
 pub(crate) use channel::{
     ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
     ExternalSupervisorExchange, RetainedExternalCandidateImport,
+};
+pub(crate) use qualification_process::{
+    QualificationWorkerDeathProof, QualificationWorkerProcessPhase,
+    QualificationWorkerProcessRecord,
 };
 
 pub(super) const FIRST_EPOCH: u32 = 40;
@@ -147,6 +152,62 @@ WHEN NEW.phase IN ('no_contact','contacted_no_occurrence','terminated')
  AND EXISTS(SELECT 1 FROM external_execution_connector c
     WHERE c.placement_thread_id=OLD.placement_thread_id AND c.state!='closed')
 BEGIN SELECT RAISE(ABORT, 'external allocation retains a live local connector'); END;
+
+-- This is local process custody for a Q allocation, not an ordinary dedicated
+-- session. One placement admits one held Worker incarnation and no relaunch.
+CREATE TABLE external_qualification_worker_process (
+    placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
+    accepted_root_id TEXT NOT NULL,
+    accepted_capsule_hash TEXT NOT NULL,
+    qualification_operation_id TEXT NOT NULL,
+    qualification_occurrence_id TEXT NOT NULL,
+    channel_binding_digest TEXT NOT NULL,
+    process_identity_json TEXT NOT NULL,
+    daemon_generation_id TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK (phase IN ('attached','terminal')),
+    attached_at_ms INTEGER NOT NULL,
+    terminal_at_ms INTEGER,
+    CHECK ((phase='attached' AND terminal_at_ms IS NULL)
+        OR (phase='terminal' AND terminal_at_ms IS NOT NULL
+            AND terminal_at_ms >= attached_at_ms))
+);
+CREATE TRIGGER external_qualification_worker_process_insert_guard
+BEFORE INSERT ON external_qualification_worker_process
+WHEN NEW.phase!='attached'
+ OR NOT EXISTS(SELECT 1 FROM external_execution_allocation a
+    JOIN external_execution_channel c ON c.placement_thread_id=a.placement_thread_id
+    JOIN external_execution_connector x ON x.placement_thread_id=a.placement_thread_id
+    WHERE a.placement_thread_id=NEW.placement_thread_id AND a.phase='bound'
+      AND json_extract(a.reservation_json,'$.owner.kind')='qualification_candidate'
+      AND json_extract(a.reservation_json,'$.owner.coordinate.accepted_root_id')=NEW.accepted_root_id
+      AND json_extract(a.reservation_json,'$.owner.coordinate.accepted_capsule_hash')=NEW.accepted_capsule_hash
+      AND json_extract(a.reservation_json,'$.owner.qualification_operation_id')=NEW.qualification_operation_id
+      AND json_extract(a.reservation_json,'$.owner.qualification_occurrence.occurrence_id')=NEW.qualification_occurrence_id
+      AND c.binding_digest=NEW.channel_binding_digest AND c.state='running'
+      AND x.channel_binding_digest=NEW.channel_binding_digest AND x.state='prepared')
+BEGIN SELECT RAISE(ABORT, 'qualification Worker attachment lost its released Q owner'); END;
+CREATE TRIGGER external_qualification_worker_process_transition_guard
+BEFORE UPDATE ON external_qualification_worker_process
+WHEN OLD.phase!='attached' OR NEW.phase!='terminal'
+ OR NEW.placement_thread_id!=OLD.placement_thread_id
+ OR NEW.accepted_root_id!=OLD.accepted_root_id
+ OR NEW.accepted_capsule_hash!=OLD.accepted_capsule_hash
+ OR NEW.qualification_operation_id!=OLD.qualification_operation_id
+ OR NEW.qualification_occurrence_id!=OLD.qualification_occurrence_id
+ OR NEW.channel_binding_digest!=OLD.channel_binding_digest
+ OR NEW.process_identity_json!=OLD.process_identity_json
+ OR NEW.daemon_generation_id!=OLD.daemon_generation_id
+ OR NEW.attached_at_ms!=OLD.attached_at_ms
+BEGIN SELECT RAISE(ABORT, 'qualification Worker process identity is immutable'); END;
+CREATE TRIGGER external_qualification_worker_process_no_delete
+BEFORE DELETE ON external_qualification_worker_process
+BEGIN SELECT RAISE(ABORT, 'qualification Worker process occurrence is retained'); END;
+CREATE TRIGGER external_qualification_worker_process_settlement_guard
+BEFORE UPDATE OF phase ON external_execution_allocation
+WHEN NEW.phase IN ('no_contact','contacted_no_occurrence','terminated')
+ AND EXISTS(SELECT 1 FROM external_qualification_worker_process p
+    WHERE p.placement_thread_id=OLD.placement_thread_id AND p.phase!='terminal')
+BEGIN SELECT RAISE(ABORT, 'external allocation retains a live qualification Worker process'); END;
 
 CREATE TABLE external_execution_no_occurrence (
     placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
@@ -1517,6 +1578,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     }
     channel::validate_channels(conn)?;
     connector::validate_connectors(conn)?;
+    qualification_process::validate_processes(conn)?;
     Ok(())
 }
 
