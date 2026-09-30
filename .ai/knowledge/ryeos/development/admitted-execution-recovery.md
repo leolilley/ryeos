@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T01:55:16Z:c94f6c783c8aabbaa63d98a64b3f4fe22fb3b81717c9356598c5cd58ec8798e1:hqtUOFESgZb7+xVn/rDGdv1CwL5KLJaW8c4QkzTdJxP1zkrOU/ZcG6Mv88dE/DmdrozAaPX5ntx9RRMU1OYHCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T01:24:31Z:898a26aab1b26321980e16909379fbe7692ac5f490c341dffb48b7260f6fdfb2:A7p6zZqjWN9kSLKhN79yWvBy9rBfPlVTQ6qCX32mpTXcXWt/F/fj6eqL+SGL7mDVP9DvROiATxpass4MK76wDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.0"
+version: "1.1.1"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -86,6 +86,24 @@ authorize execution with newly selected inputs. See
 for the supported signed profiles and input contract. Source coverage of these
 boundaries is separate from an installed verifier's execution and settlement
 evidence.
+
+## Qualification schema cut
+
+The current qualification purpose is a tagged source: a captured product and
+an activated content subject have different provenance. Sealed-root schema 22
+and admitted capsule schema 31 retain that distinction. The current decoder
+does not reinterpret predecessor schema-21 roots or schema-30 capsules as new
+launch authority. A node retaining those heads must complete an explicit,
+reviewed execution-history recovery cut before the new generation can admit
+fresh execution. Retained CAS bytes can remain archival evidence; they do not
+become current qualification or consumer permission.
+
+Dispatch-effect replay also moves to operational epoch 12 for the schema-31
+contract. Its supported explicit reset retires predecessor dispatch-effect
+rows and preserves independent provider-call rows from the immediate prior
+epoch. This source decision does not reset a node. Recovery must use the exact
+final binary's guarded dry-run and account for every authority it would retire;
+affected products and consumer proofs require current qualification afterward.
 
 ## What recovery must NOT do
 
