@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T03:29:27Z:845b1b5f3b2c91127161bdf133aa9ec39678233616cc7563056596f1349d7add:yn8C7XadcR+g/xDDYYqBPZySM1qlXPq6RzAZpL9Nwwa89efE6AaIRA8akiE+tAGBCGV3knQXhF6mZatV5uSrCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T04:06:09Z:85f1e5043778f220bbcc6b0d71af430d904b6e673a8cb06c7cc1a39365fad574:2YoFe+ATezXMIN5jW0MHyvH4kSGW8NjvkSC/m7yptGNUY9o8Y6aOrxG25MuQ3pM70CIjy3ZCdN8r0HsVCVuDBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
 title: "Remote Development and Qualification Runbook"
 description: "Use an operator-controlled stronger host and an ordinary configured RyeOS remote without adding a deployment or scheduling substrate"
 entry_type: implementation_guide
-version: "1.10.0"
+version: "1.10.1"
 ```
 
 # Remote Development and Qualification Runbook
@@ -487,9 +487,19 @@ claim, or arbitrary delegated callers.
 Product qualification uses the existing signed policy Config to select its
 trusted-bundle verifier, subject declaration, allowed claims, static
 `verifier_parameters`, and minimum process-settlement authority. The current
-reader accepts `ryeos.product_qualification_policy.v2` and requires an explicit
-`minimum_verifier_process_settlement`; predecessor v1 or an omitted field is
-refused. A missing settlement decision never acquires a compatibility default.
+reader accepts only `ryeos.product_qualification_policy.v3` and requires an
+explicit `minimum_verifier_process_settlement`; predecessor v1 and v2 policies
+or an omitted field are refused. A missing settlement decision never acquires
+a compatibility default.
+
+A v3 producer scenario may select an independent remote verifier by signed
+Bundle binary ref and guest target triple. An absent selection authorizes no
+remote verifier, and the producer executable is never used as a fallback. The
+protected node profile must separately bind the exact scenario-source digest
+and verifier artifact hash. Source capture alone grants neither hosted contact
+nor a consumer-runtime qualification claim; the accepted root must retain the
+complete signed closure and join the guest lifecycle and applied runtime to
+the direct probe before either claim is published.
 
 `trusted_process_group_absent` permits a trusted checker whose direct process
 has been reaped and whose recorded process group is absent. Descendants can
@@ -500,7 +510,7 @@ the retained execution evidence against it; a profile cannot manufacture the
 observation by declaring the stronger value.
 
 The development-platform, Cargo-vendor, static-link-input, portable-bundle,
-native-bundle, Core-seed, and substrate-receipt policy definitions now use v2
+native-bundle, Core-seed, and substrate-receipt policy definitions now use v3
 with explicit `trusted_process_group_absent`, matching GNU Python's existing
 trusted-checker lane. Their fixed claims are unchanged: platform/vendor probe
 behavior, static-link byte checks, and release tree/receipt checks do not claim
@@ -512,9 +522,11 @@ profile continues to require `scope_empty`.
 These are source-definition corrections, not installed qualification results.
 After integration and publication of the changed signed policies, qualification
 evidence must match their new identities; old evidence is not reinterpreted
-under v2. Requalify affected retained products and reassess dependent calibration
-and publication eligibility through their existing owners. Unchanged subject
-bytes do not require reproduction merely because policy identity changed.
+under v3. Retire incompatible execution history through the explicit reviewed
+schema-cut path, then requalify affected retained products and reassess
+dependent calibration and publication eligibility through their existing
+owners. Unchanged subject bytes do not require reproduction merely because
+policy identity changed.
 Policy compatibility alone does not establish a live qualified result or
 complete the release calibration/publication path.
 
