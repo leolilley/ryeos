@@ -501,6 +501,23 @@ impl RuntimeDb {
         read_local_start(&self.conn, placement)
     }
 
+    /// Read-only final pre-spawn gate. The app caller holds the Q occurrence
+    /// contact gate from this check through held attachment; this projection
+    /// itself grants neither a descriptor nor process contact.
+    pub(crate) fn authorize_qualification_local_spawn(
+        &self,
+        placement: &str,
+    ) -> Result<QualificationLocalStartRecord> {
+        let record = read_local_start(&self.conn, placement)?
+            .context("qualification local spawn has no original start")?;
+        ensure!(
+            record.phase == QualificationLocalStartPhase::ScopeBound,
+            "qualification local spawn requires original scope-bound attempt"
+        );
+        require_current_start(&self.conn, &record)?;
+        Ok(record)
+    }
+
     /// Reserve before creating a directory. Exact replay is refused even when
     /// the first attempt may have stopped before its first filesystem effect.
     pub(crate) fn reserve_qualification_local_start(
@@ -793,6 +810,40 @@ impl RuntimeDb {
         let mut next = current.clone();
         next.scope_recovery = Some(recovery.clone());
         next.phase = QualificationLocalStartPhase::ScopeBound;
+        next.updated_at_ms = now_after(&current)?;
+        transition(&tx, &current, &next)?;
+        tx.commit()?;
+        Ok(next)
+    }
+
+    /// Preserve the exact kernel scope recovery coordinate when binding it
+    /// as launch authority failed. This is a cleanup fence only: it grants no
+    /// second bind, allocation, or process contact. A signed-generation or Q
+    /// occurrence rotation must not erase recovery evidence after allocation.
+    pub(crate) fn retain_failed_qualification_scope_recovery(
+        &self,
+        placement: &str,
+        recovery: &lillux::ProcessScopeRecovery,
+    ) -> Result<QualificationLocalStartRecord> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current = read_local_start(&tx, placement)?
+            .context("failed qualification scope lost its allocation intent")?;
+        ensure!(
+            current.phase == QualificationLocalStartPhase::ScopeAllocating
+                && current.scope_recovery.is_none()
+                && current
+                    .scope_allocation
+                    .as_ref()
+                    .is_some_and(|allocation| { recovery.matches_allocation(allocation) }),
+            "failed qualification scope recovery changed or replayed its one-use allocation"
+        );
+        // `read_local_start` joins the historical allocation, accepted owner,
+        // base and channel. Cleanup evidence deliberately does not require a
+        // currently live occurrence, signed generation or channel deadline.
+        let mut next = current.clone();
+        next.scope_recovery = Some(recovery.clone());
+        next.phase = QualificationLocalStartPhase::CleanupUnproved;
+        next.cleanup_reason = Some("scope binding failed after kernel allocation".to_owned());
         next.updated_at_ms = now_after(&current)?;
         transition(&tx, &current, &next)?;
         tx.commit()?;

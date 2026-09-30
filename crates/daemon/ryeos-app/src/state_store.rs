@@ -15563,6 +15563,17 @@ impl StateStore {
         self.lock()?.runtime_db.qualification_local_start(placement)
     }
 
+    /// A read-only check for the original Q scope immediately before an
+    /// owner-gated view borrow and held Worker spawn.
+    pub(crate) fn authorize_qualification_local_spawn(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        self.lock()?
+            .runtime_db
+            .authorize_qualification_local_spawn(placement)
+    }
+
     /// The cache path comes from the pinned runtime state authority. The
     /// returned workspace coordinate must be journaled before directory Create.
     pub(crate) fn reserve_qualification_local_start(
@@ -15671,6 +15682,20 @@ impl StateStore {
             "qualification scope binding is fenced during daemon shutdown"
         );
         g.runtime_db.bind_qualification_scope(placement, recovery)
+    }
+
+    /// Retain matching kernel recovery for cleanup after a failed first bind.
+    /// This historical write remains possible after Q or signed generation
+    /// rotation and grants no fresh launch authority.
+    pub(crate) fn retain_failed_qualification_scope_recovery(
+        &self,
+        placement: &str,
+        recovery: &lillux::ProcessScopeRecovery,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .retain_failed_qualification_scope_recovery(placement, recovery)
     }
 
     pub(crate) fn mark_qualification_local_cleanup_unproved(
