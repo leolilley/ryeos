@@ -2218,6 +2218,85 @@ pub fn resolve_current_bundle_producer_recipe_for_purpose(
     })
 }
 
+/// Retained guest delivery inputs from a born root and its authenticated CAS
+/// closure. These are read-only data custody, not reservation/contact authority.
+/// The product-edge verifier renders its own input record from these values;
+/// generic execution redeems the purpose's existing realization leases.
+pub struct PreparedRetainedConsumerVerifier {
+    purpose: ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    payload: lillux::InheritedDescriptorAuthority,
+}
+
+impl PreparedRetainedConsumerVerifier {
+    pub fn purpose(
+        &self,
+    ) -> &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose {
+        &self.purpose
+    }
+
+    pub fn coordinate(&self) -> &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate{
+        &self.coordinate
+    }
+
+    pub fn selection(&self) -> &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection{
+        &self.selection
+    }
+
+    pub fn payload(&self) -> &lillux::InheritedDescriptorAuthority {
+        &self.payload
+    }
+}
+
+/// Restore exact verifier bytes from the accepted purpose, never from current
+/// installed Bundle paths. Current protected profile/root authentication is
+/// still required; historical byte verification does not authorize contact.
+pub fn prepare_retained_consumer_verifier(
+    state: &AppState,
+    context: &HandlerContext,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+) -> anyhow::Result<PreparedRetainedConsumerVerifier> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let admitted = authenticate_consumer_root(
+        state,
+        &authority,
+        &guard,
+        limits,
+        context,
+        coordinate,
+        qualification_operation_id,
+    )?;
+    let view = admitted.purpose().execution_view()?;
+    let source = view
+        .remote_verifier_source(&coordinate.scenario_id)
+        .context("accepted consumer root retains no verifier source")?;
+    if source.scenario_source_digest != admitted.selection().scenario_source_digest
+        || source.executor.payload_blob_hash != admitted.selection().verifier_artifact_hash
+    {
+        bail!("retained consumer source differs from protected verifier selection");
+    }
+    let bytes = retained_verifier::authenticate_retained_verifier_bytes(
+        &authority.cas_store()?,
+        &view,
+        &coordinate.scenario_id,
+    )?;
+    authority.ensure_guard(&guard)?;
+    // Foreign-target executable bytes remain sealed data on the controller.
+    // No local execution capability or mutable path is introduced.
+    let payload =
+        lillux::sealed_memfd(c"retained-consumer-verifier", &bytes).map_err(anyhow::Error::msg)?;
+    Ok(PreparedRetainedConsumerVerifier {
+        purpose: admitted.purpose().clone(),
+        coordinate: admitted.coordinate().clone(),
+        selection: admitted.selection().clone(),
+        payload,
+    })
+}
+
 /// Exact current preflight data, not a remote-contact or publication grant.
 /// The accepted-root owner must retain the payload and its complete source
 /// proof before transfer; recovery must use that retained closure, not resolve
