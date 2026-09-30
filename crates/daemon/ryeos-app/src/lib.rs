@@ -55,6 +55,7 @@ pub mod io;
 pub mod kind_profiles;
 pub mod launch_metadata;
 pub mod launch_stage_timings;
+pub mod legacy_product_qualification_retirement;
 pub mod live_input_queue;
 pub mod managed_external_content;
 pub mod managed_external_content_operation;

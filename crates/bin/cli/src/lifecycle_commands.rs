@@ -10,6 +10,7 @@
 //!   - `ryeos node status` — show local node lifecycle status
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
 //!   - `ryeos node reset execution-history` — explicit offline epoch retirement
+//!   - `ryeos node reset legacy-product-qualifications` — exact archived-head retirement
 //!   - `ryeos node reset replay-indexes` — explicit clean-cut replay activation
 //!   - `ryeos node reset external-content-bindings` — retire realization bindings
 //!   - `ryeos node reset authorization` — retire grants and restore the operator
@@ -86,6 +87,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "reset", "execution-history"],
         summary: "Retire the local execution-history epoch",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "reset", "legacy-product-qualifications"],
+        summary: "Retire exact archived predecessor qualification heads",
         category: "maintenance",
     },
     LocalCommandDescriptor {
@@ -186,6 +192,13 @@ pub async fn try_dispatch(
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {
             run_execution_history_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("reset"))
+            if argv.get(2).map(String::as_str) == Some("legacy-product-qualifications") =>
+        {
+            run_legacy_product_qualification_retirement_command(&argv[3..], console)
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("authorization") => {
@@ -744,6 +757,66 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
 }
 
 // ── ryeos node reset execution-history ───────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node reset legacy-product-qualifications",
+    about = "Retire exact predecessor product-qualification heads after verifying a full state archive",
+    long_about = "Inspect the node-signed predecessor product-qualification heads, or retire the exact reviewed plan while the daemon is stopped. Confirmation requires a separate byte-for-byte copy of the complete state root. A durable intent blocks startup until interrupted retirement is reconciled. CAS bytes are never deleted by this operation.",
+    no_binary_name = true
+)]
+struct LegacyProductQualificationRetirementArgs {
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+    #[arg(long, conflicts_with = "confirm")]
+    dry_run: bool,
+    #[arg(long, conflicts_with = "dry_run")]
+    confirm: bool,
+    #[arg(long)]
+    json: bool,
+    #[arg(long = "plan-sha256", requires = "confirm")]
+    plan_sha256: Option<String>,
+    #[arg(long = "archive-state-root", requires = "confirm")]
+    archive_state_root: Option<PathBuf>,
+}
+
+fn run_legacy_product_qualification_retirement_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) =
+        parse_or_render_help::<LegacyProductQualificationRetirementArgs>(argv, console)?
+    else {
+        return Ok(());
+    };
+    if !args.dry_run && !args.confirm {
+        anyhow::bail!("specify --dry-run or --confirm for qualification-head retirement");
+    }
+    if args.confirm && (args.plan_sha256.is_none() || args.archive_state_root.is_none()) {
+        anyhow::bail!(
+            "qualification-head retirement requires --plan-sha256 and --archive-state-root"
+        );
+    }
+    let report = ryeos_app::legacy_product_qualification_retirement::run_legacy_product_qualification_retirement(
+        &ryeos_app::legacy_product_qualification_retirement::LegacyProductQualificationRetirementOptions {
+            app_root: args.app_root,
+            dry_run: args.dry_run,
+            expected_plan_sha256: args.plan_sha256,
+            archive_state_root: args.archive_state_root,
+        },
+    )?;
+    if args.json {
+        crate::tty::write_json(&report)?;
+        return Ok(());
+    }
+    console.text(&format!(
+        "{}: {} predecessor qualification heads; plan SHA-256 {}; complete separate state archive required for confirmation\n",
+        if report.performed { "Retired" } else { "Reviewed" },
+        report.preview.heads.len(),
+        report.preview.plan_sha256,
+    ))?;
+    Ok(())
+}
 
 #[derive(Parser, Debug)]
 #[command(
