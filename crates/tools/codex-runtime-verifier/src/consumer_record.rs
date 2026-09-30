@@ -5,19 +5,15 @@
 //! retained signed source and archive before guest delivery.
 
 use anyhow::{Context as _, Result, ensure};
-use ryeos_external_execution_contract::restored_runtime_measurement::{
-    ConsumerRuntimeVerificationCoordinate, ConsumerRuntimeVerifierSelection,
-    RemoteVerificationPurpose, RestoredVerifierAttemptIntent,
-};
+use ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent;
 use ryeos_external_execution_contract::staging_package::GuestStagingEntry;
-use ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose;
-use ryeos_state::external_execution::admission::ExternalCandidateRequirement;
+use ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord as StateConsumerInputRecord;
 use serde::{Deserialize, Serialize};
 
 use crate::QualificationExecutionEnvironment;
 
 pub const CONSUMER_INPUT_RECORD_NAME: &str = "consumer-input.json";
-pub const MAX_CONSUMER_INPUT_RECORD_BYTES: usize = 96 * 1024;
+pub use ryeos_state::external_content::qualification_consumer_record::MAX_CONSUMER_INPUT_RECORD_BYTES;
 /// Exact archive mode shared by publication, import and subordinate selection.
 const CONSUMER_VERIFIER_MODE: u32 = 0o500;
 /// Dedicated command-environment startup input, never an admission credential.
@@ -924,14 +920,18 @@ impl ImportedConsumerInputs {
     }
 }
 
+/// Codex-specific behavior over the shared accepted input wire. The inner
+/// state value owns all serialized fields and their protocol-neutral checks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConsumerInputRecord {
-    pub schema: u32,
-    pub purpose: QualificationLaunchPurpose,
-    pub coordinate: ConsumerRuntimeVerificationCoordinate,
-    pub selection: ConsumerRuntimeVerifierSelection,
-    pub requirement: ExternalCandidateRequirement,
+#[serde(transparent)]
+pub struct ConsumerInputRecord(StateConsumerInputRecord);
+
+impl std::ops::Deref for ConsumerInputRecord {
+    type Target = StateConsumerInputRecord;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl ConsumerInputRecord {
@@ -1238,55 +1238,22 @@ impl ConsumerInputRecord {
     /// that channel; arbitrary deserialized intent data is not run authority.
     pub fn validate_attempt(&self, intent: &RestoredVerifierAttemptIntent) -> Result<()> {
         self.validate()?;
-        let RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &intent.purpose else {
-            anyhow::bail!("owner measurement cannot consume a consumer input archive");
-        };
-        ensure!(
-            coordinate == &self.coordinate
-                && intent.verifier_artifact_hash == self.selection.verifier_artifact_hash,
-            "consumer input archive differs from exact run attempt"
-        );
-        ensure!(
-            intent.upload_bytes > 0
-                && intent.upload_bytes <= self.selection.archive_budget.maximum_framed_bytes
-                && lillux::valid_hash(&intent.upload_sha256)
-                && intent.attempt_deadline_ms > 0,
-            "consumer attempt exceeds protected archive budget or has invalid upload identity"
-        );
-        intent.consumer_challenge_digest()?;
-        Ok(())
+        self.0.validate_attempt(intent)
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        ensure!(
-            !bytes.is_empty() && bytes.len() <= MAX_CONSUMER_INPUT_RECORD_BYTES,
-            "consumer input record exceeds its bound"
-        );
-        let value: serde_json::Value = serde_json::from_slice(bytes)?;
-        ensure!(
-            lillux::canonical_json(&value)?.as_bytes() == bytes,
-            "consumer input record is not canonical"
-        );
-        let record: Self = serde_json::from_value(value)?;
+        let record = Self(StateConsumerInputRecord::parse(bytes)?);
         record.validate()?;
         Ok(record)
     }
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
         self.validate()?;
-        let bytes = lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes();
-        ensure!(
-            bytes.len() <= MAX_CONSUMER_INPUT_RECORD_BYTES,
-            "consumer input record exceeds its bound"
-        );
-        Ok(bytes)
+        self.0.canonical_bytes()
     }
 
     pub fn validate(&self) -> Result<QualificationExecutionEnvironment> {
-        ensure!(self.schema == 1, "unsupported consumer input record schema");
-        self.purpose
-            .validate_remote_consumer_coordinate(&self.coordinate, &self.selection)?;
-        self.requirement.validate()?;
+        self.0.validate()?;
         let content = self
             .purpose
             .consumer_content
@@ -1299,19 +1266,6 @@ impl ConsumerInputRecord {
             .consumer_execution_context
             .as_ref()
             .context("consumer input record has no signed consumer context")?;
-        let qualified_use = content
-            .qualification_use
-            .as_ref()
-            .context("consumer input record has no admitted use")?;
-        ensure!(
-            self.requirement.qualification_requirement_digest()?
-                == qualified_use.requirement_digest
-                && self.requirement.runtime_product_declaration_id
-                    == content.runtime_realization.id
-                && self.requirement.runtime_recipe.executable_relative_path
-                    == content.runtime_member.relative_path,
-            "consumer input recipe differs from accepted use"
-        );
         QualificationExecutionEnvironment::from_retained_production_consumer(content, context)
     }
 }
