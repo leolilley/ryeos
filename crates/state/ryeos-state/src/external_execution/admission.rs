@@ -175,6 +175,54 @@ impl ExternalCandidateGuestEnvironment {
 }
 
 impl ExternalCandidateQualificationUse {
+    /// Shared domain obligation for product and acquired-content testimony.
+    /// Source owners still authenticate policy, claims and the exact bytes.
+    pub fn require_qualified_use(&self, parameters: &serde_json::Value) -> Result<()> {
+        self.validate()?;
+        let context = parameters
+            .get(QUALIFICATION_CONTEXT_PARAMETER)
+            .context("external candidate qualification has no sealed use context")?;
+        let qualified = Self::from_value(context)?;
+        if qualified != *self {
+            let changed = [
+                (
+                    "requirement",
+                    &qualified.requirement_digest,
+                    &self.requirement_digest,
+                ),
+                ("profile", &qualified.profile_hash, &self.profile_hash),
+                (
+                    "source_binding",
+                    &qualified.source_binding_hash,
+                    &self.source_binding_hash,
+                ),
+                (
+                    "source_content",
+                    &qualified.source_content_manifest_hash,
+                    &self.source_content_manifest_hash,
+                ),
+                (
+                    "provider_executable",
+                    &qualified.provider_executable_manifest_hash,
+                    &self.provider_executable_manifest_hash,
+                ),
+                (
+                    "execution_environment",
+                    &qualified.execution_environment_digest,
+                    &self.execution_environment_digest,
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(name, actual, expected)| (actual != expected).then_some(name))
+            .collect::<Vec<_>>();
+            anyhow::bail!(
+                "external candidate qualification tested a different admitted use: {}",
+                changed.join(",")
+            );
+        }
+        Ok(())
+    }
+
     /// Exact guest-visible environment coordinate shared with an independent
     /// verifier. A verifier must derive it from selected/observed inputs, not
     /// accept a caller-supplied digest as evidence.
@@ -554,57 +602,13 @@ impl ExternalCandidateRequirement {
             .qualification
             .as_ref()
             .context("external candidate runtime has no admitted qualification")?;
-        let context = qualification
-            .evidence
-            .policy_source
-            .policy
-            .verifier_parameters
-            .get(QUALIFICATION_CONTEXT_PARAMETER)
-            .context("external candidate qualification has no sealed use context")?;
-        let qualified_use = ExternalCandidateQualificationUse::from_value(context)?;
-        if qualified_use != *qualification_use {
-            let mut changed = Vec::new();
-            for (name, qualified, current) in [
-                (
-                    "requirement",
-                    &qualified_use.requirement_digest,
-                    &qualification_use.requirement_digest,
-                ),
-                (
-                    "profile",
-                    &qualified_use.profile_hash,
-                    &qualification_use.profile_hash,
-                ),
-                (
-                    "source_binding",
-                    &qualified_use.source_binding_hash,
-                    &qualification_use.source_binding_hash,
-                ),
-                (
-                    "source_content",
-                    &qualified_use.source_content_manifest_hash,
-                    &qualification_use.source_content_manifest_hash,
-                ),
-                (
-                    "provider_executable",
-                    &qualified_use.provider_executable_manifest_hash,
-                    &qualification_use.provider_executable_manifest_hash,
-                ),
-                (
-                    "execution_environment",
-                    &qualified_use.execution_environment_digest,
-                    &qualification_use.execution_environment_digest,
-                ),
-            ] {
-                if qualified != current {
-                    changed.push(name);
-                }
-            }
-            anyhow::bail!(
-                "external candidate qualification tested a different admitted use: {}",
-                changed.join(",")
-            );
-        }
+        qualification_use.require_qualified_use(
+            &qualification
+                .evidence
+                .policy_source
+                .policy
+                .verifier_parameters,
+        )?;
         // Selection validation joins the proof to its exact policy and subject.
         // Require these claims in the signed relationship too: an incidental
         // verifier result cannot widen the consumer's qualification allowance.
@@ -647,6 +651,37 @@ pub struct AdmittedExternalCandidateProgram {
 }
 
 impl AdmittedExternalCandidateProgram {
+    /// Domain validation only: the app must independently authenticate this
+    /// acquired-source testimony and its current or retained authority.
+    pub fn require_content_qualification(
+        &self,
+        evidence: &crate::external_content::qualification_evidence::ContentQualificationEvidence,
+    ) -> Result<()> {
+        self.validate()?;
+        evidence.validate()?;
+        ensure!(
+            evidence.result.subject_manifest_hash == self.runtime_manifest_hash,
+            "external candidate content qualification has a different runtime subject"
+        );
+        self.qualification_use
+            .require_qualified_use(&evidence.purpose.policy_source.policy.verifier_parameters)?;
+        ensure!(
+            REQUIRED_CLAIMS.iter().all(|claim| evidence
+                .purpose
+                .required_claims
+                .iter()
+                .any(|required| required == claim)),
+            "external candidate content allowance omits required runtime claims"
+        );
+        evidence.result.validate_claims_for(
+            &evidence.purpose.policy_source.policy,
+            &REQUIRED_CLAIMS
+                .iter()
+                .map(|claim| (*claim).to_owned())
+                .collect::<Vec<_>>(),
+        )
+    }
+
     pub fn validate(&self) -> Result<()> {
         self.requirement.validate()?;
         self.qualification_use.validate()?;
@@ -1990,6 +2025,42 @@ mod tests {
             serde_json::json!({"schema":QUALIFICATION_CONTEXT_SCHEMA,"requirement_digest":"a".repeat(64),"extra":true}),
         ] {
             assert!(ExternalCandidateQualificationUse::from_value(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn shared_qualified_use_check_refuses_each_changed_coordinate() {
+        let expected = test_support::fixture_qualification_use(&requirement()).unwrap();
+        expected
+            .require_qualified_use(&expected.parameters().unwrap())
+            .unwrap();
+        assert!(
+            expected
+                .require_qualified_use(&serde_json::json!({}))
+                .is_err()
+        );
+        for field in [
+            "requirement_digest",
+            "profile_hash",
+            "source_binding_hash",
+            "source_content_manifest_hash",
+            "provider_executable_manifest_hash",
+            "execution_environment_digest",
+        ] {
+            let mut parameters = expected.parameters().unwrap();
+            let original = parameters[QUALIFICATION_CONTEXT_PARAMETER][field]
+                .as_str()
+                .unwrap();
+            let changed = if original == "f".repeat(64) {
+                "e".repeat(64)
+            } else {
+                "f".repeat(64)
+            };
+            parameters[QUALIFICATION_CONTEXT_PARAMETER][field] = serde_json::json!(changed);
+            assert!(
+                expected.require_qualified_use(&parameters).is_err(),
+                "{field}"
+            );
         }
     }
 
