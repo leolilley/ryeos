@@ -8,6 +8,7 @@
 #[cfg(test)]
 #[path = "product_qualification/consumer_definition_tests.rs"]
 mod consumer_definition_tests;
+pub(super) mod content_proof;
 pub mod launch;
 pub(super) mod runtime_identity;
 
@@ -785,11 +786,29 @@ fn authorize_verifier_terminal(
     request: &ProductQualificationRequest,
     operator: &str,
 ) -> anyhow::Result<()> {
-    if root.thread_id != request.verifier_chain_root_id
-        || root.chain_root_id != request.verifier_chain_root_id
+    authorize_qualification_terminal(
+        root,
+        terminal,
+        has_continuation,
+        &request.verifier_chain_root_id,
+        &request.verifier_thread_id,
+        operator,
+    )
+}
+
+fn authorize_qualification_terminal(
+    root: &ThreadSnapshot,
+    terminal: &ThreadSnapshot,
+    has_continuation: bool,
+    chain_root_id: &str,
+    thread_id: &str,
+    operator: &str,
+) -> anyhow::Result<()> {
+    if root.thread_id != chain_root_id
+        || root.chain_root_id != chain_root_id
         || root.requested_by.as_deref() != Some(operator)
-        || terminal.chain_root_id != request.verifier_chain_root_id
-        || terminal.thread_id != request.verifier_thread_id
+        || terminal.chain_root_id != chain_root_id
+        || terminal.thread_id != thread_id
         || terminal.requested_by.as_deref() != Some(operator)
     {
         bail!("qualification verifier is not owned at the requested coordinate");

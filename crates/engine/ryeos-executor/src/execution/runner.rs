@@ -4653,7 +4653,16 @@ fn validate_recovered_direct_request_authority(
             capsule,
         )?;
     sealed.validate_current_operator_authority(state)?;
-    let authoritative =
+    let authoritative = if sealed.qualification_purpose().is_some_and(|purpose| matches!(
+        purpose.subject,
+        ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { .. }
+    )) {
+        sealed.restore_for_authoritative_root(
+            state, thread_id, params.provenance.request_engine(),
+            &ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, thread_id).join("launch-capsule"),
+            &params.provenance,
+        )?
+    } else {
         ryeos_app::thread_lifecycle::SealedRootExecutionRequest::restore_from_admitted_capsule(
             capsule,
             params.provenance.request_engine(),
@@ -4661,7 +4670,8 @@ fn validate_recovered_direct_request_authority(
                 .join("launch-capsule"),
             &params.provenance,
         )
-        .context("restore authoritative direct request from CAS capsule")?;
+        .context("restore authoritative direct request from CAS capsule")?
+    };
     let actual = &params.resolved;
     if params.parameters != authoritative.parameters
         || params.acting_principal != authoritative.requested_by.as_deref().unwrap_or_default()
@@ -8242,12 +8252,21 @@ pub fn execution_params_from_sealed_root_request(
             resume.item_ref
         );
     }
-    let resolved = sealed.restore_for_reconstructed_provenance(
+    let resolved = if sealed.qualification_purpose().is_some_and(|purpose| matches!(
+        purpose.subject,
+        ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { .. }
+    )) {
+        sealed.restore_for_authoritative_root(
+            state, thread_id, provenance.request_engine(),
+            &ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, thread_id).join("launch-capsule"),
+            &provenance,
+        )?
+    } else { sealed.restore_for_reconstructed_provenance(
         provenance.request_engine(),
         &ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, thread_id)
             .join("launch-capsule"),
         &provenance,
-    )?;
+    )? };
     resolved
         .root_admission
         .as_ref()

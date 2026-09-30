@@ -1,0 +1,8 @@
+kind: service
+endpoint: external-content.launch-content-qualification
+required_caps: ["ryeos.execute.service.external-content/launch-content-qualification"]
+schema:
+  launch_id: string
+  activation_ref: string
+  declaration_id: string
+description: Accept one exact activated-content qualification launch; the signed consumer allowance selects the policy and verifier. Acquisition and compatibility remain distinct authorities. Unsupported consumer-context qualification is refused.

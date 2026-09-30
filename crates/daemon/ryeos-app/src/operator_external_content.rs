@@ -23,6 +23,7 @@ pub mod product_composition;
 pub mod product_qualification;
 pub mod product_receipt;
 pub mod products;
+pub mod qualification_launch;
 mod retained_binding;
 mod retained_product;
 mod retained_result;

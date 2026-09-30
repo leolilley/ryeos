@@ -2123,6 +2123,36 @@ fn validate_admitted_runtime_route_identity(
 }
 
 #[derive(Debug, Clone)]
+enum ContentQualificationAttachment {
+    Fresh {
+        purpose_digest: String,
+    },
+    Retained {
+        purpose_digest: String,
+        root_thread_id: String,
+        capsule_hash: String,
+    },
+}
+
+impl ContentQualificationAttachment {
+    fn require_fresh(&self) -> Result<()> {
+        anyhow::ensure!(
+            matches!(self, Self::Fresh { .. }),
+            "retained content qualification cannot authorize fresh sealing or birth"
+        );
+        Ok(())
+    }
+
+    fn purpose_digest(&self) -> &str {
+        match self {
+            Self::Fresh { purpose_digest } | Self::Retained { purpose_digest, .. } => {
+                purpose_digest
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct RootExecutionAdmission {
     verified_subject: VerifiedItem,
     resolution_closure: Arc<crate::resolution_cache::ResolvedClosure>,
@@ -2139,11 +2169,21 @@ pub struct RootExecutionAdmission {
     project_binding: AdmittedProjectBinding,
     candidate_evaluation: Option<Arc<CandidateEvaluationExecutionScope>>,
     qualification: Option<QualificationLaunchPurpose>,
+    // Fresh-admission witness only. Never serialized or reconstructed from a
+    // retained purpose; binds the dedicated source check to the full intent.
+    authenticated_content_qualification_digest: Option<ContentQualificationAttachment>,
     admitted_request_snapshot: Option<Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
     selected_executor_route: Option<AdmittedExecutorRoute>,
 }
 
 impl RootExecutionAdmission {
+    fn require_fresh_qualification_attachment(&self) -> Result<()> {
+        if let Some(attachment) = &self.authenticated_content_qualification_digest {
+            attachment.require_fresh()?;
+        }
+        Ok(())
+    }
+
     pub fn verified_subject(&self) -> &VerifiedItem {
         &self.verified_subject
     }
@@ -2215,11 +2255,54 @@ impl RootExecutionAdmission {
     /// Attach only a daemon-derived, exact product-qualification purpose to a
     /// fresh root. Public execution has no path to manufacture this field.
     pub fn for_qualification(mut self, purpose: QualificationLaunchPurpose) -> Result<Self> {
+        purpose.subject.captured_product()?;
         if self.qualification.is_some() {
             bail!("root admission already has product qualification purpose");
         }
         self.validate()?;
         purpose.validate()?;
+        self.qualification = Some(purpose);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn for_content_qualification(
+        mut self,
+        state: &crate::state::AppState,
+        context: &crate::handler_context::HandlerContext,
+        acquisition_mode: crate::managed_external_content_operation::AcquisitionMode,
+        prepared: &crate::operator_external_content::content_qualification::PreparedContentQualificationSource,
+        purpose: QualificationLaunchPurpose,
+    ) -> Result<Self> {
+        self.validate()?;
+        anyhow::ensure!(
+            self.qualification.is_none(),
+            "root already has qualification purpose"
+        );
+        // The source adapter does not yet prepare authenticated worker-context
+        // inputs. Structural context decoding must not promise consumer parity.
+        anyhow::ensure!(
+            purpose
+                .policy_source
+                .policy
+                .consumer_execution_context
+                .is_none()
+                && purpose.consumer_content.is_none()
+                && purpose.consumer_definitions.is_none(),
+            "content qualification consumer context has no authenticated preparation"
+        );
+        anyhow::ensure!(
+            context.fingerprint == purpose.owner_fingerprint,
+            "content qualification owner differs from authenticated operator"
+        );
+        prepared.require_current(state, context, acquisition_mode)?;
+        prepared.validate_purpose(&purpose)?;
+        self.authenticated_content_qualification_digest =
+            Some(ContentQualificationAttachment::Fresh {
+                purpose_digest: ryeos_state::objects::canonical_value_digest(
+                    &serde_json::to_value(&purpose)?,
+                )?,
+            });
         self.qualification = Some(purpose);
         self.validate()?;
         Ok(self)
@@ -2762,9 +2845,22 @@ impl RootExecutionAdmission {
         )?;
         if let Some(purpose) = &self.qualification {
             purpose.validate()?;
-            // The content adapter must authenticate and seal its provenance
-            // before this admission path can accept that source.
-            let (product_witness_hash, witness_source, _) = purpose.subject.captured_product()?;
+            let content_source = match &purpose.subject {
+                ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { .. } => {
+                    if let Some(ContentQualificationAttachment::Retained { root_thread_id, capsule_hash, .. }) = &self.authenticated_content_qualification_digest {
+                        anyhow::ensure!(!root_thread_id.is_empty() && lillux::valid_hash(capsule_hash),
+                            "retained qualification attachment lacks root/capsule coordinates");
+                    }
+                    anyhow::ensure!(self.authenticated_content_qualification_digest.as_ref().map(ContentQualificationAttachment::purpose_digest) == Some(
+                        ryeos_state::objects::canonical_value_digest(&serde_json::to_value(purpose)?)?.as_str()
+                    ), "content qualification lacks exact authenticated attachment");
+                    true
+                }
+                _ => {
+                    anyhow::ensure!(self.authenticated_content_qualification_digest.is_none(), "product qualification carries content attachment");
+                    false
+                }
+            };
             let projectless_lane = matches!(
                 (
                     &self.plan_context.project_context,
@@ -2815,12 +2911,27 @@ impl RootExecutionAdmission {
                     .resolution_output()
                     .effective_definition_digest()?
                     .as_str()
-                    != purpose.verifier_effective_definition_digest
+                    != if matches!(
+                        self.authenticated_content_qualification_digest,
+                        Some(ContentQualificationAttachment::Retained { .. })
+                    ) {
+                        purpose.verifier_realized_definition_digest.as_str()
+                    } else {
+                        purpose.verifier_effective_definition_digest.as_str()
+                    }
                 || plan_principal_identifier(&self.plan_context) != purpose.owner_fingerprint
             {
                 bail!("qualification purpose differs from admitted trusted verifier root");
             }
-            match (pinned_lane, self.product_selections.as_slice()) {
+            if content_source {
+                anyhow::ensure!(
+                    projectless_lane && self.product_selections.is_empty(),
+                    "activated content qualification requires exact fixed-pin projectless admission"
+                );
+            } else {
+                let (product_witness_hash, witness_source, _) =
+                    purpose.subject.captured_product()?;
+                match (pinned_lane, self.product_selections.as_slice()) {
                 (false, []) => {}, // Signed fixed pin is checked against the exact subject realization.
                 (_, [selected])
                     if matches!(
@@ -2832,6 +2943,9 @@ impl RootExecutionAdmission {
                         && selected.selection.qualification_hash.is_none() => {}
                 _ => bail!("qualification purpose differs from admitted unqualified subject selection"),
             }
+            }
+        } else if self.authenticated_content_qualification_digest.is_some() {
+            bail!("content qualification attachment has no purpose");
         }
         if !self.product_selections.is_empty() {
             if self.plan_context.scheduled_fire.is_some() {
@@ -3152,6 +3266,7 @@ impl RootExecutionAdmission {
     /// deliberately not re-resolved or re-read after admission.
     fn validate_for_persistence(&self) -> Result<()> {
         self.validate()?;
+        self.require_fresh_qualification_attachment()?;
         self.ensure_matches_subject(
             self.request_engine(),
             &self.verified_subject,
@@ -7330,6 +7445,7 @@ fn admit_verified_root_execution_inner(
         project_binding,
         candidate_evaluation: None,
         qualification: None,
+        authenticated_content_qualification_digest: None,
         admitted_request_snapshot,
         selected_executor_route: None,
     };

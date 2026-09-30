@@ -8,6 +8,7 @@ use anyhow::Context as _;
 pub mod payload;
 pub mod products;
 pub mod qualification_allowance;
+pub mod qualification_evidence;
 pub mod qualification_execution;
 pub mod qualification_purpose;
 pub mod qualification_subject;

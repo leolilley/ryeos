@@ -663,6 +663,7 @@ impl SealedRootExecutionRequest {
             anyhow!("cannot seal a root execution request without root admission")
         })?;
         admission.validate()?;
+        admission.require_fresh_qualification_attachment()?;
         admission.ensure_matches_request(request)?;
         let (principal, scopes) = match &admission.plan_context.requested_by {
             EffectivePrincipal::Local(principal) => {
@@ -830,7 +831,6 @@ impl SealedRootExecutionRequest {
             return Ok(());
         };
         purpose.validate()?;
-        let (product_witness_hash, witness_source, _) = purpose.subject.captured_product()?;
         let SealedPrincipal::Local { fingerprint, .. } = &self.planning_principal else {
             bail!("qualification verifier cannot use delegated principal authority");
         };
@@ -922,6 +922,22 @@ impl SealedRootExecutionRequest {
         if let Some((name, _)) = checks.iter().find(|(_, matches)| !matches) {
             bail!("sealed qualification purpose contradicts admitted verifier root: {name}");
         }
+        if let ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { content } = &purpose.subject {
+            if !projectless_lane || !self.product_selections.is_empty()
+                || purpose.policy_source.policy.consumer_execution_context.is_some()
+                || purpose.consumer_content.is_some() || purpose.consumer_definitions.is_some()
+            {
+                bail!("sealed content qualification lacks supported fixed-pin source context");
+            }
+            let realizations = ryeos_state::objects::ExternalContentRealizationSet::from_value(
+                self.resolution_output.composed.derived.get(
+                    ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
+                ).context("sealed content verifier has no exact realization set")?
+            )?;
+            content.verify_verifier_realizations(&realizations, &purpose.subject_declaration_id)?;
+            return Ok(());
+        }
+        let (product_witness_hash, witness_source, _) = purpose.subject.captured_product()?;
         let is_exact_root_subject = |selected: &ryeos_state::external_content::products::composition::ProductSelectionInput| {
             matches!(
                 selected.target,
@@ -1618,6 +1634,21 @@ impl SealedRootExecutionRequest {
         engine: &Arc<Engine>,
         capsule_root: &Path,
     ) -> Result<ResolvedExecutionRequest> {
+        self.restore_with_content_attachment(engine, capsule_root, None)
+    }
+
+    fn restore_with_content_attachment(
+        &self,
+        engine: &Arc<Engine>,
+        capsule_root: &Path,
+        content_attachment: Option<ContentQualificationAttachment>,
+    ) -> Result<ResolvedExecutionRequest> {
+        if self.qualification.as_ref().is_some_and(|purpose| matches!(
+            purpose.subject,
+            ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { .. }
+        )) && content_attachment.is_none() {
+            bail!("content qualification restoration requires authoritative retained-root recovery");
+        }
         if self.schema_version != SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION {
             bail!(
                 "sealed root execution request schema mismatch: persisted={}, expected={}",
@@ -1720,6 +1751,8 @@ impl SealedRootExecutionRequest {
             project_binding,
             candidate_evaluation: None,
             qualification: self.qualification.clone(),
+            // Retained data cannot recreate a fresh source-admission witness.
+            authenticated_content_qualification_digest: content_attachment,
             admitted_request_snapshot: None,
             selected_executor_route: None,
         };
@@ -1779,6 +1812,16 @@ impl SealedRootExecutionRequest {
         capsule_root: &Path,
         provenance: &crate::execution_provenance::ExecutionProvenance,
     ) -> Result<ResolvedExecutionRequest> {
+        self.restore_with_provenance_and_content_attachment(engine, capsule_root, provenance, None)
+    }
+
+    fn restore_with_provenance_and_content_attachment(
+        &self,
+        engine: &Arc<Engine>,
+        capsule_root: &Path,
+        provenance: &crate::execution_provenance::ExecutionProvenance,
+        content_attachment: Option<ContentQualificationAttachment>,
+    ) -> Result<ResolvedExecutionRequest> {
         if let Some(expected) = self.candidate_evaluation.as_ref() {
             let scope = provenance.candidate_evaluation_scope().ok_or_else(|| {
                 anyhow!("candidate evaluator recovery has no dual-generation execution scope")
@@ -1832,7 +1875,8 @@ impl SealedRootExecutionRequest {
 
         // Validate the exact persisted invocation before rebinding its
         // disposable operational workspace.
-        let mut request = self.restore(engine, capsule_root)?;
+        let mut request =
+            self.restore_with_content_attachment(engine, capsule_root, content_attachment)?;
         let protected_qualification = request
             .root_admission
             .as_ref()
@@ -1923,6 +1967,48 @@ impl SealedRootExecutionRequest {
     ) -> Result<ResolvedExecutionRequest> {
         let sealed = Self::decode_from_admitted_capsule(capsule)?;
         sealed.restore_for_reconstructed_provenance(engine, capsule_root, provenance)
+    }
+
+    /// Restore only the already-born root whose exact capsule is owned by
+    /// state. Retained provenance is not fresh admission and cannot reseal.
+    pub fn restore_for_authoritative_root(
+        &self,
+        state: &crate::state::AppState,
+        root_thread_id: &str,
+        engine: &Arc<Engine>,
+        capsule_root: &Path,
+        provenance: &crate::execution_provenance::ExecutionProvenance,
+    ) -> Result<ResolvedExecutionRequest> {
+        let (chain_root_id, capsule_hash, capsule) = state
+            .state_store
+            .admitted_launch_capsule_with_coordinates(root_thread_id)?
+            .context("retained qualification root has no authoritative capsule")?;
+        anyhow::ensure!(
+            chain_root_id == root_thread_id,
+            "qualification restoration requires its exact born root"
+        );
+        let authoritative = Self::decode_from_admitted_capsule(&capsule)?;
+        anyhow::ensure!(
+            serde_json::to_value(self)? == serde_json::to_value(&authoritative)?,
+            "sealed request differs from authoritative root capsule"
+        );
+        authoritative.validate_current_operator_authority(state)?;
+        let attachment = match authoritative.qualification.as_ref() {
+            Some(purpose) if matches!(purpose.subject,
+                ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { .. }) => {
+                Some(ContentQualificationAttachment::Retained {
+                    purpose_digest: ryeos_state::objects::canonical_value_digest(&serde_json::to_value(purpose)?)?,
+                    root_thread_id: root_thread_id.to_owned(), capsule_hash,
+                })
+            }
+            _ => None,
+        };
+        authoritative.restore_with_provenance_and_content_attachment(
+            engine,
+            capsule_root,
+            provenance,
+            attachment,
+        )
     }
 
     /// Rebind an admitted worker invocation directly from capsule authority
@@ -2370,8 +2456,7 @@ mod authority_tests {
         assert!(sealed.restore(&empty_engine(), root.path()).is_err());
     }
 
-    #[test]
-    fn sealed_qualification_checks_realized_not_pre_realization_definition() {
+    fn qualified_product_sealed_fixture() -> SealedRootExecutionRequest {
         let mut sealed = SealedRootExecutionRequest::storage_test_fixture();
         let verifier_ref = "tool:test/qualify_runtime";
         sealed.item_ref = verifier_ref.to_owned();
@@ -2430,7 +2515,12 @@ mod authority_tests {
             "verifier_realized_definition_digest": realized.as_str()
         })).unwrap());
         sealed.validate_qualification_purpose().unwrap();
+        sealed
+    }
 
+    #[test]
+    fn sealed_qualification_checks_realized_not_pre_realization_definition() {
+        let mut sealed = qualified_product_sealed_fixture();
         let purpose = sealed.qualification_purpose().unwrap().clone();
         let view = purpose.execution_view().unwrap();
         sealed
@@ -2469,6 +2559,94 @@ mod authority_tests {
                 .to_string()
                 .contains("verifier definition")
         );
+    }
+
+    #[test]
+    fn sealed_content_checks_exact_fixed_subject_without_granting_plain_restore() {
+        use ryeos_state::external_content::qualification_purpose::QualificationSubject;
+        use ryeos_state::external_content::qualification_subject::{
+            CONTENT_QUALIFICATION_SUBJECT_SCHEMA, ContentQualificationSubject,
+        };
+        use ryeos_state::objects::{
+            ExternalContentKind, ExternalContentMode, ExternalContentMountRoot,
+            ExternalContentRealization, ExternalContentRealizationSet,
+        };
+        let mut sealed = qualified_product_sealed_fixture();
+        let realization = ExternalContentRealization {
+            id: "runtime".into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: "f".repeat(64),
+            entry_count: 2,
+            total_bytes: 42,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "runtime".into(),
+        };
+        let content = ContentQualificationSubject {
+            schema: CONTENT_QUALIFICATION_SUBJECT_SCHEMA,
+            activation_receipt_hash: "a".repeat(64),
+            activation_program_digest: "b".repeat(64),
+            binding_hash: "c".repeat(64),
+            consumer_ref: "worker:test/hosted".into(),
+            declaration_id: "runtime".into(),
+            manifest_hash: realization.manifest_hash.clone(),
+            manifest_kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.into(),
+            target_node_fingerprint: "d".repeat(64),
+            realization: realization.clone(),
+        };
+        sealed.resolution_output.composed.derived.insert(
+            ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY.into(),
+            ExternalContentRealizationSet::new(vec![realization])
+                .unwrap()
+                .to_value()
+                .unwrap(),
+        );
+        let d2 = sealed
+            .resolution_output
+            .effective_definition_digest()
+            .unwrap();
+        sealed.effective_definition_digest = d2.clone();
+        let purpose = sealed.qualification.as_mut().unwrap();
+        purpose.subject = QualificationSubject::ActivatedContent { content };
+        purpose.verifier_realized_definition_digest = d2.as_str().into();
+        sealed.validate_qualification_purpose().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let error = sealed
+            .restore(&empty_engine(), root.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("authoritative retained-root recovery"));
+        let mut changed = sealed.clone();
+        if let QualificationSubject::ActivatedContent { content } =
+            &mut changed.qualification.as_mut().unwrap().subject
+        {
+            content.realization.total_bytes += 1;
+        }
+        assert!(changed.validate_qualification_purpose().is_err());
+        changed = sealed.clone();
+        changed
+            .qualification
+            .as_mut()
+            .unwrap()
+            .verifier_realized_definition_digest = "9".repeat(64);
+        assert!(changed.validate_qualification_purpose().is_err());
+    }
+
+    #[test]
+    fn retained_content_provenance_never_authorizes_fresh_sealing_or_birth() {
+        let digest = "a".repeat(64);
+        let fresh = ContentQualificationAttachment::Fresh {
+            purpose_digest: digest.clone(),
+        };
+        fresh.require_fresh().unwrap();
+        let retained = ContentQualificationAttachment::Retained {
+            purpose_digest: digest,
+            root_thread_id: "T-00000000-0000-0000-0000-000000000001".into(),
+            capsule_hash: "b".repeat(64),
+        };
+        assert_eq!(fresh.purpose_digest(), retained.purpose_digest());
+        assert!(retained.require_fresh().is_err());
+        assert!(retained.clone().require_fresh().is_err());
     }
 
     #[test]
