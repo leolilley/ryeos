@@ -14512,17 +14512,12 @@ impl StateStore {
     ) -> Result<runtime_db::external_execution::ExternalAllocationRecord> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        if let Some(existing) = g
-            .runtime_db
-            .external_allocation(&reservation.placement_thread_id)?
-        {
-            anyhow::ensure!(
-                existing.reservation == *reservation
-                    && existing.phase
-                        == runtime_db::external_execution::ExternalAllocationPhase::Reserved,
-                "qualification first reservation cannot renew contacted allocation"
-            );
-        }
+        anyhow::ensure!(
+            g.runtime_db
+                .external_allocation(&reservation.placement_thread_id)?
+                .is_none(),
+            "qualification first reservation cannot replace retained input lifelines"
+        );
         let proof =
             self.verify_external_qualification_owner(state, &g, reservation, binding, &admission)?;
         g.runtime_db
