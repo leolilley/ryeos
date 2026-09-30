@@ -158,6 +158,9 @@ pub struct ScopedChildMountPreparationEvidence {
     pub schema: u32,
     pub plan_digest: String,
     pub expected: lillux::LinuxSandboxMountPreparationCommitments,
+    /// Independently compiled target commitments, journaled while the target
+    /// is still held. Never reconstructed from a post-release observation.
+    pub expected_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
     pub observed: lillux::LinuxSandboxMountPreparationReceipt,
     /// Exact admitted source descriptors used for prepared writable mounts.
     pub prepared_directory_sources:
@@ -168,9 +171,20 @@ pub struct ScopedChildMountPreparationEvidence {
 }
 
 impl ScopedChildMountPreparationEvidence {
+    pub(crate) fn validate_applied_launch(
+        &self,
+        receipt: &lillux::LinuxSandboxAppliedLaunchReceipt,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            receipt.matches_commitments(&self.expected_launch),
+            "observation applied target differs from journaled pre-release commitments"
+        );
+        Ok(())
+    }
+
     fn validate_for(&self, identity: &ExecutionProcessIdentity) -> Result<()> {
         anyhow::ensure!(
-            self.schema == 3,
+            self.schema == 4,
             "scoped child mount evidence schema is unsupported"
         );
         anyhow::ensure!(
@@ -1505,12 +1519,18 @@ mod tests {
 
     fn mount_evidence(identity: &ExecutionProcessIdentity) -> ScopedChildMountPreparationEvidence {
         ScopedChildMountPreparationEvidence {
-            schema: 3,
+            schema: 4,
             plan_digest: format!("sha256:{}", "c".repeat(64)),
             expected: lillux::LinuxSandboxMountPreparationCommitments {
                 schema: 1,
                 mount_count: 1,
                 destination_access_sha256: [7; 32],
+            },
+            expected_launch: lillux::LinuxSandboxAppliedLaunchCommitments {
+                executable_sha256: [1; 32],
+                argv_sha256: [2; 32],
+                environment_sha256: [3; 32],
+                cwd_sha256: [4; 32],
             },
             observed: lillux::LinuxSandboxMountPreparationReceipt {
                 schema: 1,
@@ -1568,6 +1588,39 @@ mod tests {
             "a".repeat(64),
         );
         wrong.validate_for(&identity).unwrap();
+    }
+
+    #[test]
+    fn applied_target_requires_all_journaled_commitments() {
+        let (_, _, identity) = fixture();
+        let evidence = mount_evidence(&identity);
+        let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: identity.target_pid as u32,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: evidence.expected_launch.executable_sha256,
+            argv_sha256: evidence.expected_launch.argv_sha256,
+            environment_sha256: evidence.expected_launch.environment_sha256,
+            cwd_sha256: evidence.expected_launch.cwd_sha256,
+            post_release_mount_view: evidence.expected.clone(),
+        };
+        evidence.validate_applied_launch(&receipt).unwrap();
+        for field in 0..4 {
+            let mut changed = receipt.clone();
+            match field {
+                0 => changed.executable_sha256 = [9; 32],
+                1 => changed.argv_sha256 = [9; 32],
+                2 => changed.environment_sha256 = [9; 32],
+                _ => changed.cwd_sha256 = [9; 32],
+            }
+            assert!(evidence.validate_applied_launch(&changed).is_err());
+        }
+        let mut value = serde_json::to_value(&evidence).unwrap();
+        value.as_object_mut().unwrap().remove("expected_launch");
+        assert!(serde_json::from_value::<ScopedChildMountPreparationEvidence>(value).is_err());
     }
 
     #[test]
