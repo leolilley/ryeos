@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T03:18:55Z:232159e939faf665aa43d8515b6293d49c50ac19ca6140f16efc762dd7f85b49:GuQnTU6kHN0CExLPkGB7lpxD6hOi6inmlHfUNUeXranLXP2loYI35H3zlJo9YR0OyzP/Ac82LF98eRkQv0BdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T03:25:09Z:1218d3e226689b8339ded6740bc5fe8b0cfa5b0e1285b01821441175142815dc:MdqgqA2mpGV59ywYhbopaTACBj9ceIe5zGHt6kejfPF+WoalC9K1ldlRbNrb3wRDFvVHkTi/Wg1MOABA3YXnBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.9"
+version: "1.1.10"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -200,6 +200,15 @@ distinct stable coordinates. The existing Render contact adapter admits only
 the owner-measurement arm; a consumer coordinate is neither a contact grant
 nor hosted-runtime qualification. Predecessor runtime rows cannot silently
 supply either the pre-release commitments or the new purpose identity.
+
+The signed runtime-snapshot qualification profile now requires schema 2. Its
+bounded `consumer_verifiers` map selects a verifier artifact and exact signed
+scenario source for each consumer scenario, separately from the owner-measurement
+verifier artifact. A missing scenario, changed source digest, or schema-1
+profile is refused. This signed selection is only artifact authority: the
+consumer attempt still needs daemon-owned prerequisite measurement, accepted
+root and same-occurrence joins before remote contact, and the observed guest
+runtime and applied launch joins before it can support a qualification claim.
 
 ## What recovery must NOT do
 
