@@ -28,6 +28,26 @@ use super::admission::{
 
 pub const QUALIFICATION_SESSION_PROGRAM_SCHEMA: u32 = 1;
 
+/// One logical Worker qualification contact per accepted verifier root,
+/// restored qualification operation and signed scenario. The key deliberately
+/// excludes retry deadlines, transport representation, binding generation and
+/// the member/program bytes: changing those cannot mint another allocation
+/// opportunity for the same accepted operation.
+pub fn qualification_candidate_placement_key(
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+) -> Result<String> {
+    coordinate.validate()?;
+    super::hash(qualification_operation_id)?;
+    let digest = canonical_value_digest(&serde_json::json!({
+        "domain": "ryeos.external-qualification-candidate-placement.v1",
+        "accepted_root_id": &coordinate.accepted_root_id,
+        "qualification_operation_id": qualification_operation_id,
+        "scenario_id": &coordinate.scenario_id,
+    }))?;
+    Ok(format!("Q-{digest}"))
+}
+
 /// A controller-owned projection of one exact accepted consumer use. It is
 /// deliberately distinct from `AdmittedExternalCandidateProgram`, which
 /// requires a prior runtime qualification and candidate-export authority.
@@ -237,5 +257,41 @@ impl AdmittedExternalQualificationSessionProgram {
             "qualification-only guest inputs lost their exact read-only runtime"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate;
+
+    #[test]
+    fn one_logical_qualification_contact_survives_evidence_and_binding_changes() {
+        let mut coordinate = ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-accepted".into(),
+            accepted_capsule_hash: "a".repeat(64),
+            qualification_purpose_digest: "b".repeat(64),
+            scenario_id: "hosted_worker".into(),
+            scenario_source_digest: "c".repeat(64),
+            subject_digest: "d".repeat(64),
+            use_digest: "e".repeat(64),
+            prerequisite_measurement_attempt_id: "f".repeat(64),
+            prerequisite_measurement_observation_digest: "0".repeat(64),
+        };
+        let key = qualification_candidate_placement_key(&coordinate, &"1".repeat(64)).unwrap();
+        assert!(key.starts_with("Q-") && key.len() == 66);
+        coordinate.prerequisite_measurement_observation_digest = "2".repeat(64);
+        coordinate.scenario_source_digest = "3".repeat(64);
+        assert_eq!(
+            key,
+            qualification_candidate_placement_key(&coordinate, &"1".repeat(64)).unwrap()
+        );
+        coordinate.scenario_id = "other_scenario".into();
+        assert_ne!(
+            key,
+            qualification_candidate_placement_key(&coordinate, &"1".repeat(64)).unwrap()
+        );
+        assert!(qualification_candidate_placement_key(&coordinate, "invalid").is_err());
     }
 }
