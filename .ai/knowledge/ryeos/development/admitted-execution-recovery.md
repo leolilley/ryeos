@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T02:13:32Z:cda7a1cd5aeaabce4812044bd1562dc7d7a9ca9a9ba3097c3c3868e399f0322b:mb2Nao1Inghu6YsRgxf7sXMSIhcMefasTQNVhkRVThAJ+3olcyGIhiv5k33lCIq592oyouxZ9L1Vh6koQHXpDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T02:18:13Z:1ab27d62a59e81bbbb4d30632c70efd93f35284bbd83d8f354d375c391d6294e:xPBugm80COmazCFpKp4RajHlm5xZdUAT4o55YbJnJ4OZmEpzeegwDlntTcrgUr4d32rxB0LpnFQUoT8BBl+OAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.5"
+version: "1.1.6"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -108,7 +108,7 @@ and attestation, owner, and finite required claims; fresh placement must rejoin
 that testimony to the session runtime manifest. This is separate from the
 guest-owner snapshot `runtime_qualification` and from the Worker product slot.
 Current source checks the selection before fresh placement, retains the exact
-content attestation and evidence in persistent-session capsule schema 19, and
+content attestation and evidence in persistent-session capsule schema 20, and
 authenticates that historical testimony during recovery. Recovery does not
 select a newer head or renew contact permission. A binding without the fresh
 proof cannot obtain structured-session contact from this source generation.
@@ -119,11 +119,18 @@ The admitted external-candidate program now tags its runtime source as
 `CapturedProduct` or `ActivatedContent`. An activated source retains the exact
 content subject and qualification coordinate; it cannot be reconstructed as
 a product witness or satisfied by a product selector for the same runtime slot.
+The signed worker requirement also selects `captured_product` or
+`activated_content` explicitly. The first lane resolves from retained product
+selections. The second resolves from an authenticated activated-content
+qualification and requires a unique signed placement binding for the exact
+provider, protocol and runtime manifest. Admission compares that prepared
+testimony with a fresh placement preflight before sealing the capsule; it
+cannot silently switch lanes when one source is absent or unqualified.
 Persistent-session recovery reconstructs that program from its retained
 content testimony and checks the exact source-specific program identity.
-The current source type and readback do not by themselves prove that an
-activated runtime was admitted, transferred into a guest, or used by a hosted
-Worker. Those are separate operational gates.
+The source has not yet established an activated-runtime guest transfer or
+hosted Worker lifecycle, so this admission join remains an untested source
+contract rather than an operational qualification claim.
 
 ## Qualification schema cut
 
