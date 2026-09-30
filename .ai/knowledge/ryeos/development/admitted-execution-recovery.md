@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T02:18:13Z:1ab27d62a59e81bbbb4d30632c70efd93f35284bbd83d8f354d375c391d6294e:xPBugm80COmazCFpKp4RajHlm5xZdUAT4o55YbJnJ4OZmEpzeegwDlntTcrgUr4d32rxB0LpnFQUoT8BBl+OAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T02:37:43Z:89b4284b7e194352c75c8a4606c909d8f68378e94870a0230e26c5a1ee5f7452:CCLkJe9pez3BHmZFdqj0xQw9OpHoxUH8F6B8u9hx1tF+xeYSXDwIjhESuY1kMXCv/jzFg09ZB47cbrhCnM3GCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.6"
+version: "1.1.7"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -132,6 +132,16 @@ The source has not yet established an activated-runtime guest transfer or
 hosted Worker lifecycle, so this admission join remains an untested source
 contract rather than an operational qualification claim.
 
+Consumer qualification content now retains its declaration authority as a
+tagged source. A captured product retains the exact signed relationship
+definition; activated content retains the exact activation definition,
+declaration ID and signed allowance. The shared same-generation Worker,
+environment and execution definition resolver returns identities only. A
+product evidence reader still requires the captured-product arm, while the
+activated-content evidence reader still refuses consumer execution context.
+The new retained shape therefore does not enable hosted Worker claims by
+itself; that requires the separate applied-runtime and lifecycle proof.
+
 ## Qualification schema cut
 
 The current qualification purpose is a tagged source: a captured product and
@@ -142,6 +152,14 @@ launch authority. A node retaining those heads must complete an explicit,
 reviewed execution-history recovery cut before the new generation can admit
 fresh execution. Retained CAS bytes can remain archival evidence; they do not
 become current qualification or consumer permission.
+
+The source-specific declaration change advances qualification launch purpose
+to v2, product qualification evidence to v10 and activated-content evidence
+to v2. Predecessor evidence is not reinterpreted under these decoders. Even
+when its subject bytes are unchanged, a product needed by the current release
+consumer must be requalified under the final installed generation; the A/B
+static-input qualifications remain evidence of their earlier verifier runs,
+not current four-slot `native-build` or `core-seed-build` permission.
 
 Dispatch-effect replay also moves to operational epoch 12 for the schema-31
 contract. Its supported explicit reset retires predecessor dispatch-effect
