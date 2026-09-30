@@ -640,7 +640,36 @@ fn run_authenticated_connector(
             capability,
         )?;
         stage = "exact_process_identity";
-        let peer_identity = peer.exact_process_identity(None)?;
+        let allocation = state
+            .state_store
+            .external_allocation(placement)?
+            .context("external connector lost its retained allocation")?;
+        let peer_identity = if matches!(
+            allocation.reservation.owner,
+            crate::runtime_db::external_execution::ExternalAllocationOwner::QualificationCandidate(
+                _
+            )
+        ) {
+            let worker = state
+                .state_store
+                .qualification_worker_process(placement)?
+                .context("qualification connector has no attached local Worker")?;
+            ensure!(
+                worker.phase
+                    == crate::runtime_db::external_execution::QualificationWorkerProcessPhase::Attached
+                    && worker.channel_binding_digest
+                        == state.state_store.external_execution_channel(placement)?.digest()?,
+                "qualification connector changed its attached Worker or channel"
+            );
+            let scope = worker
+                .process_identity
+                .process_scope
+                .as_ref()
+                .context("qualification connector Worker has no retained execution scope")?;
+            peer.require_process_scope_membership(scope)?
+        } else {
+            peer.exact_process_identity(None)?
+        };
         stage = "durable_connection";
         ensure!(
             state.state_store.connect_external_connector(

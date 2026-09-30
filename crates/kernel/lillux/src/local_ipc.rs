@@ -56,6 +56,35 @@ impl AuthenticatedUnixPeer {
             let _ = expected_group_leader;
             bail!("authenticated exact process identity is unavailable on this OS")
         }
+
+        /// Prove that this kernel-authenticated peer belongs to an already
+        /// journaled whole-execution scope. Reopening the exact scope grants only
+        /// observation here; the retained pidfd fences PID reuse before and after
+        /// the bounded membership read. A child may use a different process group
+        /// from its launcher while remaining in the same execution scope.
+        pub fn require_process_scope_membership(
+            &self,
+            recovery: &crate::ProcessScopeRecovery,
+        ) -> Result<crate::ExactProcessIdentity> {
+            let identity = self.exact_process_identity(None)?;
+            recovery
+                .validate_for_process(&identity)
+                .map_err(anyhow::Error::msg)?;
+            let timeout = recovery.control_timeout();
+            recovery
+                .recover(timeout)
+                .map_err(anyhow::Error::msg)?
+                .require_held_member(
+                    u32::try_from(self.pid).context("authenticated peer PID is outside range")?,
+                    timeout,
+                )
+                .map_err(anyhow::Error::msg)?;
+            ensure!(
+                !self.has_exited()? && self.exact_process_identity(None)? == identity,
+                "authenticated peer changed during exact process-scope membership observation"
+            );
+            Ok(identity)
+        }
     }
     /// Diagnostic executable-name guard on an already-pinned peer. This is
     /// not content authentication (use executable_digest_exact for that).

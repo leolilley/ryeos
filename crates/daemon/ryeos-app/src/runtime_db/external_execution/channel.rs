@@ -555,15 +555,24 @@ impl RuntimeDb {
         );
         let connector = connector::read_connector(&tx, placement)?
             .context("Q completion lost its one-shot local connector")?;
-        let worker_incarnation = worker.process_identity.owner_incarnation_digest()?;
+        let connector_peer = connector
+            .peer_process_identity
+            .as_ref()
+            .context("Q completion connector never authenticated a peer")?;
+        let connector_peer_incarnation = connector_peer
+            .incarnation_digest()
+            .map_err(anyhow::Error::msg)?;
         ensure!(
             connector.channel_binding_digest == binding_digest
                 && connector.phase == connector::ExternalConnectorPhase::Closed
                 && connector.close_reason.as_deref() == Some("completed")
-                && connector.connected_at_ms.is_some()
+                && connector
+                    .connected_at_ms
+                    .is_some_and(|connected| { connected >= worker.attached_at_ms })
                 && connector.peer_process_identity_digest.as_deref()
-                    == Some(worker_incarnation.as_str()),
-            "Q completion has no normally retired connector for its exact local Worker"
+                    == Some(connector_peer_incarnation.as_str())
+                && connector_peer.boot_id == worker.process_identity.boot_id,
+            "Q completion has no normally retired scoped connector peer"
         );
         for kind in ["runtime_applied", "protocol_eof"] {
             let count: i64 = tx.query_row(
@@ -631,7 +640,7 @@ impl RuntimeDb {
                 "qualification_occurrence_id": worker.qualification_occurrence_id,
                 "local_process_identity": worker.process_identity,
                 "local_process_terminal_at_ms": worker.terminal_at_ms,
-                "local_connector_peer_incarnation": worker_incarnation,
+                "local_connector_peer_incarnation": connector_peer_incarnation,
                 "runtime_applied_frame_digest": runtime.digest(),
                 "protocol_eof_frame_digest": protocol_eof.digest(),
             }))?;
