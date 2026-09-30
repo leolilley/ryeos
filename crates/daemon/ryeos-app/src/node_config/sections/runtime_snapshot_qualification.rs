@@ -6,8 +6,12 @@
 //! runtime or authorize Worker allocation on its own.
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::restored_runtime_measurement::{
+    ConsumerRuntimeVerificationCoordinate, ConsumerRuntimeVerifierSelection,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::node_config::{
     CompiledNodeConfigItem, NodeConfigSection, NodeConfigSourceScope, NodeItemContext,
@@ -29,6 +33,7 @@ struct QualificationDocument {
     settings_digest: String,
     settings: Value,
     verifier_artifact_hash: String,
+    consumer_verifiers: BTreeMap<String, ConsumerRuntimeVerifierSelection>,
     contact_timeout_seconds: u32,
     maximum_lifetime_seconds: u32,
 }
@@ -37,10 +42,25 @@ impl QualificationDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
             self.kind == "node"
-                && self.schema == 1
-                && self.protocol == "ryeos.runtime-snapshot-qualification.v1",
+                && self.schema == 2
+                && self.protocol == "ryeos.runtime-snapshot-qualification.v2",
             "unsupported runtime snapshot qualification binding"
         );
+        ensure!(
+            self.consumer_verifiers.len() <= 8,
+            "snapshot qualification consumer verifier inventory exceeds bound"
+        );
+        for (scenario, selection) in &self.consumer_verifiers {
+            ensure!(
+                !scenario.is_empty()
+                    && scenario.len() <= 128
+                    && scenario
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+                "consumer verifier scenario is invalid"
+            );
+            selection.validate()?;
+        }
         ensure!(
             !self.production_binding_id.is_empty()
                 && self.production_binding_id.len() <= 256
@@ -84,6 +104,18 @@ pub struct InstalledRuntimeSnapshotQualificationBinding {
 }
 
 impl InstalledRuntimeSnapshotQualificationBinding {
+    pub(crate) fn consumer_verifier(
+        &self,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<&ConsumerRuntimeVerifierSelection> {
+        let selection = self
+            .document
+            .consumer_verifiers
+            .get(&coordinate.scenario_id)
+            .context("signed qualification profile has no selected consumer verifier")?;
+        selection.validate_coordinate(coordinate)?;
+        Ok(selection)
+    }
     pub(crate) fn id(&self) -> &str {
         &self.id
     }
@@ -184,8 +216,8 @@ mod tests {
         let settings = serde_json::json!({"schema":1,"owner_id":"owner-1"});
         QualificationDocument {
             kind: "node".into(),
-            schema: 1,
-            protocol: "ryeos.runtime-snapshot-qualification.v1".into(),
+            schema: 2,
+            protocol: "ryeos.runtime-snapshot-qualification.v2".into(),
             production_binding_id: "render-source".into(),
             production_binding_digest: "1".repeat(64),
             provider_spec_digest: "2".repeat(64),
@@ -194,6 +226,7 @@ mod tests {
             ),
             settings,
             verifier_artifact_hash: "3".repeat(64),
+            consumer_verifiers: BTreeMap::new(),
             contact_timeout_seconds: 60,
             maximum_lifetime_seconds: 900,
         }
@@ -211,5 +244,43 @@ mod tests {
         changed = document();
         changed.maximum_lifetime_seconds = 3601;
         assert!(changed.validate().is_err());
+    }
+
+    #[test]
+    fn consumer_selection_is_explicit_bounded_and_distinct_from_owner_artifact() {
+        let mut selected = document();
+        selected.consumer_verifiers.insert(
+            "routed-consumer".into(),
+            ConsumerRuntimeVerifierSelection {
+                scenario_source_digest: "4".repeat(64),
+                verifier_artifact_hash: "5".repeat(64),
+            },
+        );
+        selected.validate().unwrap();
+        assert_ne!(
+            selected.consumer_verifiers["routed-consumer"].verifier_artifact_hash,
+            selected.verifier_artifact_hash
+        );
+        selected
+            .consumer_verifiers
+            .get_mut("routed-consumer")
+            .unwrap()
+            .verifier_artifact_hash
+            .clear();
+        assert!(selected.validate().is_err());
+        let mut oversized = document();
+        for index in 0..9 {
+            oversized.consumer_verifiers.insert(
+                format!("scenario-{index}"),
+                ConsumerRuntimeVerifierSelection {
+                    scenario_source_digest: "4".repeat(64),
+                    verifier_artifact_hash: "5".repeat(64),
+                },
+            );
+        }
+        assert!(oversized.validate().is_err());
+        let mut absent = serde_json::to_value(document()).unwrap();
+        absent.as_object_mut().unwrap().remove("consumer_verifiers");
+        assert!(serde_json::from_value::<QualificationDocument>(absent).is_err());
     }
 }

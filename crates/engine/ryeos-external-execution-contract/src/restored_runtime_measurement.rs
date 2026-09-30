@@ -45,6 +45,36 @@ pub struct ConsumerRuntimeVerificationCoordinate {
     pub prerequisite_measurement_observation_digest: String,
 }
 
+/// Protected selection for a consumer-verifier artifact, distinct from the
+/// prerequisite owner-measurement artifact. The artifact must still be
+/// resolved and sealed by the installed runtime owner before contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerRuntimeVerifierSelection {
+    pub scenario_source_digest: String,
+    pub verifier_artifact_hash: String,
+}
+
+impl ConsumerRuntimeVerifierSelection {
+    pub fn validate(&self) -> Result<()> {
+        require_hash(&self.scenario_source_digest, "consumer scenario source")?;
+        require_hash(&self.verifier_artifact_hash, "consumer verifier artifact")
+    }
+
+    pub fn validate_coordinate(
+        &self,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<()> {
+        self.validate()?;
+        coordinate.validate()?;
+        ensure!(
+            self.scenario_source_digest == coordinate.scenario_source_digest,
+            "consumer verifier selection differs from accepted scenario source"
+        );
+        Ok(())
+    }
+}
+
 impl ConsumerRuntimeVerificationCoordinate {
     pub fn validate(&self) -> Result<()> {
         ensure!(
@@ -520,6 +550,17 @@ mod tests {
             prerequisite_measurement_observation_digest: "1".repeat(64),
         };
         let original = coordinate.digest().unwrap();
+        let selection = super::ConsumerRuntimeVerifierSelection {
+            scenario_source_digest: coordinate.scenario_source_digest.clone(),
+            verifier_artifact_hash: "3".repeat(64),
+        };
+        selection.validate_coordinate(&coordinate).unwrap();
+        let mut mismatched = selection.clone();
+        mismatched.scenario_source_digest = "4".repeat(64);
+        assert!(mismatched.validate_coordinate(&coordinate).is_err());
+        mismatched = selection;
+        mismatched.verifier_artifact_hash.clear();
+        assert!(mismatched.validate().is_err());
         let value = serde_json::to_value(&coordinate).unwrap();
         for field in [
             "accepted_capsule_hash",
