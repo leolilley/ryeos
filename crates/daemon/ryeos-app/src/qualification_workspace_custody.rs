@@ -114,6 +114,14 @@ pub struct QualificationWorkspaceCustody {
     coordinate: QualificationWorkspaceCustodyCoordinate,
     workspace: Arc<TempDirGuard>,
     state_root: lillux::PinnedDirectory,
+    /// A Create view that could not be installed remains held in this daemon.
+    /// It cannot qualify or be closed by a path-based replacement owner.
+    uninstalled_views: Mutex<
+        Vec<(
+            ryeos_engine::isolation::WorkspaceLifecycleEvidence,
+            ryeos_engine::isolation::CreatedWorkspaceView,
+        )>,
+    >,
 }
 
 impl QualificationWorkspaceCustody {
@@ -127,6 +135,17 @@ impl QualificationWorkspaceCustody {
 
     pub fn state_root(&self) -> &lillux::PinnedDirectory {
         &self.state_root
+    }
+
+    pub fn retain_uninstalled_view(
+        &self,
+        evidence: ryeos_engine::isolation::WorkspaceLifecycleEvidence,
+        authority: ryeos_engine::isolation::CreatedWorkspaceView,
+    ) {
+        self.uninstalled_views
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((evidence, authority));
     }
 }
 
@@ -176,6 +195,7 @@ impl QualificationWorkspaceCustodyRegistry {
             coordinate,
             workspace,
             state_root: pinned_state_root,
+            uninstalled_views: Mutex::new(Vec::new()),
         });
         let mut entries = self
             .entries

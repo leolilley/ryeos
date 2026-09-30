@@ -199,22 +199,46 @@ impl TempDirGuard {
         evidence: &ryeos_engine::isolation::WorkspaceLifecycleEvidence,
         authority: ryeos_engine::isolation::CreatedWorkspaceView,
     ) -> anyhow::Result<()> {
+        self.install_workspace_view_retaining_authority(evidence, authority)
+            .map_err(|(_, error)| error)
+    }
+
+    /// Q custody must retain the backend's original descriptor if installing
+    /// its Create view fails. Return the authority on every refusal so the
+    /// caller can quarantine it beside the original workspace owner.
+    pub fn install_workspace_view_retaining_authority(
+        &self,
+        evidence: &ryeos_engine::isolation::WorkspaceLifecycleEvidence,
+        authority: ryeos_engine::isolation::CreatedWorkspaceView,
+    ) -> std::result::Result<(), (ryeos_engine::isolation::CreatedWorkspaceView, anyhow::Error)>
+    {
         if evidence.operation != ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create {
-            anyhow::bail!("only Create may install a workspace view");
+            return Err((
+                authority,
+                anyhow::anyhow!("only Create may install a workspace view"),
+            ));
         }
-        let path = self
-            .path()
-            .ok_or_else(|| anyhow::anyhow!("workspace is disarmed"))?;
+        let Some(path) = self.path() else {
+            return Err((authority, anyhow::anyhow!("workspace is disarmed")));
+        };
         if path.file_name().and_then(|name| name.to_str()) != Some(&evidence.workspace_id) {
-            anyhow::bail!("created view belongs to another workspace");
+            return Err((
+                authority,
+                anyhow::anyhow!("created view belongs to another workspace"),
+            ));
         }
-        let view_identity = evidence
-            .mount_identity
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("created workspace has no view identity"))?;
+        let Some(view_identity) = evidence.mount_identity.as_ref() else {
+            return Err((
+                authority,
+                anyhow::anyhow!("created workspace has no view identity"),
+            ));
+        };
         let mut slot = self.workspace_view.lock().unwrap();
         if !matches!(*slot, Some(WorkspaceViewSlot::Uncreated)) {
-            anyhow::bail!("workspace view slot is not awaiting its original Create result");
+            return Err((
+                authority,
+                anyhow::anyhow!("workspace view slot is not awaiting its original Create result"),
+            ));
         }
         *slot = Some(WorkspaceViewSlot::Available(OwnedWorkspaceView {
             workspace_id: evidence.workspace_id.clone(),

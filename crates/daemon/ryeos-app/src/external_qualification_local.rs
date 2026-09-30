@@ -11,9 +11,12 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate;
 
 use crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot;
+use crate::qualification_workspace_custody::{
+    QualificationWorkspaceCustody, QualificationWorkspaceCustodyCoordinate,
+};
 use crate::runtime_db::external_execution::{
     ExternalAllocationOwner, ExternalAllocationPhase, QualificationLocalStartPhase,
-    QualificationLocalStartRecord,
+    QualificationLocalStartRecord, QualificationWorkerProcessPhase,
 };
 use crate::state::AppState;
 use crate::temp_dir_guard::TempDirGuard;
@@ -126,12 +129,30 @@ impl QualificationLocalOwner<'_> {
         Ok(current)
     }
 
+    fn require_original_workspace_custody(
+        &self,
+        record: &QualificationLocalStartRecord,
+        guard: &Arc<TempDirGuard>,
+    ) -> Result<Arc<QualificationWorkspaceCustody>> {
+        let coordinate = QualificationWorkspaceCustodyCoordinate::from_start(record)?;
+        let custody = self
+            .state
+            .qualification_workspace_custody
+            .borrow_exact(&coordinate)?;
+        ensure!(
+            Arc::ptr_eq(custody.workspace(), guard),
+            "Q original workspace guard changed after custody registration"
+        );
+        Ok(custody)
+    }
+
     /// Create and retain the original runtime workspace only after its Q
     /// coordinate is durable. Even a failed later checkout leaves the exact
     /// directory for explicit cleanup instead of dropping it implicitly.
     pub fn create_original_workspace_root(
         &self,
         record: &QualificationLocalStartRecord,
+        state_root: &lillux::PinnedDirectory,
     ) -> Result<(std::path::PathBuf, Arc<TempDirGuard>)> {
         let current = self.require_original(record)?;
         ensure!(
@@ -147,12 +168,21 @@ impl QualificationLocalOwner<'_> {
             &cache,
             &current.workspace_id,
         )?;
-        guard.preserve_for_explicit_cleanup();
         ensure!(
             guard.path().as_deref() == Some(Path::new(&current.workspace_root))
-                && guard.owns_effective_path(&project),
+                && guard.owns_effective_path(&project)
+                && state_root.path() == Path::new(&current.state_root),
             "Q runtime workspace differs from its reserved original"
         );
+        // The daemon keeps the original view and state-root descriptors from
+        // this point onward. Every later start error can leave a durable
+        // cleanup fence without losing its physical close owner.
+        self.state.qualification_workspace_custody.insert_exact(
+            &current,
+            Arc::clone(&guard),
+            state_root,
+        )?;
+        guard.preserve_for_explicit_cleanup();
         Ok((project, guard))
     }
 
@@ -189,11 +219,12 @@ impl QualificationLocalOwner<'_> {
     pub fn create_original_workspace(
         &self,
         record: &QualificationLocalStartRecord,
-        guard: &TempDirGuard,
+        guard: &Arc<TempDirGuard>,
         project_path: &Path,
         materialization: &ryeos_state::PinnedProjectMaterialization,
     ) -> Result<QualificationLocalStartRecord> {
         let current = self.require_original(record)?;
+        let custody = self.require_original_workspace_custody(&current, guard)?;
         ensure!(
             current.phase == QualificationLocalStartPhase::Reserved
                 && guard.path().as_deref() == Some(Path::new(&current.workspace_root))
@@ -238,12 +269,15 @@ impl QualificationLocalOwner<'_> {
                 },
             )
             .map_err(|error| anyhow!("create Q original workspace: {error}"))?;
-        guard.install_workspace_view(
-            &created.evidence,
-            created
-                .created_view
-                .context("Q workspace Create omitted its original view")?,
-        )?;
+        let view = created
+            .created_view
+            .context("Q workspace Create omitted its original view")?;
+        if let Err((view, error)) =
+            guard.install_workspace_view_retaining_authority(&created.evidence, view)
+        {
+            custody.retain_uninstalled_view(created.evidence, view);
+            return Err(error.context("Q workspace Create view was retained for cleanup"));
+        }
         self.state
             .state_store
             .complete_qualification_workspace_create(self.placement, &created.evidence, guard)
@@ -294,9 +328,10 @@ impl QualificationLocalOwner<'_> {
     pub fn borrow_workspace_view(
         &self,
         record: &QualificationLocalStartRecord,
-        guard: &TempDirGuard,
+        guard: &Arc<TempDirGuard>,
     ) -> Result<lillux::InheritedDescriptorAuthority> {
         let current = self.require_original(record)?;
+        self.require_original_workspace_custody(&current, guard)?;
         ensure!(
             current.phase == QualificationLocalStartPhase::ScopeBound
                 && current.view_borrow_intent.is_none()
@@ -377,6 +412,42 @@ pub fn settle_qualification_worker_process(state: &AppState, placement: &str) ->
     state
         .state_store
         .settle_qualification_worker_process(placement)?;
+    Ok(())
+}
+
+/// A second process-local retirement observation can verify the already
+/// settled Q row without replaying its one-use terminal transition. This is
+/// only an exact death read; it confers no native or qualification claim.
+pub fn ensure_qualification_worker_terminal(
+    state: &AppState,
+    placement: &str,
+    expected: &crate::process::ExecutionProcessIdentity,
+) -> Result<()> {
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let process = state
+        .state_store
+        .qualification_worker_process(placement)?
+        .context("Q local Worker has no retained process")?;
+    let start = state
+        .state_store
+        .qualification_local_start(placement)?
+        .context("Q local Worker has no original start")?;
+    let expected_incarnation = expected.owner_incarnation_digest()?;
+    ensure!(
+        process.phase == QualificationWorkerProcessPhase::Terminal
+            && process.process_identity == *expected
+            && process.placement_thread_id == placement
+            && process.accepted_root_id == start.accepted_root_id
+            && process.accepted_capsule_hash == start.accepted_capsule_hash
+            && process.qualification_operation_id == start.qualification_operation_id
+            && process.qualification_occurrence_id == start.qualification_occurrence_id
+            && process.channel_binding_digest == start.channel_binding_digest
+            && process.daemon_generation_id == start.daemon_generation_id
+            && start.worker_incarnation_digest.as_deref() == Some(expected_incarnation.as_str()),
+        "Q local Worker terminal row changed its exact original process"
+    );
     Ok(())
 }
 
