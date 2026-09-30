@@ -1963,6 +1963,17 @@ pub(crate) fn preflight_external_qualification_program(
     binding.retained_generation()
 }
 
+/// An early offline check for callers that have authenticated the accepted
+/// root but have not yet materialized its guest descriptors. Reservation must
+/// repeat this check against the then-current signed binding.
+pub fn preflight_external_qualification_guest(
+    state: &AppState,
+    root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+) -> Result<()> {
+    preflight_external_qualification_program(state, root.program(), root.purpose())?;
+    Ok(())
+}
+
 /// Resolve one explicitly content-backed requirement against uniquely matching
 /// signed placement configuration. No credential access or provider operation.
 pub fn prepare_content_candidate_program(
@@ -3423,6 +3434,413 @@ impl<'a> ExternalPlacementOwner<'a> {
             record,
         })
     }
+}
+
+/// One process-local qualification startup owner. The accepted root and its
+/// original descriptor lifelines remain together after the durable reservation.
+/// This value has no provider-contact method yet: first contact must freshly
+/// authenticate the root, signed generation, exact program and live occurrence
+/// before using StateStore's Q-specific contact claim.
+pub struct ExternalQualificationStart<'a> {
+    state: &'a AppState,
+    context: crate::handler_context::HandlerContext,
+    coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: String,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    placement: String,
+    deadline: lillux::time::MonotonicDeadline,
+    root: crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+    guest_inputs: Option<ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
+    failed: bool,
+}
+
+impl ExternalQualificationStart<'_> {
+    pub fn placement(&self) -> &str {
+        &self.placement
+    }
+
+    pub fn deadline(&self) -> lillux::time::MonotonicDeadline {
+        self.deadline
+    }
+}
+
+/// Reserve one fresh qualification-only allocation. The caller passes the
+/// original input lifelines; all admission and placement authority is
+/// reconstructed from the accepted root, current signed Bundle generation,
+/// installed node binding and StateStore's occurrence/owner proof. No provider
+/// contact, channel attachment or activation occurs here.
+pub fn prepare_external_qualification_start<'a>(
+    state: &'a AppState,
+    context: &crate::handler_context::HandlerContext,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    root: crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+    guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+) -> Result<ExternalQualificationStart<'a>> {
+    let refreshed = crate::operator_external_content::product_qualification::prepare_external_qualification_root(
+        state,
+        context,
+        coordinate,
+        qualification_operation_id,
+        limits,
+    )?;
+    ensure!(
+        refreshed.capsule() == root.capsule()
+            && refreshed.purpose() == root.purpose()
+            && refreshed.program() == root.program(),
+        "external qualification start changed its authenticated accepted root"
+    );
+    let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+        coordinate,
+        qualification_operation_id,
+    )?;
+    ensure!(
+        state.state_store.external_allocation(&placement)?.is_none(),
+        "external qualification startup already exists; recover its original allocation"
+    );
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let snapshot_hash = validate_qualification_guest_input_authority(state, &root, &guest_inputs)?;
+    let binding = preflight_external_qualification_program(state, root.program(), root.purpose())?;
+    let contract = binding.backend_contract();
+    let qualified = state
+        .state_store
+        .snapshot_qualification_operation(qualification_operation_id)?
+        .context("external qualification start lost its restored operation")?;
+    ensure!(
+        qualified.phase
+            == crate::runtime_db::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound
+            && qualified.intent.owner_principal == context.fingerprint,
+        "external qualification start has no operator-owned bound occurrence"
+    );
+    let occurrence = qualified
+        .occurrence
+        .context("external qualification start has no bound occurrence")?;
+    let owner = ExternalAllocationOwner::QualificationCandidate(
+        crate::runtime_db::external_execution::ExternalQualificationCandidateOwner {
+            coordinate: coordinate.clone(),
+            qualification_operation_id: qualification_operation_id.to_owned(),
+            qualification_occurrence: occurrence,
+            operator_principal: context.fingerprint.clone(),
+            program: root.program().clone(),
+        },
+    );
+    let authority_generation = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "domain": "ryeos.external-qualification-channel-authority.v1",
+        "placement_thread_id": &placement,
+        "admitted_capsule_hash": &coordinate.accepted_capsule_hash,
+        "base_snapshot_hash": &snapshot_hash,
+        "binding_hash": binding.digest(),
+        "program": root.program(),
+    }))?;
+    let access = ExternalChannelAuthorityAccess::new(&authority_generation)?;
+    let channel_authority =
+        access.decode(state.vault.ensure_external_channel_authority(&access)?)?;
+    let request_digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "domain": "ryeos.external-qualification-placement-request.v1",
+        "placement_thread_id": &placement,
+        "admitted_capsule_hash": &coordinate.accepted_capsule_hash,
+        "base_snapshot_hash": &snapshot_hash,
+        "binding_hash": binding.digest(),
+        "capacity_owner": binding.capacity_owner(),
+        "owner": &owner,
+        "backend_contract": &contract,
+        "channel_authority_generation": &authority_generation,
+        "channel_owner_public_key": channel_authority.owner_public_key(),
+        "channel_bootstrap_capability_hash": channel_authority.bootstrap_capability_hash(),
+    }))?;
+    let startup_budget_ms = u64::from(contract.contact_timeout_seconds)
+        .checked_add(u64::from(contract.observation_timeout_seconds))
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .context("external qualification startup budget overflow")?;
+    ensure!(
+        (1..=600_000).contains(&startup_budget_ms),
+        "external qualification startup exceeds the reservation budget"
+    );
+    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    let reservation = ExternalAllocationReservation {
+        schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
+        placement_thread_id: placement.clone(),
+        admitted_capsule_hash: coordinate.accepted_capsule_hash.clone(),
+        owner,
+        base_snapshot_hash: snapshot_hash,
+        binding_hash: binding.digest().to_owned(),
+        capacity_owner: binding.capacity_owner().to_owned(),
+        channel_authority_generation: authority_generation,
+        channel_owner_public_key: channel_authority.owner_public_key(),
+        channel_bootstrap_capability_hash: channel_authority.bootstrap_capability_hash(),
+        request_digest,
+        max_active: contract.max_active,
+        timeout_seconds: contract.timeout_seconds,
+        contact_deadline_ms: now
+            .checked_add(i64::from(contract.contact_timeout_seconds) * 1_000)
+            .context("external qualification contact deadline overflow")?,
+        startup_started_at_ms: now,
+        startup_deadline_ms: now
+            .checked_add(i64::try_from(startup_budget_ms)?)
+            .context("external qualification startup deadline overflow")?,
+    };
+    let program =
+        AdmittedExternalExecutionProgram::QualificationStructuredSession(root.program().clone());
+    validate_external_placement_program(&program, &reservation, &contract)?;
+    reservation.validate()?;
+    let deadline = reservation.startup_deadline()?;
+    let admission = {
+        let authority = state.state_store.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let admitted =
+            crate::operator_external_content::product_qualification::authenticate_consumer_root(
+                state,
+                &authority,
+                &guard,
+                limits,
+                context,
+                coordinate,
+                qualification_operation_id,
+            )?;
+        ensure!(
+            admitted.purpose() == root.purpose()
+                && admitted.accepted_project_authority() == &root.capsule().project_authority,
+            "external qualification reservation changed its accepted owner"
+        );
+        authority.ensure_guard(&guard)?;
+        admitted
+    };
+    state
+        .state_store
+        .reserve_external_qualification_allocation(state, &reservation, &binding, admission)?;
+    Ok(ExternalQualificationStart {
+        state,
+        context: (*context).clone(),
+        coordinate: coordinate.clone(),
+        qualification_operation_id: qualification_operation_id.to_owned(),
+        limits,
+        placement,
+        deadline,
+        root,
+        guest_inputs: Some(guest_inputs),
+        failed: false,
+    })
+}
+
+fn validate_qualification_guest_input_authority(
+    state: &AppState,
+    root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+    inputs: &ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+) -> Result<String> {
+    use ryeos_external_execution_contract::{
+        GuestMountAccess, GuestMountContentAuthority, GuestMountKind, GuestMountRole,
+    };
+    use ryeos_state::objects::{
+        EnvironmentAuthority, ExecutionProjectAuthority, ExternalContentKind,
+        ExternalContentRealizationSet, PinnedProjectRealization, SessionProcessEnvironmentValue,
+    };
+    let ExecutionProjectAuthority::PinnedGeneration {
+        snapshot_hash,
+        realization: PinnedProjectRealization::ReadOnly,
+        workspace_outputs: None,
+        environment: EnvironmentAuthority::None,
+        ..
+    } = &root.capsule().project_authority
+    else {
+        bail!("external qualification guest requires its output-free pinned root");
+    };
+    let content = root
+        .purpose()
+        .consumer_content
+        .as_ref()
+        .context("external qualification guest has no accepted Worker content")?;
+    let projection = inputs.projection();
+    root.program().validate_guest_inputs(projection)?;
+    ensure!(
+        projection.base_snapshot.snapshot_hash.as_str() == snapshot_hash.as_str()
+            && projection.workspace_outputs.is_none(),
+        "external qualification guest changed its accepted base snapshot"
+    );
+    let realizations = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .chain(content.environment_realizations.iter())
+            .chain(std::iter::once(&content.runtime_realization))
+            .cloned()
+            .collect(),
+    )?;
+    let destinations = ryeos_state::external_execution::admission::ExternalCandidateGuestEnvironment::expected_destinations(
+        &root.program().requirement,
+        &realizations,
+    )?;
+    let logical =
+        ryeos_state::external_execution::admission::ExternalCandidateGuestEnvironment::derive(
+            &root.program().requirement.runtime_recipe,
+            &content.process_environment,
+            &content.executable_search,
+            &destinations,
+        )?;
+    ensure!(
+        projection.environment == logical.environment
+            && projection.executable_search == logical.executable_search,
+        "external qualification guest changed its accepted environment"
+    );
+    let mut products = realizations
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut scratch = content
+        .process_environment
+        .iter()
+        .filter_map(|(name, value)| match value {
+            SessionProcessEnvironmentValue::RuntimeViewDirectory { relative_path } => {
+                Some((name.as_str(), relative_path.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let cas = authority.cas_store()?;
+    for input in &projection.inputs {
+        match input.role {
+            GuestMountRole::Product => {
+                let entry = products
+                    .remove(input.authority_id.as_str())
+                    .context("external qualification guest added an unaccepted product")?;
+                let (manifest_kind, normalized_mode) =
+                    qualification_product_record_identity(&cas, entry)?;
+                ensure!(
+                    destinations.get(&entry.id) == Some(&input.destination)
+                        && input.access == GuestMountAccess::ReadOnly
+                        && input.bytes == entry.total_bytes
+                        && input.normalized_mode == normalized_mode
+                        && matches!(
+                            (entry.kind, input.kind),
+                            (ExternalContentKind::Tree, GuestMountKind::Directory)
+                                | (ExternalContentKind::File, GuestMountKind::RegularFile)
+                        )
+                        && matches!(
+                            &input.content_authority,
+                            GuestMountContentAuthority::ProductManifest {
+                                manifest_kind: supplied_kind,
+                                manifest_hash,
+                                ..
+                            } if *supplied_kind == manifest_kind
+                                && manifest_hash == &entry.manifest_hash
+                        ),
+                    "external qualification guest changed an accepted product mount"
+                );
+            }
+            GuestMountRole::PrivateScratch => {
+                let name = input
+                    .authority_id
+                    .strip_prefix("scratch-")
+                    .context("external qualification guest changed its scratch identity")?;
+                let relative_path = scratch
+                    .remove(name)
+                    .context("external qualification guest added unaccepted scratch")?;
+                let mut relative = std::path::PathBuf::from("scratch");
+                if relative_path != "." {
+                    relative.push(relative_path);
+                }
+                let expected_hash =
+                    ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+                        "domain": "ryeos.qualification-guest-private-scratch.v1",
+                        "purpose": root.program().qualification_purpose_digest,
+                        "snapshot": snapshot_hash,
+                        "environment_name": name,
+                        "relative_path": relative,
+                    }))?;
+                let expected_destination =
+                    ryeos_state::objects::runtime_view_mount_destination(name)?;
+                ensure!(
+                    input.destination
+                        == expected_destination
+                            .to_str()
+                            .context("external qualification scratch destination is not UTF-8")?
+                        && input.kind == GuestMountKind::Directory
+                        && input.access == GuestMountAccess::PrivateWritable
+                        && input.normalized_mode.is_none()
+                        && input.bytes == 0
+                        && matches!(
+                            &input.content_authority,
+                            GuestMountContentAuthority::PrivateScratch { binding_hash }
+                                if binding_hash == &expected_hash
+                        ),
+                    "external qualification guest changed accepted private scratch"
+                );
+            }
+            _ => bail!("external qualification guest added non-product authority"),
+        }
+    }
+    ensure!(
+        products.is_empty() && scratch.is_empty(),
+        "external qualification guest omitted accepted input authority"
+    );
+    authority.ensure_guard(&guard)?;
+    Ok(snapshot_hash.clone())
+}
+
+fn qualification_product_record_identity(
+    cas: &lillux::CasStore,
+    entry: &ryeos_state::objects::ExternalContentRealization,
+) -> Result<(
+    ryeos_external_execution_contract::GuestProductManifestKind,
+    Option<u32>,
+)> {
+    use ryeos_external_execution_contract::GuestProductManifestKind;
+    use ryeos_state::objects::{
+        EXTERNAL_CONTENT_MANIFEST_KIND, EXTERNAL_LARGE_CONTENT_MANIFEST_KIND, ExternalContentKind,
+        ExternalContentManifestObject, ExternalLargeContentManifestObject,
+        MAX_LARGE_CONTENT_MANIFEST_BYTES,
+    };
+    let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        cas,
+        &entry.manifest_hash,
+        MAX_LARGE_CONTENT_MANIFEST_BYTES as u64,
+    )?;
+    ensure!(
+        lillux::sha256_hex(lillux::canonical_json(&value)?.as_bytes()) == entry.manifest_hash,
+        "external qualification product record changed its CAS identity"
+    );
+    let (kind, entry_count, total_bytes, file_shaped, file_mode) =
+        match value.get("kind").and_then(serde_json::Value::as_str) {
+            Some(EXTERNAL_CONTENT_MANIFEST_KIND) => {
+                let manifest = ExternalContentManifestObject::from_value(&value)?;
+                (
+                    GuestProductManifestKind::Content,
+                    manifest.entry_count,
+                    manifest.total_bytes,
+                    manifest.is_file_shaped(),
+                    manifest.entries.first().and_then(|file| file.mode),
+                )
+            }
+            Some(EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
+                let manifest = ExternalLargeContentManifestObject::from_value(&value)?;
+                (
+                    GuestProductManifestKind::LargeContent,
+                    manifest.entry_count,
+                    manifest.total_bytes,
+                    manifest.is_file_shaped(),
+                    manifest.entries.first().and_then(|file| file.mode),
+                )
+            }
+            _ => bail!("external qualification product has an unsupported manifest kind"),
+        };
+    ensure!(
+        entry_count == entry.entry_count
+            && total_bytes == entry.total_bytes
+            && (entry.kind != ExternalContentKind::File || file_shaped),
+        "external qualification product record contradicts its accepted realization"
+    );
+    Ok((
+        kind,
+        if entry.kind == ExternalContentKind::File {
+            file_mode
+        } else {
+            None
+        },
+    ))
 }
 
 /// One process-local ordinary startup owner. Descriptor lifelines stay here
