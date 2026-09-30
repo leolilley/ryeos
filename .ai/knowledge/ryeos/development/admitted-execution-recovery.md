@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T03:34:41Z:65b7df7674366d7932a23b245e6744496e2afa997b5db9b1ea9fd02f16fd79f6:hZwaGBYbCm31RNJA6jiehunK86aDlX2P1tVZZMlyt4mW8SnHumQjDjx1I/nze3vtE0ztxjonHR85kDtTm1WiDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T04:33:06Z:3cb499fff044a4afb33d206f86678227543ab89cb24f28502cd584e0f4d8dda5:mmeF3e8KxFYgdWJivRANWO2EdcGXIrrcGfcul4G/Xv4CHcewR7h/o6K5AFMSf1Nm0bxDSerTHznH6vuenIGBAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.11"
+version: "1.1.12"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -161,8 +161,8 @@ the applied runtime and hosted lifecycle joins are complete and tested.
 
 The current qualification purpose is a tagged source: a captured product and
 an activated content subject have different provenance. Sealed-root schema 22
-and admitted capsule schema 31 retain that distinction. The current decoder
-does not reinterpret predecessor schema-21 roots or schema-30 capsules as new
+and admitted capsule schema 32 retain that distinction. The current decoder
+does not reinterpret predecessor schema-21 roots or schema-30/31 capsules as new
 launch authority. A node retaining those heads must complete an explicit,
 reviewed execution-history recovery cut before the new generation can admit
 fresh execution. Retained CAS bytes can remain archival evidence; they do not
@@ -176,10 +176,14 @@ consumer must be requalified under the final installed generation; the A/B
 static-input qualifications remain evidence of their earlier verifier runs,
 not current four-slot `native-build` or `core-seed-build` permission.
 
-Dispatch-effect replay also moves to operational epoch 12 for the schema-31
-contract. Its supported explicit reset retires predecessor dispatch-effect
-rows and preserves independent provider-call rows from the immediate prior
-epoch. This source decision does not reset a node. Recovery must use the exact
+Dispatch-effect replay moves to operational epoch 13 for the schema-32
+contract. Capsule 32 is the strict schema boundary chosen for retained
+remote-verifier inventory; exact source retention and protected contact joins
+remain separate admission requirements. The supported explicit reset retires
+predecessor dispatch-effect rows and preserves independent provider-call
+rows from the immediate prior epoch. It does not reinterpret schema-31
+qualification or launch authority.
+This source decision does not reset a node. Recovery must use the exact
 final binary's guarded dry-run and account for every authority it would retire;
 affected products and consumer proofs require current qualification afterward.
 
