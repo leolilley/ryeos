@@ -98,6 +98,7 @@ pub(crate) struct RelayTransferIntent {
     pub sequence: u32,
     pub direction: RelayDirection,
     pub remote_path: String,
+    pub maximum_file_bytes: u64,
     /// Inbound bytes cannot be known before reading the protected guest file.
     /// The first accepted canonical request pins these fields permanently.
     pub expected_sha256: Option<String>,
@@ -145,6 +146,7 @@ impl RelayTransferIntent {
             bootstrap_digest: bootstrap.digest()?,
             remote_path: format!("{mailbox_root}/{name}"),
             mailbox_root,
+            maximum_file_bytes: relay.maximum_file_bytes,
             kind,
             sequence,
             direction,
@@ -225,12 +227,14 @@ impl RelayTransferIntent {
         if let (Some(digest), Some(bytes)) = (&self.expected_sha256, self.expected_bytes) {
             validate_sha256("external relay upload", digest)?;
             ensure!(
-                (1..=2 * 1024 * 1024).contains(&bytes),
+                (1..=self.maximum_file_bytes).contains(&bytes),
                 "external relay upload exceeds file bound"
             );
         }
         ensure!(
-            self.deadline_ms > 0 && (4..=256 * 1024 * 1024).contains(&self.retention_budget_bytes),
+            self.deadline_ms > 0
+                && (1..=2 * 1024 * 1024).contains(&self.maximum_file_bytes)
+                && (4..=256 * 1024 * 1024).contains(&self.retention_budget_bytes),
             "external relay deadline or retained byte budget is invalid"
         );
         Ok(())
@@ -319,14 +323,14 @@ fn read_transfer(
             if let (Some(digest), Some(bytes)) = (&digest, observed_bytes) {
                 validate_sha256("external relay observation", digest)?;
                 ensure!(
-                    (1..=2 * 1024 * 1024).contains(&bytes),
+                    (1..=intent.maximum_file_bytes).contains(&bytes),
                     "external relay observation exceeds bound"
                 );
             }
             if let Some(bytes) = &canonical_bytes {
                 ensure!(
                     !bytes.is_empty()
-                        && bytes.len() <= 2 * 1024 * 1024
+                        && bytes.len() as u64 <= intent.maximum_file_bytes
                         && lillux::canonical_json(&serde_json::from_slice::<serde_json::Value>(
                             bytes
                         )?)?
@@ -592,7 +596,7 @@ impl RuntimeDb {
     ) -> Result<RelayTransferRecord> {
         intent.validate()?;
         ensure!(
-            !bytes.is_empty() && bytes.len() <= 2 * 1024 * 1024,
+            !bytes.is_empty() && bytes.len() as u64 <= intent.maximum_file_bytes,
             "external relay readback exceeds file bound"
         );
         let value: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -768,6 +772,7 @@ fn require_placement_bootstrap(conn: &Connection, intent: &RelayTransferIntent) 
         ensure!(
             prior.bootstrap_digest == intent.bootstrap_digest
                 && prior.mailbox_root == intent.mailbox_root
+                && prior.maximum_file_bytes == intent.maximum_file_bytes
                 && prior.retention_budget_bytes == intent.retention_budget_bytes,
             "external relay placement changed its sealed mailbox or byte budget"
         );
