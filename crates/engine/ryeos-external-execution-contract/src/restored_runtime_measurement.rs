@@ -222,7 +222,7 @@ impl RestoredVerifierAdapterObservation {
         require_hash(&self.upload_response_sha256, "upload response")?;
         require_hash(&self.run_stream_sha256, "run stream")?;
         self.measurement.validate_content_for_bound_snapshot(
-            &intent.challenge,
+            intent.owner_challenge()?,
             source,
             locator,
             readiness,
@@ -273,11 +273,54 @@ pub struct RestoredVerifierAttemptIntent {
     pub verifier_artifact_hash: String,
     pub upload_sha256: String,
     pub upload_bytes: u64,
-    pub challenge: RestoredOwnerChallenge,
+    pub purpose: RemoteVerificationPurpose,
     pub attempt_deadline_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RemoteVerificationPurpose {
+    OwnerMeasurement {
+        challenge: RestoredOwnerChallenge,
+    },
+    ConsumerRuntime {
+        coordinate: ConsumerRuntimeVerificationCoordinate,
+        nonce_hex: String,
+    },
+}
+
+impl RemoteVerificationPurpose {
+    /// Logical purpose only. Challenge randomness cannot create another
+    /// attempt; the journal compares complete immutable intent separately.
+    fn coordinate_digest(&self) -> Result<String> {
+        let value = match self {
+            Self::OwnerMeasurement { challenge } => {
+                challenge.validate()?;
+                serde_json::json!({"kind": "owner_measurement"})
+            }
+            Self::ConsumerRuntime {
+                coordinate,
+                nonce_hex,
+            } => {
+                coordinate.validate()?;
+                require_hash(nonce_hex, "consumer challenge nonce")?;
+                serde_json::json!({"kind": "consumer_runtime", "coordinate": coordinate})
+            }
+        };
+        Ok(hex::encode(Sha256::digest(canonical_json(&value)?)))
+    }
+}
+
 impl RestoredVerifierAttemptIntent {
+    pub fn owner_challenge(&self) -> Result<&RestoredOwnerChallenge> {
+        match &self.purpose {
+            RemoteVerificationPurpose::OwnerMeasurement { challenge } => Ok(challenge),
+            RemoteVerificationPurpose::ConsumerRuntime { .. } => {
+                anyhow::bail!("consumer verification cannot use owner-measurement contact")
+            }
+        }
+    }
+
     pub fn validate_for(
         &self,
         source: &RuntimeSnapshotIntent,
@@ -287,12 +330,13 @@ impl RestoredVerifierAttemptIntent {
     ) -> Result<()> {
         qualification.validate_for(source, locator)?;
         occurrence.validate_for(qualification)?;
-        self.challenge.validate_for(source, locator)?;
+        let challenge = self.owner_challenge()?;
+        challenge.validate_for(source, locator)?;
         ensure!(
-            self.schema == 1
+            self.schema == 2
                 && self.qualification_operation_id == qualification.operation_id
                 && self.restored_occurrence_id == occurrence.occurrence_id
-                && self.challenge.restored_occurrence_id == occurrence.occurrence_id
+                && challenge.restored_occurrence_id == occurrence.occurrence_id
                 && self.verifier_artifact_hash == qualification.verifier_artifact_hash
                 && !occurrence.contact_deadline_exceeded
                 && self.upload_bytes > 0
@@ -317,10 +361,11 @@ impl RestoredVerifierAttemptIntent {
     /// Reservation replay compares the entire intent, including those fields.
     pub fn derived_operation_id(&self) -> Result<String> {
         let coordinates = (
-            "ryeos.restored-verifier-attempt.v1",
+            "ryeos.restored-verifier-attempt.v2",
             &self.qualification_operation_id,
             &self.restored_occurrence_id,
             &self.verifier_artifact_hash,
+            self.purpose.coordinate_digest()?,
         );
         Ok(hex::encode(Sha256::digest(canonical_json(&coordinates)?)))
     }
@@ -513,25 +558,30 @@ mod tests {
     #[test]
     fn verifier_attempt_identity_cannot_be_reminted_by_nonce_or_deadline() {
         let mut attempt = RestoredVerifierAttemptIntent {
-            schema: 1,
+            schema: 2,
             operation_id: String::new(),
             qualification_operation_id: "1".repeat(64),
             restored_occurrence_id: "sbx-exact".into(),
             verifier_artifact_hash: "2".repeat(64),
             upload_sha256: "3".repeat(64),
             upload_bytes: 1024,
-            challenge: RestoredOwnerChallenge {
-                schema: 1,
-                protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
-                operation_id: "4".repeat(64),
-                snapshot_id: "snp-exact".into(),
-                restored_occurrence_id: "sbx-exact".into(),
-                nonce_hex: "5".repeat(64),
+            purpose: RemoteVerificationPurpose::OwnerMeasurement {
+                challenge: RestoredOwnerChallenge {
+                    schema: 1,
+                    protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
+                    operation_id: "4".repeat(64),
+                    snapshot_id: "snp-exact".into(),
+                    restored_occurrence_id: "sbx-exact".into(),
+                    nonce_hex: "5".repeat(64),
+                },
             },
             attempt_deadline_ms: 42,
         };
         let identity = attempt.derived_operation_id().unwrap();
-        attempt.challenge.nonce_hex = "6".repeat(64);
+        let RemoteVerificationPurpose::OwnerMeasurement { challenge } = &mut attempt.purpose else {
+            unreachable!()
+        };
+        challenge.nonce_hex = "6".repeat(64);
         attempt.attempt_deadline_ms += 1;
         assert_eq!(attempt.derived_operation_id().unwrap(), identity);
         attempt.restored_occurrence_id = "sbx-other".into();
@@ -539,6 +589,37 @@ mod tests {
         attempt.restored_occurrence_id = "sbx-exact".into();
         attempt.upload_sha256 = "7".repeat(64);
         assert_eq!(attempt.derived_operation_id().unwrap(), identity);
+        let coordinate = ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-consumer-root".into(),
+            accepted_capsule_hash: "a".repeat(64),
+            qualification_purpose_digest: "b".repeat(64),
+            scenario_id: "routed-consumer".into(),
+            scenario_source_digest: "c".repeat(64),
+            subject_digest: "d".repeat(64),
+            use_digest: "e".repeat(64),
+            prerequisite_measurement_attempt_id: "f".repeat(64),
+            prerequisite_measurement_observation_digest: "1".repeat(64),
+        };
+        attempt.purpose = RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate,
+            nonce_hex: "2".repeat(64),
+        };
+        let consumer_identity = attempt.derived_operation_id().unwrap();
+        assert_ne!(consumer_identity, identity);
+        assert!(attempt.owner_challenge().is_err());
+        let RemoteVerificationPurpose::ConsumerRuntime { nonce_hex, .. } = &mut attempt.purpose
+        else {
+            unreachable!()
+        };
+        *nonce_hex = "3".repeat(64);
+        assert_eq!(attempt.derived_operation_id().unwrap(), consumer_identity);
+        let RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &mut attempt.purpose
+        else {
+            unreachable!()
+        };
+        coordinate.use_digest = "4".repeat(64);
+        assert_ne!(attempt.derived_operation_id().unwrap(), consumer_identity);
     }
 
     #[test]
