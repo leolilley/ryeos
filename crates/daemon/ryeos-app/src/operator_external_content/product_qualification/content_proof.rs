@@ -61,8 +61,9 @@ pub struct ContentQualificationResponse {
     pub idempotent: bool,
 }
 
-/// Fresh, read-only eligibility for a protected runtime binding. This does not
-/// authorize provider contact or qualify a restored guest-owner snapshot.
+/// Fresh eligibility for a protected runtime binding. Consumer admission may
+/// stage exact CAS inputs; this does not authorize provider contact or qualify
+/// a restored guest-owner snapshot.
 pub(crate) fn load_current_qualified_content(
     state: &AppState,
     context: &HandlerContext,
@@ -137,7 +138,7 @@ pub(crate) fn load_current_qualified_content(
     content.verify_verifier_realizations(&current.realizations, &purpose.subject_declaration_id)?;
     // The current verifier lookup is another checked-generation observation.
     // Rejoin source/policy rather than treating the first preparation as a lock.
-    prepared.require_current(state, context, AcquisitionMode::Offline)?;
+    prepared.require_current_consumer(state, context, AcquisitionMode::Offline, purpose)?;
     Ok(published)
 }
 
@@ -170,7 +171,12 @@ pub async fn qualify(
             AcquisitionMode::Offline,
             &content.realization,
         )?
-        .validate_purpose(&evidence.purpose)?;
+        .require_current_consumer(
+            &state,
+            &context,
+            AcquisitionMode::Offline,
+            &evidence.purpose,
+        )?;
         let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
         let attestation = evidence.sign_attestation(&signer, lillux::time::iso8601_now(), None)?;
         let _permit = state
@@ -282,7 +288,7 @@ fn prove_blocking(
         AcquisitionMode::Offline,
         &content.realization,
     )?;
-    prepared.validate_purpose(purpose)?;
+    prepared.require_current_consumer(state, context, AcquisitionMode::Offline, purpose)?;
     let admitted = sealed.admitted_effective_resolution()?;
     require_reproducible_current_verifier_lane(&admitted.composed.derived, true)?;
     let current = resolve_current_bundle_verifier_identity_against_admitted(

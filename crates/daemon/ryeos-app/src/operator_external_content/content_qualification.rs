@@ -118,6 +118,35 @@ impl PreparedContentQualificationConsumer {
 }
 
 impl PreparedContentQualificationSource {
+    /// Fresh eligibility must rederive the consumer from current signed
+    /// definitions and exact admitted content, then match the sealed purpose.
+    /// This comparison alone does not grant a qualification claim.
+    pub fn require_current_consumer(
+        &self,
+        state: &AppState,
+        operator: &HandlerContext,
+        acquisition_mode: AcquisitionMode,
+        purpose: &QualificationLaunchPurpose,
+    ) -> Result<()> {
+        self.validate_purpose(purpose)?;
+        if self.policy.policy.consumer_execution_context.is_some() {
+            let retained = purpose.consumer_content.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("activated qualification has no retained consumer")
+            })?;
+            let current = PreparedContentQualificationConsumer::prepare(
+                state,
+                operator,
+                self,
+                acquisition_mode,
+            )?;
+            anyhow::ensure!(
+                current.retained_identity()? == *retained,
+                "activated qualification consumer differs from current signed content"
+            );
+        }
+        Ok(())
+    }
+
     /// Compare only after a fresh authenticated preparation. This pure check
     /// binds retained intent to preparation; it cannot authenticate either
     /// value or replace accepted-root/verifier-consumer admission.
