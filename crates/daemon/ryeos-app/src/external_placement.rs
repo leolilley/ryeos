@@ -1500,11 +1500,51 @@ fn require_current_runtime_qualification_for_start(
     Ok(())
 }
 
+/// Acquired session-runtime compatibility does not substitute for the separate
+/// guest-owner snapshot proof. Missing testimony is not an activation permit.
+fn require_current_runtime_content_qualification(
+    state: &AppState,
+    contract: &ExternalPlacementBackendContract,
+) -> Result<()> {
+    let session = match &contract.workload {
+        crate::node_config::sections::external_execution::ExternalWorkloadBinding::StructuredSession(session) => session,
+        crate::node_config::sections::external_execution::ExternalWorkloadBinding::DirectCommand {} => {
+            ensure!(contract.runtime_content_qualification.is_none(),
+                "direct workload cannot inherit structured-session compatibility testimony");
+            return Ok(());
+        }
+    };
+    let selected = contract
+        .runtime_content_qualification
+        .as_ref()
+        .context("external structured session has no qualified runtime content selection")?;
+    let operator = crate::operator_authority::admitted_operator_authority_for_principal(
+        state,
+        &selected.owner_principal,
+    )?;
+    let context = operator.handler_context();
+    let qualified =
+        crate::operator_external_content::content_qualification::load_current_qualified_content(
+            state,
+            &context,
+            &selected.activation_ref,
+            &selected.coordinate_id,
+            &selected.attestation_hash,
+            &session.runtime_manifest_hash,
+        )?;
+    qualified.evidence.result.validate_claims_for(
+        &qualified.evidence.purpose.policy_source.policy,
+        &selected.required_claims,
+    )?;
+    Ok(())
+}
+
 fn admit_current_runtime_qualification(
     state: &AppState,
     contract: &ExternalPlacementBackendContract,
     binding_hash: &str,
 ) -> Result<Option<ryeos_state::objects::RetainedExternalRuntimeQualification>> {
+    require_current_runtime_content_qualification(state, contract)?;
     let Some(qualification) = &contract.runtime_qualification else {
         return Ok(None);
     };

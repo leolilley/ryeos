@@ -517,7 +517,7 @@ while reusing the signed lifecycle profile and transport primitives. Adding a
 fake Worker owner or bypassing current runtime qualification to use that journal
 would create an authority cycle.
 
-Binding schema 14 now carries a required-nullable `runtime_qualification`
+Binding schema 15 carries a required-nullable `runtime_qualification`
 object with the exact attestation hash, product-owner principal, policy ref,
 and required claims. The node Config signer is not assumed to be the product
 owner. A non-null object is only an exact coordinate:
@@ -526,6 +526,17 @@ policy, independent execution evidence, and Render probe can all be joined.
 This is distinct from the Codex candidate-runtime product selection retained
 in the Worker capsule. Cleanup of an already contacted occurrence does not
 reapply this startup gate.
+
+Schema 15 also requires an explicit nullable `runtime_content_qualification`
+slot. This selects acquired structured-session runtime compatibility by exact
+activation ref, publication coordinate/hash, operator owner and finite required
+claims. Its subject is `workload.runtime_manifest_hash`, never the guest-owner
+runtime manifest above. Direct workloads refuse this slot. Fresh structured
+session admission refuses missing testimony and rechecks its owning signed
+head, expiry, current source allowance/policy/recipes and verifier artifact.
+This proof is not routed through the guest-owner snapshot probe. Retaining it
+in the admitted session and authenticating it during historical recovery are
+still open integration gates; this source cut is not installed qualification.
 
 The fresh read-only check now resolves the named owner through its current
 node-signed operator grant, loads the exact published qualification and

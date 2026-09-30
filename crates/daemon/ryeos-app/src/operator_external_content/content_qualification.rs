@@ -23,6 +23,7 @@ use crate::managed_external_content_operation::{
 };
 use crate::{handler_context::HandlerContext, state::AppState};
 
+pub(crate) use super::product_qualification::content_proof::load_current_qualified_content;
 pub use super::product_qualification::content_proof::{
     ContentQualificationProofRequest, ContentQualificationResponse, prove, qualify,
 };
