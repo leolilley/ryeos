@@ -2638,6 +2638,17 @@ pub fn prepare_external_qualification_local_worker_plan(
     state: &crate::state::AppState,
     root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
 ) -> Result<PreparedItemPlan> {
+    with_prepared_external_qualification_local_worker_plan(state, root, Ok)
+}
+
+/// Keep one checked signed Bundle generation through local Q material binding.
+/// The caller may redeem only the accepted root's retained CAS source/products
+/// and publish its profile into an already-owned state root in this window.
+pub fn with_prepared_external_qualification_local_worker_plan<T>(
+    state: &crate::state::AppState,
+    root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+    bind: impl FnOnce(PreparedItemPlan) -> Result<T>,
+) -> Result<T> {
     state.engine.with_checked_bundle_generation(|generation| {
         let resolution = root.current_local_worker_resolution(generation)?;
         let identity = &root
@@ -2777,7 +2788,7 @@ pub fn prepare_external_qualification_local_worker_plan(
             .execution_resources
             .select(plan.target_requirement.as_ref())?;
         require_qualification_no_resources(plan.target_requirement.as_ref(), &selected_resources)?;
-        Ok(PreparedItemPlan {
+        bind(PreparedItemPlan {
             plan,
             timeout_secs,
             root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity::Bundle {

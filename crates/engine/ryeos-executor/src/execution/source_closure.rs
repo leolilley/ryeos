@@ -304,6 +304,29 @@ pub(crate) fn validate_external_mount_separation(
     Ok(())
 }
 
+/// The Q root carries these two accepted projections separately. Check their
+/// exact runtime destinations without constructing a live ResolutionOutput.
+pub(crate) fn validate_retained_qualification_mount_separation(
+    state: &ryeos_app::state::AppState,
+    source: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    realizations: &ryeos_state::objects::ExternalContentRealizationSet,
+) -> anyhow::Result<()> {
+    realizations.validate()?;
+    let authority = super::pinned_state_authority(state)?;
+    let cas = authority.cas_store()?;
+    let (binding, _) = retained_source_records_for_projection(&cas, source)?;
+    let source = SourceMountPlacement::ExecutionRuntime.relative_mount(&binding)?;
+    let source = Path::new(&source);
+    for realization in realizations.iter().filter(|entry| {
+        entry.mount_root == ryeos_state::objects::ExternalContentMountRoot::ExecutionRuntime
+    }) {
+        if mount_destinations_overlap(source, Path::new(&realization.mount)) {
+            anyhow::bail!("qualification Worker source and realization destinations overlap");
+        }
+    }
+    Ok(())
+}
+
 fn mount_destinations_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
