@@ -2750,6 +2750,73 @@ impl<'a> ExternalPlacementOwner<'a> {
         Self { state }
     }
 
+    /// Reopen only the retained Q allocation and its exact signed binding for
+    /// this process-local start owner. This cannot reserve or claim contact;
+    /// the caller supplies a fresh accepted-root proof to the Q-specific claim.
+    fn prepare_retained_qualification_for_start(
+        &self,
+        placement: &str,
+    ) -> Result<PreparedExternalPlacement> {
+        let controller_lifetime = Arc::clone(&self.state.controller_lifetime);
+        controller_lifetime.ensure_protects_app_root(&self.state.config.app_root)?;
+        let record = self
+            .state
+            .state_store
+            .external_allocation(placement)?
+            .context("external qualification start lost its retained allocation")?;
+        ensure!(
+            matches!(
+                &record.reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(_)
+            ),
+            "external qualification start cannot reopen another allocation owner"
+        );
+        let binding = self
+            .state
+            .state_store
+            .retained_external_binding(&record.reservation.binding_hash)?
+            .context("external qualification start lost its retained binding")?;
+        let program = retained_external_channel_program(self.state, &record.reservation, &binding)?;
+        let contract = binding.backend_contract();
+        record
+            .reservation
+            .validate_startup_budget(qualification_startup_budget_ms(&contract)?)?;
+        let access = binding.credential_access()?;
+        let credential = access.decode(self.state.vault.placement_credential(&access)?)?;
+        let backend =
+            self.state
+                .external_placement_backends
+                .qualify(&contract, &credential, &program)?;
+        let authority_access =
+            ExternalChannelAuthorityAccess::new(&record.reservation.channel_authority_generation)?;
+        let channel_authority = authority_access.decode(
+            self.state
+                .vault
+                .external_channel_authority(&authority_access)?,
+        )?;
+        ensure!(
+            channel_authority.owner_public_key() == record.reservation.channel_owner_public_key
+                && channel_authority.bootstrap_capability_hash()
+                    == record.reservation.channel_bootstrap_capability_hash,
+            "external qualification start changed its retained channel authority"
+        );
+        Ok(PreparedExternalPlacement {
+            state_store: self.state.state_store.clone(),
+            backend,
+            contract,
+            credential,
+            contact_gate: self
+                .state
+                .external_placement_backends
+                .contact_gate(placement)?,
+            controller_lifetime,
+            channel_authority,
+            program,
+            guest_inputs: None,
+            record,
+        })
+    }
+
     /// Recover only the original qualification candidate's observation or
     /// cleanup obligation. This path cannot create the first provider contact;
     /// that requires the accepted-root proof and the Q-specific journal CAS.
@@ -3436,11 +3503,23 @@ impl<'a> ExternalPlacementOwner<'a> {
     }
 }
 
+fn qualification_startup_budget_ms(contract: &ExternalPlacementBackendContract) -> Result<u64> {
+    contract.workload.qualification_structured_session()?;
+    let budget = u64::from(contract.contact_timeout_seconds)
+        .checked_add(u64::from(contract.observation_timeout_seconds))
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .context("external qualification startup budget overflow")?;
+    ensure!(
+        (1..=600_000).contains(&budget),
+        "external qualification startup exceeds the reservation budget"
+    );
+    Ok(budget)
+}
+
 /// One process-local qualification startup owner. The accepted root and its
 /// original descriptor lifelines remain together after the durable reservation.
-/// This value has no provider-contact method yet: first contact must freshly
-/// authenticate the root, signed generation, exact program and live occurrence
-/// before using StateStore's Q-specific contact claim.
+/// First contact freshly authenticates the root, signed generation, exact
+/// program and live occurrence before using StateStore's Q-specific claim.
 pub struct ExternalQualificationStart<'a> {
     state: &'a AppState,
     context: crate::handler_context::HandlerContext,
@@ -3461,6 +3540,149 @@ impl ExternalQualificationStart<'_> {
 
     pub fn deadline(&self) -> lillux::time::MonotonicDeadline {
         self.deadline
+    }
+
+    pub fn cleanup_lifeline(&self) -> ExternalCandidateCleanupLifeline {
+        ExternalCandidateCleanupLifeline::new(self.state, &self.placement)
+    }
+
+    /// Advance the original Q allocation through its retained journal. The
+    /// restored-occurrence gate remains held across the durable first-contact
+    /// claim, provider allocation and first supervisor activation. A failure
+    /// fences this process-local owner; cleanup uses the retained allocation.
+    pub fn advance(
+        &mut self,
+    ) -> std::result::Result<ExternalCandidateStartProgress, ExternalCandidateStartFailure> {
+        let operation_id = self.qualification_operation_id.clone();
+        let result =
+            crate::hosted_operation::with_qualification_occurrence_contact(&operation_id, || {
+                self.advance_under_occurrence_gate()
+            });
+        result.map_err(|error| {
+            self.failed = true;
+            classify_external_start_failure(self.state, &self.placement, error)
+        })
+    }
+
+    fn advance_under_occurrence_gate(&mut self) -> Result<ExternalCandidateStartProgress> {
+        ensure!(
+            !self.failed,
+            "external qualification startup owner is already fenced"
+        );
+        let mut prepared = ExternalPlacementOwner::new(self.state)
+            .prepare_retained_qualification_for_start(&self.placement)?;
+        let ExternalAllocationOwner::QualificationCandidate(owner) =
+            &prepared.record.reservation.owner
+        else {
+            bail!("external qualification startup changed its retained owner");
+        };
+        ensure!(
+            owner.coordinate == self.coordinate
+                && owner.qualification_operation_id == self.qualification_operation_id
+                && owner.operator_principal == self.context.fingerprint
+                && owner.program == *self.root.program()
+                && prepared.record.reservation.admitted_capsule_hash
+                    == self.coordinate.accepted_capsule_hash,
+            "external qualification startup differs from its original accepted allocation"
+        );
+        let qualified = self
+            .state
+            .state_store
+            .snapshot_qualification_operation(&self.qualification_operation_id)?
+            .context("external qualification startup lost its restored operation")?;
+        ensure!(
+            qualified.phase
+                == crate::runtime_db::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound
+                && qualified.intent.owner_principal == self.context.fingerprint
+                && qualified.occurrence.as_ref() == Some(&owner.qualification_occurrence),
+            "external qualification startup lost its exact operator-owned occurrence"
+        );
+        let activation_exists = if prepared.record.phase == ExternalAllocationPhase::Bound {
+            self.state
+                .state_store
+                .external_supervisor_activation(&self.placement)?
+                .is_some()
+        } else {
+            false
+        };
+        let first_contact = prepared.record.phase == ExternalAllocationPhase::Reserved;
+        let first_activation =
+            prepared.record.phase == ExternalAllocationPhase::Bound && !activation_exists;
+        let binding = if first_contact || first_activation {
+            prepared.record.reservation.startup_deadline()?;
+            ensure!(
+                !self.deadline.has_elapsed(),
+                "external qualification startup deadline expired before first contact"
+            );
+            let refreshed = crate::operator_external_content::product_qualification::prepare_external_qualification_root(
+                self.state,
+                &self.context,
+                &self.coordinate,
+                &self.qualification_operation_id,
+                self.limits,
+            )?;
+            ensure!(
+                refreshed.capsule() == self.root.capsule()
+                    && refreshed.purpose() == self.root.purpose()
+                    && refreshed.program() == self.root.program(),
+                "external qualification startup changed its current accepted Worker program"
+            );
+            let binding = preflight_external_qualification_program(
+                self.state,
+                self.root.program(),
+                self.root.purpose(),
+            )?;
+            ensure!(
+                binding.digest() == prepared.record.reservation.binding_hash
+                    && binding.capacity_owner() == prepared.record.reservation.capacity_owner,
+                "external qualification startup changed its signed placement generation"
+            );
+            Some(binding)
+        } else {
+            None
+        };
+        if first_activation {
+            let inputs = self.guest_inputs.take().context(
+                "external qualification startup lost original activation input lifelines; cleanup required",
+            )?;
+            prepared = prepared.with_guest_inputs(inputs)?;
+        } else if activation_exists {
+            // A retained activation can only be reconciled; it cannot accept
+            // another descriptor inventory, even from the same local owner.
+            self.guest_inputs = None;
+        }
+        let decision = if first_contact {
+            let authority = self.state.state_store.pinned_state_authority()?;
+            let guard = authority.acquire_shared_guard()?;
+            let admission =
+                crate::operator_external_content::product_qualification::authenticate_consumer_root(
+                    self.state,
+                    &authority,
+                    &guard,
+                    self.limits,
+                    &self.context,
+                    &self.coordinate,
+                    &self.qualification_operation_id,
+                )?;
+            ensure!(
+                admission.purpose() == self.root.purpose()
+                    && admission.accepted_project_authority()
+                        == &self.root.capsule().project_authority,
+                "external qualification contact changed its accepted root"
+            );
+            authority.ensure_guard(&guard)?;
+            drop(guard);
+            prepared.claim_qualification(
+                self.state,
+                admission,
+                binding
+                    .as_ref()
+                    .context("external qualification contact lost its current binding")?,
+            )?
+        } else {
+            prepared.claim()?
+        };
+        advance_claimed_external_start(decision, self.deadline)
     }
 }
 
@@ -3551,14 +3773,7 @@ pub fn prepare_external_qualification_start<'a>(
         "channel_owner_public_key": channel_authority.owner_public_key(),
         "channel_bootstrap_capability_hash": channel_authority.bootstrap_capability_hash(),
     }))?;
-    let startup_budget_ms = u64::from(contract.contact_timeout_seconds)
-        .checked_add(u64::from(contract.observation_timeout_seconds))
-        .and_then(|seconds| seconds.checked_mul(1_000))
-        .context("external qualification startup budget overflow")?;
-    ensure!(
-        (1..=600_000).contains(&startup_budget_ms),
-        "external qualification startup exceeds the reservation budget"
-    );
+    let startup_budget_ms = qualification_startup_budget_ms(&contract)?;
     let now = i64::try_from(lillux::time::timestamp_millis())?;
     let reservation = ExternalAllocationReservation {
         schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
@@ -4544,7 +4759,14 @@ fn advance_prepared_external_start(
             "external startup live deadline expired before contact"
         );
     }
-    match prepared.claim()? {
+    advance_claimed_external_start(prepared.claim()?, live_deadline)
+}
+
+fn advance_claimed_external_start(
+    decision: ExternalPlacementContactDecision,
+    live_deadline: lillux::time::MonotonicDeadline,
+) -> Result<ExternalCandidateStartProgress> {
+    match decision {
         ExternalPlacementContactDecision::Contact(permit) => {
             let record = permit.contact(live_deadline)?;
             progress_from_allocation_record(&record)
