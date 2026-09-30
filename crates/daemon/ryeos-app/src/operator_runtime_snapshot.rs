@@ -1130,6 +1130,14 @@ pub(crate) fn verify_consumer_qualification_occurrence(
                 &intent.qualification_operation_id,
             )?;
             let selection = admission.selection().clone();
+            input.validate_attempt(intent)?;
+            ensure!(
+                input.purpose == *admission.purpose()
+                    && input.coordinate == *admission.coordinate()
+                    && input.selection == selection,
+                "consumer contact input differs from authenticated accepted root"
+            );
+            archive.require_consumer_input_record(input)?;
             archive.require_verifier_selection(&selection)?;
             let qualified = state
                 .state_store
