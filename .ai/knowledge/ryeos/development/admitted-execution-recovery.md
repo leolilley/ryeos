@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-30T03:25:09Z:1218d3e226689b8339ded6740bc5fe8b0cfa5b0e1285b01821441175142815dc:MdqgqA2mpGV59ywYhbopaTACBj9ceIe5zGHt6kejfPF+WoalC9K1ldlRbNrb3wRDFvVHkTi/Wg1MOABA3YXnBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-30T03:34:41Z:65b7df7674366d7932a23b245e6744496e2afa997b5db9b1ea9fd02f16fd79f6:hZwaGBYbCm31RNJA6jiehunK86aDlX2P1tVZZMlyt4mW8SnHumQjDjx1I/nze3vtE0ztxjonHR85kDtTm1WiDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.1.10"
+version: "1.1.11"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -209,6 +209,18 @@ profile is refused. This signed selection is only artifact authority: the
 consumer attempt still needs daemon-owned prerequisite measurement, accepted
 root and same-occurrence joins before remote contact, and the observed guest
 runtime and applied launch joins before it can support a qualification claim.
+
+The prerequisite journal read now rehydrates the observed owner-measurement
+attempt and compares its exact observation digest with the consumer coordinate.
+It refuses another operator, a retained termination intent or an expired
+occurrence. The accepted verifier root, signed scenario and provider authority
+still belong to the contact owner's later transaction. Separately, the
+controller can recover one applied `RuntimeApplied` frame from its retained
+external channel after checking its binding, signature, digest and sequence.
+That frame is guest launch evidence only. A qualification issuer must join it
+to the selected Worker product and guest occurrence, the direct probe's
+independently observed target, lifecycle termination and writer settlement.
+Neither read path currently enables consumer contact or claims.
 
 ## What recovery must NOT do
 
