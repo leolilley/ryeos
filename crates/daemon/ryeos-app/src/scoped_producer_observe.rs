@@ -692,7 +692,7 @@ fn replay_observation(
     let _guard = authority.acquire_shared_guard()?;
     let value = authority
         .cas_store()?
-        .get_object(hash)?
+        .get_object_bounded(hash, MAX_OBSERVATION_RESPONSE_BYTES as u64)?
         .context("committed scoped observation CAS object absent")?;
     let observation: ScopedProducerObservation =
         serde_json::from_value(value.clone()).context("decode committed scoped observation")?;
@@ -771,11 +771,12 @@ pub(crate) fn qualification_scoped_attempt_proof(
     );
     let value = authority
         .cas_store()?
-        .get_object(
+        .get_object_bounded(
             record
                 .observation_object_hash
                 .as_deref()
                 .context("settled scoped attempt has no retained observation")?,
+            MAX_OBSERVATION_RESPONSE_BYTES as u64,
         )?
         .context("settled scoped observation CAS object is missing")?;
     let observation: ScopedProducerObservation = serde_json::from_value(value)?;
