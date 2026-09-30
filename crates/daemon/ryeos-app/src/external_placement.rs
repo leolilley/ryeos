@@ -3530,6 +3530,7 @@ pub struct ExternalQualificationStart<'a> {
     deadline: lillux::time::MonotonicDeadline,
     root: crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
     guest_inputs: Option<ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
+    cleanup: Option<ExternalCandidateCleanupLifeline>,
     failed: bool,
 }
 
@@ -3542,8 +3543,12 @@ impl ExternalQualificationStart<'_> {
         self.deadline
     }
 
-    pub fn cleanup_lifeline(&self) -> ExternalCandidateCleanupLifeline {
-        ExternalCandidateCleanupLifeline::new(self.state, &self.placement)
+    /// Move the original cleanup owner to the next process-local owner. If it
+    /// is never transferred, dropping this start requests durable cleanup.
+    pub fn take_cleanup_lifeline(&mut self) -> Result<ExternalCandidateCleanupLifeline> {
+        self.cleanup
+            .take()
+            .context("external qualification cleanup owner was already transferred")
     }
 
     /// Advance the original Q allocation through its retained journal. The
@@ -3651,7 +3656,7 @@ impl ExternalQualificationStart<'_> {
             // another descriptor inventory, even from the same local owner.
             self.guest_inputs = None;
         }
-        let decision = if first_contact {
+        let admission = if first_contact {
             let authority = self.state.state_store.pinned_state_authority()?;
             let guard = authority.acquire_shared_guard()?;
             let admission =
@@ -3672,17 +3677,48 @@ impl ExternalQualificationStart<'_> {
             );
             authority.ensure_guard(&guard)?;
             drop(guard);
-            prepared.claim_qualification(
-                self.state,
-                admission,
-                binding
-                    .as_ref()
-                    .context("external qualification contact lost its current binding")?,
-            )?
+            Some(admission)
         } else {
-            prepared.claim()?
+            None
         };
-        advance_claimed_external_start(decision, self.deadline)
+        let state = self.state;
+        let deadline = self.deadline;
+        let advance = move || {
+            let decision = if let Some(admission) = admission {
+                prepared.claim_qualification(
+                    state,
+                    admission,
+                    binding
+                        .as_ref()
+                        .context("external qualification contact lost its current binding")?,
+                )?
+            } else {
+                prepared.claim()?
+            };
+            advance_claimed_external_start(decision, deadline)
+        };
+        if first_contact || first_activation {
+            let expected_generation = &self
+                .root
+                .purpose()
+                .consumer_content
+                .as_ref()
+                .context("external qualification contact lost its accepted Worker content")?
+                .definitions
+                .bundle_generation_identity;
+            // The root refresh above established exact definition equality.
+            // Keep that generation excluded from replacement until the fresh
+            // allocation or supervisor contact has returned.
+            state.engine.with_checked_bundle_generation(|generation| {
+                ensure!(
+                    generation.request_engine_generation_identity() == expected_generation,
+                    "external qualification changed Bundle generation before contact"
+                );
+                advance()
+            })
+        } else {
+            advance()
+        }
     }
 }
 
@@ -3826,6 +3862,7 @@ pub fn prepare_external_qualification_start<'a>(
     state
         .state_store
         .reserve_external_qualification_allocation(state, &reservation, &binding, admission)?;
+    let cleanup = ExternalCandidateCleanupLifeline::new(state, &placement);
     Ok(ExternalQualificationStart {
         state,
         context: (*context).clone(),
@@ -3836,6 +3873,7 @@ pub fn prepare_external_qualification_start<'a>(
         deadline,
         root,
         guest_inputs: Some(guest_inputs),
+        cleanup: Some(cleanup),
         failed: false,
     })
 }

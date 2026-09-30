@@ -60,7 +60,7 @@ fn await_external_qualification_ready(
     mut start: ExternalQualificationStart<'_>,
 ) -> Result<ExternalQualificationReady> {
     let deadline = start.deadline();
-    let cleanup = start.cleanup_lifeline();
+    let cleanup = start.take_cleanup_lifeline()?;
     let ready = (|| -> Result<ExecutionChannelBinding> {
         loop {
             ensure!(
