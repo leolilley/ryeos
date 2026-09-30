@@ -6020,7 +6020,10 @@ fn supervisor_activation(
         "external supervisor guest inputs changed the reserved base snapshot"
     );
     let bootstrap = ryeos_state::external_execution::transport::ExternalSupervisorBootstrap {
-        schema: 7,
+        schema: match &contract.controller_transport {
+            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_) => 7,
+            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_) => ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA,
+        },
         controller: contract.controller_transport.clone(),
         tls_root_certificates_der_base64: contract
             .controller_tls_root_certificates_der_base64
@@ -7113,7 +7116,7 @@ pub mod test_support {
 
         let bootstrap = ryeos_state::external_execution::transport::ExternalSupervisorBootstrap {
             schema: 7,
-            controller,
+            controller: controller.into(),
             tls_root_certificates_der_base64,
             placement_thread_id,
             occurrence_id: occurrence.occurrence_id,

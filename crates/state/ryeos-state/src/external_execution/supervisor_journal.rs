@@ -185,7 +185,7 @@ impl PreparedExternalSupervisorJournal {
         supervisor_signing_key: lillux::crypto::SigningKey,
     ) -> Result<Self> {
         bootstrap.validate()?;
-        captured_network_inputs.validate_for(&bootstrap.controller.network_inputs)?;
+        captured_network_inputs.validate_for(&bootstrap.controller.http()?.network_inputs)?;
         let capture_digest = captured_network_inputs.digest()?;
         let capture_json =
             lillux::canonical_json(&serde_json::to_value(&captured_network_inputs)?)?;
@@ -689,7 +689,7 @@ fn load_content(
     let captured_network_inputs: ExternalCapturedNetworkInputs =
         serde_json::from_str(&capture_json)
             .map_err(|_| anyhow::anyhow!("external supervisor network capture JSON is invalid"))?;
-    captured_network_inputs.validate_for(&bootstrap.controller.network_inputs)?;
+    captured_network_inputs.validate_for(&bootstrap.controller.http()?.network_inputs)?;
     ensure!(
         lillux::canonical_json(&serde_json::to_value(&captured_network_inputs)?)? == capture_json
             && captured_network_inputs.digest()? == capture_digest,
@@ -993,7 +993,7 @@ mod tests {
                 connect_timeout_ms: 1_000,
                 request_timeout_ms: 2_000,
                 maximum_response_bytes: 64 * 1024,
-            },
+            }.into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-supervisor-journal".into(),
             occurrence_id: "occurrence-supervisor-journal".into(),
@@ -1100,7 +1100,7 @@ mod tests {
 
     fn capture() -> ExternalCapturedNetworkInputs {
         ExternalCapturedNetworkInputs::from_bytes(
-            &bootstrap().controller.network_inputs,
+            &bootstrap().controller.http().unwrap().network_inputs,
             b"nameserver 127.0.0.1\n",
             b"127.0.0.1 localhost\n",
         )
@@ -1176,7 +1176,12 @@ mod tests {
                 if mutation == 1 {
                     replacement.resolver_base64 = STANDARD.encode(b"tampered");
                 } else if mutation == 2 {
-                    let mut policy = bootstrap().controller.network_inputs;
+                    let mut policy = bootstrap()
+                        .controller
+                        .http()
+                        .unwrap()
+                        .network_inputs
+                        .clone();
                     policy.hosts.source = "/other/hosts".into();
                     replacement =
                         ExternalCapturedNetworkInputs::from_bytes(&policy, b"", b"").unwrap();
@@ -1184,7 +1189,7 @@ mod tests {
                     // Internally valid replacement with a matching row digest must
                     // still fail the independently retained outer anchor.
                     replacement = ExternalCapturedNetworkInputs::from_bytes(
-                        &bootstrap().controller.network_inputs,
+                        &bootstrap().controller.http().unwrap().network_inputs,
                         b"different",
                         b"",
                     )

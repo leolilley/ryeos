@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use ryeos_state::external_execution::transport::ExternalControllerTransportContract;
+use ryeos_state::external_execution::transport::{
+    ExternalControllerTransportContract, ExternalControllerTransportSelection,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -309,7 +311,7 @@ struct BindingDocument {
     network_policy: String,
     storage_policy: String,
     cleanup_proof: String,
-    controller_transport: ExternalControllerTransportContract,
+    controller_transport: ExternalControllerTransportSelection,
     controller_tls_root_certificates_der_base64: Vec<String>,
     max_active: u16,
     timeout_seconds: u32,
@@ -334,8 +336,13 @@ where
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 15,
-            "unsupported external placement binding schema"
+            self.kind == "node"
+                && self.schema
+                    == match &self.controller_transport {
+                        ExternalControllerTransportSelection::HttpJson(_) => 15,
+                        ExternalControllerTransportSelection::ControllerFileRelay(_) => 16,
+                    },
+            "unsupported external placement binding schema for selected transport"
         );
         self.workload.validate()?;
         ensure!(
@@ -394,8 +401,7 @@ impl BindingDocument {
             "placement binding lifecycle deadlines exceed bounds"
         );
         ensure!(
-            self.network_policy == "supervisor_pinned_owner_only_candidate_denied_v1"
-                && self.storage_policy == "ephemeral_private_candidate_v1"
+            self.storage_policy == "ephemeral_private_candidate_v1"
                 && self.cleanup_proof == "provider_terminal_occurrence_v1",
             "placement binding requests an unsupported lifecycle contract"
         );
@@ -430,12 +436,26 @@ impl BindingDocument {
             ),
         }
         self.controller_transport.validate()?;
-        ensure!(
-            ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
-                &self.controller_tls_root_certificates_der_base64,
-            )? == self.controller_transport.tls_root_bundle_digest,
-            "external controller TLS roots changed their signed identity"
-        );
+        match &self.controller_transport {
+            ExternalControllerTransportSelection::HttpJson(http) => ensure!(
+                self.network_policy == "supervisor_pinned_owner_only_candidate_denied_v1"
+                    && ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                        &self.controller_tls_root_certificates_der_base64,
+                    )? == http.tls_root_bundle_digest,
+                "external controller TLS roots changed their signed identity"
+            ),
+            ExternalControllerTransportSelection::ControllerFileRelay(relay) => ensure!(
+                matches!(
+                    &self.workload,
+                    ExternalWorkloadBinding::QualificationStructuredSession(_)
+                ) && self.network_policy == "controller_file_relay_guest_deny_all_v1"
+                    && self.backend == "render-sandbox-early-access"
+                    && self.controller_tls_root_certificates_der_base64.is_empty()
+                    && self.settings.get("owner_id").and_then(Value::as_str)
+                        == Some(relay.owner_workspace_id.as_str()),
+                "external controller file relay requires signed Render Q owner and no TLS roots"
+            ),
+        }
         Ok(())
     }
 
@@ -501,7 +521,7 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) network_policy: String,
     pub(crate) storage_policy: String,
     pub(crate) cleanup_proof: String,
-    pub(crate) controller_transport: ExternalControllerTransportContract,
+    pub(crate) controller_transport: ExternalControllerTransportSelection,
     pub(crate) controller_tls_root_certificates_der_base64: Vec<String>,
     pub(crate) max_active: u16,
     pub(crate) timeout_seconds: u32,
@@ -759,7 +779,7 @@ impl RetainedExternalExecutionBinding {
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
             storage_policy: "ephemeral_private_candidate_v1".into(),
             cleanup_proof: "provider_terminal_occurrence_v1".into(),
-            controller_transport: ExternalControllerTransportContract {
+            controller_transport: ExternalControllerTransportSelection::HttpJson(ExternalControllerTransportContract {
                 schema: 2,
                 https_origin: "https://controller.example:7443".into(),
                 route_contract:
@@ -783,7 +803,7 @@ impl RetainedExternalExecutionBinding {
                         max_bytes: 64 * 1024,
                     },
                 },
-            },
+            }),
             controller_tls_root_certificates_der_base64,
             max_active: 1,
             timeout_seconds: 60,
@@ -920,7 +940,7 @@ impl RetainedExternalExecutionBinding {
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
             storage_policy: "ephemeral_private_candidate_v1".into(),
             cleanup_proof: "provider_terminal_occurrence_v1".into(),
-            controller_transport,
+            controller_transport: controller_transport.into(),
             controller_tls_root_certificates_der_base64,
             max_active: 1,
             timeout_seconds: 60,

@@ -1202,7 +1202,7 @@ pub(crate) fn external_supervisor_activation_request_digest(
     ryeos_state::objects::canonical_value_digest(&serde_json::json!({
         "domain":"ryeos.external-supervisor-activation.v1",
         "controller":&contract.controller_transport,
-        "tls_root_bundle_digest":&contract.controller_transport.tls_root_bundle_digest,
+        "tls_root_bundle_digest":contract.controller_transport.http().map(|http| http.tls_root_bundle_digest.as_str()).ok(),
         "placement_thread_id":&reservation.placement_thread_id,
         "occurrence_id":&occurrence.occurrence_id,
         "allocation_request_digest":&reservation.request_digest,

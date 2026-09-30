@@ -132,6 +132,13 @@ pub fn run_from_mounted_inherited() -> Result<ExternalCandidateSupervisorOutcome
         bootstrap.canonical_bytes()? == bootstrap_bytes,
         "external supervisor bootstrap is not canonical"
     );
+    ensure!(
+        matches!(
+            &bootstrap.controller,
+            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_)
+        ),
+        "controller file relay requires an installed private mailbox transport"
+    );
     let launch_record = lillux::read_sealed_inherited_descriptor(
         SUPERVISOR_LAUNCH_INTENT_FD,
         MAX_GUEST_SUPERVISOR_LAUNCH_RECORD_BYTES,
@@ -189,6 +196,13 @@ pub fn run_from_inherited() -> Result<ExternalCandidateSupervisorOutcome> {
         "external supervisor bootstrap is not canonical"
     );
     bootstrap.validate()?;
+    ensure!(
+        matches!(
+            &bootstrap.controller,
+            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_)
+        ),
+        "controller file relay requires an installed private mailbox transport"
+    );
     // SAFETY: the admitted lifecycle adapter uniquely maps each fixed
     // descriptor and this executable adopts every coordinate exactly once.
     let state_root = unsafe {

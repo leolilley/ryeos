@@ -742,7 +742,7 @@ impl CommittedGuestSupervisorLaunchIntent {
             "sealed supervisor bootstrap changed before network-input capture"
         );
         let (network_inputs, network_destinations) =
-            capture_supervisor_network_mounts(&parsed_bootstrap.controller.network_inputs)?;
+            capture_supervisor_network_mounts(&parsed_bootstrap.controller.http()?.network_inputs)?;
         let state = artifacts.state_root.inherited_descriptor_authority()?;
         let runtime = installed.runtime.inherited_descriptor_authority()?;
         let private = artifacts

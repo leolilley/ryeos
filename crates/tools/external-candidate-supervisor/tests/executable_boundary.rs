@@ -153,7 +153,7 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
             connect_timeout_ms: 1_000,
             request_timeout_ms: 2_000,
             maximum_response_bytes: 64 * 1024,
-        },
+        }.into(),
         tls_root_certificates_der_base64: roots,
         placement_thread_id: "T-executable-boundary".into(),
         occurrence_id: "occurrence-executable-boundary".into(),
@@ -347,7 +347,7 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
         outer,
         retained_bootstrap,
         ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs::from_bytes(
-            &admitted.controller.network_inputs,
+            &admitted.controller.http().unwrap().network_inputs,
             b"nameserver 127.0.0.1\n",
             b"127.0.0.1 localhost\n",
         )

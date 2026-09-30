@@ -33,7 +33,7 @@ use ryeos_state::external_execution::transport::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AttachedExternalExecutionChannel, attach_external_execution_channel_exact,
+    AttachedExternalExecutionTransport, attach_external_execution_channel_exact,
     reconnect_external_execution_channel,
 };
 
@@ -103,7 +103,7 @@ struct LiveExternalCandidateSupervisor {
     driver: Option<
         ExternalCandidateTransportDriver<
             LiveInheritedExternalCandidateSupervisor,
-            AttachedExternalExecutionChannel,
+            AttachedExternalExecutionTransport,
         >,
     >,
     execution_deadline: lillux::time::MonotonicDeadline,
@@ -117,6 +117,9 @@ pub fn run_external_candidate_supervisor(
     inputs: ExternalCandidateSupervisorInputs,
 ) -> Result<ExternalCandidateSupervisorOutcome> {
     validate_authorities(&inputs)?;
+    // A signed relay bootstrap is parseable, but this guest has no pinned
+    // mailbox descriptor or authenticated response reader yet.
+    inputs.bootstrap.controller.http()?;
     let ExternalCandidateSupervisorInputs {
         bootstrap,
         execution_guest_inputs,
@@ -429,7 +432,7 @@ impl ProtectedSupervisorState {
     ) -> Result<Self> {
         // This branch alone samples the selected target-local files, while the
         // protected root is locked and still empty. Recovery must never reach it.
-        let network_inputs = capture_network_inputs(&bootstrap.controller.network_inputs)?;
+        let network_inputs = capture_network_inputs(&bootstrap.controller.http()?.network_inputs)?;
         let outer_directory = state_root.create_child(OsStr::new(OUTER_DIRECTORY), 0o700)?;
         let guest_directory = state_root.create_child(OsStr::new(GUEST_DIRECTORY), 0o700)?;
         let journal = PreparedExternalSupervisorJournal::create(
@@ -639,7 +642,10 @@ impl LiveExternalCandidateSupervisor {
             &launcher_artifact_digest,
             expiry_deadline,
         )?;
-        let driver = ExternalCandidateTransportDriver::new(runtime, transport)?;
+        let driver = ExternalCandidateTransportDriver::new(
+            runtime,
+            AttachedExternalExecutionTransport::from(transport),
+        )?;
         Ok(Self {
             _state: state,
             _outer_journal: outer_journal,
@@ -673,7 +679,7 @@ trait ExternalCandidateControlDriver: Sized {
 impl ExternalCandidateControlDriver
     for ExternalCandidateTransportDriver<
         LiveInheritedExternalCandidateSupervisor,
-        AttachedExternalExecutionChannel,
+        AttachedExternalExecutionTransport,
     >
 {
     fn has_durable_capture(&self) -> bool {
@@ -953,7 +959,8 @@ mod tests {
                 connect_timeout_ms: 1_000,
                 request_timeout_ms: 2_000,
                 maximum_response_bytes: 64 * 1024,
-            },
+            }
+            .into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-placement".into(),
             occurrence_id: occurrence.into(),
@@ -1741,9 +1748,20 @@ mod tests {
                 "captured-network",
                 lillux::time::timestamp_millis() + 60_000,
             );
-            original.controller.network_inputs.resolver.source =
-                resolver_path.to_str().unwrap().into();
-            original.controller.network_inputs.hosts.source = hosts_path.to_str().unwrap().into();
+            original
+                .controller
+                .http_mut()
+                .unwrap()
+                .network_inputs
+                .resolver
+                .source = resolver_path.to_str().unwrap().into();
+            original
+                .controller
+                .http_mut()
+                .unwrap()
+                .network_inputs
+                .hosts
+                .source = hosts_path.to_str().unwrap().into();
             let original_bytes = original.canonical_bytes().unwrap();
             let mut state =
                 ProtectedSupervisorState::open_or_create(pinned(root.path()), original).unwrap();
@@ -1797,8 +1815,13 @@ mod tests {
             drop(recovered);
             let mut changed: ExternalSupervisorBootstrap =
                 serde_json::from_slice(&original_bytes).unwrap();
-            changed.controller.network_inputs.resolver.source =
-                sources.path().join("missing").to_str().unwrap().into();
+            changed
+                .controller
+                .http_mut()
+                .unwrap()
+                .network_inputs
+                .resolver
+                .source = sources.path().join("missing").to_str().unwrap().into();
             let error = ProtectedSupervisorState::open_or_create(pinned(root.path()), changed)
                 .err()
                 .unwrap();
@@ -1817,8 +1840,20 @@ mod tests {
             }
             let mut admitted =
                 bootstrap("invalid-network", lillux::time::timestamp_millis() + 60_000);
-            admitted.controller.network_inputs.resolver.source = path.to_str().unwrap().into();
-            admitted.controller.network_inputs.resolver.max_bytes = 1;
+            admitted
+                .controller
+                .http_mut()
+                .unwrap()
+                .network_inputs
+                .resolver
+                .source = path.to_str().unwrap().into();
+            admitted
+                .controller
+                .http_mut()
+                .unwrap()
+                .network_inputs
+                .resolver
+                .max_bytes = 1;
             assert!(
                 ProtectedSupervisorState::open_or_create(pinned(root.path()), admitted).is_err()
             );
