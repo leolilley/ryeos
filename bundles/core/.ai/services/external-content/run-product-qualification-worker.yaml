@@ -1,0 +1,7 @@
+kind: service
+endpoint: external-content.run-product-qualification-worker
+required_caps: ["ryeos.execute.service.external-content/run-product-qualification-worker"]
+schema:
+  qualification_operation_id: string
+  coordinate: object
+description: Run one signed qualification Worker under its accepted root and exact restored occurrence; transport completion does not publish a product qualification claim

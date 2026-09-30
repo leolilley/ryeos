@@ -1,0 +1,12 @@
+tokens: [external-content, run-product-qualification-worker]
+description: Run one accepted qualification Worker against its exact restored occurrence
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content run-product-qualification-worker '{\"qualification_operation_id\":\"<exact-restored-operation>\",\"coordinate\":<retained-consumer-verification-coordinate>}'"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/run-product-qualification-worker
