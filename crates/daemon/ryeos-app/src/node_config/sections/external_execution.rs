@@ -61,6 +61,19 @@ pub(crate) struct ExternalQualificationStructuredSessionBinding {
     pub(crate) connector_artifact_bytes: u64,
 }
 
+/// Shared signed artifact coordinates for the two distinct session lanes.
+/// Workload admission still checks the exact ordinary or qualification
+/// program separately before these executables may be used.
+pub(crate) struct ExternalSessionArtifactSelection<'a> {
+    pub(crate) provider_declaration_id: &'a str,
+    pub(crate) provider_configuration_destination: &'a str,
+    pub(crate) configuration_adapter_artifact_hash: &'a str,
+    pub(crate) configuration_adapter_artifact_bytes: u64,
+    pub(crate) connector_protocol: &'a str,
+    pub(crate) connector_artifact_hash: &'a str,
+    pub(crate) connector_artifact_bytes: u64,
+}
+
 impl ExternalWorkloadBinding {
     pub(crate) fn structured_session(&self) -> Result<&ExternalStructuredSessionBinding> {
         match self {
@@ -81,6 +94,33 @@ impl ExternalWorkloadBinding {
             Self::QualificationStructuredSession(session) => Ok(session),
             _ => anyhow::bail!("external binding has no qualification-only session authority"),
         }
+    }
+
+    pub(crate) fn session_artifacts(&self) -> Result<ExternalSessionArtifactSelection<'_>> {
+        let selection = match self {
+            Self::StructuredSession(session) => ExternalSessionArtifactSelection {
+                provider_declaration_id: &session.provider_declaration_id,
+                provider_configuration_destination: &session.provider_configuration_destination,
+                configuration_adapter_artifact_hash: &session.configuration_adapter_artifact_hash,
+                configuration_adapter_artifact_bytes: session.configuration_adapter_artifact_bytes,
+                connector_protocol: &session.connector_protocol,
+                connector_artifact_hash: &session.connector_artifact_hash,
+                connector_artifact_bytes: session.connector_artifact_bytes,
+            },
+            Self::QualificationStructuredSession(session) => ExternalSessionArtifactSelection {
+                provider_declaration_id: &session.provider_declaration_id,
+                provider_configuration_destination: &session.provider_configuration_destination,
+                configuration_adapter_artifact_hash: &session.configuration_adapter_artifact_hash,
+                configuration_adapter_artifact_bytes: session.configuration_adapter_artifact_bytes,
+                connector_protocol: &session.connector_protocol,
+                connector_artifact_hash: &session.connector_artifact_hash,
+                connector_artifact_bytes: session.connector_artifact_bytes,
+            },
+            Self::DirectCommand {} => {
+                anyhow::bail!("external direct command has no session artifact selection")
+            }
+        };
+        Ok(selection)
     }
 
     fn validate(&self) -> Result<()> {

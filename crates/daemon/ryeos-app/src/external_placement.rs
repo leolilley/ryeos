@@ -612,23 +612,17 @@ impl ExternalCandidateConnectorRegistry {
         &self,
         contract: &ExternalPlacementBackendContract,
     ) -> Result<Arc<InstalledExternalCandidateConnector>> {
+        let selected = contract.workload.session_artifacts()?;
         ensure!(
-            contract.workload.structured_session()?.connector_protocol
+            selected.connector_protocol
                 == ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
             "signed external connector protocol is unsupported"
         );
         let artifact = self
             .artifacts
             .get(&(
-                contract
-                    .workload
-                    .structured_session()?
-                    .connector_artifact_hash
-                    .clone(),
-                contract
-                    .workload
-                    .structured_session()?
-                    .connector_artifact_bytes,
+                selected.connector_artifact_hash.to_owned(),
+                selected.connector_artifact_bytes,
             ))
             .cloned()
             .context("exact signed external candidate connector is not installed")?;
@@ -730,32 +724,17 @@ impl ExternalProviderConfigurationRegistry {
         &self,
         contract: &ExternalPlacementBackendContract,
     ) -> Result<Arc<InstalledExternalProviderConfiguration>> {
+        let selected = contract.workload.session_artifacts()?;
         let artifact = self
             .artifacts
-            .get(
-                &contract
-                    .workload
-                    .structured_session()?
-                    .provider_declaration_id,
-            )
+            .get(selected.provider_declaration_id)
             .cloned()
             .context("exact signed external provider declaration is not installed")?;
         ensure!(
-            artifact.artifact_hash
-                == contract
-                    .workload
-                    .structured_session()?
-                    .configuration_adapter_artifact_hash
-                && artifact.artifact_bytes
-                    == contract
-                        .workload
-                        .structured_session()?
-                        .configuration_adapter_artifact_bytes
+            artifact.artifact_hash == selected.configuration_adapter_artifact_hash
+                && artifact.artifact_bytes == selected.configuration_adapter_artifact_bytes
                 && artifact.declaration.configuration_destination
-                    == contract
-                        .workload
-                        .structured_session()?
-                        .provider_configuration_destination,
+                    == selected.provider_configuration_destination,
             "external provider configuration adapter contradicts its placement binding"
         );
         Ok(artifact)
