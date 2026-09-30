@@ -61,13 +61,15 @@ pub const MAX_GUEST_ENVIRONMENT_ENTRIES: usize = 256;
 pub const MAX_GUEST_EXECUTABLE_SEARCH_ENTRIES: usize = 64;
 
 /// The admitted command protocol, not a choice the executable may change.
-/// Direct commands have no structured-session stdin or candidate export lane.
+/// Qualification sessions have structured protocol traffic without candidate
+/// export authority. Direct commands have neither lane.
 /// Raw stream ceilings do not reserve authenticated journal space: the channel
 /// independently bounds encoded frames and may refuse before either raw cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExternalExecutionMode {
     StructuredSession {},
+    QualificationStructuredSession {},
     DirectCommand {
         stdout_max_bytes: u64,
         stderr_max_bytes: u64,
@@ -103,7 +105,9 @@ impl ExternalExecutionMode {
                 ExternalCommandOutputStream::Stdout => *stdout_max_bytes,
                 ExternalCommandOutputStream::Stderr => *stderr_max_bytes,
             }),
-            Self::StructuredSession {} => bail!("session mode has no direct command output"),
+            Self::StructuredSession {} | Self::QualificationStructuredSession {} => {
+                bail!("session mode has no direct command output")
+            }
         }
     }
 }
@@ -2031,6 +2035,27 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<ExternalExecutionMode>(value).is_err());
         }
+    }
+
+    #[test]
+    fn qualification_session_mode_has_distinct_closed_wire_identity() {
+        let mode = ExternalExecutionMode::QualificationStructuredSession {};
+        mode.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(mode).unwrap(),
+            serde_json::json!({"kind":"qualification_structured_session"})
+        );
+        assert_ne!(mode, ExternalExecutionMode::StructuredSession {});
+        assert!(
+            mode.output_limit(ExternalCommandOutputStream::Stdout)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ExternalExecutionMode>(
+                serde_json::json!({"kind":"qualification_structured_session","candidate_export_max_bytes":1})
+            )
+            .is_err()
+        );
     }
 
     #[test]

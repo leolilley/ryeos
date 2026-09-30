@@ -309,7 +309,8 @@ pub struct ExternalSupervisorBootstrap {
     pub attachment_deadline_ms: i64,
     pub execution_timeout_seconds: u32,
     pub post_execution_timeout_seconds: u32,
-    /// Raw candidate-content ceiling. The separate channel ceiling includes
+    /// Raw candidate-content ceiling. Qualification sessions and direct
+    /// commands require zero. The separate channel ceiling includes
     /// authenticated framing and transfer encoding overhead.
     pub candidate_export_max_bytes: u64,
     pub channel_max_bytes: u64,
@@ -392,10 +393,11 @@ impl ExternalSupervisorBootstrap {
                     "external session supervisor export bound is invalid"
                 );
             }
-            ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand { .. } => {
+            ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {}
+            | ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand { .. } => {
                 ensure!(
                     self.candidate_export_max_bytes == 0,
-                    "external direct supervisor has no candidate export authority"
+                    "external supervisor mode has no candidate export authority"
                 );
             }
         }

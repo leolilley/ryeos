@@ -70,8 +70,8 @@ pub struct ExecutionChannelBinding {
     /// Maximum raw candidate bytes that may cross the export protocol. This is
     /// distinct from `max_bytes`, which bounds the larger authenticated wire
     /// transcript after JSON, base64, signatures, acknowledgements and control
-    /// frames are included. Direct commands require zero: their immutable input
-    /// view has no candidate export authority.
+    /// frames are included. Qualification sessions and direct commands require
+    /// zero because neither mode has candidate export authority.
     pub candidate_export_max_bytes: u64,
     /// Per-direction ordinary journal bounds including acknowledged frames.
     /// One bounded Cancel/Stopped frame is reserved independently.
@@ -119,7 +119,10 @@ impl ExecutionChannelBinding {
             match self.execution_mode {
                 ExternalExecutionMode::StructuredSession {} =>
                     (1..=self.max_bytes).contains(&self.candidate_export_max_bytes),
-                ExternalExecutionMode::DirectCommand { .. } => self.candidate_export_max_bytes == 0,
+                ExternalExecutionMode::QualificationStructuredSession {}
+                | ExternalExecutionMode::DirectCommand { .. } => {
+                    self.candidate_export_max_bytes == 0
+                }
             },
             "external channel export authority does not match execution mode"
         );
@@ -337,18 +340,23 @@ impl ExecutionChannelPayload {
             "owner cannot author supervisor observations"
         );
         ensure!(
+            !matches!(self, ProtocolBytes { .. } | ProtocolEof)
+                || matches!(
+                    binding.execution_mode,
+                    ExternalExecutionMode::StructuredSession {}
+                        | ExternalExecutionMode::QualificationStructuredSession {}
+                ),
+            "direct command channel cannot carry session protocol"
+        );
+        ensure!(
             !matches!(
                 self,
-                ProtocolBytes { .. }
-                    | ProtocolEof
-                    | Quiesce { .. }
-                    | ExportObjectChunk { .. }
-                    | ExportSealed { .. }
+                Quiesce { .. } | ExportObjectChunk { .. } | ExportSealed { .. }
             ) || matches!(
                 binding.execution_mode,
                 ExternalExecutionMode::StructuredSession {}
             ),
-            "direct command channel cannot carry session protocol or candidate export"
+            "execution mode cannot carry candidate export"
         );
         match self {
             Ready {
@@ -864,6 +872,85 @@ mod tests {
         direct.validate().unwrap();
         direct.candidate_export_max_bytes = 1;
         assert!(direct.validate().is_err());
+    }
+
+    #[test]
+    fn qualification_session_carries_protocol_but_no_export() {
+        let (mut binding, owner, supervisor) = binding();
+        let ordinary_digest = binding.digest().unwrap();
+        binding.execution_mode = ExternalExecutionMode::QualificationStructuredSession {};
+        binding.candidate_export_max_bytes = 0;
+        binding.validate().unwrap();
+        let mut wrong_export = binding.clone();
+        wrong_export.candidate_export_max_bytes = 1;
+        assert!(wrong_export.validate().is_err());
+        assert_ne!(binding.digest().unwrap(), ordinary_digest);
+
+        for (direction, payload) in [
+            (
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::ProtocolBytes {
+                    bytes_base64: STANDARD.encode(b"input"),
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ProtocolBytes {
+                    bytes_base64: STANDARD.encode(b"output"),
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ProtocolEof,
+            ),
+        ] {
+            let mut value = frame(&binding);
+            value.direction = direction;
+            value.payload = payload;
+            let signer = match direction {
+                ChannelDirection::OwnerToSupervisor => &owner,
+                ChannelDirection::SupervisorToOwner => &supervisor,
+            };
+            SignedExecutionFrame::sign(value, &binding, signer).unwrap();
+        }
+
+        for (direction, payload) in [
+            (
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::Quiesce {
+                    completion_request_digest: "a".repeat(64),
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ExportObjectChunk {
+                    content_kind: ExportContentKind::Blob,
+                    object_hash: "a".repeat(64),
+                    offset: 0,
+                    bytes_base64: STANDARD.encode(b"x"),
+                    final_chunk: true,
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ExportSealed {
+                    candidate_snapshot_hash: "a".repeat(64),
+                    candidate_output_capture_hash: None,
+                    completion_request_digest: "b".repeat(64),
+                    writer_exclusion_evidence_hash: "c".repeat(64),
+                },
+            ),
+            (ChannelDirection::SupervisorToOwner, terminated()),
+        ] {
+            let mut value = frame(&binding);
+            value.direction = direction;
+            value.payload = payload;
+            let signer = match direction {
+                ChannelDirection::OwnerToSupervisor => &owner,
+                ChannelDirection::SupervisorToOwner => &supervisor,
+            };
+            assert!(SignedExecutionFrame::sign(value, &binding, signer).is_err());
+        }
     }
 
     #[test]
