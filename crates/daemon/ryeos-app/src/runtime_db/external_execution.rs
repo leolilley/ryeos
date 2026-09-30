@@ -53,8 +53,8 @@ pub(crate) use relay_bootstrap::ExternalRelayBootstrapCommitment;
 pub(super) use relay_bootstrap::JOURNAL_SQL as RELAY_BOOTSTRAP_SQL;
 pub(super) use relay_transfer::JOURNAL_SQL as RELAY_TRANSFER_SQL;
 pub(crate) use relay_transfer::{
-    ClaimedRelayFileContact, RelayDirection, RelayKind, RelayTransferIntent, RelayTransferPhase,
-    RelayTransferRecord,
+    ClaimedRelayFileContact, RelayApplicationDecision, RelayDirection, RelayKind,
+    RelayTransferIntent, RelayTransferPhase, RelayTransferRecord,
 };
 
 pub(super) const FIRST_EPOCH: u32 = 40;
@@ -2859,6 +2859,7 @@ impl RuntimeDb {
                 prior.as_ref() == Some(observation),
                 "external terminal observation changed"
             );
+            relay_transfer::close_placement_after_terminal_tx(&tx, placement)?;
             tx.commit()?;
             return Ok(());
         }
@@ -2883,6 +2884,7 @@ impl RuntimeDb {
         )?;
         let settled = read(&tx, placement)?.context("settled allocation disappeared")?;
         validate_lifecycle_evidence(&tx, &settled)?;
+        relay_transfer::close_placement_after_terminal_tx(&tx, placement)?;
         tx.commit()?;
         Ok(())
     }

@@ -2687,7 +2687,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 115 adds exact original-descriptor physical removal and Closed evidence.
 // Epoch 116 retains one-use Render Q relay transfer intents and exact file bytes.
 // Epoch 117 binds the original sealed relay bootstrap to its activation.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 117;
+// Epoch 118 retains one semantic application attempt and its exact signed
+// response before any controller-to-guest relay file can be uploaded.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 118;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -6516,6 +6518,32 @@ fn ensure_scope_lifetime_resettable(conn: &Connection, stored_epoch: u32) -> Res
         ensure!(
             pending == 0,
             "execution-history reset retains an open external relay transfer"
+        );
+    }
+    if stored_epoch >= 118 {
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM external_execution_relay_application WHERE phase='applying'",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            pending == 0,
+            "execution-history reset retains an indeterminate external relay application"
+        );
+        let unproven_closed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM external_execution_relay_application a
+             LEFT JOIN external_execution_allocation p
+               ON p.placement_thread_id=a.placement_thread_id
+             LEFT JOIN external_execution_terminal_observation t
+               ON t.placement_thread_id=a.placement_thread_id
+             WHERE a.phase='terminal_closed'
+               AND (p.phase IS NULL OR p.phase!='terminated' OR t.placement_thread_id IS NULL)",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            unproven_closed == 0,
+            "execution-history reset has relay closure without provider terminal evidence"
         );
     }
     // The coarse owner starts with the first scope-capable runtime cut. Older

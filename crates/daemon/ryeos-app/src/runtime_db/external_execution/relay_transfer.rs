@@ -6,7 +6,9 @@
 //! attach/exchange boundary before an owner-authenticated response is signed.
 
 use super::*;
-use ryeos_state::external_execution::transport::ExternalSupervisorBootstrap;
+use ryeos_state::external_execution::transport::{
+    ExternalRelayResponseEnvelope, ExternalRelayResponseKind, ExternalSupervisorBootstrap,
+};
 
 pub(super) const JOURNAL_SQL: &str = r#"
 CREATE TABLE external_execution_relay_transfer (
@@ -51,6 +53,40 @@ BEGIN SELECT RAISE(ABORT, 'external relay transfer is one-use'); END;
 CREATE TRIGGER external_execution_relay_transfer_no_delete
 BEFORE DELETE ON external_execution_relay_transfer
 BEGIN SELECT RAISE(ABORT, 'external relay transfer is retained'); END;
+CREATE TABLE external_execution_relay_application (
+    placement_thread_id TEXT NOT NULL REFERENCES external_execution_allocation(placement_thread_id),
+    kind TEXT NOT NULL CHECK (kind IN ('attach','exchange')),
+    sequence INTEGER NOT NULL CHECK (sequence BETWEEN 0 AND 65536),
+    bootstrap_digest TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK (phase IN ('applying','committed','terminal_closed')),
+    response_sha256 TEXT,
+    response_bytes BLOB,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (placement_thread_id,kind,sequence),
+    CHECK (updated_at_ms >= created_at_ms),
+    CHECK ((phase IN ('applying','terminal_closed') AND response_sha256 IS NULL AND response_bytes IS NULL)
+        OR (phase='committed' AND response_sha256 IS NOT NULL
+            AND length(response_bytes) BETWEEN 1 AND 2097152))
+);
+CREATE TRIGGER external_execution_relay_application_initial_guard
+BEFORE INSERT ON external_execution_relay_application
+WHEN NEW.phase!='applying' OR NEW.response_sha256 IS NOT NULL
+ OR NEW.response_bytes IS NOT NULL OR NEW.updated_at_ms!=NEW.created_at_ms
+BEGIN SELECT RAISE(ABORT, 'external relay application must begin uncommitted'); END;
+CREATE TRIGGER external_execution_relay_application_transition_guard
+BEFORE UPDATE ON external_execution_relay_application
+WHEN NEW.placement_thread_id!=OLD.placement_thread_id OR NEW.kind!=OLD.kind
+ OR NEW.sequence!=OLD.sequence OR NEW.bootstrap_digest!=OLD.bootstrap_digest
+ OR NEW.request_digest!=OLD.request_digest OR NEW.created_at_ms!=OLD.created_at_ms
+ OR NEW.updated_at_ms<OLD.updated_at_ms OR OLD.phase!='applying'
+ OR NEW.phase NOT IN ('committed','terminal_closed')
+ OR OLD.response_sha256 IS NOT NULL OR OLD.response_bytes IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'external relay application response is one-use'); END;
+CREATE TRIGGER external_execution_relay_application_no_delete
+BEFORE DELETE ON external_execution_relay_application
+BEGIN SELECT RAISE(ABORT, 'external relay application is retained'); END;
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -287,6 +323,13 @@ pub(crate) struct RelayTransferRecord {
     pub canonical_bytes: Option<Vec<u8>>,
 }
 
+pub(crate) enum RelayApplicationDecision {
+    /// This caller owns the sole attempt to apply the accepted request.
+    Apply { request_digest: String },
+    /// Exact committed response bytes for a contact retry. No channel effect.
+    Committed { response_bytes: Vec<u8> },
+}
+
 /// Process-local authority returned only after the durable contact transition.
 /// It is consumed by the exact retained adapter; callers cannot construct it
 /// from an occurrence or a remote path.
@@ -462,17 +505,404 @@ fn require_preceding_transfer(conn: &Connection, intent: &RelayTransferIntent) -
     Ok(())
 }
 
+fn verify_relay_application_response(
+    conn: &Connection,
+    bootstrap: &ExternalSupervisorBootstrap,
+    kind: RelayKind,
+    sequence: u32,
+    request_digest: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    use ryeos_state::external_execution::transport::{
+        ExternalChannelAttachRequest, ExternalChannelAttachResponse,
+        ExternalChannelExchangeRequest, ExternalChannelExchangeResponse,
+    };
+
+    let request_intent = RelayTransferIntent::from_bootstrap(
+        bootstrap,
+        kind,
+        sequence,
+        RelayDirection::GuestToController,
+        None,
+    )?;
+    let request = read_transfer(conn, &request_intent)?
+        .context("external relay semantic response lost its accepted request")?;
+    ensure!(
+        request.phase == RelayTransferPhase::Accepted
+            && request.observed_sha256.as_deref() == Some(request_digest),
+        "external relay semantic response changed its accepted request"
+    );
+    let request_bytes = request
+        .canonical_bytes
+        .context("external relay semantic response lost accepted bytes")?;
+    let envelope: ExternalRelayResponseEnvelope = serde_json::from_slice(bytes)?;
+    ensure!(
+        envelope.canonical_bytes()? == bytes,
+        "external relay semantic response is noncanonical"
+    );
+    let binding = ryeos_state::external_execution::journal::load_binding(
+        conn,
+        &bootstrap.placement_thread_id,
+    )?;
+    match kind {
+        RelayKind::Attach => {
+            let request: ExternalChannelAttachRequest = serde_json::from_slice(&request_bytes)?;
+            request.validate_for_bootstrap(bootstrap)?;
+            ensure!(
+                request.canonical_bytes()? == request_bytes,
+                "external relay attach request is noncanonical"
+            );
+            let response: ExternalChannelAttachResponse =
+                ExternalRelayResponseEnvelope::decode_verified(
+                    bytes,
+                    bootstrap,
+                    ExternalRelayResponseKind::Attach,
+                    request_digest,
+                    None,
+                )?;
+            response.validate_for_bootstrap(bootstrap, &request.supervisor_public_key)?;
+            ensure!(
+                response.binding == binding,
+                "external relay attach response differs from retained channel binding"
+            );
+        }
+        RelayKind::Exchange => {
+            let request: ExternalChannelExchangeRequest = serde_json::from_slice(&request_bytes)?;
+            request.validate_shape()?;
+            ensure!(
+                request.placement_thread_id == bootstrap.placement_thread_id
+                    && request.occurrence_id == bootstrap.occurrence_id
+                    && lillux::canonical_json(&serde_json::to_value(&request)?)?.as_bytes()
+                        == request_bytes,
+                "external relay exchange request changed its sealed occurrence"
+            );
+            let wire = request.decode_frame()?;
+            let verified =
+                ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+                    &wire,
+                    &binding,
+                    binding.issued_at_ms,
+                )?;
+            ensure!(
+                verified.frame().direction
+                    == ryeos_state::external_execution::ChannelDirection::SupervisorToOwner
+                    && verified.frame().sequence == u64::from(sequence),
+                "external relay exchange request has the wrong signing role"
+            );
+            let response: ExternalChannelExchangeResponse =
+                ExternalRelayResponseEnvelope::decode_verified(
+                    bytes,
+                    bootstrap,
+                    ExternalRelayResponseKind::Exchange,
+                    request_digest,
+                    Some(&binding.digest()?),
+                )?;
+            response.validate_shape()?;
+            ensure!(
+                response.incoming_sequence == verified.frame().sequence
+                    && response.incoming_frame_digest == verified.digest(),
+                "external relay exchange response changed its accepted frame"
+            );
+            verify_relay_exchange_output(conn, &binding, &response)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_relay_exchange_output(
+    conn: &Connection,
+    binding: &ryeos_state::external_execution::ExecutionChannelBinding,
+    response: &ryeos_state::external_execution::transport::ExternalChannelExchangeResponse,
+) -> Result<()> {
+    use ryeos_state::external_execution::{ChannelDirection, SignedExecutionFrame};
+    let binding_digest = binding.digest()?;
+    for frame in &response.outbound_frames {
+        let bytes = frame.decode_frame()?;
+        let verified =
+            SignedExecutionFrame::decode_and_verify(&bytes, binding, binding.issued_at_ms)?;
+        ensure!(
+            verified.frame().direction == ChannelDirection::OwnerToSupervisor
+                && verified.frame().sequence == frame.sequence
+                && verified.digest() == frame.frame_digest,
+            "external relay response contains a changed owner frame"
+        );
+        let retained: String = conn
+            .query_row(
+                "SELECT frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+               AND sequence=?2 AND frame_digest=?3",
+                params![binding_digest, frame.sequence, frame.frame_digest],
+                |row| row.get(0),
+            )
+            .context("external relay response owner frame has no durable journal row")?;
+        ensure!(
+            retained.as_bytes() == bytes.as_slice(),
+            "external relay response owner frame differs from durable journal"
+        );
+    }
+    if let Some(frame) = response.urgent_revocation_frame.as_ref() {
+        let bytes = frame.decode_frame()?;
+        let verified =
+            SignedExecutionFrame::decode_and_verify(&bytes, binding, binding.issued_at_ms)?;
+        ensure!(
+            verified.frame().direction == ChannelDirection::OwnerToSupervisor
+                && verified.frame().sequence == frame.sequence
+                && verified.digest() == frame.frame_digest,
+            "external relay response urgent frame changed its signed identity"
+        );
+        let retained: String = conn
+            .query_row(
+                "SELECT frame_json FROM external_execution_revocation
+             WHERE binding_digest=?1 AND frame_digest=?2",
+                params![binding_digest, frame.frame_digest],
+                |row| row.get(0),
+            )
+            .context("external relay response urgent frame has no durable revocation")?;
+        ensure!(
+            retained.as_bytes() == bytes.as_slice(),
+            "external relay response urgent frame differs from durable revocation"
+        );
+    }
+    if let Some(digest) = response.acknowledgement_frame_digest.as_deref() {
+        let retained: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+               AND frame_digest=?2 AND json_extract(frame_json,'$.frame.payload.kind')='acknowledge')",
+            params![binding_digest, digest], |row| row.get(0),
+        )?;
+        ensure!(
+            retained,
+            "external relay acknowledgement has no durable owner frame"
+        );
+    }
+    Ok(())
+}
+
+fn require_committed_relay_application(
+    conn: &Connection,
+    bootstrap: &ExternalSupervisorBootstrap,
+    kind: RelayKind,
+    sequence: u32,
+    bytes: &[u8],
+) -> Result<()> {
+    let row: (String, String, String, String, Vec<u8>) = conn
+        .query_row(
+            "SELECT bootstrap_digest,request_digest,phase,response_sha256,response_bytes
+         FROM external_execution_relay_application
+         WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3",
+            params![bootstrap.placement_thread_id, kind.as_str(), sequence],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .context("external relay response has no semantic application commitment")?;
+    ensure!(
+        row.0 == bootstrap.digest()?
+            && row.2 == "committed"
+            && row.3 == lillux::sha256_hex(bytes)
+            && row.4.as_slice() == bytes,
+        "external relay response differs from committed channel application"
+    );
+    verify_relay_application_response(conn, bootstrap, kind, sequence, &row.1, bytes)
+}
+
+/// Called only inside the original provider-terminal settlement transaction.
+/// This ends transport and indeterminate semantic custody; it does not turn
+/// an applying request into a response, acknowledgement, or qualification.
+pub(super) fn close_placement_after_terminal_tx(
+    tx: &Transaction<'_>,
+    placement: &str,
+) -> Result<()> {
+    let allocation = read(tx, placement)?
+        .context("external relay terminal closure lost its original allocation")?;
+    ensure!(
+        allocation.phase == ExternalAllocationPhase::Terminated,
+        "external relay terminal closure requires provider settlement"
+    );
+    super::validate_lifecycle_evidence(tx, &allocation)?;
+    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    tx.execute(
+        "UPDATE external_execution_relay_transfer
+         SET phase='terminal_closed',updated_at_ms=MAX(updated_at_ms,?2)
+         WHERE placement_thread_id=?1 AND phase!='terminal_closed'",
+        params![placement, now],
+    )?;
+    tx.execute(
+        "UPDATE external_execution_relay_application
+         SET phase='terminal_closed',updated_at_ms=MAX(updated_at_ms,?2)
+         WHERE placement_thread_id=?1 AND phase='applying'",
+        params![placement, now],
+    )?;
+    Ok(())
+}
+
 impl RuntimeDb {
+    /// Persist the sole semantic application attempt before invoking channel
+    /// code. An uncommitted attempt is indeterminate after a crash: it may
+    /// have applied a frame, so it cannot be run again or yield new bytes.
+    pub(crate) fn begin_external_relay_application(
+        &self,
+        bootstrap: &ExternalSupervisorBootstrap,
+        kind: RelayKind,
+        sequence: u32,
+    ) -> Result<RelayApplicationDecision> {
+        let intent = RelayTransferIntent::from_bootstrap(
+            bootstrap,
+            kind,
+            sequence,
+            RelayDirection::GuestToController,
+            None,
+        )?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        require_live_q_allocation(&tx, &intent)?;
+        require_placement_bootstrap(&tx, &intent)?;
+        let inbound = read_transfer(&tx, &intent)?
+            .context("external relay semantic application has no accepted request")?;
+        ensure!(
+            inbound.phase == RelayTransferPhase::Accepted,
+            "external relay semantic application requires accepted file bytes"
+        );
+        let request_digest = inbound
+            .observed_sha256
+            .context("accepted external relay request lost its digest")?;
+        let prior: Option<(String, String, String, Option<String>, Option<Vec<u8>>)> = tx
+            .query_row(
+                "SELECT bootstrap_digest,request_digest,phase,response_sha256,response_bytes
+             FROM external_execution_relay_application
+             WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3",
+                params![bootstrap.placement_thread_id, kind.as_str(), sequence],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((bootstrap_digest, prior_digest, phase, response_digest, response_bytes)) =
+            prior
+        {
+            ensure!(
+                bootstrap_digest == intent.bootstrap_digest && prior_digest == request_digest,
+                "external relay semantic request changed its original file identity"
+            );
+            if phase == "committed" {
+                let bytes = response_bytes.context("committed relay response lost bytes")?;
+                ensure!(
+                    response_digest.as_deref() == Some(lillux::sha256_hex(&bytes).as_str()),
+                    "committed relay response changed its digest"
+                );
+                verify_relay_application_response(
+                    &tx,
+                    bootstrap,
+                    kind,
+                    sequence,
+                    &request_digest,
+                    &bytes,
+                )?;
+                tx.commit()?;
+                return Ok(RelayApplicationDecision::Committed {
+                    response_bytes: bytes,
+                });
+            }
+            ensure!(
+                phase == "applying" && response_digest.is_none() && response_bytes.is_none(),
+                "external relay application phase is invalid"
+            );
+            anyhow::bail!("external relay semantic application is indeterminate; cleanup required");
+        }
+        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        ensure!(
+            now < intent.deadline_ms,
+            "external relay semantic application deadline expired"
+        );
+        tx.execute(
+            "INSERT INTO external_execution_relay_application VALUES(?1,?2,?3,?4,?5,'applying',NULL,NULL,?6,?6)",
+            params![bootstrap.placement_thread_id, kind.as_str(), sequence,
+                intent.bootstrap_digest, request_digest, now],
+        )?;
+        tx.commit()?;
+        Ok(RelayApplicationDecision::Apply { request_digest })
+    }
+
+    /// Commit exactly one owner-signed response. A lost local return can
+    /// replay the retained bytes; no later backlog snapshot may replace it.
+    pub(crate) fn commit_external_relay_application(
+        &self,
+        bootstrap: &ExternalSupervisorBootstrap,
+        kind: RelayKind,
+        sequence: u32,
+        response: &ExternalRelayResponseEnvelope,
+    ) -> Result<Vec<u8>> {
+        let intent = RelayTransferIntent::from_bootstrap(
+            bootstrap,
+            kind,
+            sequence,
+            RelayDirection::GuestToController,
+            None,
+        )?;
+        let bytes = response.canonical_bytes()?;
+        ensure!(
+            !bytes.is_empty()
+                && bytes.len() as u64 <= bootstrap.controller.relay()?.maximum_file_bytes,
+            "external relay semantic response exceeds signed file bound"
+        );
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        require_live_q_allocation(&tx, &intent)?;
+        let inbound = read_transfer(&tx, &intent)?
+            .context("external relay semantic commit lost accepted request")?;
+        ensure!(
+            inbound.phase == RelayTransferPhase::Accepted,
+            "external relay semantic commit requires accepted request"
+        );
+        let request_digest = inbound
+            .observed_sha256
+            .context("external relay semantic commit lost request digest")?;
+        verify_relay_application_response(&tx, bootstrap, kind, sequence, &request_digest, &bytes)?;
+        require_retention_budget(&tx, &intent, bytes.len())?;
+        let changed = tx.execute(
+            "UPDATE external_execution_relay_application
+             SET phase='committed',response_sha256=?6,response_bytes=?7,updated_at_ms=?8
+             WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3
+               AND bootstrap_digest=?4 AND request_digest=?5 AND phase='applying'",
+            params![
+                bootstrap.placement_thread_id,
+                kind.as_str(),
+                sequence,
+                intent.bootstrap_digest,
+                request_digest,
+                lillux::sha256_hex(&bytes),
+                bytes,
+                i64::try_from(lillux::time::timestamp_millis())?
+            ],
+        )?;
+        ensure!(
+            changed == 1,
+            "external relay semantic response has no unique application claim"
+        );
+        tx.commit()?;
+        Ok(bytes)
+    }
+
     /// Recover precommitted controller bytes without minting a replacement PUT.
     pub(crate) fn retained_external_relay_outbound(
         &self,
         bootstrap: &ExternalSupervisorBootstrap,
         kind: RelayKind,
         sequence: u32,
-    ) -> Result<RelayTransferRecord> {
+    ) -> Result<Vec<u8>> {
         bootstrap.validate()?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
-        let bytes: Vec<u8> = tx
+        let transfer_bytes: Option<Vec<u8>> = tx
             .query_row(
                 "SELECT canonical_bytes FROM external_execution_relay_transfer
              WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3
@@ -480,7 +910,22 @@ impl RuntimeDb {
                 params![bootstrap.placement_thread_id, kind.as_str(), sequence],
                 |row| row.get(0),
             )
-            .context("external relay has no retained controller response")?;
+            .optional()?;
+        let application_bytes: Vec<u8> = tx
+            .query_row(
+                "SELECT response_bytes FROM external_execution_relay_application
+             WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3 AND phase='committed'",
+                params![bootstrap.placement_thread_id, kind.as_str(), sequence],
+                |row| row.get(0),
+            )
+            .context("external relay has no committed semantic response")?;
+        if let Some(ref transfer_bytes) = transfer_bytes {
+            ensure!(
+                transfer_bytes == &application_bytes,
+                "external relay transfer differs from committed semantic response"
+            );
+        }
+        let bytes = application_bytes;
         let intent = RelayTransferIntent::from_bootstrap(
             bootstrap,
             kind,
@@ -490,14 +935,15 @@ impl RuntimeDb {
         )?;
         require_live_q_allocation(&tx, &intent)?;
         require_placement_bootstrap(&tx, &intent)?;
-        let record = read_transfer(&tx, &intent)?
-            .context("external relay retained controller response disappeared")?;
-        ensure!(
-            record.canonical_bytes.as_deref() == Some(bytes.as_slice()),
-            "external relay retained response changed its exact bytes"
-        );
+        require_committed_relay_application(&tx, bootstrap, kind, sequence, &bytes)?;
+        if let Some(record) = read_transfer(&tx, &intent)? {
+            ensure!(
+                record.canonical_bytes.as_deref() == Some(bytes.as_slice()),
+                "external relay retained response changed its exact bytes"
+            );
+        }
         tx.commit()?;
-        Ok(record)
+        Ok(bytes)
     }
 
     pub(crate) fn accepted_external_relay_request(
@@ -576,6 +1022,15 @@ impl RuntimeDb {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         require_live_q_allocation(&tx, intent)?;
         require_placement_bootstrap(&tx, intent)?;
+        if let Some(bytes) = outbound {
+            require_committed_relay_application(
+                &tx,
+                bootstrap,
+                intent.kind,
+                intent.sequence,
+                bytes,
+            )?;
+        }
         if let Some(prior) = read_transfer(&tx, intent)? {
             if intent.direction == RelayDirection::ControllerToGuest {
                 ensure!(
@@ -885,8 +1340,10 @@ fn require_retention_budget(
     additional: usize,
 ) -> Result<()> {
     let used: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(length(canonical_bytes)),0) FROM external_execution_relay_transfer
-         WHERE placement_thread_id=?1",
+        "SELECT (SELECT COALESCE(SUM(length(canonical_bytes)),0)
+                 FROM external_execution_relay_transfer WHERE placement_thread_id=?1)
+              + (SELECT COALESCE(SUM(length(response_bytes)),0)
+                 FROM external_execution_relay_application WHERE placement_thread_id=?1)",
         [&intent.placement_thread_id],
         |row| row.get(0),
     )?;
@@ -900,6 +1357,7 @@ fn require_retention_budget(
 }
 
 pub(super) fn validate_transfers(conn: &Connection) -> Result<()> {
+    let mut budgets = std::collections::BTreeMap::<String, u64>::new();
     let mut statement = conn.prepare(
         "SELECT placement_thread_id,kind,sequence,direction,intent_json,phase,read_attempts,observed_sha256,observed_bytes,canonical_bytes
          FROM external_execution_relay_transfer"
@@ -956,6 +1414,28 @@ pub(super) fn validate_transfers(conn: &Connection) -> Result<()> {
             current.canonical_bytes == canonical_bytes,
             "external relay journal changed exact retained bytes"
         );
+        if let Some(prior) = budgets.insert(placement.clone(), intent.retention_budget_bytes) {
+            ensure!(
+                prior == intent.retention_budget_bytes,
+                "external relay placement changed its signed retention budget"
+            );
+        } else {
+            require_retention_budget(conn, &intent, 0)?;
+        }
+        if intent.direction == RelayDirection::ControllerToGuest {
+            let committed: Vec<u8> = conn
+                .query_row(
+                    "SELECT response_bytes FROM external_execution_relay_application
+                 WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3 AND phase='committed'",
+                    params![placement, kind, sequence],
+                    |row| row.get(0),
+                )
+                .context("external relay outbound transfer has no semantic commitment")?;
+            ensure!(
+                current.canonical_bytes.as_deref() == Some(committed.as_slice()),
+                "external relay outbound transfer changed committed response bytes"
+            );
+        }
         let allocation =
             read(conn, &placement)?.context("external relay journal lost allocation")?;
         ensure!(
@@ -970,6 +1450,221 @@ pub(super) fn validate_transfers(conn: &Connection) -> Result<()> {
                     ExternalAllocationOwner::QualificationCandidate(_)
                 ),
             "external relay journal changed its Q allocation owner"
+        );
+    }
+    validate_applications(conn)?;
+    Ok(())
+}
+
+fn validate_applications(conn: &Connection) -> Result<()> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use lillux::crypto::Verifier as _;
+    use ryeos_state::external_execution::transport::{
+        EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA, ExternalChannelAttachRequest,
+        ExternalChannelAttachResponse, ExternalChannelExchangeRequest,
+        ExternalChannelExchangeResponse,
+    };
+
+    let mut statement = conn.prepare(
+        "SELECT placement_thread_id,kind,sequence,bootstrap_digest,request_digest,
+                phase,response_sha256,response_bytes,created_at_ms,updated_at_ms
+         FROM external_execution_relay_application",
+    )?;
+    for row in statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, u32>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<Vec<u8>>>(7)?,
+            row.get::<_, i64>(8)?,
+            row.get::<_, i64>(9)?,
+        ))
+    })? {
+        let (
+            placement,
+            kind,
+            sequence,
+            bootstrap_digest,
+            request_digest,
+            phase,
+            response_digest,
+            response_bytes,
+            created,
+            updated,
+        ) = row?;
+        let kind = match kind.as_str() {
+            "attach" if sequence == 0 => RelayKind::Attach,
+            "exchange" if sequence > 0 => RelayKind::Exchange,
+            _ => anyhow::bail!("external relay application has invalid kind or sequence"),
+        };
+        let accepted_request: (String, String, Vec<u8>) = conn
+            .query_row(
+                "SELECT intent_json,observed_sha256,canonical_bytes
+             FROM external_execution_relay_transfer WHERE placement_thread_id=?1
+               AND kind=?2 AND sequence=?3 AND direction='guest_to_controller'
+               AND phase IN ('accepted','terminal_closed')",
+                params![placement, kind.as_str(), sequence],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .context("external relay application has no accepted request")?;
+        let request_intent: RelayTransferIntent = serde_json::from_str(&accepted_request.0)?;
+        let allocation =
+            read(conn, &placement)?.context("external relay application lost its allocation")?;
+        ensure!(
+            canonical(&request_intent)? == accepted_request.0
+                && request_intent.bootstrap_digest == bootstrap_digest
+                && request_intent.kind == kind
+                && request_intent.sequence == sequence
+                && request_intent.placement_thread_id == placement
+                && accepted_request.1 == request_digest
+                && lillux::sha256_hex(&accepted_request.2) == request_digest
+                && allocation.reservation.request_digest
+                    == request_intent.allocation_request_digest
+                && allocation
+                    .occurrence
+                    .as_ref()
+                    .map(|o| o.occurrence_id.as_str())
+                    == Some(request_intent.occurrence_id.as_str())
+                && matches!(
+                    &allocation.reservation.owner,
+                    ExternalAllocationOwner::QualificationCandidate(_)
+                )
+                && created > 0
+                && updated >= created,
+            "external relay application changed its accepted Q request"
+        );
+        if phase == "applying" {
+            ensure!(
+                allocation.phase != ExternalAllocationPhase::Terminated
+                    && response_digest.is_none()
+                    && response_bytes.is_none(),
+                "uncommitted external relay application carries response bytes"
+            );
+            continue;
+        }
+        if phase == "terminal_closed" {
+            ensure!(
+                response_digest.is_none()
+                    && response_bytes.is_none()
+                    && allocation.phase == ExternalAllocationPhase::Terminated,
+                "terminal-closed relay application lacks provider settlement"
+            );
+            super::validate_lifecycle_evidence(conn, &allocation)?;
+            continue;
+        }
+        ensure!(
+            phase == "committed",
+            "external relay application has invalid phase"
+        );
+        let bytes = response_bytes.context("committed external relay application lost response")?;
+        ensure!(
+            response_digest.as_deref() == Some(lillux::sha256_hex(&bytes).as_str())
+                && !bytes.is_empty()
+                && bytes.len() as u64 <= request_intent.maximum_file_bytes,
+            "external relay application changed its committed response digest"
+        );
+        let envelope: ExternalRelayResponseEnvelope = serde_json::from_slice(&bytes)?;
+        ensure!(
+            envelope.canonical_bytes()? == bytes
+                && envelope.payload.schema == EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA
+                && envelope.payload.bootstrap_digest == bootstrap_digest
+                && envelope.payload.placement_thread_id == placement
+                && envelope.payload.occurrence_id == request_intent.occurrence_id
+                && envelope.payload.request_digest == request_digest
+                && envelope.payload.kind
+                    == if kind == RelayKind::Attach {
+                        ExternalRelayResponseKind::Attach
+                    } else {
+                        ExternalRelayResponseKind::Exchange
+                    },
+            "external relay application changed its signed response coordinates"
+        );
+        let owner_bytes: [u8; 32] = STANDARD
+            .decode(&allocation.reservation.channel_owner_public_key)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("external relay owner key changed length"))?;
+        let owner = lillux::crypto::VerifyingKey::from_bytes(&owner_bytes)?;
+        let signature_bytes = STANDARD.decode(&envelope.signature)?;
+        ensure!(
+            STANDARD.encode(&signature_bytes) == envelope.signature,
+            "external relay application signature is noncanonical"
+        );
+        let signature = lillux::crypto::Signature::from_slice(&signature_bytes)?;
+        let signing = lillux::canonical_json(&serde_json::json!({
+            "domain": "ryeos.external-controller-file-relay-response.v1",
+            "payload": &envelope.payload,
+        }))?;
+        owner.verify_strict(signing.as_bytes(), &signature)?;
+        let binding = ryeos_state::external_execution::journal::load_binding(conn, &placement)?;
+        if kind == RelayKind::Attach {
+            let request: ExternalChannelAttachRequest =
+                serde_json::from_slice(&accepted_request.2)?;
+            request.validate_shape()?;
+            ensure!(
+                request.placement_thread_id == placement
+                    && request.occurrence_id == request_intent.occurrence_id
+                    && request.canonical_bytes()? == accepted_request.2,
+                "external relay attach request changed occurrence"
+            );
+            let response: ExternalChannelAttachResponse =
+                serde_json::from_value(envelope.payload.response.clone())?;
+            response.validate()?;
+            ensure!(
+                response.binding == binding
+                    && response.binding.supervisor_public_key == request.supervisor_public_key
+                    && envelope.payload.binding_digest.is_none(),
+                "external relay attach response changed retained channel"
+            );
+        } else {
+            let request: ExternalChannelExchangeRequest =
+                serde_json::from_slice(&accepted_request.2)?;
+            request.validate_shape()?;
+            ensure!(
+                request.placement_thread_id == placement
+                    && request.occurrence_id == request_intent.occurrence_id
+                    && lillux::canonical_json(&serde_json::to_value(&request)?)?.as_bytes()
+                        == accepted_request.2,
+                "external relay exchange request changed occurrence"
+            );
+            let verified =
+                ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+                    &request.decode_frame()?,
+                    &binding,
+                    binding.issued_at_ms,
+                )?;
+            let response: ExternalChannelExchangeResponse =
+                serde_json::from_value(envelope.payload.response.clone())?;
+            response.validate_shape()?;
+            ensure!(
+                verified.frame().direction
+                    == ryeos_state::external_execution::ChannelDirection::SupervisorToOwner
+                    && verified.frame().sequence == u64::from(sequence)
+                    && response.incoming_sequence == verified.frame().sequence
+                    && response.incoming_frame_digest == verified.digest()
+                    && envelope.payload.binding_digest.as_deref()
+                        == Some(binding.digest()?.as_str()),
+                "external relay exchange response changed accepted frame"
+            );
+            verify_relay_exchange_output(conn, &binding, &response)?;
+        }
+        let transfer_bytes: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT canonical_bytes FROM external_execution_relay_transfer
+             WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3
+               AND direction='controller_to_guest'",
+                params![placement, kind.as_str(), sequence],
+                |row| row.get(0),
+            )
+            .optional()?;
+        ensure!(
+            transfer_bytes
+                .as_deref()
+                .is_none_or(|value| value == bytes.as_slice()),
+            "external relay response transfer differs from committed semantics"
         );
     }
     Ok(())

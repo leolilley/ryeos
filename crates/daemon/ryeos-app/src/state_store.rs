@@ -16798,12 +16798,37 @@ impl StateStore {
             .accepted_external_relay_request(intent)
     }
 
+    pub(crate) fn begin_external_relay_application(
+        &self,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        kind: runtime_db::external_execution::RelayKind,
+        sequence: u32,
+    ) -> Result<runtime_db::external_execution::RelayApplicationDecision> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .begin_external_relay_application(bootstrap, kind, sequence)
+    }
+
+    pub(crate) fn commit_external_relay_application(
+        &self,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        kind: runtime_db::external_execution::RelayKind,
+        sequence: u32,
+        response: &ryeos_state::external_execution::transport::ExternalRelayResponseEnvelope,
+    ) -> Result<Vec<u8>> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .commit_external_relay_application(bootstrap, kind, sequence, response)
+    }
+
     pub(crate) fn retained_external_relay_outbound(
         &self,
         bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
         kind: runtime_db::external_execution::RelayKind,
         sequence: u32,
-    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
+    ) -> Result<Vec<u8>> {
         self.lock()?
             .runtime_db
             .retained_external_relay_outbound(bootstrap, kind, sequence)

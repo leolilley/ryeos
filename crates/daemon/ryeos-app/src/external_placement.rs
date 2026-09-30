@@ -2886,11 +2886,208 @@ pub(crate) fn recover_original_external_relay_bootstrap(
     Ok(sealed)
 }
 
+/// Apply one accepted guest file at the existing channel boundary, then
+/// reserve and contact only the exact owner-signed committed response. No
+/// operator Q loop calls this yet. An indeterminate application is deliberately
+/// refused: restart fences the Q occurrence and proceeds to cleanup, rather
+/// than reapplying a frame whose first transaction may already have committed.
+#[allow(dead_code)]
+pub(crate) fn apply_and_contact_original_external_relay_request(
+    state: &AppState,
+    placement: &str,
+    kind: crate::runtime_db::external_execution::RelayKind,
+    sequence: u32,
+) -> Result<crate::runtime_db::external_execution::RelayTransferRecord> {
+    use crate::runtime_db::external_execution::{
+        RelayApplicationDecision, RelayDirection, RelayTransferIntent,
+    };
+    use ryeos_state::external_execution::transport::{
+        EXTERNAL_CHANNEL_TRANSPORT_SCHEMA, ExternalChannelAttachRequest,
+        ExternalChannelAttachResponse, ExternalChannelExchangeRequest,
+        ExternalChannelExchangeResponse, ExternalChannelResponseFrame,
+        ExternalRelayResponseEnvelope, ExternalRelayResponseKind,
+    };
+
+    let protected = recover_original_external_relay_bootstrap(state, placement)?;
+    let bootstrap = protected.bootstrap();
+    let intent = RelayTransferIntent::from_bootstrap(
+        bootstrap,
+        kind,
+        sequence,
+        RelayDirection::GuestToController,
+        None,
+    )?;
+    let accepted = state.state_store.accepted_external_relay_request(&intent)?;
+    let request_bytes = accepted
+        .canonical_bytes
+        .context("accepted external relay request lost its exact bytes")?;
+    let request_digest = accepted
+        .observed_sha256
+        .context("accepted external relay request lost its digest")?;
+    ensure!(
+        lillux::sha256_hex(&request_bytes) == request_digest,
+        "accepted external relay request changed its retained digest"
+    );
+
+    // Parse and validate canonical guest syntax before taking the one-use
+    // semantic claim. Time-sensitive authentication happens only for a new
+    // application; committed recovery uses its exact retained response.
+    let attach = if kind == crate::runtime_db::external_execution::RelayKind::Attach {
+        let request: ExternalChannelAttachRequest = serde_json::from_slice(&request_bytes)?;
+        request.validate_for_bootstrap(bootstrap)?;
+        ensure!(
+            request.canonical_bytes()? == request_bytes,
+            "external relay attach request is noncanonical"
+        );
+        Some(request)
+    } else {
+        None
+    };
+    let exchange = if kind == crate::runtime_db::external_execution::RelayKind::Exchange {
+        let request: ExternalChannelExchangeRequest = serde_json::from_slice(&request_bytes)?;
+        request.validate_shape()?;
+        ensure!(
+            request.placement_thread_id == bootstrap.placement_thread_id
+                && request.occurrence_id == bootstrap.occurrence_id
+                && lillux::canonical_json(&serde_json::to_value(&request)?)?.as_bytes()
+                    == request_bytes,
+            "external relay exchange request changed its sealed occurrence"
+        );
+        let wire = request.decode_frame()?;
+        Some((request, wire))
+    } else {
+        None
+    };
+    let decision = state
+        .state_store
+        .begin_external_relay_application(bootstrap, kind, sequence)?;
+    let envelope = match decision {
+        RelayApplicationDecision::Committed { response_bytes } => {
+            serde_json::from_slice::<ExternalRelayResponseEnvelope>(&response_bytes)?
+        }
+        RelayApplicationDecision::Apply {
+            request_digest: claimed_digest,
+        } => {
+            ensure!(
+                claimed_digest == request_digest,
+                "external relay semantic claim changed accepted bytes"
+            );
+            let allocation = state
+                .state_store
+                .external_allocation(placement)?
+                .context("external relay semantic application lost its allocation")?;
+            let access = ExternalChannelAuthorityAccess::new(
+                &allocation.reservation.channel_authority_generation,
+            )?;
+            let authority = access.decode(state.vault.external_channel_authority(&access)?)?;
+            ensure!(
+                authority.owner_public_key() == bootstrap.owner_public_key,
+                "external relay semantic signer changed its sealed owner"
+            );
+            let envelope = if let Some(request) = attach {
+                let authenticated = authenticate_external_channel_bootstrap(
+                    state,
+                    placement,
+                    &bootstrap.occurrence_id,
+                    &request.bootstrap_capability,
+                )?;
+                let binding = attach_external_execution_channel(
+                    state,
+                    &authenticated,
+                    &request.supervisor_public_key,
+                )?;
+                let response = ExternalChannelAttachResponse {
+                    schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
+                    binding_digest: binding.digest()?,
+                    binding,
+                };
+                ExternalRelayResponseEnvelope::sign(
+                    bootstrap,
+                    ExternalRelayResponseKind::Attach,
+                    &request_digest,
+                    None,
+                    &response,
+                    authority.owner_signing_key(),
+                )?
+            } else if let Some((_request, wire)) = exchange {
+                let authenticated = authenticate_external_channel_frame(
+                    state,
+                    placement,
+                    &bootstrap.occurrence_id,
+                    &wire,
+                )?;
+                ensure!(
+                    authenticated.sequence() == u64::from(sequence),
+                    "external relay file sequence differs from its signed frame"
+                );
+                let binding_digest = state
+                    .state_store
+                    .external_execution_channel(placement)?
+                    .digest()?;
+                let result = exchange_external_channel_frame(state, &authenticated, &wire)?;
+                let outbound_frames = result
+                    .outbound()
+                    .iter()
+                    .map(|frame| {
+                        ExternalChannelResponseFrame::new(
+                            frame.sequence(),
+                            frame.frame_digest().to_owned(),
+                            frame.canonical_wire(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let urgent_revocation_frame = result
+                    .urgent_revocation()
+                    .map(|frame| {
+                        ExternalChannelResponseFrame::new(
+                            frame.sequence(),
+                            frame.frame_digest().to_owned(),
+                            frame.canonical_wire(),
+                        )
+                    })
+                    .transpose()?;
+                let response = ExternalChannelExchangeResponse {
+                    schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
+                    incoming_new: result.incoming_new(),
+                    incoming_sequence: authenticated.sequence(),
+                    incoming_frame_digest: authenticated.frame_digest().to_owned(),
+                    acknowledgement_frame_digest: result
+                        .acknowledgement_digest()
+                        .map(str::to_owned),
+                    outbound_frames,
+                    urgent_revocation_frame,
+                };
+                response.validate_shape()?;
+                ExternalRelayResponseEnvelope::sign(
+                    bootstrap,
+                    ExternalRelayResponseKind::Exchange,
+                    &request_digest,
+                    Some(&binding_digest),
+                    &response,
+                    authority.owner_signing_key(),
+                )?
+            } else {
+                bail!("external relay semantic application has no typed request")
+            };
+            state
+                .state_store
+                .commit_external_relay_application(bootstrap, kind, sequence, &envelope)?;
+            envelope
+        }
+    };
+    contact_original_external_relay_transfer(
+        state,
+        placement,
+        kind,
+        sequence,
+        RelayDirection::ControllerToGuest,
+        Some(&envelope),
+    )
+}
+
 /// Contact only an immutable file slot derived from the protected original
 /// bootstrap. This records transport bytes, never Ready, ACK, or settlement.
-/// There is deliberately no live Q loop caller yet. A later channel owner
-/// must apply typed attach/exchange under its durable channel journal and
-/// bind that application to these retained bytes before enabling this path.
+/// The outbound reservation itself requires a committed semantic application.
 #[allow(dead_code)]
 pub(crate) fn contact_original_external_relay_transfer(
     state: &AppState,
@@ -2936,8 +3133,6 @@ pub(crate) fn contact_original_external_relay_transfer(
                 state
                     .state_store
                     .retained_external_relay_outbound(bootstrap, kind, sequence)?
-                    .canonical_bytes
-                    .context("retained relay response lost its exact bytes")?
             };
             let envelope: ExternalRelayResponseEnvelope = serde_json::from_slice(&bytes)?;
             ensure!(
