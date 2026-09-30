@@ -1250,7 +1250,7 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         upload.require_owned_regular()?;
         let observation = upload.regular_file_observation()?;
         ensure!(
-            observation.full_permission_mode()? == 0o600
+            observation.full_permission_mode()? == request.required_upload_mode()
                 && observation.size() == request.upload_bytes
                 && upload.digest_regular_file_stable_exact(&observation)? == request.upload_sha256,
             "restored verifier upload changed before adapter invocation"

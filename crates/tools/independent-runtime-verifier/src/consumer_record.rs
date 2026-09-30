@@ -256,6 +256,122 @@ impl PreparedConsumerOuterRequest<'_> {
 }
 
 impl ImportedConsumerInputs {
+    /// Corroborate the currently executing consumer image against the retained
+    /// delivery descriptor. This is image identity, not run-channel authority.
+    pub(crate) fn require_current_verifier_image(&self) -> Result<()> {
+        lillux::validate_current_executable_descriptor(self._verifier.inherited_descriptor()?)
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// Transfer only private delivery records to the exact retained runtime's
+    /// account before the enclosing verifier drops administrator credentials.
+    /// Product trees remain unchanged. This operation is not transactional:
+    /// any error requires quarantine, never rollback/relaunch or qualification.
+    /// Caller authenticates this attempt and retains parent/writer custody.
+    pub(crate) fn transfer_private_delivery_account(
+        &self,
+        record: &ConsumerInputRecord,
+        challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+        runtime: &ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        use ryeos_external_execution_contract::restored_runtime_measurement::{
+            CONSUMER_VERIFIER_REMOTE_NAME, RemoteVerificationPurpose,
+        };
+        self.require_record_challenge(record, challenge)?;
+        ensure!(!deadline.has_elapsed(), "delivery account handoff expired");
+        self.root.require_owner_private_directory()?;
+        let RemoteVerificationPurpose::ConsumerRuntime {
+            guest_runtime_manifest_hash,
+            ..
+        } = &challenge.intent.purpose
+        else {
+            anyhow::bail!("delivery account requires consumer attempt");
+        };
+        ensure!(
+            runtime.manifest_hash() == guest_runtime_manifest_hash,
+            "delivery account runtime differs from retained attempt"
+        );
+        runtime.require_disjoint_directory_tree(&self.root)?;
+        runtime.recheck()?;
+        // Resolve and check every exact file before the first irreversible
+        // ownership change. Never recursively grant arbitrary archive entries.
+        let mut files = Vec::new();
+        for (name, retained, mode) in [
+            (CONSUMER_INPUT_RECORD_NAME, &self._record, 0o400),
+            (
+                CONSUMER_VERIFIER_REMOTE_NAME,
+                &self._verifier,
+                CONSUMER_VERIFIER_MODE,
+            ),
+        ] {
+            let file = self
+                .root
+                .open_pinned_regular(std::ffi::OsStr::new(name), false)?
+                .context("private delivery file disappeared before account transfer")?;
+            ensure!(
+                file.inherited_descriptor_authority()?
+                    .same_file_identity(retained)?
+                    && file.permission_mode()? == mode,
+                "private delivery file substituted identity or mode"
+            );
+            files.push((file, mode));
+        }
+        for (index, input) in self.inputs.iter().enumerate() {
+            ensure!(
+                !deadline.has_elapsed(),
+                "delivery account inventory expired"
+            );
+            let ryeos_external_execution_contract::GuestMountContentAuthority::ProductManifest {
+                manifest_descriptor,
+                ..
+            } = &input.content_authority
+            else {
+                anyhow::bail!("delivery product lacks retained manifest");
+            };
+            let retained = self
+                .descriptors
+                .get(manifest_descriptor)
+                .context("delivery manifest descriptor absent")?;
+            let file = self
+                .root
+                .open_pinned_regular(
+                    std::ffi::OsStr::new(&format!("product-{index:02}-manifest.json")),
+                    false,
+                )?
+                .context("delivery manifest disappeared")?;
+            ensure!(
+                file.inherited_descriptor_authority()?
+                    .same_file_identity(retained)?
+                    && file.permission_mode()? == 0o400,
+                "delivery manifest substituted identity or mode"
+            );
+            files.push((file, 0o400));
+        }
+        let account = &runtime.profile().account;
+        for (file, mode) in files {
+            ensure!(
+                !deadline.has_elapsed(),
+                "delivery account grant deadline expired"
+            );
+            account.grant_private_readonly_file(&file, mode)?;
+        }
+        ensure!(
+            !deadline.has_elapsed(),
+            "delivery account directory grant expired"
+        );
+        account.grant_private_directory(&self.root)?;
+        self.root.ensure_path_binding()?;
+        runtime.recheck()?;
+        ensure!(
+            !deadline.has_elapsed(),
+            "delivery account handoff exceeded deadline"
+        );
+        // Full import is rechecked under the selected account after the caller
+        // drops root. This return is only ownership handoff, never readiness.
+        Ok(())
+    }
+
     /// Select the exact admitted verifier for the dedicated outer-owner role.
     /// This prepares a subordinate launch only: the enclosing verifier retains
     /// attempt authority, pipe supervision and all settlement/evidence joins.
@@ -460,6 +576,45 @@ impl ImportedConsumerInputs {
         native_control: &lillux::PinnedDirectory,
         protected_owner: &lillux::PinnedDirectory,
     ) -> Result<PreparedConsumerOuterRequest<'a>> {
+        self.codex_outer_request(
+            record,
+            challenge,
+            fresh_home,
+            native_control,
+            protected_owner,
+            true,
+        )
+    }
+
+    /// Reopen the exact parent-authored home at dedicated helper startup.
+    /// No file is created or repaired; ambient entries and changed bytes refuse.
+    pub(crate) fn reopen_codex_outer_request<'a>(
+        &'a self,
+        record: &ConsumerInputRecord,
+        challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+        home: &lillux::PinnedDirectory,
+        native_control: &lillux::PinnedDirectory,
+        protected_owner: &lillux::PinnedDirectory,
+    ) -> Result<PreparedConsumerOuterRequest<'a>> {
+        self.codex_outer_request(
+            record,
+            challenge,
+            home,
+            native_control,
+            protected_owner,
+            false,
+        )
+    }
+
+    fn codex_outer_request<'a>(
+        &'a self,
+        record: &ConsumerInputRecord,
+        challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+        fresh_home: &lillux::PinnedDirectory,
+        native_control: &lillux::PinnedDirectory,
+        protected_owner: &lillux::PinnedDirectory,
+        initialize_home: bool,
+    ) -> Result<PreparedConsumerOuterRequest<'a>> {
         challenge.validate()?;
         record.validate_attempt(&challenge.intent)?;
         ensure!(
@@ -477,10 +632,22 @@ impl ImportedConsumerInputs {
         for exposed in [&self.root, fresh_home, native_control] {
             protected_owner.require_disjoint_directory_tree(exposed)?;
         }
-        ensure!(
-            fresh_home.entries_no_follow_bounded(1)?.is_empty(),
-            "consumer Codex home is not fresh"
-        );
+        if initialize_home {
+            ensure!(
+                fresh_home.entries_no_follow_bounded(1)?.is_empty(),
+                "consumer Codex home is not fresh"
+            );
+        } else {
+            let entries = fresh_home.entries_no_follow_bounded(2)?;
+            ensure!(
+                entries.len() == 2
+                    && entries.iter().all(|entry| matches!(
+                        entry.name.to_str(),
+                        Some("config.toml" | "environments.toml")
+                    )),
+                "consumer Codex home has missing or ambient entries"
+            );
+        }
         let home_identity = fresh_home.inherited_descriptor_authority()?;
         ensure!(
             !home_identity.same_file_identity(&self.root.inherited_descriptor_authority()?)?,
@@ -513,9 +680,20 @@ impl ImportedConsumerInputs {
                 bytes.len() <= 64 * 1024,
                 "consumer Codex configuration exceeds bound"
             );
-            fresh_home
-                .atomic_create_pinned_regular(std::ffi::OsStr::new(name), bytes, 0o400)?
-                .context("consumer Codex configuration already exists")?;
+            if initialize_home {
+                fresh_home
+                    .atomic_create_pinned_regular(std::ffi::OsStr::new(name), bytes, 0o400)?
+                    .context("consumer Codex configuration already exists")?;
+            } else {
+                let file = fresh_home
+                    .open_pinned_regular(std::ffi::OsStr::new(name), false)?
+                    .context("consumer Codex configuration disappeared")?;
+                ensure!(
+                    file.permission_mode()? == 0o400
+                        && file.read_stable_bounded(&file.observation()?, 64 * 1024)? == bytes,
+                    "consumer Codex configuration differs from parent-authored inputs"
+                );
+            }
         }
         let _ = self.controller_codex_executable(record)?;
         fresh_home.ensure_path_binding()?;
@@ -879,6 +1057,10 @@ impl ConsumerInputRecord {
             let manifest = root
                 .open_inherited_regular(std::ffi::OsStr::new(&record_name), false)?
                 .context("imported consumer product manifest is missing")?;
+            ensure!(
+                manifest.regular_file_observation()?.portable_mode()? == 0o400,
+                "imported consumer manifest differs from immutable delivery mode"
+            );
             let remaining = budget.maximum_regular_bytes - regular_bytes;
             let (bytes, _) =
                 manifest.read_regular_file_stable_bounded(remaining.min(8 * 1024 * 1024))?;

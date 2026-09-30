@@ -145,7 +145,7 @@ impl ConsumerScriptedExpectation {
             secret_read_denial: crate::staging::CONTROLLER_CANARY_DENIAL.into(),
             controller_canary_value: self.canary_value.clone(),
         };
-        crate::routing_observation::check_notifications(&collected.notifications, &routing)?;
+        crate::routing_observation::check_notifications(&routing, &collected.notifications)?;
         ensure!(collected.native_observation.len() as u64 <=
             ryeos_external_execution_contract::restored_runtime_measurement::MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
             "consumer native observation exceeds bound");
@@ -184,11 +184,168 @@ pub struct ConsumerCollectedTurn {
     pub native_observation: Vec<u8>,
 }
 
+/// Borrowed, preselected inputs for one enclosing consumer observation. These
+/// references do not authenticate delivery or create another attempt owner.
+pub struct ConsumerObservationInputs<'a> {
+    pub imported: &'a ImportedConsumerInputs,
+    pub record: &'a ConsumerInputRecord,
+    pub challenge: &'a ConsumerRuntimeChallenge,
+    pub expectation: &'a ConsumerScriptedExpectation,
+    pub fresh_home: &'a lillux::PinnedDirectory,
+    pub native_control: &'a lillux::PinnedDirectory,
+    pub protected_owner: &'a lillux::PinnedDirectory,
+    pub expected_request: &'a lillux::LinuxSandboxRequest,
+}
+
+/// Complete local observations, not a qualification or provider-death receipt.
+/// Admission must still join the authenticated executable/attempt/occurrence
+/// and authoritative provider termination before accepting testimony.
+pub struct ConsumerObservedProtocol {
+    pub turn: ConsumerCollectedTurn,
+    pub outer: crate::consumer_outer_owner::ConsumerOuterObservation,
+    pub peer_requests: Vec<serde_json::Value>,
+}
+
+impl ConsumerObservedProtocol {
+    /// Product-owned raw evidence envelope for the existing adapter/journal
+    /// transport. No success, qualification or provider-death claim is encoded.
+    /// The controller must authenticate these bytes and independently interpret
+    /// their provenance and semantics before permitting any runtime claim.
+    pub fn canonical_evidence(
+        &self,
+        record: &ConsumerInputRecord,
+        challenge: &ConsumerRuntimeChallenge,
+        deadline: MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        use ryeos_external_execution_contract::restored_runtime_measurement::MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES;
+        ensure!(!deadline.has_elapsed(), "consumer evidence export expired");
+        challenge.validate()?;
+        record.validate_attempt(&challenge.intent)?;
+        ensure!(
+            record.selection == challenge.selection
+                && self.turn.native_observation.len() as u64
+                    <= MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
+            "consumer evidence differs from protected selection or bound"
+        );
+        let native: serde_json::Value = serde_json::from_slice(&self.turn.native_observation)?;
+        ensure!(
+            native.is_object()
+                && lillux::canonical_json(&native)?.as_bytes() == self.turn.native_observation,
+            "consumer native evidence is not a canonical object"
+        );
+        let value = serde_json::json!({
+            "schema": "ryeos.codex.consumer-observation.v1",
+            "operation_id": challenge.intent.operation_id,
+            "occurrence_id": challenge.intent.restored_occurrence_id,
+            "challenge_digest": challenge.intent.consumer_challenge_digest()?,
+            "verifier_artifact_hash": challenge.intent.verifier_artifact_hash,
+            "input_record_sha256": lillux::sha256_hex(&record.canonical_bytes()?),
+            "coordinate": record.coordinate,
+            "thread_id": self.turn.thread_id,
+            "turn_id": self.turn.turn_id,
+            "notifications": self.turn.notifications,
+            "native_observation": native,
+            "outer_observation": self.outer,
+            "peer_requests": self.peer_requests,
+        });
+        let bytes = lillux::canonical_json(&value)?.into_bytes();
+        ensure!(
+            !bytes.is_empty() && bytes.len() as u64 <= MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
+            "complete consumer evidence exceeds transport bound"
+        );
+        ensure!(
+            !deadline.has_elapsed(),
+            "consumer evidence serialization expired"
+        );
+        Ok(bytes)
+    }
+}
+
+/// Compose existing process and peer ownership without replacing either one.
+/// The caller launches the exact prepared owner and retains startup failures.
+/// Any error here leaves the app borrowed and an uncertain peer in its slot;
+/// cleanup/quarantine remains the enclosing attempt's obligation. Never call
+/// again to reconstruct a lost protocol or relaunch a producer.
+pub fn collect_owned_consumer_protocol(
+    app: &mut crate::app_server::AppServerObservation,
+    peer: &mut Option<crate::scripted_peer::RunningScriptedPeer>,
+    inputs: ConsumerObservationInputs<'_>,
+    active_deadline: MonotonicDeadline,
+    cleanup_deadline: MonotonicDeadline,
+) -> Result<ConsumerObservedProtocol> {
+    ensure!(peer.is_some(), "consumer scripted peer owner absent");
+    let active_deadline = app.tighten_deadline(active_deadline);
+    ensure!(
+        !active_deadline.has_elapsed(),
+        "consumer observation expired"
+    );
+    let mut turn = collect_scripted_turn(
+        app,
+        inputs.imported,
+        inputs.record,
+        inputs.challenge,
+        inputs.expectation,
+        inputs.native_control,
+        active_deadline,
+    )?;
+    let outer = collect_outer_settlement(
+        app,
+        inputs.imported,
+        inputs.record,
+        inputs.challenge,
+        inputs.fresh_home,
+        inputs.native_control,
+        inputs.protected_owner,
+        inputs.expected_request,
+        &mut turn,
+        inputs.expectation,
+        active_deadline,
+    )?;
+    // Only after the independent namespace observation and full wire join may
+    // stdin close. Exact helper exit alone cannot replace that namespace fence.
+    let outcome = app.stop_until(active_deadline, cleanup_deadline)?;
+    ensure!(
+        matches!(outcome, crate::app_server::AppServerStopOutcome::Exited(exit)
+            if exit.success && exit.code == Some(0)),
+        "consumer outer helper did not exit cleanly: {outcome:?}"
+    );
+    ensure!(
+        !active_deadline.has_elapsed(),
+        "consumer helper join expired"
+    );
+    // The local producers are now settled. Keep the listener serving through
+    // that fence, then check its pending queue and exact finite request log.
+    // Do not substitute the weaker pre-settlement observation seal.
+    let running = peer.take().expect("peer checked before protocol contact");
+    let requests = match running.finish_after_producer_settlement(active_deadline) {
+        Ok(result) => result?,
+        Err(running) => {
+            *peer = Some(running);
+            anyhow::bail!("consumer scripted peer join remains uncertain");
+        }
+    };
+    inputs
+        .expectation
+        .check_peer_requests(&requests, inputs.record, inputs.challenge)?;
+    inputs
+        .imported
+        .require_record_challenge(inputs.record, inputs.challenge)?;
+    ensure!(
+        !active_deadline.has_elapsed(),
+        "consumer final observation expired"
+    );
+    Ok(ConsumerObservedProtocol {
+        turn,
+        outer,
+        peer_requests: requests,
+    })
+}
+
 /// Join a completed scripted turn to its independently retained outer owner's
 /// launch and complete forwarded wire transcript. All owners stay borrowed on
 /// error: callers must settle/quarantine, never relaunch to recreate pipes.
-/// This raw join does not authenticate the owner launch, qualify tail semantics
-/// or establish provider death, and therefore emits no qualification claim.
+/// This join checks complete tail semantics but does not authenticate the owner
+/// launch or establish provider death, and emits no qualification claim.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_outer_settlement<T: AppServerTransport>(
     app: &mut AppServerProtocol<T>,
@@ -199,6 +356,8 @@ pub fn collect_outer_settlement<T: AppServerTransport>(
     native_control: &lillux::PinnedDirectory,
     protected_owner: &lillux::PinnedDirectory,
     expected_request: &lillux::LinuxSandboxRequest,
+    collected: &mut ConsumerCollectedTurn,
+    expectation: &ConsumerScriptedExpectation,
     deadline: MonotonicDeadline,
 ) -> Result<crate::consumer_outer_owner::ConsumerOuterObservation> {
     app.require_completed_scripted_turn()?;
@@ -235,6 +394,10 @@ pub fn collect_outer_settlement<T: AppServerTransport>(
     };
     let (sent, output) = app.wire_transcript();
     observation.check_launch_and_transcript(expected_request, sent, output)?;
+    // Recheck the complete semantic stream, including notifications emitted
+    // after the turn terminal but before whole-scope settlement.
+    collected.notifications = app.notifications().to_vec();
+    expectation.check_turn(collected, record, challenge)?;
     ensure!(
         !deadline.has_elapsed(),
         "outer observation join exceeded deadline"

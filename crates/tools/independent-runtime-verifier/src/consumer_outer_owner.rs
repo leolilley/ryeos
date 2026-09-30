@@ -428,7 +428,7 @@ pub fn run_outer_protocol(
             "outer occurrence was already used; live pipes cannot be recreated"
         );
     }
-    let request = imported.prepare_codex_outer_request(
+    let request = imported.reopen_codex_outer_request(
         record,
         challenge,
         fresh_home,
