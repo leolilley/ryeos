@@ -38,7 +38,7 @@ pub struct VerifiedGuestOwnerMaterialization {
     pub source: GuestOwnerMaterializationSource,
     pub identity:
         ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
-    signer_keys: Vec<ryeos_state::objects::MaterializationSignerKey>,
+    signer_keys: Vec<ryeos_state::objects::RetainedBundleSignerKey>,
 }
 
 /// Authenticate historical CAS testimony without treating its old Bundle or

@@ -392,6 +392,18 @@ impl ProductQualificationRemoteVerifierSelection {
         if !self.binary_ref.starts_with("bin:") {
             bail!("remote qualification verifier must be a Bundle binary ref");
         }
+        let (_, binary_name) = self
+            .binary_ref
+            .strip_prefix("bin:")
+            .and_then(|path| path.split_once('/'))
+            .context("remote qualification verifier requires an explicit Bundle namespace")?;
+        if binary_name.is_empty()
+            || binary_name.contains('/')
+            || binary_name.starts_with('.')
+            || binary_name.contains("..")
+        {
+            bail!("remote qualification verifier must name one Bundle executor member");
+        }
         if self.guest_target_triple.is_empty()
             || self.guest_target_triple.len() > 128
             || !self.guest_target_triple.bytes().all(|byte| {
@@ -401,6 +413,18 @@ impl ProductQualificationRemoteVerifierSelection {
             bail!("remote qualification verifier target is not a bounded executor segment");
         }
         Ok(())
+    }
+
+    /// The registered Bundle root is admitted independently; its executor
+    /// resolver consumes a target/member ref relative to that exact root.
+    pub fn bundle_payload_ref(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        let (_, binary_name) = self
+            .binary_ref
+            .strip_prefix("bin:")
+            .and_then(|path| path.split_once('/'))
+            .context("remote qualification verifier has no Bundle executor member")?;
+        Ok(format!("bin/{}/{}", self.guest_target_triple, binary_name))
     }
 }
 

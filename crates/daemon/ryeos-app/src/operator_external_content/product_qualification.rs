@@ -2121,12 +2121,50 @@ pub fn prepare_remote_consumer_verifier_for_purpose(
     scenario_id: &str,
     protected_selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
 ) -> anyhow::Result<PreparedRemoteConsumerVerifier> {
+    state.engine.with_checked_bundle_generation(|_| {
+        // Preserve the completed-purpose consumer-member checks. Initial
+        // accepted-root preparation uses the source helper below instead.
+        resolve_current_bundle_producer_recipe_for_purpose(state, purpose, scenario_id)?;
+        prepare_remote_consumer_verifier_from_admitted_sources(
+            state,
+            purpose.policy_source(),
+            purpose.producer_recipe_sources(),
+            purpose.subject_manifest_hash(),
+            scenario_id,
+            protected_selection,
+        )
+    })
+}
+
+/// Capture before final purpose construction from already-authenticated source
+/// inputs. This avoids constructing an invalid provisional purpose whose
+/// required artifact closure has not yet been staged. No contact is granted.
+pub fn prepare_remote_consumer_verifier_from_admitted_sources(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+    producer_sources: &BTreeMap<String, ProductProducerRecipeSourceIdentity>,
+    subject_manifest_hash: &str,
+    scenario_id: &str,
+    protected_selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+) -> anyhow::Result<PreparedRemoteConsumerVerifier> {
+    policy_source.validate()?;
+    require_canonical_hash("remote verifier subject manifest", subject_manifest_hash)?;
     protected_selection.validate()?;
     state.engine.with_checked_bundle_generation(|generation| {
-        let current = resolve_current_bundle_producer_recipe_for_purpose(state, purpose, scenario_id)?;
-        let producer_source = current.source_identity()?;
-        let scenario = purpose.policy_source().policy.producer_scenarios.get(scenario_id)
+        let current_policy = resolve_current_bundle_qualification_policy(state, &policy_source.canonical_ref)?;
+        if current_policy != *policy_source {
+            bail!("remote verifier policy changed before source capture");
+        }
+        let scenario = policy_source.policy.producer_scenarios.get(scenario_id)
             .context("remote consumer verifier scenario was not admitted")?;
+        let current = resolve_bundle_producer_recipe_in_generation(
+            state, generation.request_engine_generation_identity(), &scenario.recipe_ref,
+        )?;
+        require_direct_consumer_target(policy_source, &current, subject_manifest_hash)?;
+        let producer_source = current.source_identity()?;
+        if producer_sources.get(scenario_id) != Some(&producer_source) {
+            bail!("remote verifier producer source changed before capture");
+        }
         let scenario_source_digest = scenario.remote_verifier_source_digest(&producer_source)?;
         if scenario_source_digest != protected_selection.scenario_source_digest {
             bail!("remote consumer verifier source differs from protected node selection");
@@ -2138,27 +2176,29 @@ pub fn prepare_remote_consumer_verifier_for_purpose(
             .context("remote verifier has no exact Bundle namespace")?;
         let bundle_root = state.engine.registered_bundle_root(bundle_name)
             .context("remote verifier Bundle has no admitted root")?;
+        let payload_ref = selection.bundle_payload_ref()?;
         let payload = ryeos_engine::binary_resolver::capture_bundle_payload_for_target(
-            &selection.binary_ref, &selection.guest_target_triple, bundle_root,
+            &payload_ref, &selection.guest_target_triple, bundle_root,
             &state.engine.node_trust_store,
             ryeos_external_execution_contract::restored_runtime_measurement::MAX_RESTORATION_VERIFIER_BYTES,
         )?;
         if payload.identity.signer_fingerprint != producer_source.publisher_fingerprint
             || payload.identity.target_triple != selection.guest_target_triple
             || payload.identity.content_hash != protected_selection.verifier_artifact_hash
+            || payload.source_proof.selected_item_ref != payload_ref
             || payload.bytes == 0
         {
             bail!("remote verifier payload differs from signed source or protected artifact");
         }
         let mut signed_sources = BTreeMap::new();
-        for reference in [&purpose.policy_source().canonical_ref, &producer_source.canonical_ref] {
+        for reference in [&policy_source.canonical_ref, &producer_source.canonical_ref] {
             let resolution = resolve_consumer_definition_in_generation(generation, reference, "config")?;
             let identity = consumer_definition_identity(&resolution)?;
             let (raw, effective, publisher) = if reference == &producer_source.canonical_ref {
                 (&producer_source.raw_content_digest, &producer_source.effective_definition_digest,
                  &producer_source.publisher_fingerprint)
             } else {
-                let policy = purpose.policy_source();
+                let policy = policy_source;
                 (&policy.raw_content_digest, &policy.effective_definition_digest,
                  &policy.publisher_fingerprint)
             };

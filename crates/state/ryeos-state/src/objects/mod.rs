@@ -31,6 +31,7 @@ where
 pub mod admitted_launch_capsule;
 pub mod attestation;
 pub mod bundle_event;
+pub mod bundle_source_evidence;
 pub mod chain_state;
 pub mod chain_writer_transition;
 pub mod effect_record;
@@ -74,6 +75,10 @@ pub use bundle_event::{
     BUNDLE_EVENT_KIND, BundleEventAttachment, BundleEventAttribution, BundleEventObject,
     MAX_BUNDLE_EVENT_ATTACHMENT_BYTES, MAX_BUNDLE_EVENT_ATTACHMENTS,
     MAX_BUNDLE_EVENT_SERIALIZED_BYTES, hash_bundle_event, validate_bundle_identifier,
+};
+pub use bundle_source_evidence::{
+    RetainedBundleExecutorSource, RetainedBundleSignerKey, RetainedSignatureEnvelope,
+    RetainedSignedBundleItem, RetainedSignedBundleManifest,
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
 pub use chain_writer_transition::{
@@ -139,9 +144,7 @@ pub use external_large_content_manifest::{
 pub use guest_runtime_materialization::{
     GUEST_RUNTIME_MATERIALIZATION_SCHEMA, GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
     GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND, GuestRuntimeMaterializationSourceEvidence,
-    GuestRuntimeMaterializationSubject, MaterializationExecutorSource,
-    MaterializationSignatureEnvelope, MaterializationSignedBundleManifest,
-    MaterializationSignedItem, MaterializationSignerKey,
+    GuestRuntimeMaterializationSubject,
 };
 pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};

@@ -12,7 +12,7 @@ use ryeos_external_execution::guest_runtime_product::{
 use ryeos_state::objects::GuestRuntimeMaterializationSourceEvidence;
 use ryeos_state::objects::external_content_manifest::ExternalContentManifestObject;
 use ryeos_state::objects::{
-    Attestation, GuestRuntimeMaterializationSubject, MaterializationSignerKey,
+    Attestation, GuestRuntimeMaterializationSubject, RetainedBundleSignerKey,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +48,7 @@ pub(super) struct MaterializationClaimEvidence {
 impl MaterializationClaimEvidence {
     pub fn from_checked_source(
         source: &GuestOwnerMaterializationSource,
-        signer_keys: &[MaterializationSignerKey],
+        signer_keys: &[RetainedBundleSignerKey],
     ) -> Result<Self> {
         source.coordinate_digest()?;
         let evidence = Self {
@@ -92,7 +92,7 @@ pub(super) struct VerifiedMaterializationTestimony {
     pub subject: GuestRuntimeMaterializationSubject,
     pub source: GuestOwnerMaterializationSource,
     pub output: GuestOwnerRuntimeManifestIdentity,
-    pub signer_keys: Vec<MaterializationSignerKey>,
+    pub signer_keys: Vec<RetainedBundleSignerKey>,
 }
 
 /// Authenticate the node's historical checked-generation claim *before*
