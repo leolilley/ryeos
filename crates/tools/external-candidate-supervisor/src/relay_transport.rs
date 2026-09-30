@@ -165,7 +165,8 @@ impl MailboxFiles {
 
 /// The original pinned, owner-private mailbox child. The caller supplies the
 /// exact descriptor; this type never creates a replacement or opens an
-/// ambient alternate root. Four protected roots must be disjoint from it.
+/// ambient alternate root. The caller also proves disjointness from every
+/// admitted directory mount before adopting this handle.
 pub struct OriginalRelayMailbox {
     bootstrap: ExternalSupervisorBootstrap,
     files: MailboxFiles,
@@ -179,11 +180,16 @@ pub struct AuthenticatedRelayAttachment {
     bootstrap_digest: String,
     mailbox_identity: lillux::PinnedDirectoryIdentity,
     supervisor_public_key: String,
+    response_digest: String,
 }
 
 impl AuthenticatedRelayAttachment {
     pub fn binding(&self) -> &ExecutionChannelBinding {
         &self.binding
+    }
+
+    pub fn response_digest(&self) -> &str {
+        &self.response_digest
     }
 }
 
@@ -191,6 +197,7 @@ impl OriginalRelayMailbox {
     pub fn adopt(
         bootstrap: ExternalSupervisorBootstrap,
         original_mailbox: lillux::PinnedDirectory,
+        sealed_mailbox_identity: lillux::PinnedDirectoryIdentity,
         state_root: &lillux::PinnedDirectory,
         candidate_runtime: &lillux::PinnedDirectory,
         candidate_private_parent: &lillux::PinnedDirectory,
@@ -199,7 +206,8 @@ impl OriginalRelayMailbox {
         bootstrap.validate()?;
         let relay = bootstrap.controller.relay()?;
         ensure!(
-            original_mailbox.path() == Path::new(&bootstrap.relay_mailbox_root()?),
+            original_mailbox.path() == Path::new(&bootstrap.relay_mailbox_root()?)
+                && original_mailbox.identity()? == sealed_mailbox_identity,
             "external relay mailbox descriptor differs from sealed occurrence path"
         );
         for protected in [
@@ -258,6 +266,12 @@ impl OriginalRelayMailbox {
             bootstrap_digest: self.bootstrap.digest()?,
             mailbox_identity: self.files.root.identity()?,
             supervisor_public_key: request.supervisor_public_key.clone(),
+            response_digest: self
+                .files
+                .accepted_responses
+                .get(ATTACH_RESPONSE)
+                .context("authenticated relay attachment has no retained response digest")?
+                .clone(),
         })
     }
 
@@ -276,6 +290,50 @@ impl OriginalRelayMailbox {
             mailbox: self,
             binding: attachment.binding,
         })
+    }
+
+    /// Recover an already journaled binding only after rereading the exact
+    /// authenticated attach response from the original mailbox. No new
+    /// attachment request or replacement supervisor key is created.
+    pub fn reconnect_retained(
+        mut self,
+        request: &ExternalChannelAttachRequest,
+        binding: &ExecutionChannelBinding,
+        expected_response_digest: &str,
+        deadline: MonotonicDeadline,
+    ) -> Result<AttachedFileRelayChannel> {
+        request.validate_for_bootstrap(&self.bootstrap)?;
+        let request_bytes = request.canonical_bytes()?;
+        self.files.publish_exact(ATTACH_REQUEST, &request_bytes)?;
+        let response: ExternalChannelAttachResponse = self.files.wait_verified(
+            ATTACH_RESPONSE,
+            &self.bootstrap,
+            ExternalRelayResponseKind::Attach,
+            &lillux::sha256_hex(&request_bytes),
+            None,
+            deadline,
+        )?;
+        response.validate_for_bootstrap(&self.bootstrap, &request.supervisor_public_key)?;
+        ensure!(
+            response.binding == *binding,
+            "external relay attachment response differs from retained binding"
+        );
+        ensure!(
+            self.files
+                .accepted_responses
+                .get(ATTACH_RESPONSE)
+                .map(String::as_str)
+                == Some(expected_response_digest),
+            "external relay attachment response differs from retained exact bytes"
+        );
+        let attachment = AuthenticatedRelayAttachment {
+            binding: response.binding,
+            bootstrap_digest: self.bootstrap.digest()?,
+            mailbox_identity: self.files.root.identity()?,
+            supervisor_public_key: request.supervisor_public_key.clone(),
+            response_digest: expected_response_digest.to_owned(),
+        };
+        self.into_attached(attachment)
     }
 }
 

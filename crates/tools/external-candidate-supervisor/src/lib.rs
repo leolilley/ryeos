@@ -49,6 +49,7 @@ pub struct AttachedExternalExecutionChannel {
 /// construct a transport or fall back to HTTP.
 pub enum AttachedExternalExecutionTransport {
     HttpJson(AttachedExternalExecutionChannel),
+    ControllerFileRelay(relay_transport::AttachedFileRelayChannel),
 }
 
 impl From<AttachedExternalExecutionChannel> for AttachedExternalExecutionTransport {
@@ -57,10 +58,17 @@ impl From<AttachedExternalExecutionChannel> for AttachedExternalExecutionTranspo
     }
 }
 
+impl From<relay_transport::AttachedFileRelayChannel> for AttachedExternalExecutionTransport {
+    fn from(value: relay_transport::AttachedFileRelayChannel) -> Self {
+        Self::ControllerFileRelay(value)
+    }
+}
+
 impl ExternalExecutionChannelTransport for AttachedExternalExecutionTransport {
     fn exchange(&mut self, canonical_supervisor_frame: &[u8]) -> Result<ExternalTransportExchange> {
         match self {
             Self::HttpJson(http) => http.exchange(canonical_supervisor_frame),
+            Self::ControllerFileRelay(relay) => relay.exchange(canonical_supervisor_frame),
         }
     }
 
@@ -71,6 +79,9 @@ impl ExternalExecutionChannelTransport for AttachedExternalExecutionTransport {
     ) -> std::result::Result<ExternalTransportExchange, ExternalTransportStepFailure> {
         match self {
             Self::HttpJson(http) => http.exchange_until(canonical_supervisor_frame, deadline),
+            Self::ControllerFileRelay(relay) => {
+                relay.exchange_until(canonical_supervisor_frame, deadline)
+            }
         }
     }
 }
@@ -994,7 +1005,7 @@ mod tests {
                 journal.bootstrap(),
                 journal.supervisor_signing_key(),
                 journal.attachment_request(),
-                journal.captured_network_inputs(),
+                journal.captured_network_inputs().unwrap(),
             )
             .is_err()
         );
@@ -1019,7 +1030,7 @@ mod tests {
             recovered.bootstrap(),
             recovered.supervisor_signing_key(),
             recovered.attachment_request(),
-            recovered.captured_network_inputs(),
+            recovered.captured_network_inputs().unwrap(),
         )
         .unwrap();
         assert_eq!(
