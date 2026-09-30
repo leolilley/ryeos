@@ -1162,6 +1162,48 @@ impl PersistentSessionPool {
         )
     }
 
+    /// Check the selected exclusive session's complete Request frame before a
+    /// domain owner commits its one-use possible-contact boundary. The actual
+    /// request id consists of two decimal u64 values separated by `-`; using
+    /// their maximum width makes this a conservative size check. This is only
+    /// a preflight: the sender still checks the real frame at the write edge.
+    pub fn ensure_exclusive_request_fits(
+        &self,
+        session_id: &str,
+        request_body: &Value,
+        expected_wire_max_bytes: u32,
+    ) -> Result<()> {
+        self.ensure_admission_open()?;
+        validate_exclusive_session_id(session_id)?;
+        let wire = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = state
+                .exclusive
+                .get(session_id)
+                .ok_or_else(|| anyhow!("exclusive persistent session is not attached"))?;
+            entry.contract.wire.clone()
+        };
+        if wire.max_frame_bytes != expected_wire_max_bytes {
+            bail!("exclusive Request changed its selected signed wire maximum");
+        }
+        let maximum_request_id = format!("{}-{}", u64::MAX, u64::MAX);
+        encode_frame(
+            &wire,
+            &PersistentSessionFrame {
+                protocol: wire.wire_protocol.clone(),
+                version: wire.wire_version,
+                kind: PersistentSessionFrameKind::Request,
+                request_id: Some(maximum_request_id),
+                body: Some(request_body.clone()),
+            },
+        )?;
+        Ok(())
+    }
+
     pub fn execute_exclusive_attributed_with_deadline<C, D>(
         &self,
         session_id: &str,
