@@ -1338,8 +1338,21 @@ impl ExternalPlacementBackendRegistry {
                 );
                 program.requirement.required_lifecycle_capabilities.clone()
             }
-            AdmittedExternalExecutionProgram::QualificationStructuredSession(_) => {
-                bail!("qualification-only session has no ordinary placement backend authority")
+            AdmittedExternalExecutionProgram::QualificationStructuredSession(program) => {
+                ensure!(
+                    cleanup_only
+                        && contract.max_export_bytes == 0
+                        && contract.runtime_content_qualification.is_none(),
+                    "qualification-only session has no ordinary placement backend authority"
+                );
+                let session = contract.workload.qualification_structured_session()?;
+                ensure!(
+                    program.requirement.qualification_requirement_digest()?
+                        == session.requirement_digest
+                        && program.runtime_manifest_hash == session.runtime_manifest_hash,
+                    "qualification cleanup changed its exact signed runtime"
+                );
+                BTreeSet::new()
             }
             AdmittedExternalExecutionProgram::DirectCommand(program) => {
                 ensure!(matches!(contract.workload,
@@ -2447,6 +2460,41 @@ fn retained_external_channel_program(
             retained.check_direct_program(program)?;
             AdmittedExternalExecutionProgram::DirectCommand(program.clone())
         }
+        ExternalAllocationOwner::QualificationCandidate(owner) => {
+            let (stored_chain, capsule_hash, capsule) = state
+                .state_store
+                .admitted_launch_capsule_with_coordinates(&owner.coordinate.accepted_root_id)?
+                .context("external qualification channel lost its accepted root capsule")?;
+            ensure!(
+                stored_chain == owner.coordinate.accepted_root_id
+                    && capsule_hash == reservation.admitted_capsule_hash
+                    && capsule_hash == owner.coordinate.accepted_capsule_hash,
+                "external qualification channel changed its accepted root coordinate"
+            );
+            let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                snapshot_hash,
+                realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                environment: ryeos_state::objects::EnvironmentAuthority::None,
+                ..
+            } = &capsule.project_authority
+            else {
+                bail!("external qualification channel requires its pinned read-only root snapshot");
+            };
+            ensure!(
+                snapshot_hash == &reservation.base_snapshot_hash,
+                "external qualification channel changed its accepted root snapshot"
+            );
+            let sealed =
+                crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+                    &capsule,
+                )?;
+            let purpose = sealed
+                .qualification_purpose()
+                .context("external qualification channel root has no sealed purpose")?;
+            owner.program.validate_against_purpose(purpose)?;
+            retained.check_qualification_program(&owner.program, purpose)?;
+            AdmittedExternalExecutionProgram::QualificationStructuredSession(owner.program.clone())
+        }
     };
     let contract = retained.backend_contract();
     validate_external_placement_program(&program, reservation, &contract)?;
@@ -2539,8 +2587,28 @@ fn validate_external_placement_program(
                 "external supervisor program contradicts its protected lifecycle binding"
             );
         }
-        AdmittedExternalExecutionProgram::QualificationStructuredSession(_) => {
-            bail!("qualification-only session has no ordinary allocation owner")
+        AdmittedExternalExecutionProgram::QualificationStructuredSession(program) => {
+            let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+                bail!("qualification-only session has no qualification allocation owner");
+            };
+            let selected = contract.workload.qualification_structured_session()?;
+            ensure!(
+                program == &owner.program
+                    && contract.max_export_bytes == 0
+                    && contract.runtime_content_qualification.is_none()
+                    && program.requirement.provider_declaration_id
+                        == selected.provider_declaration_id
+                    && program.requirement.provider_configuration_destination
+                        == selected.provider_configuration_destination
+                    && program.requirement.connector_protocol == selected.connector_protocol
+                    && program.requirement.qualification_requirement_digest()?
+                        == selected.requirement_digest
+                    && program.qualification_use.profile_hash == selected.worker_profile_hash
+                    && program.runtime_manifest_hash == selected.runtime_manifest_hash
+                    && program.runtime_member.executable_sha256 == selected.runtime_member_sha256
+                    && reservation.timeout_seconds <= contract.timeout_seconds,
+                "qualification-only program changed its owner or signed zero-export placement"
+            );
         }
         AdmittedExternalExecutionProgram::DirectCommand(program) => {
             let ExternalAllocationOwner::DirectThread {
@@ -2580,6 +2648,75 @@ pub(crate) struct ExternalPlacementOwner<'a> {
 impl<'a> ExternalPlacementOwner<'a> {
     pub(crate) fn new(state: &'a AppState) -> Self {
         Self { state }
+    }
+
+    /// Recover only the original qualification candidate's observation or
+    /// cleanup obligation. This path cannot create the first provider contact;
+    /// that requires the accepted-root proof and the Q-specific journal CAS.
+    fn prepare_retained_qualification_for_cleanup(
+        &self,
+        placement: &str,
+    ) -> Result<PreparedExternalPlacement> {
+        let controller_lifetime = Arc::clone(&self.state.controller_lifetime);
+        controller_lifetime.ensure_protects_app_root(&self.state.config.app_root)?;
+        let record = self
+            .state
+            .state_store
+            .external_allocation(placement)?
+            .context("external qualification cleanup has no retained allocation")?;
+        ensure!(
+            matches!(
+                &record.reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(_)
+            ),
+            "external qualification cleanup cannot recover another allocation owner"
+        );
+        let binding = self
+            .state
+            .state_store
+            .retained_external_binding(&record.reservation.binding_hash)?
+            .context("external qualification cleanup lost its retained binding")?;
+        let program = retained_external_channel_program(self.state, &record.reservation, &binding)?;
+        let contract = binding.backend_contract();
+        let access = binding.credential_access()?;
+        let credential = access.decode(self.state.vault.placement_credential(&access)?)?;
+        let backend = self.state.external_placement_backends.qualify_for_cleanup(
+            &contract,
+            &credential,
+            &program,
+        )?;
+        let authority_access =
+            ExternalChannelAuthorityAccess::new(&record.reservation.channel_authority_generation)?;
+        let channel_authority = authority_access.decode(
+            self.state
+                .vault
+                .external_channel_authority(&authority_access)?,
+        )?;
+        ensure!(
+            channel_authority.owner_public_key() == record.reservation.channel_owner_public_key
+                && channel_authority.bootstrap_capability_hash()
+                    == record.reservation.channel_bootstrap_capability_hash,
+            "external qualification cleanup lost its exact channel authority"
+        );
+        let record = self
+            .state
+            .state_store
+            .reserve_external_allocation(&record.reservation, &binding)?;
+        Ok(PreparedExternalPlacement {
+            state_store: self.state.state_store.clone(),
+            backend,
+            contract,
+            credential,
+            contact_gate: self
+                .state
+                .external_placement_backends
+                .contact_gate(placement)?,
+            controller_lifetime,
+            channel_authority,
+            program,
+            guest_inputs: None,
+            record,
+        })
     }
 
     /// Reentry uses the original journal owner and program, never a replacement
@@ -3658,6 +3795,9 @@ pub fn advance_external_candidate_cleanup(
         ExternalAllocationOwner::DedicatedSession(_) => owner.prepare_for_cleanup(placement)?,
         ExternalAllocationOwner::DirectThread { .. } => {
             owner.prepare_retained_direct_for_cleanup(placement)?
+        }
+        ExternalAllocationOwner::QualificationCandidate(_) => {
+            owner.prepare_retained_qualification_for_cleanup(placement)?
         }
     };
     let reconciliation = match prepared.claim()? {

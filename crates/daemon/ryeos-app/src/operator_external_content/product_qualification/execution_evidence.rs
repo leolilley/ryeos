@@ -19,6 +19,7 @@ use ryeos_state::external_content::products::qualification::{
     ProductQualificationVerifier, VerifierProcessSettlementAuthority,
 };
 use ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView;
+use ryeos_state::external_content::runtime_member::exact_runtime_member_hash;
 use ryeos_state::objects::{
     AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule, ExternalContentRealizationSet,
     ThreadEvent, ThreadSnapshot, ThreadStatus, canonical_value_digest,
@@ -53,9 +54,29 @@ pub(crate) struct AuthenticatedConsumerRoot {
     coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
     selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
     purpose: ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    accepted_project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    operator_grant_digest: String,
 }
 
 impl AuthenticatedConsumerRoot {
+    pub(crate) fn qualification_operation_id(&self) -> &str {
+        &self.qualification_operation_id
+    }
+
+    pub(crate) fn owner_principal(&self) -> &str {
+        &self.owner
+    }
+
+    pub(crate) fn operator_grant_digest(&self) -> &str {
+        &self.operator_grant_digest
+    }
+
+    pub(crate) fn accepted_project_authority(
+        &self,
+    ) -> &ryeos_state::objects::ExecutionProjectAuthority {
+        &self.accepted_project_authority
+    }
+
     pub(crate) fn require_attempt(
         &self,
         intent: &ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent,
@@ -101,6 +122,12 @@ pub(crate) fn authenticate_consumer_root(
     qualification_operation_id: &str,
 ) -> anyhow::Result<AuthenticatedConsumerRoot> {
     crate::operator_authority::require_admitted_operator(state, context)?;
+    let operator_fingerprint = context
+        .fingerprint
+        .strip_prefix("fp:")
+        .context("consumer operator principal is not canonical")?;
+    let operator_grant_digest =
+        crate::operator_authority::admitted_operator_authority_digest(state, operator_fingerprint)?;
     authority.ensure_guard(guard)?;
     let qualified = state
         .state_store
@@ -195,6 +222,23 @@ pub(crate) fn authenticate_consumer_root(
         bail!("consumer verification differs from sealed qualification purpose");
     }
     purpose.validate_remote_consumer_coordinate(coordinate, selection)?;
+    let content = purpose
+        .consumer_content
+        .as_ref()
+        .context("consumer verification has no accepted consumer content")?;
+    super::require_retained_consumer_content_closure(authority, guard, limits, content)?;
+    let manifest = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        &cas,
+        &content.runtime_realization.manifest_hash,
+        limits
+            .max_object_bytes
+            .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64),
+    )?;
+    if exact_runtime_member_hash(&manifest, &content.runtime_member.relative_path)?
+        != content.runtime_member.executable_sha256
+    {
+        bail!("consumer verification runtime member differs from accepted exact bytes");
+    }
     authority.ensure_guard(guard)?;
     Ok(AuthenticatedConsumerRoot {
         qualification_operation_id: qualified.intent.operation_id.clone(),
@@ -203,6 +247,8 @@ pub(crate) fn authenticate_consumer_root(
         coordinate: coordinate.clone(),
         selection: selection.clone(),
         purpose: purpose.clone(),
+        accepted_project_authority: capsule.project_authority.clone(),
+        operator_grant_digest,
     })
 }
 

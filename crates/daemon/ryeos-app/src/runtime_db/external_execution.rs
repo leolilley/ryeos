@@ -404,10 +404,24 @@ pub struct ExternalDedicatedSessionOwner {
     pub worker_boot_epoch: u64,
 }
 
+/// One accepted consumer's qualification-only Worker allocation. The full
+/// program and coordinate remain in the immutable reservation so recovery
+/// never has to reconstruct contact authority from current project state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalQualificationCandidateOwner {
+    pub coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    pub qualification_operation_id: String,
+    pub qualification_occurrence: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationOccurrence,
+    pub operator_principal: String,
+    pub program: ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExternalAllocationOwner {
     DedicatedSession(ExternalDedicatedSessionOwner),
+    QualificationCandidate(ExternalQualificationCandidateOwner),
     DirectThread {
         chain_root_id: String,
         launch_owner: LaunchOwner,
@@ -420,6 +434,9 @@ impl ExternalAllocationOwner {
         match self {
             Self::DedicatedSession(owner) => Ok(owner),
             Self::DirectThread { .. } => {
+                bail!("external allocation has no dedicated-session owner")
+            }
+            Self::QualificationCandidate(_) => {
                 bail!("external allocation has no dedicated-session owner")
             }
         }
@@ -456,6 +473,34 @@ impl ExternalAllocationOwner {
                     launch_owner.thread_id == placement
                         && (1..=i64::MAX as u64).contains(&launch_owner.monotonic_launch_epoch),
                     "external direct launch owner is invalid"
+                );
+            }
+            Self::QualificationCandidate(owner) => {
+                owner.coordinate.validate()?;
+                owner.program.validate()?;
+                validate_sha256(
+                    "external qualification operation",
+                    &owner.qualification_operation_id,
+                )?;
+                validate_bounded_runtime_text(
+                    "external qualification operator",
+                    &owner.operator_principal,
+                    256,
+                )?;
+                ensure!(
+                    placement
+                        == ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+                            &owner.coordinate,
+                            &owner.qualification_operation_id,
+                        )?
+                        && owner.qualification_occurrence.operation_id
+                            == owner.qualification_operation_id
+                        && owner.program.qualification_purpose_digest
+                            == owner.coordinate.qualification_purpose_digest
+                        && ryeos_state::objects::canonical_value_digest(
+                            &serde_json::to_value(&owner.program.qualification_use)?,
+                        )? == owner.coordinate.use_digest,
+                    "external qualification candidate changed its accepted operation or program"
                 );
             }
         }
@@ -565,6 +610,12 @@ impl ExternalAllocationReservation {
         }
         validate_bounded_runtime_text("external placement", &self.placement_thread_id, 256)?;
         self.owner.validate(&self.placement_thread_id)?;
+        if let ExternalAllocationOwner::QualificationCandidate(owner) = &self.owner {
+            ensure!(
+                self.admitted_capsule_hash == owner.coordinate.accepted_capsule_hash,
+                "external qualification candidate changed its accepted capsule"
+            );
+        }
         for hash in [
             &self.admitted_capsule_hash,
             &self.base_snapshot_hash,
@@ -841,6 +892,28 @@ fn reserved_runtime_manifest<'a>(
                 "direct activation changed its retained workload, binding or execution budget"
             );
             program.runtime_manifest_hash()
+        }
+        ExternalAllocationOwner::QualificationCandidate(owner) => {
+            let selected = contract.workload.qualification_structured_session()?;
+            let program = &owner.program;
+            program.validate()?;
+            ensure!(
+                contract.max_export_bytes == 0
+                    && contract.runtime_content_qualification.is_none()
+                    && program.requirement.provider_declaration_id
+                        == selected.provider_declaration_id
+                    && program.requirement.provider_configuration_destination
+                        == selected.provider_configuration_destination
+                    && program.requirement.connector_protocol == selected.connector_protocol
+                    && program.requirement.qualification_requirement_digest()?
+                        == selected.requirement_digest
+                    && program.qualification_use.profile_hash == selected.worker_profile_hash
+                    && program.runtime_manifest_hash == selected.runtime_manifest_hash
+                    && program.runtime_member.executable_sha256 == selected.runtime_member_sha256
+                    && reservation.timeout_seconds <= contract.timeout_seconds,
+                "qualification activation changed its signed zero-export program or binding"
+            );
+            Ok(&program.runtime_manifest_hash)
         }
     }
 }
@@ -1497,7 +1570,76 @@ fn require_retained_owner(
             );
             Ok(())
         }
+        ExternalAllocationOwner::QualificationCandidate(owner) => {
+            let qualification = super::runtime_snapshot_qualification::read(
+                conn,
+                &owner.qualification_operation_id,
+            )?
+            .context("external qualification candidate lost its operation")?;
+            ensure!(
+                qualification.intent.owner_principal == owner.operator_principal
+                    && qualification.occurrence.as_ref() == Some(&owner.qualification_occurrence),
+                "external qualification candidate changed its retained operator or occurrence"
+            );
+            super::restored_verifier_attempt::read_retained_consumer_prerequisite(
+                conn,
+                &owner.qualification_operation_id,
+                &owner.operator_principal,
+                &owner.coordinate,
+            )?;
+            Ok(())
+        }
     }
+}
+
+/// A Q allocation's first contact depends on the same live occurrence and
+/// observed owner measurement in this writer transaction. Historical root
+/// launch claims are not part of this gate; they may end before Q contact.
+fn require_contactable_qualification_owner(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+) -> Result<()> {
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+        bail!("external qualification contact requires a qualification candidate");
+    };
+    require_retained_owner(conn, reservation)?;
+    let qualification =
+        super::runtime_snapshot_qualification::read(conn, &owner.qualification_operation_id)?
+            .context("external qualification contact lost its operation")?;
+    super::restored_verifier_attempt::require_live_occurrence(
+        conn,
+        &qualification,
+        i64::try_from(lillux::time::timestamp_millis())?,
+    )?;
+    Ok(())
+}
+
+/// Expiry or a retained termination intent closes transport without treating
+/// the historical prerequisite or allocation as corrupt. Cleanup can still
+/// read the original reservation and occurrence.
+fn qualification_owner_is_contactable(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+) -> Result<bool> {
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+        bail!("external qualification transport requires its candidate owner");
+    };
+    require_retained_owner(conn, reservation)?;
+    let qualification =
+        super::runtime_snapshot_qualification::read(conn, &owner.qualification_operation_id)?
+            .context("external qualification transport lost its operation")?;
+    let terminated: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_snapshot_qualification_termination
+         WHERE qualification_operation_id=?1)",
+        [&owner.qualification_operation_id],
+        |row| row.get(0),
+    )?;
+    let expires_at = qualification
+        .created_at_ms
+        .checked_add(i64::from(qualification.intent.maximum_lifetime_seconds) * 1000)
+        .context("external qualification occurrence lifetime overflow")?;
+    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    Ok(!terminated && now >= qualification.created_at_ms && now < expires_at)
 }
 
 fn require_contactable_direct_owner(
@@ -1549,23 +1691,33 @@ fn direct_owner_is_contactable(
 fn require_new_owner(
     conn: &Connection,
     reservation: &ExternalAllocationReservation,
-    proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
+    direct_proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
+    qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
 ) -> Result<()> {
     match &reservation.owner {
         ExternalAllocationOwner::DedicatedSession(_) => {
             ensure!(
-                proof.is_none(),
-                "session allocation cannot consume direct thread proof"
+                direct_proof.is_none() && qualification_proof.is_none(),
+                "session allocation cannot consume another owner's proof"
             );
             require_session_owner(conn, reservation)?;
             require_contactable_session(conn, &reservation.placement_thread_id)
         }
         ExternalAllocationOwner::DirectThread { .. } => {
             ensure!(
-                proof.is_some_and(|proof| proof.matches(reservation)),
+                qualification_proof.is_none()
+                    && direct_proof.is_some_and(|proof| proof.matches(reservation)),
                 "external direct allocation requires verified born capsule authority"
             );
             require_contactable_direct_owner(conn, reservation)
+        }
+        ExternalAllocationOwner::QualificationCandidate(_) => {
+            ensure!(
+                direct_proof.is_none()
+                    && qualification_proof.is_some_and(|proof| proof.matches(reservation)),
+                "external qualification contact requires authenticated accepted root, product member and occurrence"
+            );
+            require_contactable_qualification_owner(conn, reservation)
         }
     }
 }
@@ -1605,7 +1757,9 @@ impl RuntimeDb {
                AND ((json_extract(a.reservation_json,'$.owner.kind')='direct_thread'
                      AND json_extract(a.reservation_json,'$.owner.chain_root_id')=?1)
                  OR (json_extract(a.reservation_json,'$.owner.kind')='dedicated_session'
-                     AND s.chain_root_id=?1))",
+                     AND s.chain_root_id=?1)
+                 OR (json_extract(a.reservation_json,'$.owner.kind')='qualification_candidate'
+                     AND json_extract(a.reservation_json,'$.owner.coordinate.accepted_root_id')=?1))",
             [chain_root_id],
             |row| row.get(0),
         )?;
@@ -1668,6 +1822,33 @@ impl RuntimeDb {
         retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
         proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
     ) -> Result<ExternalAllocationRecord> {
+        self.reserve_external_allocation_with_proofs(reservation, retained_binding, proof, None)
+    }
+
+    /// The StateStore supplies a non-serializable proof of the exact accepted
+    /// root, immutable guest base, selected runtime member and live Q identity.
+    /// Direct and session admission cannot consume this proof.
+    pub(crate) fn reserve_external_qualification_allocation_with_verified_owner(
+        &self,
+        reservation: &ExternalAllocationReservation,
+        retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
+    ) -> Result<ExternalAllocationRecord> {
+        self.reserve_external_allocation_with_proofs(
+            reservation,
+            retained_binding,
+            None,
+            Some(proof),
+        )
+    }
+
+    fn reserve_external_allocation_with_proofs(
+        &self,
+        reservation: &ExternalAllocationReservation,
+        retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        direct_proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
+        qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
+    ) -> Result<ExternalAllocationRecord> {
         reservation.validate()?;
         retained_binding.validate()?;
         retained_binding
@@ -1706,7 +1887,13 @@ impl RuntimeDb {
             tx.commit()?;
             return Ok(existing);
         }
-        require_new_owner(&tx, reservation, proof)?;
+        require_new_owner(&tx, reservation, direct_proof, qualification_proof)?;
+        if matches!(
+            &reservation.owner,
+            ExternalAllocationOwner::QualificationCandidate(_)
+        ) {
+            reserved_runtime_manifest(reservation, &retained_binding.backend_contract())?;
+        }
         if read_guard(&tx)? >= 256 {
             bail!("node external allocation ceiling reached");
         }
@@ -1762,6 +1949,30 @@ impl RuntimeDb {
         request_digest: &str,
         proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
     ) -> Result<ExternalAllocationContactClaim> {
+        self.claim_external_allocation_contact_with_proofs(placement, request_digest, proof, None)
+    }
+
+    pub(crate) fn claim_external_qualification_allocation_contact_with_verified_owner(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
+    ) -> Result<ExternalAllocationContactClaim> {
+        self.claim_external_allocation_contact_with_proofs(
+            placement,
+            request_digest,
+            None,
+            Some(proof),
+        )
+    }
+
+    fn claim_external_allocation_contact_with_proofs(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        direct_proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
+        qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
+    ) -> Result<ExternalAllocationContactClaim> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read(&tx, placement)?.context("external allocation was not reserved")?;
         if record.reservation.request_digest != request_digest {
@@ -1787,7 +1998,7 @@ impl RuntimeDb {
             ExternalAllocationPhase::Reserved => {}
             _ => unreachable!("settled external phase returned before owner validation"),
         }
-        require_new_owner(&tx, &record.reservation, proof)?;
+        require_new_owner(&tx, &record.reservation, direct_proof, qualification_proof)?;
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         record.reservation.require_startup_time(now)?;
         if now >= record.reservation.contact_deadline_ms {

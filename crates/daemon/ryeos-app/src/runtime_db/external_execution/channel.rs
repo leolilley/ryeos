@@ -1868,6 +1868,20 @@ fn require_retained_channel_allocation(
                 "external direct channel changed its retained program, runtime, limits or binding"
             );
         }
+        ExternalAllocationOwner::QualificationCandidate(owner) => {
+            owner.program.validate()?;
+            ensure!(
+                matches!(
+                    binding.execution_mode,
+                    ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+                )
+                    && binding.candidate_program_digest == owner.program.digest()?
+                    && binding.candidate_export_max_bytes == 0
+                    && binding.execution_deadline_ms - binding.issued_at_ms
+                        <= i64::from(reservation.timeout_seconds) * 1000,
+                "external qualification channel changed its retained zero-export program or limits"
+            );
+        }
     }
     if allocation.phase.is_settled() {
         ensure!(
@@ -1894,6 +1908,9 @@ pub(super) fn require_current_execution_owner(
         }
         ExternalAllocationOwner::DirectThread { .. } => {
             require_contactable_direct_owner(conn, reservation)
+        }
+        ExternalAllocationOwner::QualificationCandidate(_) => {
+            require_contactable_qualification_owner(conn, reservation)
         }
     }
 }
@@ -1929,6 +1946,9 @@ impl JournalOwner for NodeJournalOwner {
             ExternalAllocationOwner::DirectThread { .. } => {
                 direct_owner_is_contactable(conn, &allocation.reservation)
             }
+            ExternalAllocationOwner::QualificationCandidate(_) => {
+                qualification_owner_is_contactable(conn, &allocation.reservation)
+            }
         }
     }
 
@@ -1951,10 +1971,16 @@ impl JournalOwner for NodeJournalOwner {
         }
         if matches!(payload, ExecutionChannelPayload::Release) {
             if matches!(
-                allocation.reservation.owner,
+                &allocation.reservation.owner,
                 ExternalAllocationOwner::DirectThread { .. }
             ) {
                 require_contactable_direct_owner(conn, &allocation.reservation)?;
+            }
+            if matches!(
+                &allocation.reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(_)
+            ) {
+                require_contactable_qualification_owner(conn, &allocation.reservation)?;
             }
             // This owner also guards generic author_frame and pending
             // application. A previously retained Release crossed startup
@@ -1977,7 +2003,7 @@ impl JournalOwner for NodeJournalOwner {
         let retained_noninput_observation =
             matches!(payload, ExecutionChannelPayload::RuntimeApplied { .. })
                 || (matches!(
-                    allocation.reservation.owner,
+                    &allocation.reservation.owner,
                     ExternalAllocationOwner::DirectThread { .. }
                 ) && matches!(
                     payload,

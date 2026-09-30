@@ -1414,6 +1414,25 @@ impl VerifiedExternalDirectOwner {
     }
 }
 
+/// Ephemeral bridge from an authenticated accepted consumer root and the
+/// current restored occurrence to one exact qualification-only allocation.
+/// It is neither serializable nor independently renewable after first contact.
+pub(crate) struct VerifiedExternalQualificationOwner {
+    reservation: runtime_db::external_execution::ExternalAllocationReservation,
+}
+
+impl VerifiedExternalQualificationOwner {
+    pub(crate) fn matches(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+    ) -> bool {
+        matches!(
+            &reservation.owner,
+            runtime_db::external_execution::ExternalAllocationOwner::QualificationCandidate(_)
+        ) && self.reservation == *reservation
+    }
+}
+
 enum WorkspaceProcessSettlementOwner {
     Live,
     Abandoned,
@@ -14481,6 +14500,77 @@ impl StateStore {
         self.reserve_external_allocation_inner(reservation, binding, Some(&compiled))
     }
 
+    /// First qualification-only reservation consumes the accepted-root token.
+    /// Contacted allocations recover through the ordinary retained journal;
+    /// they never acquire another fresh proof or allocation opportunity.
+    pub(crate) fn reserve_external_qualification_allocation(
+        &self,
+        state: &crate::state::AppState,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::external_execution::ExternalAllocationRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if let Some(existing) = g
+            .runtime_db
+            .external_allocation(&reservation.placement_thread_id)?
+        {
+            anyhow::ensure!(
+                existing.reservation == *reservation
+                    && existing.phase
+                        == runtime_db::external_execution::ExternalAllocationPhase::Reserved,
+                "qualification first reservation cannot renew contacted allocation"
+            );
+        }
+        let proof =
+            self.verify_external_qualification_owner(state, &g, reservation, binding, &admission)?;
+        g.runtime_db
+            .reserve_external_qualification_allocation_with_verified_owner(
+                reservation,
+                binding,
+                &proof,
+            )
+    }
+
+    /// The only Q-path that may cross Reserved to ContactPending. The caller
+    /// must also hold the occurrence contact gate and match the installed
+    /// signed binding; the runtime transaction repeats live occurrence and
+    /// owner-measurement checks before its one-contact CAS.
+    pub(crate) fn claim_external_qualification_allocation_contact(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        request_digest: &str,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::external_execution::ExternalAllocationContactClaim> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let record = g
+            .runtime_db
+            .external_allocation(placement)?
+            .context("external qualification allocation was not reserved")?;
+        anyhow::ensure!(
+            record.phase == runtime_db::external_execution::ExternalAllocationPhase::Reserved
+                && record.reservation.request_digest == request_digest,
+            "qualification first contact changed its reserved request"
+        );
+        let proof = self.verify_external_qualification_owner(
+            state,
+            &g,
+            &record.reservation,
+            binding,
+            &admission,
+        )?;
+        g.runtime_db
+            .claim_external_qualification_allocation_contact_with_verified_owner(
+                placement,
+                request_digest,
+                &proof,
+            )
+    }
+
     fn reserve_external_allocation_inner(
         &self,
         reservation: &runtime_db::external_execution::ExternalAllocationReservation,
@@ -14599,6 +14689,102 @@ impl StateStore {
             program_digest: program.digest()?,
             launch_owner: claim.owner,
         }))
+    }
+
+    /// Authenticate the immutable accepted root against the current
+    /// operator-owned restored occurrence before a qualification-only Worker
+    /// allocation may be reserved or first contacted. The allocation journal
+    /// repeats the mutable occurrence/prerequisite checks in its transaction.
+    fn verify_external_qualification_owner(
+        &self,
+        state: &crate::state::AppState,
+        inner: &Inner,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        admission: &crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<VerifiedExternalQualificationOwner> {
+        use runtime_db::external_execution::ExternalAllocationOwner;
+        let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+            bail!("external qualification proof requires a qualification candidate owner");
+        };
+        reservation.validate()?;
+        anyhow::ensure!(
+            owner.coordinate == *admission.coordinate()
+                && owner.qualification_operation_id == admission.qualification_operation_id()
+                && owner.operator_principal == admission.owner_principal()
+                && owner.operator_principal == admission.purpose().owner_fingerprint
+                && reservation.admitted_capsule_hash == owner.coordinate.accepted_capsule_hash,
+            "external qualification owner differs from authenticated accepted root"
+        );
+        let operator_fingerprint = owner
+            .operator_principal
+            .strip_prefix("fp:")
+            .context("external qualification operator principal is not canonical")?;
+        anyhow::ensure!(
+            crate::operator_authority::admitted_operator_authority_digest(
+                state,
+                operator_fingerprint,
+            )? == admission.operator_grant_digest(),
+            "external qualification operator grant changed before first contact"
+        );
+        let root = authoritative_snapshot_for_transition(
+            inner,
+            &owner.coordinate.accepted_root_id,
+            &owner.coordinate.accepted_root_id,
+        )?;
+        anyhow::ensure!(
+            root.status == ThreadStatus::Completed
+                && root.error.is_none()
+                && root.result.is_some()
+                && root.requested_by.as_deref() == Some(owner.operator_principal.as_str())
+                && root.project_authority == *admission.accepted_project_authority()
+                && root.admitted_launch_capsule_hash.as_deref()
+                    == Some(owner.coordinate.accepted_capsule_hash.as_str()),
+            "external qualification candidate requires the exact completed accepted root"
+        );
+        let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            snapshot_hash,
+            realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            environment: ryeos_state::objects::EnvironmentAuthority::None,
+            ..
+        } = admission.accepted_project_authority()
+        else {
+            bail!("external qualification candidate requires an immutable read-only root snapshot");
+        };
+        anyhow::ensure!(
+            snapshot_hash == &reservation.base_snapshot_hash,
+            "external qualification candidate changed the accepted root snapshot"
+        );
+        owner
+            .program
+            .validate_against_purpose(admission.purpose())?;
+        binding.check_qualification_program(&owner.program, admission.purpose())?;
+        anyhow::ensure!(
+            binding.digest() == reservation.binding_hash
+                && binding.capacity_owner() == reservation.capacity_owner,
+            "external qualification candidate changed its retained signed placement"
+        );
+        let qualified = inner
+            .runtime_db
+            .snapshot_qualification_operation(&owner.qualification_operation_id)?
+            .context("external qualification candidate lost its restored occurrence")?;
+        anyhow::ensure!(
+            qualified.phase
+                == runtime_db::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound
+                && qualified.intent.owner_principal == owner.operator_principal
+                && qualified.occurrence.as_ref() == Some(&owner.qualification_occurrence),
+            "external qualification candidate changed its operator-owned occurrence"
+        );
+        inner
+            .runtime_db
+            .observed_consumer_verification_prerequisite(
+                &owner.qualification_operation_id,
+                &owner.operator_principal,
+                &owner.coordinate,
+            )?;
+        Ok(VerifiedExternalQualificationOwner {
+            reservation: reservation.clone(),
+        })
     }
 
     pub(crate) fn claim_external_allocation_contact(

@@ -276,7 +276,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
 
 /// Called inside the reservation/contact transaction. A prior read cannot
 /// exclude a subsequently retained termination intent or extend guest life.
-fn require_live_occurrence(
+pub(super) fn require_live_occurrence(
     conn: &Connection,
     qualification: &super::runtime_snapshot_qualification::SnapshotQualificationRecord,
     now: i64,
@@ -333,7 +333,7 @@ fn read_consumer_prerequisite(
 /// eligibility: settled occurrences must remain readable after termination.
 /// Only an owner observation can satisfy this prerequisite, so consumer
 /// evidence cannot recursively become another consumer's measurement root.
-fn read_retained_consumer_prerequisite(
+pub(super) fn read_retained_consumer_prerequisite(
     conn: &Connection,
     qualification_operation_id: &str,
     owner_principal: &str,
