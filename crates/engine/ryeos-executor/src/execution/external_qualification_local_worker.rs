@@ -289,6 +289,32 @@ impl ExternalQualificationLocalWorker {
             &self.process_identity,
         )
     }
+
+    /// Consume the one signed turn, settle the attached local process even
+    /// when the send or wait fails, and freeze only a successful transcript.
+    /// The outer Q guest and cleanup lifeline remain with this owner for the
+    /// separate native and provider settlement steps.
+    pub(crate) fn run_signed_turn_and_retain_transcript(
+        &mut self,
+        state: &ryeos_app::state::AppState,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+        selected: &SignedQualificationWorkerRequest,
+    ) -> Result<String> {
+        let turn = (|| -> Result<()> {
+            self.execute_one_signed_request(state, coordinate, selected)?;
+            self.wait_for_signed_turn_completion(state, selected)?;
+            Ok(())
+        })();
+        let retirement = self.retire_for_native_completion(state);
+        match (turn, retirement) {
+            (Ok(()), Ok(())) => self.retain_terminal_transcript(state, coordinate),
+            (Err(turn_error), Ok(())) => Err(turn_error),
+            (Ok(()), Err(retirement_error)) => Err(retirement_error),
+            (Err(turn_error), Err(retirement_error)) => Err(turn_error.context(format!(
+                "Q Worker retirement also remained unproved: {retirement_error:#}"
+            ))),
+        }
+    }
 }
 
 /// Select the signed Request before Q held start so the pushed-batch sink can
