@@ -3,14 +3,19 @@
 //! scoped attempt and verifier terminal before publishing qualification.
 
 use anyhow::{Context as _, Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ryeos_codex_runtime_verifier::{
-    DIRECT_QUALIFICATION_CLAIMS, INPUT_LIMIT, Parameters,
+    DIRECT_QUALIFICATION_CLAIMS, INPUT_LIMIT, Parameters, consumer_observer,
     guest_observation::{GuestScenario, check_guest_observation},
     native_guest,
     routing_observation::{RoutingScenario, check_notifications},
     scoped_relay,
     scripted_peer::{RunningScriptedPeer, ScriptedPeer},
     scripted_provider, staging,
+};
+use ryeos_external_execution_contract::restored_runtime_measurement::{
+    ConsumerRuntimeChallenge, MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
+    MAX_RESTORED_OWNER_CHALLENGE_BYTES,
 };
 use ryeos_runtime::callback::CallbackError;
 use ryeos_runtime::callback_uds::UdsRuntimeClient;
@@ -41,6 +46,15 @@ fn main() -> Result<()> {
         native_challenge.is_none() || outer_challenge.is_none(),
         "consumer native and outer startup roles conflict"
     );
+    let mut startup_args = std::env::args_os().skip(1);
+    if startup_args.next().as_deref() == Some(OsStr::new("--consumer-challenge-b64")) {
+        ensure!(
+            native_challenge.is_none() && outer_challenge.is_none(),
+            "consumer observer CLI conflicts with subordinate startup role"
+        );
+        let challenge = parse_consumer_challenge(std::env::args_os().skip(1))?;
+        return run_consumer_observer(&challenge);
+    }
     if let Some(encoded) = outer_challenge {
         ensure!(
             std::env::args_os().skip(1).next().is_none(),
@@ -67,6 +81,74 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?
         .block_on(admitted_main())
+}
+
+fn parse_consumer_challenge(
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<ConsumerRuntimeChallenge> {
+    let mut args = args.into_iter();
+    ensure!(
+        args.next().as_deref() == Some(OsStr::new("--consumer-challenge-b64")),
+        "consumer observer requires --consumer-challenge-b64"
+    );
+    let encoded = args
+        .next()
+        .context("consumer observer challenge is absent")?;
+    ensure!(
+        args.next().is_none(),
+        "consumer observer received extra arguments"
+    );
+    let encoded = encoded
+        .to_str()
+        .context("consumer observer challenge is not UTF-8")?;
+    let maximum = MAX_RESTORED_OWNER_CHALLENGE_BYTES + 2048;
+    ensure!(
+        !encoded.is_empty() && encoded.len() <= (maximum * 4).div_ceil(3),
+        "consumer observer challenge exceeds argument bound"
+    );
+    let bytes = URL_SAFE_NO_PAD.decode(encoded)?;
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= maximum && URL_SAFE_NO_PAD.encode(&bytes) == encoded,
+        "consumer observer challenge is not canonical base64url"
+    );
+    ConsumerRuntimeChallenge::parse(&bytes)
+}
+
+fn run_consumer_observer(challenge: &ConsumerRuntimeChallenge) -> Result<()> {
+    // Account transition and input selection precede any Tokio runtime or
+    // helper thread. The authenticated adapter/daemon owns this occurrence.
+    let prepared = consumer_observer::prepare_startup(challenge)?;
+    let evidence = match prepared.observe(challenge) {
+        Ok(evidence) => evidence,
+        Err(failure) => {
+            if let Err(unsettled) = failure.settle() {
+                // Exact local owners remain uncertain. Dropping one would not
+                // prove namespace or provider death; the enclosing daemon must
+                // quarantine and terminate its retained provider occurrence.
+                std::mem::forget(unsettled);
+            }
+            bail!("consumer observation failed; provider occurrence requires quarantine");
+        }
+    };
+    ensure!(
+        !prepared.active_deadline.has_elapsed()
+            && !evidence.is_empty()
+            && evidence.len() as u64 <= MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
+        "consumer observation expired or exceeds evidence bound"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&evidence)?;
+    ensure!(
+        value.is_object() && ryeos_external_execution_contract::canonical_json(&value)? == evidence,
+        "consumer observation is not an exact canonical object"
+    );
+    // One complete JSON line is the only stdout result. A partial write or
+    // nonzero exit is not a transport observation under the Render SSE parser.
+    let mut line = evidence;
+    line.push(b'\n');
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&line)?;
+    stdout.flush()?;
+    Ok(())
 }
 
 async fn admitted_main() -> Result<()> {
@@ -1322,6 +1404,78 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn consumer_cli_requires_one_exact_canonical_challenge() {
+        use ryeos_external_execution_contract::restored_runtime_measurement::{
+            ConsumerArchiveBudget, ConsumerRuntimeVerificationCoordinate,
+            ConsumerRuntimeVerifierSelection, RemoteVerificationPurpose,
+            RestoredVerifierAttemptIntent,
+        };
+
+        let coordinate = ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-consumer-cli".into(),
+            accepted_capsule_hash: "a".repeat(64),
+            qualification_purpose_digest: "b".repeat(64),
+            scenario_id: "consumer-cli".into(),
+            scenario_source_digest: "c".repeat(64),
+            subject_digest: "d".repeat(64),
+            use_digest: "e".repeat(64),
+            prerequisite_measurement_attempt_id: "f".repeat(64),
+            prerequisite_measurement_observation_digest: "1".repeat(64),
+        };
+        let mut intent = RestoredVerifierAttemptIntent {
+            schema: 2,
+            operation_id: String::new(),
+            qualification_operation_id: "2".repeat(64),
+            restored_occurrence_id: "sbx-consumer-cli".into(),
+            verifier_artifact_hash: "3".repeat(64),
+            upload_sha256: "4".repeat(64),
+            upload_bytes: 1024,
+            purpose: RemoteVerificationPurpose::ConsumerRuntime {
+                coordinate,
+                nonce_hex: "5".repeat(64),
+                guest_runtime_manifest_hash: "6".repeat(64),
+            },
+            attempt_deadline_ms: 42,
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        let challenge = ConsumerRuntimeChallenge {
+            schema: 1,
+            intent,
+            selection: ConsumerRuntimeVerifierSelection {
+                scenario_source_digest: "c".repeat(64),
+                verifier_artifact_hash: "3".repeat(64),
+                archive_budget: ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
+            },
+        };
+        let canonical = challenge.canonical_bytes().unwrap();
+        let encoded = URL_SAFE_NO_PAD.encode(&canonical);
+        let args = || ["--consumer-challenge-b64".into(), encoded.clone().into()];
+        assert_eq!(parse_consumer_challenge(args()).unwrap(), challenge);
+        assert!(parse_consumer_challenge(["--consumer-challenge-b64".into()]).is_err());
+        assert!(
+            parse_consumer_challenge(["--challenge-b64".into(), encoded.clone().into()]).is_err()
+        );
+        assert!(
+            parse_consumer_challenge([
+                "--consumer-challenge-b64".into(),
+                format!("{encoded}=").into()
+            ])
+            .is_err()
+        );
+        assert!(parse_consumer_challenge(args().into_iter().chain(["extra".into()])).is_err());
+        let mut noncanonical = canonical;
+        noncanonical.push(b'\n');
+        assert!(
+            parse_consumer_challenge([
+                "--consumer-challenge-b64".into(),
+                URL_SAFE_NO_PAD.encode(noncanonical).into()
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn scoped_observation_coordinate_matches_retained_cas_object() {
