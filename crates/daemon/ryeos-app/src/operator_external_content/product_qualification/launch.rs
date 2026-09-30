@@ -199,9 +199,9 @@ pub fn require_current_policy_matches_prepared(
     {
         bail!("prepared product relationship differs from signed qualification policy");
     }
-    let current = state.engine.with_checked_bundle_generation(|_| {
-        super::resolve_current_bundle_qualification_policy(
-            state,
+    let current = state.engine.with_checked_bundle_generation(|generation| {
+        super::resolve_current_bundle_qualification_policy_in_generation(
+            generation,
             &prepared.policy_source.canonical_ref,
         )
     })?;
