@@ -853,7 +853,7 @@ fn allocate(
         &url,
         &route_target.path_segments,
         route_target.owner_id_query.as_deref(),
-        route_target.upload_path_query.as_deref(),
+        route_target.file_path_query.as_deref(),
     )
     .is_err()
     {
@@ -1126,7 +1126,7 @@ fn terminate(
         &url,
         &route_target.path_segments,
         route_target.owner_id_query.as_deref(),
-        route_target.upload_path_query.as_deref(),
+        route_target.file_path_query.as_deref(),
     )
     .is_err()
     {
@@ -1227,7 +1227,7 @@ fn observe_termination_with_network(
         &url,
         &route_target.path_segments,
         route_target.owner_id_query.as_deref(),
-        route_target.upload_path_query.as_deref(),
+        route_target.file_path_query.as_deref(),
     )
     .is_err()
     {
@@ -1477,10 +1477,10 @@ fn api_url<S: RenderApiSettings>(
     route: RouteName,
     occurrence_id: Option<&str>,
     settings: &S,
-    upload_path: Option<&str>,
+    file_path: Option<&str>,
 ) -> Result<(url::Url, RouteTarget)> {
     let route_target =
-        provider_spec.route_target(route, occurrence_id, settings.owner_id(), upload_path)?;
+        provider_spec.route_target(route, occurrence_id, settings.owner_id(), file_path)?;
     let mut url = url::Url::parse(provider_spec.api_base())?;
     {
         let mut segments = url
@@ -1494,8 +1494,8 @@ fn api_url<S: RenderApiSettings>(
     if let Some(owner_id) = &route_target.owner_id_query {
         url.query_pairs_mut().append_pair("ownerId", owner_id);
     }
-    if let Some(upload_path) = &route_target.upload_path_query {
-        url.query_pairs_mut().append_pair("path", upload_path);
+    if let Some(file_path) = &route_target.file_path_query {
+        url.query_pairs_mut().append_pair("path", file_path);
     }
     Ok((url, route_target))
 }

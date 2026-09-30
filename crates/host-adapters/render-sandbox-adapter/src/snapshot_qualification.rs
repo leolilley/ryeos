@@ -399,7 +399,7 @@ pub(crate) fn terminate_restored_sandbox(
             &url,
             &target.path_segments,
             target.owner_id_query.as_deref(),
-            target.upload_path_query.as_deref(),
+            target.file_path_query.as_deref(),
         )?;
     }
     let network = crate::network_context_from_captured_inputs()?;
@@ -522,7 +522,7 @@ fn preflight_verifier_upload_and_routes(
             &url,
             &target.path_segments,
             target.owner_id_query.as_deref(),
-            target.upload_path_query.as_deref(),
+            target.file_path_query.as_deref(),
         )?;
         ensure!(
             url == crate::proxy_route::connect_token_url(

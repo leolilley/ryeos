@@ -161,15 +161,19 @@ Therefore the Render activation gate remains closed.
 `src/proxy_route.rs` now supplies a dormant fail-closed destination check for
 the CLI's example proxy routes. It accepts only the exact bound Sandbox ID and
 region under `<sandbox-id>.<region>.sandbox.onrender.com`, `PUT /files/upload`
-with the exact reserved path, or `POST /runs/stream`. It rejects arbitrary
+or `GET /files/download` with the exact reserved path, or `POST /runs/stream`. It rejects arbitrary
 returned origins, methods, queries, fragments, credentials, ports and alternate
 encodings before a future bearer token could be forwarded. This is local
 policy/test evidence, **not** evidence that Render always returns that shape or
 that a proxy operation has been safely implemented.
 It also constructs only the pinned CLI's exact API token-mint routes for the
 same Sandbox and owner: file upload/download with a validated path, or run
-stream. The constructor does not mint a token. A lost mint response must not
-cause a second mint or upload/run attempt under the same activation claim.
+stream. The constructor does not mint a token. The signed provider profile now
+fixes separate upload and download token routes in strict schema 4, but the
+one-shot activation contact still rejects download. A durable relay owner must
+authorize each transfer and reconcile ambiguous contact before that route is
+used. A lost mint response must not cause a second mint or upload/run attempt
+under the same activation claim.
 The same dormant boundary now parses a bounded connect response directly into
 a zeroizing bearer, rejects duplicates, unknown fields and trailing data,
 checks expiry and execution identity, and binds the returned method and URI to

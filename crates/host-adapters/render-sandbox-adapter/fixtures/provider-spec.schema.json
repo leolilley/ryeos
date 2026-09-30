@@ -14,7 +14,7 @@
     "operations"
   ],
   "properties": {
-    "schema": { "const": 3 },
+    "schema": { "const": 4 },
     "provider_profile": { "const": "render_sandbox_v1" },
     "settings_schema_digest": {
       "type": "string",
@@ -37,6 +37,7 @@
         "sandbox_by_id",
         "sandbox_terminate_by_id",
         "sandbox_file_upload_token_by_id",
+        "sandbox_file_download_token_by_id",
         "sandbox_run_stream_token_by_id"
       ],
       "properties": {
@@ -44,6 +45,7 @@
         "sandbox_by_id": { "$ref": "#/$defs/by_id_route" },
         "sandbox_terminate_by_id": { "$ref": "#/$defs/terminate_route" },
         "sandbox_file_upload_token_by_id": { "$ref": "#/$defs/file_upload_token_route" },
+        "sandbox_file_download_token_by_id": { "$ref": "#/$defs/file_download_token_route" },
         "sandbox_run_stream_token_by_id": { "$ref": "#/$defs/run_stream_token_route" }
       }
     },
@@ -105,6 +107,10 @@
       "type": "object", "additionalProperties": false, "required": ["literal"],
       "properties": { "literal": { "const": "upload" } }
     },
+    "literal_download": {
+      "type": "object", "additionalProperties": false, "required": ["literal"],
+      "properties": { "literal": { "const": "download" } }
+    },
     "literal_runs": {
       "type": "object", "additionalProperties": false, "required": ["literal"],
       "properties": { "literal": { "const": "runs" } }
@@ -144,7 +150,7 @@
         "path": {
           "type": "object", "additionalProperties": false,
           "required": ["source"],
-          "properties": { "source": { "const": "operation.upload_path" } }
+          "properties": { "source": { "const": "operation.file_path" } }
         }
       }
     },
@@ -216,6 +222,25 @@
             { "$ref": "#/$defs/occurrence_binding" },
             { "$ref": "#/$defs/literal_files" },
             { "$ref": "#/$defs/literal_upload" },
+            { "$ref": "#/$defs/literal_token" }
+          ],
+          "minItems": 6, "maxItems": 6, "items": false
+        },
+        "query": { "$ref": "#/$defs/owner_and_operation_path_query" }
+      }
+    },
+    "file_download_token_route": {
+      "type": "object", "additionalProperties": false,
+      "required": ["segments", "query"],
+      "properties": {
+        "segments": {
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/literal_v1" },
+            { "$ref": "#/$defs/literal_sandboxes" },
+            { "$ref": "#/$defs/occurrence_binding" },
+            { "$ref": "#/$defs/literal_files" },
+            { "$ref": "#/$defs/literal_download" },
             { "$ref": "#/$defs/literal_token" }
           ],
           "minItems": 6, "maxItems": 6, "items": false
