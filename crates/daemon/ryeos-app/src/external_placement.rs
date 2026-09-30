@@ -4333,18 +4333,33 @@ impl PreparedExternalPlacement {
     /// one allowed allocator call. A false claim is reconciliation authority,
     /// never permission to allocate again.
     pub(crate) fn claim(self) -> Result<ExternalPlacementContactDecision> {
+        let qualification_recovery = matches!(
+            &self.record.reservation.owner,
+            ExternalAllocationOwner::QualificationCandidate(_)
+        );
         ensure!(
-            !matches!(
-                &self.record.reservation.owner,
-                ExternalAllocationOwner::QualificationCandidate(_)
-            ),
-            "qualification allocation requires its accepted-root contact claim"
+            !qualification_recovery || self.record.phase != ExternalAllocationPhase::Reserved,
+            "qualification first contact requires its accepted-root claim"
         );
         self.claim_with(|prepared| {
-            prepared.state_store.claim_external_allocation_contact(
+            let claim = prepared.state_store.claim_external_allocation_contact(
                 &prepared.record.reservation.placement_thread_id,
                 &prepared.record.reservation.request_digest,
-            )
+            )?;
+            if qualification_recovery {
+                let record = match &claim {
+                    ExternalAllocationContactClaim::Reconcile(record)
+                    | ExternalAllocationContactClaim::Settled(record) => record,
+                    ExternalAllocationContactClaim::Contact(_) => {
+                        bail!("qualification recovery cannot create a provider contact")
+                    }
+                };
+                ensure!(
+                    record.reservation == prepared.record.reservation,
+                    "qualification recovery changed its retained request"
+                );
+            }
+            Ok(claim)
         })
     }
 
