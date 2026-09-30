@@ -105,6 +105,28 @@ fn consumer_execution_context_requires_typed_canonical_refs() {
 }
 
 #[test]
+fn consumer_execution_requires_scoped_producer_proof() {
+    let mut evidence = evidence();
+    evidence.policy_source.policy.consumer_execution_context =
+        Some(ProductQualificationConsumerExecutionContext {
+            worker_ref: "worker:codex/external-hosted-authoring".into(),
+            product_declaration_id: "guest-runtime".into(),
+            environment_ref: "config:codex/environments/external-authoring".into(),
+            worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
+            environment_binding: "environment".into(),
+        });
+    let error = validate_qualification_execution(
+        &evidence.policy_source,
+        &evidence.verifier,
+        &evidence.execution_proof,
+        &evidence.result,
+        &[],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("no scoped producer attempt"));
+}
+
+#[test]
 fn launch_purpose_retains_same_generation_consumer_definitions() {
     let mut purpose = launch_purpose();
     let context = ProductQualificationConsumerExecutionContext {

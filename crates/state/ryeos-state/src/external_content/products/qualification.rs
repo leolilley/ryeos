@@ -1200,6 +1200,9 @@ pub(crate) fn validate_qualification_execution(
     policy.validate()?;
     verifier.validate()?;
     proof.validate_for(verifier)?;
+    if policy.policy.consumer_execution_context.is_some() && proof.scoped_attempt.is_none() {
+        bail!("qualification consumer execution has no scoped producer attempt");
+    }
     if let Some(scoped) = &proof.scoped_attempt {
         let scenario = policy
             .policy
