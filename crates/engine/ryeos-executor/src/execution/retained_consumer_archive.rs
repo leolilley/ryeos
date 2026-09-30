@@ -64,7 +64,10 @@ pub(crate) fn prepare_retained_consumer_archive(
         .qualification_use
         .as_ref()
         .context("accepted consumer purpose has no admitted use")?;
-    let requirement = retained_worker_requirement(state, content)?;
+    let profile = authenticate_retained_consumer_worker_profile(state, content)?;
+    let requirement = profile
+        .external_candidate_requirement()?
+        .context("retained Worker profile has no external candidate requirement")?;
     ensure!(
         requirement.qualification_requirement_digest()? == qualified_use.requirement_digest,
         "retained Worker requirement differs from admitted consumer use"
@@ -121,13 +124,13 @@ pub(crate) fn prepare_retained_consumer_archive(
     })
 }
 
-/// Recompile the full recipe from the accepted Worker's retained CAS closure.
-/// A profile hash alone is insufficient: the resulting requirement must also
-/// rejoin the exact admitted use before it enters the input record.
-fn retained_worker_requirement(
+/// Recompile the full profile from the accepted Worker's retained CAS closure.
+/// Callers must rejoin its requirement to the exact admitted use before it
+/// enters an input record or qualification-only guest program.
+pub(crate) fn authenticate_retained_consumer_worker_profile(
     state: &ryeos_app::state::AppState,
     content: &ryeos_state::external_content::products::qualification::ProductQualificationConsumerContentIdentity,
-) -> Result<ryeos_state::external_execution::admission::ExternalCandidateRequirement> {
+) -> Result<ryeos_state::objects::AdmittedStructuredSessionProfile> {
     let projection = &content.worker_source;
     projection.validate()?;
     let authority = state.state_store.pinned_state_authority()?;
@@ -192,7 +195,5 @@ fn retained_worker_requirement(
         profile.profile_hash == content.worker_profile_hash,
         "retained Worker profile differs from accepted consumer content"
     );
-    profile
-        .external_candidate_requirement()?
-        .context("retained Worker profile has no external candidate requirement")
+    Ok(profile)
 }
