@@ -52,6 +52,7 @@ use ryeos_state::external_content::products::qualification_publication::{
 };
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use ryeos_state::external_content::runtime_member::exact_runtime_member_hash;
+use ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram;
 use ryeos_state::objects::{
     Attestation, ExecutableSearchPathEntry, ExternalContentKind, ExternalContentMode,
     ExternalContentRealizationSet, SOURCE_CLOSURE_DERIVED_KEY, SessionProcessEnvironmentValue,
@@ -2234,6 +2235,125 @@ fn resolve_current_bundle_producer_recipe_for_purpose_in_generation(
         bail!("qualification producer recipe changed after root admission");
     }
     Ok(current)
+}
+
+/// Precontact identity for one accepted qualification-only Worker root. This
+/// retains authenticated immutable inputs, but grants no placement, provider
+/// contact, channel, or qualification claim.
+pub struct PreparedExternalQualificationRoot {
+    capsule: ryeos_state::objects::AdmittedLaunchCapsule,
+    purpose: ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    program: AdmittedExternalQualificationSessionProgram,
+}
+
+impl PreparedExternalQualificationRoot {
+    pub fn capsule(&self) -> &ryeos_state::objects::AdmittedLaunchCapsule {
+        &self.capsule
+    }
+
+    pub fn purpose(
+        &self,
+    ) -> &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose {
+        &self.purpose
+    }
+
+    pub fn program(&self) -> &AdmittedExternalQualificationSessionProgram {
+        &self.program
+    }
+}
+
+/// Join a CAS-authenticated accepted root, its retained product witness, and
+/// the exact signed Worker profile compiled from its retained CAS source.
+/// Current Bundle policy and consumer definitions must still be the same
+/// signed generation as the accepted purpose. This performs no effect.
+pub fn prepare_external_qualification_root(
+    state: &AppState,
+    context: &HandlerContext,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+) -> anyhow::Result<PreparedExternalQualificationRoot> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let admission = authenticate_consumer_root(
+        state,
+        &authority,
+        &guard,
+        limits,
+        context,
+        coordinate,
+        qualification_operation_id,
+    )?;
+    let purpose = admission.purpose();
+    let content = purpose
+        .consumer_content
+        .as_ref()
+        .context("qualification-only root has no accepted Worker content")?;
+    let (profile, owner) =
+        crate::source_closure_admission::compile_retained_structured_worker_profile(
+            &authority,
+            &guard,
+            &content.worker_source,
+        )?;
+    profile.validate()?;
+    if profile.profile_hash != content.worker_profile_hash
+        || owner.item_kind != "worker"
+        || owner.canonical_ref != content.definitions.worker.canonical_ref
+        || owner.root_raw_content_digest != content.definitions.worker.raw_content_digest
+        || owner.signer_fingerprint != content.definitions.worker.publisher_fingerprint
+        || !matches!(
+            owner.source_space,
+            ryeos_state::objects::SourceSpaceIdentity::Bundle
+        )
+        || !matches!(
+            owner.source_root,
+            ryeos_state::objects::SourceRootIdentity::Bundle { .. }
+        )
+    {
+        bail!("qualification-only Worker source differs from accepted signed definition");
+    }
+    let current_definitions =
+        resolve_current_signed_bundle_consumer_definitions(state, &purpose.policy_source)?
+            .context("qualification-only Worker has no current signed consumer definitions")?;
+    if current_definitions != content.definitions {
+        bail!("qualification-only Worker changed its accepted signed Bundle generation");
+    }
+    let (witness_hash, witness_source, _) = purpose.subject.captured_product()?;
+    let product = super::product_receipt::load_product_source(
+        state,
+        &authority,
+        &guard,
+        limits,
+        context.fingerprint.as_str(),
+        witness_hash,
+        witness_source,
+        super::product_receipt::ProductSourceVerification::Retained,
+    )?;
+    let program = AdmittedExternalQualificationSessionProgram::from_authenticated_inputs(
+        purpose, &profile, &product,
+    )?;
+    let (chain_root_id, capsule_hash, capsule) = state
+        .state_store
+        .admitted_launch_capsule_with_coordinates(&coordinate.accepted_root_id)?
+        .context("qualification-only accepted root has no retained capsule")?;
+    if chain_root_id != coordinate.accepted_root_id
+        || capsule_hash != coordinate.accepted_capsule_hash
+        || capsule.project_authority != *admission.accepted_project_authority()
+    {
+        bail!("qualification-only root changed its authenticated capsule coordinate");
+    }
+    let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+        &capsule,
+    )?;
+    if sealed.qualification_purpose() != Some(purpose) {
+        bail!("qualification-only root changed its sealed purpose");
+    }
+    authority.ensure_guard(&guard)?;
+    Ok(PreparedExternalQualificationRoot {
+        capsule,
+        purpose: purpose.clone(),
+        program,
+    })
 }
 
 /// Retained guest delivery inputs from a born root and its authenticated CAS
