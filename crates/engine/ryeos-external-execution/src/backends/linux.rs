@@ -1201,6 +1201,50 @@ impl NativeExternalCandidate {
         Ok(())
     }
 
+    /// Complete only a Q session's native namespace. The returned exit is
+    /// projected from Lillux's once-reaped termination, never EOF or cleanup
+    /// init status. This proves no verifier claim or provider termination.
+    pub fn complete_qualification(
+        &mut self,
+        frame: &AuthenticatedExecutionFrame,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<NativeNamespaceExit> {
+        self.require_owner(frame)?;
+        ensure!(
+            self.binding.execution_mode == ExternalExecutionMode::QualificationStructuredSession {}
+                && matches!(
+                    frame.frame().payload,
+                    ExecutionChannelPayload::QualificationComplete { .. }
+                )
+                && self.released
+                && !self.terminal
+                && self.protocol.pending.is_none()
+                && self.application_fence.is_clear()
+                && !self.execution_expired()
+                && self.try_observe_applied_launch()?.is_some(),
+            "qualification completion lacks its released native occurrence"
+        );
+        self.application_fence.begin(frame.digest())?;
+        self.close_input();
+        self.native_termination = Some(
+            self.process
+                .terminate_namespace_for_export_until(deadline.min(self.channel_deadline))
+                .map_err(anyhow::Error::msg)?,
+        );
+        let proof = self
+            .native_termination
+            .as_ref()
+            .expect("native termination retained");
+        ensure!(
+            proof.launch_failure().is_none(),
+            "qualification workload failed before native execution"
+        );
+        Ok(match proof.exit() {
+            lillux::LinuxSandboxExit::Code(code) => NativeNamespaceExit::Code(code),
+            lillux::LinuxSandboxExit::Signal(signal) => NativeNamespaceExit::Signal(signal),
+        })
+    }
+
     pub fn capture(
         &mut self,
         frame: &AuthenticatedExecutionFrame,

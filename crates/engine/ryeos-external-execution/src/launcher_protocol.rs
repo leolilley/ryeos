@@ -13,7 +13,7 @@ use ryeos_state::external_execution::{
     AuthenticatedExecutionFrame, ExecutionChannelBinding, ExecutionChannelPayload,
     ExternalCommandOutputCommitment, ExternalCommandOutputStream, ExternalCommandTermination,
     ExternalCommandTerminationReason, ExternalExecutionMode, ExternalTargetExit,
-    SignedExecutionFrame,
+    NativeNamespaceExit, SignedExecutionFrame,
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,11 @@ enum LauncherMessage {
         schema: u32,
         frame_digest: String,
         written_bytes: Option<usize>,
+    },
+    QualificationSettled {
+        schema: u32,
+        frame_digest: String,
+        exit: NativeNamespaceExit,
     },
     Captured {
         schema: u32,
@@ -125,6 +130,7 @@ pub struct LiveInheritedExternalCandidateSupervisor {
     ready_frame: String,
     applied_runtime_recorded: bool,
     runtime_applied_frame_authored: bool,
+    qualification_settled: bool,
 }
 
 pub enum ExternalOwnerFrameOutcome {
@@ -226,6 +232,19 @@ impl LiveInheritedExternalCandidateSupervisor {
             ExecutionChannelPayload::Quiesce { .. } => {
                 ExternalOwnerFrameOutcome::Capture(self.dispatch_quiesce(wire)?)
             }
+            ExecutionChannelPayload::QualificationComplete { .. } => {
+                ensure!(
+                    self.applied_runtime_recorded && self.runtime_applied_frame_authored,
+                    "qualification completion precedes retained applied runtime"
+                );
+                let result = self.supervisor.dispatch_qualification_complete(
+                    wire,
+                    &self.supervisor_signing_key,
+                    &self.occurrence_digest,
+                )?;
+                self.qualification_settled = true;
+                ExternalOwnerFrameOutcome::Application(result)
+            }
             ExecutionChannelPayload::Acknowledge { .. } => {
                 self.supervisor.record_owner_acknowledgement(wire)?;
                 ExternalOwnerFrameOutcome::Acknowledgement
@@ -243,6 +262,9 @@ impl LiveInheritedExternalCandidateSupervisor {
     }
 
     pub fn poll_execution_output(&mut self) -> Result<Option<String>> {
+        if self.qualification_settled {
+            return Ok(None);
+        }
         // Transport may poll before the controller has released the target.
         // Do not ask Lillux for a pre-exec receipt until release is durably
         // applied, and do not forward any output before the exact local
@@ -446,6 +468,7 @@ pub fn launch_external_candidate_supervisor(
         ready_frame,
         applied_runtime_recorded: false,
         runtime_applied_frame_authored: false,
+        qualification_settled: false,
     })
 }
 
@@ -593,6 +616,46 @@ impl InheritedExternalCandidateLauncherClient {
             _ => anyhow::bail!("dedicated launcher returned a mismatched action response"),
         }
     }
+
+    fn complete_qualification(
+        &mut self,
+        frame: &AuthenticatedExecutionFrame,
+    ) -> Result<NativeNamespaceExit> {
+        ensure!(
+            self.binding.execution_mode == ExternalExecutionMode::QualificationStructuredSession {}
+                && matches!(
+                    frame.frame().payload,
+                    ExecutionChannelPayload::QualificationComplete { .. }
+                )
+                && frame.frame().binding_digest == self.binding.digest()?,
+            "launcher qualification completion changed its bound command"
+        );
+        write_message(
+            &mut self.channel,
+            self.deadline,
+            &LauncherMessage::Apply {
+                schema: PROTOCOL_SCHEMA,
+                frame_json: frame.canonical().to_owned(),
+            },
+        )?;
+        match read_message(&mut self.channel, self.deadline)
+            .context("read dedicated launcher qualification settlement")?
+        {
+            LauncherMessage::QualificationSettled {
+                schema: PROTOCOL_SCHEMA,
+                frame_digest,
+                exit,
+            } if frame_digest == frame.digest() => Ok(exit),
+            LauncherMessage::Failed {
+                schema: PROTOCOL_SCHEMA,
+                frame_digest,
+                detail,
+            } if frame_digest == frame.digest() => {
+                anyhow::bail!("dedicated launcher qualification completion failed: {detail}")
+            }
+            _ => anyhow::bail!("dedicated launcher changed qualification settlement response"),
+        }
+    }
 }
 
 impl ExternalCandidateLauncherClient for InheritedExternalCandidateLauncherClient {
@@ -619,6 +682,13 @@ impl ExternalCandidateLauncherClient for InheritedExternalCandidateLauncherClien
             "launcher cancellation returned protocol progress"
         );
         Ok(())
+    }
+
+    fn complete_qualification(
+        &mut self,
+        frame: &AuthenticatedExecutionFrame,
+    ) -> Result<NativeNamespaceExit> {
+        InheritedExternalCandidateLauncherClient::complete_qualification(self, frame)
     }
 
     fn capture(
@@ -1304,6 +1374,27 @@ pub fn serve_native_candidate_launcher(
                         ExecutionChannelPayload::Cancel => {
                             output.cancelled();
                             candidate.cancel(&decoded, deadline).map(|_| None)
+                        }
+                        ExecutionChannelPayload::QualificationComplete { .. } => {
+                            let response =
+                                match candidate.complete_qualification(&decoded, deadline) {
+                                    Ok(exit) => LauncherMessage::QualificationSettled {
+                                        schema: PROTOCOL_SCHEMA,
+                                        frame_digest: digest,
+                                        exit,
+                                    },
+                                    Err(error) => LauncherMessage::Failed {
+                                        schema: PROTOCOL_SCHEMA,
+                                        frame_digest: digest,
+                                        detail: format!("{error:#}"),
+                                    },
+                                };
+                            write_message(
+                                &mut channel,
+                                candidate.control_io_deadline(deadline),
+                                &response,
+                            )?;
+                            continue;
                         }
                         _ => anyhow::bail!("dedicated launcher received a non-native action"),
                     };

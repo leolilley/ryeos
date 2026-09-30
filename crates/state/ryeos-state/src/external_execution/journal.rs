@@ -341,17 +341,26 @@ pub fn append_frame(
     if matches!(
         frame.payload,
         ExecutionChannelPayload::RuntimeApplied { .. }
+            | ExecutionChannelPayload::QualificationScopeSettled { .. }
     ) {
+        let kind = if matches!(
+            frame.payload,
+            ExecutionChannelPayload::RuntimeApplied { .. }
+        ) {
+            "runtime_applied"
+        } else {
+            "qualification_scope_settled"
+        };
         let already_retained: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='supervisor_to_owner'
-               AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied')",
-            [&frame.binding_digest],
+               AND json_extract(frame_json,'$.frame.payload.kind')=?2)",
+            params![&frame.binding_digest, kind],
             |row| row.get(0),
         )?;
         ensure!(
             !already_retained,
-            "external runtime-applied observation was already retained"
+            "external native observation was already retained"
         );
     }
     require_direct_command_append(tx, &binding, &frame.payload)?;
@@ -422,6 +431,9 @@ pub fn append_frame(
                 [&frame.binding_digest])?;
         }
         ExecutionChannelPayload::Quiesce {
+            completion_request_digest,
+        }
+        | ExecutionChannelPayload::QualificationComplete {
             completion_request_digest,
         } => {
             tx.execute("UPDATE external_execution_channel SET completion_request_digest=?2 WHERE placement_thread_id=?1",
@@ -1290,6 +1302,7 @@ pub fn claim_application(
     let non_input_observation = matches!(
         verified.frame().payload,
         ExecutionChannelPayload::RuntimeApplied { .. }
+            | ExecutionChannelPayload::QualificationScopeSettled { .. }
             | ExecutionChannelPayload::CommandOutput { .. }
             | ExecutionChannelPayload::CommandTerminated { .. }
     );
@@ -1698,6 +1711,9 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
             state = state.advance(completion.as_deref(), &frame.payload, true)?;
             match &frame.payload {
                 ExecutionChannelPayload::Quiesce {
+                    completion_request_digest,
+                }
+                | ExecutionChannelPayload::QualificationComplete {
                     completion_request_digest,
                 } => completion = Some(completion_request_digest.clone()),
                 ExecutionChannelPayload::ExportSealed {

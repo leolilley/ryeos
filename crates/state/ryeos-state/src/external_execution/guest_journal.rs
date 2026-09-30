@@ -18,7 +18,9 @@ use super::export::{ValidatedCandidateRetention, validated_retained_candidate_ro
 use super::journal::{self, ApplicationClaim, JournalOwner};
 use super::{
     AuthenticatedExecutionFrame, ChannelDirection, ExecutionChannelBinding,
-    ExecutionChannelPayload, SignedExecutionFrame,
+    ExecutionChannelPayload, ExternalExecutionMode, NativeNamespaceExit,
+    NativeQualificationScopeSettlementObservation, NativeWriterExclusionMechanism,
+    SignedExecutionFrame,
 };
 use crate::{
     DurableCasPublicationKey, DurableCasUploadStage, DurableExternalCandidateReceipt,
@@ -158,8 +160,37 @@ BEFORE DELETE ON external_guest_native_capture
 BEGIN SELECT RAISE(ABORT, 'external guest native capture requires reconciliation'); END;
 "#;
 
-fn complete_schema() -> String {
-    format!("{}\n{}", journal::CHANNEL_SQL, OWNER_SQL)
+// Qualification journals are fresh and mode-specific. Preserve the exact
+// ordinary schema for recovery of existing structured/direct occurrences.
+const QUALIFICATION_SETTLEMENT_SQL: &str = r#"
+CREATE TABLE external_guest_qualification_settlement (
+    binding_digest TEXT PRIMARY KEY,
+    completion_frame_digest TEXT NOT NULL UNIQUE,
+    observation_json TEXT NOT NULL,
+    FOREIGN KEY(binding_digest) REFERENCES external_execution_channel(binding_digest)
+);
+CREATE TRIGGER external_guest_qualification_settlement_no_update
+BEFORE UPDATE ON external_guest_qualification_settlement
+BEGIN SELECT RAISE(ABORT, 'external guest qualification settlement is immutable'); END;
+CREATE TRIGGER external_guest_qualification_settlement_no_delete
+BEFORE DELETE ON external_guest_qualification_settlement
+BEGIN SELECT RAISE(ABORT, 'external guest qualification settlement cannot be deleted'); END;
+"#;
+
+fn complete_schema(mode: ExternalExecutionMode) -> String {
+    if matches!(
+        mode,
+        ExternalExecutionMode::QualificationStructuredSession {}
+    ) {
+        format!(
+            "{}\n{}\n{}",
+            journal::CHANNEL_SQL,
+            OWNER_SQL,
+            QUALIFICATION_SETTLEMENT_SQL
+        )
+    } else {
+        format!("{}\n{}", journal::CHANNEL_SQL, OWNER_SQL)
+    }
 }
 
 fn hash(value: &str, label: &str) -> Result<()> {
@@ -461,7 +492,7 @@ impl ReservedGuestJournal {
         );
         let conn = open_exact(&self.directory, &self.database_file)?;
         configure(&conn)?;
-        conn.execute_batch(&complete_schema())?;
+        conn.execute_batch(&complete_schema(self.binding.execution_mode))?;
         conn.pragma_update(None, "application_id", APPLICATION_ID)?;
         conn.pragma_update(None, "user_version", SCHEMA_EPOCH)?;
         let binding_digest = self.binding.digest()?;
@@ -853,6 +884,230 @@ impl LiveGuestJournal {
         Ok(Some(frame))
     }
 
+    /// Retain the one Q namespace reap reported by the authenticated held
+    /// launcher. This follows the claimed command and precedes its finish; a
+    /// lost launcher response without this row remains claimed/unknown.
+    pub fn record_qualification_scope_settlement(
+        &self,
+        completion: &AuthenticatedExecutionFrame,
+        launcher_occurrence_digest: &str,
+        exit: NativeNamespaceExit,
+    ) -> Result<NativeQualificationScopeSettlementObservation> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        ensure!(
+            matches!(
+                self.0.binding.execution_mode,
+                ExternalExecutionMode::QualificationStructuredSession {}
+            ),
+            "native qualification settlement requires Q mode"
+        );
+        let ExecutionChannelPayload::QualificationComplete {
+            completion_request_digest,
+        } = &completion.frame().payload
+        else {
+            anyhow::bail!("native qualification settlement has no completion command")
+        };
+        let binding_digest = self.0.binding.digest()?;
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        self.0.owner().require_owner(&tx, &self.0.binding)?;
+        ensure!(
+            !journal::revoked(&tx, &binding_digest)?
+                && completion.frame().binding_digest == binding_digest
+                && completion.frame().direction == ChannelDirection::OwnerToSupervisor
+                && retained_launcher_occurrence_digest(&tx, &binding_digest)?
+                    == launcher_occurrence_digest,
+            "native qualification settlement changed its live launcher authority"
+        );
+        let (applied_occurrence, receipt_digest): (String, String) = tx.query_row(
+            "SELECT launcher_occurrence_digest,receipt_digest
+             FROM external_guest_runtime_applied WHERE binding_digest=?1",
+            [&binding_digest],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let application: String = tx.query_row(
+            "SELECT application FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+               AND frame_digest=?2
+               AND json_extract(frame_json,'$.frame.payload.kind')='qualification_complete'",
+            params![&binding_digest, completion.digest()],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            applied_occurrence == launcher_occurrence_digest && application == "claimed",
+            "native qualification settlement lacks its applied runtime and claimed command"
+        );
+        let observation = NativeQualificationScopeSettlementObservation {
+            schema: 1,
+            binding_digest: binding_digest.clone(),
+            launcher_occurrence_digest: applied_occurrence,
+            applied_runtime_receipt_digest: receipt_digest,
+            completion_frame_digest: completion.digest().to_owned(),
+            completion_request_digest: completion_request_digest.clone(),
+            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+            exit,
+        };
+        observation.validate(&self.0.binding)?;
+        let json = lillux::canonical_json(&serde_json::to_value(&observation)?)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO external_guest_qualification_settlement VALUES(?1,?2,?3)",
+            params![&binding_digest, completion.digest(), &json],
+        )?;
+        let retained: String = tx.query_row(
+            "SELECT observation_json FROM external_guest_qualification_settlement
+             WHERE binding_digest=?1 AND completion_frame_digest=?2",
+            params![&binding_digest, completion.digest()],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            retained == json,
+            "native qualification settlement changed its durable row"
+        );
+        tx.commit()?;
+        Ok(observation)
+    }
+
+    pub fn qualification_scope_settlement_for_completion(
+        &self,
+        completion: &AuthenticatedExecutionFrame,
+    ) -> Result<Option<NativeQualificationScopeSettlementObservation>> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        ensure!(
+            matches!(
+                self.0.binding.execution_mode,
+                ExternalExecutionMode::QualificationStructuredSession {}
+            ),
+            "native qualification settlement requires Q mode"
+        );
+        let raw: Option<String> = self
+            .0
+            .conn
+            .query_row(
+                "SELECT observation_json FROM external_guest_qualification_settlement
+             WHERE binding_digest=?1 AND completion_frame_digest=?2",
+                params![self.0.binding.digest()?, completion.digest()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.map(|raw| {
+            let observation: NativeQualificationScopeSettlementObservation =
+                serde_json::from_str(&raw)?;
+            observation.validate(&self.0.binding)?;
+            let (occurrence, receipt_digest): (String, String) = self.0.conn.query_row(
+                "SELECT launcher_occurrence_digest,receipt_digest
+                 FROM external_guest_runtime_applied WHERE binding_digest=?1",
+                [self.0.binding.digest()?],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            ensure!(
+                raw == lillux::canonical_json(&serde_json::to_value(&observation)?)?
+                    && observation.completion_frame_digest == completion.digest()
+                    && observation.launcher_occurrence_digest == occurrence
+                    && observation.applied_runtime_receipt_digest == receipt_digest
+                    && occurrence
+                        == retained_launcher_occurrence_digest(
+                            &self.0.conn,
+                            &self.0.binding.digest()?,
+                        )?
+                    && matches!(&completion.frame().payload,
+                        ExecutionChannelPayload::QualificationComplete { completion_request_digest }
+                        if completion_request_digest == &observation.completion_request_digest),
+                "retained qualification settlement changed its completion authority"
+            );
+            Ok(observation)
+        })
+        .transpose()
+    }
+
+    pub fn reconcile_qualification_scope_settlement_application(
+        &self,
+        completion: &AuthenticatedExecutionFrame,
+    ) -> Result<GuestApplicationAck> {
+        self.qualification_scope_settlement_for_completion(completion)?
+            .context("claimed qualification completion has no native settlement row")?;
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        journal::finish_application(
+            &tx,
+            &self.0.owner(),
+            &self.0.binding.placement_thread_id,
+            ChannelDirection::OwnerToSupervisor,
+            completion.frame().sequence,
+            completion.digest(),
+        )?;
+        tx.commit()?;
+        Ok(GuestApplicationAck {
+            direction: ChannelDirection::OwnerToSupervisor,
+            sequence: completion.frame().sequence,
+            frame_digest: completion.digest().to_owned(),
+        })
+    }
+
+    /// Sign only the exact row after its initiating command is durably applied.
+    pub fn ensure_qualification_scope_settled_frame(
+        &self,
+        signing_key: &lillux::crypto::SigningKey,
+        completion: &AuthenticatedExecutionFrame,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        let observation = self
+            .qualification_scope_settlement_for_completion(completion)?
+            .context("qualification scope frame has no native settlement row")?;
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        self.0.owner().require_owner(&tx, &self.0.binding)?;
+        let applied: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+               AND frame_digest=?2 AND application='applied'
+               AND json_extract(frame_json,'$.frame.payload.kind')='qualification_complete')",
+            params![self.0.binding.digest()?, completion.digest()],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            applied,
+            "qualification native frame precedes applied completion"
+        );
+        let payload = ExecutionChannelPayload::QualificationScopeSettled { observation };
+        let mut statement = tx.prepare(
+            "SELECT frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+               AND json_extract(frame_json,'$.frame.payload.kind')='qualification_scope_settled'
+             LIMIT 2",
+        )?;
+        let frames = statement
+            .query_map([self.0.binding.digest()?], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        ensure!(
+            frames.len() <= 1,
+            "qualification native settlement has duplicate frames"
+        );
+        if let Some(wire) = frames.into_iter().next() {
+            let frame = SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                &self.0.binding,
+                self.0.binding.issued_at_ms,
+            )?;
+            ensure!(
+                frame.frame().payload == payload,
+                "qualification native frame changed its durable settlement row"
+            );
+            tx.commit()?;
+            return Ok(None);
+        }
+        ensure!(
+            !journal::revoked(&tx, &self.0.binding.digest()?)?,
+            "revoked qualification execution cannot gain normal native settlement"
+        );
+        let frame = journal::author_frame(
+            &tx,
+            &self.0.owner(),
+            &self.0.binding.placement_thread_id,
+            ChannelDirection::SupervisorToOwner,
+            signing_key,
+            payload,
+        )?;
+        tx.commit()?;
+        Ok(Some(frame))
+    }
+
     pub fn native_capture_for_quiesce(
         &self,
         quiesce_frame_digest: &str,
@@ -1063,8 +1318,12 @@ impl LiveGuestJournal {
         payload: ExecutionChannelPayload,
     ) -> Result<AuthenticatedExecutionFrame> {
         ensure!(
-            !matches!(payload, ExecutionChannelPayload::RuntimeApplied { .. }),
-            "runtime-applied projection requires its exact native row authoring path"
+            !matches!(
+                payload,
+                ExecutionChannelPayload::RuntimeApplied { .. }
+                    | ExecutionChannelPayload::QualificationScopeSettled { .. }
+            ),
+            "native projection requires its exact retained row authoring path"
         );
         ensure_same_file(&self.0.directory, &self.0.database_file)?;
         let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
@@ -1093,8 +1352,12 @@ impl LiveGuestJournal {
         let mut frames = Vec::new();
         for payload in payloads {
             ensure!(
-                !matches!(payload, ExecutionChannelPayload::RuntimeApplied { .. }),
-                "runtime-applied projection requires its exact native row authoring path"
+                !matches!(
+                    payload,
+                    ExecutionChannelPayload::RuntimeApplied { .. }
+                        | ExecutionChannelPayload::QualificationScopeSettled { .. }
+                ),
+                "native projection requires its exact retained row authoring path"
             );
             frames.push(journal::author_frame(
                 &tx,
@@ -1874,7 +2137,7 @@ impl GuestStore {
         );
         crate::sqlite_schema::assert_complete_schema_sql(
             &self.conn,
-            &complete_schema(),
+            &complete_schema(self.binding.execution_mode),
             &self.directory.path().join(DATABASE_NAME),
         )?;
         self.owner().require_owner(&self.conn, &self.binding)?;
@@ -2004,6 +2267,92 @@ impl GuestStore {
                     }),
                 "guest runtime-applied frame differs from native row"
             );
+        }
+        if matches!(
+            self.binding.execution_mode,
+            ExternalExecutionMode::QualificationStructuredSession {}
+        ) {
+            let binding_digest = self.binding.digest()?;
+            let retained: Option<(String, String)> = self
+                .conn
+                .query_row(
+                    "SELECT completion_frame_digest,observation_json
+                 FROM external_guest_qualification_settlement WHERE binding_digest=?1",
+                    [&binding_digest],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((completion_digest, json)) = retained {
+                let observation: NativeQualificationScopeSettlementObservation =
+                    serde_json::from_str(&json)?;
+                observation.validate(&self.binding)?;
+                let (applied_occurrence, _, receipt_digest, _): (String, String, String, String) =
+                    applied
+                        .as_ref()
+                        .context("qualification settlement lost applied runtime")?
+                        .clone();
+                ensure!(
+                    json == lillux::canonical_json(&serde_json::to_value(&observation)?)?
+                        && observation.completion_frame_digest == completion_digest
+                        && observation.launcher_occurrence_digest == applied_occurrence
+                        && observation.applied_runtime_receipt_digest == receipt_digest,
+                    "qualification settlement changed its native occurrence or applied runtime"
+                );
+                let (command_wire, application): (String, String) = self.conn.query_row(
+                    "SELECT frame_json,application FROM external_execution_frame
+                     WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                       AND frame_digest=?2
+                       AND json_extract(frame_json,'$.frame.payload.kind')='qualification_complete'",
+                    params![&binding_digest, &completion_digest],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let command = SignedExecutionFrame::decode_and_verify(
+                    command_wire.as_bytes(),
+                    &self.binding,
+                    self.binding.issued_at_ms,
+                )?;
+                ensure!(
+                    matches!(&command.frame().payload,
+                        ExecutionChannelPayload::QualificationComplete { completion_request_digest }
+                        if completion_request_digest == &observation.completion_request_digest)
+                        && matches!(application.as_str(), "claimed" | "applied"),
+                    "qualification settlement changed its initiating command"
+                );
+                let signed: Vec<String> = self.conn.prepare(
+                    "SELECT frame_json FROM external_execution_frame
+                     WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+                       AND json_extract(frame_json,'$.frame.payload.kind')='qualification_scope_settled'
+                     LIMIT 2",
+                )?.query_map([&binding_digest], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                ensure!(
+                    signed.len() <= 1,
+                    "qualification settlement has duplicate signed frames"
+                );
+                if let Some(wire) = signed.first() {
+                    let frame = SignedExecutionFrame::decode_and_verify(
+                        wire.as_bytes(),
+                        &self.binding,
+                        self.binding.issued_at_ms,
+                    )?;
+                    ensure!(
+                        application == "applied"
+                            && frame.frame().payload
+                                == ExecutionChannelPayload::QualificationScopeSettled {
+                                    observation
+                                },
+                        "qualification signed settlement differs from native row"
+                    );
+                }
+            } else {
+                let signed: bool = self.conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+                     WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+                       AND json_extract(frame_json,'$.frame.payload.kind')='qualification_scope_settled')",
+                    [&binding_digest], |row| row.get(0),
+                )?;
+                ensure!(!signed, "qualification settlement frame has no native row");
+            }
         }
         journal::validate_channels(&self.conn, &self.owner())?;
         Ok(())
@@ -2283,6 +2632,48 @@ impl JournalOwner for GuestOwner<'_> {
                     && digest == lillux::sha256_hex(receipt_json.as_bytes())
                     && receipt_json == lillux::canonical_json(&serde_json::to_value(receipt)?)?,
                 "guest runtime-applied frame differs from native occurrence row"
+            );
+        }
+        if matches!(
+            payload,
+            ExecutionChannelPayload::QualificationComplete { .. }
+        ) {
+            let admitted: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_guest_runtime_applied a
+                 WHERE a.binding_digest=?1
+                   AND EXISTS(SELECT 1 FROM external_execution_frame f
+                     WHERE f.binding_digest=a.binding_digest AND f.direction='owner_to_supervisor'
+                       AND f.application='applied'
+                       AND json_extract(f.frame_json,'$.frame.payload.kind')='release')
+                   AND EXISTS(SELECT 1 FROM external_execution_frame f
+                     WHERE f.binding_digest=a.binding_digest AND f.direction='supervisor_to_owner'
+                       AND f.application='applied'
+                       AND json_extract(f.frame_json,'$.frame.payload.kind')='runtime_applied')
+                   AND EXISTS(SELECT 1 FROM external_execution_frame f
+                     WHERE f.binding_digest=a.binding_digest AND f.direction='supervisor_to_owner'
+                       AND f.application='applied'
+                       AND json_extract(f.frame_json,'$.frame.payload.kind')='protocol_eof'))",
+                [binding.digest()?],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                admitted,
+                "qualification completion lacks applied release, runtime and protocol EOF"
+            );
+        }
+        if let ExecutionChannelPayload::QualificationScopeSettled { observation } = payload {
+            let retained: Option<String> = conn
+                .query_row(
+                    "SELECT observation_json FROM external_guest_qualification_settlement
+                 WHERE binding_digest=?1 AND completion_frame_digest=?2",
+                    params![binding.digest()?, &observation.completion_frame_digest],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let expected = lillux::canonical_json(&serde_json::to_value(observation)?)?;
+            ensure!(
+                retained.as_deref() == Some(expected.as_str()),
+                "qualification scope frame has no exact durable native row"
             );
         }
         Ok(())

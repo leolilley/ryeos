@@ -177,6 +177,16 @@ pub enum ExecutionChannelPayload {
         receipt: lillux::LinuxSandboxAppliedLaunchReceipt,
     },
     Release,
+    /// Controller request to reap only a qualification session's native
+    /// namespace. This request makes no assertion about verifier success.
+    QualificationComplete {
+        completion_request_digest: String,
+    },
+    /// Guest projection of an immutable native reap row, never a provider or
+    /// semantic qualification result.
+    QualificationScopeSettled {
+        observation: NativeQualificationScopeSettlementObservation,
+    },
     ProtocolBytes {
         bytes_base64: String,
     },
@@ -269,6 +279,47 @@ pub struct NativeWriterExclusionObservation {
     pub exit: NativeNamespaceExit,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeQualificationScopeSettlementObservation {
+    pub schema: u32,
+    pub binding_digest: String,
+    pub launcher_occurrence_digest: String,
+    pub applied_runtime_receipt_digest: String,
+    pub completion_frame_digest: String,
+    pub completion_request_digest: String,
+    pub mechanism: NativeWriterExclusionMechanism,
+    pub exit: NativeNamespaceExit,
+}
+
+impl NativeQualificationScopeSettlementObservation {
+    pub fn validate(&self, binding: &ExecutionChannelBinding) -> Result<()> {
+        ensure!(
+            binding.execution_mode == ExternalExecutionMode::QualificationStructuredSession {}
+                && self.schema == 1
+                && self.binding_digest == binding.digest()?
+                && self.mechanism == NativeWriterExclusionMechanism::NamespaceInitReaped,
+            "qualification scope settlement changed its native authority"
+        );
+        for digest in [
+            &self.launcher_occurrence_digest,
+            &self.applied_runtime_receipt_digest,
+            &self.completion_frame_digest,
+            &self.completion_request_digest,
+        ] {
+            hash(digest)?;
+        }
+        ensure!(
+            match self.exit {
+                NativeNamespaceExit::Code(n) => (0..=255).contains(&n),
+                NativeNamespaceExit::Signal(n) => (1..=64).contains(&n),
+            },
+            "qualification scope settlement has an invalid native exit"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeWriterExclusionMechanism {
@@ -319,11 +370,15 @@ impl ExecutionChannelPayload {
         direction: ChannelDirection,
     ) -> Result<()> {
         use ExecutionChannelPayload::*;
-        let owner_only = matches!(self, Release | Quiesce { .. } | Cancel);
+        let owner_only = matches!(
+            self,
+            Release | Quiesce { .. } | QualificationComplete { .. } | Cancel
+        );
         let supervisor_only = matches!(
             self,
             Ready { .. }
                 | RuntimeApplied { .. }
+                | QualificationScopeSettled { .. }
                 | ProtocolEof
                 | CommandOutput { .. }
                 | CommandTerminated { .. }
@@ -358,6 +413,13 @@ impl ExecutionChannelPayload {
             ),
             "execution mode cannot carry candidate export"
         );
+        ensure!(
+            !matches!(
+                self,
+                QualificationComplete { .. } | QualificationScopeSettled { .. }
+            ) || binding.execution_mode == ExternalExecutionMode::QualificationStructuredSession {},
+            "qualification settlement requires a qualification session"
+        );
         match self {
             Ready {
                 supervisor_runtime_hash,
@@ -388,6 +450,10 @@ impl ExecutionChannelPayload {
                     "external runtime-applied frame changed bound native controls"
                 );
             }
+            QualificationComplete {
+                completion_request_digest,
+            } => hash(completion_request_digest)?,
+            QualificationScopeSettled { observation } => observation.validate(binding)?,
             ProtocolBytes { bytes_base64 } => {
                 chunk(bytes_base64, false)?;
             }

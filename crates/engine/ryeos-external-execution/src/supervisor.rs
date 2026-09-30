@@ -30,6 +30,10 @@ pub trait ExternalCandidateLauncherClient {
     fn poll_applied_launch(&mut self) -> Result<Option<lillux::LinuxSandboxAppliedLaunchReceipt>>;
     fn apply_protocol_chunk(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<usize>;
     fn cancel(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()>;
+    fn complete_qualification(
+        &mut self,
+        frame: &AuthenticatedExecutionFrame,
+    ) -> Result<ryeos_state::external_execution::NativeNamespaceExit>;
     fn capture(
         &mut self,
         frame: &AuthenticatedExecutionFrame,
@@ -451,6 +455,73 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
         })
     }
 
+    /// Q-only normal native settlement. The initiating command carries no
+    /// semantic success claim; the guest signs only its already durable native
+    /// row after the one-shot command has an applied journal state.
+    pub fn dispatch_qualification_complete(
+        &mut self,
+        wire: &[u8],
+        signing_key: &lillux::crypto::SigningKey,
+        occurrence_digest: &str,
+    ) -> Result<SupervisorApplicationOutcome> {
+        ensure!(
+            matches!(
+                self.journal.binding().execution_mode,
+                ExternalExecutionMode::QualificationStructuredSession {}
+            ) && self.pending_protocol.is_none(),
+            "qualification completion cannot overtake a live protocol application"
+        );
+        let completion = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+            wire,
+            self.journal.binding(),
+            lillux::time::timestamp_millis(),
+        )?;
+        let fresh = match self.journal.record_and_claim(wire)? {
+            GuestApplicationClaim::New(token) => {
+                let (exit, performed) = self
+                    .journal
+                    .apply_once(token, |frame| self.launcher.complete_qualification(frame))?;
+                self.journal.record_qualification_scope_settlement(
+                    &completion,
+                    occurrence_digest,
+                    exit,
+                )?;
+                let acknowledged = self.journal.finish(performed)?;
+                self.launcher
+                    .acknowledge_finish(acknowledged.frame_digest())?;
+                true
+            }
+            GuestApplicationClaim::AlreadyClaimed | GuestApplicationClaim::AlreadyApplied => {
+                let retained = self
+                    .journal
+                    .qualification_scope_settlement_for_completion(&completion)?
+                    .context(
+                        "qualification completion is uncertain without a native settlement row",
+                    )?;
+                ensure!(
+                    retained.launcher_occurrence_digest == occurrence_digest,
+                    "qualification completion changed its retained launcher occurrence"
+                );
+                let acknowledged = self
+                    .journal
+                    .reconcile_qualification_scope_settlement_application(&completion)?;
+                self.launcher
+                    .acknowledge_finish(acknowledged.frame_digest())?;
+                false
+            }
+            GuestApplicationClaim::Revoked => {
+                anyhow::bail!("qualification completion was durably revoked")
+            }
+        };
+        self.journal
+            .ensure_qualification_scope_settled_frame(signing_key, &completion)?;
+        Ok(if fresh {
+            SupervisorApplicationOutcome::Applied
+        } else {
+            SupervisorApplicationOutcome::FinishReconciled
+        })
+    }
+
     pub fn into_parts(self) -> (LiveGuestJournal, L) {
         (self.journal, self.launcher)
     }
@@ -501,6 +572,13 @@ mod tests {
 
         fn cancel(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {
             anyhow::bail!("test launcher does not admit cancellation")
+        }
+
+        fn complete_qualification(
+            &mut self,
+            _frame: &AuthenticatedExecutionFrame,
+        ) -> Result<ryeos_state::external_execution::NativeNamespaceExit> {
+            anyhow::bail!("test launcher does not admit qualification completion")
         }
 
         fn capture(
