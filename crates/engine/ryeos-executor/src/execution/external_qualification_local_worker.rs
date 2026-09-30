@@ -174,6 +174,50 @@ impl ExternalQualificationLocalWorker {
         )
     }
 
+    /// Wait only until the retained Q channel deadline for the already
+    /// settled send's asynchronous turn observation. This performs no new
+    /// Worker or provider contact and returns no semantic success claim.
+    pub(crate) fn wait_for_signed_turn_completion(
+        &self,
+        state: &ryeos_app::state::AppState,
+        selected: &SignedQualificationWorkerRequest,
+    ) -> Result<QualificationWorkerCommandOutcome> {
+        let now = lillux::time::timestamp_millis();
+        let remaining_ms = self
+            .ready
+            .binding()
+            .execution_deadline_ms
+            .checked_sub(now)
+            .filter(|remaining| *remaining > 0)
+            .context("Q Worker turn wait passed its retained channel deadline")?;
+        let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(
+            u64::try_from(remaining_ms)?,
+        ));
+        loop {
+            let outcome = ryeos_app::external_qualification_command::read_qualification_worker_command_outcome(
+                state,
+                self.ready.placement(),
+                &selected.digest,
+            )?
+            .context("Q Worker send lost its durable owner settlement")?;
+            if matches!(
+                outcome,
+                QualificationWorkerCommandOutcome::TurnCompleted { .. }
+            ) {
+                return Ok(outcome);
+            }
+            ensure!(
+                !deadline.has_elapsed(),
+                "Q Worker Final has no completed turn before channel expiry"
+            );
+            lillux::time::sleep(
+                deadline
+                    .remaining()
+                    .min(lillux::time::Duration::from_millis(20)),
+            );
+        }
+    }
+
     /// The pool's `Reaped` result includes successful invocation of both the
     /// exact Q process-row settlement and connector relay retirement. Keep the
     /// original Ready, workspace, and state-root owners even if this fails.
