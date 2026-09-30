@@ -1907,6 +1907,62 @@ pub fn preflight_external_candidate_program(
     Ok((runtime_proof, retained_content))
 }
 
+/// Offline placement admission for the accepted qualification-only Worker.
+/// The caller must authenticate the purpose and product member from the born
+/// root. This checks the current signed node selection and installed
+/// dependencies, but gives no reservation, credential or provider-contact
+/// permit. StateStore reauthenticates the root and binding at each first-contact
+/// transition.
+pub fn preflight_external_qualification_program(
+    state: &AppState,
+    program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+    purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+) -> Result<RetainedExternalExecutionBinding> {
+    program.validate_against_purpose(purpose)?;
+    let matched = state
+        .node_config
+        .external_execution
+        .iter()
+        .filter(|binding| {
+            binding
+                .check_qualification_program(program, purpose)
+                .is_ok()
+        })
+        .collect::<Vec<_>>();
+    let binding = match matched.as_slice() {
+        [binding] => *binding,
+        [] => bail!("no signed placement binding admits the exact qualification program"),
+        _ => bail!("qualification program matches multiple signed placement bindings"),
+    };
+    let contract = binding.backend_contract();
+    state.external_candidate_connectors.qualify(&contract)?;
+    let provider = state.external_provider_configurations.qualify(&contract)?;
+    require_connector_process_group_authority(
+        provider.declaration().connector_process_group,
+        state.isolation.is_enforced(),
+        state
+            .isolation
+            .inspection()
+            .process_scope_readiness
+            .trusted_exclusive_session
+            .ready,
+    )?;
+    let access = binding.credential_access()?;
+    let credential = access.decode(
+        state
+            .vault
+            .placement_credential(&access)
+            .context("read protected qualification placement credential")?,
+    )?;
+    let backend = state.external_placement_backends.qualify(
+        &contract,
+        &credential,
+        &AdmittedExternalExecutionProgram::QualificationStructuredSession(program.clone()),
+    )?;
+    require_guest_package_artifact_floor(&contract, backend.as_ref())?;
+    binding.retained_generation()
+}
+
 /// Resolve one explicitly content-backed requirement against uniquely matching
 /// signed placement configuration. No credential access or provider operation.
 pub fn prepare_content_candidate_program(
