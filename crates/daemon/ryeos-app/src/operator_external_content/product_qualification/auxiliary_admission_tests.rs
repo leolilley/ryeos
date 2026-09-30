@@ -602,6 +602,8 @@ fn write_signed(path: &Path, source: &str, key: &SigningKey) -> Result<()> {
 
 fn fixture() -> Result<Fixture> {
     use std::os::unix::fs::PermissionsExt;
+    let policy_schema =
+        ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_POLICY_SCHEMA;
     let directory = tempfile::tempdir()?;
     let mut state = crate::state::test_support::build(directory.path())?;
     state.node_policy = Arc::new(crate::node_policy::NodePolicySnapshot::from_test_records(
@@ -714,7 +716,7 @@ config_schema: {{type: object, properties: {{}}, additionalProperties: false}}
 name: auxiliary
 version: '1.0.0'
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v2
+  schema: {policy_schema}
   verifier_ref: {AUX_VERIFIER}
   subject_declaration_id: subject
   allowed_claims: [fixture_auxiliary]
@@ -751,7 +753,7 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
 name: complete
 version: '1.0.0'
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v2
+  schema: {policy_schema}
   verifier_ref: {TARGET_VERIFIER}
   subject_declaration_id: subject
   allowed_claims: [fixture_complete]
@@ -787,7 +789,7 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
 name: auxiliary-pinned
 version: '1.0.0'
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v2
+  schema: {policy_schema}
   verifier_ref: {AUX_PINNED_VERIFIER}
   subject_declaration_id: subject
   allowed_claims: [fixture_auxiliary]

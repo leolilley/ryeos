@@ -35,9 +35,14 @@ fn bundled_qualification_policies_match_the_current_reader() {
                 .unwrap()
                 .remove("minimum_verifier_process_settlement");
             assert!(ProductQualificationPolicy::from_value(&missing_settlement).is_err());
-            let mut predecessor = wire.clone();
-            predecessor["schema"] = "ryeos.product_qualification_policy.v1".into();
-            assert!(ProductQualificationPolicy::from_value(&predecessor).is_err());
+            for predecessor_schema in [
+                "ryeos.product_qualification_policy.v1",
+                "ryeos.product_qualification_policy.v2",
+            ] {
+                let mut predecessor = wire.clone();
+                predecessor["schema"] = predecessor_schema.into();
+                assert!(ProductQualificationPolicy::from_value(&predecessor).is_err());
+            }
         }
     }
     assert!(policies > 0, "no authored qualification policies checked");
