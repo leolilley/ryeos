@@ -1039,14 +1039,29 @@ impl SealedRootExecutionRequest {
     /// verifier's sealed parameters or receive a second input authority.
     pub(crate) fn admitted_qualification_producer_stdin(
         &self,
-        expected: &ProductQualificationLaunchPurpose,
+        expected: &ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView<'_>,
     ) -> Result<String> {
-        self.validate_product_qualification_purpose()?;
-        if self.product_qualification.as_ref() != Some(expected) {
-            bail!("producer input requires the exact admitted qualification purpose");
-        }
+        self.require_qualification_execution_purpose(expected)?;
         lillux::canonical_json(&self.parameters)
             .context("encode exact admitted qualification producer input")
+    }
+
+    /// Corroborate the execution view against the complete sealed purpose,
+    /// retaining all source-specific admission checks at their existing owner.
+    pub(crate) fn require_qualification_execution_purpose(
+        &self,
+        expected: &ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView<'_>,
+    ) -> Result<()> {
+        self.validate_product_qualification_purpose()?;
+        let sealed = self
+            .product_qualification
+            .as_ref()
+            .context("execution has no admitted qualification purpose")?
+            .execution_view()?;
+        if !expected.has_same_enclosing_purpose(&sealed) {
+            bail!("execution requires the exact admitted qualification purpose");
+        }
+        Ok(())
     }
 
     /// Verify and expose the immutable effective resolution for sanitized
@@ -2344,6 +2359,17 @@ mod authority_tests {
                 .is_ok()
         );
         assert!(sealed.validate_product_qualification_purpose().is_err());
+        let view = sealed
+            .product_qualification_purpose()
+            .unwrap()
+            .execution_view()
+            .unwrap();
+        assert!(
+            sealed
+                .require_qualification_execution_purpose(&view)
+                .is_err()
+        );
+        assert!(sealed.admitted_qualification_producer_stdin(&view).is_err());
         assert!(sealed.requires_process_scope_for_qualification().is_err());
         let root = tempfile::tempdir().unwrap();
         assert!(sealed.restore(&empty_engine(), root.path()).is_err());
@@ -2406,6 +2432,29 @@ mod authority_tests {
             "verifier_realized_definition_digest": realized.as_str()
         })).unwrap());
         sealed.validate_product_qualification_purpose().unwrap();
+
+        let purpose = sealed.product_qualification_purpose().unwrap().clone();
+        let view = purpose.execution_view().unwrap();
+        sealed
+            .require_qualification_execution_purpose(&view)
+            .unwrap();
+        assert_eq!(
+            sealed.admitted_qualification_producer_stdin(&view).unwrap(),
+            "{}"
+        );
+        let mut different_source = purpose;
+        different_source.product_witness_hash = "9".repeat(64);
+        let different_view = different_source.execution_view().unwrap();
+        assert!(
+            sealed
+                .require_qualification_execution_purpose(&different_view)
+                .is_err()
+        );
+        assert!(
+            sealed
+                .admitted_qualification_producer_stdin(&different_view)
+                .is_err()
+        );
 
         sealed
             .product_qualification

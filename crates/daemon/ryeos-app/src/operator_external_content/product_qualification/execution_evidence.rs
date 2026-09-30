@@ -15,10 +15,10 @@ use ryeos_handler_protocol::{
 };
 use ryeos_state::external_content::products::qualification::{
     ProductQualificationEvidence, ProductQualificationExecutionProof,
-    ProductQualificationLaunchPurpose, ProductQualificationParticipant,
-    ProductQualificationProjectorIdentity, ProductQualificationVerifier,
-    VerifierProcessSettlementAuthority,
+    ProductQualificationParticipant, ProductQualificationProjectorIdentity,
+    ProductQualificationVerifier, VerifierProcessSettlementAuthority,
 };
+use ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView;
 use ryeos_state::objects::{
     AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule, ExternalContentRealizationSet,
     ThreadEvent, ThreadSnapshot, ThreadStatus, canonical_value_digest,
@@ -293,9 +293,7 @@ pub(super) fn prove(
     capsule: &AdmittedLaunchCapsule,
     admitted: &ResolutionOutput,
     current: &CurrentBundleVerifierIdentity,
-    purpose: &ProductQualificationLaunchPurpose,
-    subject_id: &str,
-    subject_hash: &str,
+    purpose: &QualificationExecutionPurposeView<'_>,
     project_context_resolver: Option<&dyn super::QualificationProjectContextResolver>,
 ) -> anyhow::Result<(
     Value,
@@ -303,6 +301,10 @@ pub(super) fn prove(
     Option<(String, VerifierProcessSettlementAuthority)>,
 )> {
     require_terminal_invocation(terminal, capsule)?;
+    crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(capsule)?
+        .require_qualification_execution_purpose(purpose)?;
+    let subject_id = purpose.subject_declaration_id();
+    let subject_hash = purpose.subject_manifest_hash();
     let (contract_ref, contract_digest) = projection_owner(&capsule.artifact_identity);
     let projector = current
         .request_engine

@@ -19,7 +19,7 @@ use ryeos_runtime::scoped_relay_handoff::{
 use ryeos_state::external_content::products::producer_recipe::{
     ProducerExecutableSource, ProducerStdinSource,
 };
-use ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose;
+use ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView;
 
 use crate::operator_external_content::product_qualification::{
     CurrentBundleProducerRecipe, resolve_current_bundle_producer_recipe_for_purpose,
@@ -95,7 +95,7 @@ mod recipe_subject_tests {
 pub fn start_scoped_producer(
     state: &AppState,
     key: &ScopedProducerAuthorityKey,
-    purpose: &ProductQualificationLaunchPurpose,
+    purpose: &QualificationExecutionPurposeView<'_>,
     scenario_id: &str,
     selected: &CurrentBundleProducerRecipe,
     admitted_stdin: &str,
@@ -116,7 +116,17 @@ pub fn start_scoped_producer(
         "scoped producer isolation class moved before reservation"
     );
     ScopedProducerAuthorityKey::new(key.root_thread_id.clone(), key.launch_owner.clone())?;
-    purpose.validate()?;
+    // Rejoin the entire source-specific purpose to the authenticated root
+    // before consuming its live process authority. A validated view is data,
+    // and cannot supply a different purpose or producer input for this owner.
+    ensure!(
+        crate::operator_external_content::product_qualification::admitted_root_producer_stdin(
+            state,
+            &key.root_thread_id,
+            purpose,
+        )? == admitted_stdin,
+        "scoped producer input differs from the authenticated root"
+    );
     let current = resolve_current_bundle_producer_recipe_for_purpose(state, purpose, scenario_id)?;
     ensure!(
         current == *selected,
@@ -124,10 +134,10 @@ pub fn start_scoped_producer(
     );
     admit_recipe_subject(
         &selected.recipe.executable_source,
-        &purpose.subject_declaration_id,
-        &purpose.subject_manifest_hash,
+        purpose.subject_declaration_id(),
+        purpose.subject_manifest_hash(),
         purpose
-            .policy_source
+            .policy_source()
             .policy
             .consumer_execution_context
             .is_some(),

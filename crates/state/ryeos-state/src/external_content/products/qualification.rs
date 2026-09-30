@@ -465,6 +465,15 @@ impl ProductProducerRecipeSourceIdentity {
 }
 
 impl ProductQualificationLaunchPurpose {
+    /// Execution inputs borrow this validated purpose without lending its
+    /// product witness authority to the execution interpreter.
+    pub fn execution_view(
+        &self,
+    ) -> anyhow::Result<super::super::qualification_execution::QualificationExecutionPurposeView<'_>>
+    {
+        super::super::qualification_execution::QualificationExecutionPurposeView::from_product(self)
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA {
             bail!("unsupported product qualification launch purpose schema");

@@ -3093,7 +3093,7 @@ fn promoted_scoped_producer_commands(
         let selected =
             ryeos_app::operator_external_content::product_qualification::resolve_current_bundle_producer_recipe_for_purpose(
                 state,
-                purpose,
+                &purpose.execution_view()?,
                 scenario_id,
             )?;
         requires_ingress_handoff |= selected.recipe.loopback_ingress.is_some();

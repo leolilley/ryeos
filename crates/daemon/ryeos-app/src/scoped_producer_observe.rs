@@ -21,9 +21,8 @@ use crate::state::AppState;
 use ryeos_handler_protocol::ExecutionEvidenceCandidateScopedAttemptWire;
 use ryeos_runtime::scoped_relay_handoff::ScopedRelayHandoff;
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
-use ryeos_state::external_content::products::qualification::{
-    ProductQualificationLaunchPurpose, ProductQualificationScopedAttemptProof,
-};
+use ryeos_state::external_content::products::qualification::ProductQualificationScopedAttemptProof;
+use ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView;
 
 const OBSERVATION_SCHEMA: &str = "ryeos.scoped_producer_observation.v7";
 const MAX_OBSERVATION_RESPONSE_BYTES: usize = 9 * 1024 * 1024;
@@ -644,18 +643,17 @@ pub(crate) fn qualification_scoped_attempt_proof(
     authority: &ryeos_state::PinnedStateAuthority,
     _guard: &ryeos_state::CasMutationGuard,
     owner: &LaunchOwner,
-    purpose: &ProductQualificationLaunchPurpose,
+    purpose: &QualificationExecutionPurposeView<'_>,
     candidate: &ExecutionEvidenceCandidateScopedAttemptWire,
 ) -> Result<ProductQualificationScopedAttemptProof> {
-    purpose.validate()?;
     let scenario = purpose
-        .policy_source
+        .policy_source()
         .policy
         .producer_scenarios
         .get(&candidate.scenario_id)
         .context("projected scoped attempt has no signed scenario")?;
     let source = purpose
-        .producer_recipe_sources
+        .producer_recipe_sources()
         .get(&candidate.scenario_id)
         .context("projected scoped attempt has no pinned recipe source")?;
     ensure!(

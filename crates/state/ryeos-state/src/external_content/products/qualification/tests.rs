@@ -413,6 +413,49 @@ fn launch_purpose_requires_exact_signed_policy_subject_parameters_and_owner_coor
 }
 
 #[test]
+fn execution_view_binds_the_entire_enclosing_purpose() {
+    let original = launch_purpose();
+    let view = original.execution_view().unwrap();
+    assert!(view.has_same_enclosing_purpose(&original.execution_view().unwrap()));
+    // Each change leaves the execution inputs identical, but selects a
+    // different owner, source provenance, reservation, or verifier identity.
+    for mutate in [
+        (|p: &mut ProductQualificationLaunchPurpose| p.product_witness_hash = "9".repeat(64))
+            as fn(&mut ProductQualificationLaunchPurpose),
+        |p| p.owner_fingerprint = "fp:another-operator".into(),
+        |p| p.launch_id = format!("L-{}", "9".repeat(32)),
+        |p| p.relationship_name = "another_relationship".into(),
+        |p| {
+            p.witness_source = ProductWitnessSource::Received {
+                acceptance_hash: "9".repeat(64),
+            }
+        },
+        |p| p.policy_source.raw_content_digest = "9".repeat(64),
+        |p| p.verifier_effective_definition_digest = "9".repeat(64),
+        |p| p.verifier_realized_definition_digest = "9".repeat(64),
+    ] {
+        let mut changed = original.clone();
+        mutate(&mut changed);
+        assert!(!view.has_same_enclosing_purpose(&changed.execution_view().unwrap()));
+    }
+    let mut changed = original.clone();
+    changed.product_witness_hash = "bad".into();
+    assert!(changed.execution_view().is_err());
+}
+
+#[test]
+fn execution_view_preserves_optional_scenarios_and_kind_independent_policy() {
+    let mut purpose = launch_purpose();
+    purpose.verifier_ref = "custom_kind:fixtures/verifier".into();
+    purpose.policy_source.policy.verifier_ref = purpose.verifier_ref.clone();
+    let view = purpose.execution_view().unwrap();
+    assert!(view.consumer_content().is_none());
+    assert!(view.producer_recipe_sources().is_empty());
+    assert_eq!(view.policy_source(), &purpose.policy_source);
+    assert_eq!(view.subject_manifest_hash(), purpose.subject_manifest_hash);
+}
+
+#[test]
 fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
     let mut policy_wire = serde_json::to_value(policy()).unwrap();
     policy_wire

@@ -45,6 +45,7 @@ use ryeos_state::external_content::products::qualification_publication::{
     lookup_qualification_witness_hash_guarded, publish_qualification_witness,
 };
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
+use ryeos_state::external_content::runtime_member::exact_runtime_member_hash;
 use ryeos_state::objects::{
     Attestation, ExecutableSearchPathEntry, ExternalContentKind, ExternalContentMode,
     ExternalContentRealizationSet, SOURCE_CLOSURE_DERIVED_KEY, SessionProcessEnvironmentValue,
@@ -692,9 +693,7 @@ fn prove_with_guard(
         &capsule,
         &admitted_resolution,
         &current_verifier,
-        purpose,
-        &policy_source.policy.subject_declaration_id,
-        product.evidence.manifest_hash.as_str(),
+        &purpose.execution_view()?,
         project_context_resolver,
     )?;
     let result = ProductQualificationResult::from_value(&projected_result)?;
@@ -1214,52 +1213,6 @@ impl PreparedBundleConsumerContentInputs {
         });
         Ok(())
     }
-}
-
-fn exact_runtime_member_hash(
-    manifest: &serde_json::Value,
-    relative_path: &str,
-) -> anyhow::Result<String> {
-    use ryeos_state::objects::ExternalContentManifestEntryKind;
-    let member = match manifest.get("kind").and_then(serde_json::Value::as_str) {
-        Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
-            let manifest =
-                ryeos_state::objects::ExternalContentManifestObject::from_value(manifest)?;
-            let entry = manifest
-                .entries
-                .iter()
-                .find(|entry| entry.path == relative_path)
-                .context("external runtime product has no selected executable member")?;
-            if entry.kind != ExternalContentManifestEntryKind::File || entry.mode != Some(0o755) {
-                bail!("external runtime product member is not an executable file");
-            }
-            entry
-                .blob_hash
-                .as_deref()
-                .context("external runtime product member has no exact file digest")?
-                .to_owned()
-        }
-        Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
-            let manifest =
-                ryeos_state::objects::ExternalLargeContentManifestObject::from_value(manifest)?;
-            let entry = manifest
-                .entries
-                .iter()
-                .find(|entry| entry.path == relative_path)
-                .context("external runtime product has no selected executable member")?;
-            if entry.kind != ExternalContentManifestEntryKind::File || entry.mode != Some(0o755) {
-                bail!("external runtime product member is not an executable file");
-            }
-            entry
-                .file_sha256
-                .as_deref()
-                .or(entry.blob_hash.as_deref())
-                .context("external runtime product member has no exact file digest")?
-                .to_owned()
-        }
-        _ => bail!("external runtime product has no supported exact manifest"),
-    };
-    Ok(member)
 }
 
 #[cfg(test)]
@@ -1784,16 +1737,15 @@ fn consumer_definition_identity(
 /// identity in the attempt journal and recheck it at the irreversible release.
 pub fn resolve_current_bundle_producer_recipe_for_purpose(
     state: &AppState,
-    purpose: &ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose,
+    purpose: &ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView<'_>,
     scenario_id: &str,
 ) -> anyhow::Result<CurrentBundleProducerRecipe> {
-    purpose.validate()?;
     state.engine.with_checked_bundle_generation(|generation| {
         let current_policy = resolve_current_bundle_qualification_policy(
             state,
-            &purpose.policy_source.canonical_ref,
+            &purpose.policy_source().canonical_ref,
         )?;
-        if current_policy != purpose.policy_source {
+        if &current_policy != purpose.policy_source() {
             bail!("qualification producer policy changed after root admission");
         }
         let scenario = current_policy
@@ -1806,8 +1758,8 @@ pub fn resolve_current_bundle_producer_recipe_for_purpose(
             generation.request_engine_generation_identity(),
             &scenario.recipe_ref,
         )?;
-        require_direct_consumer_target(&current_policy, &current, &purpose.subject_manifest_hash)?;
-        if let Some(content) = &purpose.consumer_content {
+        require_direct_consumer_target(&current_policy, &current, purpose.subject_manifest_hash())?;
+        if let Some(content) = purpose.consumer_content() {
             if generation.request_engine_generation_identity()
                 != content.definitions.bundle_generation_identity
             {
@@ -1832,7 +1784,7 @@ pub fn resolve_current_bundle_producer_recipe_for_purpose(
             .require::<NodeExecutionAdmissionPolicy>()?
             .admit_producer_bounds(&current.recipe.bounds)?;
         let admitted = purpose
-            .producer_recipe_sources
+            .producer_recipe_sources()
             .get(scenario_id)
             .context("qualification purpose did not admit the selected producer scenario")?;
         if current.source_identity()? != *admitted {
@@ -1848,7 +1800,7 @@ pub fn resolve_current_bundle_producer_recipe_for_purpose(
 pub fn admitted_root_producer_stdin(
     state: &AppState,
     root_thread_id: &str,
-    purpose: &ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose,
+    purpose: &ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView<'_>,
 ) -> anyhow::Result<String> {
     let (chain_root_id, _, capsule) = state
         .state_store
