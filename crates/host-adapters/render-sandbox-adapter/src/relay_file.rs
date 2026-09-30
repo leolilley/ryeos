@@ -22,7 +22,7 @@ use super::{
     parse_provider_spec_bytes, read_sealed_env, request_deadline, validate_settings,
     write_response_bounded,
 };
-use crate::relay_contact::RenderRelayFileContact;
+use crate::relay_contact::{RenderRelayDownload, RenderRelayFileContact};
 
 fn validate_bootstrap(
     request: &RelayFileAdapterRequest,
@@ -159,15 +159,17 @@ pub(super) fn operate() -> Result<()> {
             )?;
             RelayFileAdapterResponse::UploadTransportObserved { request_digest }
         }
-        RelayFileEffect::Download => {
-            let bytes = contact.download_bounded(request.maximum_file_bytes)?;
-            RelayFileAdapterResponse::Downloaded {
+        RelayFileEffect::Download => match contact.download_bounded(request.maximum_file_bytes)? {
+            RenderRelayDownload::HttpNotFound => {
+                RelayFileAdapterResponse::DownloadHttpNotFound { request_digest }
+            }
+            RenderRelayDownload::Downloaded(bytes) => RelayFileAdapterResponse::Downloaded {
                 request_digest,
                 bytes_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
                 sha256: lillux::sha256_hex(&bytes),
                 bytes: bytes.len() as u64,
-            }
-        }
+            },
+        },
     };
     response.validate_for(&request, &lillux::sha256_hex(&request_bytes))?;
     write_response_bounded(&response, MAX_RELAY_RESPONSE_BYTES - 1)

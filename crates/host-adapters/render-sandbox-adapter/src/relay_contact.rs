@@ -27,6 +27,13 @@ use crate::{
 const MAX_RELAY_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_UPLOAD_RESPONSE_BYTES: u64 = 16 * 1024;
 
+pub(super) enum RenderRelayDownload {
+    Downloaded(Vec<u8>),
+    /// Exact HTTP 404 from the selected file GET. This does not distinguish
+    /// a not-yet-written file from a missing or unreachable sandbox.
+    HttpNotFound,
+}
+
 /// An exact provider file path is supplied only by the controller transfer
 /// journal after it has checked the original sealed bootstrap and occurrence.
 /// These fields are private so activation cannot synthesize a relay operation.
@@ -202,7 +209,10 @@ impl<'a> RenderRelayFileContact<'a> {
     /// This GET may be repeated only after the daemon retained another read
     /// attempt on the *same* transfer. A missing, partial or oversized file is
     /// not a negative provider proof and never grants a replacement upload.
-    pub(super) fn download_bounded(&mut self, maximum_file_bytes: u64) -> Result<Vec<u8>> {
+    pub(super) fn download_bounded(
+        &mut self,
+        maximum_file_bytes: u64,
+    ) -> Result<RenderRelayDownload> {
         ensure!(
             (1..=MAX_RELAY_FILE_BYTES).contains(&maximum_file_bytes),
             "Render relay download exceeds signed file bound"
@@ -229,6 +239,12 @@ impl<'a> RenderRelayFileContact<'a> {
             self.cancellation,
         )?;
         let response = HttpClient::new(self.network.clone()).execute(request)?;
+        // Render's SDK names a missing-path error but does not document the
+        // raw file-route status. Keep this exact 404 as a bounded pending
+        // observation until an installed missing-file probe establishes it.
+        if response.status == 404 {
+            return Ok(RenderRelayDownload::HttpNotFound);
+        }
         ensure!(
             response.status == 200,
             "Render relay file read is absent or ambiguous"
@@ -247,6 +263,6 @@ impl<'a> RenderRelayFileContact<'a> {
             ryeos_external_execution_contract::canonical_json(&value)? == bytes,
             "Render relay file is not complete canonical JSON"
         );
-        Ok(bytes)
+        Ok(RenderRelayDownload::Downloaded(bytes))
     }
 }

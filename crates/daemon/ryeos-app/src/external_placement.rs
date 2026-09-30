@@ -2886,6 +2886,15 @@ pub(crate) fn recover_original_external_relay_bootstrap(
     Ok(sealed)
 }
 
+/// A 404 from the signed file GET is only a pending transport observation.
+/// The retained read claim has still consumed one attempt and its deadline;
+/// no channel application, absent-file proof, or replacement PUT follows.
+#[derive(Debug)]
+pub(crate) enum ExternalRelayFileContactProgress {
+    Accepted(crate::runtime_db::external_execution::RelayTransferRecord),
+    PendingHttpNotFound(crate::runtime_db::external_execution::RelayTransferRecord),
+}
+
 /// Apply one accepted guest file at the existing channel boundary, then
 /// reserve and contact only the exact owner-signed committed response. No
 /// operator Q loop calls this yet. An indeterminate application is deliberately
@@ -2897,7 +2906,7 @@ pub(crate) fn apply_and_contact_original_external_relay_request(
     placement: &str,
     kind: crate::runtime_db::external_execution::RelayKind,
     sequence: u32,
-) -> Result<crate::runtime_db::external_execution::RelayTransferRecord> {
+) -> Result<ExternalRelayFileContactProgress> {
     use crate::runtime_db::external_execution::{
         RelayApplicationDecision, RelayDirection, RelayTransferIntent,
     };
@@ -3096,7 +3105,7 @@ pub(crate) fn contact_original_external_relay_transfer(
     sequence: u32,
     direction: crate::runtime_db::external_execution::RelayDirection,
     outbound: Option<&ryeos_state::external_execution::transport::ExternalRelayResponseEnvelope>,
-) -> Result<crate::runtime_db::external_execution::RelayTransferRecord> {
+) -> Result<ExternalRelayFileContactProgress> {
     use crate::runtime_db::external_execution::{
         RelayDirection, RelayTransferIntent, RelayTransferPhase,
     };
@@ -3218,7 +3227,7 @@ pub(crate) fn contact_original_external_relay_transfer(
         outbound_bytes.as_deref(),
     )?;
     if reserved.phase == RelayTransferPhase::Accepted {
-        return Ok(reserved);
+        return Ok(ExternalRelayFileContactProgress::Accepted(reserved));
     }
     ensure!(
         matches!(
@@ -3257,23 +3266,30 @@ pub(crate) fn contact_original_external_relay_transfer(
     let claim = state
         .state_store
         .claim_external_relay_read_contact(&intent)?;
+    let claimed_record = claim.record().clone();
     let observed =
         backend.relay_file_contact(&contract, &credential, bootstrap, claim, deadline)?;
     ensure!(
         !observed.deadline_exceeded,
         "external relay download finished after its contact deadline"
     );
-    let ryeos_external_execution_contract::relay_file::RelayFileAdapterResponse::Downloaded {
-        bytes_base64,
-        ..
-    } = observed.value
-    else {
-        bail!("external relay read returned a non-read transport observation");
-    };
-    let bytes = STANDARD.decode(bytes_base64)?;
-    state
-        .state_store
-        .accept_external_relay_readback(&intent, &bytes)
+    match observed.value {
+        ryeos_external_execution_contract::relay_file::RelayFileAdapterResponse::DownloadHttpNotFound { .. } => {
+            // For an outbound UploadPossible slot, 404 does not prove the
+            // previous PUT failed. A later attempt can only GET this slot.
+            Ok(ExternalRelayFileContactProgress::PendingHttpNotFound(claimed_record))
+        }
+        ryeos_external_execution_contract::relay_file::RelayFileAdapterResponse::Downloaded {
+            bytes_base64,
+            ..
+        } => {
+            let bytes = STANDARD.decode(bytes_base64)?;
+            Ok(ExternalRelayFileContactProgress::Accepted(
+                state.state_store.accept_external_relay_readback(&intent, &bytes)?,
+            ))
+        }
+        _ => bail!("external relay read returned a non-read transport observation"),
+    }
 }
 
 fn build_external_execution_channel_binding(
