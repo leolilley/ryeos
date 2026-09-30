@@ -3,9 +3,12 @@
 //! The manifest is structural testimony only. Its chunks contain the exact
 //! canonical ObservationBatch bodies, the optional retained Delta body, and
 //! the retained Final body. The command journal also retains turn State
-//! digests and turn coordinates; State bodies outside those retained frames
-//! are not present here. Neither a valid manifest nor a transcript establishes
-//! semantic success, native death, provider settlement, or a qualification.
+//! digests, turn coordinates, and the daemon-owned successful send return
+//! timestamp. State bodies outside those retained frames are not present here.
+//! The timestamp must be joined to the exact retained command row by the
+//! publisher; a self-described manifest cannot prove that return on its own.
+//! Neither a valid manifest nor a transcript establishes semantic success,
+//! native death, provider settlement, or a qualification.
 
 use anyhow::{Context as _, ensure};
 use serde::{Deserialize, Serialize};
@@ -47,6 +50,8 @@ pub struct QualificationWorkerTranscriptManifest {
     pub turn_id: String,
     pub turn_start_digest: String,
     pub turn_completion_digest: String,
+    /// Exact durable daemon-owned successful send return for this command.
+    pub owner_send_settled_at_ms: i64,
     #[serde(deserialize_with = "super::deserialize_required_nullable")]
     pub delta_digest: Option<String>,
     #[serde(deserialize_with = "super::deserialize_required_nullable")]
@@ -132,6 +137,10 @@ impl QualificationWorkerTranscriptManifest {
         ] {
             hash(label, value)?;
         }
+        ensure!(
+            self.owner_send_settled_at_ms > 0,
+            "Q transcript lacks a positive daemon-owned send return marker"
+        );
         ensure!(
             (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&self.wire_max_bytes)
                 && (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES).contains(&self.final_response_bytes)
@@ -393,6 +402,7 @@ mod tests {
             turn_id: "turn".into(),
             turn_start_digest: "2".repeat(64),
             turn_completion_digest: "3".repeat(64),
+            owner_send_settled_at_ms: 1,
             delta_digest: None,
             delta_response_bytes: None,
             delta_wire_max_bytes: None,
@@ -449,6 +459,17 @@ mod tests {
         let mut missing_null = manifest.to_value().unwrap();
         missing_null.as_object_mut().unwrap().remove("delta_digest");
         assert!(QualificationWorkerTranscriptManifest::from_current_value(&missing_null).is_err());
+        let mut missing_settlement = manifest.to_value().unwrap();
+        missing_settlement
+            .as_object_mut()
+            .unwrap()
+            .remove("owner_send_settled_at_ms");
+        assert!(
+            QualificationWorkerTranscriptManifest::from_current_value(&missing_settlement).is_err()
+        );
+        let mut unsettled = manifest;
+        unsettled.owner_send_settled_at_ms = 0;
+        assert!(unsettled.validate().is_err());
     }
 
     #[test]
