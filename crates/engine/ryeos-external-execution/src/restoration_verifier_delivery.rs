@@ -216,10 +216,29 @@ pub struct PreparedConsumerArchive {
     payload: lillux::PinnedRegularFile,
     bytes: u64,
     sha256: String,
+    // Captured only after the archive writer has verified member bytes.
+    verifier_member: Option<GuestStagingEntry>,
     discarded: bool,
 }
 
 impl PreparedConsumerArchive {
+    /// Bind transported executable bytes to the authenticated product-edge
+    /// selection. A matching whole-archive digest alone cannot establish this.
+    pub fn require_verifier_selection(
+        &self,
+        selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    ) -> Result<()> {
+        selection.validate()?;
+        ensure!(
+            matches!(&self.verifier_member,
+                Some(GuestStagingEntry::RegularFile { path, mode, bytes, sha256 })
+                if path == CONSUMER_VERIFIER_REMOTE_NAME && *mode == 0o500
+                    && *bytes > 0 && *bytes <= MAX_RESTORATION_VERIFIER_BYTES
+                    && sha256 == &selection.verifier_artifact_hash),
+            "consumer archive does not contain the exact selected verifier"
+        );
+        Ok(())
+    }
     pub fn bytes(&self) -> u64 {
         self.bytes
     }
@@ -342,6 +361,10 @@ pub fn prepare_private_consumer_archive(
             payload,
             bytes,
             sha256,
+            verifier_member: entries
+                .iter()
+                .find(|entry| entry.path() == CONSUMER_VERIFIER_REMOTE_NAME)
+                .cloned(),
             discarded: false,
         }),
         Err(error) => {
@@ -746,6 +769,56 @@ fn seal_verifier_upload(
 mod tests {
     use super::*;
     use std::io::Read as _;
+
+    #[test]
+    fn consumer_archive_requires_exact_selected_executable_member() {
+        use ryeos_external_execution_contract::restored_runtime_measurement::{
+            ConsumerArchiveBudget, ConsumerRuntimeVerifierSelection,
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = lillux::PinnedDirectory::open(temporary.path())
+            .unwrap()
+            .unwrap();
+        let (_, parent) = parent
+            .create_unique_child("verifier-member-fixture", 0o700)
+            .unwrap();
+        let descriptor = lillux::sealed_memfd(c"verifier-member-fixture", b"x").unwrap();
+        let selection = ConsumerRuntimeVerifierSelection {
+            scenario_source_digest: "a".repeat(64),
+            verifier_artifact_hash: lillux::sha256_hex(b"x"),
+            archive_budget: ConsumerArchiveBudget::new(1, 1, 4096).unwrap(),
+        };
+        for (name, mode, accepted) in [
+            (CONSUMER_VERIFIER_REMOTE_NAME, 0o500, true),
+            (CONSUMER_VERIFIER_REMOTE_NAME, 0o400, false),
+            ("other-verifier", 0o500, false),
+        ] {
+            let entries = [GuestStagingEntry::RegularFile {
+                path: name.into(),
+                mode,
+                bytes: 1,
+                sha256: selection.verifier_artifact_hash.clone(),
+            }];
+            let descriptors = std::collections::BTreeMap::from([(name, &descriptor)]);
+            let archive = prepare_private_consumer_archive(
+                &parent,
+                &entries,
+                &descriptors,
+                &selection.archive_budget,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(10)),
+            )
+            .unwrap();
+            assert_eq!(
+                archive.require_verifier_selection(&selection).is_ok(),
+                accepted
+            );
+            let mut wrong = selection.clone();
+            wrong.verifier_artifact_hash = "b".repeat(64);
+            assert!(archive.require_verifier_selection(&wrong).is_err());
+            archive.discard().unwrap();
+        }
+        assert!(parent.entries_no_follow_bounded(1).unwrap().is_empty());
+    }
 
     #[test]
     fn private_consumer_archive_retains_exact_delivery_and_cleans_failure() {
