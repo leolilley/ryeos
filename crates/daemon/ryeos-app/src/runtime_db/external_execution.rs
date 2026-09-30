@@ -16,6 +16,7 @@ mod qualification_process;
 pub(crate) use channel::{
     ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
     ExternalSupervisorExchange, RetainedExternalCandidateImport,
+    RetainedExternalQualificationScopeSettlement,
 };
 pub(crate) use qualification_process::{
     QualificationWorkerDeathProof, QualificationWorkerProcessPhase,

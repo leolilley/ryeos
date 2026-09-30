@@ -45,6 +45,17 @@ pub(crate) struct RetainedExternalRuntimeApplied {
     pub frame: AuthenticatedExecutionFrame,
 }
 
+/// Applied native Q settlement and the exact preceding controller/guest
+/// frames. This is evidence data only: provider death, local Worker terminal,
+/// semantic verifier result and cancellation still belong to the claim join.
+pub(crate) struct RetainedExternalQualificationScopeSettlement {
+    pub binding: ExecutionChannelBinding,
+    pub completion: AuthenticatedExecutionFrame,
+    pub runtime_applied: AuthenticatedExecutionFrame,
+    pub protocol_eof: AuthenticatedExecutionFrame,
+    pub settlement: AuthenticatedExecutionFrame,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExternalCandidateImportTarget {
     pub placement: String,
@@ -78,6 +89,197 @@ pub struct ExternalDirectOutput {
 }
 
 impl RuntimeDb {
+    /// Apply one signed Q native observation as a no-effect local read. A
+    /// claimed application may be retried against the same immutable frames;
+    /// there is no guest input delivery or qualification decision here.
+    pub(crate) fn apply_external_qualification_scope_settlement(
+        &self,
+        placement: &str,
+    ) -> Result<Option<RetainedExternalQualificationScopeSettlement>> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let binding = load_binding(&tx, placement)?;
+        ensure!(
+            matches!(
+                binding.execution_mode,
+                ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+            ) && binding.candidate_export_max_bytes == 0,
+            "native qualification read requires the zero-export Q channel"
+        );
+        NodeJournalOwner.require_owner(&tx, &binding)?;
+        let allocation = read(&tx, placement)?.context("native qualification lost allocation")?;
+        ensure!(
+            matches!(
+                allocation.reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(_)
+            ) && allocation.phase == ExternalAllocationPhase::Bound,
+            "native qualification read requires its live Q occurrence"
+        );
+        let binding_digest = binding.digest()?;
+        let signed = |direction: ChannelDirection,
+                      kind: &str|
+         -> Result<Vec<(i64, String, String, String)>> {
+            tx.prepare(
+                "SELECT sequence,frame_digest,frame_json,application
+                   FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction=?2
+                    AND json_extract(frame_json,'$.frame.payload.kind')=?3
+                  ORDER BY sequence LIMIT 2",
+            )?
+            .query_map(params![&binding_digest, direction.as_str(), kind], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+        };
+        let mut settlement_rows = signed(
+            ChannelDirection::SupervisorToOwner,
+            "qualification_scope_settled",
+        )?;
+        ensure!(
+            settlement_rows.len() <= 1,
+            "Q channel has competing native settlements"
+        );
+        let Some((settlement_sequence, settlement_digest, settlement_wire, _)) =
+            settlement_rows.pop()
+        else {
+            drop(signed);
+            tx.commit()?;
+            return Ok(None);
+        };
+        ensure!(
+            !revoked(&tx, &binding_digest)?,
+            "cancelled Q channel cannot yield normal native settlement"
+        );
+        let settlement = SignedExecutionFrame::decode_and_verify(
+            settlement_wire.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )?;
+        ensure!(
+            settlement.digest() == settlement_digest
+                && i64::try_from(settlement.frame().sequence)? == settlement_sequence
+                && settlement.frame().direction == ChannelDirection::SupervisorToOwner,
+            "Q native settlement changed its signed frame"
+        );
+        let ExecutionChannelPayload::QualificationScopeSettled { observation } =
+            &settlement.frame().payload
+        else {
+            bail!("Q native settlement has the wrong signed payload")
+        };
+        observation.validate(&binding)?;
+        let mut completions = signed(
+            ChannelDirection::OwnerToSupervisor,
+            "qualification_complete",
+        )?;
+        ensure!(
+            completions.len() == 1,
+            "Q native settlement has no unique completion request"
+        );
+        let (completion_sequence, completion_digest, completion_wire, completion_application) =
+            completions.pop().expect("length checked");
+        let completion = SignedExecutionFrame::decode_and_verify(
+            completion_wire.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )?;
+        ensure!(
+            completion_application == "applied"
+                && completion.digest() == completion_digest
+                && i64::try_from(completion.frame().sequence)? == completion_sequence
+                && completion_digest == observation.completion_frame_digest
+                && matches!(&completion.frame().payload,
+                    ExecutionChannelPayload::QualificationComplete { completion_request_digest }
+                    if completion_request_digest == &observation.completion_request_digest),
+            "Q native settlement changed its applied controller completion"
+        );
+        let mut applied = signed(ChannelDirection::SupervisorToOwner, "runtime_applied")?;
+        ensure!(
+            applied.len() == 1,
+            "Q native settlement has no unique applied runtime"
+        );
+        let (applied_sequence, applied_digest, applied_wire, applied_application) =
+            applied.pop().expect("length checked");
+        let runtime_applied = SignedExecutionFrame::decode_and_verify(
+            applied_wire.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )?;
+        let ExecutionChannelPayload::RuntimeApplied {
+            launcher_occurrence_digest,
+            receipt,
+            ..
+        } = &runtime_applied.frame().payload
+        else {
+            bail!("Q runtime observation has the wrong signed payload")
+        };
+        let receipt_json = lillux::canonical_json(&serde_json::to_value(receipt)?)?;
+        ensure!(
+            applied_application == "applied"
+                && runtime_applied.digest() == applied_digest
+                && i64::try_from(runtime_applied.frame().sequence)? == applied_sequence
+                && applied_sequence < settlement_sequence
+                && launcher_occurrence_digest == &observation.launcher_occurrence_digest
+                && lillux::sha256_hex(receipt_json.as_bytes())
+                    == observation.applied_runtime_receipt_digest,
+            "Q native settlement changed its exact applied runtime receipt"
+        );
+        let mut eofs = signed(ChannelDirection::SupervisorToOwner, "protocol_eof")?;
+        ensure!(
+            eofs.len() == 1,
+            "Q native settlement has no unique protocol EOF"
+        );
+        let (eof_sequence, eof_digest, eof_wire, eof_application) =
+            eofs.pop().expect("length checked");
+        let protocol_eof = SignedExecutionFrame::decode_and_verify(
+            eof_wire.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )?;
+        ensure!(
+            eof_application == "applied"
+                && protocol_eof.digest() == eof_digest
+                && i64::try_from(protocol_eof.frame().sequence)? == eof_sequence
+                && eof_sequence < settlement_sequence
+                && matches!(
+                    protocol_eof.frame().payload,
+                    ExecutionChannelPayload::ProtocolEof
+                ),
+            "Q native settlement preceded exact applied protocol EOF"
+        );
+        match journal::claim_application(
+            &tx,
+            &NodeJournalOwner,
+            placement,
+            ChannelDirection::SupervisorToOwner,
+            settlement.frame().sequence,
+            settlement.digest(),
+        )? {
+            journal::ApplicationClaim::Revoked => {
+                bail!("Q native settlement was durably revoked")
+            }
+            journal::ApplicationClaim::New(_)
+            | journal::ApplicationClaim::AlreadyClaimed
+            | journal::ApplicationClaim::AlreadyApplied => {}
+        }
+        journal::finish_application(
+            &tx,
+            &NodeJournalOwner,
+            placement,
+            ChannelDirection::SupervisorToOwner,
+            settlement.frame().sequence,
+            settlement.digest(),
+        )?;
+        drop(signed);
+        tx.commit()?;
+        Ok(Some(RetainedExternalQualificationScopeSettlement {
+            binding,
+            completion,
+            runtime_applied,
+            protocol_eof,
+            settlement,
+        }))
+    }
+
     /// Recover only the single applied, authenticated runtime receipt for this
     /// retained placement. A caller issuing a claim must recheck this evidence
     /// with its owner and qualification coordinates in the claim transaction.
@@ -308,6 +510,164 @@ impl RuntimeDb {
                 signing_key,
                 ExecutionChannelPayload::Quiesce {
                     completion_request_digest: completion_request_digest.to_owned(),
+                },
+            )?
+        };
+        tx.commit()?;
+        Ok(frame)
+    }
+
+    /// Author one Q-only native completion request after the exact local
+    /// Worker has been death-settled, its connector closed normally, and the
+    /// guest's applied runtime and protocol EOF are durable. The digest is
+    /// derived from those retained facts; a retry cannot select new work.
+    /// This request asks the native guest to stop its scope, not to declare
+    /// verifier semantics or qualification success.
+    pub(crate) fn ensure_external_qualification_complete(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let binding = load_binding(&tx, placement)?;
+        ensure!(
+            matches!(
+                binding.execution_mode,
+                ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+            ) && binding.candidate_export_max_bytes == 0,
+            "Q completion requires the zero-export qualification channel"
+        );
+        NodeJournalOwner.require_owner(&tx, &binding)?;
+        let allocation = read(&tx, placement)?.context("Q completion lost its allocation")?;
+        ensure!(
+            allocation.phase == ExternalAllocationPhase::Bound,
+            "Q completion has no live bound occurrence"
+        );
+        require_contactable_qualification_owner(&tx, &allocation.reservation)?;
+        let worker = qualification_process::require_terminal_qualification_worker_process(
+            &tx,
+            &allocation.reservation,
+        )?;
+        let binding_digest = binding.digest()?;
+        ensure!(
+            worker.channel_binding_digest == binding_digest && !revoked(&tx, &binding_digest)?,
+            "Q completion lost exact live channel or was cancelled"
+        );
+        let connector: (String, Option<String>) = tx.query_row(
+            "SELECT state,close_reason FROM external_execution_connector
+             WHERE placement_thread_id=?1 AND channel_binding_digest=?2",
+            params![placement, &binding_digest],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        ensure!(
+            connector.0 == "closed" && connector.1.as_deref() == Some("completed"),
+            "Q completion has no normally retired local connector"
+        );
+        for kind in ["runtime_applied", "protocol_eof"] {
+            let count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+                   AND json_extract(frame_json,'$.frame.payload.kind')=?2",
+                params![&binding_digest, kind],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                count == 1,
+                "Q completion requires one exact native runtime and protocol EOF"
+            );
+        }
+        let applied_runtime: (String, String) = tx.query_row(
+            "SELECT frame_digest,frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+               AND application='applied'
+               AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied'",
+            [&binding_digest],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let runtime = SignedExecutionFrame::decode_and_verify(
+            applied_runtime.1.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )?;
+        ensure!(
+            runtime.digest() == applied_runtime.0
+                && matches!(
+                    runtime.frame().payload,
+                    ExecutionChannelPayload::RuntimeApplied { .. }
+                ),
+            "Q completion has no exact applied native runtime"
+        );
+        let eof: (String, String) = tx.query_row(
+            "SELECT frame_digest,frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+               AND application='applied'
+               AND json_extract(frame_json,'$.frame.payload.kind')='protocol_eof'",
+            [&binding_digest],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let protocol_eof = SignedExecutionFrame::decode_and_verify(
+            eof.1.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )?;
+        ensure!(
+            protocol_eof.digest() == eof.0
+                && matches!(
+                    protocol_eof.frame().payload,
+                    ExecutionChannelPayload::ProtocolEof
+                ),
+            "Q completion has no exact applied protocol EOF"
+        );
+        let completion_request_digest =
+            ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+                "domain": "ryeos.external-qualification-native-completion.v1",
+                "placement_thread_id": placement,
+                "binding_digest": binding_digest,
+                "accepted_root_id": worker.accepted_root_id,
+                "accepted_capsule_hash": worker.accepted_capsule_hash,
+                "qualification_operation_id": worker.qualification_operation_id,
+                "qualification_occurrence_id": worker.qualification_occurrence_id,
+                "local_process_identity": worker.process_identity,
+                "local_process_terminal_at_ms": worker.terminal_at_ms,
+                "runtime_applied_frame_digest": runtime.digest(),
+                "protocol_eof_frame_digest": protocol_eof.digest(),
+            }))?;
+        let mut statement = tx.prepare(
+            "SELECT frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+               AND json_extract(frame_json,'$.frame.payload.kind')='qualification_complete'
+             ORDER BY sequence LIMIT 2",
+        )?;
+        let retained = statement
+            .query_map([&binding_digest], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        ensure!(
+            retained.len() <= 1,
+            "Q channel retained competing completion requests"
+        );
+        let frame = if let Some(wire) = retained.into_iter().next() {
+            let frame = SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                &binding,
+                binding.issued_at_ms,
+            )?;
+            ensure!(
+                matches!(&frame.frame().payload,
+                    ExecutionChannelPayload::QualificationComplete { completion_request_digest: retained }
+                    if retained == &completion_request_digest),
+                "Q completion retry changed its exact terminal coordinate"
+            );
+            frame
+        } else {
+            journal::author_frame(
+                &tx,
+                &NodeJournalOwner,
+                placement,
+                ChannelDirection::OwnerToSupervisor,
+                signing_key,
+                ExecutionChannelPayload::QualificationComplete {
+                    completion_request_digest,
                 },
             )?
         };

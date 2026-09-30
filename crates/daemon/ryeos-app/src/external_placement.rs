@@ -2418,6 +2418,54 @@ pub fn author_external_channel_command(
     })
 }
 
+/// Request the Q guest's native scope stop only after the retained local
+/// Worker process and connector have settled. This is a controller operation
+/// under the same restored-occurrence exclusion as provider termination; the
+/// runtime journal derives its completion coordinate from exact durable rows.
+pub fn request_external_qualification_native_completion(
+    state: &AppState,
+    placement: &str,
+) -> Result<ExternalChannelOutboundFrame> {
+    use crate::runtime_db::external_execution::ExternalAllocationOwner;
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("Q native completion has no retained allocation")?;
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+    else {
+        bail!("Q native completion requires a qualification candidate")
+    };
+    let operation_id = owner.qualification_operation_id.clone();
+    crate::hosted_operation::with_qualification_occurrence_contact(&operation_id, || {
+        let access = ExternalChannelAuthorityAccess::new(
+            &allocation.reservation.channel_authority_generation,
+        )?;
+        let authority = access.decode(
+            state
+                .vault
+                .external_channel_authority(&access)
+                .context("read protected Q channel signer")?,
+        )?;
+        let binding = state.state_store.external_execution_channel(placement)?;
+        ensure!(
+            binding.owner_public_key == authority.owner_public_key()
+                && binding.execution_binding_hash == allocation.reservation.binding_hash,
+            "Q native completion changed protected channel authority"
+        );
+        let frame = state
+            .state_store
+            .ensure_external_qualification_complete(placement, authority.owner_signing_key())?;
+        Ok(ExternalChannelOutboundFrame {
+            sequence: frame.frame().sequence,
+            frame_digest: frame.digest().to_owned(),
+            canonical_wire: frame.canonical().as_bytes().to_vec(),
+        })
+    })
+}
+
 /// Finalize exactly one occurrence-scoped channel after bootstrap
 /// authentication.  All mutable limits and identities are derived from the
 /// retained session, allocation and signed binding rather than request data.

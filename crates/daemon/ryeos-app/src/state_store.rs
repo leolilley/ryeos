@@ -15677,6 +15677,31 @@ impl StateStore {
         )
     }
 
+    /// Q-only stop request after exact local Worker and connector settlement.
+    pub(crate) fn ensure_external_qualification_complete(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<ryeos_state::external_execution::AuthenticatedExecutionFrame> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .ensure_external_qualification_complete(placement, signing_key)
+    }
+
+    /// Apply the signed native scope row as inert evidence. This does not
+    /// settle the provider occurrence or publish a qualification claim.
+    pub(crate) fn apply_external_qualification_scope_settlement(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::RetainedExternalQualificationScopeSettlement>>
+    {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .apply_external_qualification_scope_settlement(placement)
+    }
+
     pub(crate) fn retained_external_candidate_import(
         &self,
         placement: &str,
