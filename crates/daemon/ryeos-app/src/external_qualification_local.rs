@@ -658,3 +658,171 @@ pub fn mark_qualification_local_cleanup_unproved(
         },
     )
 }
+
+/// Retire the original Q local workspace after the one-shot Worker and
+/// connector have settled. Every effect follows its durable Q cleanup phase;
+/// an interrupted phase can be resumed only with this daemon's original
+/// workspace and state-root descriptors. This grants no qualification claim.
+pub fn cleanup_qualification_local_worker(
+    state: &AppState,
+    placement: &str,
+    view_close_deadline: lillux::time::MonotonicDeadline,
+) -> Result<QualificationLocalStartRecord> {
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let initial = state
+        .state_store
+        .qualification_local_start(placement)?
+        .context("Q local cleanup has no original start")?;
+    crate::hosted_operation::with_qualification_occurrence_contact(
+        &initial.qualification_operation_id,
+        || {
+            let mut current = state
+                .state_store
+                .qualification_local_start(placement)?
+                .context("Q local cleanup lost its original start")?;
+            ensure!(
+                current == initial,
+                "Q local cleanup changed its original start before contact gate"
+            );
+            if current.phase == QualificationLocalStartPhase::Closed {
+                state
+                    .qualification_workspace_custody
+                    .release_closed_original(&current)?;
+                return Ok(current);
+            }
+            let coordinate = QualificationWorkspaceCustodyCoordinate::from_start(&current)?;
+            let custody = state
+                .qualification_workspace_custody
+                .borrow_exact(&coordinate)?;
+            if let Some(process) = state.state_store.qualification_worker_process(placement)? {
+                ensure_qualification_worker_terminal(state, placement, &process.process_identity)?;
+                crate::process::assert_reaped_process_group_absent(&process.process_identity)?;
+            } else {
+                ensure!(
+                    current.worker_incarnation_digest.is_none(),
+                    "Q local cleanup lost an attached Worker process"
+                );
+            }
+            ensure!(
+                state.state_store.external_connector_retired(placement)?,
+                "Q local cleanup retains a live connector"
+            );
+            // The generic signed backend protocol has no idempotent-Destroy
+            // contract. A later retry is allowed only for the captured Lillux
+            // backend, whose exact-state Destroy accepts a missing or partly
+            // removed overlay after a lost response.
+            let mut fresh_destroy_intent = false;
+            loop {
+                current = match current.phase {
+                    QualificationLocalStartPhase::Reserved
+                    | QualificationLocalStartPhase::WorkspaceReady
+                    | QualificationLocalStartPhase::ScopeAllocating
+                    | QualificationLocalStartPhase::ScopeBound
+                    | QualificationLocalStartPhase::WorkerAttached
+                    | QualificationLocalStartPhase::CleanupUnproved => state
+                        .state_store
+                        .begin_qualification_local_cleanup(state, placement, &custody)?,
+                    QualificationLocalStartPhase::CleanupIntent => {
+                        if current.workspace_receipt.is_some() {
+                            state
+                                .state_store
+                                .reserve_qualification_local_scope_retirement(&current)?
+                        } else {
+                            state
+                                .state_store
+                                .remove_qualification_workspace_root(state, &current, &custody)?
+                        }
+                    }
+                    QualificationLocalStartPhase::ScopeRetirementPending => state
+                        .state_store
+                        .complete_qualification_local_scope_retirement(&current)?,
+                    QualificationLocalStartPhase::ScopeRetired => {
+                        state.state_store.close_qualification_local_view(
+                            state,
+                            &current,
+                            &custody,
+                            view_close_deadline,
+                        )?
+                    }
+                    QualificationLocalStartPhase::ViewClosed => {
+                        let pending = state
+                            .state_store
+                            .reserve_qualification_workspace_destroy(&current)?;
+                        fresh_destroy_intent = true;
+                        pending
+                    }
+                    QualificationLocalStartPhase::DestroyPending => {
+                        let receipt = current
+                            .workspace_receipt
+                            .as_ref()
+                            .context("Q Destroy lost its original Create receipt")?;
+                        let (backend_id, backend_version) =
+                            state.isolation.workspace_backend_identity()?;
+                        ensure!(
+                            backend_id == receipt.backend_id
+                                && backend_version == receipt.backend_version
+                                && receipt.mount_identity == receipt.view_identity,
+                            "Q Destroy changed its retained signed backend"
+                        );
+                        ensure!(
+                            fresh_destroy_intent || backend_id == "linux-lillux",
+                            "Q Destroy outcome is unknown for a backend without proven repeatable Destroy"
+                        );
+                        fresh_destroy_intent = false;
+                        let workspace = custody.workspace();
+                        let original = workspace.owned_scratch_root()?;
+                        original.ensure_path_binding()?;
+                        ensure!(
+                            workspace.path().as_deref() == Some(Path::new(&current.workspace_root)),
+                            "Q Destroy lost its original workspace guard"
+                        );
+                        let project = original
+                            .open_child_directory(OsStr::new(
+                                ryeos_engine::execution_workspace::PROJECT_DIR,
+                            ))?
+                            .context("Q Destroy lost its original project directory")?;
+                        project.ensure_path_binding()?;
+                        ensure!(
+                            workspace.owns_effective_path(project.path()),
+                            "Q Destroy changed its original project view"
+                        );
+                        let evidence = state
+                            .isolation
+                            .workspace_lifecycle(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+                                operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
+                                workspace_id: &current.workspace_id,
+                                launch_owner: &current.launch_owner,
+                                base_snapshot: &current.base_snapshot_hash,
+                                project_path: project.path(),
+                                mount_identity: Some(&receipt.mount_identity),
+                            })
+                            .map_err(|error| anyhow!("destroy Q original workspace: {error}"))?;
+                        state
+                            .state_store
+                            .record_qualification_workspace_destroyed(&current, &evidence)?
+                    }
+                    QualificationLocalStartPhase::Destroyed => state
+                        .state_store
+                        .remove_qualification_workspace_root(state, &current, &custody)?,
+                    QualificationLocalStartPhase::WorkspaceRemoved => state
+                        .state_store
+                        .remove_qualification_state_root(state, &current, &custody)?,
+                    QualificationLocalStartPhase::StateRemoved => state
+                        .state_store
+                        .close_qualification_local_start(state, &current, &custody)?,
+                    QualificationLocalStartPhase::Closed => {
+                        state
+                            .qualification_workspace_custody
+                            .release_closed_original(&current)?;
+                        return Ok(current);
+                    }
+                    QualificationLocalStartPhase::WorkspaceCreating => {
+                        bail!("Q local cleanup lacks completed Create or no-Create proof")
+                    }
+                };
+            }
+        },
+    )
+}

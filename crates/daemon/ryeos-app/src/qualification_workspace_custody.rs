@@ -415,6 +415,45 @@ impl QualificationWorkspaceCustodyRegistry {
         Ok(())
     }
 
+    /// Drop registry custody only after the exact Q cleanup journal closed
+    /// and both original pinned children have been physically removed.
+    pub(crate) fn release_closed_original(
+        &self,
+        record: &QualificationLocalStartRecord,
+    ) -> Result<()> {
+        ensure!(
+            record.phase == QualificationLocalStartPhase::Closed,
+            "Q original workspace release has no Closed receipt"
+        );
+        let coordinate = QualificationWorkspaceCustodyCoordinate::from_start(record)?;
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q workspace custody registry is poisoned"))?;
+        let Some(entry) = entries.get(coordinate.placement()) else {
+            return Ok(());
+        };
+        ensure!(
+            entry.coordinate == coordinate
+                && entry.workspace.path().is_none()
+                && *entry
+                    .state_root_removed
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Q state-root removal owner is poisoned"))?,
+            "Q original workspace release lacks exact physical removal"
+        );
+        entry.state_root_parent.ensure_path_binding()?;
+        ensure!(
+            entry
+                .state_root_parent
+                .open_child_directory(OsStr::new(record.workspace_id.as_str()))?
+                .is_none(),
+            "Q state root reappeared before custody release"
+        );
+        entries.remove(coordinate.placement());
+        Ok(())
+    }
+
     /// Register the exact guards returned by original Q workspace and state
     /// root creation while the durable start is still Reserved, before backend
     /// Create. A second insertion is refused even if its coordinates match.
