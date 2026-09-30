@@ -232,6 +232,17 @@ impl AdmittedExternalQualificationSessionProgram {
     pub fn validate_guest_inputs(&self, inputs: &ExternalGuestInputProjection) -> Result<()> {
         self.validate()?;
         inputs.validate()?;
+        ensure!(
+            inputs.workspace_outputs.is_none()
+                && inputs.inputs.iter().all(|input| {
+                    matches!(
+                        input.role,
+                        ryeos_external_execution_contract::GuestMountRole::Product
+                            | ryeos_external_execution_contract::GuestMountRole::PrivateScratch
+                    )
+                }),
+            "qualification-only guest cannot import workspace output, source, or configuration authority"
+        );
         let expected_kind = match self.runtime_manifest_kind.as_str() {
             EXTERNAL_CONTENT_MANIFEST_KIND => GuestProductManifestKind::Content,
             EXTERNAL_LARGE_CONTENT_MANIFEST_KIND => GuestProductManifestKind::LargeContent,
