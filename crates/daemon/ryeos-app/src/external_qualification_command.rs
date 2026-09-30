@@ -1,8 +1,7 @@
-//! Signed first Request selection for one qualification-only local Worker.
-//!
-//! This facade grants no send, contact, or claim. The caller receives only the
-//! exact body selected by the accepted signed scenario while both the Q
-//! occurrence gate and one checked Bundle generation remain held.
+//! Signed first Request selection and one-use send for a qualification-only
+//! local Worker. The owner retains contact, Delta, pushed batches, Final, and
+//! turn facts under the Q occurrence gate and checked Bundle generation.
+//! These communication facts grant no qualification claim.
 
 use anyhow::{Context as _, Result, bail, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate;
