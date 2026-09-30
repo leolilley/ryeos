@@ -693,7 +693,7 @@ mod tests {
         };
         let recipe_digest = recipe.digest().unwrap();
         let requirement = ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             protocol: PROTOCOL.into(),
             connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
             execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
@@ -701,6 +701,7 @@ mod tests {
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "product".into(),
+            runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe: recipe,
         };
         let qualification_use =

@@ -2447,7 +2447,8 @@ mod tests {
             .unwrap()
             .remove("external_candidate");
         assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
-        profile["external_candidate"] = json!({"schema":6,
+        profile["external_candidate"] = json!({"schema":7,
+        "runtime_authority":"captured_product",
         "protocol":ryeos_state::external_execution::admission::PROTOCOL,
         "connector_protocol":ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
         "execution_route":"connector_only",
