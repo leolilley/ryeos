@@ -168,6 +168,11 @@ pub struct AppState {
     /// Empty after restart; callbacks cannot reconstruct process ownership.
     pub scoped_producer_processes:
         Arc<crate::scoped_producer_process::ScopedProducerProcessRegistry>,
+    /// Original Q workspace and pinned state-root guards retained across
+    /// fallible local start/pool binding in this daemon generation. Empty on
+    /// restart; a durable row alone cannot recreate the backend view owner.
+    pub qualification_workspace_custody:
+        Arc<crate::qualification_workspace_custody::QualificationWorkspaceCustodyRegistry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -433,6 +438,7 @@ pub mod test_support {
             ),
             scoped_producer_authorities: Arc::new(Default::default()),
             scoped_producer_processes: Arc::new(Default::default()),
+            qualification_workspace_custody: Arc::new(Default::default()),
         })
     }
 }

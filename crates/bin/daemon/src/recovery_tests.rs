@@ -735,6 +735,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         ),
         scoped_producer_authorities: Arc::new(Default::default()),
         scoped_producer_processes: Arc::new(Default::default()),
+        qualification_workspace_custody: Arc::new(Default::default()),
     };
     (tmpdir, state)
 }

@@ -1374,6 +1374,7 @@ async fn run(
                 execution_resources: Arc::new(execution_resources),
                 scoped_producer_authorities: Arc::new(Default::default()),
                 scoped_producer_processes: Arc::new(Default::default()),
+                qualification_workspace_custody: Arc::new(Default::default()),
             };
             // This is a generation cut, not a periodic repair. Settle every
             // attempt owned by the dead predecessor before any startup
@@ -3966,6 +3967,7 @@ async fn run_service_standalone(
         ),
         scoped_producer_authorities: Arc::new(Default::default()),
         scoped_producer_processes: Arc::new(Default::default()),
+        qualification_workspace_custody: Arc::new(Default::default()),
     };
 
     let ctx = ExecutionContext {
