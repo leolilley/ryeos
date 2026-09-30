@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, ensure};
 
 use crate::runtime_db::external_execution::{
-    QualificationLocalStartPhase, QualificationLocalStartRecord,
+    QualificationGuestScratchPhase, QualificationGuestScratchRecord, QualificationLocalStartPhase,
+    QualificationLocalStartRecord,
 };
 use crate::temp_dir_guard::TempDirGuard;
 
@@ -125,6 +126,55 @@ pub struct QualificationWorkspaceCustody {
             ryeos_engine::isolation::CreatedWorkspaceView,
         )>,
     >,
+}
+
+/// Original pinned Q guest-input parent, created once before allocation
+/// reservation. The durable scratch row is a fence, never a descriptor
+/// reconstruction permit. This guard stays in the daemon through uncertain
+/// activation and later cleanup; Drop is disabled after registration.
+pub struct QualificationGuestScratchCustody {
+    reserved: QualificationGuestScratchRecord,
+    guard: Arc<TempDirGuard>,
+}
+
+impl QualificationGuestScratchCustody {
+    pub(crate) fn new(
+        reserved: &QualificationGuestScratchRecord,
+        guard: Arc<TempDirGuard>,
+    ) -> Result<Self> {
+        ensure!(
+            reserved.phase == QualificationGuestScratchPhase::Reserved
+                && reserved.daemon_generation_id == crate::runtime_db::daemon_generation_id()
+                && guard.path().as_deref() == Some(Path::new(&reserved.scratch_root))
+                && guard.owned_scratch_root()?.path() == Path::new(&reserved.scratch_root),
+            "Q guest scratch custody changed its original pinned root"
+        );
+        guard.owned_scratch_root()?.ensure_path_binding()?;
+        Ok(Self {
+            reserved: reserved.clone(),
+            guard,
+        })
+    }
+
+    fn matches_record(&self, record: &QualificationGuestScratchRecord) -> bool {
+        self.reserved.placement_thread_id == record.placement_thread_id
+            && self.reserved.qualification_operation_id == record.qualification_operation_id
+            && self.reserved.coordinate == record.coordinate
+            && self.reserved.qualification_occurrence_id == record.qualification_occurrence_id
+            && self.reserved.owner_principal == record.owner_principal
+            && self.reserved.daemon_generation_id == record.daemon_generation_id
+            && self.reserved.program_digest == record.program_digest
+            && self.reserved.scratch_root == record.scratch_root
+            && self.reserved.created_at_ms == record.created_at_ms
+    }
+
+    pub fn pinned_root(&self) -> Result<&lillux::PinnedDirectory> {
+        self.guard.owned_scratch_root()
+    }
+
+    pub(crate) fn guard(&self) -> &Arc<TempDirGuard> {
+        &self.guard
+    }
 }
 
 /// Original descriptors retained when registration failed before backend
@@ -275,6 +325,7 @@ impl QualificationWorkspaceCustody {
 #[derive(Default)]
 pub struct QualificationWorkspaceCustodyRegistry {
     entries: Mutex<BTreeMap<String, Arc<QualificationWorkspaceCustody>>>,
+    guest_scratch: Mutex<BTreeMap<String, Arc<QualificationGuestScratchCustody>>>,
     rollback_failures: Mutex<BTreeMap<String, Arc<QualificationUnregisteredRollbackCustody>>>,
     partial_failures: Mutex<BTreeMap<String, Arc<QualificationUnregisteredWorkspaceCustody>>>,
 }
@@ -282,6 +333,43 @@ pub struct QualificationWorkspaceCustodyRegistry {
 impl QualificationWorkspaceCustodyRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn retain_guest_scratch(
+        &self,
+        entry: Arc<QualificationGuestScratchCustody>,
+    ) -> Result<()> {
+        let mut entries = self
+            .guest_scratch
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q guest scratch custody registry is poisoned"))?;
+        ensure!(
+            !entries.contains_key(&entry.reserved.placement_thread_id),
+            "Q guest scratch already has original descriptor custody"
+        );
+        // The journal already owns recovery. Once registered, no Drop path
+        // may erase input bytes after uncertain provider contact.
+        entry.guard.preserve_for_explicit_cleanup();
+        entries.insert(entry.reserved.placement_thread_id.clone(), entry);
+        Ok(())
+    }
+
+    pub(crate) fn borrow_guest_scratch(
+        &self,
+        record: &QualificationGuestScratchRecord,
+    ) -> Result<Arc<QualificationGuestScratchCustody>> {
+        let entry = self
+            .guest_scratch
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q guest scratch custody registry is poisoned"))?
+            .get(&record.placement_thread_id)
+            .cloned()
+            .context("Q original guest scratch descriptor is unavailable in this daemon")?;
+        ensure!(
+            entry.matches_record(record),
+            "Q guest scratch changed its immutable original custody"
+        );
+        Ok(entry)
     }
 
     /// A no-Create rollback may remove only roots that were never transferred

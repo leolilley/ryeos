@@ -309,7 +309,7 @@ pub(super) fn require_live_occurrence(
 /// Transaction-local prerequisite authentication. The caller owns the
 /// transaction and must hold the occurrence contact gate before using this
 /// check for a reservation or contact claim.
-fn read_consumer_prerequisite(
+pub(super) fn read_consumer_prerequisite(
     conn: &Connection,
     qualification_operation_id: &str,
     owner_principal: &str,

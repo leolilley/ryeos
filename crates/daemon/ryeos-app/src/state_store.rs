@@ -5136,6 +5136,22 @@ impl StateStore {
         Ok(parent)
     }
 
+    /// Private one-use Q input namespace beneath the original pinned state
+    /// generation. A child is created only after its placement-keyed intent
+    /// is durable; the parent path cannot reconstruct a lost child owner.
+    pub(crate) fn qualification_guest_scratch_parent(&self) -> Result<lillux::PinnedDirectory> {
+        anyhow::ensure!(
+            !self.read_only,
+            "read-only state cannot create Q guest scratch"
+        );
+        let parent = self
+            .state_authority
+            .runtime_directory()
+            .open_or_create_child(std::ffi::OsStr::new("qualification-guest-inputs"), 0o700)?;
+        parent.require_owner_private_directory()?;
+        Ok(parent)
+    }
+
     /// Resolve current admitted persistent-session authority from the exact
     /// pinned CAS generation. Callers never reopen a project or source path.
     pub fn admitted_persistent_session_capsule(
@@ -15561,6 +15577,94 @@ impl StateStore {
         placement: &str,
     ) -> Result<Option<runtime_db::external_execution::QualificationLocalStartRecord>> {
         self.lock()?.runtime_db.qualification_local_start(placement)
+    }
+
+    pub(crate) fn qualification_guest_scratch(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::QualificationGuestScratchRecord>> {
+        self.lock()?
+            .runtime_db
+            .qualification_guest_scratch(placement)
+    }
+
+    /// First Q scratch intent precedes filesystem Create and allocation
+    /// reservation. The nonserializable accepted-root proof is checked before
+    /// the transaction repeats current occurrence and measurement liveness.
+    pub(crate) fn reserve_qualification_guest_scratch(
+        &self,
+        state: &crate::state::AppState,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+        program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+        qualification_operation_id: &str,
+        parent: &lillux::PinnedDirectory,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let _permit = self.acquire_write_permit()?;
+        parent.require_owner_private_directory()?;
+        parent.ensure_path_binding()?;
+        let original_parent = self
+            .state_authority
+            .runtime_directory()
+            .open_child_directory(std::ffi::OsStr::new("qualification-guest-inputs"))?
+            .context("Q scratch lost its original state-owned parent")?;
+        anyhow::ensure!(
+            parent.is_same_directory(&original_parent)?,
+            "Q scratch parent differs from pinned state authority"
+        );
+        let coordinate = admission.coordinate();
+        program.validate_against_purpose(admission.purpose())?;
+        anyhow::ensure!(
+            admission.qualification_operation_id() == qualification_operation_id
+                && admission.owner_principal() == admission.purpose().owner_fingerprint,
+            "Q scratch changed its authenticated root program"
+        );
+        let operator_fingerprint = admission
+            .owner_principal()
+            .strip_prefix("fp:")
+            .context("Q scratch operator principal is not canonical")?;
+        anyhow::ensure!(
+            crate::operator_authority::admitted_operator_authority_digest(
+                state,
+                operator_fingerprint,
+            )? == admission.operator_grant_digest(),
+            "Q scratch operator grant changed before reservation"
+        );
+        let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+            coordinate,
+            qualification_operation_id,
+        )?;
+        let root = parent.path().join(&placement);
+        let g = self.lock()?;
+        g.runtime_db.reserve_qualification_guest_scratch(
+            coordinate,
+            qualification_operation_id,
+            admission.owner_principal(),
+            &program.digest()?,
+            &root,
+        )
+    }
+
+    /// The original guard was retained before this one-way Created CAS.
+    pub(crate) fn mark_qualification_guest_scratch_created(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+        custody: &std::sync::Arc<
+            crate::qualification_workspace_custody::QualificationGuestScratchCustody,
+        >,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_guest_scratch(expected)?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(&retained, custody)
+                && custody.pinned_root()?.path() == std::path::Path::new(&expected.scratch_root),
+            "Q scratch creation lost original descriptor custody"
+        );
+        self.lock()?
+            .runtime_db
+            .mark_qualification_guest_scratch_created(expected)
     }
 
     /// A read-only check for the original Q scope immediately before an
