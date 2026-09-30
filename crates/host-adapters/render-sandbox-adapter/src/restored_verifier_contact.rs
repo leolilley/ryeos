@@ -9,7 +9,8 @@ use lillux::network::{NetworkCancellation, NetworkContext};
 use lillux::time::MonotonicDeadline;
 use ryeos_external_execution_contract::canonical_json;
 use ryeos_external_execution_contract::restored_runtime_measurement::{
-    RESTORATION_VERIFIER_REMOTE_DIRECTORY, RESTORATION_VERIFIER_REMOTE_NAME,
+    CONSUMER_VERIFIER_REMOTE_NAME, RESTORATION_VERIFIER_REMOTE_DIRECTORY,
+    RESTORATION_VERIFIER_REMOTE_NAME, RemoteVerificationPurpose,
     RestoredVerifierAdapterObservation, RestoredVerifierAdapterRequest,
     RestoredVerifierAdapterResponse,
 };
@@ -22,6 +23,34 @@ use crate::proxy_route::ProxyOperation;
 
 const MAX_UPLOAD_RESPONSE_BYTES: u64 = 16 * 1024;
 const MAX_RUN_RESPONSE_BYTES: u64 = 64 * 1024;
+
+/// Exact provider command framing only. Selection and challenge validation
+/// remain at the shared contract; this grants no contact or qualification.
+pub(crate) fn verifier_command(request: &RestoredVerifierAdapterRequest) -> Result<String> {
+    request.validate()?;
+    let (name, flag, challenge) = match &request.intent.purpose {
+        RemoteVerificationPurpose::OwnerMeasurement { .. } => (
+            RESTORATION_VERIFIER_REMOTE_NAME,
+            "--challenge-b64",
+            canonical_json(request.intent.owner_challenge()?)?,
+        ),
+        RemoteVerificationPurpose::ConsumerRuntime { .. } => (
+            CONSUMER_VERIFIER_REMOTE_NAME,
+            "--consumer-challenge-b64",
+            canonical_json(&request.consumer_challenge()?)?,
+        ),
+    };
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge);
+    let command = format!(
+        "{}/{name} {flag} {encoded}",
+        request.intent.remote_upload_directory()?
+    );
+    ensure!(
+        command.len() <= 8192,
+        "restored verifier command exceeds bound"
+    );
+    Ok(command)
+}
 
 /// The caller has already preflighted the signed qualifier, exact sealed tar
 /// and finite routes. No failure here permits a second invocation. A complete
@@ -40,7 +69,9 @@ pub(crate) fn first_contact(
     // Consumer request decoding is not activation of a guest verifier mode.
     // Refuse this lane before token minting/upload until its native protocol
     // and settlement/evidence join are installed.
-    let owner_challenge = request.intent.owner_challenge()?;
+    request.intent.owner_challenge()?;
+    // Resolve the entire finite command before any provider contact.
+    let command = verifier_command(request)?;
     let contact = RenderContact::new(
         network,
         provider_spec,
@@ -80,15 +111,6 @@ pub(crate) fn first_contact(
         "restored verifier upload response exceeds bound"
     );
 
-    let challenge = canonical_json(owner_challenge)?;
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge);
-    let command = format!(
-        "{RESTORATION_VERIFIER_REMOTE_DIRECTORY}/{RESTORATION_VERIFIER_REMOTE_NAME} --challenge-b64 {encoded}"
-    );
-    ensure!(
-        command.len() <= 8192,
-        "restored verifier command exceeds bound"
-    );
     let run_operation = ProxyOperation::RunStream;
     let run_token = contact.mint(run_operation, Some(&command))?;
     let run_execution_id = run_token.execution_id.clone();
