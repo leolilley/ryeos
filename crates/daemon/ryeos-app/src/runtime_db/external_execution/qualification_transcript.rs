@@ -7,7 +7,10 @@
 use super::*;
 use anyhow::ensure;
 use ryeos_external_execution_contract::ProviderConfigurationLaunchInput;
-use ryeos_state::objects::QualificationWorkerTranscriptManifest;
+use ryeos_state::objects::{
+    QualificationWorkerTranscriptManifest,
+    qualification_fixture::{QFixtureCaptureContent, QFixtureCaptureReference},
+};
 
 use super::qualification_batch::{QualificationWorkerObservationBatchRecord, read_batches};
 use super::qualification_command::{
@@ -19,6 +22,8 @@ use super::qualification_process::require_terminal_qualification_worker_process;
 pub(crate) struct QualificationWorkerTranscriptSource {
     pub owner_principal: String,
     pub provider_configuration: ProviderConfigurationLaunchInput,
+    pub fixture_capture: Option<QFixtureCaptureReference>,
+    pub fixture_content: Option<QFixtureCaptureContent>,
     pub command: QualificationWorkerCommandRecord,
     pub batches: Vec<QualificationWorkerObservationBatchRecord>,
 }
@@ -29,6 +34,28 @@ pub(crate) struct QualificationWorkerTranscriptRecord {
     pub owner_principal: String,
     pub manifest_hash: String,
     pub retained_at_ms: i64,
+}
+
+/// Authenticated signed native data must also have been applied by the original
+/// owner. This predicate deliberately does not require cleanup/provider terminal:
+/// transcript publication precedes those steps, including for a null fixture.
+fn require_applied_native_frame(
+    conn: &Connection,
+    binding_digest: &str,
+    settlement_digest: &str,
+) -> Result<()> {
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+         WHERE binding_digest=?1 AND frame_digest=?2
+           AND direction='supervisor_to_owner' AND application='applied')",
+        params![binding_digest, settlement_digest],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        applied,
+        "Q transcript native settlement has not been applied"
+    );
+    Ok(())
 }
 
 fn source(conn: &Connection, placement: &str) -> Result<QualificationWorkerTranscriptSource> {
@@ -53,10 +80,35 @@ fn source(conn: &Connection, placement: &str) -> Result<QualificationWorkerTrans
             && process.channel_binding_digest == command.channel_binding_digest,
         "Q transcript changed its death-settled process"
     );
+    let native = channel::prepare_qualification_scope_settlement_tx(conn, placement, false)?
+        .context("Q transcript has no original native settlement")?;
+    ensure!(
+        native.evidence.binding.digest()? == command.channel_binding_digest,
+        "Q transcript native settlement changed its original command channel"
+    );
+    require_applied_native_frame(
+        conn,
+        &command.channel_binding_digest,
+        native.evidence.settlement.digest(),
+    )?;
+    qualification_fixture_receiver::require_verified_receiver_for_settlement(
+        conn,
+        placement,
+        &native.evidence.binding,
+        &native.evidence.settlement,
+    )?;
+    let ryeos_state::external_execution::ExecutionChannelPayload::QualificationScopeSettled {
+        observation,
+    } = &native.evidence.settlement.frame().payload
+    else {
+        bail!("Q transcript lost its original native settlement payload");
+    };
     let batches = read_batches(conn, placement)?;
     Ok(QualificationWorkerTranscriptSource {
         owner_principal: owner.operator_principal.clone(),
         provider_configuration: process.provider_configuration.clone(),
+        fixture_capture: observation.fixture_capture.clone(),
+        fixture_content: observation.fixture_content.clone(),
         command,
         batches,
     })
@@ -88,6 +140,7 @@ fn require_manifest_source(
     ensure!(
         manifest.owner_principal == source.owner_principal
             && manifest.provider_configuration == source.provider_configuration
+            && manifest.fixture_capture == source.fixture_capture
             && manifest.placement_thread_id == command.placement_thread_id
             && manifest.accepted_root_id == command.accepted_root_id
             && manifest.accepted_capsule_hash == command.accepted_capsule_hash
@@ -194,7 +247,10 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<QualificationWorkerTranscriptSource> {
-        source(&self.conn, placement)
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+        let retained = source(&tx, placement)?;
+        tx.commit()?;
+        Ok(retained)
     }
 
     /// CAS chunks and manifest must already be staged under the same StateStore
@@ -246,5 +302,54 @@ impl RuntimeDb {
             .context("Q transcript bind disappeared")?;
         tx.commit()?;
         Ok(record)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_publication_requires_exact_applied_frame_even_without_fixture() {
+        let conn = Connection::open_in_memory().unwrap();
+        // This isolated predicate tests Applied ordering; the source reader
+        // separately authenticates the original signed frame and Q owner.
+        conn.execute_batch(
+            "CREATE TABLE external_execution_frame(
+            binding_digest TEXT,frame_digest TEXT,direction TEXT,application TEXT)",
+        )
+        .unwrap();
+        let binding = "a".repeat(64);
+        let frame = "b".repeat(64);
+        assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+        conn.execute(
+            "INSERT INTO external_execution_frame VALUES(?1,?2,'supervisor_to_owner','pending')",
+            params![&binding, &frame],
+        )
+        .unwrap();
+        assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+        conn.execute(
+            "UPDATE external_execution_frame SET application='claimed'",
+            [],
+        )
+        .unwrap();
+        assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+        conn.execute(
+            "UPDATE external_execution_frame SET application='applied'",
+            [],
+        )
+        .unwrap();
+        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred).unwrap();
+        require_applied_native_frame(&tx, &binding, &frame).unwrap();
+        assert!(require_applied_native_frame(&tx, &"c".repeat(64), &frame).is_err());
+        assert!(require_applied_native_frame(&tx, &binding, &"d".repeat(64)).is_err());
+        assert!(!tx.is_autocommit());
+        tx.rollback().unwrap();
+        conn.execute(
+            "UPDATE external_execution_frame SET direction='owner_to_supervisor'",
+            [],
+        )
+        .unwrap();
+        assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
     }
 }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-01T04:33:31Z:a8c1c0c6deb69a74c13c54108e1dec91c93bb231b7be81920756ba6ce230b512:2e/XN2vi3BBN2/nxQRu9njXdy7jzjw5iHadry95dxq1UBultJKor7eyKRWslK6DxIyXEBWaiVkqsgXHdPp5dAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-01T09:49:55Z:32c0579fc93ad41c01f54ad985fd86efccd7c2098f1e1a23c55069f93770467e:1+Ukz+V4z6v6FT9DziC1vnbVOubs6cN/JO8fVsb4Te2HhJyMTS0HlLRbbHefMeXxxh9su2ZcyWs0sKqhB5/ADQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
 description: Check the actual Q command and independent diagnostic through restricted daemon callbacks; propose finite claims for issuer corroboration.
@@ -30,15 +30,16 @@ config_schema:
     qualification_worker:
       type: object
       additionalProperties: false
-      required: [schema, environment_id, command, command_presentation, cwd, output, exit_code]
+      required: [schema, environment_id, command, command_presentation, cwd, output, exit_code, expected_final_content_b64]
       properties:
-        schema: {type: string, enum: [ryeos.codex.q_command.v1]}
+        schema: {type: string, enum: [ryeos.codex.q_command.v2]}
         environment_id: {type: string, enum: [ryeos-external-candidate]}
         command: {type: string, minLength: 1, maxLength: 4096}
         command_presentation: {type: string, minLength: 1, maxLength: 4096}
         cwd: {type: string, enum: [/workspace]}
         output: {type: string, minLength: 1, maxLength: 16384}
         exit_code: {type: integer, enum: [0]}
+        expected_final_content_b64: {type: [string, "null"], maxLength: 87384}
     # The typed admitted-use parser checks this exact value against the sealed
     # purpose. It is data agreement, never caller-created admission authority.
     external_candidate_qualification_context: {type: object}

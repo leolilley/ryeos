@@ -3,7 +3,14 @@
 //! These checks do not establish native death, provider settlement, writer
 //! exclusion or an issued qualification. Those facts have separate owners.
 use anyhow::{Context as _, Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_external_execution_contract::ProviderConfigurationLaunchInput;
+use ryeos_external_execution_contract::qualification_fixture::{
+    MAX_Q_FIXTURE_BYTES, QFixtureContract,
+};
+use ryeos_state::objects::qualification_fixture::{
+    QFixtureCaptureContent, QFixtureCaptureReference, q_fixture_contract_digest,
+};
 use ryeos_state::objects::{QualificationWorkerTranscriptStream, canonical_value_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -26,12 +33,24 @@ pub struct QCommandExpectation {
     pub cwd: String,
     pub output: String,
     pub exit_code: i32,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub expected_final_content_b64: Option<String>,
+}
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 impl QCommandExpectation {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "ryeos.codex.q_command.v1",
+            self.schema == "ryeos.codex.q_command.v2",
             "unsupported Q command expectation"
         );
         ensure!(
@@ -56,7 +75,79 @@ impl QCommandExpectation {
             self.exit_code == 0,
             "Q positive command expectation must require exit zero"
         );
+        self.decode_expected_content(MAX_Q_FIXTURE_BYTES)?;
         Ok(())
+    }
+
+    fn decode_expected_content(&self, maximum: u64) -> Result<Option<Vec<u8>>> {
+        let Some(encoded) = self.expected_final_content_b64.as_ref() else {
+            return Ok(None);
+        };
+        ensure!(
+            maximum <= MAX_Q_FIXTURE_BYTES && encoded.len() as u64 <= maximum.div_ceil(3) * 4,
+            "Q expected fixture content exceeds its bound"
+        );
+        let mut bytes = vec![0; maximum as usize];
+        let count = STANDARD
+            .decode_slice(encoded, &mut bytes)
+            .context("Q expected fixture content is not bounded base64")?;
+        bytes.truncate(count);
+        ensure!(
+            STANDARD.encode(&bytes) == *encoded,
+            "Q expected fixture content is not canonical base64"
+        );
+        Ok(Some(bytes))
+    }
+
+    pub(crate) fn expected_fixture_content(
+        &self,
+        fixture: Option<&QFixtureContract>,
+    ) -> Result<Option<Vec<u8>>> {
+        self.validate()?;
+        match (fixture, self.expected_final_content_b64.as_ref()) {
+            (None, None) => Ok(None),
+            (Some(fixture), Some(_)) => {
+                let initial = fixture.decoded_initial_content()?;
+                let expected = self
+                    .decode_expected_content(fixture.max_bytes)?
+                    .context("Q expected fixture bytes missing")?;
+                ensure!(
+                    expected != initial,
+                    "Q expected final fixture content must differ from its signed initial content"
+                );
+                Ok(Some(expected))
+            }
+            _ => bail!("Q expected fixture presence differs from the signed Worker request"),
+        }
+    }
+}
+
+/// Verify finite product meaning against protected capture data. Native
+/// settlement authority comes from the controller's retained custody join.
+pub(crate) fn check_fixture_capture(
+    expected: &QCommandExpectation,
+    fixture: Option<&QFixtureContract>,
+    reference: Option<&QFixtureCaptureReference>,
+    content: Option<&QFixtureCaptureContent>,
+    binding_digest: &str,
+) -> Result<()> {
+    let expected_bytes = expected.expected_fixture_content(fixture)?;
+    match (fixture, expected_bytes, reference, content) {
+        (None, None, None, None) => Ok(()),
+        (Some(fixture), Some(expected_bytes), Some(reference), Some(content)) => {
+            ensure!(
+                content.metadata.fixture_contract_digest == q_fixture_contract_digest(fixture)?
+                    && content.metadata.native_settlement.binding_digest == binding_digest
+                    && reference.size_bytes <= fixture.max_bytes,
+                "Q captured fixture changed its signed contract, native binding or bound"
+            );
+            ensure!(
+                content.verify_content_identity(reference)? == expected_bytes,
+                "Q captured fixture does not equal the expected final content"
+            );
+            Ok(())
+        }
+        _ => bail!("Q protected fixture capture presence differs from the signed expectation"),
     }
 }
 
@@ -103,6 +194,13 @@ pub fn check_q_conversation(
         "Q signed setup did not opt into actual raw tool observations"
     );
     let manifest = &transcript.reference.manifest;
+    check_fixture_capture(
+        expected,
+        request.fixture.as_ref(),
+        manifest.fixture_capture.as_ref(),
+        transcript.stream.fixture_content.as_ref(),
+        &manifest.channel_binding_digest,
+    )?;
     ensure!(
         canonical_value_digest(&transcript.stream.setup_final_response)?
             == manifest.setup_final_response_digest
@@ -596,13 +694,14 @@ mod tests {
 
     fn expectation() -> QCommandExpectation {
         QCommandExpectation {
-            schema: "ryeos.codex.q_command.v1".into(),
+            schema: "ryeos.codex.q_command.v2".into(),
             environment_id: "ryeos-external-candidate".into(),
             command: "printf probe".into(),
             command_presentation: "zsh -c 'printf probe'".into(),
             cwd: "/workspace".into(),
             output: "probe".into(),
             exit_code: 0,
+            expected_final_content_b64: None,
         }
     }
 
@@ -685,6 +784,7 @@ mod tests {
     fn stream() -> QualificationWorkerTranscriptStream {
         QualificationWorkerTranscriptStream {
             schema: QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA.into(),
+            fixture_content: None,
             setup_final_response: json!({"response":{"result":{"thread":{"id":"thread-one"}}},
                 "session_observations":[{"kind":"remote_thread","id":"thread-one"}]}),
             final_response: json!({"response":{"result":{"turn":{"id":"turn-one","status":"inProgress"}}},
@@ -972,15 +1072,189 @@ mod tests {
         assert!(collect_notifications(&stream).is_err());
     }
 
+    fn fixture_contract() -> QFixtureContract {
+        QFixtureContract {
+            schema: 1,
+            mount_destination: ryeos_external_execution_contract::qualification_fixture::Q_FIXTURE_MOUNT_DESTINATION.into(),
+            leaf: "result.txt".into(),
+            initial_content_b64: STANDARD.encode(b"before"),
+            initial_blob_hash: lillux::sha256_hex(b"before"),
+            max_bytes: 8,
+        }
+    }
+
+    fn fixture_capture(
+        fixture: &QFixtureContract,
+        bytes: &[u8],
+    ) -> (QFixtureCaptureReference, QFixtureCaptureContent) {
+        use ryeos_state::external_execution::{
+            NativeNamespaceExit, NativeQualificationScopeSettlementObservation,
+            NativeWriterExclusionMechanism,
+        };
+        use ryeos_state::objects::qualification_fixture::{
+            Q_FIXTURE_CAPTURE_KIND, Q_FIXTURE_CAPTURE_SCHEMA, QFixtureCaptureMetadata,
+        };
+        let metadata = QFixtureCaptureMetadata {
+            kind: Q_FIXTURE_CAPTURE_KIND.into(),
+            schema: Q_FIXTURE_CAPTURE_SCHEMA,
+            fixture_contract_digest: q_fixture_contract_digest(fixture).unwrap(),
+            native_settlement: NativeQualificationScopeSettlementObservation {
+                schema: 1,
+                binding_digest: "a".repeat(64),
+                launcher_occurrence_digest: "b".repeat(64),
+                applied_runtime_receipt_digest: "c".repeat(64),
+                completion_frame_digest: "d".repeat(64),
+                completion_request_digest: "e".repeat(64),
+                mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+                exit: NativeNamespaceExit::Code(0),
+            },
+            blob_hash: lillux::sha256_hex(bytes),
+            size_bytes: bytes.len() as u64,
+            normalized_mode: ryeos_state::objects::ProjectFile::REGULAR_MODE,
+        };
+        let reference = QFixtureCaptureReference {
+            metadata_hash: metadata.digest().unwrap(),
+            blob_hash: metadata.blob_hash.clone(),
+            size_bytes: metadata.size_bytes,
+        };
+        (
+            reference,
+            QFixtureCaptureContent::from_bytes(metadata, bytes).unwrap(),
+        )
+    }
+
+    #[test]
+    fn expected_fixture_bytes_are_canonical_bounded_and_require_a_changed_signed_fixture() {
+        let fixture = fixture_contract();
+        let mut expected = expectation();
+        assert!(expected.expected_fixture_content(None).unwrap().is_none());
+        assert!(expected.expected_fixture_content(Some(&fixture)).is_err());
+        expected.expected_final_content_b64 = Some(STANDARD.encode(b"after"));
+        assert_eq!(
+            expected
+                .expected_fixture_content(Some(&fixture))
+                .unwrap()
+                .unwrap(),
+            b"after"
+        );
+        assert!(expected.expected_fixture_content(None).is_err());
+        for encoded in [
+            STANDARD.encode(b"before"),
+            STANDARD.encode(b"too large"),
+            "YR==".into(),
+            "YQ".into(),
+        ] {
+            expected.expected_final_content_b64 = Some(encoded);
+            assert!(expected.expected_fixture_content(Some(&fixture)).is_err());
+        }
+        expected.expected_final_content_b64 =
+            Some(STANDARD.encode(vec![0; MAX_Q_FIXTURE_BYTES as usize]));
+        expected.validate().unwrap();
+        expected.expected_final_content_b64 =
+            Some(STANDARD.encode(vec![0; MAX_Q_FIXTURE_BYTES as usize + 1]));
+        assert!(expected.validate().is_err());
+    }
+
+    #[test]
+    fn protected_fixture_capture_matches_exact_final_bytes_contract_and_native_binding() {
+        let fixture = fixture_contract();
+        let mut expected = expectation();
+        expected.expected_final_content_b64 = Some(STANDARD.encode(b"after"));
+        let (reference, content) = fixture_capture(&fixture, b"after");
+        let binding = "a".repeat(64);
+        check_fixture_capture(
+            &expected,
+            Some(&fixture),
+            Some(&reference),
+            Some(&content),
+            &binding,
+        )
+        .unwrap();
+        for (reference, content) in [
+            (None, None),
+            (Some(&reference), None),
+            (None, Some(&content)),
+        ] {
+            assert!(
+                check_fixture_capture(&expected, Some(&fixture), reference, content, &binding)
+                    .is_err()
+            );
+        }
+        // Independently rehash substitutions: the product join must still reject
+        // them even though each inert capture is structurally self-consistent.
+        for bytes in [b"other".as_slice(), b"before".as_slice()] {
+            let (reference, content) = fixture_capture(&fixture, bytes);
+            assert!(
+                check_fixture_capture(
+                    &expected,
+                    Some(&fixture),
+                    Some(&reference),
+                    Some(&content),
+                    &binding
+                )
+                .is_err()
+            );
+        }
+        for native in [false, true] {
+            let mut content = content.clone();
+            if native {
+                content.metadata.native_settlement.binding_digest = "f".repeat(64);
+            } else {
+                content.metadata.fixture_contract_digest = "f".repeat(64);
+            }
+            let mut reference = reference.clone();
+            reference.metadata_hash = content.metadata.digest().unwrap();
+            assert!(
+                check_fixture_capture(
+                    &expected,
+                    Some(&fixture),
+                    Some(&reference),
+                    Some(&content),
+                    &binding
+                )
+                .is_err()
+            );
+        }
+        let mut changed = content.clone();
+        changed.bytes_base64 = STANDARD.encode(b"other");
+        assert!(
+            check_fixture_capture(
+                &expected,
+                Some(&fixture),
+                Some(&reference),
+                Some(&changed),
+                &binding
+            )
+            .is_err()
+        );
+        assert!(
+            check_fixture_capture(
+                &expectation(),
+                None,
+                Some(&reference),
+                Some(&content),
+                &binding
+            )
+            .is_err()
+        );
+        check_fixture_capture(&expectation(), None, None, None, &binding).unwrap();
+    }
+
     #[test]
     fn expectation_is_closed_and_current_positive_only() {
         let valid = expectation();
         valid.validate().unwrap();
+        let mut missing = serde_json::to_value(&valid).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_final_content_b64");
+        assert!(serde_json::from_value::<QCommandExpectation>(missing).is_err());
         let mut wire = serde_json::to_value(&valid).unwrap();
         wire["extra"] = json!(true);
         assert!(serde_json::from_value::<QCommandExpectation>(wire).is_err());
         for (key, value) in [
-            ("schema", json!("ryeos.codex.q_command.v0")),
+            ("schema", json!("ryeos.codex.q_command.v1")),
             ("exit_code", json!(1)),
             ("environment_id", json!("local")),
             ("cwd", json!("/tmp")),

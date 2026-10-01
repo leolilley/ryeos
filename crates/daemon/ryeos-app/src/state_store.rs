@@ -15788,7 +15788,7 @@ impl StateStore {
             return Ok(false);
         }
         let guard = self.state_authority.acquire_shared_guard()?;
-        self.verify_external_q_fixture_custody_admitted(&guard, placement)?;
+        self.verify_retained_external_q_fixture_custody_admitted(&guard, placement)?;
         self.lock()?
             .runtime_db
             .completed_qualification_guest_scratch_transport(
@@ -15813,7 +15813,7 @@ impl StateStore {
         let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
             coordinate, qualification_operation_id,
         )?;
-        self.verify_external_q_fixture_custody_admitted(guard, &placement)?;
+        self.verify_retained_external_q_fixture_custody_admitted(guard, &placement)?;
         self.lock()?
             .runtime_db
             .qualification_historical_transport_evidence(
@@ -16775,12 +16775,17 @@ impl StateStore {
             .lock()?
             .runtime_db
             .qualification_worker_transcript_source(placement)?;
+        // Verify the SAME original receiver stage and exact native capture CAS
+        // under this publication guard before creating any transcript roots.
+        self.verify_retained_external_q_fixture_custody_admitted(permit.cas_guard(), placement)?;
         let prepared =
             crate::external_qualification_transcript::prepare_qualification_worker_transcript(
                 &source.owner_principal,
                 &source.command,
                 &source.batches,
                 &source.provider_configuration,
+                source.fixture_capture.as_ref(),
+                source.fixture_content.as_ref(),
             )?;
         let authority = self.pinned_state_authority()?;
         authority.ensure_guard(permit.cas_guard())?;
@@ -17017,15 +17022,16 @@ impl StateStore {
         Ok(Some(retained))
     }
 
-    /// Authenticate the original receiver stage and exact CAS bytes. The DB
-    /// plan and finish reader separately enforce immutable signed frame joins.
+    /// Cancellation cleanup may proceed without successful capture custody.
+    /// Positive evidence publication/readback uses the unconditional retained
+    /// check below, including after channel revocation.
     fn verify_external_q_fixture_custody_admitted(
         &self,
         guard: &ryeos_state::CasMutationGuard,
         placement: &str,
     ) -> Result<()> {
         self.state_authority.ensure_guard(guard)?;
-        let plan = {
+        {
             let state = self.lock()?;
             if !state
                 .runtime_db
@@ -17033,10 +17039,26 @@ impl StateStore {
             {
                 return Ok(());
             }
-            state
-                .runtime_db
-                .retained_q_fixture_receiver_plan(placement)?
-                .context("Q fixture receiver lost its retained custody plan")?
+        }
+        self.verify_retained_external_q_fixture_custody_admitted(guard, placement)
+    }
+
+    /// Authenticate the original stage and exact CAS bytes for positive
+    /// retained evidence. Revocation cannot replace or waive that custody.
+    /// Null/non-Q selections have no fixture; their callers check their exact
+    /// historical source separately. No provider contact is authorized here.
+    fn verify_retained_external_q_fixture_custody_admitted(
+        &self,
+        guard: &ryeos_state::CasMutationGuard,
+        placement: &str,
+    ) -> Result<()> {
+        self.state_authority.ensure_guard(guard)?;
+        let Some(plan) = self
+            .lock()?
+            .runtime_db
+            .retained_q_fixture_receiver_plan(placement)?
+        else {
+            return Ok(());
         };
         let record = plan
             .receiver_stage
@@ -17347,7 +17369,7 @@ impl StateStore {
         placement: &str,
     ) -> Result<()> {
         let guard = self.state_authority.acquire_shared_guard()?;
-        self.verify_external_q_fixture_custody_admitted(&guard, placement)?;
+        self.verify_retained_external_q_fixture_custody_admitted(&guard, placement)?;
         self.lock()?
             .runtime_db
             .ensure_external_qualification_normal_terminal(placement)
@@ -17367,7 +17389,7 @@ impl StateStore {
             return Ok(false);
         }
         let guard = self.state_authority.acquire_shared_guard()?;
-        self.verify_external_q_fixture_custody_admitted(&guard, placement)?;
+        self.verify_retained_external_q_fixture_custody_admitted(&guard, placement)?;
         self.lock()?
             .runtime_db
             .has_external_qualification_normal_termination_intent(placement)

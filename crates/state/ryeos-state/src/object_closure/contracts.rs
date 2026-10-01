@@ -341,7 +341,17 @@ fn links_qualification_worker_transcript(value: &Value) -> Result<ContractLinks,
     let manifest = crate::objects::QualificationWorkerTranscriptManifest::from_current_value(value)
         .map_err(|error| format!("invalid Q Worker transcript: {error:#}"))?;
     Ok(ContractLinks {
-        object_edges: Vec::new(),
+        object_edges: manifest
+            .fixture_capture
+            .into_iter()
+            .map(|capture| ObjectEdge {
+                hash: capture.metadata_hash,
+                expected: ExpectedObject::Kind(
+                    crate::objects::qualification_fixture::Q_FIXTURE_CAPTURE_KIND,
+                ),
+                history_graph: None,
+            })
+            .collect(),
         blob_hashes: manifest
             .chunks
             .into_iter()

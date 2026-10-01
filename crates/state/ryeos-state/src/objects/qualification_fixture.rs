@@ -255,7 +255,7 @@ impl QFixtureCaptureContent {
             self.bytes_base64.len() as u64 <= contract.max_bytes.div_ceil(3) * 4,
             "Q fixture transfer encoding exceeds its signed ceiling"
         );
-        self.decode_reference(reference)
+        self.verify_content_identity(reference)
     }
 
     /// Global structural/content identity only. A frame validator can use this
@@ -274,10 +274,14 @@ impl QFixtureCaptureContent {
             self.metadata.native_settlement == *expected_native,
             "Q fixture transfer changed its original native completion"
         );
-        self.decode_reference(reference)
+        self.verify_content_identity(reference)
     }
 
-    fn decode_reference(&self, reference: &QFixtureCaptureReference) -> Result<Vec<u8>> {
+    /// Bounded inert content identity only. Protected transcript readers may
+    /// reuse this decoder without inventing a channel binding. The publishing
+    /// owner must authenticate native settlement and custody separately; the
+    /// product verifier must still join the original signed fixture contract.
+    pub fn verify_content_identity(&self, reference: &QFixtureCaptureReference) -> Result<Vec<u8>> {
         reference.validate()?;
         self.metadata.validate()?;
         ensure!(

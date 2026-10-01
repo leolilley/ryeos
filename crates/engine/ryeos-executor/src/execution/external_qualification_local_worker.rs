@@ -284,16 +284,17 @@ impl ExternalQualificationLocalWorker {
         )
     }
 
-    /// Consume the signed setup and one turn, settle the attached local process even
-    /// when the send or wait fails, and freeze only a successful transcript.
+    /// Consume the signed setup and one turn, settling the attached local process
+    /// even when the send or wait fails. Transcript publication must wait for
+    /// original native settlement and bounded fixture receiver custody.
     /// The outer Q guest and cleanup lifeline remain with this owner for the
     /// separate native and provider settlement steps.
-    pub(crate) fn run_signed_turn_and_retain_transcript(
+    pub(crate) fn run_signed_turn_and_retire(
         &mut self,
         state: &ryeos_app::state::AppState,
         coordinate: &ConsumerRuntimeVerificationCoordinate,
         selected: &SignedQualificationWorkerRequest,
-    ) -> Result<String> {
+    ) -> Result<()> {
         let turn = (|| -> Result<()> {
             self.execute_one_signed_request(state, coordinate, selected)?;
             self.wait_for_signed_turn_completion(state, selected)?;
@@ -314,7 +315,7 @@ impl ExternalQualificationLocalWorker {
         };
         let retirement = self.retire_for_native_completion(state);
         match (turn, retirement) {
-            (Ok(()), Ok(())) => self.retain_terminal_transcript(state, coordinate),
+            (Ok(()), Ok(())) => Ok(()),
             (Err(turn_error), Ok(())) => Err(turn_error),
             (Ok(()), Err(retirement_error)) => Err(retirement_error),
             (Err(turn_error), Err(retirement_error)) => Err(turn_error.context(format!(
@@ -342,7 +343,7 @@ pub(crate) fn run_external_qualification_to_normal_terminal(
         start_external_qualification_local_worker_for_signed_request(state, coordinate, ready)?;
     let placement = worker.ready().placement().to_owned();
     let binding_digest = worker.ready().binding().digest()?;
-    worker.run_signed_turn_and_retain_transcript(state, coordinate, &selected)?;
+    worker.run_signed_turn_and_retire(state, coordinate, &selected)?;
 
     // The signed frame is durably queued for the existing channel transport;
     // its return is not evidence that the guest processed the command.
@@ -370,6 +371,11 @@ pub(crate) fn run_external_qualification_to_normal_terminal(
         native.placement_thread_id == placement && native.binding_digest == binding_digest,
         "Q native settlement changed its exact channel"
     );
+
+    // Publish once only after the original native frame is Applied and its
+    // optional capture has verified controller custody. This reuses historical
+    // evidence ownership; it cannot repeat the turn or mint contact permission.
+    worker.retain_terminal_transcript(state, coordinate)?;
 
     // Join the last bounded file contact before physical local cleanup or
     // provider termination can acquire the same placement contact gate.

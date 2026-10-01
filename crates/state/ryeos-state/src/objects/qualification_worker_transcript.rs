@@ -2,7 +2,9 @@
 //!
 //! The manifest is structural testimony only. Its chunks contain the exact
 //! canonical ObservationBatch bodies, the optional retained Delta body, and
-//! the retained setup and turn Final bodies. Batches span the session beginning
+//! the retained setup and turn Final bodies, and the optional original native
+//! fixture capture. Capture identity is checked here; the publisher authenticates
+//! its native predecessor and retained receiver custody. Batches span the session beginning
 //! at setup contact; they are not evidence of turn request causality. The command
 //! journal also retains turn State digests, turn coordinates, and daemon-owned
 //! successful send return timestamps. State bodies outside those retained frames
@@ -11,6 +13,7 @@
 //! Neither a valid manifest nor a transcript establishes semantic success,
 //! native death, provider settlement, or a qualification.
 
+use super::qualification_fixture::{QFixtureCaptureContent, QFixtureCaptureReference};
 use anyhow::{Context as _, ensure};
 use base64::Engine as _;
 use ryeos_external_execution_contract::ProviderConfigurationLaunchInput;
@@ -18,9 +21,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const QUALIFICATION_WORKER_TRANSCRIPT_KIND: &str = "qualification_worker_transcript";
-pub const QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA: u32 = 3;
+pub const QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA: u32 = 4;
 pub const QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA: &str =
-    "ryeos.qualification_worker_transcript_stream.v2";
+    "ryeos.qualification_worker_transcript_stream.v3";
 pub const MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES: u64 = 1024 * 1024;
 pub const MAX_QUALIFICATION_WORKER_TRANSCRIPT_BYTES: u64 = 112 * 1024 * 1024;
 pub const MAX_QUALIFICATION_WORKER_BATCH_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -51,6 +54,9 @@ pub struct QualificationWorkerTranscriptManifest {
     /// Bounded public projection retained from the exact original process launch.
     /// It describes one provider configuration, not a complete tool inventory.
     pub provider_configuration: ProviderConfigurationLaunchInput,
+    /// Original post-native-settlement capture, never ordinary project export.
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub fixture_capture: Option<QFixtureCaptureReference>,
     pub setup_request_digest: String,
     pub setup_final_response_digest: String,
     /// Exact durable daemon-owned successful setup send return.
@@ -179,6 +185,8 @@ impl QualificationWorkerTranscriptChunkResponse {
 #[serde(deny_unknown_fields)]
 pub struct QualificationWorkerTranscriptStream {
     pub schema: String,
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub fixture_content: Option<QFixtureCaptureContent>,
     pub batches: Vec<Value>,
     #[serde(deserialize_with = "super::deserialize_required_nullable")]
     pub delta_response: Option<Value>,
@@ -203,9 +211,12 @@ impl QualificationWorkerTranscriptManifest {
         super::validate_object_kind(&self.kind, QUALIFICATION_WORKER_TRANSCRIPT_KIND)?;
         ensure!(
             self.schema == QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
-            "Q Worker transcript is not the current v3 schema"
+            "Q Worker transcript is not the current v4 schema"
         );
         self.provider_configuration.validate()?;
+        if let Some(capture) = &self.fixture_capture {
+            capture.validate()?;
+        }
         let owner = self
             .owner_principal
             .strip_prefix("fp:")
@@ -391,6 +402,17 @@ impl QualificationWorkerTranscriptManifest {
             stream.schema == QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA,
             "Q transcript stream schema is not current"
         );
+        ensure!(
+            self.fixture_capture.is_some() == stream.fixture_content.is_some(),
+            "Q transcript fixture reference and content differ in presence"
+        );
+        if let (Some(reference), Some(content)) = (&self.fixture_capture, &stream.fixture_content) {
+            ensure!(
+                content.metadata.native_settlement.binding_digest == self.channel_binding_digest,
+                "Q transcript fixture changed its original channel binding"
+            );
+            content.verify_content_identity(reference)?;
+        }
         let setup_final_bytes = lillux::canonical_json(&stream.setup_final_response)?;
         ensure!(
             setup_final_bytes.len() <= self.wire_max_bytes as usize
@@ -505,6 +527,7 @@ mod tests {
         let batch_json = lillux::canonical_json(&batch).unwrap();
         let stream = json!({
             "schema":QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA,
+            "fixture_content":null,
             "batches":[batch],
             "delta_response":null,
             "setup_final_response":setup_final_response,
@@ -522,6 +545,7 @@ mod tests {
             qualification_occurrence_id: "occurrence".into(),
             channel_binding_digest: "e".repeat(64),
             process_incarnation_digest: "f".repeat(64),
+            fixture_capture: None,
             provider_configuration: ProviderConfigurationLaunchInput {
                 schema: 1,
                 configuration_sha256: "5".repeat(64),
@@ -563,6 +587,156 @@ mod tests {
             }],
         };
         (manifest, bytes)
+    }
+
+    fn rebind_stream(
+        manifest: &mut QualificationWorkerTranscriptManifest,
+        stream: &Value,
+    ) -> Vec<u8> {
+        let bytes = lillux::canonical_json(stream).unwrap().into_bytes();
+        assert!(bytes.len() <= MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES as usize);
+        manifest.stream_sha256 = lillux::sha256_hex(&bytes);
+        manifest.stream_bytes = bytes.len() as u64;
+        manifest.chunks = vec![QualificationWorkerTranscriptChunk {
+            blob_hash: manifest.stream_sha256.clone(),
+            size_bytes: manifest.stream_bytes,
+        }];
+        bytes
+    }
+
+    fn captured_stream(bytes: &[u8]) -> (QualificationWorkerTranscriptManifest, Value) {
+        use super::super::qualification_fixture::{
+            Q_FIXTURE_CAPTURE_KIND, Q_FIXTURE_CAPTURE_SCHEMA, QFixtureCaptureMetadata,
+        };
+        use crate::external_execution::{
+            NativeNamespaceExit, NativeQualificationScopeSettlementObservation,
+            NativeWriterExclusionMechanism,
+        };
+        let (mut manifest, original) = manifest_and_chunk();
+        let metadata = QFixtureCaptureMetadata {
+            kind: Q_FIXTURE_CAPTURE_KIND.into(),
+            schema: Q_FIXTURE_CAPTURE_SCHEMA,
+            fixture_contract_digest: "a".repeat(64),
+            native_settlement: NativeQualificationScopeSettlementObservation {
+                schema: 1,
+                binding_digest: manifest.channel_binding_digest.clone(),
+                launcher_occurrence_digest: "b".repeat(64),
+                applied_runtime_receipt_digest: "c".repeat(64),
+                completion_frame_digest: "d".repeat(64),
+                completion_request_digest: "e".repeat(64),
+                mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+                exit: NativeNamespaceExit::Code(0),
+            },
+            blob_hash: lillux::sha256_hex(bytes),
+            size_bytes: bytes.len() as u64,
+            normalized_mode: super::super::ProjectFile::REGULAR_MODE,
+        };
+        manifest.fixture_capture = Some(QFixtureCaptureReference {
+            metadata_hash: metadata.digest().unwrap(),
+            blob_hash: metadata.blob_hash.clone(),
+            size_bytes: metadata.size_bytes,
+        });
+        let content = QFixtureCaptureContent::from_bytes(metadata, bytes).unwrap();
+        let mut stream: Value = serde_json::from_slice(&original).unwrap();
+        stream["fixture_content"] = serde_json::to_value(content).unwrap();
+        (manifest, stream)
+    }
+
+    #[test]
+    fn fixture_content_is_required_nullable_and_current() {
+        let (manifest, bytes) = manifest_and_chunk();
+        manifest.verify_chunks(&[bytes.clone()]).unwrap();
+        let mut missing = manifest.to_value().unwrap();
+        missing.as_object_mut().unwrap().remove("fixture_capture");
+        assert!(QualificationWorkerTranscriptManifest::from_current_value(&missing).is_err());
+        let mut predecessor = manifest.clone();
+        predecessor.schema = 3;
+        assert!(predecessor.validate().is_err());
+        for missing_field in [true, false] {
+            let mut changed = manifest.clone();
+            let mut stream: Value = serde_json::from_slice(&bytes).unwrap();
+            if missing_field {
+                stream.as_object_mut().unwrap().remove("fixture_content");
+            } else {
+                stream["schema"] = json!("ryeos.qualification_worker_transcript_stream.v2");
+            }
+            let rebound = rebind_stream(&mut changed, &stream);
+            assert!(changed.verify_chunks(&[rebound]).is_err());
+        }
+    }
+
+    #[test]
+    fn fixture_stream_refuses_substitution_even_when_outer_chunks_are_rehashed() {
+        let (manifest, stream) = captured_stream(b"changed");
+        for mutation in [
+            "missing_reference",
+            "missing_content",
+            "native_binding",
+            "reference",
+            "bytes",
+            "oversized",
+            "extra",
+        ] {
+            let mut changed = manifest.clone();
+            let mut body = stream.clone();
+            match mutation {
+                "missing_reference" => changed.fixture_capture = None,
+                "missing_content" => body["fixture_content"] = Value::Null,
+                "native_binding" => {
+                    body["fixture_content"]["metadata"]["native_settlement"]["binding_digest"] =
+                        json!("0".repeat(64));
+                    // Rehash the metadata too: the separate original-channel
+                    // join must reject a structurally valid foreign capture.
+                    changed.fixture_capture.as_mut().unwrap().metadata_hash =
+                        super::super::canonical_value_digest(&body["fixture_content"]["metadata"])
+                            .unwrap();
+                }
+                "reference" => {
+                    changed.fixture_capture.as_mut().unwrap().metadata_hash = "0".repeat(64)
+                }
+                "bytes" => {
+                    body["fixture_content"]["bytes_base64"] =
+                        json!(base64::engine::general_purpose::STANDARD.encode(b"swapped"))
+                }
+                "oversized" => body["fixture_content"]["bytes_base64"] = json!("A".repeat(87388)),
+                "extra" => body["fixture_content"]["authority"] = json!(true),
+                _ => unreachable!(),
+            }
+            let bytes = rebind_stream(&mut changed, &body);
+            assert!(
+                changed.verify_chunks(&[bytes]).is_err(),
+                "accepted {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn finite_capture_roundtrip_roots_metadata_and_its_blob_only() {
+        for bytes in [
+            Vec::new(),
+            vec![b'x'; super::super::qualification_fixture::MAX_Q_FIXTURE_BYTES as usize],
+        ] {
+            let (mut manifest, body) = captured_stream(&bytes);
+            let chunk = rebind_stream(&mut manifest, &body);
+            let stream = manifest.verify_chunks(&[chunk]).unwrap();
+            let reference = manifest.fixture_capture.as_ref().unwrap();
+            let content = stream.fixture_content.unwrap();
+            assert_eq!(content.verify_content_identity(reference).unwrap(), bytes);
+            let links = crate::object_closure::object_links(&manifest.to_value().unwrap()).unwrap();
+            assert_eq!(links.object_hashes, vec![reference.metadata_hash.clone()]);
+            assert_eq!(
+                links.blob_hashes,
+                vec![manifest.chunks[0].blob_hash.clone()]
+            );
+            assert!(links.large_object_hashes.is_empty() && links.unsupported_kind.is_none());
+            let capture_links =
+                crate::object_closure::object_links(&content.metadata.to_value().unwrap()).unwrap();
+            assert_eq!(capture_links.blob_hashes, vec![reference.blob_hash.clone()]);
+            assert!(
+                capture_links.object_hashes.is_empty()
+                    && capture_links.large_object_hashes.is_empty()
+            );
+        }
     }
 
     #[test]

@@ -80,6 +80,22 @@ pub async fn read_consumer_worker_transcript(
         "Q transcript verification exceeded caller deadline"
     );
     let stream = reference.manifest.verify_chunks(&chunks)?;
+    let configuration = original.scripted_configuration()?;
+    let request = original
+        .purpose
+        .policy_source
+        .policy
+        .producer_scenarios
+        .get(&original.coordinate.scenario_id)
+        .and_then(|scenario| scenario.consumer_worker_request.as_ref())
+        .context("Q transcript has no original signed Worker request")?;
+    crate::consumer_worker_semantics::check_fixture_capture(
+        &configuration.qualification_worker,
+        request.fixture.as_ref(),
+        reference.manifest.fixture_capture.as_ref(),
+        stream.fixture_content.as_ref(),
+        &reference.manifest.channel_binding_digest,
+    )?;
     ensure!(
         !deadline.has_elapsed(),
         "Q transcript verification exceeded caller deadline"
@@ -93,7 +109,7 @@ pub(crate) fn validate_reference_for_record(
 ) -> Result<()> {
     original.validate()?;
     reference.validate()?;
-    original.scripted_configuration()?;
+    let configuration = original.scripted_configuration()?;
     let inputs = original.consumer_invocation()?;
     let manifest = &reference.manifest;
     // Required bounded projection from the exact death-settled launch process.
@@ -126,6 +142,13 @@ pub(crate) fn validate_reference_for_record(
         .as_ref()
         .context("Q transcript scenario has no signed Worker Request")?;
     request.validate()?;
+    configuration
+        .qualification_worker
+        .expected_fixture_content(request.fixture.as_ref())?;
+    ensure!(
+        request.fixture.is_some() == manifest.fixture_capture.is_some(),
+        "Q transcript fixture presence differs from the original signed request"
+    );
     ensure!(
         manifest.request_digest == canonical_value_digest(&request.body)?
             && manifest.setup_request_digest == canonical_value_digest(&request.session_setup)?,

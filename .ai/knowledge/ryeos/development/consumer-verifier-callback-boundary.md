@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T08:57:57Z:a3c2bb0f0be062f44ea6a6f01c291f1d9fe5b72ebb2bbe2f5d661a4963ce9c0f:ASn9fx0/YdI8/ZuQUyOm3F9OLeScwFwcZFo2d/tBLfOeohNCawtEwQ7xnnfOnFpMUZP14xgtZZj2cyumFWaVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T09:49:55Z:5bd445421739ac9d93e897cece9717b44c337f4f7c9bf32d5c93c02e24c7edd8:LDaNMxsi1m3OEHMRkj/lOQp0/bEqrsPUIxFqAzJyN0vXzGBf9ra1QMrb3N60yFvVtHYT4BJSnyuJN3gkrf8xAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -125,7 +125,7 @@ Both sends use the original channel deadline; successful setup does not renew
 it. A fresh turn admission refusal retires the attached owner through existing
 cleanup, without repeating setup.
 
-The schema 3 transcript manifest retains the exact setup Final, its digest, signed setup-request
+The schema 4 transcript manifest retains the exact setup Final, its digest, signed setup-request
 digest and owner-send marker alongside the turn Delta/Final and completed-turn
 fence. Pushed batches are the whole Q session's ordered observations, including
 setup. Their receipt order does not establish that a turn request caused them;
@@ -184,7 +184,7 @@ remains eligible for the existing maintenance cutoff. If it has expired or is
 missing, exact-stage recovery refuses; a new stage cannot substitute for the
 recorded ID. This boundary does not promise unlimited pending recovery. Once the
 two-root receipt is retained, that maintenance path preserves it. Runtime epoch
-123 joins placement, exact owner/program,
+124 joins placement, exact owner/program,
 binding, completion, native settlement, capture reference and stage identity.
 Bounded metadata/blob verification uses the original signed fixture and native
 predecessor, outside the StateStore/RuntimeDb lock. The verified receiver row and
@@ -198,6 +198,31 @@ remains negative without demanding a capture that never happened. Revocation
 and cancellation cleanup remain independent of normal fixture evidence. SQL
 readback alone is not authenticated CAS custody. These source joins and authored
 tests do not establish installed execution, product semantics or a Render proof.
+
+The transcript is published after original Worker retirement and exact native
+settlement application, before relay shutdown, private-root removal and provider
+termination. Both fixture and null-fixture publication require the original
+Applied native frame, exact command channel and historical retained owner. The
+source, bind and cold reader rederive those joins in their own existing database
+transactions; they do not require cleanup to have finished first.
+
+Manifest schema 4 carries a required-null capture reference; stream schema 3
+carries the matching required-null content. The inert bounded decoder checks
+metadata/reference identity, canonical bytes and size; it grants no native or
+process authority. Native authentication and receiver custody remain daemon
+checks. Object closure follows capture metadata and its blob, never commitment-only
+ProjectFile hashes. The existing total 112 MiB transcript ceiling includes capture
+content; no new protected reader or evidence service is introduced.
+
+Publication and positive historical reads verify the original receiver stage and
+exact CAS bytes under their existing CAS guard, even after channel revocation.
+Cancellation cleanup retains its distinct exemption so failed capture cannot
+prevent retirement. Original successful evidence retention and identical lost-ACK
+readback may finish after callback expiry; they cannot authorize another turn,
+capture, provider contact or issued claim. Missing or substituted original custody
+refuses positive evidence. Full integrated publication, replay, expiry and CAS-loss
+regressions remain an acceptance requirement; isolated source predicates do not
+prove those paths.
 
 ## Actual production Q semantics and remaining joins
 
@@ -219,8 +244,12 @@ Existing execution arguments, provider, credentials, routes and lifecycle State
 authority are preserved. Raw events still need an explicit signed setup opt-in.
 
 Current-only consumer-verifier configuration v4 requires a finite signed Q
-command expectation: remote environment, command, command presentation, cwd,
-output and successful exit code. The product interpreter binds the actual setup
+command expectation (`ryeos.codex.q_command.v2`): remote environment, command,
+command presentation, cwd, output, successful exit code and required-null expected
+final fixture content. Presence must match the original signed fixture. Expected
+bytes must be canonical base64, within its signed limit and different from the
+initial content; the captured bytes must match exactly. Null retains the
+no-fixture diagnostic. The product interpreter binds the actual setup
 thread and turn to the retained request, lifecycle observations and manifest;
 requires one raw remote exec_command, its terminal result and the corresponding
 completed command item before successful turn completion; and refuses swapped,
@@ -268,7 +297,7 @@ Historical release uses the retained process identity without requiring a curren
 callback, active generation or original disposable-directory descriptors.
 Launch/send/readiness failures attempt the same release and preserve uncertainty.
 No-Create rollback releases safe credential custody before its terminal cleanup.
-Runtime epoch 123 and required-null journal fields are current-only; there is no
+Runtime epoch 124 and required-null journal fields are current-only; there is no
 predecessor decoder.
 
 ## Finite result and issuance joins
@@ -362,14 +391,15 @@ SQLite transaction or move freshness outside attachment. Missing/mismatched home
 placement, adapter/destination or channel refuses held release. Existing abort/reap
 cleanup remains available. The bounded canonical public configuration JSON is a
 required immutable field of the existing Q process row, not a new evidence service,
-CAS object or root. Runtime epoch 123 owns this storage contract. Authenticated peer
+CAS object or root. Runtime epoch 124 owns this storage contract. Authenticated peer
 and cold/historical process readers rejoin the original retained adapter binding.
 
-Transcript manifest schema 3 requires that exact process observation. Structural
+Transcript manifest schema 4 requires that exact process observation. Structural
 source/retained reading compares it to the terminal process, alongside original
-setup/turn, process incarnation and channel. Stream schema remains v2 because the
-chunk stream shape did not change. Original protected chunk readback carries only
-the public observation. A lost ACK cannot authorize rerendering configuration,
+setup/turn, process incarnation and channel. Stream schema 3 adds bounded fixture
+content; original protected chunk readback carries the public configuration
+observation and captured fixture bytes, never private configuration or HOME. A
+lost ACK cannot authorize rerendering configuration,
 selecting a replacement HOME/process or renewing original contact.
 
 Pinned Codex omits environment_id from a sole environment's advertised command

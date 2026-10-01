@@ -10,6 +10,9 @@
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::ProviderConfigurationLaunchInput;
 use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate;
+use ryeos_state::objects::qualification_fixture::{
+    QFixtureCaptureContent, QFixtureCaptureReference,
+};
 use ryeos_state::objects::{
     MAX_QUALIFICATION_WORKER_TRANSCRIPT_BYTES, MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES,
     QUALIFICATION_WORKER_TRANSCRIPT_KIND, QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
@@ -79,8 +82,21 @@ pub(crate) fn prepare_qualification_worker_transcript(
     command: &QualificationWorkerCommandRecord,
     batches: &[QualificationWorkerObservationBatchRecord],
     provider_configuration: &ProviderConfigurationLaunchInput,
+    fixture_capture: Option<&QFixtureCaptureReference>,
+    fixture_content: Option<&QFixtureCaptureContent>,
 ) -> Result<PreparedQualificationWorkerTranscript> {
     provider_configuration.validate()?;
+    match (fixture_capture, fixture_content) {
+        (None, None) => {}
+        (Some(reference), Some(content)) => {
+            content.verify_content_identity(reference)?;
+            ensure!(
+                content.metadata.native_settlement.binding_digest == command.channel_binding_digest,
+                "Q transcript fixture differs from its original command channel"
+            );
+        }
+        _ => anyhow::bail!("Q transcript fixture reference/content presence differs"),
+    }
     ensure!(
         command.phase == QualificationWorkerCommandPhase::TurnCompleted
             && command.owner_send_settled_at_ms.is_some()
@@ -149,6 +165,7 @@ pub(crate) fn prepare_qualification_worker_transcript(
         setup_final_response,
         delta_response: command.delta_response.clone(),
         final_response: final_response.clone(),
+        fixture_content: fixture_content.cloned(),
     };
     let stream_bytes = lillux::canonical_json(&serde_json::to_value(&stream)?)?.into_bytes();
     ensure!(
@@ -178,6 +195,7 @@ pub(crate) fn prepare_qualification_worker_transcript(
         channel_binding_digest: command.channel_binding_digest.clone(),
         process_incarnation_digest: command.process_incarnation_digest.clone(),
         provider_configuration: provider_configuration.clone(),
+        fixture_capture: fixture_capture.cloned(),
         setup_request_digest: command.setup_request_digest.clone(),
         setup_final_response_digest,
         setup_owner_send_settled_at_ms: command
