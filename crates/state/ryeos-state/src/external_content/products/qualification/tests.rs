@@ -2423,6 +2423,7 @@ fn qualification_expiry_remains_explicit_existing_attestation_authority() {
     assert!(signed.is_expired_at("2026-09-09T00:00:00Z").unwrap());
 }
 
+#[cfg(test)]
 fn consumer_q_evidence_fixture() -> ProductQualificationEvidence {
     let mut evidence = evidence();
     let purpose = consumer_launch_purpose_fixture();
