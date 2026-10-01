@@ -43,6 +43,68 @@ struct CompletionMarker {
 /// Layout: `{cache_root}/{snapshot_hash}/` contains the materialized files.
 pub struct MaterializationCache {
     cache_root: PathBuf,
+    kind: MaterializationCacheKind,
+}
+
+/// Cache domain bound to a construction token, never supplied by worker JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MaterializationCacheKind {
+    Snapshot,
+    SourceClosure,
+}
+
+/// The already-held construction lock and its exact descriptor-rooted domain.
+/// It cannot be cloned, serialized or reconstructed from a generation hash.
+pub struct GenerationConstruction {
+    root: lillux::PinnedDirectory,
+    generation: String,
+    kind: MaterializationCacheKind,
+    _lock: lillux::PinnedRegularFile,
+}
+
+/// One-shot unlink operation; the caller must invoke it INSIDE its current pin
+/// critical section. Dropping it preserves the generation. The construction
+/// token and exclusive lease remain live throughout the callback and unlink.
+pub(super) struct GenerationRetirement<'a> {
+    construction: &'a GenerationConstruction,
+    _lease: lillux::PinnedRegularFile,
+}
+
+impl GenerationRetirement<'_> {
+    pub(super) fn generation(&self) -> &str {
+        &self.construction.generation
+    }
+
+    pub(super) fn kind(&self) -> MaterializationCacheKind {
+        self.construction.kind
+    }
+
+    pub(super) fn require_root(&self, expected: &lillux::PinnedDirectory) -> Result<()> {
+        expected.ensure_path_binding()?;
+        self.construction.root.ensure_path_binding()?;
+        if self.construction.root.identity()? != expected.identity()? {
+            anyhow::bail!("materialization retirement belongs to a different runtime namespace");
+        }
+        Ok(())
+    }
+
+    pub(super) fn remove(self) -> Result<()> {
+        let root = &self.construction.root;
+        root.ensure_path_binding()?;
+        let name = OsStr::new(&self.construction.generation);
+        if let Some(directory) = root.open_child_directory(name)? {
+            directory.remove_contents_recursive()?;
+            if !root.remove_empty_child_if_same(name, &directory)? {
+                anyhow::bail!("materialization generation changed during retirement");
+            }
+        }
+        if let Some(markers) = root.open_child_directory(OsStr::new(".complete"))? {
+            if let Some(marker) = markers.open_pinned_regular(name, true)? {
+                markers.remove_pinned_regular_if_same(&marker)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Exact outcome of one lease-aware materialization-cache sweep.
@@ -159,7 +221,17 @@ impl VerifiedContentFile {
 
 impl MaterializationCache {
     pub fn new(cache_root: PathBuf) -> Self {
-        Self { cache_root }
+        Self {
+            cache_root,
+            kind: MaterializationCacheKind::Snapshot,
+        }
+    }
+
+    pub(super) fn source_closures(cache_root: PathBuf) -> Self {
+        Self {
+            cache_root,
+            kind: MaterializationCacheKind::SourceClosure,
+        }
     }
 
     /// Resolve the materialization cache beneath the runtime cache root. This
@@ -333,65 +405,59 @@ impl MaterializationCache {
     /// The caller retains the returned descriptor for the workspace lifetime.
     pub fn generation_lease(&self, snapshot_hash: &str) -> Result<fs::File> {
         validate_canonical_hash("materialization snapshot hash", snapshot_hash)?;
-        let leases = self.cache_root.join(".leases");
-        fs::create_dir_all(&leases)?;
-        let path = leases.join(snapshot_hash);
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)?;
-        #[cfg(unix)]
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        Ok(file)
+        let root = self.pinned_root()?;
+        let leases = root.open_or_create_child(OsStr::new(".leases"), 0o700)?;
+        let lease =
+            leases.open_pinned_regular_create(OsStr::new(snapshot_hash), true, false, 0o600)?;
+        lease.lock_shared()?;
+        root.ensure_path_binding()?;
+        lease.try_clone_descriptor()
     }
 
-    pub fn generation_build_lock(&self, snapshot_hash: &str) -> Result<fs::File> {
-        validate_canonical_hash("materialization snapshot hash", snapshot_hash)?;
-        let locks = self.cache_root.join(".locks");
-        fs::create_dir_all(&locks)?;
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(locks.join(snapshot_hash))?;
-        #[cfg(unix)]
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        Ok(file)
+    pub fn generation_build_lock(&self, snapshot_hash: &str) -> Result<GenerationConstruction> {
+        self.construction_token(snapshot_hash, false)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("blocking generation construction did not acquire its lock")
+            })
     }
 
-    fn try_generation_build_lock(&self, snapshot_hash: &str) -> Result<Option<fs::File>> {
-        validate_canonical_hash("materialization snapshot hash", snapshot_hash)?;
-        let locks = self.cache_root.join(".locks");
-        fs::create_dir_all(&locks)?;
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(locks.join(snapshot_hash))?;
-        #[cfg(unix)]
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::WouldBlock {
+    fn try_generation_build_lock(
+        &self,
+        snapshot_hash: &str,
+    ) -> Result<Option<GenerationConstruction>> {
+        self.construction_token(snapshot_hash, true)
+    }
+
+    fn construction_token(
+        &self,
+        generation: &str,
+        nonblocking: bool,
+    ) -> Result<Option<GenerationConstruction>> {
+        validate_canonical_hash("materialization snapshot hash", generation)?;
+        let root = self.pinned_root()?;
+        let locks = root.open_or_create_child(OsStr::new(".locks"), 0o700)?;
+        let lock = locks.open_pinned_regular_create(OsStr::new(generation), true, false, 0o600)?;
+        if nonblocking {
+            if !lock.try_lock_exclusive()? {
                 return Ok(None);
             }
-            return Err(error.into());
+        } else {
+            lock.lock_exclusive()?;
         }
-        Ok(Some(file))
+        root.ensure_path_binding()?;
+        Ok(Some(GenerationConstruction {
+            root,
+            generation: generation.to_owned(),
+            kind: self.kind,
+            _lock: lock,
+        }))
     }
 
     pub fn remove_incomplete_tree(&self, snapshot_hash: &str) -> Result<()> {
-        validate_canonical_hash("materialization snapshot hash", snapshot_hash)?;
+        self.require_snapshot_domain()?;
+        let construction = self.generation_build_lock(snapshot_hash)?;
         if self.verify_complete(snapshot_hash).is_err() {
-            remove_path_no_follow(&self.cache_dir(snapshot_hash))?;
-            remove_file_if_present(&self.cache_root.join(".complete").join(snapshot_hash))?;
+            self.discard_generation(snapshot_hash, &construction)?;
         }
         Ok(())
     }
@@ -532,10 +598,59 @@ impl MaterializationCache {
         Ok(())
     }
 
-    pub fn discard_generation(&self, snapshot_hash: &str) -> Result<()> {
-        validate_canonical_hash("materialization snapshot hash", snapshot_hash)?;
-        remove_path_no_follow(&self.cache_dir(snapshot_hash))?;
-        remove_file_if_present(&self.cache_root.join(".complete").join(snapshot_hash))
+    pub fn discard_generation(
+        &self,
+        generation: &str,
+        construction: &GenerationConstruction,
+    ) -> Result<()> {
+        self.require_snapshot_domain()?;
+        self.discard_generation_with(generation, construction, |operation| operation.remove())
+    }
+
+    pub(super) fn discard_generation_with(
+        &self,
+        generation: &str,
+        construction: &GenerationConstruction,
+        retire: impl FnOnce(GenerationRetirement<'_>) -> Result<()>,
+    ) -> Result<()> {
+        let retirement = self.retirement(generation, construction)?.ok_or_else(|| {
+            anyhow::anyhow!("materialization repair refused a leased generation: {generation}")
+        })?;
+        retire(retirement)
+    }
+
+    fn retirement<'a>(
+        &self,
+        generation: &str,
+        construction: &'a GenerationConstruction,
+    ) -> Result<Option<GenerationRetirement<'a>>> {
+        validate_canonical_hash("materialization snapshot hash", generation)?;
+        construction.root.ensure_path_binding()?;
+        if construction.generation != generation
+            || construction.kind != self.kind
+            || construction.root.identity()? != self.pinned_root()?.identity()?
+        {
+            anyhow::bail!("construction token does not protect this cache domain and generation");
+        }
+        let leases = construction
+            .root
+            .open_or_create_child(OsStr::new(".leases"), 0o700)?;
+        let lease =
+            leases.open_pinned_regular_create(OsStr::new(generation), true, false, 0o600)?;
+        if !lease.try_lock_exclusive()? {
+            return Ok(None);
+        }
+        Ok(Some(GenerationRetirement {
+            construction,
+            _lease: lease,
+        }))
+    }
+
+    fn require_snapshot_domain(&self) -> Result<()> {
+        if self.kind != MaterializationCacheKind::Snapshot {
+            anyhow::bail!("source generation deletion requires its current protected pin callback");
+        }
+        Ok(())
     }
 
     /// Evict a cache entry.
@@ -544,6 +659,7 @@ impl MaterializationCache {
     }
 
     fn evict_with_footprint(&self, snapshot_hash: &str) -> Result<Option<(usize, u64)>> {
+        self.require_snapshot_domain()?;
         validate_canonical_hash("materialization snapshot hash", snapshot_hash)?;
         // Construction lock precedes the exact generation lease everywhere.
         // A checkout retains this lock until it has acquired its shared lease,
@@ -551,31 +667,16 @@ impl MaterializationCache {
         let Some(_construction) = self.try_generation_build_lock(snapshot_hash)? else {
             return Ok(None);
         };
-        let leases = self.cache_root.join(".leases");
-        fs::create_dir_all(&leases)?;
-        let lease = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(leases.join(snapshot_hash))?;
-        #[cfg(unix)]
-        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                return Ok(None);
-            }
-            return Err(error.into());
-        }
+        let Some(retirement) = self.retirement(snapshot_hash, &_construction)? else {
+            return Ok(None);
+        };
         let dir = self.cache_dir(snapshot_hash);
         match fs::symlink_metadata(&dir) {
             Ok(_) => {
                 let (files, bytes) = path_footprint(&dir)?;
                 let (marker_files, marker_bytes) =
                     path_footprint(&self.cache_root.join(".complete").join(snapshot_hash))?;
-                remove_path_no_follow(&dir)?;
-                let marker = self.cache_root.join(".complete").join(snapshot_hash);
-                remove_file_if_present(&marker)?;
+                retirement.remove()?;
                 Ok(Some((
                     files + marker_files,
                     bytes.saturating_add(marker_bytes),
@@ -590,6 +691,7 @@ impl MaterializationCache {
     /// or workspace references. Active generations are skipped through exact
     /// non-blocking leases; cleanup never creates writable aliases.
     pub fn prune(&self, max_generations: usize) -> Result<()> {
+        self.require_snapshot_domain()?;
         self.prune_abandoned_staging()?;
         let mut generations = self._list()?;
         if generations.len() > max_generations {
@@ -614,6 +716,7 @@ impl MaterializationCache {
     /// bookkeeping. Dry-run performs no filesystem mutations, including lock
     /// anchor creation.
     pub fn prune_inactive_generations(&self, dry_run: bool) -> Result<MaterializationPruneReport> {
+        self.require_snapshot_domain()?;
         if !self.cache_root.is_dir() {
             return Ok(MaterializationPruneReport::default());
         }
@@ -1268,8 +1371,284 @@ fn verify_cached_file_metadata(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    pub(in crate::execution) fn open_custody_store(
+        root: &Path,
+    ) -> ryeos_app::state_store::StateStore {
+        use std::sync::Arc;
+        let key = root.join("test-node-key.pem");
+        let identity = if key.exists() {
+            ryeos_app::identity::NodeIdentity::load(&key).unwrap()
+        } else {
+            ryeos_app::identity::NodeIdentity::create(&key).unwrap()
+        };
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+        let state = root.join(".ai/state");
+        ryeos_app::state_store::StateStore::new_with_head_trust(
+            root.to_owned(),
+            state.clone(),
+            state.join("runtime.sqlite3"),
+            Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
+                &identity,
+            )),
+            ryeos_app::write_barrier::WriteBarrier::new(),
+            Arc::new(trust),
+        )
+        .unwrap()
+    }
+
+    /// Storage-only reservation: no launch, admitted capsule or GPU evidence.
+    #[cfg(target_os = "linux")]
+    pub(in crate::execution) fn storage_pin(
+        root: &Path,
+        cache: ryeos_app::runtime_db::process_resource_custody::ProcessMaterializationCache,
+        generation: &str,
+    ) -> ryeos_app::runtime_db::ProcessResourceReservationRecord {
+        use ryeos_app::runtime_db::{
+            self, process_resource_custody::*, process_resource_launch::*,
+        };
+        ryeos_app::runtime_db::ProcessResourceReservationRecord {
+            owner_kind: "pooled_session".to_owned(),
+            owner_coordinate: "storage-cache-pin".to_owned(),
+            daemon_generation_id: runtime_db::daemon_generation_id().to_owned(),
+            selections: vec![ryeos_engine::contracts::ExecutionResourceSelection {
+                stable_id: "storage-accelerator".to_owned(),
+                class: "accelerator".to_owned(),
+                matched_facts: BTreeMap::new(),
+                observation_contract_digest: "1".repeat(64),
+                device_binding_digest: "2".repeat(64),
+                access: ryeos_engine::contracts::ExecutionResourceAccess::DeploymentVisible,
+                enforcement:
+                    ryeos_engine::contracts::ExecutionResourceEnforcement::DeploymentVisible,
+                character_devices: Vec::new(),
+            }],
+            allocation_limit: 1,
+            runtime_custody: Some(ProcessResourceRuntimeCustody {
+                version: ProcessResourceRuntimeCustody::VERSION,
+                session_capsule_hash: "1".repeat(64),
+                execution_realization_hash: "2".repeat(64),
+                source_binding_hash: Some("3".repeat(64)),
+                materializations: vec![ProcessMaterializationCustody {
+                    cache,
+                    manifest_hash: generation.to_owned(),
+                }],
+                workspace_id: "storage-workspace".to_owned(),
+                workspace_identity: lillux::PinnedDirectory::open(root)
+                    .unwrap()
+                    .unwrap()
+                    .identity()
+                    .unwrap(),
+            }),
+            launch_authority: ProcessResourceLaunchAuthority::TrustedProcessGroup {
+                cleanup_contract_digest: "7".repeat(64),
+                host_lifetime: lillux::ProcessHostLifetime::capture_current().unwrap(),
+                phase: TrustedResourceLaunchPhase::Reserved,
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generation_repair_refuses_foreign_tokens_and_live_leases() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = MaterializationCache::new(root.path().join("cache"));
+        let foreign = MaterializationCache::new(root.path().join("foreign"));
+        let hash = snapshot_hash();
+        write_regular(&cache.cache_dir(&hash).join("input"), b"original");
+        let construction = cache.generation_build_lock(&hash).unwrap();
+        let foreign_construction = foreign.generation_build_lock(&hash).unwrap();
+        assert!(
+            cache
+                .discard_generation(&hash, &foreign_construction)
+                .is_err()
+        );
+        assert!(
+            cache
+                .discard_generation(&"cd".repeat(32), &construction)
+                .is_err()
+        );
+        let source = MaterializationCache::source_closures(cache.cache_root.clone());
+        assert!(
+            source
+                .discard_generation_with(&hash, &construction, |_| panic!(
+                    "foreign domain callback"
+                ))
+                .is_err()
+        );
+        let lease = cache.generation_lease(&hash).unwrap();
+        assert!(
+            cache
+                .discard_generation_with(&hash, &construction, |_| panic!("live lease callback"))
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(cache.cache_dir(&hash).join("input")).unwrap(),
+            b"original"
+        );
+        drop(lease);
+        // A failed authority read or a declined callback must not unlink.
+        assert!(
+            cache
+                .discard_generation_with(&hash, &construction, |_| anyhow::bail!(
+                    "pin authority unavailable"
+                ))
+                .is_err()
+        );
+        assert!(cache.cache_dir(&hash).exists());
+        cache.discard_generation(&hash, &construction).unwrap();
+        assert!(!cache.cache_dir(&hash).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generation_repair_refuses_a_replaced_root_binding() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = MaterializationCache::new(root.path().join("cache"));
+        let hash = snapshot_hash();
+        write_regular(&cache.cache_dir(&hash).join("input"), b"old");
+        let construction = cache.generation_build_lock(&hash).unwrap();
+        fs::rename(&cache.cache_root, root.path().join("old-cache")).unwrap();
+        write_regular(&cache.cache_dir(&hash).join("input"), b"replacement");
+        assert!(cache.discard_generation(&hash, &construction).is_err());
+        assert_eq!(
+            fs::read(cache.cache_dir(&hash).join("input")).unwrap(),
+            b"replacement"
+        );
+        assert_eq!(
+            fs::read(root.path().join("old-cache").join(&hash).join("input")).unwrap(),
+            b"old"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resource_pin_blocks_source_repair_after_restart() {
+        use ryeos_app::runtime_db::process_resource_custody::ProcessMaterializationCache;
+        let root = tempfile::tempdir().unwrap();
+        let hash = snapshot_hash();
+        let cache = MaterializationCache::source_closures(
+            root.path().join(".ai/state/cache/source-closures"),
+        );
+        write_regular(&cache.cache_dir(&hash).join("input"), b"retained");
+        let store = open_custody_store(root.path());
+        store
+            .reserve_process_resource_launch(&storage_pin(
+                root.path(),
+                ProcessMaterializationCache::SourceClosure,
+                &hash,
+            ))
+            .unwrap();
+        drop(store);
+        let store = open_custody_store(root.path());
+        let construction = cache.generation_build_lock(&hash).unwrap();
+        // A corrupt marker does not waive durable retention after lease drop.
+        assert!(!cache.is_complete(&hash));
+        assert!(
+            cache
+                .discard_generation_with(&hash, &construction, |operation| {
+                    super::super::source_closure::retire_source_generation(&store, operation)
+                })
+                .is_err()
+        );
+        assert!(cache._evict(&hash).is_err());
+        assert!(cache.prune(0).is_err());
+        assert_eq!(
+            fs::read(cache.cache_dir(&hash).join("input")).unwrap(),
+            b"retained"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn source_retirement_refuses_a_different_pin_owner_namespace() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let store_a = open_custody_store(a.path());
+        let store_b = open_custody_store(b.path());
+        let cache_a =
+            MaterializationCache::source_closures(a.path().join(".ai/state/cache/source-closures"));
+        cache_a.pinned_root().unwrap(); // Empty A pins must not authorize B.
+        let cache_b =
+            MaterializationCache::source_closures(b.path().join(".ai/state/cache/source-closures"));
+        let hash = snapshot_hash();
+        write_regular(&cache_b.cache_dir(&hash).join("input"), b"B generation");
+        let construction = cache_b.generation_build_lock(&hash).unwrap();
+        assert!(
+            cache_b
+                .discard_generation_with(&hash, &construction, |operation| {
+                    super::super::source_closure::retire_source_generation(&store_a, operation)
+                })
+                .is_err()
+        );
+        assert!(cache_b.cache_dir(&hash).exists());
+        cache_b
+            .discard_generation_with(&hash, &construction, |operation| {
+                super::super::source_closure::retire_source_generation(&store_b, operation)
+            })
+            .unwrap();
+        assert!(!cache_b.cache_dir(&hash).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pin_registration_waits_until_protected_unlink_finishes() {
+        use ryeos_app::runtime_db::process_resource_custody::ProcessMaterializationCache;
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(open_custody_store(root.path()));
+        let cache = MaterializationCache::source_closures(root.path().join("source-cache"));
+        let hash = snapshot_hash();
+        write_regular(&cache.cache_dir(&hash).join("input"), b"idle generation");
+        let construction = cache.generation_build_lock(&hash).unwrap();
+        // Register a distinct storage generation: this exercises serialization,
+        // not a claim that coordinate-only fixtures prove admission equality.
+        let record = storage_pin(
+            root.path(),
+            ProcessMaterializationCache::SourceClosure,
+            &"cd".repeat(32),
+        );
+        let (begin_tx, begin_rx) = mpsc::channel();
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let registering_store = store.clone();
+        let registration = std::thread::spawn(move || {
+            begin_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            attempt_tx.send(()).unwrap();
+            registering_store
+                .reserve_process_resource_launch(&record)
+                .unwrap();
+            done_tx.send(()).unwrap();
+        });
+        cache
+            .discard_generation_with(&hash, &construction, |operation| {
+                store.with_process_resource_materialization_pins(|pins| {
+                    assert!(pins.is_empty());
+                    begin_tx.send(()).unwrap();
+                    attempt_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    assert!(matches!(
+                        done_rx.recv_timeout(Duration::from_millis(100)),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ));
+                    operation.remove()?;
+                    assert!(!cache.cache_dir(&hash).exists());
+                    Ok(())
+                })
+            })
+            .unwrap();
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        registration.join().unwrap();
+        store
+            .with_process_resource_materialization_pins(|pins| {
+                assert_eq!(pins.len(), 1);
+                Ok(())
+            })
+            .unwrap();
+    }
 
     fn snapshot_hash() -> String {
         "ab".repeat(32)

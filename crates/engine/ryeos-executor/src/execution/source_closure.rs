@@ -393,7 +393,7 @@ fn bind_source_with(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let cache = super::cache::MaterializationCache::new(
+    let cache = super::cache::MaterializationCache::source_closures(
         state
             .config
             .runtime_state_dir()
@@ -405,7 +405,11 @@ fn bind_source_with(
         .verify_completion_marker_for_files(&files, generation)
         .is_err()
     {
-        cache.discard_generation(generation)?;
+        // CAS authority and the exact construction token precede the lease;
+        // retain current durable pins THROUGH actual descriptor-relative unlink.
+        cache.discard_generation_with(generation, &build, |retirement| {
+            retire_source_generation(&state.state_store, retirement)
+        })?;
         let cache_root = cache.pinned_root()?;
         let staging_name = OsString::from(format!(
             "{generation}.staging.{}.{}",
@@ -603,6 +607,39 @@ fn open_source_parent(
             .ok_or_else(|| anyhow::anyhow!("admitted source cache directory disappeared"))?;
     }
     anyhow::bail!("admitted source path is empty")
+}
+
+/// The actual unlink stays inside current namespace pin authority. This checks
+/// retention only; it grants neither source admission nor process release.
+pub(super) fn retire_source_generation(
+    state_store: &ryeos_app::state_store::StateStore,
+    retirement: super::cache::GenerationRetirement<'_>,
+) -> anyhow::Result<()> {
+    let authority = state_store.pinned_state_authority()?;
+    let runtime = authority.runtime_directory();
+    runtime.ensure_path_binding()?;
+    let cache = runtime
+        .open_child_directory(OsStr::new("cache"))?
+        .ok_or_else(|| anyhow::anyhow!("protected source cache namespace is missing"))?;
+    let expected = cache
+        .open_child_directory(OsStr::new("source-closures"))?
+        .ok_or_else(|| anyhow::anyhow!("protected source cache root is missing"))?;
+    retirement.require_root(&expected)?;
+    state_store.with_process_resource_materialization_pins(|pins| {
+        use ryeos_app::runtime_db::process_resource_custody::{
+            ProcessMaterializationCache, ProcessMaterializationCustody,
+        };
+        if retirement.kind() != super::cache::MaterializationCacheKind::SourceClosure {
+            anyhow::bail!("source repair received a different cache domain");
+        }
+        if pins.contains(&ProcessMaterializationCustody {
+            cache: ProcessMaterializationCache::SourceClosure,
+            manifest_hash: retirement.generation().to_owned(),
+        }) {
+            anyhow::bail!("admitted source repair refused a retained generation");
+        }
+        retirement.remove()
+    })
 }
 
 #[cfg(test)]

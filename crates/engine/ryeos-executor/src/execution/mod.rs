@@ -514,7 +514,7 @@ pub(crate) fn checkout_project_snapshot(
         .verify_completion_marker_for_files(project_files, snapshot_hash)
         .is_err()
     {
-        cache.discard_generation(snapshot_hash)?;
+        cache.discard_generation(snapshot_hash, &_build_lock)?;
         let cache_root = cache.pinned_root()?;
         let (staging_name, staging_root) =
             cache_root.create_unique_child(&format!("{snapshot_hash}.staging"), 0o700)?;
@@ -597,7 +597,7 @@ pub(crate) fn checkout_project_snapshot(
             // A valid marker beside a mutated generation is not authority.
             // Rebuild once beneath the still-held construction lock, then
             // mint the proof from the rebuilt descriptor tree.
-            cache.discard_generation(snapshot_hash)?;
+            cache.discard_generation(snapshot_hash, &_build_lock)?;
             let cache_root = cache.pinned_root()?;
             let (staging_name, staging_root) =
                 cache_root.create_unique_child(&format!("{snapshot_hash}.staging"), 0o700)?;
