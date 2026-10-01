@@ -9035,7 +9035,6 @@ fn extract_candidate_evaluation_result(
     }
     sealed.admitted_effective_resolution().map_err(internal)?;
     let contract = match canonical.kind.as_str() {
-        "tool" => CandidateEvaluatorResultContract::Tool,
         "graph" => {
             use ryeos_state::objects::{
                 AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, ExecutionLaunchDriver,
@@ -9062,11 +9061,9 @@ fn extract_candidate_evaluation_result(
                 effective_definition_digest: sealed.effective_definition_digest().as_str(),
             }
         }
-        _ => {
-            return Err(HandlerError::BadRequest(
-                "candidate evaluator root must be an admitted Tool or Graph".into(),
-            ));
-        }
+        // Every other admitted root retains its existing flat result contract.
+        // Candidate launch admission, not this result reader, selects kinds.
+        _ => CandidateEvaluatorResultContract::Flat,
     };
     let value = evaluator
         .result
@@ -9081,7 +9078,7 @@ fn extract_candidate_evaluation_result(
 }
 
 enum CandidateEvaluatorResultContract<'a> {
-    Tool,
+    Flat,
     Graph {
         definition_ref: &'a str,
         effective_definition_digest: &'a str,
@@ -9095,7 +9092,7 @@ fn validate_candidate_evaluation_payload(
     base_snapshot_hash: &str,
 ) -> Result<CandidateEvaluationResult, HandlerError> {
     let payload = match contract {
-        CandidateEvaluatorResultContract::Tool => value,
+        CandidateEvaluatorResultContract::Flat => value,
         CandidateEvaluatorResultContract::Graph {
             definition_ref,
             effective_definition_digest,
@@ -10922,7 +10919,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_evaluator_contract_selects_flat_tool_or_exact_graph_return() {
+    fn candidate_evaluator_contract_selects_flat_or_exact_graph_return() {
         use super::{CandidateEvaluatorResultContract, validate_candidate_evaluation_payload};
         let candidate = "c".repeat(64);
         let base = "b".repeat(64);
@@ -10931,7 +10928,7 @@ mod tests {
             let graph = graph_evaluator_result(accepted);
             let payload = graph["result"].clone();
             let flat = validate_candidate_evaluation_payload(
-                CandidateEvaluatorResultContract::Tool,
+                CandidateEvaluatorResultContract::Flat,
                 payload.clone(),
                 &candidate,
                 &base,
@@ -10957,7 +10954,7 @@ mod tests {
             // Neither lane guesses a different contract from the value shape.
             assert!(
                 validate_candidate_evaluation_payload(
-                    CandidateEvaluatorResultContract::Tool,
+                    CandidateEvaluatorResultContract::Flat,
                     graph,
                     &candidate,
                     &base,
@@ -11035,6 +11032,36 @@ mod tests {
             changed["result"][field] = json!("f".repeat(64));
             assert!(validate(changed).is_err(), "{field}");
         }
+    }
+
+    #[test]
+    fn graph_evaluator_full_result_identity_includes_unprojected_runtime_state() {
+        use super::{CandidateEvaluatorResultContract, validate_candidate_evaluation_payload};
+        let candidate = "c".repeat(64);
+        let base = "b".repeat(64);
+        let definition = "d".repeat(64);
+        let original = graph_evaluator_result(true);
+        let original_digest = ryeos_state::objects::canonical_value_digest(&original).unwrap();
+        let mut changed = original.clone();
+        changed["state"]["private_intermediate"] = json!(8);
+        assert_eq!(original["result"], changed["result"]);
+        let payload = validate_candidate_evaluation_payload(
+            CandidateEvaluatorResultContract::Graph {
+                definition_ref: "graph:test/candidate-evaluator",
+                effective_definition_digest: &definition,
+            },
+            changed.clone(),
+            &candidate,
+            &base,
+        )
+        .unwrap();
+        assert!(payload.accepted);
+        // Fresh and retained testimony digest the complete Thread.result.
+        // Authored-payload equivalence cannot substitute for that identity.
+        assert_ne!(
+            original_digest,
+            ryeos_state::objects::canonical_value_digest(&changed).unwrap(),
+        );
     }
 
     #[test]
