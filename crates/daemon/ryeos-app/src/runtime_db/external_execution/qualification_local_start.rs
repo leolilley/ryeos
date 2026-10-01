@@ -1486,6 +1486,199 @@ mod tests {
         (conn, current)
     }
 
+    // This fixture serves the real retained readers, unlike fixture_journal's
+    // deliberately partial rows for isolated SQL trigger tests. It supplies no
+    // admission token, provider contact, process, or successful held attachment.
+    fn fixture_retained_credential_journal() -> (Connection, QualificationLocalStartRecord) {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use ryeos_external_execution_contract::{
+            restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+            runtime_snapshot::RuntimeSnapshotQualificationOccurrence,
+        };
+        use ryeos_state::{
+            external_content::products::qualification::ProductQualificationConsumerRuntimeMemberIdentity,
+            external_execution::{
+                EXECUTION_CHANNEL_BINDING_SCHEMA, ExecutionChannelBinding,
+                admission::test_support::{fixture_qualification_use, fixture_requirement},
+                qualification_session::{
+                    AdmittedExternalQualificationSessionProgram,
+                    QUALIFICATION_SESSION_PROGRAM_SCHEMA, qualification_candidate_placement_key,
+                },
+            },
+            objects::{
+                EXTERNAL_CONTENT_MANIFEST_KIND, ExternalContentKind, canonical_value_digest,
+            },
+        };
+        let requirement = fixture_requirement();
+        let program = AdmittedExternalQualificationSessionProgram {
+            schema: QUALIFICATION_SESSION_PROGRAM_SCHEMA,
+            qualification_purpose_digest: "7".repeat(64),
+            consumer_content_digest: "8".repeat(64),
+            qualification_use: fixture_qualification_use(&requirement).unwrap(),
+            runtime_manifest_kind: EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+            runtime_content_kind: ExternalContentKind::Tree,
+            runtime_manifest_hash: "e".repeat(64),
+            runtime_member: ProductQualificationConsumerRuntimeMemberIdentity {
+                product_declaration_id: requirement.runtime_product_declaration_id.clone(),
+                relative_path: requirement.runtime_recipe.executable_relative_path.clone(),
+                executable_sha256: "6".repeat(64),
+            },
+            runtime_recipe_digest: requirement.runtime_recipe.digest().unwrap(),
+            requirement,
+            fixture: None,
+        };
+        program.validate().unwrap();
+        let coordinate = ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-qualification-root".into(),
+            accepted_capsule_hash: "2".repeat(64),
+            qualification_purpose_digest: program.qualification_purpose_digest.clone(),
+            scenario_id: "hosted_worker".into(),
+            scenario_source_digest: "a".repeat(64),
+            subject_digest: "b".repeat(64),
+            use_digest: canonical_value_digest(
+                &serde_json::to_value(&program.qualification_use).unwrap(),
+            )
+            .unwrap(),
+            prerequisite_measurement_attempt_id: "c".repeat(64),
+            prerequisite_measurement_observation_digest: "d".repeat(64),
+        };
+        let operation = "3".repeat(64);
+        let placement = qualification_candidate_placement_key(&coordinate, &operation).unwrap();
+        let owner_key = lillux::crypto::generate_signing_key();
+        let supervisor_key = lillux::crypto::generate_signing_key();
+        let binding = ExecutionChannelBinding {
+            schema: EXECUTION_CHANNEL_BINDING_SCHEMA,
+            execution_mode: ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {},
+            placement_thread_id: placement.clone(),
+            allocation_request_digest: "a".repeat(64),
+            occurrence_id: "qualification-occurrence".into(),
+            admitted_capsule_hash: coordinate.accepted_capsule_hash.clone(),
+            base_snapshot_hash: "5".repeat(64),
+            execution_binding_hash: "d".repeat(64),
+            supervisor_runtime_hash: program.runtime_manifest_hash.clone(),
+            candidate_program_digest: program.digest().unwrap(),
+            channel_nonce: "f".repeat(64),
+            owner_public_key: STANDARD.encode(owner_key.verifying_key().as_bytes()),
+            supervisor_public_key: STANDARD.encode(supervisor_key.verifying_key().as_bytes()),
+            issued_at_ms: 1,
+            execution_deadline_ms: 60_001,
+            expires_at_ms: 120_001,
+            candidate_export_max_bytes: 0,
+            max_frames: 100,
+            max_bytes: 1024 * 1024,
+        };
+        binding.validate().unwrap();
+        let reservation = ExternalAllocationReservation {
+            schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
+            placement_thread_id: placement.clone(),
+            admitted_capsule_hash: coordinate.accepted_capsule_hash.clone(),
+            owner: ExternalAllocationOwner::QualificationCandidate(
+                ExternalQualificationCandidateOwner {
+                    coordinate: coordinate.clone(),
+                    qualification_operation_id: operation.clone(),
+                    qualification_occurrence: RuntimeSnapshotQualificationOccurrence {
+                        schema: 1,
+                        operation_id: operation.clone(),
+                        occurrence_id: binding.occurrence_id.clone(),
+                        provider_response_sha256: "9".repeat(64),
+                        contact_deadline_exceeded: false,
+                    },
+                    operator_principal: "principal".into(),
+                    program,
+                },
+            ),
+            base_snapshot_hash: binding.base_snapshot_hash.clone(),
+            binding_hash: binding.execution_binding_hash.clone(),
+            capacity_owner: "b".repeat(64),
+            channel_authority_generation: "c".repeat(64),
+            channel_owner_public_key: binding.owner_public_key.clone(),
+            channel_bootstrap_capability_hash: "e".repeat(64),
+            request_digest: binding.allocation_request_digest.clone(),
+            max_active: 1,
+            timeout_seconds: 60,
+            contact_deadline_ms: 60_001,
+            startup_started_at_ms: 1,
+            startup_deadline_ms: 60_001,
+        };
+        reservation.validate().unwrap();
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: binding.occurrence_id.clone(),
+            provider_observation_digest: "9".repeat(64),
+        };
+        occurrence.validate(&reservation).unwrap();
+        let mut current = fixture_record();
+        current.placement_thread_id = placement;
+        current.accepted_root_id = coordinate.accepted_root_id.clone();
+        current.accepted_capsule_hash = coordinate.accepted_capsule_hash.clone();
+        current.qualification_operation_id = operation.clone();
+        current.qualification_occurrence_id = occurrence.occurrence_id.clone();
+        current.base_snapshot_hash = reservation.base_snapshot_hash.clone();
+        current.channel_binding_digest = binding.digest().unwrap();
+        let digest = local_workspace_digest(
+            &current.placement_thread_id,
+            &coordinate.accepted_root_id,
+            &coordinate.accepted_capsule_hash,
+            &operation,
+            &occurrence.occurrence_id,
+            &current.channel_binding_digest,
+            &current.daemon_generation_id,
+        )
+        .unwrap();
+        current.workspace_id = format!("QW-{digest}");
+        current.launch_owner = format!("Q-local-{digest}");
+        current.workspace_root = format!(
+            "/tmp/qualification-cache/executions/{}",
+            current.workspace_id
+        );
+        current.state_root = format!(
+            "/tmp/qualification-cache/qualification-local/{}",
+            current.workspace_id
+        );
+        current.validate().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE credential_profile(profile_id TEXT PRIMARY KEY,owner_principal TEXT,home_id TEXT,credential_generation INTEGER,authority_revision INTEGER,lock_owner TEXT,state TEXT);
+             CREATE TABLE external_qualification_worker_process(placement_thread_id TEXT PRIMARY KEY,phase TEXT,process_identity_json TEXT);
+             CREATE TABLE external_execution_connector(placement_thread_id TEXT PRIMARY KEY,state TEXT);
+             CREATE TABLE external_execution_allocation(placement_thread_id TEXT PRIMARY KEY,capacity_owner TEXT,reservation_json TEXT,phase TEXT,occurrence_json TEXT);
+             CREATE TABLE external_execution_channel(placement_thread_id TEXT PRIMARY KEY,binding_digest TEXT,binding_json TEXT,state TEXT);",
+        ).unwrap();
+        conn.execute_batch(JOURNAL_SQL).unwrap();
+        let json = |value: serde_json::Value| lillux::canonical_json(&value).unwrap();
+        conn.execute(
+            "INSERT INTO external_execution_allocation VALUES(?1,?2,?3,'bound',?4)",
+            params![
+                current.placement_thread_id,
+                reservation.capacity_owner,
+                json(serde_json::to_value(&reservation).unwrap()),
+                json(serde_json::to_value(&occurrence).unwrap())
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'running')",
+            params![
+                current.placement_thread_id,
+                current.channel_binding_digest,
+                json(serde_json::to_value(&binding).unwrap())
+            ],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO external_qualification_local_start VALUES(?1,?2,?3,?4,?5,?6,'reserved',?7,1,1)",
+            params![current.placement_thread_id, current.accepted_root_id, current.accepted_capsule_hash,
+                current.qualification_operation_id, current.qualification_occurrence_id,
+                current.channel_binding_digest, canonical(&current).unwrap()]).unwrap();
+        assert_eq!(
+            read_local_start(&conn, &current.placement_thread_id).unwrap(),
+            Some(current.clone())
+        );
+        (conn, current)
+    }
+
     fn claim_fixture_credential(
         conn: &Connection,
         current: &QualificationLocalStartRecord,
@@ -1540,12 +1733,20 @@ mod tests {
 
     #[test]
     fn credential_check_borrows_outer_transaction_without_renewing_original_generation() {
-        let (conn, original) = fixture_journal();
+        let (conn, original) = fixture_retained_credential_journal();
         let claimed = claim_fixture_credential(&conn, &original);
+        assert_eq!(
+            read_local_start(&conn, &claimed.placement_thread_id).unwrap(),
+            Some(claimed.clone())
+        );
         let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
         require_live_credential_custody(&tx, &claimed).unwrap();
         // This fixture's original daemon is intentionally stale. The borrowed
         // check must reach that semantic fence, rather than fail a nested BEGIN.
+        // This is a refused fresh-use check, not proof of a successful held attach.
+        assert_eq!(claimed.phase, QualificationLocalStartPhase::Reserved);
+        assert!(claimed.directory_borrow_intent.is_none());
+        assert!(claimed.worker_incarnation_digest.is_none());
         let error =
             require_live_credential_start_tx(&tx, &claimed.placement_thread_id).unwrap_err();
         assert!(
