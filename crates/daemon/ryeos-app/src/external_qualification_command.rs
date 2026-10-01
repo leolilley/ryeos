@@ -380,9 +380,9 @@ pub fn execute_signed_qualification_worker_request(
                 .checked_sub(now)
                 .filter(|remaining| *remaining > 0)
                 .context("Q Worker command passed its retained channel deadline")?;
-            let deadline = lillux::time::MonotonicDeadline::after(
+            let deadline = root.cap_execution_deadline(lillux::time::MonotonicDeadline::after(
                 lillux::time::Duration::from_millis(u64::try_from(remaining)?),
-            );
+            ));
             state.persistent_sessions.ensure_exclusive_request_fits(
                 placement,
                 &selected.body,

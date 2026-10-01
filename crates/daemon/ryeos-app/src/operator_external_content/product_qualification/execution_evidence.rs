@@ -69,6 +69,10 @@ struct ConsumerCallbackAdmission {
 }
 
 impl AuthenticatedConsumerRoot {
+    pub(crate) fn callback_expiry(&self) -> Option<lillux::time::MonotonicDeadline> {
+        self.callback_expiry
+    }
+
     pub(crate) fn with_live_callback<T>(
         &self,
         admit: impl FnOnce() -> anyhow::Result<T>,

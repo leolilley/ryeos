@@ -239,6 +239,10 @@ fn await_external_qualification_ready(
                 "external qualification did not reach authenticated readiness before its deadline"
             );
             let progress = start.advance().map_err(anyhow::Error::from)?;
+            ensure!(
+                !deadline.has_elapsed(),
+                "external qualification startup exceeded channel startup or callback expiry"
+            );
             // The start and relay contacts share a rejecting placement gate.
             // Alternate in this thread until Ready, never race two contacts.
             if !matches!(progress, ExternalCandidateStartProgress::CleanupProved | ExternalCandidateStartProgress::CleanupRequired) {
@@ -252,6 +256,10 @@ fn await_external_qualification_ready(
                     relay.advance_if_due(state, start.placement())?;
                 }
             }
+            ensure!(
+                !deadline.has_elapsed(),
+                "external qualification readiness exceeded channel startup or callback expiry"
+            );
             match progress {
                 ExternalCandidateStartProgress::Ready(binding) => {
                     ensure!(

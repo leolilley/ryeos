@@ -87,7 +87,7 @@ pub async fn read_consumer_worker_transcript(
     Ok(VerifiedConsumerWorkerTranscript { reference, stream })
 }
 
-fn validate_reference_for_record(
+pub(crate) fn validate_reference_for_record(
     reference: &QualificationWorkerTranscriptReference,
     original: &ConsumerInputRecord,
 ) -> Result<()> {

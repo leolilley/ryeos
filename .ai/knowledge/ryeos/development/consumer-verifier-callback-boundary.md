@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T02:25:15Z:ef34cca109c80957bdd7bde5e91e7bc06c4c2cc71a4a85d869ca590657904cd7:zSY7qafmxrotdJtbaqYsvWUDRpCXqvK+TwgtxUB4kWN7ZmnXRo3qwkJ+wf4ZlaoHdgJKJLc3poNlPwpx5l2dAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T03:03:28Z:cd8139152bd81a3129961ab95fa475c6bb228ab2e88e7aa0bcd56da88436a170:nOFoU0AObYWeVLAzvlEYMDMG0ZVko7G7aYSwAcjGUYdgqRRHLC/7p3TaSvNFS+YCVaHcbOJVjtzk0LQNI8+5CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -10,7 +10,7 @@ An ordinary Tool launch cannot mint the sealed qualification-purpose grant.
 
 ## Invocation and protected inputs
 
-The signed Codex configuration v2 selects the scenario, qualification operation,
+The signed Codex configuration v3 selects the scenario, qualification operation,
 prerequisite owner-measurement attempt and a finite controller duration. The
 inputs callback accepts these bounded selectors. The daemon derives root,
 capsule, purpose, subject, admitted use and scenario-source commitments from
@@ -51,7 +51,11 @@ measurement is its provenance, not a claim of the same runtime instance. After
 Q's signed setup and turn, native settlement, local cleanup and provider terminal, START
 re-authenticates the original callback and prepares the diagnostic contact
 deadline. The enclosing signed verifier lifetime has continued throughout;
-starting the diagnostic deadline does not renew it. These are source contracts,
+starting the diagnostic deadline does not renew it. Q startup, both Request
+sends and turn-observation waits are capped by the immutable callback expiry.
+Checks after returned relay/read operations refuse late success. Cleanup and
+attachment retain their own bounded lifelines after expiry so an already-owned
+process is settled rather than abandoned. These are source contracts,
 not evidence that the installed lifecycle has passed.
 
 The actual invocation is retained as process-local operator or callback
@@ -110,37 +114,51 @@ the request-correlated Delta/Final and turn observation gates remain distinct.
 Structural readback authenticates both signed request digests and both actual
 Final byte sequences. It still grants no semantic success or qualification.
 
-## Remaining product semantic contract
+## Actual production Q semantics and remaining joins
 
-No authored signed Q scenario yet selects that finite conversation, and no Q
-fixture profile joins the actual app-server configuration to the signed
-expectations. The ordinary external-authoring profile pins a real model
-provider; a verifier may not override that accepted profile later by injecting
-an endpoint or argv. Actual Q's model-speaking app-server runs in the local
-trusted Worker; the guest runs isolated exec-server commands through the existing
-connector. A fixture-specific signed profile can select controller loopback
-before accepted-root admission, without granting guest networking.
+The accepted external-authoring Worker pins its production provider and
+authentication configuration.
+Replacing it with a credential-free fixture profile would measure a different
+effective consumer. Preserve that production identity: the credential-free
+scripted peer, successful patch and canary belong to the independently allocated
+diagnostic occurrence. They do not attest Q denial or Q workspace writes.
+Q retains its read-only workspace and zero exports.
 
-The credential-free scripted peer currently belongs to the separate diagnostic.
-Its existing script expects a successful candidate patch, whereas Q's workspace
-is read-only with zero exports. Q requires a finite signed scenario that proves
-read-only tool behavior and refusal, or a separately admitted private scratch
-target. Do not change Q's workspace/export authority to reuse the diagnostic.
-The ordinary authoring projection also omits observations needed to independently
-establish exact Q output and request behavior; omitted events cannot be
-reconstructed from hashes.
+The production profile now projects canonical complete parsed notifications
+(`notification_json`, at most 64 KiB) for twelve explicit method families,
+including completed command items and opt-in raw responses. These are actual
+message bytes after canonical serialization, not original wire whitespace or
+an exhaustive log of every notification. Overflow, schema failure and missing
+required observations refuse rather than truncate or reconstruct evidence.
+Existing execution arguments, provider, credentials, routes and lifecycle State
+authority are preserved. Raw events still need an explicit signed setup opt-in.
 
-The next product cut must bind a finite credential-free fixture to actual Q,
-retain the required bounded observations and interpret actual bytes against the
-signed read-only expectations. Reuse the existing scripted peer and its bounded
-Responses framing, with a Q-specific canary/lifecycle owner under the original
-controller deadline. Retain it through Q's local/native/provider settlement;
-cancel and join on uncertainty without success testimony. Peer logs are secondary
-loopback evidence and do not identify the selected executable by themselves.
-Do not synthesize a Codex wire transcript from projected events or infer Q
-success from the later diagnostic. Until the actual contract and all its joins
-exist, the controller remains diagnostic and consumer qualification publication
-remains refused.
+Current-only consumer-verifier configuration v3 requires a finite signed Q
+command expectation: remote environment, command, command presentation, cwd,
+output and successful exit code. The product interpreter binds the actual setup
+thread and turn to the retained request, lifecycle observations and manifest;
+requires one raw remote exec_command, its terminal result and the corresponding
+completed command item before successful turn completion; and refuses swapped,
+missing or extra effectful calls. Call/item IDs are Codex invocation IDs, not
+guest process IDs. Both raw and item output must match the signed expectation;
+assistant prose cannot replace command evidence. Interpretation grants neither
+provider permission nor a qualification result.
+
+Production launch remains unresolved. Q's fresh disposable state directory does
+not acquire the ordinary owner-bound credential profile, operation lock or
+credential home, and its Worker launch omits required structured-session context
+bindings. Reuse the existing dedicated-session credential custody interfaces,
+with exact principal/profile/generation, exclusivity and settlement; do not
+silently inject node credentials. The credential home must remain separately
+owned because Q cleanup recursively deletes its disposable state directory.
+No live model execution is authorized by this source preparation.
+
+There is not yet an admitted authored Q scenario with final captured product
+identities and raw-event setup. Complete production credential/context custody,
+then the full Q/diagnostic/native/provider/enclosing-root issuance and retained
+current-selection joins. Until those joins and operational evidence exist, the
+controller emits bounded diagnostic references and explicitly refuses;
+consumer-context publication and qualification claims remain disabled.
 
 Carry the existing authenticated callback invocation through Q admission;
 never manufacture an operator HandlerContext or use historical evidence as

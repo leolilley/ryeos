@@ -27,6 +27,7 @@ pub struct SettledConsumerObservation {
     pub evidence: ConsumerRetainedEvidence,
     pub provider_terminal: crate::consumer_termination::ConsumerProviderTerminalReference,
     pub qualification_worker: crate::consumer_worker_transcript::VerifiedConsumerWorkerTranscript,
+    pub checked_q: crate::consumer_worker_semantics::CheckedQConversation,
 }
 
 pub enum ConsumerControllerOutcome {
@@ -205,14 +206,24 @@ pub async fn run_controller_beat(
                 !deadline.has_elapsed(),
                 "consumer settlement join exceeded caller deadline"
             );
+            let qualification_worker =
+                qualification_worker.context("observed consumer has no Q transcript read")??;
+            let checked_q = crate::consumer_worker_semantics::check_q_conversation(
+                retained.record(),
+                &qualification_worker,
+            )?;
+            ensure!(
+                !deadline.has_elapsed(),
+                "Q semantic join exceeded caller deadline"
+            );
             Ok(ConsumerControllerOutcome::Settled(
                 SettledConsumerObservation {
                     challenge,
                     evidence,
                     evidence_sha256,
                     provider_terminal,
-                    qualification_worker: qualification_worker
-                        .context("observed consumer has no Q transcript read")??,
+                    qualification_worker,
+                    checked_q,
                 },
             ))
         }

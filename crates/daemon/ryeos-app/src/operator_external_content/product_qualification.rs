@@ -2245,6 +2245,7 @@ fn resolve_current_bundle_producer_recipe_for_purpose_in_generation(
 /// contact, channel, or qualification claim.
 pub struct PreparedExternalQualificationRoot {
     invocation: crate::external_qualification_invocation::QualificationInvocation,
+    callback_expiry: Option<lillux::time::MonotonicDeadline>,
     coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
     qualification_operation_id: String,
     capsule: ryeos_state::objects::AdmittedLaunchCapsule,
@@ -2255,6 +2256,17 @@ pub struct PreparedExternalQualificationRoot {
 }
 
 impl PreparedExternalQualificationRoot {
+    /// Bound execution and its waits by the original callback clock. Fresh
+    /// authentication cannot renew this limit. Retained cleanup uses its own
+    /// authority and deadlines, including after callback expiry.
+    pub fn cap_execution_deadline(
+        &self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> lillux::time::MonotonicDeadline {
+        self.callback_expiry
+            .map_or(deadline, |expiry| deadline.min(expiry))
+    }
+
     /// Re-authenticate a new effect under the original invocation. Historical
     /// observations and cleanup use retained custody instead of this method.
     pub(crate) fn authenticate_invocation(
@@ -2497,6 +2509,7 @@ pub fn prepare_external_qualification_root_for_invocation(
     authority.ensure_guard(&guard)?;
     Ok(PreparedExternalQualificationRoot {
         invocation: invocation.clone(),
+        callback_expiry: admission.callback_expiry(),
         coordinate: coordinate.clone(),
         qualification_operation_id: qualification_operation_id.to_owned(),
         capsule,

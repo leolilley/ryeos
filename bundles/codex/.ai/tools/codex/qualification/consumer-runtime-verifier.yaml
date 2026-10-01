@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-01T01:33:35Z:852b7e5721dc7fbe1f355e0ff313ec02f3971141d9cea38cdc0b10bf29dd78df:Mx2/Ig6CUyY05NWO9rofmzI+2kP7BvNTLLTckb9eZOPacwL4m4TvycZuXMkWpH/dHn2ZCW5s21/MOB3T/00TAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-01T03:00:38Z:3ab94e590cdba8ef2d13d2f5968d29be7432015ce51ec6cd4e275b2fc7df0560:J2j55KIMy3vTxnn5o+hkN5BbdLufVwSqdzay75XIPcpZzFSG9Dh+tAnSfp9cZXJuWOUIMZ9x4uyVZ2m0humvDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
 description: Observe the exact admitted consumer runtime through restricted daemon callbacks; qualification remains refused until the Q transcript joins.
@@ -14,9 +14,9 @@ config:
 config_schema:
   type: object
   additionalProperties: false
-  required: [schema, controller, expected_command_output, responses_origin, outer_network, external_candidate_qualification_context]
+  required: [schema, controller, expected_command_output, responses_origin, outer_network, qualification_worker, external_candidate_qualification_context]
   properties:
-    schema: {type: string, enum: [ryeos.codex.consumer_verifier.v2]}
+    schema: {type: string, enum: [ryeos.codex.consumer_verifier.v3]}
     controller:
       type: object
       additionalProperties: false
@@ -34,6 +34,18 @@ config_schema:
     expected_command_output: {type: string}
     responses_origin: {type: string}
     outer_network: {type: string, enum: [shared_guest_loopback]}
+    qualification_worker:
+      type: object
+      additionalProperties: false
+      required: [schema, environment_id, command, command_presentation, cwd, output, exit_code]
+      properties:
+        schema: {type: string, enum: [ryeos.codex.q_command.v1]}
+        environment_id: {type: string, enum: [ryeos-external-candidate]}
+        command: {type: string, minLength: 1, maxLength: 4096}
+        command_presentation: {type: string, minLength: 1, maxLength: 4096}
+        cwd: {type: string, enum: [/workspace]}
+        output: {type: string, minLength: 1, maxLength: 16384}
+        exit_code: {type: integer, enum: [0]}
     # The typed admitted-use parser checks this exact value against the sealed
     # purpose. It is data agreement, never caller-created admission authority.
     external_candidate_qualification_context: {type: object}

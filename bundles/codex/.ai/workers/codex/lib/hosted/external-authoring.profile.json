@@ -980,6 +980,11 @@
             "pointer": "/message/params/turn/status",
             "optional": true,
             "max_string_bytes": 256
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
@@ -1039,6 +1044,11 @@
             "op": "pointer",
             "pointer": "/message/params/delta",
             "max_string_bytes": 65536
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
@@ -1071,6 +1081,11 @@
           "delta_digest": {
             "op": "digest",
             "pointer": "/message/params/delta"
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
@@ -1103,6 +1118,11 @@
           "delta_digest": {
             "op": "digest",
             "pointer": "/message/params/delta"
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
@@ -1135,6 +1155,11 @@
           "changes_digest": {
             "op": "digest",
             "pointer": "/message/params/changes"
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
@@ -1153,6 +1178,11 @@
             "op": "pointer",
             "pointer": "/message/params/thread/id",
             "max_string_bytes": 256
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
@@ -1176,6 +1206,11 @@
             "op": "pointer",
             "pointer": "/message/params/status",
             "max_string_bytes": 256
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
@@ -1200,6 +1235,11 @@
             "op": "pointer",
             "pointer": "/message/params/turn/id",
             "max_string_bytes": 256
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
@@ -1335,6 +1375,82 @@
       },
       "observations": [],
       "ceremony_clear": false
+    },
+    {
+      "method": "item/started",
+      "schema": "schema/ItemStartedNotification.json",
+      "upstream_session_pointer": "/message/params/threadId",
+      "event_type": "item.started",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "item/completed",
+      "schema": "schema/ItemCompletedNotification.json",
+      "upstream_session_pointer": "/message/params/threadId",
+      "event_type": "item.completed",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "rawResponseItem/completed",
+      "schema": "schema/RawResponseItemCompletedNotification.json",
+      "upstream_session_pointer": "/message/params/threadId",
+      "event_type": "workload.raw_response_item_completed",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "rawResponse/completed",
+      "schema": "schema/RawResponseCompletedNotification.json",
+      "upstream_session_pointer": "/message/params/threadId",
+      "event_type": "workload.raw_response_completed",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
     }
   ],
   "ignored_notifications": {
@@ -1345,8 +1461,6 @@
     "thread/tokenUsage/updated": "schema/ThreadTokenUsageUpdatedNotification.json",
     "turn/diff/updated": "schema/TurnDiffUpdatedNotification.json",
     "turn/plan/updated": "schema/TurnPlanUpdatedNotification.json",
-    "item/started": "schema/ItemStartedNotification.json",
-    "item/completed": "schema/ItemCompletedNotification.json",
     "item/plan/delta": "schema/PlanDeltaNotification.json",
     "serverRequest/resolved": "schema/ServerRequestResolvedNotification.json",
     "model/rerouted": "schema/ModelReroutedNotification.json",

@@ -4784,7 +4784,7 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         AdmittedExternalExecutionProgram::QualificationStructuredSession(root.program().clone());
     validate_external_placement_program(&program, &reservation, &contract)?;
     reservation.validate()?;
-    let deadline = reservation.startup_deadline()?;
+    let deadline = root.cap_execution_deadline(reservation.startup_deadline()?);
     let admission = {
         let authority = state.state_store.pinned_state_authority()?;
         let guard = authority.acquire_shared_guard()?;

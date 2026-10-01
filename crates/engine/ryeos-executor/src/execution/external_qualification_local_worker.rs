@@ -153,9 +153,10 @@ impl ExternalQualificationLocalWorker {
         )
     }
 
-    /// Wait only until the retained Q channel deadline for the already
-    /// settled send's asynchronous turn observation. This performs no new
-    /// Worker or provider contact and returns no semantic success claim.
+    /// Wait only until the retained Q channel deadline or original callback
+    /// expiry for the already settled send's asynchronous turn observation.
+    /// This performs no new Worker or provider contact and returns no semantic
+    /// success claim.
     pub(crate) fn wait_for_signed_turn_completion(
         &self,
         state: &ryeos_app::state::AppState,
@@ -169,10 +170,17 @@ impl ExternalQualificationLocalWorker {
             .checked_sub(now)
             .filter(|remaining| *remaining > 0)
             .context("Q Worker turn wait passed its retained channel deadline")?;
-        let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(
-            u64::try_from(remaining_ms)?,
-        ));
+        let deadline =
+            self.ready
+                .root()
+                .cap_execution_deadline(lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+                ));
         loop {
+            ensure!(
+                !deadline.has_elapsed(),
+                "Q Worker turn observation exceeded channel or callback expiry"
+            );
             self.ready.ensure_relay_running()?;
             let outcome = ryeos_app::external_qualification_command::read_qualification_worker_command_outcome(
                 state,
@@ -180,16 +188,16 @@ impl ExternalQualificationLocalWorker {
                 &selected.digest,
             )?
             .context("Q Worker send lost its durable owner settlement")?;
+            ensure!(
+                !deadline.has_elapsed(),
+                "Q Worker turn observation exceeded channel or callback expiry"
+            );
             if matches!(
                 outcome,
                 QualificationWorkerCommandOutcome::TurnCompleted { .. }
             ) {
                 return Ok(outcome);
             }
-            ensure!(
-                !deadline.has_elapsed(),
-                "Q Worker Final has no completed turn before channel expiry"
-            );
             lillux::time::sleep(
                 deadline
                     .remaining()

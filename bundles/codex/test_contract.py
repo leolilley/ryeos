@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-09-30T02:30:49Z:47b6d6e89d33c4ba28feac4bdb90797590d70da487b4cd8b88650846a5e61e11:LNKu6vJfl1FxRIHE5MDLk0/Uuz6hg7jY3RcVsiCrMtmsIgZIX8JosliijEpeijbg22l9/d3yWFpOQnefTvacDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-01T02:57:52Z:36d378bd96ef22ba75de0ebec1acc3fbdee29718f9106881b908f20aa86f237a:Ewf1Tsj9+Iip+91HBI5xDvIfddvBhp3b9zb9g01epKQTK5oamZ4RjHOjgKJeuUhejK0a2+4QMhuJTKP5D1xiCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
@@ -904,6 +904,44 @@ class CodexContractTests(unittest.TestCase):
         )
         self.assertEqual(selectors[".tmp/**"]["class"], "rebuildable_cache")
         self.assertEqual(selectors["tmp/**"]["class"], "rebuildable_cache")
+
+    def test_external_profile_retains_bounded_actual_notification_family(self) -> None:
+        profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
+        # This is an explicit projection family, not a claim that ignored
+        # notifications or original JSON wire formatting have been retained.
+        family = {
+            "thread/started", "thread/status/changed", "turn/started", "turn/completed",
+            "item/agentMessage/delta", "item/commandExecution/outputDelta",
+            "item/fileChange/outputDelta", "item/fileChange/patchUpdated",
+            "item/started", "item/completed",
+            "rawResponseItem/completed", "rawResponse/completed",
+        }
+        rules = {rule["method"]: rule for rule in profile["notifications"]}
+        projected = {
+            method for method, rule in rules.items()
+            if "notification_json" in rule["payload"].get("fields", {})
+        }
+        self.assertEqual(projected, family)
+        for method in family:
+            with self.subTest(method=method):
+                rule = rules[method]
+                self.assertTrue(rule["durable"])
+                self.assertNotIn(method, profile["ignored_notifications"])
+                self.assertEqual(rule["payload"]["fields"]["notification_json"], {
+                    "op": "json_string", "pointer": "/message", "max_bytes": 65536,
+                })
+                self.assertTrue((SOURCE / rule["schema"]).is_file())
+        for method in ("item/started", "item/completed",
+                       "rawResponseItem/completed", "rawResponse/completed"):
+            self.assertEqual(rules[method]["upstream_session_pointer"],
+                             "/message/params/threadId")
+            self.assertEqual(rules[method]["observations"], [])
+        for name in ("RawResponseItemCompletedNotification.json",
+                     "RawResponseCompletedNotification.json"):
+            self.assertEqual((SOURCE / "schema" / name).read_bytes(),
+                             (BUNDLE / "schema/app-server-0.147.0/v2" / name).read_bytes())
+        setup = next(route for route in profile["routes"] if route["id"] == "session.start")
+        self.assertNotIn("experimentalRawEvents", setup["fixed_params"])
 
     def test_worker_source_digest_covers_the_complete_profile_closure(self) -> None:
         for path in (

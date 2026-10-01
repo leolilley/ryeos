@@ -220,7 +220,7 @@ mod control_tests {
             "provider_executable_manifest_hash":hash, "execution_environment_digest":hash,
         });
         let value = serde_json::json!({
-            "schema":"ryeos.codex.consumer_verifier.v2",
+            "schema":"ryeos.codex.consumer_verifier.v3",
             "controller": {
                 "inputs": {"scenario_id":"consumer", "qualification_operation_id":"a".repeat(64), "prerequisite_measurement_attempt_id":"b".repeat(64)},
                 "maximum_duration_ms":300_000,
@@ -228,11 +228,31 @@ mod control_tests {
             "expected_command_output":"/workspace\nripgrep fixture\n",
             "responses_origin":"http://127.0.0.1:1234",
             "outer_network":"shared_guest_loopback",
+            "qualification_worker": {
+                "schema":"ryeos.codex.q_command.v1",
+                "environment_id":"ryeos-external-candidate",
+                "command":"pwd", "command_presentation":"pwd",
+                "cwd":"/workspace", "output":"/workspace\n", "exit_code":0,
+            },
             "external_candidate_qualification_context":context,
         });
         let configuration: ConsumerVerifierConfiguration =
             serde_json::from_value(value.clone()).unwrap();
         configuration.validate().unwrap();
+        let mut missing_q = value.clone();
+        missing_q
+            .as_object_mut()
+            .unwrap()
+            .remove("qualification_worker");
+        assert!(serde_json::from_value::<ConsumerVerifierConfiguration>(missing_q).is_err());
+        let mut predecessor = value.clone();
+        predecessor["schema"] = "ryeos.codex.consumer_verifier.v2".into();
+        assert!(
+            serde_json::from_value::<ConsumerVerifierConfiguration>(predecessor)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
         let mut missing_controller = value.clone();
         missing_controller
             .as_object_mut()
@@ -315,6 +335,9 @@ pub struct ConsumerVerifierConfiguration {
     pub expected_command_output: String,
     pub responses_origin: String,
     pub outer_network: ConsumerOuterNetwork,
+    /// Actual production Q command expectations. These do not select a fixture
+    /// Worker or replace its admitted provider/credential configuration.
+    pub qualification_worker: crate::consumer_worker_semantics::QCommandExpectation,
     pub external_candidate_qualification_context:
         ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
 }
@@ -339,7 +362,7 @@ pub enum ConsumerOuterNetwork {
 impl ConsumerVerifierConfiguration {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "ryeos.codex.consumer_verifier.v2",
+            self.schema == "ryeos.codex.consumer_verifier.v3",
             "unsupported consumer verifier configuration"
         );
         self.controller.inputs.validate()?;
@@ -348,6 +371,7 @@ impl ConsumerVerifierConfiguration {
             "consumer controller duration exceeds its finite allowance"
         );
         self.external_candidate_qualification_context.validate()?;
+        self.qualification_worker.validate()?;
         crate::scripted_provider::validate_configuration(
             &self.expected_command_output,
             &self.responses_origin,
