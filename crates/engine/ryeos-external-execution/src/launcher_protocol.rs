@@ -167,6 +167,49 @@ impl LiveInheritedExternalCandidateSupervisor {
         self.supervisor.journal().has_retained_export()
     }
 
+    /// Immutable relay slots cannot refresh a previously accepted response.
+    /// Advance with another truthful acknowledgement of the same retained peer;
+    /// this consumes the existing signed transcript budget and grants no input.
+    pub fn author_idle_poll(&mut self, previous_poll: &[u8]) -> Result<Vec<u8>> {
+        let previous = SignedExecutionFrame::decode_and_verify(
+            previous_poll,
+            self.binding(),
+            lillux::time::timestamp_millis(),
+        )?;
+        let ExecutionChannelPayload::Acknowledge {
+            peer_frame_sequence,
+            peer_frame_digest,
+            ..
+        } = &previous.frame().payload
+        else {
+            anyhow::bail!("fresh relay poll requires a delivered supervisor acknowledgement")
+        };
+        ensure!(
+            previous.frame().direction
+                == ryeos_state::external_execution::ChannelDirection::SupervisorToOwner,
+            "fresh relay poll changed its supervisor direction"
+        );
+        let current = self
+            .supervisor
+            .ensure_supervisor_acknowledgement(
+                &self.supervisor_signing_key,
+                *peer_frame_sequence,
+                peer_frame_digest,
+            )?
+            .context("fresh relay poll lost its retained peer application")?;
+        // A changed durable application can already have authored a successor.
+        // Otherwise repeat the same evidence in a new signed transcript slot.
+        let fresh = if current.frame().sequence > previous.frame().sequence {
+            current
+        } else {
+            self.supervisor.journal().author_supervisor_frame(
+                &self.supervisor_signing_key,
+                current.frame().payload.clone(),
+            )?
+        };
+        Ok(fresh.canonical().as_bytes().to_vec())
+    }
+
     pub fn dispatch_release(&mut self, wire: &[u8]) -> Result<SupervisorApplicationOutcome> {
         self.supervisor.dispatch_release(wire)
     }

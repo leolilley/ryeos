@@ -355,6 +355,10 @@ pub struct AttachedFileRelayChannel {
 }
 
 impl ExternalExecutionChannelTransport for AttachedFileRelayChannel {
+    fn fresh_idle_poll_interval(&self) -> Option<Duration> {
+        Some(self.mailbox.files.poll_interval)
+    }
+
     fn exchange(&mut self, canonical_supervisor_frame: &[u8]) -> Result<ExternalTransportExchange> {
         self.exchange_until(
             canonical_supervisor_frame,

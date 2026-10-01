@@ -65,6 +65,13 @@ impl From<relay_transport::AttachedFileRelayChannel> for AttachedExternalExecuti
 }
 
 impl ExternalExecutionChannelTransport for AttachedExternalExecutionTransport {
+    fn fresh_idle_poll_interval(&self) -> Option<lillux::time::Duration> {
+        match self {
+            Self::HttpJson(http) => http.fresh_idle_poll_interval(),
+            Self::ControllerFileRelay(relay) => relay.fresh_idle_poll_interval(),
+        }
+    }
+
     fn exchange(&mut self, canonical_supervisor_frame: &[u8]) -> Result<ExternalTransportExchange> {
         match self {
             Self::HttpJson(http) => http.exchange(canonical_supervisor_frame),

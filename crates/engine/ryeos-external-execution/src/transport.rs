@@ -44,6 +44,12 @@ pub struct ExternalTransportExchange {
 pub trait ExternalExecutionChannelTransport {
     fn exchange(&mut self, canonical_supervisor_frame: &[u8]) -> Result<ExternalTransportExchange>;
 
+    /// Immutable response slots need a fresh signed acknowledgement to poll
+    /// for later controller work. HTTP keeps replaying its exact last frame.
+    fn fresh_idle_poll_interval(&self) -> Option<lillux::time::Duration> {
+        None
+    }
+
     /// Perform the same exact exchange beneath the caller's active lifecycle
     /// deadline. Production transports override this to bind their blocking
     /// I/O timeout to the remaining window. The default preserves existing
@@ -101,6 +107,12 @@ pub trait ExternalSupervisorRuntime {
     fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch>;
     fn poll_execution_output(&mut self) -> Result<Option<String>>;
     fn next_pending_transport_frame_after(&self, after_sequence: u64) -> Result<Option<Vec<u8>>>;
+
+    /// Journal a fresh acknowledgement of an already authenticated peer.
+    /// Authoring uncertainty is fatal; transport ambiguity retries these bytes.
+    fn author_idle_poll(&mut self, _previous_poll: &[u8]) -> Result<Vec<u8>> {
+        bail!("external runtime cannot author fresh immutable-slot polls")
+    }
 }
 
 impl ExternalSupervisorRuntime for LiveInheritedExternalCandidateSupervisor {
@@ -129,6 +141,10 @@ impl ExternalSupervisorRuntime for LiveInheritedExternalCandidateSupervisor {
             self,
             after_sequence,
         )
+    }
+
+    fn author_idle_poll(&mut self, previous_poll: &[u8]) -> Result<Vec<u8>> {
+        LiveInheritedExternalCandidateSupervisor::author_idle_poll(self, previous_poll)
     }
 }
 
@@ -162,6 +178,7 @@ pub struct ExternalCandidateTransportDriver<R, T> {
     pending_supervisor: BTreeMap<u64, Vec<u8>>,
     delivered_supervisor: BTreeMap<u64, String>,
     poll_frame: Option<Vec<u8>>,
+    next_idle_poll: Option<lillux::time::MonotonicDeadline>,
     partial_owner_frame: Option<Vec<u8>>,
     revocation_progress: Option<ExternalTransportProgress>,
     sealed_exports: BTreeSet<(u64, String)>,
@@ -206,6 +223,7 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             pending_supervisor,
             delivered_supervisor: BTreeMap::new(),
             poll_frame: None,
+            next_idle_poll: None,
             partial_owner_frame: None,
             revocation_progress: None,
             sealed_exports: BTreeSet::new(),
@@ -305,6 +323,18 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             }
             self.enqueue_supervisor_wire(wire.into_bytes())?;
         }
+        if self.pending_supervisor.is_empty() && self.transport.fresh_idle_poll_interval().is_some()
+        {
+            if self.next_idle_poll.is_some_and(|due| !due.has_elapsed()) {
+                return Ok(ExternalTransportProgress::Idle);
+            }
+            let previous = self
+                .poll_frame
+                .as_deref()
+                .context("external immutable-slot poll has no delivered predecessor")?;
+            let fresh = self.runtime.author_idle_poll(previous)?;
+            self.enqueue_supervisor_wire(fresh)?;
+        }
         let outgoing = self
             .pending_supervisor
             .first_key_value()
@@ -342,6 +372,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             }
         }
         self.poll_frame = Some(outgoing);
+        self.next_idle_poll = self
+            .transport
+            .fresh_idle_poll_interval()
+            .map(lillux::time::MonotonicDeadline::after);
 
         if let Some(urgent) = response.urgent_revocation_frame.as_ref() {
             return Ok(self.dispatch_urgent_revocation(urgent)?);
@@ -897,6 +931,15 @@ mod tests {
                         ExecutionFrameApplication::Applied,
                     )
                 }
+                ExecutionChannelPayload::QualificationComplete { .. } if !self.revoked => {
+                    self.dispatched.push("qualification_complete");
+                    (
+                        ExternalOwnerFrameOutcome::Application(
+                            SupervisorApplicationOutcome::Applied,
+                        ),
+                        ExecutionFrameApplication::Applied,
+                    )
+                }
                 ExecutionChannelPayload::Release
                 | ExecutionChannelPayload::ProtocolBytes { .. } => {
                     self.dispatched.push("ordinary");
@@ -955,6 +998,164 @@ mod tests {
         ) -> Result<Option<Vec<u8>>> {
             Ok(self.pending_transport.borrow_mut().pop_front())
         }
+
+        fn author_idle_poll(&mut self, previous_poll: &[u8]) -> Result<Vec<u8>> {
+            let previous = SignedExecutionFrame::decode_and_verify(
+                previous_poll,
+                &self.binding,
+                lillux::time::timestamp_millis(),
+            )?;
+            ensure!(matches!(
+                previous.frame().payload,
+                ExecutionChannelPayload::Acknowledge { .. }
+            ));
+            let fresh = sign(
+                &self.binding,
+                &self.supervisor_key,
+                ChannelDirection::SupervisorToOwner,
+                self.next_sequence,
+                Some(self.previous_digest.clone()),
+                previous.frame().acknowledged_peer_sequence,
+                previous.frame().payload.clone(),
+            );
+            self.next_sequence += 1;
+            self.previous_digest = fresh.digest().to_owned();
+            Ok(fresh.canonical().as_bytes().to_vec())
+        }
+    }
+
+    /// Models immutable response files: work queued after a response is sealed
+    /// can appear only in a subsequent signed supervisor slot.
+    struct ImmutablePollTransport {
+        binding: ExecutionChannelBinding,
+        queued_owner: Vec<ExternalTransportFrame>,
+        responses: BTreeMap<u64, ExternalTransportExchange>,
+        calls: Vec<Vec<u8>>,
+        fail_next: bool,
+    }
+
+    impl ExternalExecutionChannelTransport for ImmutablePollTransport {
+        fn fresh_idle_poll_interval(&self) -> Option<lillux::time::Duration> {
+            Some(lillux::time::Duration::from_secs(60))
+        }
+
+        fn exchange(&mut self, wire: &[u8]) -> Result<ExternalTransportExchange> {
+            let sent = SignedExecutionFrame::decode_and_verify(
+                wire,
+                &self.binding,
+                lillux::time::timestamp_millis(),
+            )?;
+            self.calls.push(wire.to_vec());
+            let result = self
+                .responses
+                .entry(sent.frame().sequence)
+                .or_insert_with(|| response(&sent, std::mem::take(&mut self.queued_owner), None))
+                .clone();
+            if std::mem::take(&mut self.fail_next) {
+                bail!("lost response after immutable slot commit")
+            }
+            Ok(result)
+        }
+    }
+
+    #[test]
+    fn immutable_relay_idle_polls_receive_late_release_and_completion_with_exact_retry() {
+        let (binding, owner_key, supervisor_key) = qualification_fixture();
+        let runtime = FixtureRuntime::new(binding.clone(), supervisor_key);
+        let ready = SignedExecutionFrame::decode_and_verify(
+            runtime.ready.as_bytes(),
+            &binding,
+            lillux::time::timestamp_millis(),
+        )
+        .unwrap();
+        let ready_receipt = sign(
+            &binding,
+            &owner_key,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                peer_frame_digest: ready.digest().to_owned(),
+                application: ExecutionFrameApplication::Retained,
+            },
+        );
+        let transport = ImmutablePollTransport {
+            binding: binding.clone(),
+            queued_owner: vec![envelope(&ready_receipt)],
+            responses: BTreeMap::new(),
+            calls: Vec::new(),
+            fail_next: false,
+        };
+        let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+        driver.step().unwrap(); // Ready receives its retained receipt.
+        driver.step().unwrap(); // Supervisor ACK gets an empty immutable slot.
+        let calls = driver.transport.calls.len();
+        let next_sequence = driver.runtime.next_sequence;
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Idle);
+        assert_eq!(driver.transport.calls.len(), calls);
+        assert_eq!(driver.runtime.next_sequence, next_sequence);
+
+        let release = sign(
+            &binding,
+            &owner_key,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(ready_receipt.digest().to_owned()),
+            2,
+            ExecutionChannelPayload::Release,
+        );
+        driver.transport.queued_owner.push(envelope(&release));
+        driver.next_idle_poll = Some(lillux::time::MonotonicDeadline::after(
+            lillux::time::Duration::ZERO,
+        ));
+        driver.step().unwrap(); // Fresh sequence 3 discovers the late Release.
+        assert!(driver.runtime.dispatched.contains(&"release"));
+        driver.step().unwrap(); // Sequence 4 acknowledges Release, then idles.
+
+        let completion = sign(
+            &binding,
+            &owner_key,
+            ChannelDirection::OwnerToSupervisor,
+            3,
+            Some(release.digest().to_owned()),
+            4,
+            ExecutionChannelPayload::QualificationComplete {
+                completion_request_digest: "9".repeat(64),
+            },
+        );
+        driver.transport.queued_owner.push(envelope(&completion));
+        driver.transport.fail_next = true;
+        driver.next_idle_poll = Some(lillux::time::MonotonicDeadline::after(
+            lillux::time::Duration::ZERO,
+        ));
+        assert!(driver.step().is_err()); // Sequence 5's response was committed.
+        let uncertain_wire = driver.transport.calls.last().unwrap().clone();
+        driver.step().unwrap();
+        assert_eq!(driver.transport.calls.last().unwrap(), &uncertain_wire);
+        assert!(
+            driver
+                .runtime
+                .dispatched
+                .contains(&"qualification_complete")
+        );
+        let sequences: Vec<_> = driver
+            .transport
+            .calls
+            .iter()
+            .map(|wire| {
+                SignedExecutionFrame::decode_and_verify(
+                    wire,
+                    &binding,
+                    lillux::time::timestamp_millis(),
+                )
+                .unwrap()
+                .frame()
+                .sequence
+            })
+            .collect();
+        assert_eq!(sequences, [1, 2, 3, 4, 5, 5]);
     }
 
     struct JournalFixtureRuntime {
@@ -968,6 +1169,48 @@ mod tests {
         _state_root: tempfile::TempDir,
         _journal_root: tempfile::TempDir,
         _authority: ryeos_state::PinnedStateAuthority,
+    }
+
+    #[test]
+    fn fresh_idle_acknowledgements_use_existing_durable_transcript_budget() {
+        let (binding, owner_key, supervisor_key) = fixture();
+        let runtime =
+            JournalFixtureRuntime::running(binding.clone(), &owner_key, supervisor_key, Vec::new());
+        let initial = runtime
+            .journal
+            .ensure_supervisor_acknowledgement(
+                &runtime.supervisor_key,
+                1,
+                &runtime.owner_predecessor_digest,
+            )
+            .unwrap()
+            .unwrap();
+        let mut previous = initial;
+        let mut authored = 0;
+        loop {
+            let result = runtime
+                .journal
+                .author_supervisor_frame(&runtime.supervisor_key, previous.frame().payload.clone());
+            let Ok(fresh) = result else { break };
+            assert_eq!(fresh.frame().sequence, previous.frame().sequence + 1);
+            assert_eq!(fresh.frame().payload, previous.frame().payload);
+            assert_ne!(fresh.digest(), previous.digest());
+            previous = fresh;
+            authored += 1;
+            assert!(authored <= binding.max_frames);
+        }
+        assert!(authored > 0);
+        // Budget refusal does not delete, rewrite or replace the last exact poll.
+        let retained = runtime
+            .journal
+            .pending_supervisor_transport_frames_after(
+                previous.frame().sequence - 1,
+                1,
+                ryeos_state::external_execution::MAX_FRAME_BYTES,
+            )
+            .unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].wire(), previous.canonical().as_bytes());
     }
 
     impl JournalFixtureRuntime {
