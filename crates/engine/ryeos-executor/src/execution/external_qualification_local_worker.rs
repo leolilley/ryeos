@@ -114,8 +114,8 @@ impl ExternalQualificationLocalWorker {
         &self.state_root
     }
 
-    /// Send the one signed Request through this exact attached exclusive
-    /// Worker. The app owns the durable contact and observation journal;
+    /// Send the finite signed setup and turn through this exact attached
+    /// exclusive Worker. The app owns the durable contact and observation journal;
     /// this owner only lends the already attached pool process for one send.
     /// The returned outcome is communication evidence, not qualification.
     pub(crate) fn execute_one_signed_request(
@@ -270,7 +270,7 @@ impl ExternalQualificationLocalWorker {
         )
     }
 
-    /// Consume the one signed turn, settle the attached local process even
+    /// Consume the signed setup and one turn, settle the attached local process even
     /// when the send or wait fails, and freeze only a successful transcript.
     /// The outer Q guest and cleanup lifeline remain with this owner for the
     /// separate native and provider settlement steps.
@@ -310,8 +310,8 @@ impl ExternalQualificationLocalWorker {
     }
 }
 
-/// Drive one already authenticated Q Ready occurrence through its single
-/// signed Worker turn and independent transport, native, local and provider
+/// Drive one already authenticated Q Ready occurrence through its signed
+/// session setup and single Worker turn and independent transport, native, local and provider
 /// settlement. Every transition rechecks its own durable owner. This returns
 /// only after exact provider terminal proof; it makes no verifier verdict or
 /// product qualification claim. A failure drops the original cleanup lifeline,

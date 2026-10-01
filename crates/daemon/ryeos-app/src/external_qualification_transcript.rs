@@ -80,7 +80,8 @@ pub(crate) fn prepare_qualification_worker_transcript(
 ) -> Result<PreparedQualificationWorkerTranscript> {
     ensure!(
         command.phase == QualificationWorkerCommandPhase::TurnCompleted
-            && command.owner_send_settled_at_ms.is_some(),
+            && command.owner_send_settled_at_ms.is_some()
+            && command.setup_owner_send_settled_at_ms.is_some(),
         "Q transcript has no completed turn and successful owner send"
     );
     let turn_id = command
@@ -95,6 +96,14 @@ pub(crate) fn prepare_qualification_worker_transcript(
         .turn_completion_digest
         .clone()
         .context("Q transcript has no turn completion")?;
+    let setup_final_response = command
+        .setup_final_response
+        .clone()
+        .context("Q transcript has no retained setup Final")?;
+    let setup_final_response_digest = command
+        .setup_final_response_digest
+        .clone()
+        .context("Q transcript has no setup Final digest")?;
     let final_response = command
         .final_response
         .clone()
@@ -106,6 +115,10 @@ pub(crate) fn prepare_qualification_worker_transcript(
     let wire_max_bytes = command
         .final_wire_max_bytes
         .context("Q transcript has no signed wire maximum")?;
+    ensure!(
+        command.setup_final_wire_max_bytes == Some(wire_max_bytes),
+        "Q transcript setup and turn changed signed wire maximum"
+    );
     ensure!(
         command
             .delta_wire_max_bytes
@@ -130,6 +143,7 @@ pub(crate) fn prepare_qualification_worker_transcript(
     let stream = QualificationWorkerTranscriptStream {
         schema: QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA.to_owned(),
         batches: batch_bodies,
+        setup_final_response,
         delta_response: command.delta_response.clone(),
         final_response: final_response.clone(),
     };
@@ -160,6 +174,11 @@ pub(crate) fn prepare_qualification_worker_transcript(
         qualification_occurrence_id: command.qualification_occurrence_id.clone(),
         channel_binding_digest: command.channel_binding_digest.clone(),
         process_incarnation_digest: command.process_incarnation_digest.clone(),
+        setup_request_digest: command.setup_request_digest.clone(),
+        setup_final_response_digest,
+        setup_owner_send_settled_at_ms: command
+            .setup_owner_send_settled_at_ms
+            .context("Q transcript lost setup owner-send success marker")?,
         request_digest: command.request_digest.clone(),
         owner_send_settled_at_ms: command
             .owner_send_settled_at_ms

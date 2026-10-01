@@ -1,13 +1,15 @@
-//! Durable, request-bound pushed ObservationBatch ingress for one Q Worker.
+//! Durable, session-bound pushed ObservationBatch ingress for one Q Worker.
+//!
+//! Batches describe the entire Q session, including setup. Their retained
+//! request digest identifies the command row; it does not attribute every
+//! event to the turn. Setup may retain session events and remote-thread
+//! bindings, but State observations require actual turn contact first.
 //!
 //! A batch ACK means its complete canonical content and chain coordinate were
-//! committed to the local operator database. It says nothing about the
-//! Worker's turn or semantic result. This local receipt is not a portable
-//! signed root fact. The accepted root is already Completed during Q, so a
-//! later portable claim using pushed batches needs a distinct authenticated
-//! Q event root or exact CAS blobs bound into node-signed qualification
-//! evidence. No such claim is opened here.
-//! Request-correlated Delta/Final observations have their own command journal.
+//! committed locally. It proves neither causality nor a semantic result.
+//! Later transcript retention preserves this session evidence for a verifier;
+//! it opens no positive qualification claim. Request-correlated Delta/Final
+//! observations have their own command journal.
 
 use super::*;
 use anyhow::ensure;
@@ -168,6 +170,27 @@ fn prepare_batch(raw: &Value, wire_max_bytes: u32) -> Result<PreparedBatch> {
     })
 }
 
+fn require_turn_contact_for_batch(
+    raw: &Value,
+    contacted_at_ms: Option<i64>,
+    retained_at_ms: i64,
+) -> Result<()> {
+    let observations = raw
+        .get("session_observations")
+        .and_then(Value::as_array)
+        .context("Q observation batch has no session observation inventory")?;
+    if observations
+        .iter()
+        .any(|observation| observation.get("kind").and_then(Value::as_str) == Some("state"))
+    {
+        ensure!(
+            contacted_at_ms.is_some_and(|contact| retained_at_ms >= contact),
+            "Q turn State observation preceded actual turn contact"
+        );
+    }
+    Ok(())
+}
+
 fn read_batch_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<(
@@ -267,13 +290,24 @@ pub(super) fn read_batches(
             .as_ref()
             .context("Q observation has no contacted command")?;
         ensure!(
-            command.contacted_at_ms.is_some()
+            command.setup_contacted_at_ms.is_some()
                 && record.process_incarnation_digest == command.process_incarnation_digest
                 && record.request_digest == command.request_digest
                 && record.first_sequence == next_sequence
                 && record.previous_digest == previous_digest
                 && first_wire_max.is_none_or(|wire| wire == record.wire_max_bytes),
             "Q observation chain changed its command, sequence, or signed wire maximum"
+        );
+        require_turn_contact_for_batch(
+            &record.batch,
+            command.contacted_at_ms,
+            record.retained_at_ms,
+        )?;
+        ensure!(
+            command
+                .setup_final_wire_max_bytes
+                .is_none_or(|wire| wire == record.wire_max_bytes),
+            "Q observation changed its setup signed wire maximum"
         );
         total_bytes = total_bytes
             .checked_add(i64::try_from(lillux::canonical_json(&record.batch)?.len())?)
@@ -338,7 +372,9 @@ impl RuntimeDb {
         ensure!(
             matches!(
                 command.phase,
-                QualificationWorkerCommandPhase::PossibleContact
+                QualificationWorkerCommandPhase::SetupPossibleContact
+                    | QualificationWorkerCommandPhase::SetupSettled
+                    | QualificationWorkerCommandPhase::PossibleContact
                     | QualificationWorkerCommandPhase::TurnCompleted
             ) && command.request_digest == request_digest
                 && process_phase == "attached",
@@ -404,7 +440,22 @@ impl RuntimeDb {
                 .is_some_and(|total| total <= MAX_JOURNAL_BYTES),
             "Q observation journal exceeds its cumulative byte bound"
         );
-        let retained_at_ms = i64::try_from(lillux::time::timestamp_millis())?;
+        // Clamp only to the durable contact stage: receipt time does not
+        // establish causality, and wall-clock regression must not make a
+        // legitimate post-turn receipt look like a pre-turn observation.
+        let retained_at_ms = i64::try_from(lillux::time::timestamp_millis())?.max(
+            command
+                .contacted_at_ms
+                .or(command.setup_contacted_at_ms)
+                .context("Q observation has no session contact boundary")?,
+        );
+        require_turn_contact_for_batch(raw, command.contacted_at_ms, retained_at_ms)?;
+        ensure!(
+            command
+                .setup_final_wire_max_bytes
+                .is_none_or(|wire| wire == wire_max_bytes),
+            "Q observation changed its setup signed wire maximum"
+        );
         ensure!(
             tx.execute(
                 "INSERT INTO external_qualification_worker_observation_batch
@@ -459,6 +510,20 @@ mod tests {
         let digest = ryeos_state::objects::canonical_value_digest(&value).unwrap();
         value["batch_digest"] = Value::String(digest);
         value
+    }
+
+    #[test]
+    fn session_setup_batches_allow_bindings_but_fence_turn_state() {
+        let session = json!({"session_observations": [
+            {"kind": "remote_thread", "remote_thread_id": "session-one"}
+        ]});
+        require_turn_contact_for_batch(&session, None, 10).unwrap();
+        let state = json!({"session_observations": [
+            {"kind": "state", "expected": "idle", "next": "turn_running", "turn_id": "one"}
+        ]});
+        assert!(require_turn_contact_for_batch(&state, None, 10).is_err());
+        assert!(require_turn_contact_for_batch(&state, Some(11), 10).is_err());
+        require_turn_contact_for_batch(&state, Some(11), 11).unwrap();
     }
 
     #[test]

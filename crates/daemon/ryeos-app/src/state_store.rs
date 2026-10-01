@@ -16475,16 +16475,39 @@ impl StateStore {
     pub(crate) fn reserve_qualification_worker_command(
         &self,
         placement: &str,
+        setup_request_digest: &str,
         request_digest: &str,
     ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
         let _permit = self.acquire_write_permit()?;
         self.lock()?
             .runtime_db
-            .reserve_qualification_worker_command(placement, request_digest)
+            .reserve_qualification_worker_command(placement, setup_request_digest, request_digest)
     }
 
     /// This is the one-use pre-send boundary. A caller may send one framed
     /// Request only after this transaction succeeds, and may never resend it.
+    pub(crate) fn mark_qualification_worker_setup_possible_contact(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        setup_request_digest: &str,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state, &g, placement, &admission,
+            )?;
+            g.runtime_db
+                .mark_qualification_worker_setup_possible_contact(
+                    placement,
+                    setup_request_digest,
+                    &proof,
+                )
+        })
+    }
+
     pub(crate) fn mark_qualification_worker_command_possible_contact(
         &self,
         state: &crate::state::AppState,
@@ -16536,6 +16559,35 @@ impl StateStore {
                 delta,
                 max_frame_bytes,
             )
+    }
+
+    pub(crate) fn record_qualification_worker_setup_final(
+        &self,
+        placement: &str,
+        setup_request_digest: &str,
+        response: &serde_json::Value,
+        max_frame_bytes: u32,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_worker_setup_final(
+                placement,
+                setup_request_digest,
+                response,
+                max_frame_bytes,
+            )
+    }
+
+    pub(crate) fn mark_qualification_worker_setup_send_settled_success(
+        &self,
+        placement: &str,
+        setup_request_digest: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .mark_qualification_worker_setup_send_settled_success(placement, setup_request_digest)
     }
 
     pub(crate) fn record_qualification_worker_final(

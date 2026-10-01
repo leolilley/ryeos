@@ -40,6 +40,8 @@ fn source(conn: &Connection, placement: &str) -> Result<QualificationWorkerTrans
     ensure!(
         command.phase == QualificationWorkerCommandPhase::TurnCompleted
             && command.owner_send_settled_at_ms.is_some()
+            && command.setup_owner_send_settled_at_ms.is_some()
+            && command.setup_final_response.is_some()
             && command.final_response.is_some(),
         "Q transcript has no successful owner send and completed turn"
     );
@@ -89,6 +91,12 @@ fn require_manifest_source(
             && manifest.qualification_occurrence_id == command.qualification_occurrence_id
             && manifest.channel_binding_digest == command.channel_binding_digest
             && manifest.process_incarnation_digest == command.process_incarnation_digest
+            && manifest.setup_request_digest == command.setup_request_digest
+            && Some(manifest.setup_final_response_digest.as_str())
+                == command.setup_final_response_digest.as_deref()
+            && Some(manifest.setup_owner_send_settled_at_ms)
+                == command.setup_owner_send_settled_at_ms
+            && Some(manifest.wire_max_bytes) == command.setup_final_wire_max_bytes
             && manifest.request_digest == command.request_digest
             && Some(manifest.owner_send_settled_at_ms) == command.owner_send_settled_at_ms
             && Some(manifest.wire_max_bytes) == command.final_wire_max_bytes

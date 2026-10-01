@@ -120,8 +120,9 @@ fn validate_reference_for_record(
         .context("Q transcript scenario has no signed Worker Request")?;
     request.validate()?;
     ensure!(
-        manifest.request_digest == canonical_value_digest(&request.body)?,
-        "Q transcript changed the original signed Worker Request"
+        manifest.request_digest == canonical_value_digest(&request.body)?
+            && manifest.setup_request_digest == canonical_value_digest(&request.session_setup)?,
+        "Q transcript changed the original signed setup or turn Request"
     );
     Ok(())
 }

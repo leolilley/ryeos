@@ -13,6 +13,9 @@ pub(crate) struct QualificationHistoricalTransportEvidence {
     pub owner: ExternalQualificationCandidateOwner,
     pub channel_binding_digest: String,
     pub transcript_manifest_hash: String,
+    pub setup_request_digest: String,
+    pub setup_final_response_digest: String,
+    pub setup_owner_send_settled_at_ms: i64,
     pub request_digest: String,
     pub final_response_digest: String,
     pub turn_id: String,
@@ -85,6 +88,13 @@ impl RuntimeDb {
             owner: owner.clone(),
             channel_binding_digest: command.channel_binding_digest,
             transcript_manifest_hash: transcript.manifest_hash,
+            setup_request_digest: command.setup_request_digest,
+            setup_final_response_digest: command
+                .setup_final_response_digest
+                .context("Q historical transport has no setup Final")?,
+            setup_owner_send_settled_at_ms: command
+                .setup_owner_send_settled_at_ms
+                .context("Q historical transport has no setup owner-send success")?,
             request_digest: command.request_digest,
             final_response_digest: command
                 .final_response_digest

@@ -1,4 +1,4 @@
-//! Signed first Request selection and one-use send for a qualification-only
+//! Signed finite session setup and turn sends for a qualification-only
 //! local Worker. The owner retains contact, Delta, pushed batches, Final, and
 //! turn facts under the Q occurrence gate and checked Bundle generation.
 //! These communication facts grant no qualification claim.
@@ -21,6 +21,8 @@ use crate::state::AppState;
 /// reselects it inside its one-use journal gate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignedQualificationWorkerRequest {
+    pub session_setup: Value,
+    pub setup_digest: String,
     pub body: Value,
     pub digest: String,
     pub wire_max_bytes: u32,
@@ -151,9 +153,13 @@ pub fn with_signed_qualification_worker_request<T>(
                     .as_ref()
                     .context("selected Q scenario has no signed Worker request")?;
                 request.validate()?;
+                let session_setup = request.session_setup.clone();
+                let setup_digest = canonical_value_digest(&session_setup)?;
                 let body = request.body.clone();
                 let digest = canonical_value_digest(&body)?;
                 run(SignedQualificationWorkerRequest {
+                    session_setup,
+                    setup_digest,
                     body,
                     digest,
                     wire_max_bytes: session.max_frame_bytes,
@@ -179,7 +185,8 @@ fn command_outcome(
     if record.phase == QualificationWorkerCommandPhase::OutcomeUnknown {
         bail!("Q Worker command has an unknown contacted outcome");
     }
-    if record.owner_send_settled_at_ms.is_none() {
+    if record.setup_owner_send_settled_at_ms.is_none() || record.owner_send_settled_at_ms.is_none()
+    {
         return Ok(None);
     }
     let Some(final_response_digest) = &record.final_response_digest else {
@@ -323,9 +330,9 @@ fn persist_request_delta(
     })))
 }
 
-/// Redeem one signed Q Request inside the restored occurrence gate and one
-/// checked Bundle generation. PossibleContact is durable before the callback
-/// can call the exclusive pool. The callback has no authority to select bytes
+/// Execute the signed setup and turn inside the restored occurrence gate and
+/// one checked Bundle generation. Each PossibleContact is durable before its
+/// exclusive-pool send, and turn contact requires settled setup. The callback has no authority to select bytes
 /// or extend the retained channel deadline. This returns communication facts
 /// only; semantic completion and qualification remain separate.
 pub fn execute_signed_qualification_worker_request(
@@ -336,7 +343,7 @@ pub fn execute_signed_qualification_worker_request(
     root: &PreparedExternalQualificationRoot,
     expected_request: &SignedQualificationWorkerRequest,
     expected_process: &crate::process::ExecutionProcessIdentity,
-    send_once: impl FnOnce(
+    mut send_once: impl FnMut(
         Value,
         lillux::time::MonotonicDeadline,
         &mut dyn FnMut(Value) -> Result<Option<Value>>,
@@ -381,18 +388,64 @@ pub fn execute_signed_qualification_worker_request(
                 &selected.body,
                 selected.wire_max_bytes,
             )?;
-            let reserved = state
-                .state_store
-                .reserve_qualification_worker_command(placement, &selected.digest)?;
+            state.persistent_sessions.ensure_exclusive_request_fits(
+                placement,
+                &selected.session_setup,
+                selected.wire_max_bytes,
+            )?;
+            let reserved = state.state_store.reserve_qualification_worker_command(
+                placement,
+                &selected.setup_digest,
+                &selected.digest,
+            )?;
             ensure!(
                 reserved.phase == QualificationWorkerCommandPhase::Reserved
                     && reserved.process_incarnation_digest
                         == expected_process.owner_incarnation_digest()?,
                 "Q Worker command was already contacted or changed process"
             );
-            // Reservation is not permission to send later under an expired or
-            // revoked caller. Consume fresh admission at the durable contact
-            // boundary, then release its bearer gate before waiting on I/O.
+            // Each stage consumes fresh admission at its own durable contact
+            // boundary. Setup has no replay or replacement policy; a lost Final
+            // fences the conversation rather than granting turn contact.
+            let admission = root.authenticate_invocation(state)?;
+            state
+                .state_store
+                .mark_qualification_worker_setup_possible_contact(
+                    state,
+                    placement,
+                    &selected.setup_digest,
+                    admission,
+                )?;
+            let setup = (|| -> Result<()> {
+                ensure!(
+                    !deadline.has_elapsed(),
+                    "Q session setup expired before send"
+                );
+                let mut reject_delta = |_delta| -> Result<Option<Value>> {
+                    bail!("Q session setup cannot emit a turn progress Delta")
+                };
+                let final_body =
+                    send_once(selected.session_setup.clone(), deadline, &mut reject_delta)?;
+                validate_setup_final(&final_body, selected.wire_max_bytes)?;
+                state.state_store.record_qualification_worker_setup_final(
+                    placement,
+                    &selected.setup_digest,
+                    &final_body,
+                    selected.wire_max_bytes,
+                )?;
+                state
+                    .state_store
+                    .mark_qualification_worker_setup_send_settled_success(
+                        placement,
+                        &selected.setup_digest,
+                    )?;
+                Ok(())
+            })();
+            if let Err(error) = setup {
+                return Err(fence_unknown_command(state, placement, error));
+            }
+            // Successful setup does not authorize a turn after revocation or
+            // expiry. This independent gate verifies setup settlement too.
             let admission = root.authenticate_invocation(state)?;
             state
                 .state_store
@@ -430,28 +483,105 @@ pub fn execute_signed_qualification_worker_request(
             })();
             match contacted {
                 Ok(outcome) => Ok(outcome),
-                Err(error) => {
-                    let unknown = state
-                        .state_store
-                        .mark_qualification_worker_command_outcome_unknown(placement);
-                    Err(match unknown {
-                        Ok(_) => error,
-                        Err(fence) => error.context(format!(
-                            "Q Worker command unknown-outcome fence failed: {fence:#}"
-                        )),
-                    })
-                }
+                Err(error) => Err(fence_unknown_command(state, placement, error)),
             }
         },
     )
 }
 
+/// The structured bridge owns session binding. Require its exact bounded
+/// common binding observation; never extract Codex-specific response pointers
+/// or interpolate an upstream ID in the daemon's turn payload.
+fn validate_setup_final(body: &Value, wire_max_bytes: u32) -> Result<()> {
+    ensure!(
+        lillux::canonical_json(body)?.len() <= wire_max_bytes as usize,
+        "Q session setup Final exceeds its signed wire maximum"
+    );
+    let response = body
+        .get("response")
+        .and_then(Value::as_object)
+        .context("Q session setup Final has no structured response")?;
+    ensure!(
+        !response.contains_key("error"),
+        "Q session setup returned an error response"
+    );
+    let observations = body
+        .get("session_observations")
+        .and_then(Value::as_array)
+        .context("Q session setup Final has no binding observations")?;
+    ensure!(
+        observations.len() <= 16,
+        "Q session setup observations exceed bound"
+    );
+    let mut bindings = observations.iter().filter(|observation| {
+        observation.get("kind").and_then(Value::as_str) == Some("remote_thread")
+    });
+    let binding = bindings
+        .next()
+        .context("Q session setup did not bind an upstream session")?;
+    ensure!(
+        bindings.next().is_none(),
+        "Q session setup bound multiple upstream sessions"
+    );
+    let id = binding
+        .get("id")
+        .and_then(Value::as_str)
+        .context("Q session setup bound no textual upstream session")?;
+    ensure!(
+        !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control),
+        "Q session setup bound an invalid upstream session"
+    );
+    ensure!(
+        observations.iter().all(|observation| {
+            observation.get("kind").and_then(Value::as_str) != Some("state")
+        }),
+        "Q session setup cannot supply turn state testimony"
+    );
+    Ok(())
+}
+
+fn fence_unknown_command(state: &AppState, placement: &str, error: anyhow::Error) -> anyhow::Error {
+    match state
+        .state_store
+        .mark_qualification_worker_command_outcome_unknown(placement)
+    {
+        Ok(_) => error,
+        Err(fence) => error.context(format!(
+            "Q Worker command unknown-outcome fence failed: {fence:#}"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{QualificationWorkerCommandOutcome, command_outcome};
+    use super::{QualificationWorkerCommandOutcome, command_outcome, validate_setup_final};
     use crate::runtime_db::external_execution::{
         QualificationWorkerCommandPhase, QualificationWorkerCommandRecord,
     };
+
+    #[test]
+    fn setup_requires_single_bounded_binding_without_turn_testimony() {
+        let good = serde_json::json!({"response":{"result":{}},"session_observations":[{"kind":"remote_thread","id":"upstream"}]});
+        validate_setup_final(&good, 4096).unwrap();
+        for observations in [
+            serde_json::json!([]),
+            serde_json::json!([{"kind":"remote_thread","id":""}]),
+            serde_json::json!([{"kind":"remote_thread","id":"one"},{"kind":"remote_thread","id":"two"}]),
+            serde_json::json!([{"kind":"remote_thread","id":"one"},{"kind":"state","next":"turn_running"}]),
+        ] {
+            assert!(
+                validate_setup_final(
+                    &serde_json::json!({"response":{"result":{}},"session_observations":observations}),
+                    4096
+                )
+                .is_err()
+            );
+        }
+        assert!(validate_setup_final(&good, 1).is_err());
+        let mut error = good.clone();
+        error["response"]["error"] = serde_json::json!({"code":-1});
+        assert!(validate_setup_final(&error, 4096).is_err());
+    }
 
     #[test]
     fn completed_observations_require_owner_send_settlement() {
@@ -463,6 +593,12 @@ mod tests {
             qualification_occurrence_id: "occurrence".into(),
             channel_binding_digest: "channel".into(),
             process_incarnation_digest: "process".into(),
+            setup_request_digest: "setup-request".into(),
+            setup_contacted_at_ms: Some(1),
+            setup_final_response_digest: Some("setup-final".into()),
+            setup_final_response: None,
+            setup_final_wire_max_bytes: None,
+            setup_owner_send_settled_at_ms: Some(2),
             request_digest: "request".into(),
             phase: QualificationWorkerCommandPhase::TurnCompleted,
             turn_id: Some("turn-one".into()),
@@ -483,6 +619,9 @@ mod tests {
         };
         assert_eq!(command_outcome(&record).unwrap(), None);
         record.owner_send_settled_at_ms = Some(6);
+        record.setup_owner_send_settled_at_ms = None;
+        assert_eq!(command_outcome(&record).unwrap(), None);
+        record.setup_owner_send_settled_at_ms = Some(2);
         assert!(matches!(
             command_outcome(&record).unwrap(),
             Some(QualificationWorkerCommandOutcome::TurnCompleted { .. })

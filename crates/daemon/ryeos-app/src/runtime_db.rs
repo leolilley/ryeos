@@ -2691,7 +2691,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // response before any controller-to-guest relay file can be uploaded.
 // Epoch 119 retains the original private Q project directory and its one-use
 // descriptor borrow, without backend workspace or process-scope authority.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 119;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 120;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

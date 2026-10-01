@@ -28,7 +28,7 @@ pub mod remote_verifier_source;
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v4";
 pub const PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA: &str =
-    "ryeos.qualification_worker_request.v1";
+    "ryeos.qualification_worker_request.v2";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
 // Current-only cut: an immutable v12 qualification head at the same
 // coordinate cannot be replaced by v14. Reissuance requires a fresh
@@ -422,7 +422,7 @@ pub struct ProductQualificationProducerScenario {
     /// selects no remote verifier; the producer target is never a fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_verifier: Option<ProductQualificationRemoteVerifierSelection>,
-    /// One signed, bounded first Request body for the qualification Worker.
+    /// Signed, bounded session setup and turn Request bodies for the qualification Worker.
     /// Absence is valid for scenarios that do not use the local Worker; the
     /// Q command owner must require this for its exact selected scenario.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -433,6 +433,9 @@ pub struct ProductQualificationProducerScenario {
 #[serde(deny_unknown_fields)]
 pub struct ProductQualificationConsumerWorkerRequest {
     pub schema: String,
+    #[serde(deserialize_with = "Value::deserialize")]
+    pub session_setup: Value,
+    #[serde(deserialize_with = "Value::deserialize")]
     pub body: Value,
 }
 
@@ -441,7 +444,17 @@ impl ProductQualificationConsumerWorkerRequest {
         if self.schema != PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA {
             bail!("unsupported qualification Worker request schema");
         }
-        bounded_object(&self.body, "qualification Worker request body")
+        bounded_object(&self.session_setup, "qualification Worker session setup")?;
+        bounded_object(&self.body, "qualification Worker request body")?;
+        bounded(
+            &serde_json::json!({"session_setup": self.session_setup, "body": self.body}),
+            MAX_PROBE_VALUE_BYTES,
+            "qualification Worker combined requests",
+        )?;
+        if canonical_value_digest(&self.session_setup)? == canonical_value_digest(&self.body)? {
+            bail!("qualification Worker setup and turn requests must have distinct digests");
+        }
+        Ok(())
     }
 }
 

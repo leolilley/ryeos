@@ -1,12 +1,13 @@
-//! Portable bytes for one locally observed Q Worker command and pushed stream.
+//! Portable bytes for one finite Q Worker setup and turn with a session stream.
 //!
 //! The manifest is structural testimony only. Its chunks contain the exact
 //! canonical ObservationBatch bodies, the optional retained Delta body, and
-//! the retained Final body. The command journal also retains turn State
-//! digests, turn coordinates, and the daemon-owned successful send return
-//! timestamp. State bodies outside those retained frames are not present here.
-//! The timestamp must be joined to the exact retained command row by the
-//! publisher; a self-described manifest cannot prove that return on its own.
+//! the retained setup and turn Final bodies. Batches span the session beginning
+//! at setup contact; they are not evidence of turn request causality. The command
+//! journal also retains turn State digests, turn coordinates, and daemon-owned
+//! successful send return timestamps. State bodies outside those retained frames
+//! are not present here. The timestamps must be joined to the exact retained
+//! command row by the publisher; a manifest cannot prove those returns itself.
 //! Neither a valid manifest nor a transcript establishes semantic success,
 //! native death, provider settlement, or a qualification.
 
@@ -16,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const QUALIFICATION_WORKER_TRANSCRIPT_KIND: &str = "qualification_worker_transcript";
-pub const QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA: u32 = 1;
+pub const QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA: u32 = 2;
 pub const QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA: &str =
-    "ryeos.qualification_worker_transcript_stream.v1";
+    "ryeos.qualification_worker_transcript_stream.v2";
 pub const MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES: u64 = 1024 * 1024;
 pub const MAX_QUALIFICATION_WORKER_TRANSCRIPT_BYTES: u64 = 112 * 1024 * 1024;
 pub const MAX_QUALIFICATION_WORKER_BATCH_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -46,6 +47,10 @@ pub struct QualificationWorkerTranscriptManifest {
     pub qualification_occurrence_id: String,
     pub channel_binding_digest: String,
     pub process_incarnation_digest: String,
+    pub setup_request_digest: String,
+    pub setup_final_response_digest: String,
+    /// Exact durable daemon-owned successful setup send return.
+    pub setup_owner_send_settled_at_ms: i64,
     pub request_digest: String,
     pub wire_max_bytes: u32,
     pub turn_id: String,
@@ -173,6 +178,8 @@ pub struct QualificationWorkerTranscriptStream {
     pub batches: Vec<Value>,
     #[serde(deserialize_with = "super::deserialize_required_nullable")]
     pub delta_response: Option<Value>,
+    #[serde(deserialize_with = "Value::deserialize")]
+    pub setup_final_response: Value,
     pub final_response: Value,
 }
 
@@ -192,7 +199,7 @@ impl QualificationWorkerTranscriptManifest {
         super::validate_object_kind(&self.kind, QUALIFICATION_WORKER_TRANSCRIPT_KIND)?;
         ensure!(
             self.schema == QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
-            "Q Worker transcript is not the current v1 schema"
+            "Q Worker transcript is not the current v2 schema"
         );
         let owner = self
             .owner_principal
@@ -225,6 +232,8 @@ impl QualificationWorkerTranscriptManifest {
             ("qualification operation", &self.qualification_operation_id),
             ("channel binding", &self.channel_binding_digest),
             ("process incarnation", &self.process_incarnation_digest),
+            ("setup request", &self.setup_request_digest),
+            ("setup Final response", &self.setup_final_response_digest),
             ("request", &self.request_digest),
             ("turn start", &self.turn_start_digest),
             ("turn completion", &self.turn_completion_digest),
@@ -234,8 +243,13 @@ impl QualificationWorkerTranscriptManifest {
             hash(label, value)?;
         }
         ensure!(
-            self.owner_send_settled_at_ms > 0,
-            "Q transcript lacks a positive daemon-owned send return marker"
+            self.setup_request_digest != self.request_digest,
+            "Q transcript setup and turn request digests must differ"
+        );
+        ensure!(
+            self.setup_owner_send_settled_at_ms > 0
+                && self.owner_send_settled_at_ms >= self.setup_owner_send_settled_at_ms,
+            "Q transcript lacks ordered positive daemon-owned send return markers"
         );
         ensure!(
             (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&self.wire_max_bytes)
@@ -372,6 +386,13 @@ impl QualificationWorkerTranscriptManifest {
             stream.schema == QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA,
             "Q transcript stream schema is not current"
         );
+        let setup_final_bytes = lillux::canonical_json(&stream.setup_final_response)?;
+        ensure!(
+            setup_final_bytes.len() <= self.wire_max_bytes as usize
+                && lillux::sha256_hex(setup_final_bytes.as_bytes())
+                    == self.setup_final_response_digest,
+            "Q transcript setup Final exceeds its wire bound or differs from retained digest"
+        );
         let final_bytes = lillux::canonical_json(&stream.final_response)?;
         ensure!(
             u64::try_from(final_bytes.len())? == self.final_response_bytes
@@ -472,6 +493,8 @@ mod tests {
         });
         let digest = super::super::canonical_value_digest(&batch).unwrap();
         batch["batch_digest"] = Value::String(digest.clone());
+        let setup_final_response = json!({"result":"session observed"});
+        let setup_final_json = lillux::canonical_json(&setup_final_response).unwrap();
         let final_response = json!({"result":"observed"});
         let final_json = lillux::canonical_json(&final_response).unwrap();
         let batch_json = lillux::canonical_json(&batch).unwrap();
@@ -479,6 +502,7 @@ mod tests {
             "schema":QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA,
             "batches":[batch],
             "delta_response":null,
+            "setup_final_response":setup_final_response,
             "final_response":final_response,
         });
         let bytes = lillux::canonical_json(&stream).unwrap().into_bytes();
@@ -493,6 +517,9 @@ mod tests {
             qualification_occurrence_id: "occurrence".into(),
             channel_binding_digest: "e".repeat(64),
             process_incarnation_digest: "f".repeat(64),
+            setup_request_digest: "4".repeat(64),
+            setup_final_response_digest: lillux::sha256_hex(setup_final_json.as_bytes()),
+            setup_owner_send_settled_at_ms: 1,
             request_digest: "1".repeat(64),
             wire_max_bytes: 1024 * 1024,
             turn_id: "turn".into(),
@@ -660,6 +687,83 @@ mod tests {
         let mut unsettled = manifest;
         unsettled.owner_send_settled_at_ms = 0;
         assert!(unsettled.validate().is_err());
+    }
+
+    #[test]
+    fn setup_evidence_is_required_exact_and_bounded() {
+        let (manifest, bytes) = manifest_and_chunk();
+        for field in [
+            "setup_request_digest",
+            "setup_final_response_digest",
+            "setup_owner_send_settled_at_ms",
+        ] {
+            let mut value = manifest.to_value().unwrap();
+            value.as_object_mut().unwrap().remove(field);
+            assert!(QualificationWorkerTranscriptManifest::from_current_value(&value).is_err());
+        }
+        let mut predecessor = manifest.clone();
+        predecessor.schema = 1;
+        assert!(predecessor.validate().is_err());
+        let mut unsettled = manifest.clone();
+        unsettled.setup_owner_send_settled_at_ms = 0;
+        assert!(unsettled.validate().is_err());
+        let mut reversed = manifest.clone();
+        reversed.setup_owner_send_settled_at_ms = reversed.owner_send_settled_at_ms + 1;
+        assert!(reversed.validate().is_err());
+        let mut same_request = manifest.clone();
+        same_request.setup_request_digest = same_request.request_digest.clone();
+        assert!(same_request.validate().is_err());
+        let mut substituted_digest = manifest.clone();
+        substituted_digest.setup_final_response_digest = "0".repeat(64);
+        assert!(substituted_digest.verify_chunks(&[bytes.clone()]).is_err());
+
+        // Update the outer hashes too: the retained setup digest and bound,
+        // required field and current schema must each reject independently.
+        for mutation in [
+            "missing",
+            "substituted",
+            "oversized",
+            "predecessor",
+            "extra",
+        ] {
+            let mut changed = manifest.clone();
+            let mut stream: Value = serde_json::from_slice(&bytes).unwrap();
+            match mutation {
+                "missing" => {
+                    stream
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("setup_final_response");
+                }
+                "substituted" => {
+                    stream["setup_final_response"] = json!({"result":"other"});
+                }
+                "oversized" => {
+                    stream["setup_final_response"] = json!({"result":"x".repeat(2048)});
+                    changed.setup_final_response_digest =
+                        super::super::canonical_value_digest(&stream["setup_final_response"])
+                            .unwrap();
+                    changed.wire_max_bytes = 1024;
+                }
+                "predecessor" => {
+                    stream["schema"] = json!("ryeos.qualification_worker_transcript_stream.v1");
+                }
+                "extra" => {
+                    stream["extra"] = json!(true);
+                }
+                _ => unreachable!(),
+            }
+            let updated = lillux::canonical_json(&stream).unwrap().into_bytes();
+            changed.stream_sha256 = lillux::sha256_hex(&updated);
+            changed.stream_bytes = updated.len() as u64;
+            changed.chunks[0].blob_hash = changed.stream_sha256.clone();
+            changed.chunks[0].size_bytes = changed.stream_bytes;
+            changed.validate().unwrap();
+            assert!(
+                changed.verify_chunks(&[updated]).is_err(),
+                "accepted {mutation}"
+            );
+        }
     }
 
     #[test]

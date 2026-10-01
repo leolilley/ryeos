@@ -1,4 +1,4 @@
-//! One framed request and one observed turn for a Q-only local Worker.
+//! One setup request followed by one observed turn for a Q-only local Worker.
 //!
 //! These are daemon-observed I/O facts. A Final frame does not establish a
 //! completed turn, and even both facts do not grant a qualification claim.
@@ -16,6 +16,8 @@ const MAX_QUALIFICATION_WORKER_FINAL_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QualificationWorkerCommandPhase {
     Reserved,
+    SetupPossibleContact,
+    SetupSettled,
     PossibleContact,
     TurnCompleted,
     OutcomeUnknown,
@@ -25,6 +27,8 @@ impl QualificationWorkerCommandPhase {
     fn parse(raw: &str) -> Result<Self> {
         match raw {
             "reserved" => Ok(Self::Reserved),
+            "setup_possible_contact" => Ok(Self::SetupPossibleContact),
+            "setup_settled" => Ok(Self::SetupSettled),
             "possible_contact" => Ok(Self::PossibleContact),
             "turn_completed" => Ok(Self::TurnCompleted),
             "outcome_unknown" => Ok(Self::OutcomeUnknown),
@@ -44,6 +48,12 @@ pub(crate) struct QualificationWorkerCommandRecord {
     pub qualification_occurrence_id: String,
     pub channel_binding_digest: String,
     pub process_incarnation_digest: String,
+    pub setup_request_digest: String,
+    pub setup_contacted_at_ms: Option<i64>,
+    pub setup_final_response_digest: Option<String>,
+    pub setup_final_response: Option<serde_json::Value>,
+    pub setup_final_wire_max_bytes: Option<u32>,
+    pub setup_owner_send_settled_at_ms: Option<i64>,
     pub request_digest: String,
     pub phase: QualificationWorkerCommandPhase,
     pub turn_id: Option<String>,
@@ -87,9 +97,65 @@ impl QualificationWorkerCommandRecord {
             &self.qualification_operation_id,
             &self.channel_binding_digest,
             &self.process_incarnation_digest,
+            &self.setup_request_digest,
             &self.request_digest,
         ] {
             validate_sha256("qualification Worker command digest", hash)?;
+        }
+        ensure!(
+            self.setup_final_response_digest.is_some() == self.setup_final_response.is_some()
+                && self.setup_final_response_digest.is_some()
+                    == self.setup_final_wire_max_bytes.is_some(),
+            "Q setup Final content, digest and wire bound differ in presence"
+        );
+        ensure!(
+            self.setup_request_digest != self.request_digest,
+            "Q setup and turn request digests must differ"
+        );
+        if let Some(response) = &self.setup_final_response {
+            let canonical = lillux::canonical_json(response)?;
+            let wire = self.setup_final_wire_max_bytes.expect("presence checked");
+            ensure!(
+                (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&wire)
+                    && canonical.len() <= wire as usize
+                    && self.setup_final_response_digest.as_deref()
+                        == Some(lillux::sha256_hex(canonical.as_bytes()).as_str())
+                    && self.setup_contacted_at_ms.is_some(),
+                "Q setup Final differs from its contacted request or retained bytes"
+            );
+        }
+        ensure!(
+            self.setup_contacted_at_ms
+                .is_none_or(|at| at >= self.reserved_at_ms)
+                && self.setup_owner_send_settled_at_ms.is_none_or(|at| {
+                    self.setup_final_response.is_some()
+                        && self
+                            .setup_contacted_at_ms
+                            .is_some_and(|contact| at >= contact)
+                })
+                && self.contacted_at_ms.is_none_or(|at| {
+                    self.setup_owner_send_settled_at_ms
+                        .is_some_and(|settled| at >= settled)
+                })
+                && self
+                    .setup_final_wire_max_bytes
+                    .zip(self.final_wire_max_bytes)
+                    .is_none_or(|(setup, turn)| setup == turn)
+                && self
+                    .setup_final_wire_max_bytes
+                    .zip(self.delta_wire_max_bytes)
+                    .is_none_or(|(setup, turn)| setup == turn),
+            "Q command crossed setup/turn ordering or signed wire bounds"
+        );
+        if self.contacted_at_ms.is_none() {
+            ensure!(
+                self.turn_id.is_none()
+                    && self.delta_response.is_none()
+                    && self.final_response.is_none()
+                    && self.completed_at_ms.is_none()
+                    && self.owner_send_settled_at_ms.is_none(),
+                "Q turn evidence preceded actual turn contact"
+            );
         }
         if let Some(hash) = &self.final_response_digest {
             validate_sha256("qualification Worker Final response", hash)?;
@@ -183,12 +249,25 @@ impl QualificationWorkerCommandRecord {
                 && (self.turn_completed_at_ms.is_some() == self.turn_completion_digest.is_some())
                 && match self.phase {
                     QualificationWorkerCommandPhase::Reserved => {
-                        self.contacted_at_ms.is_none()
+                        self.setup_contacted_at_ms.is_none()
+                            && self.setup_final_response.is_none()
+                            && self.setup_owner_send_settled_at_ms.is_none()
+                            && self.contacted_at_ms.is_none()
                             && self.turn_id.is_none()
                             && self.delta_response_digest.is_none()
                             && self.final_response_digest.is_none()
                             && self.completed_at_ms.is_none()
                             && self.owner_send_settled_at_ms.is_none()
+                    }
+                    QualificationWorkerCommandPhase::SetupPossibleContact => {
+                        self.setup_contacted_at_ms.is_some()
+                            && self.setup_owner_send_settled_at_ms.is_none()
+                            && self.contacted_at_ms.is_none()
+                    }
+                    QualificationWorkerCommandPhase::SetupSettled => {
+                        self.setup_contacted_at_ms.is_some()
+                            && self.setup_owner_send_settled_at_ms.is_some()
+                            && self.contacted_at_ms.is_none()
                     }
                     QualificationWorkerCommandPhase::PossibleContact => {
                         self.contacted_at_ms.is_some()
@@ -203,7 +282,7 @@ impl QualificationWorkerCommandRecord {
                             && self.completed_at_ms.is_some()
                     }
                     QualificationWorkerCommandPhase::OutcomeUnknown => {
-                        self.contacted_at_ms.is_some()
+                        self.setup_contacted_at_ms.is_some()
                     }
                 },
             "qualification Worker command result is not current"
@@ -223,7 +302,9 @@ pub(super) fn read_command(
                 turn_completed_at_ms,turn_completion_digest,delta_response_digest,
                 delta_response_json,delta_wire_max_bytes,final_response_digest,
                 final_response_json,final_wire_max_bytes,reserved_at_ms,
-                contacted_at_ms,completed_at_ms,owner_send_settled_at_ms
+                contacted_at_ms,completed_at_ms,owner_send_settled_at_ms,
+                setup_request_digest,setup_contacted_at_ms,setup_final_response_digest,
+                setup_final_response_json,setup_final_wire_max_bytes,setup_owner_send_settled_at_ms
          FROM external_qualification_worker_command WHERE placement_thread_id=?1",
         [placement],
         |row| {
@@ -251,6 +332,12 @@ pub(super) fn read_command(
                 row.get::<_, Option<i64>>(20)?,
                 row.get::<_, Option<i64>>(21)?,
                 row.get::<_, Option<i64>>(22)?,
+                row.get::<_, String>(23)?,
+                row.get::<_, Option<i64>>(24)?,
+                row.get::<_, Option<String>>(25)?,
+                row.get::<_, Option<String>>(26)?,
+                row.get::<_, Option<i64>>(27)?,
+                row.get::<_, Option<i64>>(28)?,
             ))
         },
     )
@@ -274,8 +361,15 @@ pub(super) fn read_command(
         };
         let delta_response = decode_body(row.14.as_deref(), "Delta")?;
         let final_response = decode_body(row.17.as_deref(), "Final")?;
+        let setup_final_response = decode_body(row.26.as_deref(), "setup Final")?;
         let record = QualificationWorkerCommandRecord {
             placement_thread_id: placement.to_owned(),
+            setup_request_digest: row.23,
+            setup_contacted_at_ms: row.24,
+            setup_final_response_digest: row.25,
+            setup_final_response,
+            setup_final_wire_max_bytes: row.27.map(u32::try_from).transpose()?,
+            setup_owner_send_settled_at_ms: row.28,
             accepted_root_id: row.0,
             accepted_capsule_hash: row.1,
             qualification_operation_id: row.2,
@@ -498,9 +592,15 @@ impl RuntimeDb {
     pub(crate) fn reserve_qualification_worker_command(
         &self,
         placement: &str,
+        setup_request_digest: &str,
         request_digest: &str,
     ) -> Result<QualificationWorkerCommandRecord> {
+        validate_sha256("qualification Worker setup request", setup_request_digest)?;
         validate_sha256("qualification Worker request", request_digest)?;
+        ensure!(
+            setup_request_digest != request_digest,
+            "Q setup and turn request digests must differ"
+        );
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let allocation = read(&tx, placement)?.context("Q command lost its allocation")?;
         ensure!(
@@ -573,7 +673,8 @@ impl RuntimeDb {
         if let Some(prior) = read_command(&tx, placement)? {
             require_owner(&tx, &prior)?;
             ensure!(
-                prior.request_digest == request_digest
+                prior.setup_request_digest == setup_request_digest
+                    && prior.request_digest == request_digest
                     && prior.process_incarnation_digest == process_digest,
                 "Q command reservation replay changed its one request"
             );
@@ -586,8 +687,8 @@ impl RuntimeDb {
              (placement_thread_id,accepted_root_id,accepted_capsule_hash,
               qualification_operation_id,qualification_occurrence_id,
               channel_binding_digest,process_incarnation_digest,request_digest,
-              state,reserved_at_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'reserved',?9)",
+              state,reserved_at_ms,setup_request_digest)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'reserved',?9,?10)",
             params![
                 placement,
                 &owner.coordinate.accepted_root_id,
@@ -598,6 +699,7 @@ impl RuntimeDb {
                 &process_digest,
                 request_digest,
                 now,
+                setup_request_digest,
             ],
         )?;
         let record = read_command(&tx, placement)?.context("Q command reservation disappeared")?;
@@ -607,17 +709,17 @@ impl RuntimeDb {
 
     /// Possible contact must be committed before the pool may send its one
     /// framed Request. The caller must never resend a prior contacted row.
-    pub(crate) fn mark_qualification_worker_command_possible_contact(
+    pub(crate) fn mark_qualification_worker_setup_possible_contact(
         &self,
         placement: &str,
-        request_digest: &str,
+        setup_request_digest: &str,
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read_command(&tx, placement)?.context("Q command was not reserved")?;
         ensure!(
             record.phase == QualificationWorkerCommandPhase::Reserved
-                && record.request_digest == request_digest,
+                && record.setup_request_digest == setup_request_digest,
             "Q command already crossed its one-use send boundary"
         );
         require_owner(&tx, &record)?;
@@ -659,14 +761,182 @@ impl RuntimeDb {
         ensure!(
             tx.execute(
                 "UPDATE external_qualification_worker_command
+                 SET state='setup_possible_contact',setup_contacted_at_ms=?2
+                 WHERE placement_thread_id=?1 AND state='reserved' AND setup_request_digest=?3",
+                params![placement, now, setup_request_digest],
+            )? == 1,
+            "Q command lost its one-use send boundary"
+        );
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn mark_qualification_worker_command_possible_contact(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
+    ) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read_command(&tx, placement)?.context("Q command was not reserved")?;
+        ensure!(
+            record.phase == QualificationWorkerCommandPhase::SetupSettled
+                && record.setup_final_response.is_some()
+                && record.setup_owner_send_settled_at_ms.is_some()
+                && record.request_digest == request_digest,
+            "Q command already crossed its one-use send boundary"
+        );
+        require_owner(&tx, &record)?;
+        let allocation = read(&tx, placement)?.context("Q command lost allocation at contact")?;
+        ensure!(
+            allocation.phase == ExternalAllocationPhase::Bound,
+            "Q command is not bound"
+        );
+        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+        let process_state: String = tx.query_row(
+            "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+            [placement],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            process_state == "attached",
+            "Q command Worker is no longer attached"
+        );
+        let channel = load_binding(&tx, placement)?;
+        let channel_state: String = tx.query_row(
+            "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+            [placement],
+            |row| row.get(0),
+        )?;
+        let connector: (String, String) = tx.query_row(
+            "SELECT state,channel_binding_digest FROM external_execution_connector
+             WHERE placement_thread_id=?1",
+            [placement],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        ensure!(
+            channel_state == "running"
+                && connector.0 == "connected"
+                && connector.1 == record.channel_binding_digest
+                && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
+            "Q command lost its live connected channel before contact"
+        );
+        let now = i64::try_from(lillux::time::timestamp_millis())?.max(
+            record
+                .setup_owner_send_settled_at_ms
+                .context("Q turn lost settled setup")?,
+        );
+        ensure!(
+            tx.execute(
+                "UPDATE external_qualification_worker_command
                  SET state='possible_contact',contacted_at_ms=?2
-                 WHERE placement_thread_id=?1 AND state='reserved' AND request_digest=?3",
+                 WHERE placement_thread_id=?1 AND state='setup_settled' AND request_digest=?3",
                 params![placement, now, request_digest],
             )? == 1,
             "Q command lost its one-use send boundary"
         );
         tx.commit()?;
         Ok(())
+    }
+
+    /// Retain setup's exact Final only under its one-use contact row. This
+    /// evidence cannot settle setup until the original send owner returns Ok.
+    pub(crate) fn record_qualification_worker_setup_final(
+        &self,
+        placement: &str,
+        setup_request_digest: &str,
+        response: &serde_json::Value,
+        max_frame_bytes: u32,
+    ) -> Result<QualificationWorkerCommandRecord> {
+        ensure!(
+            (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&max_frame_bytes),
+            "Q setup selected wire maximum is invalid"
+        );
+        let bytes = lillux::canonical_json(response)?;
+        ensure!(
+            bytes.len() <= max_frame_bytes as usize,
+            "Q setup Final exceeds its signed wire bound"
+        );
+        let digest = lillux::sha256_hex(bytes.as_bytes());
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read_command(&tx, placement)?.context("Q setup Final has no command")?;
+        require_owner(&tx, &record)?;
+        let process_state: String = tx.query_row(
+            "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+            [placement],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            record.setup_request_digest == setup_request_digest
+                && process_state == "attached"
+                && matches!(
+                    record.phase,
+                    QualificationWorkerCommandPhase::SetupPossibleContact
+                        | QualificationWorkerCommandPhase::SetupSettled
+                )
+                && record
+                    .setup_final_response_digest
+                    .as_deref()
+                    .is_none_or(|prior| prior == digest)
+                && record
+                    .setup_final_response
+                    .as_ref()
+                    .is_none_or(|prior| prior == response)
+                && record
+                    .setup_final_wire_max_bytes
+                    .is_none_or(|prior| prior == max_frame_bytes),
+            "Q setup Final differs from its one contacted setup request"
+        );
+        if record.setup_final_response_digest.is_none() {
+            ensure!(tx.execute(
+                "UPDATE external_qualification_worker_command
+                 SET setup_final_response_digest=?2,setup_final_response_json=?3,setup_final_wire_max_bytes=?4
+                 WHERE placement_thread_id=?1 AND state='setup_possible_contact' AND setup_final_response_digest IS NULL",
+                params![placement, digest, bytes, max_frame_bytes],
+            )? == 1, "Q setup Final CAS did not retain one exact response");
+        }
+        let updated = read_command(&tx, placement)?.context("Q setup Final disappeared")?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    /// This owner-return marker alone advances setup to its settled stage.
+    /// Pushed observations and a Final without successful send cannot do so.
+    pub(crate) fn mark_qualification_worker_setup_send_settled_success(
+        &self,
+        placement: &str,
+        setup_request_digest: &str,
+    ) -> Result<QualificationWorkerCommandRecord> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read_command(&tx, placement)?.context("Q setup send has no command")?;
+        require_owner(&tx, &record)?;
+        ensure!(
+            record.setup_request_digest == setup_request_digest
+                && record.setup_final_response.is_some()
+                && matches!(
+                    record.phase,
+                    QualificationWorkerCommandPhase::SetupPossibleContact
+                        | QualificationWorkerCommandPhase::SetupSettled
+                ),
+            "Q setup send has no exact successful Final to settle"
+        );
+        if record.setup_owner_send_settled_at_ms.is_none() {
+            let at = i64::try_from(lillux::time::timestamp_millis())?.max(
+                record
+                    .setup_contacted_at_ms
+                    .context("Q setup send has no possible contact")?,
+            );
+            ensure!(tx.execute(
+                "UPDATE external_qualification_worker_command
+                 SET state='setup_settled',setup_owner_send_settled_at_ms=?2
+                 WHERE placement_thread_id=?1 AND state='setup_possible_contact'
+                   AND setup_final_response_digest IS NOT NULL AND setup_owner_send_settled_at_ms IS NULL",
+                params![placement, at],
+            )? == 1, "Q setup send settlement CAS did not update its exact command");
+        }
+        let updated = read_command(&tx, placement)?.context("Q setup send disappeared")?;
+        tx.commit()?;
+        Ok(updated)
     }
 
     /// Retain the exact request-correlated command-progress Delta before its
@@ -978,7 +1248,9 @@ impl RuntimeDb {
         ensure!(
             matches!(
                 record.phase,
-                QualificationWorkerCommandPhase::PossibleContact
+                QualificationWorkerCommandPhase::SetupPossibleContact
+                    | QualificationWorkerCommandPhase::SetupSettled
+                    | QualificationWorkerCommandPhase::PossibleContact
                     | QualificationWorkerCommandPhase::TurnCompleted
                     | QualificationWorkerCommandPhase::OutcomeUnknown
             ),
@@ -988,7 +1260,7 @@ impl RuntimeDb {
             ensure!(
                 tx.execute(
                     "UPDATE external_qualification_worker_command SET state='outcome_unknown'
-                 WHERE placement_thread_id=?1 AND state IN ('possible_contact','turn_completed')",
+                 WHERE placement_thread_id=?1 AND state IN ('setup_possible_contact','setup_settled','possible_contact','turn_completed')",
                     [placement],
                 )? == 1,
                 "Q Worker unknown-outcome CAS did not update one command"
@@ -1007,13 +1279,12 @@ mod tests {
         turn_start_is_exact_replay,
     };
 
-    #[test]
-    fn failed_owner_return_can_fence_completed_observations() {
+    fn completed_unknown_record() -> QualificationWorkerCommandRecord {
         let hash = "a".repeat(64);
         let final_body = serde_json::json!({});
         let final_json = lillux::canonical_json(&final_body).unwrap();
         let final_digest = lillux::sha256_hex(final_json.as_bytes());
-        let record = QualificationWorkerCommandRecord {
+        QualificationWorkerCommandRecord {
             placement_thread_id: format!("Q-{hash}"),
             accepted_root_id: "root".into(),
             accepted_capsule_hash: hash.clone(),
@@ -1021,6 +1292,12 @@ mod tests {
             qualification_occurrence_id: "occurrence".into(),
             channel_binding_digest: hash.clone(),
             process_incarnation_digest: hash.clone(),
+            setup_request_digest: "b".repeat(64),
+            setup_contacted_at_ms: Some(1),
+            setup_final_response_digest: Some(final_digest.clone()),
+            setup_final_response: Some(final_body.clone()),
+            setup_final_wire_max_bytes: Some(4096),
+            setup_owner_send_settled_at_ms: Some(2),
             request_digest: hash.clone(),
             phase: QualificationWorkerCommandPhase::OutcomeUnknown,
             turn_id: Some("turn-one".into()),
@@ -1038,8 +1315,66 @@ mod tests {
             contacted_at_ms: Some(2),
             completed_at_ms: Some(5),
             owner_send_settled_at_ms: None,
-        };
+        }
+    }
+
+    #[test]
+    fn failed_owner_return_can_fence_completed_observations() {
+        completed_unknown_record().validate().unwrap();
+    }
+
+    #[test]
+    fn setup_final_and_owner_return_are_both_required_before_turn_contact() {
+        let mut record = completed_unknown_record();
+        record.turn_id = None;
+        record.turn_started_at_ms = None;
+        record.turn_start_digest = None;
+        record.turn_completed_at_ms = None;
+        record.turn_completion_digest = None;
+        record.final_response = None;
+        record.final_response_digest = None;
+        record.final_wire_max_bytes = None;
+        record.completed_at_ms = None;
+        record.contacted_at_ms = None;
+        record.phase = QualificationWorkerCommandPhase::SetupSettled;
         record.validate().unwrap();
+
+        record.setup_owner_send_settled_at_ms = None;
+        assert!(record.validate().is_err());
+        record.phase = QualificationWorkerCommandPhase::SetupPossibleContact;
+        record.validate().unwrap();
+        record.phase = QualificationWorkerCommandPhase::PossibleContact;
+        record.contacted_at_ms = Some(3);
+        assert!(record.validate().is_err());
+        record.setup_owner_send_settled_at_ms = Some(2);
+        record.validate().unwrap();
+        record.setup_final_response = None;
+        record.setup_final_response_digest = None;
+        record.setup_final_wire_max_bytes = None;
+        assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn setup_ambiguity_is_retained_without_turn_evidence_and_request_aliases_fail() {
+        let mut record = completed_unknown_record();
+        record.setup_request_digest = record.request_digest.clone();
+        assert!(record.validate().is_err());
+        record.setup_request_digest = "b".repeat(64);
+        record.contacted_at_ms = None;
+        assert!(record.validate().is_err());
+        record.turn_id = None;
+        record.turn_started_at_ms = None;
+        record.turn_start_digest = None;
+        record.turn_completed_at_ms = None;
+        record.turn_completion_digest = None;
+        record.final_response = None;
+        record.final_response_digest = None;
+        record.final_wire_max_bytes = None;
+        record.completed_at_ms = None;
+        record.setup_owner_send_settled_at_ms = None;
+        record.validate().unwrap();
+        record.setup_contacted_at_ms = None;
+        assert!(record.validate().is_err());
     }
 
     #[test]

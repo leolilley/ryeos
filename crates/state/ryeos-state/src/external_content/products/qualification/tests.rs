@@ -1951,6 +1951,7 @@ fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source(
 
     let request = ProductQualificationConsumerWorkerRequest {
         schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        session_setup: json!({"task":"bounded session setup"}),
         body: json!({"task":"bounded qualification turn"}),
     };
     policy
@@ -2013,7 +2014,7 @@ fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source(
         .consumer_worker_request
         .as_mut()
         .unwrap()
-        .schema = "ryeos.qualification_worker_request.v0".into();
+        .schema = "ryeos.qualification_worker_request.v1".into();
     assert!(invalid.validate().is_err());
     let mut wire = serde_json::to_value(&policy).unwrap();
     wire["producer_scenarios"]["remote_codex"]["consumer_worker_request"]["command"] =
@@ -2022,6 +2023,50 @@ fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source(
     let mut predecessor = serde_json::to_value(policy).unwrap();
     predecessor["schema"] = json!("ryeos.product_qualification_policy.v3");
     assert!(ProductQualificationPolicy::from_value(&predecessor).is_err());
+}
+
+#[test]
+fn worker_request_requires_distinct_bounded_setup_and_turn_in_current_schema() {
+    let request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        session_setup: json!({"route_id":"session.start", "payload":{}}),
+        body: json!({"route_id":"turn.start", "payload":{"input":"probe"}}),
+    };
+    request.validate().unwrap();
+    for field in ["session_setup", "body"] {
+        let mut wire = serde_json::to_value(&request).unwrap();
+        wire.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(wire).is_err());
+        for invalid in [json!(null), json!([]), json!("text")] {
+            let mut wire = serde_json::to_value(&request).unwrap();
+            wire[field] = invalid;
+            let decoded: ProductQualificationConsumerWorkerRequest =
+                serde_json::from_value(wire).unwrap();
+            assert!(decoded.validate().is_err());
+        }
+    }
+    let mut same = request.clone();
+    same.session_setup = same.body.clone();
+    assert!(same.validate().is_err());
+    let mut combined = request.clone();
+    combined.session_setup = json!({"setup":"x".repeat(4096)});
+    combined.body = json!({"turn":"y".repeat(4096)});
+    bounded_object(&combined.session_setup, "setup").unwrap();
+    bounded_object(&combined.body, "turn").unwrap();
+    assert!(combined.validate().is_err());
+    let mut predecessor = request.clone();
+    predecessor.schema = "ryeos.qualification_worker_request.v1".into();
+    assert!(predecessor.validate().is_err());
+    let mut wire = serde_json::to_value(&request).unwrap();
+    wire["extra"] = json!(true);
+    assert!(serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(wire).is_err());
+    let mut changed_setup = request.clone();
+    changed_setup.session_setup["payload"] = json!({"probe":"changed"});
+    changed_setup.validate().unwrap();
+    assert_ne!(
+        canonical_value_digest(&serde_json::to_value(request).unwrap()).unwrap(),
+        canonical_value_digest(&serde_json::to_value(changed_setup).unwrap()).unwrap()
+    );
 }
 
 #[test]

@@ -50,6 +50,9 @@ pub(crate) fn read_retained_reference(
             && manifest.qualification_occurrence_id
                 == retained.owner.qualification_occurrence.occurrence_id
             && manifest.channel_binding_digest == retained.channel_binding_digest
+            && manifest.setup_request_digest == retained.setup_request_digest
+            && manifest.setup_final_response_digest == retained.setup_final_response_digest
+            && manifest.setup_owner_send_settled_at_ms == retained.setup_owner_send_settled_at_ms
             && manifest.request_digest == retained.request_digest
             && manifest.final_response_digest == retained.final_response_digest
             && manifest.turn_id == retained.turn_id

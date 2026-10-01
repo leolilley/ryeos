@@ -252,8 +252,14 @@ CREATE TABLE external_qualification_worker_command (
     qualification_occurrence_id TEXT NOT NULL,
     channel_binding_digest TEXT NOT NULL,
     process_incarnation_digest TEXT NOT NULL,
+    setup_request_digest TEXT NOT NULL,
+    setup_contacted_at_ms INTEGER,
+    setup_final_response_digest TEXT,
+    setup_final_response_json TEXT,
+    setup_final_wire_max_bytes INTEGER,
+    setup_owner_send_settled_at_ms INTEGER,
     request_digest TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('reserved','possible_contact','turn_completed','outcome_unknown')),
+    state TEXT NOT NULL CHECK (state IN ('reserved','setup_possible_contact','setup_settled','possible_contact','turn_completed','outcome_unknown')),
     turn_id TEXT,
     turn_started_at_ms INTEGER,
     turn_start_digest TEXT,
@@ -269,6 +275,26 @@ CREATE TABLE external_qualification_worker_command (
     contacted_at_ms INTEGER,
     completed_at_ms INTEGER,
     owner_send_settled_at_ms INTEGER,
+    CHECK (setup_request_digest != request_digest),
+    CHECK (setup_contacted_at_ms IS NULL OR setup_contacted_at_ms >= reserved_at_ms),
+    CHECK ((setup_final_response_digest IS NULL AND setup_final_response_json IS NULL
+            AND setup_final_wire_max_bytes IS NULL)
+        OR (setup_contacted_at_ms IS NOT NULL AND setup_final_response_digest IS NOT NULL
+            AND setup_final_response_json IS NOT NULL
+            AND setup_final_wire_max_bytes IS NOT NULL
+            AND setup_final_wire_max_bytes BETWEEN 1 AND 16777216
+            AND length(CAST(setup_final_response_json AS BLOB)) <= setup_final_wire_max_bytes)),
+    CHECK (setup_owner_send_settled_at_ms IS NULL
+        OR (setup_contacted_at_ms IS NOT NULL AND setup_final_response_digest IS NOT NULL
+            AND setup_owner_send_settled_at_ms >= setup_contacted_at_ms)),
+    CHECK (contacted_at_ms IS NULL
+        OR (setup_owner_send_settled_at_ms IS NOT NULL
+            AND contacted_at_ms >= setup_owner_send_settled_at_ms)),
+    CHECK (contacted_at_ms IS NOT NULL
+        OR (turn_id IS NULL AND delta_response_digest IS NULL AND final_response_digest IS NULL
+            AND completed_at_ms IS NULL AND owner_send_settled_at_ms IS NULL)),
+    CHECK (final_wire_max_bytes IS NULL OR final_wire_max_bytes = setup_final_wire_max_bytes),
+    CHECK (delta_wire_max_bytes IS NULL OR delta_wire_max_bytes = setup_final_wire_max_bytes),
     CHECK ((turn_id IS NULL AND turn_started_at_ms IS NULL AND turn_start_digest IS NULL
             AND turn_completed_at_ms IS NULL AND turn_completion_digest IS NULL)
         OR (turn_id IS NOT NULL AND turn_started_at_ms IS NOT NULL
@@ -289,15 +315,21 @@ CREATE TABLE external_qualification_worker_command (
     CHECK (owner_send_settled_at_ms IS NULL
         OR (contacted_at_ms IS NOT NULL AND final_response_digest IS NOT NULL
             AND owner_send_settled_at_ms >= contacted_at_ms)),
-    CHECK ((state='reserved' AND contacted_at_ms IS NULL AND turn_id IS NULL
+    CHECK ((state='reserved' AND setup_contacted_at_ms IS NULL
+            AND setup_final_response_digest IS NULL AND setup_owner_send_settled_at_ms IS NULL
+            AND contacted_at_ms IS NULL AND turn_id IS NULL
             AND delta_response_digest IS NULL AND final_response_digest IS NULL
             AND completed_at_ms IS NULL AND owner_send_settled_at_ms IS NULL)
+        OR (state='setup_possible_contact' AND setup_contacted_at_ms IS NOT NULL
+            AND setup_owner_send_settled_at_ms IS NULL AND contacted_at_ms IS NULL)
+        OR (state='setup_settled' AND setup_owner_send_settled_at_ms IS NOT NULL
+            AND contacted_at_ms IS NULL)
         OR (state='possible_contact' AND contacted_at_ms IS NOT NULL
             AND completed_at_ms IS NULL)
         OR (state='turn_completed' AND contacted_at_ms IS NOT NULL
             AND turn_completed_at_ms IS NOT NULL AND final_response_digest IS NOT NULL
             AND completed_at_ms IS NOT NULL)
-        OR (state='outcome_unknown' AND contacted_at_ms IS NOT NULL))
+        OR (state='outcome_unknown' AND setup_contacted_at_ms IS NOT NULL))
 );
 CREATE TRIGGER external_qualification_worker_command_insert_guard
 BEFORE INSERT ON external_qualification_worker_command
@@ -319,6 +351,17 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
  OR NEW.qualification_occurrence_id!=OLD.qualification_occurrence_id
  OR NEW.channel_binding_digest!=OLD.channel_binding_digest
  OR NEW.process_incarnation_digest!=OLD.process_incarnation_digest
+ OR NEW.setup_request_digest!=OLD.setup_request_digest
+ OR NEW.setup_contacted_at_ms IS NOT OLD.setup_contacted_at_ms
+    AND OLD.setup_contacted_at_ms IS NOT NULL
+ OR NEW.setup_final_response_digest IS NOT OLD.setup_final_response_digest
+    AND OLD.setup_final_response_digest IS NOT NULL
+ OR NEW.setup_final_response_json IS NOT OLD.setup_final_response_json
+    AND OLD.setup_final_response_json IS NOT NULL
+ OR NEW.setup_final_wire_max_bytes IS NOT OLD.setup_final_wire_max_bytes
+    AND OLD.setup_final_wire_max_bytes IS NOT NULL
+ OR NEW.setup_owner_send_settled_at_ms IS NOT OLD.setup_owner_send_settled_at_ms
+    AND OLD.setup_owner_send_settled_at_ms IS NOT NULL
  OR NEW.request_digest!=OLD.request_digest
  OR NEW.reserved_at_ms!=OLD.reserved_at_ms
  OR NEW.contacted_at_ms IS NOT OLD.contacted_at_ms
@@ -351,7 +394,10 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
  OR (OLD.state='turn_completed' AND NEW.state='outcome_unknown'
     AND EXISTS(SELECT 1 FROM external_qualification_worker_transcript t
       WHERE t.placement_thread_id=OLD.placement_thread_id))
- OR NOT ((OLD.state='reserved' AND NEW.state IN ('possible_contact','outcome_unknown'))
+ OR NOT ((OLD.state='reserved' AND NEW.state='setup_possible_contact')
+      OR (OLD.state='setup_possible_contact' AND NEW.state IN
+          ('setup_possible_contact','setup_settled','outcome_unknown'))
+      OR (OLD.state='setup_settled' AND NEW.state IN ('possible_contact','outcome_unknown'))
       OR (OLD.state='possible_contact' AND NEW.state IN
           ('possible_contact','turn_completed','outcome_unknown'))
       OR (OLD.state='turn_completed' AND NEW.state IN ('turn_completed','outcome_unknown')))
@@ -385,7 +431,8 @@ WHEN NOT EXISTS(SELECT 1 FROM external_qualification_worker_command c
     JOIN external_qualification_worker_process p
       ON p.placement_thread_id=c.placement_thread_id
     WHERE c.placement_thread_id=NEW.placement_thread_id
-      AND c.state IN ('possible_contact','turn_completed')
+      AND c.state IN ('setup_possible_contact','setup_settled','possible_contact','turn_completed')
+      AND c.setup_contacted_at_ms IS NOT NULL
       AND c.request_digest=NEW.request_digest
       AND c.process_incarnation_digest=NEW.process_incarnation_digest
       AND p.phase='attached')
@@ -412,7 +459,8 @@ WHEN NOT EXISTS(SELECT 1 FROM external_qualification_worker_command c
     JOIN external_qualification_worker_process p
       ON p.placement_thread_id=c.placement_thread_id
     WHERE c.placement_thread_id=NEW.placement_thread_id
-      AND c.state='turn_completed' AND c.owner_send_settled_at_ms IS NOT NULL
+      AND c.state='turn_completed' AND c.setup_owner_send_settled_at_ms IS NOT NULL
+      AND c.setup_final_response_digest IS NOT NULL AND c.owner_send_settled_at_ms IS NOT NULL
       AND p.phase='terminal' AND p.channel_binding_digest=c.channel_binding_digest)
 BEGIN SELECT RAISE(ABORT, 'qualification transcript lacks a terminal successful Worker'); END;
 CREATE TRIGGER external_qualification_worker_transcript_no_update
