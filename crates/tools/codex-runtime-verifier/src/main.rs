@@ -1459,12 +1459,12 @@ mod tests {
     #[test]
     fn consumer_cli_requires_one_exact_canonical_challenge() {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use ryeos_codex_runtime_verifier::consumer_observer::decode_startup_arguments as decode;
         use ryeos_external_execution_contract::restored_runtime_measurement::{
             ConsumerArchiveBudget, ConsumerRuntimeChallenge, ConsumerRuntimeVerificationCoordinate,
             ConsumerRuntimeVerifierSelection, RemoteVerificationPurpose,
             RestoredVerifierAttemptIntent,
         };
-        let decode = ryeos_codex_runtime_verifier::consumer_observer::decode_startup_arguments;
 
         let coordinate = ConsumerRuntimeVerificationCoordinate {
             schema: 1,
