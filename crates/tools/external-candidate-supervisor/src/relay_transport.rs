@@ -411,6 +411,7 @@ impl ExternalExecutionChannelTransport for AttachedFileRelayChannel {
                 .map_err(anyhow::Error::new)
                 .map_err(ExternalTransportStepFailure::Fatal)?,
         )
+        .map_err(anyhow::Error::new)
         .map_err(ExternalTransportStepFailure::Fatal)?
         .into_bytes();
         let request_name = format!("exchange-{sequence:05}.request.json");
