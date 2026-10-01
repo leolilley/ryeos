@@ -353,3 +353,7 @@ mod tests {
         assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "qualification_transcript/retained_tests.rs"]
+mod retained_tests;

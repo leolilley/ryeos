@@ -315,7 +315,7 @@ impl RuntimeDb {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         ConsumerRuntimeVerificationCoordinate, RESTORED_OWNER_MEASUREMENT_PROTOCOL,
@@ -329,8 +329,18 @@ mod tests {
     };
     use sha2::{Digest, Sha256};
 
-    #[test]
-    fn qualified_sandbox_create_has_one_durable_contact_attempt() {
+    // Shared retained testimony fixture. All snapshot/prerequisite transitions use
+    // their real journal APIs; this does not supply a compiler admission token.
+    pub(crate) fn retained_owner_measurement_fixture() -> (
+        RuntimeDb,
+        RuntimeSnapshotIntent,
+        RuntimeSnapshotLocator,
+        RuntimeSnapshotReadinessObservation,
+        RuntimeSnapshotQualificationIntent,
+        RuntimeSnapshotQualificationOccurrence,
+        RestoredVerifierAttemptIntent,
+        RestoredVerifierAdapterObservation,
+    ) {
         let db = RuntimeDb::new_in_memory().unwrap();
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let mut source = RuntimeSnapshotIntent {
@@ -503,6 +513,23 @@ mod tests {
             },
             contact_deadline_exceeded: false,
         };
+        (
+            db,
+            source,
+            locator,
+            readiness,
+            intent,
+            occurrence,
+            verifier,
+            observation,
+        )
+    }
+
+    #[test]
+    fn qualified_sandbox_create_has_one_durable_contact_attempt() {
+        let (db, source, locator, readiness, intent, occurrence, verifier, observation) =
+            retained_owner_measurement_fixture();
+        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let invocation = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection {
             scenario_id: "codex-runtime".into(),
             qualification_operation_id: intent.operation_id.clone(),
