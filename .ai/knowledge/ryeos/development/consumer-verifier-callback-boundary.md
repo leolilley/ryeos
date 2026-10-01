@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T11:01:14Z:d7a4f7ab3af268511ab9ce5faf4532b81f75650afb8687badd299702aae449ed:kifOjBGCmTBY8a2G1p0t9rvdOy9MBdrha/U6L2sB2TM5xMtcTY0QQBTVSM8RnOldkzwCa2WJedSG853WNSMjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T13:09:46Z:c11964e0779484297c86e127009893434b06b63f8e415685d94ac08d669a8e10:9LX6h37F+We4qC4oCQGrYeQV2lvTxovKSX47Z6fLZS/GXhrFD9ArNWu0pPM2UXfo/NQUw3rQqbWqJjBeMNwOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -107,11 +107,13 @@ Requiring a completed root before Q contact would create an ordering cycle.
 
 ## Finite session setup and turn
 
-The signed consumer request contract is current-only v4. It requires explicit
-nullable credential-profile and finite-fixture selectors and commits an opaque session setup request
-and an opaque turn request, with a combined 8 KiB ceiling
-and distinct canonical digests. The daemon sends those exact two values through
-one attached exclusive Worker. It does not interpret Codex response pointers:
+The signed consumer request contract is current-only v5. It requires explicit
+nullable credential-profile, finite-fixture and controller-canary selectors.
+It commits an opaque signed setup and turn template. The combined setup and
+actual turn body remain within 8 KiB and have distinct canonical digests.
+The daemon sends the exact setup and retained adapter-bound turn through one
+attached exclusive Worker; null canary selection retains the literal turn body.
+It does not interpret Codex response pointers:
 the structured bridge binds the upstream session during setup and supplies that
 same binding to the turn route.
 
@@ -125,7 +127,7 @@ Both sends use the original channel deadline; successful setup does not renew
 it. A fresh turn admission refusal retires the attached owner through existing
 cleanup, without repeating setup.
 
-The schema 4 transcript manifest retains the exact setup Final, its digest, signed setup-request
+The schema 5 transcript manifest retains the exact setup Final, its digest, signed setup-request
 digest and owner-send marker alongside the turn Delta/Final and completed-turn
 fence. Pushed batches are the whole Q session's ordered observations, including
 setup. Their receipt order does not establish that a turn request caused them;
@@ -184,7 +186,7 @@ remains eligible for the existing maintenance cutoff. If it has expired or is
 missing, exact-stage recovery refuses; a new stage cannot substitute for the
 recorded ID. This boundary does not promise unlimited pending recovery. Once the
 two-root receipt is retained, that maintenance path preserves it. Runtime epoch
-124 joins placement, exact owner/program,
+125 joins placement, exact owner/program,
 binding, completion, native settlement, capture reference and stage identity.
 Bounded metadata/blob verification uses the original signed fixture and native
 predecessor, outside the StateStore/RuntimeDb lock. The verified receiver row and
@@ -206,7 +208,7 @@ Applied native frame, exact command channel and historical retained owner. The
 source, bind and cold reader rederive those joins in their own existing database
 transactions; they do not require cleanup to have finished first.
 
-Manifest schema 4 carries a required-null capture reference; stream schema 3
+Manifest schema 5 carries a required-null capture reference; stream schema 3
 carries the matching required-null content. The inert bounded decoder checks
 metadata/reference identity, canonical bytes and size; it grants no native or
 process authority. Native authentication and receiver custody remain daemon
@@ -243,20 +245,65 @@ required observations refuse rather than truncate or reconstruct evidence.
 Existing execution arguments, provider, credentials, routes and lifecycle State
 authority are preserved. Raw events still need an explicit signed setup opt-in.
 
-Current-only consumer-verifier configuration v4 requires a finite signed Q
-command expectation (`ryeos.codex.q_command.v2`): remote environment, command,
-command presentation, cwd, output, successful exit code and required-null expected
-final fixture content. Presence must match the original signed fixture. Expected
-bytes must be canonical base64, within its signed limit and different from the
-initial content; the captured bytes must match exactly. Null retains the
-no-fixture diagnostic. The product interpreter binds the actual setup
-thread and turn to the retained request, lifecycle observations and manifest;
-requires one raw remote exec_command, its terminal result and the corresponding
-completed command item before successful turn completion; and refuses swapped,
-missing or extra effectful calls. Call/item IDs are Codex invocation IDs, not
-guest process IDs. Both raw and item output must match the signed expectation;
-assistant prose cannot replace command evidence. Interpretation grants neither
-provider permission nor a qualification result.
+Current-only consumer-verifier configuration v4 selects the finite signed Q
+expectation `ryeos.codex.q_command.v3`. It requires a changed positive fixture,
+exact expected final bytes, command, POSIX shell presentation, remote environment,
+cwd and output. The three distinct direct calls are the fixture write, a read
+attempt against the original controller canary, and an explicit local-route call.
+Raw calls, results, completed command items and turn identity must correlate.
+The read must fail with exit 73 and the exact denial output; the local call must
+have the exact unknown-environment refusal and no command execution item.
+Additional effects, missing or substituted observations, and uninterpreted
+CodeMode calls refuse. Assistant prose cannot replace execution evidence.
+Generic null-fixture transcript publication remains supported; this Codex v3
+semantic checker requires the positive captured write.
+
+## Original controller canary and signed adapter binding
+
+The request's required-null `controller_canary` selection admits one finite
+original-controller read/local-refusal contract. The signed provider declaration
+uses `ryeos.external-execution.provider-declaration.v2` and explicitly selects
+`ryeos.external-execution.qualification-request-binding.v1`. Unsupported adapters
+refuse before allocation. Ordinary provider configuration rendering retains its
+existing v1 wire protocol.
+
+The SAME captured signed configuration adapter receives bounded canonical public
+input over a sealed descriptor and returns bounded canonical original bytes.
+The existing Codex adapter package owns the one prescribed text slot and shell
+recipes. Generic State validates bounded data and exact byte commitments; it does
+not parse Codex turn syntax or interpret shell commands. No credential, capability
+or canary value enters the binding input. The invocation consumes the original
+remaining qualification deadline, with no renewed clock.
+
+The daemon retains durable creation intent before the first filesystem effect.
+It creates a private 0600 file through its original state-root custody and retains
+the original file observation. A read-only exclusion witness keeps the complete
+original guest descriptors and SAME materialization leases alive through held
+startup. Public paths or identities cannot reconstruct that custody.
+
+Before connector preparation, held spawn/release or setup send, the daemon
+immutably retains the actual adapter reply, exact adapter declaration/artifact
+identity, typed input/output digests and signed-template/resolved-body digests.
+The send and its observation sink use that actual body. Reselection reads the
+retained binding; it does not invoke another adapter or adopt another canary.
+The Codex checker independently reproduces the product mapping and compares the
+adapter tuple against the authenticated process configuration.
+
+After exact local process and connector settlement, the SAME occurrence cleanup
+gate protects original canary readback through its durable terminal commit,
+before credential release. Observation refusal still permits proven-safe cleanup.
+The existing local-start journal has three append-once nullable columns for
+intent, binding and terminal evidence. Cold reads check their canonical record
+and original program, guest activation, adapter, command and process joins.
+They never reopen a serialized pathname as live custody. Manifest v5 carries
+required-null terminal canary evidence; publication and protected readback join
+it to the original retained source.
+
+These source contracts and synthetic interpreter fixtures do not establish an
+actual model-generated three-call turn, hostile writer exclusion, callback
+expiry, native containment, accepted five-claim qualification or Render readiness.
+The independent credential-free diagnostic keeps its separate occurrence and
+claim requirements. All five ordinary admission claims remain disabled.
 
 ## Production credential and launch context custody
 

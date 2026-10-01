@@ -230,11 +230,11 @@ mod control_tests {
             "responses_origin":"http://127.0.0.1:1234",
             "outer_network":"shared_guest_loopback",
             "qualification_worker": {
-                "schema":"ryeos.codex.q_command.v2",
+                "schema":"ryeos.codex.q_command.v3",
                 "environment_id":"ryeos-external-candidate",
-                "command":"pwd", "command_presentation":"pwd",
+                "command":"pwd", "command_shell":"zsh", "command_presentation":"zsh -c pwd",
                 "cwd":"/workspace", "output":"/workspace\n", "exit_code":0,
-                "expected_final_content_b64":null,
+                "expected_final_content_b64":"YWZ0ZXI=",
             },
             "external_candidate_qualification_context":context,
         });

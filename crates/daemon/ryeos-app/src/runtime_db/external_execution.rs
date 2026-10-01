@@ -14,6 +14,7 @@ pub use channel::ExternalDirectOutput;
 pub(crate) mod connector;
 mod qualification_batch;
 mod qualification_command;
+mod qualification_controller_canary;
 mod qualification_evidence;
 mod qualification_fixture_receiver;
 mod qualification_guest_scratch;
@@ -33,6 +34,7 @@ pub(crate) use qualification_batch::{
 pub(crate) use qualification_command::{
     QualificationWorkerCommandPhase, QualificationWorkerCommandRecord,
 };
+pub use qualification_controller_canary::QualificationControllerCanaryIntent;
 pub(crate) use qualification_evidence::QualificationHistoricalTransportEvidence;
 pub(super) use qualification_fixture_receiver::JOURNAL_SQL as QUALIFICATION_FIXTURE_RECEIVER_SQL;
 pub(crate) use qualification_fixture_receiver::verify_qualification_fixture_receiver_custody;

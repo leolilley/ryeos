@@ -336,6 +336,56 @@ impl<'a> Fixture<'a> {
         self.db
             .prepare_external_connector(placement, &capability_generation, &"d".repeat(64))
             .unwrap();
+        // Retained local-directory testimony, not live descriptors or a held
+        // launch permit. The production reader now rejoins this original row.
+        let local_digest = canonical_value_digest(&serde_json::json!({
+            "placement":placement,"root":owner.coordinate.accepted_root_id,
+            "capsule":owner.coordinate.accepted_capsule_hash,
+            "operation":owner.qualification_operation_id,
+            "occurrence":owner.qualification_occurrence.occurrence_id,
+            "channel":digest,"daemon":"retained-generation",
+        }))
+        .unwrap();
+        let workspace_id = format!("QW-{local_digest}");
+        let mut local:qualification_local_start::QualificationLocalStartRecord=
+            serde_json::from_value(serde_json::json!({
+                "placement_thread_id":placement,"accepted_root_id":owner.coordinate.accepted_root_id,
+                "accepted_capsule_hash":owner.coordinate.accepted_capsule_hash,
+                "qualification_operation_id":owner.qualification_operation_id,
+                "qualification_occurrence_id":owner.qualification_occurrence.occurrence_id,
+                "channel_binding_digest":digest,"daemon_generation_id":"retained-generation",
+                "base_snapshot_hash":reservation.base_snapshot_hash,"workspace_id":workspace_id,
+                "workspace_root":format!("/tmp/retained-cache/executions/{workspace_id}"),
+                "state_root":format!("/tmp/retained-cache/qualification-local/{workspace_id}"),
+                "launch_owner":format!("Q-local-{local_digest}"),"credential_custody":null,
+                "controller_canary_intent":null,"controller_canary_binding":null,"controller_canary_terminal":null,
+                "phase":"reserved","workspace_identity":null,"directory_borrow_intent":null,
+                "worker_incarnation_digest":null,"cleanup_reason":null,"cleanup":null,
+                "created_at_ms":1,"updated_at_ms":1,
+            })).unwrap();
+        self.db.conn.execute("INSERT INTO external_qualification_local_start(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,phase,record_json,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,'reserved',?7,1,1)",
+            params![placement,local.accepted_root_id,local.accepted_capsule_hash,local.qualification_operation_id,local.qualification_occurrence_id,digest,canonical(&local)]).unwrap();
+        let mut next = local.clone();
+        next.phase = qualification_local_start::QualificationLocalStartPhase::WorkspaceReady;
+        next.workspace_identity = Some(
+            serde_json::from_value(serde_json::json!({"containing_device":1,"inode":123})).unwrap(),
+        );
+        qualification_local_start::transition(&self.db.conn, &local, &next).unwrap();
+        local = next;
+        let mut next = local.clone();
+        next.directory_borrow_intent = Some(
+            qualification_local_start::QualificationWorkspaceBorrowIntent {
+                workspace_id: workspace_id.clone(),
+                directory_identity: next.workspace_identity.clone().unwrap(),
+                reserved_at_ms: 1,
+            },
+        );
+        qualification_local_start::transition(&self.db.conn, &local, &next).unwrap();
+        local = next;
+        let mut next = local.clone();
+        next.phase = qualification_local_start::QualificationLocalStartPhase::WorkerAttached;
+        next.worker_incarnation_digest = Some(identity.owner_incarnation_digest().unwrap());
+        qualification_local_start::transition(&self.db.conn, &local, &next).unwrap();
         self.db.conn.execute("INSERT INTO external_qualification_worker_process(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_identity_json,daemon_generation_id,phase,attached_at_ms,provider_configuration_json) VALUES(?1,?2,?3,?4,?5,?6,?7,'retained-generation','attached',1,?8)",
             params![placement,owner.coordinate.accepted_root_id,owner.coordinate.accepted_capsule_hash,owner.qualification_operation_id,owner.qualification_occurrence.occurrence_id,digest,canonical(&identity),canonical(&configuration)]).unwrap();
         self.db.conn.execute("INSERT INTO external_qualification_worker_command(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_incarnation_digest,setup_request_digest,request_digest,state,reserved_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'reserved',1)",
@@ -542,6 +592,7 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
             &source.command,
             &source.batches,
             &source.provider_configuration,
+            source.controller_canary.as_ref(),
             None,
             None,
         )
@@ -772,6 +823,7 @@ fn retained_capture_publication_requires_original_verified_receiver_and_exact_co
             &source.command,
             &source.batches,
             &source.provider_configuration,
+            source.controller_canary.as_ref(),
             source.fixture_capture.as_ref(),
             source.fixture_content.as_ref(),
         )

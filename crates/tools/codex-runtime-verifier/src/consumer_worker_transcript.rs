@@ -149,8 +149,28 @@ pub(crate) fn validate_reference_for_record(
         request.fixture.is_some() == manifest.fixture_capture.is_some(),
         "Q transcript fixture presence differs from the original signed request"
     );
+    let binding = manifest
+        .controller_canary
+        .as_ref()
+        .map(|evidence| &evidence.binding);
+    let actual_body = request.bound_controller_canary_body(binding)?;
+    if let Some(binding) = binding {
+        ensure!(
+            binding.provider_declaration_id
+                == manifest.provider_configuration.provider_declaration_id
+                && binding.configuration_adapter_artifact_hash
+                    == manifest
+                        .provider_configuration
+                        .configuration_adapter_artifact_hash
+                && binding.configuration_adapter_artifact_bytes
+                    == manifest
+                        .provider_configuration
+                        .configuration_adapter_artifact_bytes,
+            "Q canary request adapter differs from the authenticated process configuration adapter"
+        );
+    }
     ensure!(
-        manifest.request_digest == canonical_value_digest(&request.body)?
+        manifest.request_digest == canonical_value_digest(&actual_body)?
             && manifest.setup_request_digest == canonical_value_digest(&request.session_setup)?,
         "Q transcript changed the original signed setup or turn Request"
     );

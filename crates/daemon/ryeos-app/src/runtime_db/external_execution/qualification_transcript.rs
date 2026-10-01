@@ -22,6 +22,9 @@ use super::qualification_process::require_terminal_qualification_worker_process;
 pub(crate) struct QualificationWorkerTranscriptSource {
     pub owner_principal: String,
     pub provider_configuration: ProviderConfigurationLaunchInput,
+    pub controller_canary: Option<
+        ryeos_state::external_execution::qualification_controller_canary::QControllerCanaryEvidence,
+    >,
     pub fixture_capture: Option<QFixtureCaptureReference>,
     pub fixture_content: Option<QFixtureCaptureContent>,
     pub command: QualificationWorkerCommandRecord,
@@ -80,6 +83,33 @@ fn source(conn: &Connection, placement: &str) -> Result<QualificationWorkerTrans
             && process.channel_binding_digest == command.channel_binding_digest,
         "Q transcript changed its death-settled process"
     );
+    let local = qualification_local_start::read_local_start(conn, placement)?
+        .context("Q transcript lost original canary custody row")?;
+    ensure!(
+        local.worker_incarnation_digest.as_deref()
+            == Some(
+                process
+                    .process_identity
+                    .owner_incarnation_digest()?
+                    .as_str()
+            ),
+        "Q transcript canary changed its exact terminal process"
+    );
+    let controller_canary = match (
+        &local.controller_canary_intent,
+        &local.controller_canary_terminal,
+    ) {
+        (None, None) => None,
+        (Some(_), Some(evidence)) => {
+            evidence.validate()?;
+            ensure!(
+                evidence.binding.resolved_request_digest == command.request_digest,
+                "Q transcript canary changed its actual sent request"
+            );
+            Some(evidence.clone())
+        }
+        _ => bail!("Q transcript has no original terminal canary observation"),
+    };
     let native = channel::prepare_qualification_scope_settlement_tx(conn, placement, false)?
         .context("Q transcript has no original native settlement")?;
     ensure!(
@@ -107,6 +137,7 @@ fn source(conn: &Connection, placement: &str) -> Result<QualificationWorkerTrans
     Ok(QualificationWorkerTranscriptSource {
         owner_principal: owner.operator_principal.clone(),
         provider_configuration: process.provider_configuration.clone(),
+        controller_canary,
         fixture_capture: observation.fixture_capture.clone(),
         fixture_content: observation.fixture_content.clone(),
         command,
@@ -140,6 +171,7 @@ fn require_manifest_source(
     ensure!(
         manifest.owner_principal == source.owner_principal
             && manifest.provider_configuration == source.provider_configuration
+            && manifest.controller_canary == source.controller_canary
             && manifest.fixture_capture == source.fixture_capture
             && manifest.placement_thread_id == command.placement_thread_id
             && manifest.accepted_root_id == command.accepted_root_id

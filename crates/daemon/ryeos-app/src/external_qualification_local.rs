@@ -22,6 +22,10 @@ use crate::runtime_db::external_execution::{
 use crate::state::AppState;
 use crate::temp_dir_guard::TempDirGuard;
 
+#[path = "external_qualification_local/controller_canary.rs"]
+mod controller_canary;
+pub(crate) use controller_canary::PreparedQualificationControllerCanary;
+
 /// This borrowed token exists only while the existing qualification occurrence
 /// contact gate is held. Its methods still recheck the durable Q journal.
 pub struct QualificationLocalOwner<'a> {
@@ -273,6 +277,17 @@ pub fn resume_unregistered_qualification_roots(
 }
 
 impl QualificationLocalOwner<'_> {
+    pub fn select_signed_worker_request(
+        &self,
+    ) -> Result<crate::external_qualification_command::SignedQualificationWorkerRequest> {
+        crate::external_qualification_command::select_for_original_owner(
+            self.state,
+            self.placement,
+            self.root,
+            false,
+        )
+    }
+
     pub fn reserve_start(&self) -> Result<QualificationLocalStartRecord> {
         self.state
             .state_store
@@ -743,57 +758,211 @@ pub fn cleanup_qualification_local_worker(
                 current == initial,
                 "Q local cleanup changed its original start before contact gate"
             );
-            // Credential retirement can succeed even when this daemon has
-            // lost original disposable-directory descriptors after restart.
-            current = release_qualification_worker_credential_custody(state, placement)?;
-            if current.phase == QualificationLocalStartPhase::Closed {
-                state
-                    .qualification_workspace_custody
-                    .release_closed_original(&current)?;
-                return Ok(current);
-            }
-            let coordinate = QualificationWorkspaceCustodyCoordinate::from_start(&current)?;
-            let custody = state
-                .qualification_workspace_custody
-                .borrow_exact(&coordinate)?;
-            if let Some(process) = state.state_store.qualification_worker_process(placement)? {
-                ensure_qualification_worker_terminal(state, placement, &process.process_identity)?;
-                crate::process::assert_reaped_process_group_absent(&process.process_identity)?;
-            } else {
-                ensure!(
-                    current.worker_incarnation_digest.is_none(),
-                    "Q local cleanup lost an attached Worker process"
-                );
-            }
-            ensure!(
-                state.state_store.external_connector_retired(placement)?,
-                "Q local cleanup retains a live connector"
-            );
-            loop {
-                current = match current.phase {
-                    QualificationLocalStartPhase::Reserved
-                    | QualificationLocalStartPhase::WorkspaceReady
-                    | QualificationLocalStartPhase::WorkerAttached
-                    | QualificationLocalStartPhase::CleanupUnproved => state
-                        .state_store
-                        .begin_qualification_local_cleanup(state, placement, &custody)?,
-                    QualificationLocalStartPhase::CleanupIntent => state
-                        .state_store
-                        .remove_qualification_workspace_root(state, &current, &custody)?,
-                    QualificationLocalStartPhase::WorkspaceRemoved => state
-                        .state_store
-                        .remove_qualification_state_root(state, &current, &custody)?,
-                    QualificationLocalStartPhase::StateRemoved => state
-                        .state_store
-                        .close_qualification_local_start(state, &current, &custody)?,
-                    QualificationLocalStartPhase::Closed => {
+            // Same cleanup gate as normal retirement: preserve the original
+            // terminal observation before releasing any credential/root custody.
+            // Missing live custody is a refusal, never a reason to recreate it.
+            final_canary_attempt_then_cleanup(
+                || retain_controller_canary_terminal_under_gate(state, &initial),
+                || {
+                    // Credential retirement can succeed even when this daemon has
+                    // lost original disposable-directory descriptors after restart.
+                    current = release_qualification_worker_credential_custody(state, placement)?;
+                    if current.phase == QualificationLocalStartPhase::Closed {
                         state
                             .qualification_workspace_custody
                             .release_closed_original(&current)?;
                         return Ok(current);
                     }
-                };
-            }
+                    let coordinate = QualificationWorkspaceCustodyCoordinate::from_start(&current)?;
+                    let custody = state
+                        .qualification_workspace_custody
+                        .borrow_exact(&coordinate)?;
+                    if let Some(process) =
+                        state.state_store.qualification_worker_process(placement)?
+                    {
+                        ensure_qualification_worker_terminal(
+                            state,
+                            placement,
+                            &process.process_identity,
+                        )?;
+                        crate::process::assert_reaped_process_group_absent(
+                            &process.process_identity,
+                        )?;
+                    } else {
+                        ensure!(
+                            current.worker_incarnation_digest.is_none(),
+                            "Q local cleanup lost an attached Worker process"
+                        );
+                    }
+                    ensure!(
+                        state.state_store.external_connector_retired(placement)?,
+                        "Q local cleanup retains a live connector"
+                    );
+                    loop {
+                        current = match current.phase {
+                            QualificationLocalStartPhase::Reserved
+                            | QualificationLocalStartPhase::WorkspaceReady
+                            | QualificationLocalStartPhase::WorkerAttached
+                            | QualificationLocalStartPhase::CleanupUnproved => state
+                                .state_store
+                                .begin_qualification_local_cleanup(state, placement, &custody)?,
+                            QualificationLocalStartPhase::CleanupIntent => state
+                                .state_store
+                                .remove_qualification_workspace_root(state, &current, &custody)?,
+                            QualificationLocalStartPhase::WorkspaceRemoved => state
+                                .state_store
+                                .remove_qualification_state_root(state, &current, &custody)?,
+                            QualificationLocalStartPhase::StateRemoved => state
+                                .state_store
+                                .close_qualification_local_start(state, &current, &custody)?,
+                            QualificationLocalStartPhase::Closed => {
+                                state
+                                    .qualification_workspace_custody
+                                    .release_closed_original(&current)?;
+                                return Ok(current);
+                            }
+                        };
+                    }
+                },
+            )
         },
     )
+}
+
+/// Retain original post-death canary facts before the caller releases credential
+/// custody. Failure is a semantic refusal, not permission to skip already-proven
+/// credential/process/provider cleanup. This function requires no live callback.
+pub fn retain_qualification_controller_canary_terminal(
+    state: &AppState,
+    placement: &str,
+) -> Result<()> {
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let initial = state
+        .state_store
+        .qualification_local_start(placement)?
+        .context("Q terminal canary has no original local start")?;
+    crate::hosted_operation::with_qualification_occurrence_contact(
+        &initial.qualification_operation_id,
+        || {
+            let current = state
+                .state_store
+                .qualification_local_start(placement)?
+                .context("Q terminal canary lost original local start")?;
+            ensure!(
+                current == initial,
+                "Q terminal canary changed before its cleanup gate"
+            );
+            retain_controller_canary_terminal_under_gate(state, &current)
+        },
+    )
+}
+
+/// Both callers already hold the original occurrence contact/removal gate.
+/// This method never renews callback authority or reopens a lost canary path.
+fn retain_controller_canary_terminal_under_gate(
+    state: &AppState,
+    current: &QualificationLocalStartRecord,
+) -> Result<()> {
+    if current.controller_canary_intent.is_none() || current.controller_canary_terminal.is_some() {
+        return Ok(());
+    }
+    // A preparation that never bound or attached cannot publish a successful
+    // transcript. Its cleanup must not demand nonexistent terminal file proof.
+    if current.controller_canary_binding.is_none() || current.worker_incarnation_digest.is_none() {
+        return Ok(());
+    }
+    let placement = &current.placement_thread_id;
+    let process = state
+        .state_store
+        .qualification_worker_process(placement)?
+        .context("Q terminal canary has no exact process")?;
+    crate::process::assert_reaped_process_group_absent(&process.process_identity)?;
+    ensure_qualification_worker_terminal(state, placement, &process.process_identity)?;
+    ensure!(
+        state.state_store.external_connector_retired(placement)?,
+        "Q terminal canary retains a live connector"
+    );
+    let coordinate = QualificationWorkspaceCustodyCoordinate::from_start(current)?;
+    let custody = state
+        .qualification_workspace_custody
+        .borrow_exact(&coordinate)?;
+    state
+        .state_store
+        .retain_qualification_controller_canary_terminal(state, current, &custody)?;
+    Ok(())
+}
+
+/// Keep the finite semantic attempt ahead of cleanup, but never let its error
+/// short-circuit the existing independent process/credential/removal proofs.
+fn final_canary_attempt_then_cleanup<T>(
+    attempt: impl FnOnce() -> Result<()>,
+    cleanup: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let observation = attempt();
+    let cleanup = cleanup();
+    match (observation, cleanup) {
+        (Ok(()), Ok(value)) => Ok(value),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup)) => Err(error.context(format!(
+            "Q canary final observation refused and local cleanup remains incomplete: {cleanup:#}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod canary_cleanup_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn final_observation_precedes_cleanup_and_refusal_does_not_skip_cleanup() {
+        for refuse_observation in [false, true] {
+            for refuse_cleanup in [false, true] {
+                let steps = RefCell::new(Vec::new());
+                let result = final_canary_attempt_then_cleanup(
+                    || {
+                        steps.borrow_mut().push("original terminal observation");
+                        if refuse_observation {
+                            bail!("missing original custody");
+                        }
+                        Ok(())
+                    },
+                    || {
+                        steps.borrow_mut().push("independently proven cleanup");
+                        if refuse_cleanup {
+                            bail!("resource removal incomplete");
+                        }
+                        Ok(7)
+                    },
+                );
+                assert_eq!(
+                    *steps.borrow(),
+                    vec![
+                        "original terminal observation",
+                        "independently proven cleanup"
+                    ]
+                );
+                match (refuse_observation, refuse_cleanup) {
+                    (false, false) => assert_eq!(result.unwrap(), 7),
+                    (true, false) => assert!(
+                        format!("{:#}", result.unwrap_err()).contains("missing original custody")
+                    ),
+                    (false, true) => assert!(
+                        format!("{:#}", result.unwrap_err())
+                            .contains("resource removal incomplete")
+                    ),
+                    (true, true) => {
+                        let message = format!("{:#}", result.unwrap_err());
+                        assert!(
+                            message.contains("missing original custody")
+                                && message.contains("resource removal incomplete")
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

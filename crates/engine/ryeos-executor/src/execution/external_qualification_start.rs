@@ -134,6 +134,8 @@ pub(crate) struct ExternalQualificationReady {
     binding: ExecutionChannelBinding,
     root: PreparedExternalQualificationRoot,
     _cleanup: ExternalCandidateCleanupLifeline,
+    original_guest_exclusion:
+        ryeos_external_execution::guest_inputs::ExternalGuestInputExclusionWitness,
 }
 
 impl ExternalQualificationReady {
@@ -157,6 +159,14 @@ impl ExternalQualificationReady {
 
     pub(crate) fn placement(&self) -> &str {
         &self.binding.placement_thread_id
+    }
+
+    /// Original input data for a descriptor exclusion check, not activation
+    /// authority. This owner also retains their SAME materialization lifelines.
+    pub(crate) fn original_guest_exclusion(
+        &self,
+    ) -> &ryeos_external_execution::guest_inputs::ExternalGuestInputExclusionWitness {
+        &self.original_guest_exclusion
     }
 
     pub(crate) fn root(&self) -> &PreparedExternalQualificationRoot {
@@ -296,12 +306,16 @@ fn await_external_qualification_ready(
         }
     })();
     match ready {
-        Ok((binding, relay)) => Ok(ExternalQualificationReady {
-            relay,
-            binding,
-            root: start.into_authenticated_root(),
-            _cleanup: cleanup,
-        }),
+        Ok((binding, relay)) => {
+            let (root, original_guest_exclusion) = start.into_authenticated_ready_parts();
+            Ok(ExternalQualificationReady {
+                relay,
+                binding,
+                root,
+                _cleanup: cleanup,
+                original_guest_exclusion,
+            })
+        }
         Err(error) => {
             // The lifeline retains cancellation even when no local provider
             // was launched. Cleanup proof is a separate durable observation.

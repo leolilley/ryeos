@@ -19,6 +19,7 @@ pub mod connector;
 pub mod export;
 pub mod guest_journal;
 pub mod journal;
+pub mod qualification_controller_canary;
 pub mod qualification_session;
 pub mod runtime_content;
 pub mod supervisor_journal;

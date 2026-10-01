@@ -340,6 +340,7 @@ mod tests {
             "initialization":[{"effect_class":"pure_read"}], "recovery":{"route_sets":["session"]}
         });
         let request = ProductQualificationConsumerWorkerRequest {
+            controller_canary: None,
             schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
             credential_profile_id: Some("profile-one".into()),
             fixture: None,

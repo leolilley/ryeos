@@ -53,6 +53,7 @@ struct ReleasedQualificationWorker {
     boot_identity: String,
     observation_sink: PersistentSessionObservationSink,
     wire_max_bytes: u32,
+    selected_request: SignedQualificationWorkerRequest,
 }
 
 enum LaunchOutcome {
@@ -245,9 +246,26 @@ impl ExternalQualificationLocalWorker {
                 self.ready.placement(),
                 &self.process_identity,
             )?;
-            ryeos_app::external_qualification_local::release_qualification_worker_credential_custody(
+            // Persist the SAME original post-death canary observation before
+            // releasing credential custody. Its helper holds the same removal
+            // gate through read+commit; no live callback is needed for cleanup.
+            let canary = ryeos_app::external_qualification_local::retain_qualification_controller_canary_terminal(
                 state, self.ready.placement(),
-            )?;
+            );
+            // A refused observation must not strand proven-safe cleanup.
+            let credential = ryeos_app::external_qualification_local::release_qualification_worker_credential_custody(
+                state, self.ready.placement(),
+            );
+            match (canary, credential) {
+                (Ok(()), Ok(_)) => {}
+                (Err(error), Ok(_)) => return Err(error),
+                (Ok(()), Err(error)) => return Err(error),
+                (Err(error), Err(cleanup)) => {
+                    return Err(error.context(format!(
+                        "Q canary refusal also retained credential cleanup: {cleanup:#}"
+                    )));
+                }
+            }
             self.retired = true;
             Ok(())
         })();
@@ -420,10 +438,9 @@ pub(crate) fn run_external_qualification_to_normal_terminal(
     worker.ready.disarm_after_normal_terminal()
 }
 
-/// Select the signed Request before Q held start so the pushed-batch sink can
-/// capture its exact digest. The start independently rechecks the accepted
-/// Worker and protocol under its Q occurrence gate. The later send reselects
-/// the same Request under that gate before consuming the one-use contact row.
+/// Resolve the signed turn from original controller custody before the sink
+/// or held process exists. The selected request remains in the existing released
+/// owner through pool publication; no callback can replace its sent digest.
 pub(crate) fn start_external_qualification_local_worker_for_signed_request(
     state: &ryeos_app::state::AppState,
     coordinate: &ConsumerRuntimeVerificationCoordinate,
@@ -432,52 +449,6 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
     ExternalQualificationLocalWorker,
     SignedQualificationWorkerRequest,
 )> {
-    let placement = ready.placement().to_owned();
-    let binding_digest = ready.binding().digest()?;
-    let selected =
-        ryeos_app::external_qualification_command::select_signed_qualification_worker_request(
-            state,
-            &placement,
-            coordinate,
-            &binding_digest,
-            ready.root(),
-        )?;
-    let sink_state = (*state).clone();
-    let sink_placement = placement.clone();
-    let sink_digest = selected.digest.clone();
-    let selected_wire_max_bytes = selected.wire_max_bytes;
-    let worker = start_external_qualification_local_worker(
-        state,
-        coordinate,
-        ready,
-        move |wire_max_bytes| {
-            ensure!(
-                wire_max_bytes == selected_wire_max_bytes,
-                "Q held Worker changed its selected signed wire maximum"
-            );
-            Ok(Arc::new(move |batch| {
-                ryeos_app::external_qualification_command::ingest_qualification_worker_observation_batch(
-                    &sink_state,
-                    &sink_placement,
-                    &sink_digest,
-                    wire_max_bytes,
-                    batch,
-                )
-            }))
-        },
-    )?;
-    Ok((worker, selected))
-}
-
-/// Attach the exact held Worker before release, then publish it to the
-/// existing exclusive pool. The caller supplies the Q observation journal
-/// sink; command CAS and semantic completion are separate later operations.
-pub(crate) fn start_external_qualification_local_worker(
-    state: &ryeos_app::state::AppState,
-    coordinate: &ConsumerRuntimeVerificationCoordinate,
-    ready: ExternalQualificationReady,
-    make_observation_sink: impl FnOnce(u32) -> Result<PersistentSessionObservationSink>,
-) -> Result<ExternalQualificationLocalWorker> {
     let placement = ready.placement().to_owned();
     let binding_digest = ready.binding().digest()?;
     let contract = ready.root().worker_launch_contract();
@@ -542,7 +513,7 @@ pub(crate) fn start_external_qualification_local_worker(
                     authority.ensure_guard(&guard)?;
                     pinned
                 };
-                let workspace_ready = owner.prepare_original_workspace(
+                owner.prepare_original_workspace(
                     &reserved,
                     &workspace,
                     &project,
@@ -562,7 +533,27 @@ pub(crate) fn start_external_qualification_local_worker(
                 let (mut plan, session, mut mounts, mut lifelines, workspace_path, state_root_path) =
                     materials.into_spawn_parts();
                 let wire_max_bytes = session.wire.max_frame_bytes;
-                let observation_sink = make_observation_sink(wire_max_bytes)?;
+                // The SAME original occurrence gate is already held. Prepare
+                // intent/file/binding once, then select its retained adapter
+                // output without reacquiring that nonreentrant gate.
+                owner.prepare_controller_canary(ready.original_guest_exclusion())?;
+                // Creation/binding appended to the SAME original local row.
+                // Refresh its exact record under this still-held owner gate;
+                // the subsequent borrow keeps its complete equality check.
+                let workspace_ready = owner.start_record()?;
+                let selected_request = owner.select_signed_worker_request()?;
+                ensure!(
+                    selected_request.wire_max_bytes == wire_max_bytes,
+                    "Q held Worker changed its selected signed wire maximum"
+                );
+                let sink_state = state.clone();
+                let sink_placement = placement.clone();
+                let sink_digest = selected_request.digest.clone();
+                let observation_sink: PersistentSessionObservationSink = Arc::new(move |batch| {
+                    ryeos_app::external_qualification_command::ingest_qualification_worker_observation_batch(
+                        &sink_state, &sink_placement, &sink_digest, wire_max_bytes, batch,
+                    )
+                });
                 ensure!(
                     workspace_path == project && state_root_path == state_root.path(),
                     "Q prepared material changed its original runtime roots"
@@ -787,6 +778,7 @@ pub(crate) fn start_external_qualification_local_worker(
                         boot_identity,
                         observation_sink,
                         wire_max_bytes,
+                        selected_request,
                     }))
                 }
             })();
@@ -816,6 +808,9 @@ pub(crate) fn start_external_qualification_local_worker(
                     );
             }
             let relay = connector_settlement();
+            let canary = ryeos_app::external_qualification_local::retain_qualification_controller_canary_terminal(
+                state, &placement,
+            );
             let credential =
                 ryeos_app::external_qualification_local::release_qualification_worker_credential_custody(
                     state, &placement,
@@ -827,7 +822,7 @@ pub(crate) fn start_external_qualification_local_worker(
                     "Q held Worker start failed after connector preparation",
                 );
             return Err(error.context(format!(
-                "Q held Worker start failed; death: {death:?}; connector: {relay:?}; credential: {credential:?}"
+                "Q held Worker start failed; death: {death:?}; connector: {relay:?}; canary: {canary:?}; credential: {credential:?}"
             )));
         }
         Err(error) => {
@@ -837,10 +832,15 @@ pub(crate) fn start_external_qualification_local_worker(
                     &placement,
                     "Q local Worker start failed before connector preparation",
                 );
+                let canary = ryeos_app::external_qualification_local::retain_qualification_controller_canary_terminal(
+                    state, &placement,
+                );
                 let credential = ryeos_app::external_qualification_local::release_qualification_worker_credential_custody(
                     state, &placement,
                 );
-                return Err(error.context(format!("Q startup credential cleanup: {credential:?}")));
+                return Err(error.context(format!(
+                    "Q startup final canary attempt: {canary:?}; credential cleanup: {credential:?}"
+                )));
             }
             return Err(error);
         }
@@ -860,6 +860,7 @@ pub(crate) fn start_external_qualification_local_worker(
         boot_identity,
         observation_sink,
         wire_max_bytes,
+        selected_request,
     } = prepared;
     let settlement_state = state.clone();
     let settlement_placement = placement.clone();
@@ -888,19 +889,27 @@ pub(crate) fn start_external_qualification_local_worker(
             &placement,
             "Q exclusive Worker readiness or pool binding failed",
         );
+        let canary = ryeos_app::external_qualification_local::retain_qualification_controller_canary_terminal(
+            state, &placement,
+        );
         let credential = ryeos_app::external_qualification_local::release_qualification_worker_credential_custody(
             state, &placement,
         );
-        return Err(error.context(format!("Q readiness credential cleanup: {credential:?}")));
+        return Err(error.context(format!(
+            "Q readiness final canary attempt: {canary:?}; credential cleanup: {credential:?}"
+        )));
     }
-    Ok(ExternalQualificationLocalWorker {
-        ready,
-        workspace,
-        state_root,
-        _custody: custody,
-        process_identity,
-        boot_identity,
-        wire_max_bytes,
-        retired: false,
-    })
+    Ok((
+        ExternalQualificationLocalWorker {
+            ready,
+            workspace,
+            state_root,
+            _custody: custody,
+            process_identity,
+            boot_identity,
+            wire_max_bytes,
+            retired: false,
+        },
+        selected_request,
+    ))
 }

@@ -39,9 +39,37 @@ fn main() -> Result<()> {
         .next()
         .context("Codex configuration adapter requires an operation")?;
     ensure!(
-        operation == "render" && arguments.next().is_none(),
-        "Codex configuration adapter accepts only `render`"
+        arguments.next().is_none(),
+        "Codex configuration adapter accepts one operation"
     );
+    match operation.to_str() {
+        Some("render") => render_operation(),
+        Some("bind-qualification-request") => bind_qualification_request_operation(),
+        _ => anyhow::bail!("Codex configuration adapter operation is unsupported"),
+    }
+}
+
+fn bind_qualification_request_operation() -> Result<()> {
+    use ryeos_external_execution_contract::qualification_request_binding::MAX_QUALIFICATION_REQUEST_BINDING_BYTES;
+    // SAFETY: the controller installs this one sealed public-data request
+    // descriptor once for the exact admitted adapter invocation. No stdin/path
+    // fallback or configuration/credential descriptor is read by this operation.
+    let bytes = unsafe {
+        lillux::read_sealed_inherited_descriptor_from_env(
+            "RYEOS_QUALIFICATION_REQUEST_BINDING_FD",
+            MAX_QUALIFICATION_REQUEST_BINDING_BYTES,
+        )
+    }
+    .map_err(anyhow::Error::msg)
+    .context("read sealed qualification request binding")?;
+    let response = ryeos_codex_external_configuration::qualification_request::bind_qualification_request_bytes(&bytes)?;
+    std::io::stdout()
+        .lock()
+        .write_all(&response)
+        .context("write qualification request binding")
+}
+
+fn render_operation() -> Result<()> {
     // SAFETY: the controller installs this one sealed request descriptor
     // exactly once for the dedicated adapter process.
     let bytes = unsafe {

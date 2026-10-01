@@ -14,7 +14,7 @@ requires_kinds:
 uses_kinds: []
 external_providers:
   - id: codex-hosted
-    protocol: ryeos.external-execution.provider-configuration.v1
+    protocol: ryeos.external-execution.provider-declaration.v2
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
@@ -22,3 +22,4 @@ external_providers:
     connector_process_group: new
     configuration_adapter: ryeos-codex-external-configuration
     configuration_destination: environments.toml
+    qualification_request_binding_protocol: ryeos.external-execution.qualification-request-binding.v1

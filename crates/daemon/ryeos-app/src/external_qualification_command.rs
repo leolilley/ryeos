@@ -59,116 +59,12 @@ pub fn with_signed_qualification_worker_request<T>(
         coordinate,
         binding_digest,
         root,
-        |_| {
-            state.engine.with_checked_bundle_generation(|generation| {
-                let allocation = state
-                    .state_store
-                    .external_allocation(placement)?
-                    .context("Q Worker request lost its allocation")?;
-                let ExternalAllocationOwner::QualificationCandidate(owner) =
-                    &allocation.reservation.owner
-                else {
-                    bail!("Q Worker request has no qualification owner");
-                };
-                ensure!(
-                    owner.coordinate == *coordinate && owner.program == *root.program(),
-                    "Q Worker request changed its accepted owner"
-                );
-                let qualification = state
-                    .state_store
-                    .snapshot_qualification_operation(&owner.qualification_operation_id)?
-                    .context("Q Worker request lost its restored qualification")?;
-                ensure!(
-                    qualification.intent.operation_id == owner.qualification_operation_id
-                        && qualification.intent.owner_principal == owner.operator_principal
-                        && qualification.phase == SnapshotQualificationPhase::OccurrenceBound
-                        && qualification.occurrence.as_ref()
-                            == Some(&owner.qualification_occurrence),
-                    "Q Worker request changed its restored occurrence"
-                );
-                let profile = state
-                    .node_config
-                    .runtime_snapshot_qualification
-                    .iter()
-                    .find(|binding| {
-                        binding.digest() == qualification.intent.qualification_profile_digest
-                    })
-                    .context("Q Worker request lost its signed qualification profile")?;
-                ensure!(
-                    qualification.intent.verifier_artifact_hash == profile.verifier_artifact_hash(),
-                    "Q Worker request changed its signed qualification verifier"
-                );
-                let selection = profile.consumer_verifier(coordinate)?;
-                let purpose = root.purpose();
-                purpose.validate_remote_consumer_coordinate(coordinate, selection)?;
-                let source = purpose
-                    .remote_verifier_sources
-                    .get(&coordinate.scenario_id)
-                    .context("Q Worker request has no accepted selected verifier source")?;
-                ensure!(
-                    source.scenario_source_digest == selection.scenario_source_digest
-                        && source.executor.payload_blob_hash == selection.verifier_artifact_hash,
-                    "Q Worker request differs from its selected signed verifier source"
-                );
-                // This rechecks the current policy and all Worker definitions
-                // against the accepted root in this same checked generation.
-                let resolution = root.current_local_worker_resolution(generation)?;
-                let execution = state
-                    .engine
-                    .kinds
-                    .get("worker")
-                    .and_then(|schema| schema.execution.as_ref())
-                    .context("Q Worker request has no signed execution schema")?;
-                let protocol_ref = match execution
-                    .terminator
-                    .as_ref()
-                    .context("Q Worker request has no signed terminator")?
-                {
-                    ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => {
-                        protocol
-                            .resolve(&resolution.composed.composed)
-                            .map_err(anyhow::Error::msg)?
-                    }
-                    ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => {
-                        bail!("Q Worker request has no subprocess protocol")
-                    }
-                };
-                let verified_protocol = state.engine.protocols.require(&protocol_ref)?;
-                let session = ryeos_engine::protocols::validate_persistent_session_protocol(
-                    &verified_protocol.descriptor,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let scenario = purpose
-                    .policy_source
-                    .policy
-                    .producer_scenarios
-                    .get(&coordinate.scenario_id)
-                    .context("Q Worker request has no selected signed scenario")?;
-                ensure!(
-                    scenario.remote_verifier.as_ref() == Some(&source.selection),
-                    "Q Worker request changed its signed scenario verifier"
-                );
-                let request = scenario
-                    .consumer_worker_request
-                    .as_ref()
-                    .context("selected Q scenario has no signed Worker request")?;
-                request.validate()?;
-                let session_setup = request.session_setup.clone();
-                let setup_digest = canonical_value_digest(&session_setup)?;
-                let body = request.body.clone();
-                let digest = canonical_value_digest(&body)?;
-                run(SignedQualificationWorkerRequest {
-                    session_setup,
-                    setup_digest,
-                    body,
-                    digest,
-                    wire_max_bytes: session.max_frame_bytes,
-                })
-            })
-        },
+        |_| with_selected_for_original_owner(state, placement, root, false, run),
     )
 }
 
+/// Prestart signed template selection only. Actual contact and observation
+/// sinks use the owner's strict immutable bound selection after preparation.
 pub fn select_signed_qualification_worker_request(
     state: &AppState,
     placement: &str,
@@ -176,7 +72,150 @@ pub fn select_signed_qualification_worker_request(
     binding_digest: &str,
     root: &PreparedExternalQualificationRoot,
 ) -> Result<SignedQualificationWorkerRequest> {
-    with_signed_qualification_worker_request(state, placement, coordinate, binding_digest, root, Ok)
+    crate::external_qualification_local::with_qualification_local_owner(
+        state,
+        placement,
+        coordinate,
+        binding_digest,
+        root,
+        |_| select_for_original_owner(state, placement, root, true),
+    )
+}
+
+/// Data selection while the original local owner already holds its occurrence
+/// gate; this function neither takes that mutex again nor authorizes contact.
+pub(crate) fn select_for_original_owner(
+    state: &AppState,
+    placement: &str,
+    root: &PreparedExternalQualificationRoot,
+    allow_unbound_template: bool,
+) -> Result<SignedQualificationWorkerRequest> {
+    with_selected_for_original_owner(state, placement, root, allow_unbound_template, Ok)
+}
+
+fn with_selected_for_original_owner<T>(
+    state: &AppState,
+    placement: &str,
+    root: &PreparedExternalQualificationRoot,
+    allow_unbound_template: bool,
+    run: impl FnOnce(SignedQualificationWorkerRequest) -> Result<T>,
+) -> Result<T> {
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("Q selection lost allocation")?;
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+    else {
+        bail!("Q selection has wrong owner")
+    };
+    let coordinate = &owner.coordinate;
+    state.engine.with_checked_bundle_generation(|generation| {
+        let allocation = state
+            .state_store
+            .external_allocation(placement)?
+            .context("Q Worker request lost its allocation")?;
+        let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+        else {
+            bail!("Q Worker request has no qualification owner");
+        };
+        ensure!(
+            owner.coordinate == *coordinate && owner.program == *root.program(),
+            "Q Worker request changed its accepted owner"
+        );
+        let qualification = state
+            .state_store
+            .snapshot_qualification_operation(&owner.qualification_operation_id)?
+            .context("Q Worker request lost its restored qualification")?;
+        ensure!(
+            qualification.intent.operation_id == owner.qualification_operation_id
+                && qualification.intent.owner_principal == owner.operator_principal
+                && qualification.phase == SnapshotQualificationPhase::OccurrenceBound
+                && qualification.occurrence.as_ref() == Some(&owner.qualification_occurrence),
+            "Q Worker request changed its restored occurrence"
+        );
+        let profile = state
+            .node_config
+            .runtime_snapshot_qualification
+            .iter()
+            .find(|binding| binding.digest() == qualification.intent.qualification_profile_digest)
+            .context("Q Worker request lost its signed qualification profile")?;
+        ensure!(
+            qualification.intent.verifier_artifact_hash == profile.verifier_artifact_hash(),
+            "Q Worker request changed its signed qualification verifier"
+        );
+        let selection = profile.consumer_verifier(coordinate)?;
+        let purpose = root.purpose();
+        purpose.validate_remote_consumer_coordinate(coordinate, selection)?;
+        let source = purpose
+            .remote_verifier_sources
+            .get(&coordinate.scenario_id)
+            .context("Q Worker request has no accepted selected verifier source")?;
+        ensure!(
+            source.scenario_source_digest == selection.scenario_source_digest
+                && source.executor.payload_blob_hash == selection.verifier_artifact_hash,
+            "Q Worker request differs from its selected signed verifier source"
+        );
+        // This rechecks the current policy and all Worker definitions
+        // against the accepted root in this same checked generation.
+        let resolution = root.current_local_worker_resolution(generation)?;
+        let execution = state
+            .engine
+            .kinds
+            .get("worker")
+            .and_then(|schema| schema.execution.as_ref())
+            .context("Q Worker request has no signed execution schema")?;
+        let protocol_ref = match execution
+            .terminator
+            .as_ref()
+            .context("Q Worker request has no signed terminator")?
+        {
+            ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => protocol
+                .resolve(&resolution.composed.composed)
+                .map_err(anyhow::Error::msg)?,
+            ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => {
+                bail!("Q Worker request has no subprocess protocol")
+            }
+        };
+        let verified_protocol = state.engine.protocols.require(&protocol_ref)?;
+        let session = ryeos_engine::protocols::validate_persistent_session_protocol(
+            &verified_protocol.descriptor,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let scenario = purpose
+            .policy_source
+            .policy
+            .producer_scenarios
+            .get(&coordinate.scenario_id)
+            .context("Q Worker request has no selected signed scenario")?;
+        ensure!(
+            scenario.remote_verifier.as_ref() == Some(&source.selection),
+            "Q Worker request changed its signed scenario verifier"
+        );
+        let request = scenario
+            .consumer_worker_request
+            .as_ref()
+            .context("selected Q scenario has no signed Worker request")?;
+        request.validate()?;
+        let session_setup = request.session_setup.clone();
+        let setup_digest = canonical_value_digest(&session_setup)?;
+        let body = if allow_unbound_template {
+            request.body.clone()
+        } else {
+            let local = state
+                .state_store
+                .qualification_local_start(placement)?
+                .context("Q bound selection lost its original local row")?;
+            request.bound_controller_canary_body(local.controller_canary_binding.as_ref())?
+        };
+        let digest = canonical_value_digest(&body)?;
+        run(SignedQualificationWorkerRequest {
+            session_setup,
+            setup_digest,
+            body,
+            digest,
+            wire_max_bytes: session.max_frame_bytes,
+        })
+    })
 }
 
 fn command_outcome(

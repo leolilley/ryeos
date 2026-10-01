@@ -82,10 +82,18 @@ pub(crate) fn prepare_qualification_worker_transcript(
     command: &QualificationWorkerCommandRecord,
     batches: &[QualificationWorkerObservationBatchRecord],
     provider_configuration: &ProviderConfigurationLaunchInput,
+    controller_canary: Option<&ryeos_state::external_execution::qualification_controller_canary::QControllerCanaryEvidence>,
     fixture_capture: Option<&QFixtureCaptureReference>,
     fixture_content: Option<&QFixtureCaptureContent>,
 ) -> Result<PreparedQualificationWorkerTranscript> {
     provider_configuration.validate()?;
+    if let Some(canary) = controller_canary {
+        canary.validate()?;
+        ensure!(
+            canary.binding.resolved_request_digest == command.request_digest,
+            "Q transcript canary differs from original sent command"
+        );
+    }
     match (fixture_capture, fixture_content) {
         (None, None) => {}
         (Some(reference), Some(content)) => {
@@ -195,6 +203,7 @@ pub(crate) fn prepare_qualification_worker_transcript(
         channel_binding_digest: command.channel_binding_digest.clone(),
         process_incarnation_digest: command.process_incarnation_digest.clone(),
         provider_configuration: provider_configuration.clone(),
+        controller_canary: controller_canary.cloned(),
         fixture_capture: fixture_capture.cloned(),
         setup_request_digest: command.setup_request_digest.clone(),
         setup_final_response_digest,

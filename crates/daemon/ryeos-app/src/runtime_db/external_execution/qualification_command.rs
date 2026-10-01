@@ -732,6 +732,11 @@ impl RuntimeDb {
         let local = qualification_local_start::read_local_start(&tx, placement)?
             .context("Q Worker contact has no original local start")?;
         qualification_local_start::require_live_credential_custody(&tx, &local)?;
+        qualification_controller_canary::require_bound_canary(
+            &local,
+            proof,
+            Some(&record.request_digest),
+        )?;
         let process_state: String = tx.query_row(
             "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
             [placement],
@@ -799,6 +804,11 @@ impl RuntimeDb {
         let local = qualification_local_start::read_local_start(&tx, placement)?
             .context("Q Worker contact has no original local start")?;
         qualification_local_start::require_live_credential_custody(&tx, &local)?;
+        qualification_controller_canary::require_bound_canary(
+            &local,
+            proof,
+            Some(&record.request_digest),
+        )?;
         let process_state: String = tx.query_row(
             "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
             [placement],

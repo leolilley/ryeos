@@ -28,7 +28,7 @@ pub mod remote_verifier_source;
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v4";
 pub const PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA: &str =
-    "ryeos.qualification_worker_request.v4";
+    "ryeos.qualification_worker_request.v5";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
 // Current-only cut: an immutable v12 qualification head at the same
 // coordinate cannot be replaced by v14. Reissuance requires a fresh
@@ -441,6 +441,11 @@ pub struct ProductQualificationConsumerWorkerRequest {
     /// Native mount/capture admission and claim interpretation remain separate.
     #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
     pub fixture: Option<ryeos_external_execution_contract::qualification_fixture::QFixtureContract>,
+    /// Fixed original-controller custody selection; provider syntax is external.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub controller_canary: Option<
+        crate::external_execution::qualification_controller_canary::QControllerCanaryContract,
+    >,
     #[serde(deserialize_with = "Value::deserialize")]
     pub session_setup: Value,
     #[serde(deserialize_with = "Value::deserialize")]
@@ -475,6 +480,31 @@ impl ProductQualificationConsumerWorkerRequest {
             bail!("qualification Worker setup and turn requests must have distinct digests");
         }
         Ok(())
+    }
+
+    /// Verify retained selected-adapter byte commitments, without interpreting
+    /// provider syntax or treating deserialized data as original custody.
+    pub fn bound_controller_canary_body(
+        &self,
+        binding: Option<
+            &crate::external_execution::qualification_controller_canary::QControllerCanaryBinding,
+        >,
+    ) -> anyhow::Result<Value> {
+        self.validate()?;
+        let body = match (self.controller_canary, binding) {
+            (None, None) => self.body.clone(),
+            (Some(_), Some(binding)) => binding.require_bound_body(&self.body)?,
+            _ => bail!("Q canary binding presence differs from signed request"),
+        };
+        bounded(
+            &serde_json::json!({"session_setup":self.session_setup,"body":body}),
+            MAX_PROBE_VALUE_BYTES,
+            "qualification Worker combined bound requests",
+        )?;
+        if canonical_value_digest(&self.session_setup)? == canonical_value_digest(&body)? {
+            bail!("qualification Worker setup and actual turn must have distinct digests");
+        }
+        Ok(body)
     }
 }
 

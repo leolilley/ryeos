@@ -1420,9 +1420,13 @@ impl VerifiedExternalDirectOwner {
 pub(crate) struct VerifiedExternalQualificationOwner {
     reservation: runtime_db::external_execution::ExternalAllocationReservation,
     callback_launch_owner: Option<String>,
+    canary_request: Option<ryeos_state::external_content::products::qualification::ProductQualificationConsumerWorkerRequest>,
 }
 
 impl VerifiedExternalQualificationOwner {
+    pub(crate) fn canary_request(&self) -> Option<&ryeos_state::external_content::products::qualification::ProductQualificationConsumerWorkerRequest>{
+        self.canary_request.as_ref()
+    }
     pub(crate) fn callback_launch_owner(&self) -> Option<&str> {
         self.callback_launch_owner.as_deref()
     }
@@ -14855,9 +14859,21 @@ impl StateStore {
                 &owner.operator_principal,
                 &owner.coordinate,
             )?;
+        let canary_request = admission
+            .purpose()
+            .policy_source
+            .policy
+            .producer_scenarios
+            .get(&owner.coordinate.scenario_id)
+            .context("Q proof lost its signed scenario")?
+            .consumer_worker_request
+            .as_ref()
+            .filter(|request| request.controller_canary.is_some())
+            .cloned();
         Ok(VerifiedExternalQualificationOwner {
             reservation: reservation.clone(),
             callback_launch_owner: admission.callback_launch_owner().map(str::to_owned),
+            canary_request,
         })
     }
 
@@ -16020,6 +16036,103 @@ impl StateStore {
             .close_qualification_guest_scratch(expected)
     }
 
+    pub(crate) fn reserve_qualification_controller_canary(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+        witness: &ryeos_external_execution::guest_inputs::ExternalGuestInputExclusionWitness,
+        admission:crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state,
+                &g,
+                &expected.placement_thread_id,
+                &admission,
+            )?;
+            g.runtime_db.reserve_qualification_controller_canary(
+                expected,
+                witness.identity_digest(),
+                &proof,
+            )
+        })
+    }
+
+    /// Only the original owner module can construct this opaque successful
+    /// captured-adapter invocation. Public deserialized bindings cannot enter.
+    pub(crate) fn bind_qualification_controller_canary(
+        &self,
+        state: &crate::state::AppState,
+        prepared: &crate::external_qualification_local::PreparedQualificationControllerCanary,
+        admission:crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let coordinate=crate::qualification_workspace_custody::QualificationWorkspaceCustodyCoordinate::from_start(prepared.record())?;
+        let custody = state
+            .qualification_workspace_custody
+            .borrow_exact(&coordinate)?;
+        let (path, observed) = custody.recheck_controller_canary()?;
+        anyhow::ensure!(
+            path == prepared.binding().controller_path
+                && observed == prepared.binding().initial_file,
+            "Q canary adapter result lost original file custody"
+        );
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state,
+                &g,
+                &prepared.record().placement_thread_id,
+                &admission,
+            )?;
+            g.runtime_db.bind_qualification_controller_canary(
+                prepared.record(),
+                prepared.binding(),
+                &proof,
+            )
+        })
+    }
+
+    /// Caller holds the original occurrence cleanup gate through this method.
+    /// Re-read the original private observation here; public JSON supplied by a
+    /// caller is never accepted as terminal file custody.
+    pub(crate) fn retain_qualification_controller_canary_terminal(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+        custody: &std::sync::Arc<
+            crate::qualification_workspace_custody::QualificationWorkspaceCustody,
+        >,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let coordinate = crate::qualification_workspace_custody::QualificationWorkspaceCustodyCoordinate::from_start(expected)?;
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_exact(&coordinate)?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(&retained, custody),
+            "Q terminal canary changed its original owner"
+        );
+        let _permit = self.acquire_write_permit()?;
+        let binding = expected
+            .controller_canary_binding
+            .as_ref()
+            .context("Q terminal canary has no original binding")?;
+        let (path, terminal_file) = custody.recheck_controller_canary()?;
+        anyhow::ensure!(
+            path == binding.controller_path,
+            "Q terminal canary changed original path"
+        );
+        let evidence = ryeos_state::external_execution::qualification_controller_canary::QControllerCanaryEvidence {
+            schema:1,binding:binding.clone(),terminal_file,
+        };
+        evidence.validate()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_controller_canary_terminal(expected, &evidence)
+    }
+
     /// A read-only check for the original Q directory immediately before an
     /// owner-gated view borrow and held Worker spawn.
     pub(crate) fn authorize_qualification_local_spawn(
@@ -16784,6 +16897,7 @@ impl StateStore {
                 &source.command,
                 &source.batches,
                 &source.provider_configuration,
+                source.controller_canary.as_ref(),
                 source.fixture_capture.as_ref(),
                 source.fixture_content.as_ref(),
             )?;

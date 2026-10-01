@@ -2696,7 +2696,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 121 retains Q credential profile custody through exact local retirement.
 // Epoch 124 retains current-only transcript manifest4/streamv3 native capture
 // semantics. Actual owned DDL remains unchanged; predecessor manifests refuse.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 124;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 125;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -3996,6 +3996,24 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "INTEGER",
                         pk: false,
                         not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "controller_canary_intent_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "controller_canary_binding_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "controller_canary_terminal_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
                     },
                 ],
             },

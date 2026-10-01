@@ -19,6 +19,11 @@ use crate::runtime_db::external_execution::{
 };
 use crate::temp_dir_guard::TempDirGuard;
 
+#[path = "qualification_workspace_custody/controller_canary.rs"]
+mod controller_canary;
+use controller_canary::CanarySlot;
+use ryeos_state::external_execution::qualification_controller_canary::QControllerCanaryFileObservation;
+
 /// Immutable Q identity retained across the start journal's phase changes.
 /// The diagnostic path fields identify original guards; they cannot recreate
 /// either guard after the daemon loses them.
@@ -117,6 +122,7 @@ pub struct QualificationWorkspaceCustody {
     state_root: lillux::PinnedDirectory,
     state_root_parent: lillux::PinnedDirectory,
     state_root_removed: Mutex<bool>,
+    controller_canary: Mutex<CanarySlot>,
 }
 
 /// Original pinned Q guest-input parent, created once before allocation
@@ -258,6 +264,57 @@ impl QualificationWorkspaceCustody {
 
     pub fn state_root(&self) -> &lillux::PinnedDirectory {
         &self.state_root
+    }
+
+    /// Filesystem observation only. The caller first retains the original
+    /// creation intent under its Q occurrence gate and authenticates the complete
+    /// guest descriptor inventory plus materialization lifetimes. This method
+    /// supplies no process, input-selection, contact or qualification authority.
+    pub(crate) fn create_controller_canary(
+        &self,
+        credential_home: &lillux::PinnedDirectory,
+        original_guest_sources: &[lillux::InheritedDescriptorAuthority],
+    ) -> Result<(String, QControllerCanaryFileObservation)> {
+        let removed = self
+            .state_root_removed
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q state-root removal owner is poisoned"))?;
+        ensure!(
+            !*removed,
+            "Q canary cannot use a removed original state root"
+        );
+        let mut canary = self
+            .controller_canary
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q original canary custody is poisoned"))?;
+        canary.create(
+            &self.state_root,
+            self.workspace.owned_scratch_root()?,
+            credential_home,
+            original_guest_sources,
+        )
+    }
+
+    /// Preserve the occurrence gate through the later durable observation
+    /// commit. These local locks prevent physical removal during this read;
+    /// they do not themselves seal a terminal process or a journal transition.
+    /// Missing custody after restart can never reconstruct a live observation.
+    pub(crate) fn recheck_controller_canary(
+        &self,
+    ) -> Result<(String, QControllerCanaryFileObservation)> {
+        let removed = self
+            .state_root_removed
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q state-root removal owner is poisoned"))?;
+        ensure!(
+            !*removed,
+            "Q canary lost its original state root before observation"
+        );
+        let canary = self
+            .controller_canary
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Q original canary custody is poisoned"))?;
+        canary.recheck(&self.state_root)
     }
 
     /// Remove only the original pinned state-root child below its retained
@@ -580,6 +637,7 @@ impl QualificationWorkspaceCustodyRegistry {
             state_root: pinned_state_root,
             state_root_parent: pinned_parent,
             state_root_removed: Mutex::new(false),
+            controller_canary: Mutex::new(CanarySlot::default()),
         });
         let mut entries = self
             .entries

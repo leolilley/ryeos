@@ -235,6 +235,23 @@ fn require_configuration_binding(
     Ok(())
 }
 
+fn require_canary_configuration_binding(
+    binding: &ryeos_state::external_execution::qualification_controller_canary::QControllerCanaryBinding,
+    input: &ryeos_external_execution_contract::ProviderConfigurationLaunchInput,
+) -> Result<()> {
+    binding.validate()?;
+    input.validate()?;
+    ensure!(
+        binding.provider_declaration_id == input.provider_declaration_id
+            && binding.configuration_adapter_artifact_hash
+                == input.configuration_adapter_artifact_hash
+            && binding.configuration_adapter_artifact_bytes
+                == input.configuration_adapter_artifact_bytes,
+        "Q canary binder differs from the exact process configuration adapter"
+    );
+    Ok(())
+}
+
 fn require_retained_process_owner(
     conn: &Connection,
     record: &QualificationWorkerProcessRecord,
@@ -261,6 +278,11 @@ fn require_retained_process_owner(
             && owner.qualification_occurrence.occurrence_id == record.qualification_occurrence_id,
         "qualification Worker process differs from retained accepted root and occurrence"
     );
+    let local = qualification_local_start::read_local_start(conn, &record.placement_thread_id)?
+        .context("qualification process lost its original local owner")?;
+    if let Some(binding) = &local.controller_canary_binding {
+        require_canary_configuration_binding(binding, &record.provider_configuration)?;
+    }
     let channel = load_binding(conn, &record.placement_thread_id)?;
     ensure!(
         channel.digest()? == record.channel_binding_digest
@@ -450,6 +472,9 @@ impl RuntimeDb {
             credential_home_id,
         )?;
         require_configuration_binding(&tx, &allocation.reservation, configuration_input)?;
+        if let Some(binding) = &credential_start.controller_canary_binding {
+            require_canary_configuration_binding(binding, configuration_input)?;
+        }
         let channel_binding_digest = channel.digest()?;
         let channel_state: String = tx.query_row(
             "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-22T11:47:01Z:12fa179b21d8c81bd06a4b6385ca348b7f44807a91a0c470fec17e5b7bfb0ae8:rJX38CKLHXXGa9m3E6YhOQBneDvIPZ1zInjVZGushr/B0A75+dXJkyzt09XxFUpTibIUBDhBs6VbJYqXduJFCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-01T13:09:46Z:f486bfc71227ada6d612bac0b421885d0f6967fbcb587a56ecc8f0b50b22812e:X8Wg7Zl/c8RAgx0m1Ll0hO+a9+DdH0X8wJ2lp2mhRzQzzEPr+8p89Rl/Ce5droNBOv71iCAFn7ou0ZLWt4gmAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: codex
 version: 1.0.0
 description: Supported RyeOS-hosted Codex structured-session worker and remote session surfaces
@@ -16,7 +16,7 @@ requires_kinds:
 uses_kinds: []
 external_providers:
 - id: codex-hosted
-  protocol: ryeos.external-execution.provider-configuration.v1
+  protocol: ryeos.external-execution.provider-declaration.v2
   targets:
   - x86_64-unknown-linux-gnu
   - aarch64-unknown-linux-gnu
@@ -24,3 +24,4 @@ external_providers:
   connector_process_group: new
   configuration_adapter: ryeos-codex-external-configuration
   configuration_destination: environments.toml
+  qualification_request_binding_protocol: ryeos.external-execution.qualification-request-binding.v1

@@ -2007,6 +2007,24 @@ pub(crate) fn preflight_external_qualification_program(
     )?;
     state.external_candidate_connectors.qualify(&contract)?;
     let provider = state.external_provider_configurations.qualify(&contract)?;
+    let invocation = purpose
+        .consumer_invocation
+        .as_ref()
+        .context("Q binder preflight has no original sealed invocation")?;
+    let request = purpose
+        .policy_source
+        .policy
+        .producer_scenarios
+        .get(&invocation.scenario_id)
+        .and_then(|scenario| scenario.consumer_worker_request.as_ref())
+        .context("Q binder preflight has no original signed Worker request")?;
+    request.validate()?;
+    if request.controller_canary.is_some() {
+        // The exact captured signed provider opts in before allocator/provider
+        // contact. Do not probe an older adapter or try another implementation.
+        provider.declaration().require_qualification_request_binding()?;
+    }
+
     require_connector_process_group_authority(
         provider.declaration().connector_process_group,
         state.isolation.is_enforced(),
@@ -4454,6 +4472,9 @@ pub struct ExternalQualificationStart<'a> {
     deadline: lillux::time::MonotonicDeadline,
     root: crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
     guest_inputs: Option<ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
+    // Original descriptors AND their same materialization holds survive the
+    // one-use activation transfer, for the controller exclusion check at Ready.
+    original_guest_exclusion: ryeos_external_execution::guest_inputs::ExternalGuestInputExclusionWitness,
     cleanup: Option<ExternalCandidateCleanupLifeline>,
     failed: bool,
 }
@@ -4470,11 +4491,13 @@ impl ExternalQualificationStart<'_> {
     /// Carry the authenticated accepted root into the local Worker owner after
     /// startup reaches Ready. This root is retained identity, not a new contact
     /// permit; the local plan and effectful spawn must recheck current authority.
-    pub fn into_authenticated_root(
+    pub fn into_authenticated_ready_parts(
         self,
-    ) -> crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot
-    {
-        self.root
+    ) -> (
+        crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+        ryeos_external_execution::guest_inputs::ExternalGuestInputExclusionWitness,
+    ) {
+        (self.root, self.original_guest_exclusion)
     }
 
     /// Move the original cleanup owner to the next process-local owner. If it
@@ -4839,6 +4862,7 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         )
     })?;
     let cleanup = ExternalCandidateCleanupLifeline::new(state, &placement);
+    let original_guest_exclusion = guest_inputs.retain_exclusion_witness()?;
     Ok(ExternalQualificationStart {
         state,
         invocation: invocation.clone(),
@@ -4849,6 +4873,7 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         deadline,
         root,
         guest_inputs: Some(guest_inputs),
+        original_guest_exclusion,
         cleanup: Some(cleanup),
         failed: false,
     })

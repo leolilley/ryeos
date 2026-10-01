@@ -2835,6 +2835,7 @@ dependencies = [
  "lillux",
  "ryeos-external-execution-contract",
  "serde",
+ "serde_json",
  "toml",
 ]
 
@@ -2855,6 +2856,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "lillux",
+ "ryeos-codex-external-configuration",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "ryeos-project-capture",
@@ -2862,6 +2864,7 @@ dependencies = [
  "ryeos-state",
  "serde",
  "serde_json",
+ "shlex",
  "tempfile",
  "tokio",
  "toml",

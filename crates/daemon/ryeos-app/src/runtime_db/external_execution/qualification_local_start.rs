@@ -4,8 +4,12 @@
 //! original private workspace directory after a crash. A surviving row grants
 //! cleanup/recovery only, never another directory borrow or Worker launch.
 
+use super::qualification_controller_canary::QualificationControllerCanaryIntent;
 use super::*;
 use ryeos_state::external_execution::journal::load_binding;
+use ryeos_state::external_execution::qualification_controller_canary::{
+    QControllerCanaryBinding, QControllerCanaryEvidence,
+};
 
 // A present null is permitted; omitting the journal field is not.
 fn deserialize_required_nullable<'de, D, T>(
@@ -32,6 +36,9 @@ CREATE TABLE external_qualification_local_start (
     record_json TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
+    controller_canary_intent_json TEXT,
+    controller_canary_binding_json TEXT,
+    controller_canary_terminal_json TEXT,
     CHECK (updated_at_ms >= created_at_ms),
     CHECK (length(CAST(record_json AS BLOB)) BETWEEN 1 AND 131072)
 );
@@ -39,6 +46,12 @@ CREATE TRIGGER external_qualification_local_start_insert_guard
 BEFORE INSERT ON external_qualification_local_start
 WHEN NEW.phase!='reserved'
  OR json_type(NEW.record_json,'$.credential_custody') IS NOT 'null'
+ OR json_type(NEW.record_json,'$.controller_canary_intent') IS NOT 'null'
+ OR json_type(NEW.record_json,'$.controller_canary_binding') IS NOT 'null'
+ OR json_type(NEW.record_json,'$.controller_canary_terminal') IS NOT 'null'
+ OR NEW.controller_canary_intent_json IS NOT NULL
+ OR NEW.controller_canary_binding_json IS NOT NULL
+ OR NEW.controller_canary_terminal_json IS NOT NULL
  OR NOT EXISTS(SELECT 1 FROM external_execution_allocation a
     JOIN external_execution_channel c ON c.placement_thread_id=a.placement_thread_id
     WHERE a.placement_thread_id=NEW.placement_thread_id AND a.phase='bound'
@@ -63,9 +76,9 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
      AND json_extract(NEW.record_json,'$.directory_borrow_intent') IS NOT NULL
      AND json_extract(NEW.record_json,'$.worker_incarnation_digest') IS NULL)
  OR json_remove(NEW.record_json,'$.phase','$.workspace_identity','$.directory_borrow_intent',
-      '$.worker_incarnation_digest','$.cleanup_reason','$.cleanup','$.credential_custody','$.updated_at_ms')
+      '$.worker_incarnation_digest','$.cleanup_reason','$.cleanup','$.credential_custody','$.controller_canary_intent','$.controller_canary_binding','$.controller_canary_terminal','$.updated_at_ms')
     != json_remove(OLD.record_json,'$.phase','$.workspace_identity','$.directory_borrow_intent',
-      '$.worker_incarnation_digest','$.cleanup_reason','$.cleanup','$.credential_custody','$.updated_at_ms')
+      '$.worker_incarnation_digest','$.cleanup_reason','$.cleanup','$.credential_custody','$.controller_canary_intent','$.controller_canary_binding','$.controller_canary_terminal','$.updated_at_ms')
  OR (json_extract(NEW.record_json,'$.workspace_identity') IS NOT json_extract(OLD.record_json,'$.workspace_identity')
      AND NOT (OLD.phase='reserved' AND NEW.phase='workspace_ready'
           AND json_extract(OLD.record_json,'$.workspace_identity') IS NULL
@@ -79,7 +92,12 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
           AND json_extract(OLD.record_json,'$.worker_incarnation_digest') IS NULL
           AND json_extract(NEW.record_json,'$.worker_incarnation_digest') IS NOT NULL))
  OR (NEW.phase=OLD.phase AND NOT (
-      (json_extract(NEW.record_json,'$.credential_custody') IS NOT json_extract(OLD.record_json,'$.credential_custody')
+      ((NEW.controller_canary_intent_json IS NOT OLD.controller_canary_intent_json
+        OR NEW.controller_canary_binding_json IS NOT OLD.controller_canary_binding_json
+        OR NEW.controller_canary_terminal_json IS NOT OLD.controller_canary_terminal_json)
+       AND json_remove(NEW.record_json,'$.controller_canary_intent','$.controller_canary_binding','$.controller_canary_terminal','$.updated_at_ms')
+           = json_remove(OLD.record_json,'$.controller_canary_intent','$.controller_canary_binding','$.controller_canary_terminal','$.updated_at_ms'))
+      OR (json_extract(NEW.record_json,'$.credential_custody') IS NOT json_extract(OLD.record_json,'$.credential_custody')
        AND json_remove(NEW.record_json,'$.credential_custody','$.updated_at_ms')
            = json_remove(OLD.record_json,'$.credential_custody','$.updated_at_ms'))
       OR (OLD.phase='workspace_ready'
@@ -87,7 +105,11 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
       AND json_extract(NEW.record_json,'$.directory_borrow_intent') IS NOT NULL
       AND json_remove(NEW.record_json,'$.directory_borrow_intent','$.updated_at_ms')
           = json_remove(OLD.record_json,'$.directory_borrow_intent','$.updated_at_ms'))))
- OR NOT ((NEW.phase=OLD.phase AND json_extract(NEW.record_json,'$.credential_custody') IS NOT json_extract(OLD.record_json,'$.credential_custody'))
+ OR NOT ((NEW.phase=OLD.phase AND (
+      json_extract(NEW.record_json,'$.credential_custody') IS NOT json_extract(OLD.record_json,'$.credential_custody')
+      OR NEW.controller_canary_intent_json IS NOT OLD.controller_canary_intent_json
+      OR NEW.controller_canary_binding_json IS NOT OLD.controller_canary_binding_json
+      OR NEW.controller_canary_terminal_json IS NOT OLD.controller_canary_terminal_json))
       OR (OLD.phase='reserved' AND NEW.phase='workspace_ready')
       OR (OLD.phase='workspace_ready' AND NEW.phase IN ('workspace_ready','worker_attached'))
       OR (OLD.phase IN ('reserved','workspace_ready','worker_attached') AND NEW.phase='cleanup_unproved')
@@ -96,6 +118,51 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
       OR (OLD.phase='workspace_removed' AND NEW.phase='state_removed')
       OR (OLD.phase='state_removed' AND NEW.phase='closed'))
 BEGIN SELECT RAISE(ABORT, 'qualification local start transition changed its one-use owner'); END;
+CREATE TRIGGER external_qualification_local_canary_transition_guard
+BEFORE UPDATE ON external_qualification_local_start
+WHEN json_type(NEW.record_json,'$.controller_canary_intent') IS NULL
+ OR json_type(NEW.record_json,'$.controller_canary_binding') IS NULL
+ OR json_type(NEW.record_json,'$.controller_canary_terminal') IS NULL
+ OR NEW.controller_canary_intent_json IS NOT json_extract(NEW.record_json,'$.controller_canary_intent')
+ OR NEW.controller_canary_binding_json IS NOT json_extract(NEW.record_json,'$.controller_canary_binding')
+ OR NEW.controller_canary_terminal_json IS NOT json_extract(NEW.record_json,'$.controller_canary_terminal')
+ OR ((NEW.controller_canary_intent_json IS NOT OLD.controller_canary_intent_json
+      OR NEW.controller_canary_binding_json IS NOT OLD.controller_canary_binding_json
+      OR NEW.controller_canary_terminal_json IS NOT OLD.controller_canary_terminal_json)
+  AND NOT COALESCE((NEW.phase=OLD.phase AND (
+   (OLD.phase IN ('reserved','workspace_ready')
+    AND json_type(OLD.record_json,'$.directory_borrow_intent')='null'
+    AND json_type(OLD.record_json,'$.worker_incarnation_digest')='null'
+    AND json_type(OLD.record_json,'$.credential_custody')='object'
+    AND json_type(OLD.record_json,'$.credential_custody.released_at_ms')='null'
+    AND OLD.controller_canary_intent_json IS NULL
+    AND json_type(NEW.record_json,'$.controller_canary_intent')='object'
+    AND OLD.controller_canary_binding_json IS NULL AND NEW.controller_canary_binding_json IS NULL
+    AND OLD.controller_canary_terminal_json IS NULL AND NEW.controller_canary_terminal_json IS NULL)
+   OR (OLD.phase IN ('reserved','workspace_ready')
+    AND json_type(OLD.record_json,'$.directory_borrow_intent')='null'
+    AND json_type(OLD.record_json,'$.worker_incarnation_digest')='null'
+    AND json_type(OLD.record_json,'$.credential_custody')='object'
+    AND json_type(OLD.record_json,'$.credential_custody.released_at_ms')='null'
+    AND OLD.controller_canary_intent_json IS NOT NULL
+    AND NEW.controller_canary_intent_json=OLD.controller_canary_intent_json
+    AND OLD.controller_canary_binding_json IS NULL
+    AND json_type(NEW.record_json,'$.controller_canary_binding')='object'
+    AND OLD.controller_canary_terminal_json IS NULL AND NEW.controller_canary_terminal_json IS NULL)
+   OR (OLD.phase IN ('worker_attached','cleanup_unproved')
+    AND OLD.controller_canary_binding_json IS NOT NULL
+    AND NEW.controller_canary_intent_json=OLD.controller_canary_intent_json
+    AND NEW.controller_canary_binding_json=OLD.controller_canary_binding_json
+    AND OLD.controller_canary_terminal_json IS NULL
+    AND json_type(NEW.record_json,'$.controller_canary_terminal')='object'
+    AND json_type(OLD.record_json,'$.credential_custody.released_at_ms')='null'
+    AND json_type(OLD.record_json,'$.worker_incarnation_digest')='text'
+    AND EXISTS(SELECT 1 FROM external_qualification_worker_process p
+       WHERE p.placement_thread_id=OLD.placement_thread_id AND p.phase='terminal')
+    AND NOT EXISTS(SELECT 1 FROM external_execution_connector c
+       WHERE c.placement_thread_id=OLD.placement_thread_id AND c.state!='closed'))
+  )),0))
+BEGIN SELECT RAISE(ABORT, 'qualification canary changed its original custody stage'); END;
 CREATE TRIGGER external_qualification_local_credential_transition_guard
 BEFORE UPDATE ON external_qualification_local_start
 WHEN json_type(NEW.record_json,'$.credential_custody') IS NULL
@@ -243,6 +310,12 @@ pub struct QualificationLocalStartRecord {
     pub launch_owner: String,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub credential_custody: Option<QualificationLocalCredentialCustody>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub controller_canary_intent: Option<QualificationControllerCanaryIntent>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub controller_canary_binding: Option<QControllerCanaryBinding>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub controller_canary_terminal: Option<QControllerCanaryEvidence>,
     pub phase: QualificationLocalStartPhase,
     pub workspace_identity: Option<lillux::PinnedDirectoryIdentity>,
     pub directory_borrow_intent: Option<QualificationWorkspaceBorrowIntent>,
@@ -275,6 +348,7 @@ fn local_workspace_digest(
 
 impl QualificationLocalStartRecord {
     fn validate(&self) -> Result<()> {
+        super::qualification_controller_canary::validate_canary_shape(self)?;
         ensure!(
             self.placement_thread_id
                 .strip_prefix("Q-")
@@ -465,7 +539,7 @@ impl QualificationLocalStartRecord {
     }
 }
 
-fn canonical(record: &QualificationLocalStartRecord) -> Result<String> {
+pub(super) fn canonical(record: &QualificationLocalStartRecord) -> Result<String> {
     record.validate()?;
     let json = lillux::canonical_json(&serde_json::to_value(record)?)?;
     ensure!(
@@ -509,6 +583,7 @@ pub(super) fn read_local_start(
     );
     require_retained_local_owner(conn, &record)?;
     require_historical_credential_custody(conn, &record)?;
+    super::qualification_controller_canary::require_retained_canary(conn, &record)?;
     Ok(Some(record))
 }
 
@@ -603,7 +678,10 @@ pub(super) fn require_live_credential_custody(
     Ok(())
 }
 
-fn require_current_start(conn: &Connection, record: &QualificationLocalStartRecord) -> Result<()> {
+pub(super) fn require_current_start(
+    conn: &Connection,
+    record: &QualificationLocalStartRecord,
+) -> Result<()> {
     ensure!(
         record.daemon_generation_id == daemon_generation_id(),
         "qualification local start is from another daemon generation; cleanup required"
@@ -655,7 +733,7 @@ pub(super) fn require_live_credential_start_tx(
     Ok(record)
 }
 
-fn transition(
+pub(super) fn transition(
     conn: &Connection,
     current: &QualificationLocalStartRecord,
     next: &QualificationLocalStartRecord,
@@ -664,7 +742,8 @@ fn transition(
     let next_json = canonical(next)?;
     ensure!(
         conn.execute(
-            "UPDATE external_qualification_local_start SET phase=?3,record_json=?4,updated_at_ms=?5
+            "UPDATE external_qualification_local_start SET phase=?3,record_json=?4,updated_at_ms=?5,
+                 controller_canary_intent_json=?7,controller_canary_binding_json=?8,controller_canary_terminal_json=?9
              WHERE placement_thread_id=?1 AND record_json=?2 AND phase=?6",
             params![
                 current.placement_thread_id,
@@ -672,7 +751,10 @@ fn transition(
                 next.phase.as_str(),
                 next_json,
                 next.updated_at_ms,
-                current.phase.as_str()
+                current.phase.as_str(),
+                super::qualification_controller_canary::optional_json(next.controller_canary_intent.as_ref())?,
+                super::qualification_controller_canary::optional_json(next.controller_canary_binding.as_ref())?,
+                super::qualification_controller_canary::optional_json(next.controller_canary_terminal.as_ref())?,
             ],
         )? == 1,
         "qualification local start lost its exact one-use transition"
@@ -680,11 +762,11 @@ fn transition(
     Ok(())
 }
 
-fn now_after(current: &QualificationLocalStartRecord) -> Result<i64> {
+pub(super) fn now_after(current: &QualificationLocalStartRecord) -> Result<i64> {
     Ok(i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms))
 }
 
-fn require_local_processes_settled(
+pub(super) fn require_local_processes_settled(
     conn: &Connection,
     record: &QualificationLocalStartRecord,
 ) -> Result<()> {
@@ -990,6 +1072,7 @@ impl RuntimeDb {
         );
         require_current_start(&tx, &record)?;
         require_live_credential_custody(&tx, &record)?;
+        super::qualification_controller_canary::require_bound_canary(&record, proof, None)?;
         tx.commit()?;
         Ok(record)
     }
@@ -1013,6 +1096,7 @@ impl RuntimeDb {
         );
         require_current_start(&tx, &local)?;
         require_live_credential_custody(&tx, &local)?;
+        super::qualification_controller_canary::require_bound_canary(&local, proof, None)?;
         let process = qualification_process::require_current_attached_worker(&tx, placement)?;
         ensure!(
             local.worker_incarnation_digest.as_deref()
@@ -1152,6 +1236,9 @@ impl RuntimeDb {
             state_root: state_root.to_string_lossy().into_owned(),
             launch_owner,
             credential_custody: None,
+            controller_canary_intent: None,
+            controller_canary_binding: None,
+            controller_canary_terminal: None,
             phase: QualificationLocalStartPhase::Reserved,
             workspace_identity: None,
             directory_borrow_intent: None,
@@ -1163,7 +1250,7 @@ impl RuntimeDb {
         };
         let json = canonical(&record)?;
         tx.execute(
-            "INSERT INTO external_qualification_local_start VALUES (?1,?2,?3,?4,?5,?6,'reserved',?7,?8,?8)",
+            "INSERT INTO external_qualification_local_start (placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,phase,record_json,created_at_ms,updated_at_ms) VALUES (?1,?2,?3,?4,?5,?6,'reserved',?7,?8,?8)",
             params![record.placement_thread_id, record.accepted_root_id, record.accepted_capsule_hash,
                 record.qualification_operation_id, record.qualification_occurrence_id,
                 record.channel_binding_digest, json, now],
@@ -1405,6 +1492,9 @@ mod tests {
             workspace_id,
             launch_owner: format!("Q-local-{digest}"),
             credential_custody: None,
+            controller_canary_intent: None,
+            controller_canary_binding: None,
+            controller_canary_terminal: None,
             phase: QualificationLocalStartPhase::Reserved,
             workspace_identity: None,
             directory_borrow_intent: None,
@@ -1479,7 +1569,7 @@ mod tests {
             params![current.placement_thread_id, current.channel_binding_digest],
         )
         .unwrap();
-        conn.execute("INSERT INTO external_qualification_local_start VALUES(?1,?2,?3,?4,?5,?6,'reserved',?7,1,1)",
+        conn.execute("INSERT INTO external_qualification_local_start (placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,phase,record_json,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,'reserved',?7,1,1)",
             params![current.placement_thread_id, current.accepted_root_id, current.accepted_capsule_hash,
                 current.qualification_operation_id, current.qualification_occurrence_id,
                 current.channel_binding_digest, canonical(&current).unwrap()]).unwrap();
@@ -1668,7 +1758,7 @@ mod tests {
             ],
         )
         .unwrap();
-        conn.execute("INSERT INTO external_qualification_local_start VALUES(?1,?2,?3,?4,?5,?6,'reserved',?7,1,1)",
+        conn.execute("INSERT INTO external_qualification_local_start (placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,phase,record_json,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,'reserved',?7,1,1)",
             params![current.placement_thread_id, current.accepted_root_id, current.accepted_capsule_hash,
                 current.qualification_operation_id, current.qualification_occurrence_id,
                 current.channel_binding_digest, canonical(&current).unwrap()]).unwrap();
@@ -1925,5 +2015,142 @@ mod tests {
         let mut skipped = borrowed.clone();
         skipped.phase = QualificationLocalStartPhase::WorkspaceRemoved;
         assert!(transition(&conn, &borrowed, &skipped).is_err());
+    }
+    // Public shape testimony for isolated SQL transition tests. These rows do
+    // not mint original file custody, accepted-root proof, or adapter execution.
+    fn canary_stage_fixture(
+        current: &QualificationLocalStartRecord,
+    ) -> (
+        QualificationControllerCanaryIntent,
+        QControllerCanaryBinding,
+    ) {
+        use ryeos_external_execution_contract::qualification_request_binding::{
+            QualificationRequestBindingInput, QualificationRequestBindingOutput,
+        };
+        use ryeos_state::external_execution::qualification_controller_canary::QControllerCanaryContract;
+        let path = format!("{}/controller-canary/canary", current.state_root);
+        let input = QualificationRequestBindingInput {
+            schema: 1,
+            template: serde_json::json!({"provider_defined":"template"}),
+            controller_canary_path: path.clone(),
+        };
+        let output = QualificationRequestBindingOutput {
+            schema: 1,
+            input_digest: input.digest().unwrap(),
+            resolved_body: serde_json::json!({"provider_defined":"bound"}),
+        };
+        let binding:QControllerCanaryBinding=serde_json::from_value(serde_json::json!({
+            "schema":1,"controller_path":path,
+            "initial_file":{"directory_identity":{"containing_device":1,"inode":44},
+                "file_identity":{"containing_device":1,"inode":45},"content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384},
+            "provider_declaration_id":"provider","configuration_adapter_artifact_hash":"b".repeat(64),"configuration_adapter_artifact_bytes":1,
+            "binding_input_digest":input.digest().unwrap(),"binding_output_digest":output.digest().unwrap(),
+            "template_request_digest":ryeos_state::objects::canonical_value_digest(&input.template).unwrap(),
+            "resolved_request_digest":ryeos_state::objects::canonical_value_digest(&output.resolved_body).unwrap(),
+            "resolved_body":output.resolved_body,
+        })).unwrap();
+        binding.validate().unwrap();
+        let intent = QualificationControllerCanaryIntent {
+            schema: 1,
+            contract: QControllerCanaryContract::OriginalControllerReadAndLocalRefusalV1,
+            controller_path: path,
+            program_digest: "c".repeat(64),
+            provider_declaration_id: binding.provider_declaration_id.clone(),
+            configuration_adapter_artifact_hash: binding
+                .configuration_adapter_artifact_hash
+                .clone(),
+            configuration_adapter_artifact_bytes: binding.configuration_adapter_artifact_bytes,
+            guest_input_identity: "d".repeat(64),
+            template_request_digest: binding.template_request_digest.clone(),
+            reserved_at_ms: 1,
+        };
+        (intent, binding)
+    }
+
+    #[test]
+    fn canary_journal_requires_append_once_intent_before_binding_and_never_clears_it() {
+        let (conn, initial) = fixture_journal();
+        let current = claim_fixture_credential(&conn, &initial);
+        let (intent, binding) = canary_stage_fixture(&current);
+        let mut reserved = current.clone();
+        reserved.controller_canary_intent = Some(intent);
+        transition(&conn, &current, &reserved).unwrap();
+        assert!(transition(&conn, &reserved, &reserved).is_err());
+        assert!(transition(&conn, &reserved, &current).is_err());
+        let mut substituted = reserved.clone();
+        substituted
+            .controller_canary_intent
+            .as_mut()
+            .unwrap()
+            .guest_input_identity = "e".repeat(64);
+        assert!(transition(&conn, &reserved, &substituted).is_err());
+        let mut bound = reserved.clone();
+        bound.controller_canary_binding = Some(binding);
+        transition(&conn, &reserved, &bound).unwrap();
+        assert!(transition(&conn, &bound, &bound).is_err());
+        assert!(transition(&conn, &bound, &reserved).is_err());
+        // Neither stripping the required-null field nor changing one mirrored
+        // SQL column can erase or replace the original append-only commitment.
+        assert!(conn.execute("UPDATE external_qualification_local_start SET record_json=json_remove(record_json,'$.controller_canary_intent')",[]).is_err());
+        assert!(
+            conn.execute(
+                "UPDATE external_qualification_local_start SET controller_canary_binding_json=NULL",
+                []
+            )
+            .is_err()
+        );
+        let encoded: String = conn
+            .query_row(
+                "SELECT record_json FROM external_qualification_local_start",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(encoded, canonical(&bound).unwrap());
+        // Unsuccessful preparation is still cleanable before any directory
+        // borrow. No missing terminal observation may strand proven-safe cleanup.
+        require_local_processes_settled(&conn, &bound).unwrap();
+        let mut released = bound.clone();
+        released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
+        transition(&conn, &bound, &released).unwrap();
+        let mut late = released.clone();
+        late.controller_canary_terminal = Some(QControllerCanaryEvidence {
+            schema: 1,
+            terminal_file: bound
+                .controller_canary_binding
+                .as_ref()
+                .unwrap()
+                .initial_file
+                .clone(),
+            binding: bound.controller_canary_binding.clone().unwrap(),
+        });
+        assert!(transition(&conn, &released, &late).is_err());
+    }
+
+    #[test]
+    fn canary_journal_cold_shape_refuses_missing_fields_or_binding_without_original_intent() {
+        let original = fixture_record();
+        for field in [
+            "controller_canary_intent",
+            "controller_canary_binding",
+            "controller_canary_terminal",
+        ] {
+            let mut value = serde_json::to_value(&original).unwrap();
+            value.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<QualificationLocalStartRecord>(value).is_err());
+        }
+        let (_, binding) = canary_stage_fixture(&original);
+        let mut changed = original.clone();
+        changed.controller_canary_binding = Some(binding);
+        assert!(changed.validate().is_err());
+        let (intent, _) = canary_stage_fixture(&original);
+        changed.controller_canary_intent = Some(intent);
+        changed.validate().unwrap();
+        changed
+            .controller_canary_binding
+            .as_mut()
+            .unwrap()
+            .configuration_adapter_artifact_hash = "f".repeat(64);
+        assert!(changed.validate().is_err());
     }
 }

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const QUALIFICATION_WORKER_TRANSCRIPT_KIND: &str = "qualification_worker_transcript";
-pub const QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA: u32 = 4;
+pub const QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA: u32 = 5;
 pub const QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA: &str =
     "ryeos.qualification_worker_transcript_stream.v3";
 pub const MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES: u64 = 1024 * 1024;
@@ -54,6 +54,12 @@ pub struct QualificationWorkerTranscriptManifest {
     /// Bounded public projection retained from the exact original process launch.
     /// It describes one provider configuration, not a complete tool inventory.
     pub provider_configuration: ProviderConfigurationLaunchInput,
+    /// Original controller observation, authenticated by the publisher's
+    /// death-settled process and local custody source, not by this shape.
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub controller_canary: Option<
+        crate::external_execution::qualification_controller_canary::QControllerCanaryEvidence,
+    >,
     /// Original post-native-settlement capture, never ordinary project export.
     #[serde(deserialize_with = "super::deserialize_required_nullable")]
     pub fixture_capture: Option<QFixtureCaptureReference>,
@@ -211,9 +217,26 @@ impl QualificationWorkerTranscriptManifest {
         super::validate_object_kind(&self.kind, QUALIFICATION_WORKER_TRANSCRIPT_KIND)?;
         ensure!(
             self.schema == QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
-            "Q Worker transcript is not the current v4 schema"
+            "Q Worker transcript is not the current v5 schema"
         );
         self.provider_configuration.validate()?;
+        if let Some(canary) = &self.controller_canary {
+            canary.validate()?;
+            ensure!(
+                canary.binding.resolved_request_digest == self.request_digest
+                    && canary.binding.provider_declaration_id
+                        == self.provider_configuration.provider_declaration_id
+                    && canary.binding.configuration_adapter_artifact_hash
+                        == self
+                            .provider_configuration
+                            .configuration_adapter_artifact_hash
+                    && canary.binding.configuration_adapter_artifact_bytes
+                        == self
+                            .provider_configuration
+                            .configuration_adapter_artifact_bytes,
+                "Q canary resolved request differs from its transcript"
+            );
+        }
         if let Some(capture) = &self.fixture_capture {
             capture.validate()?;
         }
@@ -561,6 +584,7 @@ mod tests {
                 configuration_adapter_artifact_hash: "6".repeat(64),
                 configuration_adapter_artifact_bytes: 100,
             },
+            controller_canary: None,
             setup_request_digest: "4".repeat(64),
             setup_final_response_digest: lillux::sha256_hex(setup_final_json.as_bytes()),
             setup_owner_send_settled_at_ms: 1,
@@ -1034,5 +1058,71 @@ mod tests {
                 .verify_chunks(&[lillux::canonical_json(&stream).unwrap().into_bytes()])
                 .is_err()
         );
+    }
+    #[test]
+    fn original_controller_canary_is_required_nullable_and_manifest_current_only() {
+        let (manifest, _) = manifest_and_chunk();
+        let mut wire = manifest.to_value().unwrap();
+        assert!(wire["controller_canary"].is_null());
+        wire.as_object_mut().unwrap().remove("controller_canary");
+        assert!(serde_json::from_value::<QualificationWorkerTranscriptManifest>(wire).is_err());
+        let mut previous = manifest;
+        previous.schema = 4;
+        assert!(previous.validate().is_err());
+    }
+    #[test]
+    fn canary_manifest_must_use_its_actual_process_configuration_adapter() {
+        use ryeos_external_execution_contract::qualification_request_binding::{
+            QualificationRequestBindingInput, QualificationRequestBindingOutput,
+        };
+        let (mut manifest, _) = manifest_and_chunk();
+        let input = QualificationRequestBindingInput {
+            schema: 1,
+            template: json!({"provider_defined":"template"}),
+            controller_canary_path: "/private/controller-canary/canary".into(),
+        };
+        let output = QualificationRequestBindingOutput {
+            schema: 1,
+            input_digest: input.digest().unwrap(),
+            resolved_body: json!({"provider_defined":"bound"}),
+        };
+        let initial = json!({"directory_identity":{"containing_device":1,"inode":2},
+            "file_identity":{"containing_device":1,"inode":3},"content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384});
+        let binding = json!({
+            "schema":1,"controller_path":input.controller_canary_path,"initial_file":initial,
+            "provider_declaration_id":manifest.provider_configuration.provider_declaration_id,
+            "configuration_adapter_artifact_hash":manifest.provider_configuration.configuration_adapter_artifact_hash,
+            "configuration_adapter_artifact_bytes":manifest.provider_configuration.configuration_adapter_artifact_bytes,
+            "binding_input_digest":input.digest().unwrap(),"binding_output_digest":output.digest().unwrap(),
+            "template_request_digest":super::super::canonical_value_digest(&input.template).unwrap(),
+            "resolved_request_digest":super::super::canonical_value_digest(&output.resolved_body).unwrap(),"resolved_body":output.resolved_body,
+        });
+        manifest.request_digest = binding["resolved_request_digest"].as_str().unwrap().into();
+        manifest.controller_canary = Some(
+            serde_json::from_value(json!({"schema":1,"binding":binding,"terminal_file":initial}))
+                .unwrap(),
+        );
+        manifest.validate().unwrap();
+        for changed in [
+            "provider_declaration_id",
+            "configuration_adapter_artifact_hash",
+            "configuration_adapter_artifact_bytes",
+        ] {
+            let mut value = serde_json::to_value(&manifest).unwrap();
+            value["controller_canary"]["binding"][changed] = match changed {
+                "provider_declaration_id" => json!("other-provider"),
+                "configuration_adapter_artifact_hash" => json!("f".repeat(64)),
+                _ => json!(999),
+            };
+            let changed: QualificationWorkerTranscriptManifest =
+                serde_json::from_value(value).unwrap();
+            changed
+                .controller_canary
+                .as_ref()
+                .unwrap()
+                .validate()
+                .unwrap();
+            assert!(changed.validate().is_err());
+        }
     }
 }

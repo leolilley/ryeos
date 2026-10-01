@@ -346,6 +346,7 @@ mod tests {
             remote_verifier: None,
             consumer_worker_request: Some(ProductQualificationConsumerWorkerRequest {
                 schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+                controller_canary: None,
                 credential_profile_id: None,
                 fixture: Some(fixture.clone()),
                 session_setup: serde_json::json!({"route":"session.start"}),

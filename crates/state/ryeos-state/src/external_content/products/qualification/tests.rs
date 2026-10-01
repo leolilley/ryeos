@@ -2048,6 +2048,7 @@ fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source(
 
     let request = ProductQualificationConsumerWorkerRequest {
         schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        controller_canary: None,
         credential_profile_id: None,
         fixture: None,
         session_setup: json!({"task":"bounded session setup"}),
@@ -2128,6 +2129,7 @@ fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source(
 fn worker_request_requires_distinct_bounded_setup_and_turn_in_current_schema() {
     let request = ProductQualificationConsumerWorkerRequest {
         schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        controller_canary: None,
         credential_profile_id: None,
         fixture: None,
         session_setup: json!({"route_id":"session.start", "payload":{}}),
@@ -2205,6 +2207,7 @@ fn worker_fixture_requires_explicit_null_or_exact_current_signed_data() {
     };
     let mut request = ProductQualificationConsumerWorkerRequest {
         schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        controller_canary: None,
         credential_profile_id: None,
         fixture: None,
         session_setup: json!({"route_id":"session.start", "payload":{}}),
@@ -2508,6 +2511,7 @@ fn consumer_q_evidence_fixture() -> ProductQualificationEvidence {
             }),
             consumer_worker_request: Some(ProductQualificationConsumerWorkerRequest {
                 schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+                controller_canary: None,
                 credential_profile_id: Some("fixture-profile".into()),
                 fixture: None,
                 session_setup: json!({"route":"session.start","body":{}}),
@@ -2611,4 +2615,102 @@ fn nonconsumer_evidence_refuses_even_null_q_reference() {
                 .contains("no admitted consumer content")
         );
     }
+}
+
+#[test]
+fn worker_canary_selection_is_required_nullable_and_predecessor_refuses() {
+    let request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        credential_profile_id: None,
+        fixture: None,
+        controller_canary: None,
+        session_setup: json!({"route_id":"session.start","payload":{}}),
+        body: json!({"route_id":"turn.start","payload":{"input":[]}}),
+    };
+    request.validate().unwrap();
+    assert_eq!(
+        request.bound_controller_canary_body(None).unwrap(),
+        request.body
+    );
+    let mut value = serde_json::to_value(&request).unwrap();
+    assert!(value["controller_canary"].is_null());
+    value.as_object_mut().unwrap().remove("controller_canary");
+    assert!(serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(value).is_err());
+    let mut previous = request;
+    previous.schema = "ryeos.qualification_worker_request.v4".into();
+    assert!(previous.validate().is_err());
+}
+
+#[test]
+fn bound_canary_preserves_distinct_stages_and_combined_original_request_bound() {
+    use crate::external_execution::qualification_controller_canary::{
+        QControllerCanaryBinding, QControllerCanaryContract,
+    };
+    use ryeos_external_execution_contract::qualification_request_binding::{
+        QualificationRequestBindingInput, QualificationRequestBindingOutput,
+    };
+    // Inert shape fixture only. This test cannot construct original custody or
+    // the daemon's nonserializable successful-adapter proof.
+    let make_binding = |template: &serde_json::Value, resolved: serde_json::Value| {
+        let input = QualificationRequestBindingInput {
+            schema: 1,
+            template: template.clone(),
+            controller_canary_path: "/private/controller-canary/canary".into(),
+        };
+        let output = QualificationRequestBindingOutput {
+            schema: 1,
+            input_digest: input.digest().unwrap(),
+            resolved_body: resolved,
+        };
+        serde_json::from_value::<QControllerCanaryBinding>(json!({
+            "schema":1,"controller_path":input.controller_canary_path,
+            "initial_file":{"directory_identity":{"containing_device":1,"inode":2},
+                "file_identity":{"containing_device":1,"inode":3},
+                "content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384},
+            "provider_declaration_id":"provider","configuration_adapter_artifact_hash":"b".repeat(64),
+            "configuration_adapter_artifact_bytes":1,
+            "binding_input_digest":input.digest().unwrap(),"binding_output_digest":output.digest().unwrap(),
+            "template_request_digest":crate::objects::canonical_value_digest(template).unwrap(),
+            "resolved_request_digest":crate::objects::canonical_value_digest(&output.resolved_body).unwrap(),
+            "resolved_body":output.resolved_body,
+        })).unwrap()
+    };
+    let mut request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        credential_profile_id: None,
+        fixture: None,
+        controller_canary: Some(QControllerCanaryContract::OriginalControllerReadAndLocalRefusalV1),
+        session_setup: json!({"provider_defined":"setup"}),
+        body: json!({"provider_defined":"template"}),
+    };
+    let binding = make_binding(&request.body, json!({"provider_defined":"resolved"}));
+    assert_eq!(
+        request
+            .bound_controller_canary_body(Some(&binding))
+            .unwrap(),
+        binding.resolved_body
+    );
+    assert!(request.bound_controller_canary_body(None).is_err());
+    request.session_setup = binding.resolved_body.clone();
+    request.validate().unwrap(); // Literal stages differ before adapter mapping.
+    assert!(
+        request
+            .bound_controller_canary_body(Some(&binding))
+            .is_err()
+    );
+    request.session_setup = json!({"provider_defined":"x".repeat(5000)});
+    let expanded = make_binding(&request.body, json!({"provider_defined":"y".repeat(4000)}));
+    request.validate().unwrap();
+    expanded.validate().unwrap(); // Each body fits; their original sum does not.
+    assert!(
+        request
+            .bound_controller_canary_body(Some(&expanded))
+            .is_err()
+    );
+    request.controller_canary = None;
+    assert!(
+        request
+            .bound_controller_canary_body(Some(&binding))
+            .is_err()
+    );
 }
