@@ -4,7 +4,7 @@
 
 use super::*;
 
-pub(super) const JOURNAL_SQL: &str = r#"
+pub(in crate::runtime_db) const JOURNAL_SQL: &str = r#"
 CREATE TABLE external_execution_relay_bootstrap (
     placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
     commitment_json TEXT NOT NULL,

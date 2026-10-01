@@ -7,7 +7,7 @@
 use super::*;
 use ryeos_state::external_execution::journal::load_binding;
 
-pub(super) const JOURNAL_SQL: &str = r#"
+pub(in crate::runtime_db) const JOURNAL_SQL: &str = r#"
 CREATE TABLE external_qualification_local_start (
     placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
     accepted_root_id TEXT NOT NULL,

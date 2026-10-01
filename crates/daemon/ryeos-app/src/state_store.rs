@@ -16058,7 +16058,8 @@ impl StateStore {
         let workspace = retained.workspace();
         let parent = retained.state_root_parent();
         let root = retained.state_root();
-        let name = OsStr::new(&current.workspace_id);
+        let workspace_id = current.workspace_id.clone();
+        let name = OsStr::new(&workspace_id);
         let state_parent_path = Path::new(&current.state_root)
             .parent()
             .context("Q rollback state root has no parent")?;

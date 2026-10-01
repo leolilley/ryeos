@@ -379,7 +379,8 @@ fn require_connector_channel_mode(
         ExternalAllocationOwner::DirectThread { .. } => {
             bail!("external direct command cannot admit a session connector")
         }
-    }
+    };
+    Ok(())
 }
 
 fn expected_connector(

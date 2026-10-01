@@ -10,7 +10,7 @@ use ryeos_state::external_execution::transport::{
     ExternalRelayResponseEnvelope, ExternalRelayResponseKind, ExternalSupervisorBootstrap,
 };
 
-pub(super) const JOURNAL_SQL: &str = r#"
+pub(in crate::runtime_db) const JOURNAL_SQL: &str = r#"
 CREATE TABLE external_execution_relay_transfer (
     placement_thread_id TEXT NOT NULL REFERENCES external_execution_allocation(placement_thread_id),
     kind TEXT NOT NULL CHECK (kind IN ('attach','exchange')),
@@ -1458,7 +1458,6 @@ pub(super) fn validate_transfers(conn: &Connection) -> Result<()> {
 
 fn validate_applications(conn: &Connection) -> Result<()> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use lillux::crypto::Verifier as _;
     use ryeos_state::external_execution::transport::{
         EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA, ExternalChannelAttachRequest,
         ExternalChannelAttachResponse, ExternalChannelExchangeRequest,

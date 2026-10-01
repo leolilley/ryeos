@@ -965,11 +965,7 @@ pub(in crate::operator_external_content) fn verify_current(
             .get(&scoped.scenario_id)
             .context("current scoped qualification scenario disappeared")?;
         let current_recipe = state.engine.with_checked_bundle_generation(|generation| {
-            super::resolve_bundle_producer_recipe_in_generation(
-                state,
-                generation.request_engine_generation_identity(),
-                &scenario.recipe_ref,
-            )
+            super::resolve_bundle_producer_recipe_in_generation(generation, &scenario.recipe_ref)
         })?;
         if current_recipe.source_identity()? != scoped.producer_source {
             bail!("current scoped qualification recipe source changed");

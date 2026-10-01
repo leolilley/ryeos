@@ -9,7 +9,7 @@ use super::*;
 use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate;
 use std::ffi::OsStr;
 
-pub(super) const JOURNAL_SQL: &str = r#"
+pub(in crate::runtime_db) const JOURNAL_SQL: &str = r#"
 CREATE TABLE external_qualification_guest_scratch (
     placement_thread_id TEXT PRIMARY KEY,
     qualification_operation_id TEXT NOT NULL REFERENCES runtime_snapshot_qualification(operation_id),
