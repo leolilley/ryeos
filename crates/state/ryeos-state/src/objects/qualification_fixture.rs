@@ -10,7 +10,8 @@
 //! reference that wrapper. Its CAS closure contains exactly this object and its
 //! blob. The derived ProjectFile commitment is not a third stored-object link.
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -205,11 +206,82 @@ impl QFixtureCaptureReference {
     }
 }
 
+/// One finite transfer of already captured Q evidence. This is not an export
+/// command, a CAS publication capability, or native settlement authority.
+///
+/// The caller must bound the complete incoming frame before deserializing this
+/// type. At the 64 KiB raw ceiling the padded body is 87,384 bytes; the current
+/// fixed metadata adds less than 4 KiB. This fits the 384 KiB frame ceiling, but
+/// the selected frame/relay/aggregate budgets still require independent admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QFixtureCaptureContent {
+    /// The metadata's current kind/schema versions this closed transfer shape.
+    pub metadata: QFixtureCaptureMetadata,
+    pub bytes_base64: String,
+}
+
+impl QFixtureCaptureContent {
+    /// Package bounded captured bytes. Native provenance and signed fixture
+    /// authority are deliberately not inferred by this encoding operation.
+    pub fn from_bytes(metadata: QFixtureCaptureMetadata, bytes: &[u8]) -> Result<Self> {
+        metadata.validate()?;
+        ensure!(
+            bytes.len() as u64 == metadata.size_bytes
+                && bytes.len() as u64 <= MAX_Q_FIXTURE_BYTES
+                && lillux::sha256_hex(bytes) == metadata.blob_hash,
+            "Q fixture transfer changed captured byte size or hash"
+        );
+        Ok(Self {
+            metadata,
+            bytes_base64: STANDARD.encode(bytes),
+        })
+    }
+
+    /// Return exact inert bytes only after their full retained identity agrees.
+    /// Every decoded allocation is capped by the signed raw ceiling, including
+    /// padded encodings that could otherwise decode to one or two extra bytes.
+    pub fn verify_for(
+        &self,
+        reference: &QFixtureCaptureReference,
+        contract: &QFixtureContract,
+        binding: &ExecutionChannelBinding,
+        expected_native: &NativeQualificationScopeSettlementObservation,
+    ) -> Result<Vec<u8>> {
+        reference.validate()?;
+        self.metadata
+            .validate_for(contract, binding, expected_native)?;
+        ensure!(
+            reference.metadata_hash == self.metadata.digest()?
+                && reference.blob_hash == self.metadata.blob_hash
+                && reference.size_bytes == self.metadata.size_bytes
+                && reference.size_bytes <= contract.max_bytes,
+            "Q fixture transfer changed its retained metadata reference"
+        );
+        let encoded_size = reference.size_bytes.div_ceil(3) * 4;
+        ensure!(
+            self.bytes_base64.len() as u64 == encoded_size
+                && encoded_size <= contract.max_bytes.div_ceil(3) * 4,
+            "Q fixture transfer encoding changed its bounded declared size"
+        );
+        let mut bytes = vec![0; usize::try_from(reference.size_bytes)?];
+        let decoded = STANDARD
+            .decode_slice(&self.bytes_base64, &mut bytes)
+            .context("decode bounded Q fixture transfer")?;
+        ensure!(
+            decoded == bytes.len() && STANDARD.encode(&bytes) == self.bytes_base64,
+            "Q fixture transfer bytes are not exact canonical base64"
+        );
+        reference.verify_for(&self.metadata, contract, binding, expected_native, &bytes)?;
+        Ok(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::external_execution::{EXECUTION_CHANNEL_BINDING_SCHEMA, ExternalExecutionMode};
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::Engine as _;
 
     fn fixture() -> (
         QFixtureContract,
@@ -274,6 +346,126 @@ mod tests {
             size_bytes: 5,
         };
         (contract, binding, native, metadata, reference)
+    }
+
+    fn transfer_fixture(
+        bytes: &[u8],
+    ) -> (
+        QFixtureContract,
+        ExecutionChannelBinding,
+        NativeQualificationScopeSettlementObservation,
+        QFixtureCaptureReference,
+        QFixtureCaptureContent,
+    ) {
+        let (mut contract, binding, native, mut metadata, _) = fixture();
+        contract.max_bytes = MAX_Q_FIXTURE_BYTES;
+        metadata.fixture_contract_digest = q_fixture_contract_digest(&contract).unwrap();
+        metadata.blob_hash = lillux::sha256_hex(bytes);
+        metadata.size_bytes = bytes.len() as u64;
+        let reference = QFixtureCaptureReference {
+            metadata_hash: metadata.digest().unwrap(),
+            blob_hash: metadata.blob_hash.clone(),
+            size_bytes: metadata.size_bytes,
+        };
+        let content = QFixtureCaptureContent::from_bytes(metadata, bytes).unwrap();
+        (contract, binding, native, reference, content)
+    }
+
+    #[test]
+    fn finite_transfer_roundtrips_empty_and_maximum_bytes() {
+        for bytes in [vec![], vec![0xff; MAX_Q_FIXTURE_BYTES as usize]] {
+            let (contract, binding, native, reference, content) = transfer_fixture(&bytes);
+            assert_eq!(
+                content
+                    .verify_for(&reference, &contract, &binding, &native)
+                    .unwrap(),
+                bytes
+            );
+            let wire = lillux::canonical_json(&serde_json::to_value(&content).unwrap()).unwrap();
+            assert!(wire.len() < crate::external_execution::MAX_FRAME_BYTES - 16 * 1024);
+            assert_eq!(
+                serde_json::from_str::<QFixtureCaptureContent>(&wire).unwrap(),
+                content
+            );
+        }
+        let (_, _, _, metadata, _) = fixture();
+        assert!(
+            QFixtureCaptureContent::from_bytes(
+                metadata.clone(),
+                &vec![0; MAX_Q_FIXTURE_BYTES as usize + 1]
+            )
+            .is_err()
+        );
+        assert!(QFixtureCaptureContent::from_bytes(metadata, b"other").is_err());
+    }
+
+    #[test]
+    fn finite_transfer_refuses_padding_overrun_and_same_size_byte_substitution() {
+        let (contract, binding, native, reference, content) = transfer_fixture(b"a");
+        // "YWJj" has the same padded encoded length as "YQ==", but would
+        // decode three bytes into a declared one-byte result. decode_slice
+        // must refuse without allocating those extra decoded bytes.
+        for bad in [
+            "YQ".to_owned(),
+            "YR==".into(),
+            "YQ==\n".into(),
+            "YWJj".into(),
+            "Yg==".into(),
+            "A".repeat(90_000),
+        ] {
+            let mut changed = content.clone();
+            changed.bytes_base64 = bad;
+            assert!(
+                changed
+                    .verify_for(&reference, &contract, &binding, &native)
+                    .is_err()
+            );
+        }
+        let mut changed_reference = reference;
+        changed_reference.size_bytes = MAX_Q_FIXTURE_BYTES + 1;
+        assert!(
+            content
+                .verify_for(&changed_reference, &contract, &binding, &native)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn finite_transfer_refuses_rehashed_native_substitution_and_open_or_stale_wire() {
+        let (contract, binding, native, reference, content) = transfer_fixture(b"after");
+        let mut changed = content.clone();
+        changed.metadata.native_settlement.completion_frame_digest = "9".repeat(64);
+        let mut rehashed = reference.clone();
+        rehashed.metadata_hash = changed.metadata.digest().unwrap();
+        assert!(
+            changed
+                .verify_for(&rehashed, &contract, &binding, &native)
+                .is_err()
+        );
+        let value = serde_json::to_value(&content).unwrap();
+        for field in ["metadata", "bytes_base64"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<QFixtureCaptureContent>(missing).is_err());
+        }
+        let mut extra = value.clone();
+        extra["path"] = serde_json::json!("/workspace");
+        assert!(serde_json::from_value::<QFixtureCaptureContent>(extra).is_err());
+        let mut stale = value;
+        stale["metadata"]["schema"] = serde_json::json!(0);
+        let decoded: QFixtureCaptureContent = serde_json::from_value(stale).unwrap();
+        assert!(
+            decoded
+                .verify_for(&reference, &contract, &binding, &native)
+                .is_err()
+        );
+        changed = content;
+        changed.metadata.normalized_mode = ProjectFile::EXECUTABLE_MODE;
+        assert!(
+            changed
+                .verify_for(&reference, &contract, &binding, &native)
+                .is_err()
+        );
     }
 
     #[test]
