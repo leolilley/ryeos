@@ -8187,8 +8187,10 @@ fn verify_candidate_evaluation_testimony(
         .result
         .as_ref()
         .ok_or_else(|| internal("retained successful evaluator has no result"))?;
-    let evaluator_result = validate_candidate_evaluation_result(
-        evaluator_result_value.clone(),
+    let evaluator_result = extract_candidate_evaluation_result(
+        &sealed,
+        &evaluator_capsule,
+        &evaluator,
         candidate_snapshot_hash,
         base_snapshot_hash,
     )?;
@@ -9007,6 +9009,125 @@ fn immutable_base_program_evidence(
     }))
 }
 
+/// Select the result contract from the admitted root, never from output shape.
+/// Both fresh qualification and retained-integrity verification use this join.
+/// The callers continue to digest the complete Thread.result, including the
+/// Graph wrapper; only its authored return is interpreted as evaluator output.
+fn extract_candidate_evaluation_result(
+    sealed: &ryeos_app::thread_lifecycle::SealedRootExecutionRequest,
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    evaluator: &ryeos_state::objects::ThreadSnapshot,
+    candidate_snapshot_hash: &str,
+    base_snapshot_hash: &str,
+) -> Result<CandidateEvaluationResult, HandlerError> {
+    let subject = sealed.admitted_program_subject().map_err(internal)?;
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&subject.canonical_ref)
+        .map_err(internal)?;
+    if canonical.kind != subject.kind
+        || subject.canonical_ref != sealed.item_ref()
+        || evaluator.item_ref != sealed.item_ref()
+        || evaluator.kind_name != subject.kind
+        || evaluator.executor_ref != sealed.executor_ref()
+    {
+        return Err(internal(
+            "evaluator result contract differs from its admitted root",
+        ));
+    }
+    sealed.admitted_effective_resolution().map_err(internal)?;
+    let contract = match canonical.kind.as_str() {
+        "tool" => CandidateEvaluatorResultContract::Tool,
+        "graph" => {
+            use ryeos_state::objects::{
+                AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, ExecutionLaunchDriver,
+            };
+            if capsule.launch_driver != ExecutionLaunchDriver::ManagedRuntime
+                || !matches!(&capsule.artifact_identity,
+                    AdmittedLaunchArtifactIdentity::ManagedRuntime { runtime_ref, executor_ref, .. }
+                    if runtime_ref == sealed.runtime_ref() && executor_ref == sealed.executor_ref())
+                || !matches!(
+                    &capsule.execution_closure,
+                    AdmittedExecutionClosure::ManagedRuntime { .. }
+                )
+                || !evaluator
+                    .managed_runtime_terminal
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.outputs.is_null())
+            {
+                return Err(internal(
+                    "Graph evaluator lacks its admitted managed runtime terminal",
+                ));
+            }
+            CandidateEvaluatorResultContract::Graph {
+                definition_ref: sealed.item_ref(),
+                effective_definition_digest: sealed.effective_definition_digest().as_str(),
+            }
+        }
+        _ => {
+            return Err(HandlerError::BadRequest(
+                "candidate evaluator root must be an admitted Tool or Graph".into(),
+            ));
+        }
+    };
+    let value = evaluator
+        .result
+        .as_ref()
+        .ok_or_else(|| HandlerError::BadRequest("successful evaluator has no result".into()))?;
+    validate_candidate_evaluation_payload(
+        contract,
+        value.clone(),
+        candidate_snapshot_hash,
+        base_snapshot_hash,
+    )
+}
+
+enum CandidateEvaluatorResultContract<'a> {
+    Tool,
+    Graph {
+        definition_ref: &'a str,
+        effective_definition_digest: &'a str,
+    },
+}
+
+fn validate_candidate_evaluation_payload(
+    contract: CandidateEvaluatorResultContract<'_>,
+    value: Value,
+    candidate_snapshot_hash: &str,
+    base_snapshot_hash: &str,
+) -> Result<CandidateEvaluationResult, HandlerError> {
+    let payload = match contract {
+        CandidateEvaluatorResultContract::Tool => value,
+        CandidateEvaluatorResultContract::Graph {
+            definition_ref,
+            effective_definition_digest,
+        } => {
+            let graph: ryeos_graph_definition::GraphResult = serde_json::from_value(value)
+                .map_err(|error| {
+                    HandlerError::BadRequest(format!("invalid Graph evaluator result: {error}"))
+                })?;
+            if graph.definition_ref != definition_ref
+                || graph.effective_definition_digest != effective_definition_digest
+                || !graph.success
+                || graph.status != ryeos_graph_definition::GraphRunStatus::Completed
+                || graph.errors_suppressed.unwrap_or(0) != 0
+                || graph
+                    .errors
+                    .as_ref()
+                    .is_some_and(|errors| !errors.is_empty())
+                || graph.error.is_some()
+            {
+                return Err(HandlerError::BadRequest(
+                    "Graph evaluator did not complete its exact admitted definition without errors"
+                        .into(),
+                ));
+            }
+            graph.result.ok_or_else(|| {
+                HandlerError::BadRequest("Graph evaluator has no authored return payload".into())
+            })?
+        }
+    };
+    validate_candidate_evaluation_result(payload, candidate_snapshot_hash, base_snapshot_hash)
+}
+
 fn validate_candidate_evaluation_result(
     value: Value,
     candidate_snapshot_hash: &str,
@@ -9591,8 +9712,10 @@ async fn qualify_candidate(
         .result
         .clone()
         .ok_or_else(|| HandlerError::BadRequest("successful evaluator has no result".into()))?;
-    let evaluator_result = validate_candidate_evaluation_result(
-        evaluator_result_value.clone(),
+    let evaluator_result = extract_candidate_evaluation_result(
+        &sealed,
+        &evaluator_capsule,
+        &evaluator,
         &req.candidate_snapshot_hash,
         &base_snapshot_hash,
     )?;
@@ -10593,6 +10716,8 @@ pub const DISCARD_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
+
     use super::{
         CandidatePublicationRecovery, CheckpointRequest, CommandObservationRequest, CommandRequest,
         HandoffPreflightRequest, HandoffRequest, QualifyCandidateRequest, ResumeRequest,
@@ -10773,6 +10898,142 @@ mod tests {
             assert!(
                 super::validate_candidate_evaluation_result(value, &candidate, &candidate).is_err()
             );
+        }
+    }
+
+    fn graph_evaluator_result(accepted: bool) -> Value {
+        json!({
+            "success": true,
+            "graph_id": "candidate-evaluator",
+            "definition_ref": "graph:test/candidate-evaluator",
+            "effective_definition_digest": "d".repeat(64),
+            "graph_run_id": "run-evaluator",
+            "status": "completed",
+            "steps": 2,
+            "state": {"private_intermediate": 7},
+            "result": {
+                "schema_version": 1,
+                "candidate_snapshot_hash": "c".repeat(64),
+                "base_snapshot_hash": "b".repeat(64),
+                "accepted": accepted,
+                "evidence": {"fixture_count": 20},
+            },
+        })
+    }
+
+    #[test]
+    fn candidate_evaluator_contract_selects_flat_tool_or_exact_graph_return() {
+        use super::{CandidateEvaluatorResultContract, validate_candidate_evaluation_payload};
+        let candidate = "c".repeat(64);
+        let base = "b".repeat(64);
+        let definition = "d".repeat(64);
+        for accepted in [true, false] {
+            let graph = graph_evaluator_result(accepted);
+            let payload = graph["result"].clone();
+            let flat = validate_candidate_evaluation_payload(
+                CandidateEvaluatorResultContract::Tool,
+                payload.clone(),
+                &candidate,
+                &base,
+            )
+            .unwrap();
+            let projected = validate_candidate_evaluation_payload(
+                CandidateEvaluatorResultContract::Graph {
+                    definition_ref: "graph:test/candidate-evaluator",
+                    effective_definition_digest: &definition,
+                },
+                graph.clone(),
+                &candidate,
+                &base,
+            )
+            .unwrap();
+            assert_eq!(flat.accepted, accepted);
+            assert_eq!(projected.accepted, accepted);
+            assert_eq!(flat.evidence, projected.evidence);
+            assert_ne!(
+                ryeos_state::objects::canonical_value_digest(&graph).unwrap(),
+                ryeos_state::objects::canonical_value_digest(&payload).unwrap(),
+            );
+            // Neither lane guesses a different contract from the value shape.
+            assert!(
+                validate_candidate_evaluation_payload(
+                    CandidateEvaluatorResultContract::Tool,
+                    graph,
+                    &candidate,
+                    &base,
+                )
+                .is_err()
+            );
+            assert!(
+                validate_candidate_evaluation_payload(
+                    CandidateEvaluatorResultContract::Graph {
+                        definition_ref: "graph:test/candidate-evaluator",
+                        effective_definition_digest: &definition,
+                    },
+                    payload,
+                    &candidate,
+                    &base,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_graph_evaluator_refuses_nonterminal_errors_and_identity_substitution() {
+        use super::{CandidateEvaluatorResultContract, validate_candidate_evaluation_payload};
+        let candidate = "c".repeat(64);
+        let base = "b".repeat(64);
+        let definition = "d".repeat(64);
+        let validate = |value| {
+            validate_candidate_evaluation_payload(
+                CandidateEvaluatorResultContract::Graph {
+                    definition_ref: "graph:test/candidate-evaluator",
+                    effective_definition_digest: &definition,
+                },
+                value,
+                &candidate,
+                &base,
+            )
+        };
+        for status in [
+            "valid",
+            "invalid",
+            "completed_with_errors",
+            "continued",
+            "error",
+            "max_steps_exceeded",
+            "cancelled",
+            "killed",
+        ] {
+            let mut value = graph_evaluator_result(true);
+            value["status"] = json!(status);
+            assert!(validate(value).is_err(), "{status}");
+        }
+        for (field, replacement) in [
+            ("success", json!(false)),
+            ("definition_ref", json!("graph:test/other")),
+            ("effective_definition_digest", json!("e".repeat(64))),
+            ("errors_suppressed", json!(1)),
+            (
+                "errors",
+                json!([{"step":1,"node":"probe","error":"failed"}]),
+            ),
+            ("error", json!("")),
+            ("result", Value::Null),
+            ("unknown_field", json!(true)),
+        ] {
+            let mut value = graph_evaluator_result(true);
+            value[field] = replacement;
+            assert!(validate(value).is_err(), "{field}");
+        }
+        let mut missing = graph_evaluator_result(true);
+        missing.as_object_mut().unwrap().remove("result");
+        assert!(validate(missing).is_err());
+        for field in ["candidate_snapshot_hash", "base_snapshot_hash"] {
+            let mut changed = graph_evaluator_result(true);
+            changed["result"][field] = json!("f".repeat(64));
+            assert!(validate(changed).is_err(), "{field}");
         }
     }
 
