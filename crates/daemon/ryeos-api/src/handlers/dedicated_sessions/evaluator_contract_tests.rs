@@ -131,7 +131,7 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
         let engine = &self.state.engine;
         let context = PlanContext {
             requested_by: EffectivePrincipal::Local(Principal {
-                fingerprint: self.state.identity.fingerprint().into(),
+                fingerprint: self.state.identity.principal_id(),
                 scopes: vec!["*".into()],
             }),
             project_context: ProjectContext::None,
