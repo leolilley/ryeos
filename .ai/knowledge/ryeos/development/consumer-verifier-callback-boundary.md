@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T07:15:01Z:675989c2aa5a75e235627d966fa44d0fa3ead80ffd3b4f5642fa62ffb60f904f:dkrtXuHPRetLIssjpMjMlEv9XRtTq4hmv/WOyypuarGUT+0ABonkX4icKsHHCbHz3yCZDtDKXjyKc7fZPGzTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T07:22:43Z:efd96c3751a086cb5884f7feba8adf9b65c6f5dc204b1ce6a697b6b7ce4274b4:ISKW1e89CgQjIg0axfd6q2FlnzqSiNfityCIrGqtJzNfl8AdgR3ErlMu6fnwC/4TRCl00ZnFi3WtMk60bm/jDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -179,7 +179,12 @@ not execution or claim authority.
 The controller records its own immutable receiver-stage locator before writing
 or protecting any CAS root. An empty stage abandoned before that locator may
 expire; retries reopen the chosen original stage and cannot create another
-permanent receipt. Runtime epoch 122 joins placement, exact owner/program,
+permanent receipt. A chosen stage that has not yet reached retained custody
+remains eligible for the existing maintenance cutoff. If it has expired or is
+missing, exact-stage recovery refuses; a new stage cannot substitute for the
+recorded ID. This boundary does not promise unlimited pending recovery. Once the
+two-root receipt is retained, that maintenance path preserves it. Runtime epoch
+122 joins placement, exact owner/program,
 binding, completion, native settlement, capture reference and stage identity.
 Bounded metadata/blob verification uses the original signed fixture and native
 predecessor, outside the StateStore/RuntimeDb lock. The verified receiver row and

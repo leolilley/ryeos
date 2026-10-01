@@ -3329,6 +3329,60 @@ mod tests {
     }
 
     #[test]
+    fn q_fixture_unretained_stage_expiry_never_reopens_a_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let key =
+            DurableCasPublicationKey::qualification_fixture_occurrence(&hash("a"), &hash("b"))
+                .unwrap();
+        let owner = hash("c");
+        let original_id = {
+            let guard = CasMutationGuard::acquire_shared(temp.path()).unwrap();
+            let stage = store
+                .begin_durable_cas_upload_admitted(
+                    &guard,
+                    &owner,
+                    "qualification-fixture-receiver",
+                    &key,
+                    None,
+                )
+                .unwrap();
+            stage.staging_id().to_owned()
+        };
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        assert_eq!(
+            store
+                .retire_durable_cas_uploads_created_before("9999-12-31T23:59:59Z", &guard,)
+                .unwrap(),
+            1
+        );
+        assert!(
+            store
+                .open_durable_cas_upload_admitted(&guard, &original_id, &owner,)
+                .is_err()
+        );
+        // Even a fresh capability with the same publication key does not
+        // restore an immutable receiver row's selected stage identity.
+        let replacement = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &owner,
+                "qualification-fixture-receiver",
+                &key,
+                None,
+            )
+            .unwrap();
+        assert_ne!(replacement.staging_id(), original_id);
+        assert!(replacement.qualification_fixture_receipt().is_err());
+        assert!(
+            store
+                .open_durable_cas_upload_admitted(&guard, &original_id, &owner,)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn guest_runtime_materialization_has_a_distinct_exact_publication_key() {
         let key = DurableCasPublicationKey::guest_runtime_materialization(&hash("a"), &hash("b"))
             .unwrap();
