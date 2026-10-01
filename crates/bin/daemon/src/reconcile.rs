@@ -2350,6 +2350,16 @@ pub fn reconcile_process_resource_owners(state: &AppState) -> Result<()> {
             if attached.contains(recovery.owner_incarnation.as_str()) {
                 continue;
             }
+            // Financial reservation precedes resource binding. Its retained
+            // recovery identity therefore has an empty resource set and no
+            // settlement tag. An absent local scope cannot prove either the
+            // selected authority or driver retirement after a lost attach ACK.
+            if recovery.process_identity.process_scope.is_none() {
+                anyhow::bail!(
+                    "unattached resource owner `{}` remains quarantined: settlement and driver retirement are unproved",
+                    recovery.owner_incarnation
+                );
+            }
             let dead = match execution_group_liveness(&recovery.process_identity) {
                 IdentityLiveness::DeadOrStale => true,
                 IdentityLiveness::Alive => {
@@ -2377,6 +2387,19 @@ pub fn reconcile_process_resource_owners(state: &AppState) -> Result<()> {
         }
     }
     for owner in owners {
+        if !owner.cleanup_proved
+            && matches!(
+                owner.process_identity.resource_settlement_authority,
+                Some(
+                    ryeos_app::process::ProcessResourceSettlementAuthority::TrustedProcessGroup { .. }
+                )
+            )
+        {
+            anyhow::bail!(
+                "trusted resource owner `{}` remains quarantined: driver retirement is unproved",
+                owner.owner_coordinate
+            );
+        }
         let evidence = if owner.cleanup_proved {
             owner
                 .cleanup_evidence

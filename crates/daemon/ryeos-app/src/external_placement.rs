@@ -2022,7 +2022,9 @@ pub(crate) fn preflight_external_qualification_program(
     if request.controller_canary.is_some() {
         // The exact captured signed provider opts in before allocator/provider
         // contact. Do not probe an older adapter or try another implementation.
-        provider.declaration().require_qualification_request_binding()?;
+        provider
+            .declaration()
+            .require_qualification_request_binding()?;
     }
 
     require_connector_process_group_authority(
@@ -8172,6 +8174,7 @@ pub mod test_support {
                     group_leader_pid: 41,
                     group_leader_start_time_ticks: 100,
                     resource_selections: Vec::new(),
+                    resource_settlement_authority: None,
                     resource_operations: Vec::new(),
                     resource_allocation_limit: None,
                     resource_occupancy_start: None,

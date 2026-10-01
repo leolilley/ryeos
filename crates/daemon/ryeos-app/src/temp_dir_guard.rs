@@ -153,6 +153,17 @@ impl TempDirGuard {
             .ok_or_else(|| anyhow::anyhow!("temporary guard has no owned scratch descriptor"))
     }
 
+    /// Borrow the ORIGINAL scratch removal parent and leaf. These descriptors
+    /// are retention inputs; callers still need their exact journal owner.
+    pub fn owned_scratch_parent(
+        &self,
+    ) -> anyhow::Result<(&lillux::PinnedDirectory, &std::ffi::OsStr)> {
+        self.pinned_removal
+            .as_ref()
+            .map(|owned| (&owned.parent, owned.name.as_os_str()))
+            .ok_or_else(|| anyhow::anyhow!("temporary guard has no owned scratch parent"))
+    }
+
     /// The Q private-directory owner never invokes backend Create. Check that
     /// its original pinned workspace has not acquired, drained or closed a
     /// backend view. This is a custody check, not isolation evidence.

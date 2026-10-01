@@ -520,7 +520,7 @@ pub(crate) fn checkout_project_snapshot(
         .verify_completion_marker_for_files(project_files, snapshot_hash)
         .is_err()
     {
-        cache.discard_generation(snapshot_hash)?;
+        cache.discard_generation(snapshot_hash, &_build_lock)?;
         let cache_root = cache.pinned_root()?;
         let (staging_name, staging_root) =
             cache_root.create_unique_child(&format!("{snapshot_hash}.staging"), 0o700)?;
@@ -603,7 +603,7 @@ pub(crate) fn checkout_project_snapshot(
             // A valid marker beside a mutated generation is not authority.
             // Rebuild once beneath the still-held construction lock, then
             // mint the proof from the rebuilt descriptor tree.
-            cache.discard_generation(snapshot_hash)?;
+            cache.discard_generation(snapshot_hash, &_build_lock)?;
             let cache_root = cache.pinned_root()?;
             let (staging_name, staging_root) =
                 cache_root.create_unique_child(&format!("{snapshot_hash}.staging"), 0o700)?;
@@ -2353,6 +2353,7 @@ mod pinned_child_authority_tests {
             group_leader_pid: 39,
             group_leader_start_time_ticks: 190,
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -2402,6 +2403,7 @@ mod pinned_child_authority_tests {
             group_leader_pid: 39,
             group_leader_start_time_ticks: 190,
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -2434,6 +2436,7 @@ mod pinned_child_authority_tests {
             group_leader_pid: 39,
             group_leader_start_time_ticks: 0,
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,

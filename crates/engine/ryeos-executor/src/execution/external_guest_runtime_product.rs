@@ -319,6 +319,7 @@ pub fn stage_current_guest_owner_runtime_product(
         &identity.manifest_hash,
         ProductStorage::Content,
         &PrivateMaterializationBudget::new(maximum_bytes),
+        Some(&state.state_store),
     )?;
     let observed = ObservedGuestRuntime::observe(&root)?;
     ensure!(

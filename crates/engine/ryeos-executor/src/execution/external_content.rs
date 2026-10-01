@@ -37,6 +37,9 @@ pub(crate) struct BoundExternalRealizations {
     /// `realized`; local mount wrappers are not reopened or unwrapped.
     guest_sources: Vec<lillux::InheritedDescriptorAuthority>,
     realized: RealizedExternalContentSet,
+    /// Original cache parents returned by each materialization, in set order.
+    custody_generations: Vec<(lillux::PinnedDirectory, lillux::PinnedDirectory)>,
+    private_workspace_identity: Option<lillux::secure_fs::PinnedDirectoryIdentity>,
     /// Canonical JSON of the sealed realization set, injected into the spawn
     /// env (`RYEOS_EXTERNAL_REALIZATIONS`) so a runtime can reference the
     /// identity it executes under without re-observing any content.
@@ -45,6 +48,22 @@ pub(crate) struct BoundExternalRealizations {
 }
 
 impl BoundExternalRealizations {
+    /// Retention inputs only; these records never grant spawn or cleanup.
+    pub(crate) fn custody_records(
+        &self,
+    ) -> (
+        &RealizedExternalContentSet,
+        &[(lillux::PinnedDirectory, lillux::PinnedDirectory)],
+    ) {
+        (&self.realized, &self.custody_generations)
+    }
+
+    pub(crate) fn private_workspace_identity(
+        &self,
+    ) -> Option<&lillux::secure_fs::PinnedDirectoryIdentity> {
+        self.private_workspace_identity.as_ref()
+    }
+
     pub(crate) fn project_mount_targets(
         &self,
     ) -> impl Iterator<Item = (&str, ExternalContentKind)> {
@@ -212,7 +231,34 @@ struct ExternalMaterializationCache {
     root: PathBuf,
 }
 
+/// A one-shot descriptor unlink offered only while both generation locks are
+/// held. A pin callback may preserve it; worker hashes cannot construct it.
+enum ExternalRepairAuthority<'a> {
+    Protected(&'a ryeos_app::state_store::StateStore),
+    /// Output restoration has CAS authority but no current process pin owner.
+    /// It may use a valid generation or build an absent one; it may not delete.
+    PreserveOnly,
+    #[cfg(test)]
+    LeaseOnlyStorageTest,
+}
+
+struct ExternalGenerationRetirement<'a> {
+    root: &'a lillux::PinnedDirectory,
+    directory: &'a lillux::PinnedDirectory,
+    generation: &'a str,
+}
+
+impl ExternalGenerationRetirement<'_> {
+    fn remove(self) -> anyhow::Result<bool> {
+        self.root.ensure_path_binding()?;
+        self.directory.remove_contents_recursive()?;
+        self.root
+            .remove_empty_child_if_same(OsStr::new(self.generation), self.directory)
+    }
+}
+
 struct MaterializedExternalGeneration {
+    cache_root: lillux::PinnedDirectory,
     root: lillux::PinnedDirectory,
     source_path: PathBuf,
     source: lillux::InheritedDescriptorAuthority,
@@ -379,11 +425,27 @@ impl ExternalMaterializationCache {
         }
     }
 
+    #[cfg(test)]
     fn materialize(
         &self,
         cas: &lillux::CasStore,
         closure: &ryeos_state::VerifiedExternalContentClosure,
         kind: ExternalContentKind,
+    ) -> anyhow::Result<MaterializedExternalGeneration> {
+        self.materialize_with(
+            cas,
+            closure,
+            kind,
+            ExternalRepairAuthority::LeaseOnlyStorageTest,
+        )
+    }
+
+    fn materialize_with(
+        &self,
+        cas: &lillux::CasStore,
+        closure: &ryeos_state::VerifiedExternalContentClosure,
+        kind: ExternalContentKind,
+        repair: ExternalRepairAuthority<'_>,
     ) -> anyhow::Result<MaterializedExternalGeneration> {
         let manifest_hash = closure.manifest_hash();
         let root = lillux::PinnedDirectory::open_or_create(&self.root)?;
@@ -401,12 +463,7 @@ impl ExternalMaterializationCache {
                         %error,
                         "discarding invalid external-content materialization"
                     );
-                    existing.remove_contents_recursive()?;
-                    if !root.remove_empty_child_if_same(OsStr::new(manifest_hash), &existing)? {
-                        anyhow::bail!(
-                            "invalid external-content generation {manifest_hash} remained non-empty"
-                        );
-                    }
+                    Self::repair_generation(&root, &existing, manifest_hash, repair)?;
                     self.build_generation(cas, &root, closure)?
                 }
             },
@@ -445,6 +502,7 @@ impl ExternalMaterializationCache {
         };
         drop(lock);
         Ok(MaterializedExternalGeneration {
+            cache_root: root,
             root: generation,
             source_path,
             source,
@@ -452,6 +510,7 @@ impl ExternalMaterializationCache {
         })
     }
 
+    #[cfg(test)]
     fn materialize_large(
         &self,
         cas: &lillux::CasStore,
@@ -459,6 +518,25 @@ impl ExternalMaterializationCache {
         manifest_hash: &str,
         manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
         kind: ExternalContentKind,
+    ) -> anyhow::Result<MaterializedExternalGeneration> {
+        self.materialize_large_with(
+            cas,
+            store,
+            manifest_hash,
+            manifest,
+            kind,
+            ExternalRepairAuthority::LeaseOnlyStorageTest,
+        )
+    }
+
+    fn materialize_large_with(
+        &self,
+        cas: &lillux::CasStore,
+        store: &ryeos_state::LargeObjectStore,
+        manifest_hash: &str,
+        manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
+        kind: ExternalContentKind,
+        repair: ExternalRepairAuthority<'_>,
     ) -> anyhow::Result<MaterializedExternalGeneration> {
         let mut large_sources = BTreeMap::new();
         for entry in &manifest.entries {
@@ -498,12 +576,7 @@ impl ExternalMaterializationCache {
                             %error,
                             "discarding invalid large-content materialization"
                         );
-                        existing.remove_contents_recursive()?;
-                        if !root.remove_empty_child_if_same(OsStr::new(manifest_hash), &existing)? {
-                            anyhow::bail!(
-                                "invalid large-content generation {manifest_hash} remained non-empty"
-                            );
-                        }
+                        Self::repair_generation(&root, &existing, manifest_hash, repair)?;
                         self.build_large_generation(
                             cas,
                             store,
@@ -563,6 +636,7 @@ impl ExternalMaterializationCache {
         }
         drop(lock);
         Ok(MaterializedExternalGeneration {
+            cache_root: root,
             root: generation,
             source_path,
             source,
@@ -709,8 +783,85 @@ impl ExternalMaterializationCache {
         result
     }
 
-    fn sweep(&self) -> anyhow::Result<()> {
-        self.sweep_to_budget(MAX_EXTERNAL_MATERIALIZATION_CACHE_BYTES)
+    /// Called only beneath the ORIGINAL held construction lock. Never
+    /// reacquire that flock. Take an exclusive lease before consulting pins.
+    fn repair_generation(
+        root: &lillux::PinnedDirectory,
+        directory: &lillux::PinnedDirectory,
+        generation: &str,
+        authority: ExternalRepairAuthority<'_>,
+    ) -> anyhow::Result<()> {
+        let leases = root.open_or_create_child(OsStr::new(".leases"), 0o700)?;
+        let lease =
+            leases.open_pinned_regular_create(OsStr::new(generation), true, false, 0o600)?;
+        if !lease.try_lock_exclusive()? {
+            anyhow::bail!("external-content repair refused a leased generation");
+        }
+        let operation = ExternalGenerationRetirement {
+            root,
+            directory,
+            generation,
+        };
+        let removed = match authority {
+            ExternalRepairAuthority::Protected(store) => Self::retire_protected(store, operation)?,
+            ExternalRepairAuthority::PreserveOnly => {
+                anyhow::bail!("external-content repair requires current process pin authority")
+            }
+            #[cfg(test)]
+            ExternalRepairAuthority::LeaseOnlyStorageTest => operation.remove()?,
+        };
+        if !removed {
+            anyhow::bail!("external-content repair refused a retained or changed generation");
+        }
+        Ok(())
+    }
+
+    fn retire_protected(
+        store: &ryeos_app::state_store::StateStore,
+        operation: ExternalGenerationRetirement<'_>,
+    ) -> anyhow::Result<bool> {
+        let authority = store.pinned_state_authority()?;
+        let runtime = authority.runtime_directory();
+        runtime.ensure_path_binding()?;
+        let expected = runtime
+            .open_child_directory(OsStr::new("external-content-cache"))?
+            .ok_or_else(|| anyhow::anyhow!("protected external cache namespace is missing"))?;
+        expected.ensure_path_binding()?;
+        operation.root.ensure_path_binding()?;
+        if operation.root.identity()? != expected.identity()? {
+            anyhow::bail!("external retirement belongs to a different runtime namespace");
+        }
+        store.with_process_resource_materialization_pins(|pins| {
+            use ryeos_app::runtime_db::process_resource_custody::{
+                ProcessMaterializationCache, ProcessMaterializationCustody,
+            };
+            if pins.contains(&ProcessMaterializationCustody {
+                cache: ProcessMaterializationCache::ExternalContent,
+                manifest_hash: operation.generation.to_owned(),
+            }) {
+                return Ok(false);
+            }
+            operation.remove()
+        })
+    }
+
+    fn sweep(&self, state_store: &ryeos_app::state_store::StateStore) -> anyhow::Result<()> {
+        self.sweep_to_budget_protected(MAX_EXTERNAL_MATERIALIZATION_CACHE_BYTES, state_store)
+    }
+
+    fn sweep_to_budget_protected(
+        &self,
+        budget: u64,
+        state_store: &ryeos_app::state_store::StateStore,
+    ) -> anyhow::Result<()> {
+        self.sweep_to_budget_with(budget, |retirement| {
+            Self::retire_protected(state_store, retirement)
+        })
+    }
+
+    #[cfg(test)]
+    fn sweep_to_budget(&self, budget: u64) -> anyhow::Result<()> {
+        self.sweep_to_budget_with(budget, |operation| operation.remove())
     }
 
     /// Best-effort, lease-respecting sweep back under the given byte budget.
@@ -720,7 +871,11 @@ impl ExternalMaterializationCache {
     /// acquires the shared lease before releasing the build lock, so a live
     /// user can never lose both races. Eviction is operational, never a
     /// correctness event: a later bind re-materializes from CAS.
-    fn sweep_to_budget(&self, budget: u64) -> anyhow::Result<()> {
+    fn sweep_to_budget_with(
+        &self,
+        budget: u64,
+        mut retire: impl FnMut(ExternalGenerationRetirement<'_>) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<()> {
         let Some(root) = lillux::PinnedDirectory::open(&self.root)? else {
             return Ok(());
         };
@@ -781,8 +936,11 @@ impl ExternalMaterializationCache {
             let Some(directory) = root.open_child_directory(OsStr::new(&name))? else {
                 continue;
             };
-            directory.remove_contents_recursive()?;
-            if root.remove_empty_child_if_same(OsStr::new(&name), &directory)? {
+            if retire(ExternalGenerationRetirement {
+                root: &root,
+                directory: &directory,
+                generation: &name,
+            })? {
                 total_bytes = total_bytes.saturating_sub(bytes);
                 tracing::info!(
                     manifest_hash = %name,
@@ -1273,6 +1431,7 @@ fn bind_external_realization_set_with(
     let mut mounts = Vec::with_capacity(realized.iter().len());
     let mut guest_sources = Vec::with_capacity(realized.iter().len());
     let mut leases = Vec::with_capacity(realized.iter().len());
+    let mut custody_generations = Vec::with_capacity(realized.iter().len());
     for entry in realized.iter() {
         if let Some(manifest) =
             ryeos_state::objects::load_if_large_content_manifest(&cas, &entry.manifest_hash)?
@@ -1294,12 +1453,13 @@ fn bind_external_realization_set_with(
                 );
             }
             let store = authority.large_object_store()?;
-            let generation = cache.materialize_large(
+            let generation = cache.materialize_large_with(
                 &cas,
                 &store,
                 &entry.manifest_hash,
                 &manifest,
                 entry.kind,
+                ExternalRepairAuthority::Protected(&state.state_store),
             )?;
             if let Some(workspace) = private_workspace.as_ref() {
                 let expected_file = if entry.kind == ExternalContentKind::File {
@@ -1376,6 +1536,7 @@ fn bind_external_realization_set_with(
                     generation.source,
                 ));
             }
+            custody_generations.push((generation.cache_root, generation.root));
             leases.extend(generation.leases);
             continue;
         }
@@ -1390,7 +1551,12 @@ fn bind_external_realization_set_with(
                 entry.manifest_hash
             );
         }
-        let generation = cache.materialize(&cas, &closure, entry.kind)?;
+        let generation = cache.materialize_with(
+            &cas,
+            &closure,
+            entry.kind,
+            ExternalRepairAuthority::Protected(&state.state_store),
+        )?;
         if let Some(workspace) = private_workspace.as_ref() {
             let expected_file = if entry.kind == ExternalContentKind::File {
                 closure.manifest().entries.iter().find(|manifest_entry| {
@@ -1448,18 +1614,27 @@ fn bind_external_realization_set_with(
                 generation.source,
             ));
         }
+        custody_generations.push((generation.cache_root, generation.root));
         leases.extend(generation.leases);
     }
     authority.ensure_guard(&guard)?;
     // This launch's generations are lease-protected above, so the sweep can
     // only reclaim idle history. Failure to sweep never fails a launch.
-    if let Err(error) = cache.sweep() {
+    if let Err(error) = cache.sweep(&state.state_store) {
         tracing::warn!(%error, "external-content materialization sweep failed");
     }
     Ok(Some(BoundExternalRealizations {
         mounts,
         guest_sources,
         realized,
+        custody_generations,
+        private_workspace_identity: private_workspace
+            .as_ref()
+            .map(|root| {
+                root.ensure_path_binding()?;
+                root.identity()
+            })
+            .transpose()?,
         sealed_set_env,
         _leases: leases,
     }))
@@ -1792,6 +1967,7 @@ pub(crate) fn restore_workspace_output_tree(
     manifest_hash: &str,
     storage: ryeos_state::external_content::products::ProductStorage,
     budget: &PrivateMaterializationBudget,
+    process_pin_owner: Option<&ryeos_app::state_store::StateStore>,
 ) -> anyhow::Result<()> {
     authority.ensure_guard(guard)?;
     if !target.entries_no_follow_bounded(1)?.is_empty() {
@@ -1800,10 +1976,18 @@ pub(crate) fn restore_workspace_output_tree(
     let cas = authority.cas_store()?;
     let cache =
         ExternalMaterializationCache::from_runtime_state_root(authority.runtime_directory().path());
+    // Production callers supply their ORIGINAL controller-owned store. CAS
+    // authority alone is sufficient for valid reuse or absent construction,
+    // but never waives current pins before deleting a corrupt generation.
+    let repair = match process_pin_owner {
+        Some(store) => ExternalRepairAuthority::Protected(store),
+        None => ExternalRepairAuthority::PreserveOnly,
+    };
     match storage {
         ryeos_state::external_content::products::ProductStorage::Content => {
             let closure = ryeos_state::VerifiedExternalContentClosure::load(&cas, manifest_hash)?;
-            let generation = cache.materialize(&cas, &closure, ExternalContentKind::Tree)?;
+            let generation =
+                cache.materialize_with(&cas, &closure, ExternalContentKind::Tree, repair)?;
             copy_materialized_tree(&generation.root, target, closure.manifest(), budget)?;
             verify_materialized_tree(&cas, target, closure.manifest())?;
         }
@@ -1816,12 +2000,13 @@ pub(crate) fn restore_workspace_output_tree(
             let manifest =
                 ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&value)?;
             let store = authority.large_object_store()?;
-            let generation = cache.materialize_large(
+            let generation = cache.materialize_large_with(
                 &cas,
                 &store,
                 manifest_hash,
                 &manifest,
                 ExternalContentKind::Tree,
+                repair,
             )?;
             // Large shared objects must never become writable workspace
             // hardlinks. The existing private-copy budget owns reflink/copy.
@@ -2902,6 +3087,304 @@ mod tests {
                 descriptor.read_regular_file_stable_bounded(8).unwrap().0,
                 b"retained"
             );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resource_pin_blocks_zero_budget_sweep_after_restart() {
+        use super::super::cache::tests::{open_custody_store, storage_pin};
+        use ryeos_app::runtime_db::process_resource_custody::ProcessMaterializationCache;
+        let (dir, cas) = temp_cas();
+        let app = dir.path().join("app");
+        let cache = ExternalMaterializationCache::from_runtime_state_root(&app.join(".ai/state"));
+        let closure = store_tree_closure(&cas, &[("runtime", b"retained runtime")]);
+        let generation = cache
+            .materialize(&cas, &closure, ExternalContentKind::Tree)
+            .unwrap();
+        let path = generation.source_path.clone();
+        let hash = path.file_name().unwrap().to_str().unwrap();
+        let store = open_custody_store(&app);
+        store
+            .reserve_process_resource_launch(&storage_pin(
+                &app,
+                ProcessMaterializationCache::ExternalContent,
+                hash,
+            ))
+            .unwrap();
+        drop(generation);
+        drop(store);
+        let store = open_custody_store(&app);
+        cache.sweep_to_budget_protected(0, &store).unwrap();
+        assert_eq!(fs::read(path.join("runtime")).unwrap(), b"retained runtime");
+        // Deletion also fails closed if current pin authority is unavailable.
+        assert!(
+            cache
+                .sweep_to_budget_with(0, |_| anyhow::bail!("pin read failed"))
+                .is_err()
+        );
+        assert!(path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn external_repair_refuses_live_or_durable_custody_for_both_tiers() {
+        use super::super::cache::tests::{open_custody_store, storage_pin};
+        use ryeos_app::runtime_db::process_resource_custody::ProcessMaterializationCache;
+        use std::os::unix::fs::MetadataExt as _;
+        for large in [false, true] {
+            let (dir, cas) = temp_cas();
+            let app = dir.path().join("app");
+            let store = open_custody_store(&app);
+            let authority = store.pinned_state_authority().unwrap();
+            let cache = ExternalMaterializationCache::from_runtime_state_root(
+                authority.runtime_directory().path(),
+            );
+            let small = store_tree_closure(&cas, &[("payload", b"small runtime")]);
+            let large_store = authority.large_object_store().unwrap();
+            let input = dir.path().join("large-input");
+            fs::write(&input, b"storage-only large runtime").unwrap();
+            let file = fs::File::open(&input).unwrap();
+            let metadata = file.metadata().unwrap();
+            let ingested = large_store
+                .ingest_open_regular(
+                    file,
+                    ryeos_state::PinnedLargeObjectSourceIdentity {
+                        containing_device: metadata.dev(),
+                        inode: metadata.ino(),
+                        size: metadata.len(),
+                    },
+                    "payload",
+                    None,
+                )
+                .unwrap();
+            let manifest = ryeos_state::objects::ExternalLargeContentManifestObject {
+                schema: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA.to_owned(),
+                kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.to_owned(),
+                entry_count: 1,
+                total_bytes: ingested.size,
+                entries: vec![ryeos_state::objects::ExternalLargeContentManifestEntry {
+                    path: "payload".to_owned(),
+                    kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                    mode: Some(0o644),
+                    blob_hash: None,
+                    file_sha256: Some(ingested.file_sha256),
+                    size: Some(ingested.size),
+                    chunk_size: Some(ingested.chunk_size),
+                    chunk_hashes: ingested.chunk_hashes,
+                    target: None,
+                }],
+            };
+            manifest.validate().unwrap();
+            let large_hash = cas.store_object(&manifest.to_value().unwrap()).unwrap();
+            let hash = if large {
+                large_hash.as_str()
+            } else {
+                small.manifest_hash()
+            };
+            let bind = |store: &ryeos_app::state_store::StateStore| {
+                if large {
+                    cache.materialize_large_with(
+                        &cas,
+                        &large_store,
+                        hash,
+                        &manifest,
+                        ExternalContentKind::Tree,
+                        ExternalRepairAuthority::Protected(store),
+                    )
+                } else {
+                    cache.materialize_with(
+                        &cas,
+                        &small,
+                        ExternalContentKind::Tree,
+                        ExternalRepairAuthority::Protected(store),
+                    )
+                }
+            };
+            let generation = bind(&store).unwrap();
+            let path = generation.source_path.clone();
+            // Add drift without mutating a CAS/shared-large hardlink.
+            fs::write(path.join("unexpected"), b"drift").unwrap();
+            assert!(
+                bind(&store).is_err(),
+                "live lease bypassed for tier {large}"
+            );
+            assert!(path.join("unexpected").exists());
+            drop(generation);
+            store
+                .reserve_process_resource_launch(&storage_pin(
+                    &app,
+                    ProcessMaterializationCache::ExternalContent,
+                    hash,
+                ))
+                .unwrap();
+            drop(store);
+            let store = open_custody_store(&app);
+            assert!(
+                bind(&store).is_err(),
+                "durable pin bypassed for tier {large}"
+            );
+            assert!(path.join("unexpected").exists());
+            assert!(path.join("payload").exists());
+            // An unrelated empty pin namespace cannot authorize this repair or
+            // sweep. It has a cache root so absence alone cannot explain refusal.
+            let other_app = dir.path().join("other-app");
+            let other = open_custody_store(&other_app);
+            let other_cache =
+                ExternalMaterializationCache::from_runtime_state_root(&other_app.join(".ai/state"));
+            lillux::PinnedDirectory::open_or_create(&other_cache.root).unwrap();
+            assert!(bind(&other).is_err());
+            assert!(cache.sweep_to_budget_protected(0, &other).is_err());
+            assert!(path.join("unexpected").exists());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restoration_repairs_only_idle_unpinned_same_owner_generations() {
+        use super::super::cache::tests::{open_custody_store, storage_pin};
+        use ryeos_app::runtime_db::process_resource_custody::ProcessMaterializationCache;
+        use ryeos_state::external_content::products::ProductStorage;
+        use std::os::unix::fs::MetadataExt as _;
+        for storage in [ProductStorage::Content, ProductStorage::LargeContent] {
+            let dir = tempfile::tempdir().unwrap();
+            let app = dir.path().join("app");
+            let owner = open_custody_store(&app);
+            let authority = owner.pinned_state_authority().unwrap();
+            // All store/anchor initialization precedes the original CAS guard;
+            // opening another namespace while holding it is not this test's authority.
+            let other_app = dir.path().join("other-app");
+            let other = open_custody_store(&other_app);
+            let other_cache =
+                ExternalMaterializationCache::from_runtime_state_root(&other_app.join(".ai/state"));
+            lillux::PinnedDirectory::open_or_create(&other_cache.root).unwrap();
+            let guard = authority.acquire_shared_guard().unwrap();
+            let cas = authority.cas_store().unwrap();
+            let small = store_tree_closure(&cas, &[("payload", b"small runtime")]);
+            let large_store = authority.large_object_store().unwrap();
+            let input = dir.path().join("large-input");
+            let large_bytes = b"storage-only large runtime";
+            fs::write(&input, large_bytes).unwrap();
+            let file = fs::File::open(&input).unwrap();
+            let metadata = file.metadata().unwrap();
+            let ingested = large_store
+                .ingest_open_regular(
+                    file,
+                    ryeos_state::PinnedLargeObjectSourceIdentity {
+                        containing_device: metadata.dev(),
+                        inode: metadata.ino(),
+                        size: metadata.len(),
+                    },
+                    "payload",
+                    None,
+                )
+                .unwrap();
+            let manifest = ryeos_state::objects::ExternalLargeContentManifestObject {
+                schema: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA.to_owned(),
+                kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.to_owned(),
+                entry_count: 1,
+                total_bytes: ingested.size,
+                entries: vec![ryeos_state::objects::ExternalLargeContentManifestEntry {
+                    path: "payload".to_owned(),
+                    kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                    mode: Some(0o644),
+                    blob_hash: None,
+                    file_sha256: Some(ingested.file_sha256),
+                    size: Some(ingested.size),
+                    chunk_size: Some(ingested.chunk_size),
+                    chunk_hashes: ingested.chunk_hashes,
+                    target: None,
+                }],
+            };
+            manifest.validate().unwrap();
+            let large_hash = cas.store_object(&manifest.to_value().unwrap()).unwrap();
+            let hash = match storage {
+                ProductStorage::Content => small.manifest_hash(),
+                ProductStorage::LargeContent => &large_hash,
+            };
+            let cache = ExternalMaterializationCache::from_runtime_state_root(
+                authority.runtime_directory().path(),
+            );
+            let generation = match storage {
+                ProductStorage::Content => cache
+                    .materialize_with(
+                        &cas,
+                        &small,
+                        ExternalContentKind::Tree,
+                        ExternalRepairAuthority::Protected(&owner),
+                    )
+                    .unwrap(),
+                ProductStorage::LargeContent => cache
+                    .materialize_large_with(
+                        &cas,
+                        &large_store,
+                        hash,
+                        &manifest,
+                        ExternalContentKind::Tree,
+                        ExternalRepairAuthority::Protected(&owner),
+                    )
+                    .unwrap(),
+            };
+            let path = generation.source_path.clone();
+            fs::write(path.join("unexpected"), b"drift").unwrap();
+            let target =
+                lillux::PinnedDirectory::open_or_create(&dir.path().join("output")).unwrap();
+            let budget = PrivateMaterializationBudget::new(4096);
+            let restore = |store| {
+                restore_workspace_output_tree(
+                    &authority, &guard, &target, hash, storage, &budget, store,
+                )
+            };
+            assert!(
+                restore(Some(&owner)).is_err(),
+                "live generation must not be repaired"
+            );
+            assert!(target.entries_no_follow().unwrap().is_empty());
+            drop(generation);
+            assert!(
+                restore(None).is_err(),
+                "CAS authority alone must not authorize deletion"
+            );
+            assert!(restore(Some(&other)).is_err());
+            assert!(path.join("unexpected").exists());
+            assert!(target.entries_no_follow().unwrap().is_empty());
+            restore(Some(&owner)).unwrap();
+            let expected: &[u8] = match storage {
+                ProductStorage::Content => b"small runtime",
+                ProductStorage::LargeContent => large_bytes,
+            };
+            assert_eq!(fs::read(target.path().join("payload")).unwrap(), expected);
+            assert!(!path.join("unexpected").exists());
+            assert_ne!(
+                fs::metadata(path.join("payload")).unwrap().ino(),
+                fs::metadata(target.path().join("payload")).unwrap().ino()
+            );
+            // Durable retention still wins after the successful restore's
+            // temporary lease drops. Do not clear custody to manufacture a pass.
+            owner
+                .reserve_process_resource_launch(&storage_pin(
+                    &app,
+                    ProcessMaterializationCache::ExternalContent,
+                    hash,
+                ))
+                .unwrap();
+            fs::write(path.join("unexpected"), b"retained drift").unwrap();
+            let second =
+                lillux::PinnedDirectory::open_or_create(&dir.path().join("second-output")).unwrap();
+            assert!(
+                restore_workspace_output_tree(
+                    &authority,
+                    &guard,
+                    &second,
+                    hash,
+                    storage,
+                    &budget,
+                    Some(&owner)
+                )
+                .is_err()
+            );
+            assert!(second.entries_no_follow().unwrap().is_empty());
+            assert!(path.join("unexpected").exists());
         }
     }
 

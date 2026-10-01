@@ -1111,11 +1111,14 @@ fn corroborate_qualification_worker_transcript(
         .get(&input.coordinate.scenario_id)
         .and_then(|scenario| scenario.consumer_worker_request.as_ref())
         .context("Q proof has no original signed Worker setup/turn")?;
-    request.validate()?;
+    require_qualification_worker_request(
+        request,
+        &reference.manifest.setup_request_digest,
+        &reference.manifest.request_digest,
+        reference.manifest.controller_canary.as_ref(),
+    )?;
     if reference.manifest_hash != result.q_transcript_manifest_hash()?
-        || reference.manifest.setup_request_digest
-            != canonical_value_digest(&request.session_setup)?
-        || reference.manifest.request_digest != canonical_value_digest(&request.body)?
+        || reference.manifest.controller_canary != local.controller_canary_terminal
         || local.worker_incarnation_digest.as_deref()
             != Some(reference.manifest.process_incarnation_digest.as_str())
     {
@@ -1135,6 +1138,27 @@ fn corroborate_qualification_worker_transcript(
         .collect::<anyhow::Result<Vec<_>>>()?;
     reference.manifest.verify_chunks(&chunks)?;
     authority.ensure_guard(guard)?;
+    Ok(())
+}
+
+/// Compare the sent setup/turn to the sealed request and the exact retained
+/// adapter binding. Template bytes are not the actual turn when a canary was
+/// selected. This checks commitments only; no provider grammar is interpreted.
+fn require_qualification_worker_request(
+    request: &ryeos_state::external_content::products::qualification::ProductQualificationConsumerWorkerRequest,
+    setup_digest: &str,
+    turn_digest: &str,
+    canary: Option<&ryeos_state::external_execution::qualification_controller_canary::QControllerCanaryEvidence>,
+) -> anyhow::Result<()> {
+    if let Some(canary) = canary {
+        canary.validate()?;
+    }
+    let body = request.bound_controller_canary_body(canary.map(|value| &value.binding))?;
+    if setup_digest != canonical_value_digest(&request.session_setup)?
+        || turn_digest != canonical_value_digest(&body)?
+    {
+        bail!("Q proof substituted its signed setup or actual bound request bytes");
+    }
     Ok(())
 }
 

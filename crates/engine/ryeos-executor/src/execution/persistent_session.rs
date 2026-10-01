@@ -32,6 +32,8 @@ use ryeos_state::objects::{
     PersistentSessionLifecycleContract, PersistentSessionWireContract,
 };
 
+mod custody;
+
 use super::launch_preparation::{
     PreparedContentDependency, PreparedEvidenceAttachment, PreparedExecutionDependency,
     PreparedRuntimeLaunch, RefBindingLaunchRecord,
@@ -2598,9 +2600,9 @@ where
     let capsule = load_capsule(state, capsule_hash)?;
     require_candidate_connector_ready(capsule.external_candidate.as_ref())?;
     validate_capsule_current_trust(&state.engine, &capsule)?;
-    if retained_session_protocol(&state.engine, &capsule)?.process_mode
-        != PersistentSessionProcessMode::PooledRequests
-    {
+    let session_protocol = retained_session_protocol(&state.engine, &capsule)?;
+    validate_session_process_control(state, &session_protocol)?;
+    if session_protocol.process_mode != PersistentSessionProcessMode::PooledRequests {
         let protocol_ref = capsule_protocol_identity(&capsule)?.0;
         bail!(
             "exclusive persistent-session protocol `{protocol_ref}` cannot enter the request pool"
@@ -2657,11 +2659,38 @@ fn validate_session_process_control(
     state: &AppState,
     session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
 ) -> Result<()> {
+    ryeos_engine::protocols::descriptor::validate_session_resource_cleanup_contract(session)
+        .map_err(|error| anyhow!(error))?;
+    if session.resource_cleanup_contract.is_some() {
+        let node = state
+            .node_policy
+            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
+        )?;
+        // The caller uses a verified protocol (or the reverified retained
+        // capsule), and the node snapshot is independently node-signed. An
+        // agreement value is private and cannot come from worker JSON.
+        let authority =
+            admit_session_resource_cleanup_contract(node.resource_authority.as_ref(), session)?
+                .context("trusted resource cleanup agreement is missing")?;
+        authority.require_executable_prerequisites()?;
+    }
     match (session.process_mode, session.cleanup_authority) {
         (
             PersistentSessionProcessMode::PooledRequests,
             PersistentSessionCleanupAuthority::NotRequired,
         ) => {}
+        (
+            PersistentSessionProcessMode::PooledRequests,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
+        ) => {
+            // Parsing this explicit contract must not make an existing pooled
+            // worker acquire resource cleanup authority. Until the retained
+            // node/product owner and driver-retirement joins exist, refuse
+            // before spawning or contacting the inference process.
+            bail!(
+                "trusted pooled session requires admitted resource settlement and driver-retirement authority"
+            );
+        }
         (
             PersistentSessionProcessMode::ExclusiveSession,
             PersistentSessionCleanupAuthority::LocalProcessScope,
@@ -2719,11 +2748,55 @@ fn validate_session_process_control(
     Ok(())
 }
 
+/// Only agreement of independently verified node/product contracts. This is
+/// neither a spawn permit nor authenticated process/driver retirement evidence.
+/// Keep construction private, with no deserialization or public enum bridge.
+struct AdmittedTrustedResourceCleanupContract {
+    cleanup_contract_digest: String,
+}
+
+impl AdmittedTrustedResourceCleanupContract {
+    fn require_executable_prerequisites(&self) -> Result<()> {
+        bail!(
+            "trusted resource cleanup contract {} requires driver retirement, financial prebinding and uncertain runtime custody before executable admission",
+            self.cleanup_contract_digest
+        );
+    }
+}
+
+fn admit_session_resource_cleanup_contract(
+    node: Option<&ryeos_app::node_policy::sections::execution::NodeExecutionResourcePolicy>,
+    session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
+) -> Result<Option<AdmittedTrustedResourceCleanupContract>> {
+    ryeos_engine::protocols::descriptor::validate_session_resource_cleanup_contract(session)
+        .map_err(|error| anyhow!(error))?;
+    let Some(product) = session.resource_cleanup_contract.as_ref() else {
+        // Resource-free CPU and Q contracts do not request this authority.
+        return Ok(None);
+    };
+    let node = node.context("node execution resource authority is disabled")?;
+    node.validate()?;
+    let ceiling = node
+        .trusted_cleanup_contract_digest
+        .as_ref()
+        .context("node trusted resource cleanup authority is disabled")?;
+    ensure!(
+        ceiling == product,
+        "node/product resource cleanup contracts differ"
+    );
+    Ok(Some(AdmittedTrustedResourceCleanupContract {
+        cleanup_contract_digest: product.clone(),
+    }))
+}
+
 fn supports_private_descriptor_realizations(
     session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
 ) -> bool {
-    session.process_mode == PersistentSessionProcessMode::ExclusiveSession
-        && session.cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup
+    matches!(
+        session.process_mode,
+        PersistentSessionProcessMode::ExclusiveSession
+            | PersistentSessionProcessMode::PooledRequests
+    ) && session.cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup
 }
 
 fn protocol_supports_private_descriptor_realizations(
@@ -2837,6 +2910,7 @@ fn start_capsule_process(
     funding_owner: &str,
 ) -> Result<StartedPersistentSession> {
     let session_protocol = retained_session_protocol(&state.engine, capsule)?;
+    validate_session_process_control(state, &session_protocol)?;
     if session_protocol.process_mode != PersistentSessionProcessMode::PooledRequests {
         bail!("exclusive persistent-session protocol cannot use the pooled launcher");
     }
@@ -3961,6 +4035,12 @@ pub fn start_exclusive_capsule(
     let exact = retained_exact_program(&capsule)?;
     validate_exact_evidence_attachments(&exact)?;
     let session_protocol = retained_session_protocol(&state.engine, &capsule)?;
+    if capsule.external_candidate.is_none() {
+        // Recovery of an admitted capsule is not current node permission.
+        // Recheck before local capacity reservation, realization preparation
+        // or held spawn. External guests use their distinct placement owner.
+        validate_session_process_control(state, &session_protocol)?;
+    }
     use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority;
     if session_protocol.process_mode != PersistentSessionProcessMode::ExclusiveSession
         || !matches!(
@@ -4718,6 +4798,10 @@ mod tests {
         ryeos_engine::protocols::descriptor::PersistentSessionProtocol {
             process_mode,
             cleanup_authority,
+            resource_cleanup_contract: (process_mode
+                == PersistentSessionProcessMode::PooledRequests
+                && cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup)
+                .then(|| "a".repeat(64)),
             workspace_authority: PersistentSessionWorkspaceAuthority::RuntimeWorkspace,
             network_authority: PersistentSessionNetworkAuthority::NodePolicy,
             runtime_env_allowlist: Vec::new(),
@@ -4732,10 +4816,96 @@ mod tests {
     }
 
     #[test]
+    fn trusted_resource_cleanup_agreement_requires_exact_node_and_product() {
+        use ryeos_app::node_policy::sections::execution::NodeExecutionResourcePolicy;
+        use ryeos_engine::contracts::{
+            ExecutionResourceAccess, ExecutionResourceAdmissionPolicy, ExecutionResourceAllocation,
+            ExecutionTargetLimits,
+        };
+        let session = realization_delivery_session(
+            PersistentSessionProcessMode::PooledRequests,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
+        );
+        assert!(admit_session_resource_cleanup_contract(None, &session).is_err());
+        let mut node = NodeExecutionResourcePolicy {
+            admission: ExecutionResourceAdmissionPolicy {
+                limits: ExecutionTargetLimits {
+                    max_requirements: 1,
+                    max_resource_count: 1,
+                    max_facts_per_requirement: 4,
+                },
+                max_total_resource_count: 1,
+                max_concurrent_exclusive_allocations: 1,
+                allowed_classes: vec!["accelerator".to_owned()],
+                allowed_allocations: vec![ExecutionResourceAllocation::Exclusive],
+                allowed_access: vec![ExecutionResourceAccess::DeploymentVisible],
+            },
+            cleanup_allowance_ms: 1_000,
+            trusted_cleanup_contract_digest: None,
+            resources: Vec::new(),
+        };
+        assert!(admit_session_resource_cleanup_contract(Some(&node), &session).is_err());
+        node.trusted_cleanup_contract_digest = Some("b".repeat(64));
+        assert!(admit_session_resource_cleanup_contract(Some(&node), &session).is_err());
+        node.trusted_cleanup_contract_digest = Some("A".repeat(64));
+        assert!(admit_session_resource_cleanup_contract(Some(&node), &session).is_err());
+        node.trusted_cleanup_contract_digest = session.resource_cleanup_contract.clone();
+        let agreed = admit_session_resource_cleanup_contract(Some(&node), &session)
+            .unwrap()
+            .unwrap();
+        assert_eq!(agreed.cleanup_contract_digest, "a".repeat(64));
+        assert!(agreed.require_executable_prerequisites().is_err());
+
+        // A retained product (and a prior agreement) must not reuse a node
+        // permission revoked or changed between admission and recovery.
+        node.trusted_cleanup_contract_digest = None;
+        assert!(admit_session_resource_cleanup_contract(Some(&node), &session).is_err());
+        node.trusted_cleanup_contract_digest = Some("c".repeat(64));
+        assert!(admit_session_resource_cleanup_contract(Some(&node), &session).is_err());
+        let mut recovered_exclusive = session;
+        recovered_exclusive.process_mode = PersistentSessionProcessMode::ExclusiveSession;
+        assert!(
+            admit_session_resource_cleanup_contract(Some(&node), &recovered_exclusive).is_err()
+        );
+        node.trusted_cleanup_contract_digest = Some("a".repeat(64));
+        let recovered = admit_session_resource_cleanup_contract(Some(&node), &recovered_exclusive)
+            .unwrap()
+            .unwrap();
+        assert!(recovered.require_executable_prerequisites().is_err());
+    }
+
+    #[test]
+    fn resource_free_sessions_do_not_acquire_resource_cleanup_authority() {
+        for (mode, cleanup) in [
+            (
+                PersistentSessionProcessMode::PooledRequests,
+                PersistentSessionCleanupAuthority::NotRequired,
+            ),
+            (
+                PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            ),
+        ] {
+            let session = realization_delivery_session(mode, cleanup);
+            assert!(
+                admit_session_resource_cleanup_contract(None, &session)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn private_descriptor_realizations_require_the_exact_trusted_session_class() {
         assert!(supports_private_descriptor_realizations(
             &realization_delivery_session(
                 PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            )
+        ));
+        assert!(supports_private_descriptor_realizations(
+            &realization_delivery_session(
+                PersistentSessionProcessMode::PooledRequests,
                 PersistentSessionCleanupAuthority::TrustedProcessGroup,
             )
         ));
