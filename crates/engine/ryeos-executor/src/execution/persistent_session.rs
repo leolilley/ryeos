@@ -32,6 +32,8 @@ use ryeos_state::objects::{
     PersistentSessionLifecycleContract, PersistentSessionWireContract,
 };
 
+mod custody;
+
 use super::launch_preparation::{
     PreparedContentDependency, PreparedEvidenceAttachment, PreparedExecutionDependency,
     PreparedRuntimeLaunch, RefBindingLaunchRecord,

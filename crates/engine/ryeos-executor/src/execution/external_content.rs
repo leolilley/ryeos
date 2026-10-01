@@ -37,6 +37,9 @@ pub(crate) struct BoundExternalRealizations {
     /// `realized`; local mount wrappers are not reopened or unwrapped.
     guest_sources: Vec<lillux::InheritedDescriptorAuthority>,
     realized: RealizedExternalContentSet,
+    /// Original cache parents returned by each materialization, in set order.
+    custody_generations: Vec<(lillux::PinnedDirectory, lillux::PinnedDirectory)>,
+    private_workspace_identity: Option<lillux::secure_fs::PinnedDirectoryIdentity>,
     /// Canonical JSON of the sealed realization set, injected into the spawn
     /// env (`RYEOS_EXTERNAL_REALIZATIONS`) so a runtime can reference the
     /// identity it executes under without re-observing any content.
@@ -45,6 +48,22 @@ pub(crate) struct BoundExternalRealizations {
 }
 
 impl BoundExternalRealizations {
+    /// Retention inputs only; these records never grant spawn or cleanup.
+    pub(crate) fn custody_records(
+        &self,
+    ) -> (
+        &RealizedExternalContentSet,
+        &[(lillux::PinnedDirectory, lillux::PinnedDirectory)],
+    ) {
+        (&self.realized, &self.custody_generations)
+    }
+
+    pub(crate) fn private_workspace_identity(
+        &self,
+    ) -> Option<&lillux::secure_fs::PinnedDirectoryIdentity> {
+        self.private_workspace_identity.as_ref()
+    }
+
     pub(crate) fn project_mount_targets(
         &self,
     ) -> impl Iterator<Item = (&str, ExternalContentKind)> {
@@ -239,6 +258,7 @@ impl ExternalGenerationRetirement<'_> {
 }
 
 struct MaterializedExternalGeneration {
+    cache_root: lillux::PinnedDirectory,
     root: lillux::PinnedDirectory,
     source_path: PathBuf,
     source: lillux::InheritedDescriptorAuthority,
@@ -482,6 +502,7 @@ impl ExternalMaterializationCache {
         };
         drop(lock);
         Ok(MaterializedExternalGeneration {
+            cache_root: root,
             root: generation,
             source_path,
             source,
@@ -615,6 +636,7 @@ impl ExternalMaterializationCache {
         }
         drop(lock);
         Ok(MaterializedExternalGeneration {
+            cache_root: root,
             root: generation,
             source_path,
             source,
@@ -1391,6 +1413,7 @@ fn bind_external_realization_set_with(
     let mut mounts = Vec::with_capacity(realized.iter().len());
     let mut guest_sources = Vec::with_capacity(realized.iter().len());
     let mut leases = Vec::with_capacity(realized.iter().len());
+    let mut custody_generations = Vec::with_capacity(realized.iter().len());
     for entry in realized.iter() {
         if let Some(manifest) =
             ryeos_state::objects::load_if_large_content_manifest(&cas, &entry.manifest_hash)?
@@ -1495,6 +1518,7 @@ fn bind_external_realization_set_with(
                     generation.source,
                 ));
             }
+            custody_generations.push((generation.cache_root, generation.root));
             leases.extend(generation.leases);
             continue;
         }
@@ -1572,6 +1596,7 @@ fn bind_external_realization_set_with(
                 generation.source,
             ));
         }
+        custody_generations.push((generation.cache_root, generation.root));
         leases.extend(generation.leases);
     }
     authority.ensure_guard(&guard)?;
@@ -1584,6 +1609,14 @@ fn bind_external_realization_set_with(
         mounts,
         guest_sources,
         realized,
+        custody_generations,
+        private_workspace_identity: private_workspace
+            .as_ref()
+            .map(|root| {
+                root.ensure_path_binding()?;
+                root.identity()
+            })
+            .transpose()?,
         sealed_set_env,
         _leases: leases,
     }))

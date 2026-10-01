@@ -18,6 +18,8 @@ pub(crate) struct BoundSourceClosure {
     execution_root: PathBuf,
     members: std::collections::BTreeSet<String>,
     source_directory: lillux::PinnedDirectory,
+    custody_cache_root: lillux::PinnedDirectory,
+    private_workspace_identity: Option<lillux::secure_fs::PinnedDirectoryIdentity>,
     records: ryeos_state::source_verification::VerifiedAdmittedSourceRecords,
     _leases: Vec<std::fs::File>,
 }
@@ -150,9 +152,24 @@ impl BoundSourceClosure {
         &self.execution_entry_path
     }
 
+    /// Identity of the actual private copy destination; not a cleanup grant.
+    pub(crate) fn private_workspace_identity(
+        &self,
+    ) -> Option<&lillux::secure_fs::PinnedDirectoryIdentity> {
+        self.private_workspace_identity.as_ref()
+    }
+
+    pub(crate) fn custody_records(
+        &self,
+    ) -> (
+        &ryeos_state::source_verification::VerifiedAdmittedSourceRecords,
+        &lillux::PinnedDirectory,
+    ) {
+        (&self.records, &self.custody_cache_root)
+    }
+
     /// Exact verified materialization retained by this binding and its lease.
-    /// Daemon-side reads must use this authority, never reopen the workload's
-    /// execution coordinate or look up the installed/live source again.
+    /// Daemon-side reads use this authority, never the workload coordinate.
     pub(crate) fn source_directory(&self) -> &lillux::PinnedDirectory {
         &self.source_directory
     }
@@ -401,6 +418,7 @@ fn bind_source_with(
     );
     let generation = &projection.content_manifest_hash;
     let build = cache.generation_build_lock(generation)?;
+    let custody_cache_root = cache.pinned_root()?;
     if cache
         .verify_completion_marker_for_files(&files, generation)
         .is_err()
@@ -441,6 +459,7 @@ fn bind_source_with(
     let source = lillux::PinnedDirectory::open(&source_path)?
         .ok_or_else(|| anyhow::anyhow!("admitted source generation disappeared"))?;
     let destination = placement.destination(workspace, &mount)?;
+    let mut private_workspace_identity = None;
     let mounts = match mode {
         BindingMode::IsolationMount(placement) => vec![match placement {
             SourceMountPlacement::Project => {
@@ -459,14 +478,14 @@ fn bind_source_with(
             }
         }],
         BindingMode::PrivateWorkspace => {
-            publish_private_source(
+            private_workspace_identity = Some(publish_private_source(
                 &source,
                 workspace,
                 &mount,
                 &manifest,
                 budget
                     .ok_or_else(|| anyhow::anyhow!("private source binding has no copy budget"))?,
-            )?;
+            )?);
             Vec::new()
         }
     };
@@ -482,6 +501,8 @@ fn bind_source_with(
             .map(|entry| entry.path.clone())
             .collect(),
         source_directory: source,
+        custody_cache_root,
+        private_workspace_identity,
         records,
         _leases: vec![lease],
     }))
@@ -540,7 +561,7 @@ fn publish_private_source(
     mount: &str,
     manifest: &ryeos_state::objects::SourceClosureManifest,
     budget: &super::external_content::PrivateMaterializationBudget,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<lillux::secure_fs::PinnedDirectoryIdentity> {
     let workspace = lillux::PinnedDirectory::open(workspace)?
         .ok_or_else(|| anyhow::anyhow!("private source workspace is absent"))?;
     let (parent_path, name) = Path::new(mount)
@@ -589,7 +610,8 @@ fn publish_private_source(
     }
     target.sync_tree()?;
     ryeos_state::source_verification::verify_admitted_source_tree(&target, manifest)?;
-    Ok(())
+    workspace.ensure_path_binding()?;
+    workspace.identity()
 }
 
 fn open_source_parent(
@@ -843,6 +865,10 @@ pub(crate) mod tests {
             source_directory: lillux::PinnedDirectory::open(cache.path())
                 .unwrap()
                 .unwrap(),
+            custody_cache_root: lillux::PinnedDirectory::open(cache.path())
+                .unwrap()
+                .unwrap(),
+            private_workspace_identity: None,
             records,
             _leases: Vec::new(),
         };
