@@ -53,6 +53,7 @@ pub mod project_file;
 pub mod project_snapshot;
 pub mod project_snapshot_policy;
 pub mod project_tree;
+pub mod qualification_fixture;
 pub mod qualification_worker_transcript;
 pub mod retained_lifecycle_artifacts;
 pub mod source_closure;

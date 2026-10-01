@@ -8,6 +8,7 @@
 
 pub mod guest_import_authorization;
 pub mod guest_supervisor_descriptors;
+pub mod qualification_fixture;
 pub mod relay_file;
 pub mod restored_runtime_measurement;
 pub mod runtime_snapshot;
