@@ -15809,7 +15809,7 @@ impl StateStore {
             .close_qualification_guest_scratch(expected)
     }
 
-    /// A read-only check for the original Q scope immediately before an
+    /// A read-only check for the original Q directory immediately before an
     /// owner-gated view borrow and held Worker spawn.
     pub(crate) fn authorize_qualification_local_spawn(
         &self,
@@ -15820,9 +15820,9 @@ impl StateStore {
             .authorize_qualification_local_spawn(placement)
     }
 
-    /// One durable possible-borrow intent before the original workspace view
+    /// One durable possible-borrow intent before the original private directory
     /// is cloned for the held Q Worker. No replacement borrow is admitted.
-    pub(crate) fn reserve_qualification_workspace_view_borrow(
+    pub(crate) fn reserve_qualification_workspace_directory_borrow(
         &self,
         placement: &str,
     ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
@@ -15834,7 +15834,7 @@ impl StateStore {
             "qualification workspace borrow is fenced during daemon shutdown"
         );
         g.runtime_db
-            .reserve_qualification_workspace_view_borrow(placement)
+            .reserve_qualification_workspace_directory_borrow(placement)
     }
 
     /// The cache path comes from the pinned runtime state authority. The
@@ -15859,106 +15859,22 @@ impl StateStore {
             .reserve_qualification_local_start(placement, cache.path())
     }
 
-    pub(crate) fn begin_qualification_workspace_create(
+    /// Bind the original privately materialized project. The caller holds its
+    /// pinned custody; this receipt does not permit reopening it after restart.
+    pub(crate) fn complete_qualification_private_workspace(
         &self,
-        state: &crate::state::AppState,
         placement: &str,
+        identity: lillux::PinnedDirectoryIdentity,
     ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
-        anyhow::ensure!(
-            state.isolation.is_enforced(),
-            "qualification workspace requires enforced signed isolation"
-        );
-        let (backend_id, backend_version) = state
-            .isolation
-            .workspace_backend_identity()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         anyhow::ensure!(
             self.process_attachment_admission_open
                 .load(Ordering::Acquire),
-            "qualification workspace Create is fenced during daemon shutdown"
+            "qualification private workspace is fenced during daemon shutdown"
         );
         g.runtime_db
-            .begin_qualification_workspace_create(placement, backend_id, backend_version)
-    }
-
-    pub(crate) fn attach_qualification_workspace_creator(
-        &self,
-        placement: &str,
-        identity: &crate::process::ExecutionProcessIdentity,
-    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
-        let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
-        anyhow::ensure!(
-            self.process_attachment_admission_open
-                .load(Ordering::Acquire),
-            "qualification workspace creator is fenced during daemon shutdown"
-        );
-        g.runtime_db
-            .attach_qualification_workspace_creator(placement, identity)
-    }
-
-    pub(crate) fn complete_qualification_workspace_create(
-        &self,
-        placement: &str,
-        evidence: &ryeos_engine::isolation::WorkspaceLifecycleEvidence,
-        guard: &crate::temp_dir_guard::TempDirGuard,
-    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
-        let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
-        anyhow::ensure!(
-            self.process_attachment_admission_open
-                .load(Ordering::Acquire),
-            "qualification workspace binding is fenced during daemon shutdown"
-        );
-        g.runtime_db
-            .complete_qualification_workspace_create(placement, evidence, guard)
-    }
-
-    pub(crate) fn begin_qualification_scope_allocation(
-        &self,
-        placement: &str,
-        allocation: &lillux::ProcessScopeAllocation,
-    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
-        let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
-        anyhow::ensure!(
-            self.process_attachment_admission_open
-                .load(Ordering::Acquire),
-            "qualification scope allocation is fenced during daemon shutdown"
-        );
-        g.runtime_db
-            .begin_qualification_scope_allocation(placement, allocation)
-    }
-
-    pub(crate) fn bind_qualification_scope(
-        &self,
-        placement: &str,
-        recovery: &lillux::ProcessScopeRecovery,
-    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
-        let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
-        anyhow::ensure!(
-            self.process_attachment_admission_open
-                .load(Ordering::Acquire),
-            "qualification scope binding is fenced during daemon shutdown"
-        );
-        g.runtime_db.bind_qualification_scope(placement, recovery)
-    }
-
-    /// Retain matching kernel recovery for cleanup after a failed first bind.
-    /// This historical write remains possible after Q or signed generation
-    /// rotation and grants no fresh launch authority.
-    pub(crate) fn retain_failed_qualification_scope_recovery(
-        &self,
-        placement: &str,
-        recovery: &lillux::ProcessScopeRecovery,
-    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
-        let _permit = self.acquire_write_permit()?;
-        self.lock()?
-            .runtime_db
-            .retain_failed_qualification_scope_recovery(placement, recovery)
+            .complete_qualification_private_workspace(placement, identity)
     }
 
     pub(crate) fn mark_qualification_local_cleanup_unproved(
@@ -15997,7 +15913,6 @@ impl StateStore {
                 ),
             "Q cleanup lacks original registered workspace custody"
         );
-        custody.ensure_no_uninstalled_view()?;
         Ok(record)
     }
 
@@ -16017,7 +15932,7 @@ impl StateStore {
     }
 
     /// Close a fully created pair of original Q roots if custody registration
-    /// failed before backend Create. The facade holds the Q occurrence contact
+    /// failed before private workspace preparation. The facade holds the Q occurrence contact
     /// gate for this entire call. No descriptor is reconstructed from a path.
     /// Each physical removal follows a durable no-contact intent and precedes
     /// its corresponding retained receipt; interruption leaves an explicit
@@ -16127,14 +16042,9 @@ impl StateStore {
                     | runtime_db::external_execution::QualificationLocalStartPhase::WorkspaceRemoved
                     | runtime_db::external_execution::QualificationLocalStartPhase::StateRemoved
                     | runtime_db::external_execution::QualificationLocalStartPhase::Closed
-            ) && current.backend_id.is_none()
-                && current.backend_version.is_none()
-                && current.workspace_receipt.is_none()
-                && current.creator_identity.is_none()
-                && current.scope_allocation.is_none()
-                && current.scope_recovery.is_none()
+            ) && current.workspace_identity.is_none()
                 && current.worker_incarnation_digest.is_none()
-                && current.view_borrow_intent.is_none(),
+                && current.directory_borrow_intent.is_none(),
             "Q rollback resume lacks its exact no-Create cleanup phase"
         );
         let coordinate =
@@ -16170,6 +16080,9 @@ impl StateStore {
         if current.phase
             == runtime_db::external_execution::QualificationLocalStartPhase::CleanupIntent
         {
+            self.lock()?
+                .runtime_db
+                .authorize_qualification_workspace_removal(&current)?;
             workspace.remove_uncreated_workspace_now()?;
             workspace.prove_uncreated_workspace_removed()?;
             current = {
@@ -16227,103 +16140,8 @@ impl StateStore {
         Ok(current)
     }
 
-    pub(crate) fn reserve_qualification_local_scope_retirement(
-        &self,
-        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
-    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
-        let _permit = self.acquire_write_permit()?;
-        self.lock()?
-            .runtime_db
-            .reserve_qualification_local_scope_retirement(expected)
-    }
-
-    /// Retire only the journaled exact scope recovery. A no-scope Created
-    /// workspace has no allocation and passes through this phase without a
-    /// kernel retirement call.
-    pub(crate) fn complete_qualification_local_scope_retirement(
-        &self,
-        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
-    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
-        let current = self
-            .qualification_local_start(&expected.placement_thread_id)?
-            .context("Q scope retirement lost its original journal")?;
-        anyhow::ensure!(current == *expected
-            && current.phase == runtime_db::external_execution::QualificationLocalStartPhase::ScopeRetirementPending,
-            "Q scope retirement lost its exact cleanup intent");
-        if let Some(recovery) = &expected.scope_recovery {
-            recovery
-                .retire_after_settlement()
-                .map_err(anyhow::Error::msg)?;
-        } else {
-            anyhow::ensure!(
-                expected.scope_allocation.is_none(),
-                "Q local scope has no exact retirement recovery"
-            );
-        }
-        let _permit = self.acquire_write_permit()?;
-        self.lock()?
-            .runtime_db
-            .complete_qualification_local_scope_retirement(expected)
-    }
-
-    /// Close the original registered Create view before retaining ViewClosed.
-    pub(crate) fn close_qualification_local_view(
-        &self,
-        state: &crate::state::AppState,
-        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
-        custody: &Arc<crate::qualification_workspace_custody::QualificationWorkspaceCustody>,
-        deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
-        let current = self.checked_qualification_cleanup_custody(
-            state,
-            &expected.placement_thread_id,
-            custody,
-        )?;
-        anyhow::ensure!(
-            current == *expected
-                && current.phase
-                    == runtime_db::external_execution::QualificationLocalStartPhase::ScopeRetired,
-            "Q view closure lost its exact journal intent"
-        );
-        let receipt = current
-            .workspace_receipt
-            .as_ref()
-            .context("Q view closure lost original Create receipt")?;
-        custody.workspace().close_workspace_view(
-            &current.workspace_id,
-            &receipt.view_identity,
-            deadline,
-        )?;
-        let _permit = self.acquire_write_permit()?;
-        self.lock()?
-            .runtime_db
-            .record_qualification_local_view_closed(expected)
-    }
-
-    pub(crate) fn reserve_qualification_workspace_destroy(
-        &self,
-        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
-    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
-        let _permit = self.acquire_write_permit()?;
-        self.lock()?
-            .runtime_db
-            .reserve_qualification_workspace_destroy(expected)
-    }
-
-    pub(crate) fn record_qualification_workspace_destroyed(
-        &self,
-        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
-        evidence: &ryeos_engine::isolation::WorkspaceLifecycleEvidence,
-    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
-        let _permit = self.acquire_write_permit()?;
-        self.lock()?
-            .runtime_db
-            .record_qualification_workspace_destroyed(expected, evidence)
-    }
-
-    /// Remove the original pinned workspace root. The no-Create route uses
-    /// the guard's special Uncreated close; the Created route requires the
-    /// durable Destroy receipt and prior physical view close.
+    /// Remove only the original private root after the exact Worker and
+    /// connector have settled. No backend view or Destroy receipt is involved.
     pub(crate) fn remove_qualification_workspace_root(
         &self,
         state: &crate::state::AppState,
@@ -16339,19 +16157,11 @@ impl StateStore {
             current == *expected,
             "Q workspace removal lost its exact journal row"
         );
-        match current.phase {
-            runtime_db::external_execution::QualificationLocalStartPhase::CleanupIntent
-                if current.workspace_receipt.is_none() =>
-            {
-                custody.workspace().remove_uncreated_workspace_now()?
-            }
-            runtime_db::external_execution::QualificationLocalStartPhase::Destroyed
-                if current.workspace_receipt.is_some() =>
-            {
-                custody.workspace().remove_now()?
-            }
-            _ => anyhow::bail!("Q workspace removal lacks no-Create or Destroy proof"),
-        }
+        self.lock()?
+            .runtime_db
+            .authorize_qualification_workspace_removal(&current)?;
+        custody.workspace().remove_uncreated_workspace_now()?;
+        custody.workspace().prove_uncreated_workspace_removed()?;
         let _permit = self.acquire_write_permit()?;
         self.lock()?
             .runtime_db

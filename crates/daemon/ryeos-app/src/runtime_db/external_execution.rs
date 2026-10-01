@@ -39,8 +39,7 @@ pub(crate) use qualification_guest_scratch::{
 };
 pub(super) use qualification_local_start::JOURNAL_SQL as QUALIFICATION_LOCAL_START_SQL;
 pub use qualification_local_start::{
-    QualificationLocalStartPhase, QualificationLocalStartRecord,
-    QualificationWorkspaceBorrowIntent, QualificationWorkspaceReceipt,
+    QualificationLocalStartPhase, QualificationLocalStartRecord, QualificationWorkspaceBorrowIntent,
 };
 pub(crate) use qualification_process::{
     QualificationWorkerDeathProof, QualificationWorkerProcessPhase,

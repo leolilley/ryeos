@@ -315,13 +315,21 @@ pub(crate) fn validate_retained_qualification_mount_separation(
     let authority = super::pinned_state_authority(state)?;
     let cas = authority.cas_store()?;
     let (binding, _) = retained_source_records_for_projection(&cas, source)?;
-    let source = SourceMountPlacement::ExecutionRuntime.relative_mount(&binding)?;
+    let source = SourceMountPlacement::Project.relative_mount(&binding)?;
     let source = Path::new(&source);
-    for realization in realizations.iter().filter(|entry| {
-        entry.mount_root == ryeos_state::objects::ExternalContentMountRoot::ExecutionRuntime
-    }) {
+    for realization in realizations.iter() {
         if mount_destinations_overlap(source, Path::new(&realization.mount)) {
             anyhow::bail!("qualification Worker source and realization destinations overlap");
+        }
+    }
+    // Private descriptor delivery collapses both logical roots into one
+    // physical directory. Cross-root aliases must refuse before copying.
+    let entries: Vec<_> = realizations.iter().collect();
+    for (index, left) in entries.iter().enumerate() {
+        for right in &entries[index + 1..] {
+            if mount_destinations_overlap(Path::new(&left.mount), Path::new(&right.mount)) {
+                anyhow::bail!("qualification private realization destinations overlap");
+            }
         }
     }
     Ok(())
@@ -353,13 +361,14 @@ pub(crate) fn bind_retained_qualification_source(
     state: &ryeos_app::state::AppState,
     projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
     workspace: &Path,
+    budget: &super::external_content::PrivateMaterializationBudget,
 ) -> anyhow::Result<BoundSourceClosure> {
     bind_source_projection_with(
         state,
         projection,
         workspace,
-        BindingMode::IsolationMount(SourceMountPlacement::ExecutionRuntime),
-        None,
+        BindingMode::PrivateWorkspace,
+        Some(budget),
     )
 }
 

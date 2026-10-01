@@ -1,11 +1,10 @@
-//! Process-local custody for one Q backend-created workspace.
+//! Process-local custody for one Q private workspace.
 //!
 //! The durable Q start row identifies cleanup work after restart, but cannot
-//! recreate an original backend view descriptor or a pinned state-root owner.
-//! Register the original guards before backend Create. A surviving entry is
-//! custody only; it does not authorize a Worker launch, view borrow, physical
-//! close, or positive qualification claim. There is deliberately no remove API
-//! until exact Q close, Destroy, and directory-removal proofs are implemented.
+//! recreate original pinned workspace or state-root owners. Register the guards
+//! before private workspace preparation. A surviving entry is custody only;
+//! it does not authorize a Worker launch, descriptor borrow, or qualification
+//! claim. Removal requires the exact settled process and cleanup journal.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -118,14 +117,6 @@ pub struct QualificationWorkspaceCustody {
     state_root: lillux::PinnedDirectory,
     state_root_parent: lillux::PinnedDirectory,
     state_root_removed: Mutex<bool>,
-    /// A Create view that could not be installed remains held in this daemon.
-    /// It cannot qualify or be closed by a path-based replacement owner.
-    uninstalled_views: Mutex<
-        Vec<(
-            ryeos_engine::isolation::WorkspaceLifecycleEvidence,
-            ryeos_engine::isolation::CreatedWorkspaceView,
-        )>,
-    >,
 }
 
 /// Original pinned Q guest-input parent, created once before allocation
@@ -292,36 +283,11 @@ impl QualificationWorkspaceCustody {
         *removed = true;
         Ok(())
     }
-
-    pub fn retain_uninstalled_view(
-        &self,
-        evidence: ryeos_engine::isolation::WorkspaceLifecycleEvidence,
-        authority: ryeos_engine::isolation::CreatedWorkspaceView,
-    ) {
-        self.uninstalled_views
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push((evidence, authority));
-    }
-
-    /// Ordinary receipt-based closure cannot account for a Create descriptor
-    /// which failed installation into the original guard.
-    pub fn ensure_no_uninstalled_view(&self) -> Result<()> {
-        let views = self
-            .uninstalled_views
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Q uninstalled view custody is poisoned"))?;
-        ensure!(
-            views.is_empty(),
-            "Q original workspace has an uninstalled Create view requiring recovery"
-        );
-        Ok(())
-    }
 }
 
 /// One entry per Q placement, empty after restart. A cold process may read the
 /// durable Q row for reconciliation but cannot adopt an old descriptor from a
-/// path or claim that the vanished original view was physically closed.
+/// path or claim that the vanished original directory was removed.
 #[derive(Default)]
 pub struct QualificationWorkspaceCustodyRegistry {
     entries: Mutex<BTreeMap<String, Arc<QualificationWorkspaceCustody>>>,
@@ -566,8 +532,8 @@ impl QualificationWorkspaceCustodyRegistry {
     }
 
     /// Register the exact guards returned by original Q workspace and state
-    /// root creation while the durable start is still Reserved, before backend
-    /// Create. A second insertion is refused even if its coordinates match.
+    /// root creation while the durable start is still Reserved, before any
+    /// directory borrow. A second insertion is refused even if its coordinates match.
     pub fn insert_exact(
         &self,
         record: &QualificationLocalStartRecord,
@@ -577,7 +543,7 @@ impl QualificationWorkspaceCustodyRegistry {
     ) -> Result<Arc<QualificationWorkspaceCustody>> {
         ensure!(
             record.phase == QualificationLocalStartPhase::Reserved,
-            "Q workspace custody must precede backend Create"
+            "Q workspace custody must precede private workspace preparation"
         );
         let coordinate = QualificationWorkspaceCustodyCoordinate::from_start(record)?;
         let project = Path::new(&record.workspace_root).join("project");
@@ -614,7 +580,6 @@ impl QualificationWorkspaceCustodyRegistry {
             state_root: pinned_state_root,
             state_root_parent: pinned_parent,
             state_root_removed: Mutex::new(false),
-            uninstalled_views: Mutex::new(Vec::new()),
         });
         let mut entries = self
             .entries

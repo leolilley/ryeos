@@ -67,8 +67,8 @@ impl QualificationWorkerProcessRecord {
         }
         crate::process::validate_execution_process_identity_shape(&self.process_identity)?;
         ensure!(
-            self.process_identity.process_scope.is_some(),
-            "qualification Worker process has no whole-execution scope"
+            self.process_identity.process_scope.is_none(),
+            "qualification Worker requires its signed trusted process-group owner"
         );
         // Resource-financial settlement is not part of this Q-only journal.
         // Keep that authority closed until a Q resource owner is implemented.
@@ -258,8 +258,8 @@ pub(super) fn require_terminal_qualification_worker_process(
 
 /// Rejoin the live Q process under the connector's writer transaction after
 /// Lillux has observed the authenticated peer in this process's retained
-/// scope. The original attachment and scope identity cannot be replaced;
-/// only its phase can change between observation and connection CAS.
+/// group. Boot and group-leader birth identity prevent numeric PGID reuse
+/// from joining a different incarnation. This makes no containment claim.
 pub(super) fn require_attached_qualification_worker_process(
     conn: &Connection,
     reservation: &ExternalAllocationReservation,
@@ -271,12 +271,41 @@ pub(super) fn require_attached_qualification_worker_process(
     require_retained_process_owner(conn, &record)?;
     ensure!(
         record.phase == QualificationWorkerProcessPhase::Attached
-            && record.channel_binding_digest == channel_binding_digest
-            && record.process_identity.process_scope.is_some()
-            && record.process_identity.boot_id == peer.boot_id,
-        "qualification connector lost its live exact Worker scope"
+            && record.channel_binding_digest == channel_binding_digest,
+        "qualification connector lost its live exact Worker owner"
     );
+    require_trusted_peer_group(&record.process_identity, peer)?;
     Ok(record)
+}
+
+/// Validate historical connector evidence without requiring a live Worker.
+/// A retained terminal row must still identify the exact original group.
+pub(super) fn require_retained_qualification_peer(
+    conn: &Connection,
+    placement: &str,
+    peer: &lillux::ExactProcessIdentity,
+) -> Result<()> {
+    let record = read_process(conn, placement)?
+        .context("qualification connector lost its retained local Worker")?;
+    require_retained_process_owner(conn, &record)?;
+    require_trusted_peer_group(&record.process_identity, peer)
+}
+
+fn require_trusted_peer_group(
+    worker: &crate::process::ExecutionProcessIdentity,
+    peer: &lillux::ExactProcessIdentity,
+) -> Result<()> {
+    crate::process::validate_execution_process_identity_shape(worker)?;
+    peer.incarnation_digest().map_err(anyhow::Error::msg)?;
+    ensure!(
+        worker.process_scope.is_none()
+            && worker.boot_id == peer.boot_id
+            && worker.group_leader_pid == i64::from(peer.group_leader_pid)
+            && u64::try_from(worker.group_leader_start_time_ticks).ok()
+                == Some(peer.group_leader_start_time_ticks),
+        "qualification connector peer changed its trusted Worker group incarnation"
+    );
+    Ok(())
 }
 
 pub(super) fn validate_processes(conn: &Connection) -> Result<()> {
@@ -445,5 +474,39 @@ impl RuntimeDb {
             .context("terminal qualification Worker process disappeared")?;
         tx.commit()?;
         Ok(terminal)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trusted_connector_joins_group_birth_not_just_numeric_pgid() {
+        let leader = lillux::ExactProcessIdentity {
+            boot_id: "fixture-boot".into(),
+            target_pid: 40,
+            target_start_time_ticks: 100,
+            group_leader_pid: 40,
+            group_leader_start_time_ticks: 100,
+        };
+        let worker = crate::process::execution_process_identity_from_lillux(leader, None).unwrap();
+        let peer = lillux::ExactProcessIdentity {
+            boot_id: "fixture-boot".into(),
+            target_pid: 41,
+            target_start_time_ticks: 110,
+            group_leader_pid: 40,
+            group_leader_start_time_ticks: 100,
+        };
+        require_trusted_peer_group(&worker, &peer).unwrap();
+        let mut reused_group = peer.clone();
+        reused_group.group_leader_start_time_ticks += 1;
+        assert!(require_trusted_peer_group(&worker, &reused_group).is_err());
+        let mut other_boot = peer.clone();
+        other_boot.boot_id = "different-boot".into();
+        assert!(require_trusted_peer_group(&worker, &other_boot).is_err());
+        let mut other_group = peer;
+        other_group.group_leader_pid = 39;
+        assert!(require_trusted_peer_group(&worker, &other_group).is_err());
     }
 }

@@ -661,12 +661,16 @@ fn run_authenticated_connector(
                         == state.state_store.external_execution_channel(placement)?.digest()?,
                 "qualification connector changed its attached Worker or channel"
             );
-            let scope = worker
-                .process_identity
-                .process_scope
-                .as_ref()
-                .context("qualification connector Worker has no retained execution scope")?;
-            peer.require_process_scope_membership(scope)?
+            ensure!(
+                worker.process_identity.process_scope.is_none(),
+                "qualification connector requires its signed trusted process-group owner"
+            );
+            let group = u32::try_from(worker.process_identity.group_leader_pid)
+                .context("qualification connector Worker group is outside range")?;
+            // Lillux observes both the socket peer and group leader through
+            // pinned process descriptors. The connection transaction below
+            // rejoins their boot/group birth tuple to this retained Worker.
+            peer.exact_process_identity(Some(group))?
         } else {
             peer.exact_process_identity(None)?
         };

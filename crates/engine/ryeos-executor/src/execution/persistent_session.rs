@@ -3033,7 +3033,7 @@ fn start_capsule_process(
 /// Create a daemon-owned execution view under RyeOS's code-enforced
 /// `.ai/cache` snapshot exclusion. Disabled-isolation launches can materialize
 /// immutable runtime inputs here without adding them to the project candidate.
-fn create_node_owned_runtime_view(workspace: &Path) -> Result<lillux::PinnedDirectory> {
+pub(crate) fn create_node_owned_runtime_view(workspace: &Path) -> Result<lillux::PinnedDirectory> {
     let mut current = lillux::PinnedDirectory::open(workspace)?
         .ok_or_else(|| anyhow!("persistent-session workspace is missing"))?;
     for component in [".ai", "cache", "ryeos-runtime"] {

@@ -468,6 +468,13 @@ pub(super) fn validate_connectors(conn: &Connection) -> Result<()> {
                 "settled external allocation retains a live connector"
             );
         }
+        if matches!(
+            &allocation.reservation.owner,
+            ExternalAllocationOwner::QualificationCandidate(_)
+        ) && let Some(peer) = &record.peer_process_identity
+        {
+            qualification_process::require_retained_qualification_peer(conn, &placement, peer)?;
+        }
     }
     Ok(())
 }

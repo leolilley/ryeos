@@ -1,6 +1,6 @@
-//! Local immutable material for one accepted qualification-only Worker.
+//! Local private material for one accepted qualification-only Worker.
 //!
-//! The caller already owns the Q runtime workspace, its installed view, and
+//! The caller already owns the Q private runtime workspace and
 //! the protected provider state root. This module only redeems accepted CAS
 //! content and publishes the accepted configuration into that state root.
 
@@ -26,7 +26,7 @@ pub(crate) struct PreparedExternalQualificationLocalSession {
     pub(crate) protocol: PersistentSessionProtocol,
 }
 
-/// The plan, immutable mounts, and exact source/cache/workspace lifelines stay
+/// The plan, privately copied inputs, and exact source/cache/workspace lifelines stay
 /// in one owner until a future Q process owner transfers them to its held
 /// subprocess. This carries no connector, scope, or provider-contact permit.
 pub(crate) struct PreparedExternalQualificationLocalMaterials {
@@ -71,10 +71,11 @@ pub(crate) fn prepare_external_qualification_local_materials(
     workspace: &Path,
     workspace_lifeline: Arc<TempDirGuard>,
     state_root: &lillux::PinnedDirectory,
+    budget: &super::external_content::PrivateMaterializationBudget,
 ) -> Result<PreparedExternalQualificationLocalMaterials> {
     ensure!(
-        state.isolation.is_enforced(),
-        "qualification local Worker requires enforced read-only source and realization mounts"
+        !state.isolation.is_enforced(),
+        "qualification trusted controller requires its signed private-directory isolation policy"
     );
     ensure!(
         workspace_lifeline.owns_effective_path(workspace),
@@ -83,15 +84,13 @@ pub(crate) fn prepare_external_qualification_local_materials(
     workspace_lifeline
         .owned_scratch_root()?
         .ensure_path_binding()?;
-    ensure!(
-        workspace_lifeline.workspace_view_identity()?.is_some(),
-        "qualification Worker workspace has no installed original view"
-    );
+    workspace_lifeline.require_uncreated_private_workspace()?;
     state_root.require_owner_private_directory()?;
     state_root.ensure_path_binding()?;
     let state_root_lifeline = state_root.inherited_descriptor_authority()?;
     let state_root_path = state_root.path().to_path_buf();
     let workspace_path = workspace.to_path_buf();
+    let runtime_view = super::persistent_session::create_node_owned_runtime_view(workspace)?;
 
     ryeos_app::thread_lifecycle::with_prepared_external_qualification_local_worker_plan(
         state,
@@ -130,13 +129,15 @@ pub(crate) fn prepare_external_qualification_local_materials(
             let bound = super::external_content::bind_retained_qualification_local_realizations(
                 state,
                 &realizations,
-                &workspace_path,
+                runtime_view.path(),
+                budget,
             )?
             .context("qualification local Worker has no retained realizations")?;
             let source = super::source_closure::bind_retained_qualification_source(
                 state,
                 &content.worker_source,
-                &workspace_path,
+                runtime_view.path(),
+                budget,
             )?;
             let (mut mounts, realizations_env, leases) = bound.into_spawn_parts();
             ensure!(
@@ -149,7 +150,7 @@ pub(crate) fn prepare_external_qualification_local_materials(
                     root.worker_profile(),
                     source.source_directory(),
                     &state_root_path,
-                    true,
+                    false,
                 )?,
             );
             state_root.ensure_path_binding()?;
@@ -162,8 +163,8 @@ pub(crate) fn prepare_external_qualification_local_materials(
                 .transpose()?;
             plan.bind_persistent_session_spawn_environment(
                 Some(&realizations_env),
-                Some(&workspace_path),
-                Some(ExternalRealizationDelivery::FixedNamespace),
+                Some(runtime_view.path()),
+                Some(ExternalRealizationDelivery::PrivateDescriptorRoot),
                 Some(source.sealed_identity_env()),
                 Some(source.execution_entry_path()),
                 executable_search.as_deref(),
@@ -173,6 +174,7 @@ pub(crate) fn prepare_external_qualification_local_materials(
                 .map(|lease| Box::new(lease) as Box<dyn Send + Sync>)
                 .collect();
             lifelines.push(Box::new(source));
+            lifelines.push(Box::new(runtime_view));
             lifelines.push(Box::new(state_root_lifeline));
             lifelines.push(Box::new(workspace_lifeline));
             Ok(PreparedExternalQualificationLocalMaterials {

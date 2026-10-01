@@ -2689,7 +2689,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 117 binds the original sealed relay bootstrap to its activation.
 // Epoch 118 retains one semantic application attempt and its exact signed
 // response before any controller-to-guest relay file can be uploaded.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 118;
+// Epoch 119 retains the original private Q project directory and its one-use
+// descriptor borrow, without backend workspace or process-scope authority.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 119;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

@@ -1,13 +1,13 @@
 //! Application custody for one qualification-only local Worker start.
 //!
 //! The executor supplies original descriptor owners, while the app retains
-//! the Q allocation and its one-use workspace, scope, and process journal.
+//! the Q allocation and its one-use private workspace and process journal.
 
 use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate;
 
 use crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot;
@@ -67,7 +67,7 @@ fn rollback_precreate_workspace(
     let error = if unproved {
         error.context("Q original root rollback remains unproved")
     } else {
-        error.context("Q original roots were removed before backend Create")
+        error.context("Q original roots were removed before private workspace preparation")
     };
     error
 }
@@ -249,8 +249,8 @@ impl QualificationLocalOwner<'_> {
     }
 
     /// Create both original private roots under pinned parents and register
-    /// their exact descriptors before returning. No backend Create or view
-    /// borrow may follow a partial registration. A failed preparation removes
+    /// their exact descriptors before returning. No private-directory borrow
+    /// may follow a partial registration. A failed preparation removes
     /// only children whose newly created identity is still held here.
     pub fn create_original_runtime_roots(
         &self,
@@ -377,7 +377,9 @@ impl QualificationLocalOwner<'_> {
                     self.state
                         .qualification_workspace_custody
                         .release_closed_unregistered_rollback(&closed)?;
-                    error.context("Q original roots were rolled back before backend Create")
+                    error.context(
+                        "Q original roots were rolled back before private workspace preparation",
+                    )
                 }
                 Err(cleanup) => {
                     let failure = error.context(format!(
@@ -398,9 +400,9 @@ impl QualificationLocalOwner<'_> {
         Ok((project, guard, root))
     }
 
-    /// Backend Create consumes only the retained base snapshot. The pinned
-    /// materialization proves the exact project bytes before first contact.
-    pub fn create_original_workspace(
+    /// Retain the exact privately copied project before borrowing it for the
+    /// trusted controller Worker. No backend view or kernel scope is created.
+    pub fn prepare_original_workspace(
         &self,
         record: &QualificationLocalStartRecord,
         guard: &Arc<TempDirGuard>,
@@ -408,119 +410,49 @@ impl QualificationLocalOwner<'_> {
         materialization: &ryeos_state::PinnedProjectMaterialization,
     ) -> Result<QualificationLocalStartRecord> {
         let current = self.require_original(record)?;
-        let custody = self.require_original_workspace_custody(&current, guard)?;
+        self.require_original_workspace_custody(&current, guard)?;
+        guard.require_uncreated_private_workspace()?;
         ensure!(
             current.phase == QualificationLocalStartPhase::Reserved
                 && guard.path().as_deref() == Some(Path::new(&current.workspace_root))
                 && guard.owns_effective_path(project_path)
                 && materialization.snapshot_hash() == current.base_snapshot_hash
                 && materialization.owns_path(project_path)?,
-            "Q workspace Create changed its original base or project owner"
+            "Q private workspace changed its original base or project owner"
         );
         materialization.ensure_path_binding()?;
-        guard.owned_scratch_root()?.ensure_path_binding()?;
-        // A durable Q start now owns this workspace. Dropping a process-local
-        // Arc cannot silently remove its backend state or original view.
-        guard.preserve_for_explicit_cleanup();
-        let creating = self
-            .state
-            .state_store
-            .begin_qualification_workspace_create(self.state, self.placement)?;
-        let created = self
-            .state
-            .isolation
-            .create_workspace(
-                ryeos_engine::isolation::WorkspaceLifecycleInvocation {
-                    operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
-                    workspace_id: &creating.workspace_id,
-                    launch_owner: &creating.launch_owner,
-                    base_snapshot: &creating.base_snapshot_hash,
-                    project_path,
-                    mount_identity: None,
-                },
-                &|held| {
-                    let identity = crate::process::execution_process_identity_from_lillux(
-                        held.exact_process_identity()
-                            .map_err(|error| format!("capture Q workspace creator: {error}"))?,
-                        None,
-                    )
-                    .map_err(|error| error.to_string())?;
-                    self.state
-                        .state_store
-                        .attach_qualification_workspace_creator(self.placement, &identity)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
-                },
-            )
-            .map_err(|error| anyhow!("create Q original workspace: {error}"))?;
-        let view = created
-            .created_view
-            .context("Q workspace Create omitted its original view")?;
-        if let Err((view, error)) =
-            guard.install_workspace_view_retaining_authority(&created.evidence, view)
-        {
-            custody.retain_uninstalled_view(created.evidence, view);
-            return Err(error.context("Q workspace Create view was retained for cleanup"));
-        }
-        self.state
-            .state_store
-            .complete_qualification_workspace_create(self.placement, &created.evidence, guard)
-    }
-
-    /// Allocate one scope only after its exact intent is durable. A failed
-    /// allocation or bind leaves the Q start fenced for cleanup review.
-    pub fn allocate_original_scope(
-        &self,
-        record: &QualificationLocalStartRecord,
-    ) -> Result<(lillux::ProcessScopeAllocation, lillux::ProcessScope)> {
-        let current = self.require_original(record)?;
+        let root = guard.owned_scratch_root()?;
+        root.ensure_path_binding()?;
+        let project = root
+            .open_child_directory(OsStr::new(ryeos_engine::execution_workspace::PROJECT_DIR))?
+            .context("Q original private project is absent")?;
+        project.ensure_path_binding()?;
         ensure!(
-            current.phase == QualificationLocalStartPhase::WorkspaceReady,
-            "Q scope requires its original ready workspace"
+            project.path() == project_path
+                && project.is_same_directory(&materialization.try_clone_root()?)?,
+            "Q private project changed its materialized directory identity"
         );
-        let name = format!(
-            "qualification-{}",
-            &lillux::sha256_hex(current.workspace_id.as_bytes())[..32]
-        );
-        let allocation = self.state.isolation.plan_process_scope(&name)?;
+        guard.preserve_for_explicit_cleanup();
         self.state
             .state_store
-            .begin_qualification_scope_allocation(self.placement, &allocation)?;
-        let scope = self.state.isolation.allocate_process_scope(&allocation)?;
-        let recovery = scope.recovery().clone();
-        if let Err(error) = self
-            .state
-            .state_store
-            .bind_qualification_scope(self.placement, &recovery)
-        {
-            let retained = self
-                .state
-                .state_store
-                .retain_failed_qualification_scope_recovery(self.placement, &recovery);
-            // Use the original admitted control ceiling. Reading mutable node
-            // policy here could fail after rotation and skip retirement.
-            let retirement = scope.retire_unlaunched(recovery.control_timeout());
-            return Err(error.context(format!(
-                "Q scope bind failed; retained recovery: {retained:?}; retirement: {retirement:?}; exact recovery: {recovery:?}"
-            )));
-        }
-        Ok((allocation, scope))
+            .complete_qualification_private_workspace(self.placement, project.identity()?)
     }
 
-    /// The original guard may lend its view only after the Q journal has
-    /// reached the exact ScopeBound owner. No path lookup supplies authority.
-    pub fn borrow_workspace_view(
+    /// Lend only the original private project's descriptor after journaling
+    /// the one-use borrow. A persisted identity is never a reopening permit.
+    pub fn borrow_workspace_directory(
         &self,
         record: &QualificationLocalStartRecord,
         guard: &Arc<TempDirGuard>,
     ) -> Result<lillux::InheritedDescriptorAuthority> {
         let current = self.require_original(record)?;
         self.require_original_workspace_custody(&current, guard)?;
+        guard.require_uncreated_private_workspace()?;
         ensure!(
-            current.phase == QualificationLocalStartPhase::ScopeBound
-                && current.view_borrow_intent.is_none()
+            current.phase == QualificationLocalStartPhase::WorkspaceReady
+                && current.directory_borrow_intent.is_none()
                 && guard.path().as_deref() == Some(Path::new(&current.workspace_root)),
-            "Q workspace view has no scope-bound original owner"
+            "Q directory borrow has no original private workspace owner"
         );
         self.state
             .engine
@@ -529,34 +461,38 @@ impl QualificationLocalOwner<'_> {
                     .current_local_worker_resolution(generation)
                     .map(|_| ())
             })?;
-        let receipt = current
-            .workspace_receipt
-            .as_ref()
-            .context("Q workspace view has no accepted Create receipt")?;
+        let root = guard.owned_scratch_root()?;
+        root.ensure_path_binding()?;
+        let project = root
+            .open_child_directory(OsStr::new(ryeos_engine::execution_workspace::PROJECT_DIR))?
+            .context("Q original private project is absent")?;
+        project.ensure_path_binding()?;
+        let identity = project.identity()?;
         ensure!(
-            guard.workspace_view_identity()?.as_ref()
-                == Some(&(current.workspace_id.clone(), receipt.view_identity.clone())),
-            "Q workspace view differs from its retained receipt"
+            current.workspace_identity.as_ref() == Some(&identity)
+                && guard.owns_effective_path(project.path()),
+            "Q private project differs from its retained identity"
         );
         let admitted = self
             .state
             .state_store
-            .reserve_qualification_workspace_view_borrow(self.placement)?;
+            .reserve_qualification_workspace_directory_borrow(self.placement)?;
         ensure!(
-            admitted.view_borrow_intent.as_ref().is_some_and(|intent| {
-                intent.workspace_id == current.workspace_id
-                    && intent.view_identity == receipt.view_identity
-            }),
-            "Q workspace view borrow changed its original intent"
+            admitted
+                .directory_borrow_intent
+                .as_ref()
+                .is_some_and(|intent| {
+                    intent.workspace_id == current.workspace_id
+                        && intent.directory_identity == identity
+                }),
+            "Q directory borrow changed its original intent"
         );
-        guard
-            .borrow_workspace_view(&current.workspace_id, &receipt.view_identity)?
-            .context("Q requires an enforced original workspace view")
+        project.inherited_descriptor_authority()
     }
 
     /// Recheck the live, original Q authority at the last point before the
     /// held process is created. Material and connector preparation may have
-    /// taken time after the view was first borrowed.
+    /// taken time after the directory was first borrowed.
     pub fn authorize_spawn(&self) -> Result<()> {
         self.state
             .state_store
@@ -666,7 +602,6 @@ pub fn mark_qualification_local_cleanup_unproved(
 pub fn cleanup_qualification_local_worker(
     state: &AppState,
     placement: &str,
-    view_close_deadline: lillux::time::MonotonicDeadline,
 ) -> Result<QualificationLocalStartRecord> {
     state
         .controller_lifetime
@@ -709,101 +644,15 @@ pub fn cleanup_qualification_local_worker(
                 state.state_store.external_connector_retired(placement)?,
                 "Q local cleanup retains a live connector"
             );
-            // The generic signed backend protocol has no idempotent-Destroy
-            // contract. A later retry is allowed only for the captured Lillux
-            // backend, whose exact-state Destroy accepts a missing or partly
-            // removed overlay after a lost response.
-            let mut fresh_destroy_intent = false;
             loop {
                 current = match current.phase {
                     QualificationLocalStartPhase::Reserved
                     | QualificationLocalStartPhase::WorkspaceReady
-                    | QualificationLocalStartPhase::ScopeAllocating
-                    | QualificationLocalStartPhase::ScopeBound
                     | QualificationLocalStartPhase::WorkerAttached
                     | QualificationLocalStartPhase::CleanupUnproved => state
                         .state_store
                         .begin_qualification_local_cleanup(state, placement, &custody)?,
-                    QualificationLocalStartPhase::CleanupIntent => {
-                        if current.workspace_receipt.is_some() {
-                            state
-                                .state_store
-                                .reserve_qualification_local_scope_retirement(&current)?
-                        } else {
-                            state
-                                .state_store
-                                .remove_qualification_workspace_root(state, &current, &custody)?
-                        }
-                    }
-                    QualificationLocalStartPhase::ScopeRetirementPending => state
-                        .state_store
-                        .complete_qualification_local_scope_retirement(&current)?,
-                    QualificationLocalStartPhase::ScopeRetired => {
-                        state.state_store.close_qualification_local_view(
-                            state,
-                            &current,
-                            &custody,
-                            view_close_deadline,
-                        )?
-                    }
-                    QualificationLocalStartPhase::ViewClosed => {
-                        let pending = state
-                            .state_store
-                            .reserve_qualification_workspace_destroy(&current)?;
-                        fresh_destroy_intent = true;
-                        pending
-                    }
-                    QualificationLocalStartPhase::DestroyPending => {
-                        let receipt = current
-                            .workspace_receipt
-                            .as_ref()
-                            .context("Q Destroy lost its original Create receipt")?;
-                        let (backend_id, backend_version) =
-                            state.isolation.workspace_backend_identity()?;
-                        ensure!(
-                            backend_id == receipt.backend_id
-                                && backend_version == receipt.backend_version
-                                && receipt.mount_identity == receipt.view_identity,
-                            "Q Destroy changed its retained signed backend"
-                        );
-                        ensure!(
-                            fresh_destroy_intent || backend_id == "linux-lillux",
-                            "Q Destroy outcome is unknown for a backend without proven repeatable Destroy"
-                        );
-                        fresh_destroy_intent = false;
-                        let workspace = custody.workspace();
-                        let original = workspace.owned_scratch_root()?;
-                        original.ensure_path_binding()?;
-                        ensure!(
-                            workspace.path().as_deref() == Some(Path::new(&current.workspace_root)),
-                            "Q Destroy lost its original workspace guard"
-                        );
-                        let project = original
-                            .open_child_directory(OsStr::new(
-                                ryeos_engine::execution_workspace::PROJECT_DIR,
-                            ))?
-                            .context("Q Destroy lost its original project directory")?;
-                        project.ensure_path_binding()?;
-                        ensure!(
-                            workspace.owns_effective_path(project.path()),
-                            "Q Destroy changed its original project view"
-                        );
-                        let evidence = state
-                            .isolation
-                            .workspace_lifecycle(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
-                                operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
-                                workspace_id: &current.workspace_id,
-                                launch_owner: &current.launch_owner,
-                                base_snapshot: &current.base_snapshot_hash,
-                                project_path: project.path(),
-                                mount_identity: Some(&receipt.mount_identity),
-                            })
-                            .map_err(|error| anyhow!("destroy Q original workspace: {error}"))?;
-                        state
-                            .state_store
-                            .record_qualification_workspace_destroyed(&current, &evidence)?
-                    }
-                    QualificationLocalStartPhase::Destroyed => state
+                    QualificationLocalStartPhase::CleanupIntent => state
                         .state_store
                         .remove_qualification_workspace_root(state, &current, &custody)?,
                     QualificationLocalStartPhase::WorkspaceRemoved => state
@@ -817,9 +666,6 @@ pub fn cleanup_qualification_local_worker(
                             .qualification_workspace_custody
                             .release_closed_original(&current)?;
                         return Ok(current);
-                    }
-                    QualificationLocalStartPhase::WorkspaceCreating => {
-                        bail!("Q local cleanup lacks completed Create or no-Create proof")
                     }
                 };
             }

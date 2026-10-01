@@ -153,6 +153,21 @@ impl TempDirGuard {
             .ok_or_else(|| anyhow::anyhow!("temporary guard has no owned scratch descriptor"))
     }
 
+    /// The Q private-directory owner never invokes backend Create. Check that
+    /// its original pinned workspace has not acquired, drained or closed a
+    /// backend view. This is a custody check, not isolation evidence.
+    pub fn require_uncreated_private_workspace(&self) -> anyhow::Result<()> {
+        let view = self.workspace_view.lock().unwrap();
+        anyhow::ensure!(
+            self.owns_removal
+                && self.pinned_removal.is_some()
+                && self.inner.lock().unwrap().is_some()
+                && matches!(view.as_ref(), Some(WorkspaceViewSlot::Uncreated)),
+            "private workspace has no original uncreated pinned owner"
+        );
+        self.owned_scratch_root()?.ensure_path_binding()
+    }
+
     /// Borrow the exact effective directory below this guard's retained
     /// descriptor-owned root. This is distinct from an isolation workspace
     /// view: disabled/trusted execution has no backend view, but an external
@@ -1138,6 +1153,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let (project, original) = create_runtime_workspace(cache.path(), "view-uncreated").unwrap();
         original.preserve_for_explicit_cleanup();
+        original.require_uncreated_private_workspace().unwrap();
         assert!(
             original
                 .close_workspace_view("view-uncreated", &"a".repeat(64), close_deadline())
@@ -1146,6 +1162,7 @@ mod tests {
         assert!(original.remove_now().is_err());
         let root = original.path().unwrap();
         let reopened = TempDirGuard::new_workspace(root, project.clone()).unwrap();
+        assert!(reopened.require_uncreated_private_workspace().is_err());
         assert!(
             reopened
                 .close_workspace_view("view-uncreated", &"a".repeat(64), close_deadline())
@@ -1158,6 +1175,9 @@ mod tests {
         );
         assert!(reopened.remove_now().is_err());
         assert!(project.is_dir());
+        original.remove_uncreated_workspace_now().unwrap();
+        original.prove_uncreated_workspace_removed().unwrap();
+        assert!(original.require_uncreated_private_workspace().is_err());
     }
 
     #[test]

@@ -1128,13 +1128,14 @@ pub(crate) fn bind_retained_qualification_local_realizations(
     state: &ryeos_app::state::AppState,
     realized: &ryeos_state::objects::ExternalContentRealizationSet,
     workspace: &Path,
+    budget: &PrivateMaterializationBudget,
 ) -> anyhow::Result<Option<BoundExternalRealizations>> {
     bind_external_realization_set_with(
         state,
         realized.clone(),
         workspace,
-        ExternalRealizationBinding::IsolationMounts,
-        None,
+        ExternalRealizationBinding::PrivateRuntimeView,
+        Some(budget),
     )
 }
 

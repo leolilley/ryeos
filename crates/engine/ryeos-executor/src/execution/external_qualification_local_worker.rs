@@ -1,6 +1,6 @@
 //! One local process owner for an already released qualification occurrence.
 //!
-//! The Q start journal owns the workspace, scope, and held-process transition.
+//! The Q start journal owns the private roots and held-process transition.
 //! This module keeps their original operational authorities together until the
 //! exclusive session pool has accepted the released Worker.
 
@@ -72,41 +72,6 @@ fn fence_start_failure(
     match owner.mark_cleanup_unproved(reason) {
         Ok(()) => error,
         Err(fence) => error.context(format!("Q local cleanup fence failed: {fence:#}")),
-    }
-}
-
-/// Before held spawn consumes the one-use scope, every fallible preparation
-/// must explicitly retire its live kernel allocation. The ScopeBound journal
-/// keeps recovery even when that physical retirement cannot be proved.
-fn with_unlaunched_scope(
-    scope: lillux::ProcessScope,
-    run: impl FnOnce(&mut Option<lillux::ProcessScope>) -> Result<LaunchOutcome>,
-) -> Result<LaunchOutcome> {
-    let timeout = scope.recovery().control_timeout();
-    let mut pending = Some(scope);
-    let result = run(&mut pending);
-    let Some(scope) = pending else {
-        return result;
-    };
-    let retirement = scope.retire_unlaunched(timeout);
-    let detail = match retirement {
-        Ok(()) => "unlaunched Q process scope retired".to_owned(),
-        Err(error) => format!("unlaunched Q process scope retirement unproved: {error}"),
-    };
-    match result {
-        Ok(LaunchOutcome::Failed {
-            error,
-            connector_settlement,
-            attached_process,
-        }) => Ok(LaunchOutcome::Failed {
-            error: error.context(detail),
-            connector_settlement,
-            attached_process,
-        }),
-        Err(error) => Err(error.context(detail)),
-        Ok(LaunchOutcome::Released(_)) => {
-            anyhow::bail!("Q Worker release retained an unconsumed process scope: {detail}")
-        }
     }
 }
 
@@ -396,18 +361,16 @@ pub(crate) fn run_external_qualification_to_normal_terminal(
     // provider termination can acquire the same placement contact gate.
     worker.ready.stop_relay()?;
 
-    // Physical view closure is local cleanup, independent of the expired
+    // Private root removal is local cleanup, independent of the expired
     // guest protocol deadline. It retains original descriptors and has its
-    // own bounded close attempt.
+    // own exact directory removal authority.
     let local = ryeos_app::external_qualification_local::cleanup_qualification_local_worker(
-        state,
-        &placement,
-        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+        state, &placement,
     )?;
     ensure!(
         local.phase
             == ryeos_app::runtime_db::external_execution::QualificationLocalStartPhase::Closed,
-        "Q original local workspace and scope remain unclosed"
+        "Q original local private roots remain unclosed"
     );
 
     // The first provider call commits its intent before contact. A Pending
@@ -522,7 +485,8 @@ pub(crate) fn start_external_qualification_local_worker(
                     "Q local runtime roots differ from their reserved coordinates"
                 );
                 // CAS construction and its fork-sensitive guard end before the
-                // signed backend Create or the held Worker is allowed to fork.
+                // held trusted Worker is allowed to fork.
+                let budget = super::external_content::private_materialization_budget()?;
                 let materialization = {
                     let authority = state.state_store.pinned_state_authority()?;
                     let guard = authority.acquire_shared_guard()?;
@@ -532,7 +496,10 @@ pub(crate) fn start_external_qualification_local_worker(
                         &authority,
                         &guard,
                         &reserved.base_snapshot_hash,
-                        super::ProjectMaterialization::EnforcedCowProject(&project),
+                        super::ProjectMaterialization::PrivateWritableWorkspace {
+                            target_dir: &project,
+                            budget: Some(&budget),
+                        },
                         &cache,
                     )?;
                     ensure!(
@@ -543,7 +510,7 @@ pub(crate) fn start_external_qualification_local_worker(
                     authority.ensure_guard(&guard)?;
                     pinned
                 };
-                let workspace_ready = owner.create_original_workspace(
+                let workspace_ready = owner.prepare_original_workspace(
                     &reserved,
                     &workspace,
                     &project,
@@ -557,6 +524,7 @@ pub(crate) fn start_external_qualification_local_worker(
                 &project,
                 Arc::clone(&workspace),
                 &state_root,
+                &budget,
             )?;
                 let (mut plan, session, mut mounts, mut lifelines, workspace_path, state_root_path) =
                     materials.into_spawn_parts();
@@ -577,20 +545,19 @@ pub(crate) fn start_external_qualification_local_worker(
                     &session.lifecycle,
                     &session.wire,
                 )?;
-                let (allocation, scope) = owner.allocate_original_scope(&workspace_ready)?;
-                with_unlaunched_scope(scope, |pending_scope| {
-                    let scope_bound = owner.start_record()?;
-                    let workspace_view = owner.borrow_workspace_view(&scope_bound, &workspace)?;
+                {
+                    let workspace_directory =
+                        owner.borrow_workspace_directory(&workspace_ready, &workspace)?;
                     let (prepared_environment, writable_runtime_view_mounts) =
                         super::persistent_session::prepare_retained_session_process_environment(
                             &content.process_environment,
                             &workspace_path,
-                            Some(&workspace_view),
+                            Some(&workspace_directory),
                             session.protocol.workspace_authority,
-                            state.isolation.is_enforced(),
+                            false,
                         )?;
 
-                    let boot_identity = lillux::sha256_hex(scope_bound.launch_owner.as_bytes());
+                    let boot_identity = lillux::sha256_hex(workspace_ready.launch_owner.as_bytes());
                     let mut runtime_environment = BTreeMap::from([(
                         "RYEOS_STRUCTURED_SESSION_PROFILE_HASH".to_owned(),
                         ready.root().worker_profile().profile_hash.clone(),
@@ -663,10 +630,14 @@ pub(crate) fn start_external_qualification_local_worker(
                             attached_process: None,
                         });
                     }
+                    // Disabled isolation accepts no backend workspace view.
+                    // Retain the original private directory through the held
+                    // process lifetime; use the existing trusted launch path.
+                    lifelines.push(Box::new(workspace_directory));
                     let spawned = plan.spawn_persistent_session_held(
                         state,
                         &workspace_path,
-                        Some(&workspace_view),
+                        None,
                         mounts,
                         writable_runtime_view_mounts,
                         inherited_fds,
@@ -677,15 +648,11 @@ pub(crate) fn start_external_qualification_local_worker(
                         Some(&state_root_path),
                         &placement,
                         None,
-                        &scope_bound.launch_owner,
+                        &workspace_ready.launch_owner,
                         "qualification_local_worker",
                         &placement,
-                        Some(&allocation),
-                        Some(
-                            pending_scope
-                                .take()
-                                .context("Q held spawn lost its one-use process scope")?,
-                        ),
+                        None,
+                        None,
                     );
                     let held = match spawned {
                         Ok(held) => held,
@@ -746,7 +713,7 @@ pub(crate) fn start_external_qualification_local_worker(
                         observation_sink,
                         wire_max_bytes,
                     }))
-                })
+                }
             })();
             launch.map_err(|error| {
                 fence_start_failure(
