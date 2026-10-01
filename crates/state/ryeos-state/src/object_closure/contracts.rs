@@ -637,6 +637,7 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
         if let Some(content) = &evidence.consumer_content {
             push_qualification_consumer_content_edges(content, &mut links)?;
         }
+        push_qualification_subordinate_edges(&evidence.execution_proof, &mut links);
         for verifier in evidence.execution_verifiers() {
             super::push_typed_hash(
                 &verifier.execution_realization_hash,
@@ -658,6 +659,7 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
             &serde_json::to_value(&evidence.purpose).map_err(|error| error.to_string())?,
             &mut links,
         )?;
+        push_qualification_subordinate_edges(&evidence.execution_proof, &mut links);
         for verifier in std::iter::once(&evidence.verifier).chain(
             evidence.execution_proof.participants.iter().map(|participant| &participant.verifier),
         ) {
@@ -670,6 +672,22 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
         }
     }
     Ok(links)
+}
+
+fn push_qualification_subordinate_edges(
+    proof: &crate::external_content::products::qualification::ProductQualificationExecutionProof,
+    links: &mut ContractLinks,
+) {
+    use crate::external_content::products::qualification::ProductQualificationSubordinateAttemptProof;
+    if let Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof }) =
+        &proof.subordinate_attempt
+    {
+        // Retained testimony owns the exact evidence bytes, independently of
+        // whether its runtime journal is still present on this node.
+        links
+            .blob_hashes
+            .push(proof.observation.evidence_sha256.clone());
+    }
 }
 
 fn push_qualification_consumer_content_edges(

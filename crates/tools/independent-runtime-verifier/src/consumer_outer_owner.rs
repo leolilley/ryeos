@@ -30,8 +30,9 @@ pub const OUTER_CONTROL_ENV: &str = "RYEOS_CONSUMER_OUTER_CONTROL";
 /// values select already-private inputs; they grant no admission or identity.
 /// The enclosing verifier must authenticate this executable and its launch.
 pub fn run_startup(encoded_challenge: &str) -> Result<()> {
-    use crate::consumer_record::{
-        CONSUMER_INPUT_RECORD_NAME, CONSUMER_INPUT_ROOT_ENV, MAX_CONSUMER_INPUT_RECORD_BYTES,
+    use crate::consumer_record::CONSUMER_INPUT_ROOT_ENV;
+    use ryeos_external_execution_contract::restored_runtime_measurement::{
+        CONSUMER_INPUT_RECORD_NAME, MAX_CONSUMER_INPUT_RECORD_BYTES,
     };
     ensure!(
         !encoded_challenge.is_empty() && encoded_challenge.len() <= 8192,
@@ -185,16 +186,27 @@ impl ConsumerOuterObservation {
                 && self.applied_receipt.seccomp_mode == 2,
             "outer applied receipt lacks native controls"
         );
+        self.check_complete_transcript(sent, forwarded_output)
+    }
+
+    /// Retained observer bytes must cover the whole owner-captured output, not
+    /// merely a forwarded prefix ending at the turn terminal.
+    pub fn check_complete_transcript(&self, sent: &[u8], forwarded_output: &[u8]) -> Result<()> {
         require_exact_wire_bytes(sent, self.protocol_input_bytes, &self.protocol_input_sha256)?;
         require_exact_wire_bytes(
             forwarded_output,
             self.forwarded_protocol_output_bytes,
             &self.forwarded_protocol_output_sha256,
         )?;
+        require_exact_wire_bytes(
+            forwarded_output,
+            self.full_protocol_output_bytes,
+            &self.full_protocol_output_sha256,
+        )?;
         Ok(())
     }
 
-    fn parse_for_inputs(
+    pub(crate) fn parse_for_inputs(
         bytes: &[u8],
         record: &ConsumerInputRecord,
         challenge: &ConsumerRuntimeChallenge,

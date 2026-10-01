@@ -28,7 +28,7 @@ pub mod remote_verifier_source;
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v3";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
-pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v12";
+pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v13";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
 pub const PRODUCT_QUALIFICATION_CLAIM: &str = "retained_product_qualified";
 pub const MAX_PRODUCT_QUALIFICATION_CLAIMS: usize = 32;
@@ -947,16 +947,99 @@ impl ProductQualificationScopedAttemptProof {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ProductQualificationRemoteConsumerProof {
+    pub launch_owner_digest: String,
+    pub intent: ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent,
+    pub selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    pub observation: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerifierAdapterObservation,
+    pub termination_intent: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationIntent,
+    pub terminal_observation: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminalObservation,
+}
+
+impl ProductQualificationRemoteConsumerProof {
+    /// Mechanical agreement only. The daemon must corroborate the historical
+    /// journals and CAS bytes; the admitted verifier owns protocol semantics.
+    pub fn validate_for(&self, root: &ProductQualificationVerifier) -> anyhow::Result<()> {
+        use ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose;
+        validate_hash("remote verifier launch owner", &self.launch_owner_digest)?;
+        let RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate,
+            nonce_hex,
+            guest_runtime_manifest_hash,
+        } = &self.intent.purpose
+        else {
+            bail!("remote consumer proof cannot use an owner measurement");
+        };
+        coordinate.validate()?;
+        self.selection.validate_coordinate(coordinate)?;
+        validate_hash("remote consumer nonce", nonce_hex)?;
+        validate_hash("remote consumer runtime", guest_runtime_manifest_hash)?;
+        validate_hash("remote consumer upload", &self.intent.upload_sha256)?;
+        if self.intent.schema != 2
+            || self.intent.operation_id != self.intent.derived_operation_id()?
+            || self.intent.attempt_deadline_ms <= 0
+            || self.intent.upload_bytes == 0
+            || self.intent.upload_bytes > self.selection.archive_budget.maximum_framed_bytes
+            || self.intent.verifier_artifact_hash != self.selection.verifier_artifact_hash
+            || coordinate.accepted_root_id != root.thread_id
+            || coordinate.accepted_capsule_hash != root.admitted_launch_capsule_hash
+        {
+            bail!("remote consumer proof contradicts its accepted root or selection");
+        }
+        self.observation.validate_for_intent(&self.intent)?;
+        let termination = &self.termination_intent;
+        validate_hash(
+            "remote termination provider spec",
+            &termination.provider_spec_digest,
+        )?;
+        if termination.schema != 1
+            || termination.operation_id != termination.derived_operation_id()?
+            || termination.qualification_operation_id != self.intent.qualification_operation_id
+            || termination.occurrence_id != self.intent.restored_occurrence_id
+            || termination.attempt_deadline_ms <= 0
+            || termination.owner_principal.is_empty()
+            || termination.provider_id.is_empty()
+            || self.observation.contact_deadline_exceeded
+            || self.terminal_observation.contact_deadline_exceeded
+        {
+            bail!("remote consumer proof has no exact timely provider termination");
+        }
+        self.terminal_observation.validate_for(termination)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProductQualificationSubordinateAttemptProof {
+    ScopedProducer {
+        proof: ProductQualificationScopedAttemptProof,
+    },
+    RemoteConsumer {
+        proof: ProductQualificationRemoteConsumerProof,
+    },
+}
+
+impl ProductQualificationSubordinateAttemptProof {
+    pub fn scoped_producer(&self) -> Option<&ProductQualificationScopedAttemptProof> {
+        match self {
+            Self::ScopedProducer { proof } => Some(proof),
+            Self::RemoteConsumer { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProductQualificationExecutionProof {
     /// Declaration owner, distinct from the realization's execution contract.
     pub projection_contract_ref: String,
     pub projection_contract_digest: String,
     pub projector: ProductQualificationProjectorIdentity,
     pub participants: Vec<ProductQualificationParticipant>,
-    /// Required nullable: a scoped producer is a daemon-owned process attempt,
-    /// never a synthetic managed child participant.
+    /// Required nullable and exclusive with managed child participants.
     #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
-    pub scoped_attempt: Option<ProductQualificationScopedAttemptProof>,
+    pub subordinate_attempt: Option<ProductQualificationSubordinateAttemptProof>,
 }
 
 impl ProductQualificationExecutionProof {
@@ -990,16 +1073,23 @@ impl ProductQualificationExecutionProof {
         if self.participants.len() > MAX_PRODUCT_QUALIFICATION_PARTICIPANTS {
             bail!("qualification execution proof exceeds participant bound");
         }
-        if let Some(scoped) = &self.scoped_attempt {
-            scoped.validate()?;
+        if let Some(attempt) = &self.subordinate_attempt {
+            match attempt {
+                ProductQualificationSubordinateAttemptProof::ScopedProducer { proof } => {
+                    proof.validate()?
+                }
+                ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof } => {
+                    proof.validate_for(root)?
+                }
+            }
             if !self.participants.is_empty() {
-                bail!("qualification cannot mix scoped attempt and managed participants");
+                bail!("qualification cannot mix subordinate attempt and managed participants");
             }
             if !matches!(
                 root.artifact_identity,
                 AdmittedLaunchArtifactIdentity::DirectItemExecutor { .. }
             ) {
-                bail!("qualification scoped attempt requires a direct verifier");
+                bail!("qualification subordinate attempt requires a direct verifier");
             }
         }
         let mut calls = BTreeSet::new();
@@ -1325,7 +1415,28 @@ pub(crate) fn validate_qualification_execution(
     policy.validate()?;
     verifier.validate()?;
     proof.validate_for(verifier)?;
-    if let Some(scoped) = &proof.scoped_attempt {
+    if let Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof: remote }) =
+        &proof.subordinate_attempt
+    {
+        let ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &remote.intent.purpose else {
+            bail!("remote qualification proof has no consumer coordinate");
+        };
+        let scenario = policy
+            .policy
+            .producer_scenarios
+            .get(&coordinate.scenario_id)
+            .context("remote qualification proof has no signed producer scenario")?;
+        if scenario.remote_verifier.is_none() {
+            bail!("remote qualification proof scenario has no signed remote verifier");
+        }
+        // Source/use/purpose and prerequisite history are corroborated by the
+        // app proof owner, not inferred from scenario membership here.
+    }
+    if let Some(scoped) = proof
+        .subordinate_attempt
+        .as_ref()
+        .and_then(ProductQualificationSubordinateAttemptProof::scoped_producer)
+    {
         let scenario = policy
             .policy
             .producer_scenarios

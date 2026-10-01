@@ -10,6 +10,7 @@ pub mod cache;
 mod direct_output;
 pub mod effective_program_projection;
 pub(crate) mod execution_realization;
+pub mod external_consumer_delivery;
 pub(crate) mod external_content;
 mod external_direct_inputs;
 pub(crate) mod external_guest_inputs;

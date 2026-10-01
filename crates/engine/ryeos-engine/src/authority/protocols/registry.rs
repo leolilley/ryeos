@@ -400,7 +400,7 @@ fn validate_protocol_descriptor(
                 detail,
             })?;
     }
-    if desc.requires_qualification_purpose
+    if desc.qualification_callback.is_some()
         && (desc.callback_channel != CallbackChannel::Http
             || desc.execution_evidence.is_none()
             || desc.lifecycle.mode != crate::protocol_vocabulary::LifecycleMode::Managed
@@ -507,7 +507,8 @@ mod tests {
             "http",
             "  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }\n  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }\n",
         );
-        desc.requires_qualification_purpose = true;
+        desc.qualification_callback =
+            Some(crate::protocols::QualificationCallbackAuthority::ScopedProducer);
         assert!(validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).is_err());
         desc.lifecycle.mode = crate::protocol_vocabulary::LifecycleMode::Managed;
         desc.capabilities.allows_detached = false;
@@ -517,6 +518,9 @@ mod tests {
             )
             .unwrap(),
         );
+        validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).unwrap();
+        desc.qualification_callback =
+            Some(crate::protocols::QualificationCallbackAuthority::RemoteConsumer);
         validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).unwrap();
         desc.capabilities.allows_target_site = true;
         assert!(validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).is_err());

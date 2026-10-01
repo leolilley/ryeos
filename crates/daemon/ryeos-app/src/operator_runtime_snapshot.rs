@@ -1106,12 +1106,363 @@ pub(crate) fn verify_consumer_qualification_occurrence(
     intent: &RestoredVerifierAttemptIntent,
     archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
+    deadline: lillux::time::MonotonicDeadline,
 ) -> Result<RestoredVerifierAttemptRecord> {
     crate::operator_authority::require_admitted_operator(state, context)?;
+    verify_consumer_occurrence_with_invocation(
+        state,
+        ConsumerVerifierInvocation::Operator(context),
+        intent,
+        archive,
+        limits,
+        deadline,
+    )
+}
+
+/// Prepare a challenge under the actual callback, without claiming contact.
+/// On replay the existing journal supplies the original nonce and deadline;
+/// changed archive bytes or protected selection refuse, never mint a new run.
+pub struct PreparedConsumerAttempt {
+    intent: RestoredVerifierAttemptIntent,
+    retained: Option<RestoredVerifierAttemptRecord>,
+    selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    deadline: lillux::time::MonotonicDeadline,
+}
+
+impl PreparedConsumerAttempt {
+    pub fn deadline(&self) -> lillux::time::MonotonicDeadline {
+        self.deadline
+    }
+
+    /// Bind mechanically copied bytes before this draft may become an intent.
+    /// Neither this custody nor successful binding grants provider contact.
+    pub fn bind_archive(
+        mut self,
+        archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
+    ) -> Result<RestoredVerifierAttemptIntent> {
+        ensure!(
+            !self.deadline.has_elapsed(),
+            "consumer delivery exceeded original preparation deadline"
+        );
+        archive.require_verifier_selection(&self.selection)?;
+        self.intent.upload_sha256 = archive.sha256().into();
+        self.intent.upload_bytes = archive.bytes();
+        if let Some(retained) = self.retained {
+            ensure!(
+                self.intent == retained.intent
+                    && retained.consumer_selection.as_ref() == Some(&self.selection),
+                "consumer challenge replay changed immutable upload or selection"
+            );
+        }
+        self.intent.consumer_challenge_digest()?;
+        Ok(self.intent)
+    }
+}
+
+pub fn prepare_consumer_verifier_attempt_for_callback(
+    state: &AppState,
+    token: &str,
+    prepared: &crate::operator_external_content::product_qualification::PreparedRetainedConsumerVerifier,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+) -> Result<PreparedConsumerAttempt> {
+    use crate::operator_external_content::product_qualification::authenticate_consumer_callback_root;
+    use ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose;
+    let started_at_ms = lillux::time::timestamp_millis();
+    let preparation_timer = lillux::time::MonotonicTimer::start();
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let admitted = authenticate_consumer_callback_root(
+        state,
+        &authority,
+        &guard,
+        limits,
+        token,
+        "runtime.consumer_verification_start",
+        prepared.coordinate(),
+        qualification_operation_id,
+    )?;
+    ensure!(
+        admitted.purpose() == prepared.purpose() && admitted.selection() == prepared.selection(),
+        "consumer challenge preparation differs from exact retained input authority"
+    );
+    let qualification = state
+        .state_store
+        .snapshot_qualification_operation(qualification_operation_id)?
+        .context("consumer challenge qualification disappeared")?;
+    let occurrence = qualification
+        .occurrence
+        .as_ref()
+        .context("consumer challenge has no retained occurrence")?;
+    let source = state
+        .state_store
+        .runtime_snapshot_operation(&qualification.intent.snapshot_operation_id)?
+        .context("consumer challenge snapshot disappeared")?;
+    ensure!(
+        source.intent.owner_principal == admitted.purpose().owner_fingerprint,
+        "consumer challenge snapshot belongs to another owner"
+    );
+    let profile = state
+        .node_config
+        .runtime_snapshot_qualification
+        .iter()
+        .find(|profile| profile.digest() == qualification.intent.qualification_profile_digest)
+        .context("consumer challenge protected profile disappeared")?;
+    let mut intent = RestoredVerifierAttemptIntent {
+        schema: 2,
+        operation_id: String::new(),
+        qualification_operation_id: qualification_operation_id.into(),
+        restored_occurrence_id: occurrence.occurrence_id.clone(),
+        verifier_artifact_hash: admitted.selection().verifier_artifact_hash.clone(),
+        // Private draft only: exact upload is supplied by bind_archive.
+        upload_sha256: String::new(),
+        upload_bytes: 0,
+        purpose: RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate: admitted.coordinate().clone(),
+            nonce_hex: hex::encode(lillux::crypto::generate_random_bytes::<32>()),
+            guest_runtime_manifest_hash: source.intent.guest_runtime_manifest_hash.clone(),
+        },
+        attempt_deadline_ms: started_at_ms
+            .checked_add(i64::from(profile.contact_timeout_seconds()) * 1000)
+            .context("consumer challenge deadline overflow")?,
+    };
+    intent.operation_id = intent.derived_operation_id()?;
+    let retained = state
+        .state_store
+        .restored_verifier_attempt(&intent.operation_id)?;
+    if let Some(existing) = retained.as_ref() {
+        match (&mut intent.purpose, &existing.intent.purpose) {
+            (
+                RemoteVerificationPurpose::ConsumerRuntime {
+                    coordinate,
+                    nonce_hex,
+                    guest_runtime_manifest_hash,
+                },
+                RemoteVerificationPurpose::ConsumerRuntime {
+                    coordinate: retained_coordinate,
+                    nonce_hex: retained_nonce,
+                    guest_runtime_manifest_hash: retained_manifest,
+                },
+            ) => {
+                ensure!(
+                    coordinate == retained_coordinate
+                        && guest_runtime_manifest_hash == retained_manifest,
+                    "consumer challenge replay changed accepted coordinate or owner runtime"
+                );
+                *nonce_hex = retained_nonce.clone();
+            }
+            _ => anyhow::bail!("consumer challenge replay changed verification lane"),
+        }
+        intent.attempt_deadline_ms = existing.intent.attempt_deadline_ms;
+        ensure!(
+            intent.qualification_operation_id == existing.intent.qualification_operation_id
+                && intent.restored_occurrence_id == existing.intent.restored_occurrence_id
+                && intent.verifier_artifact_hash == existing.intent.verifier_artifact_hash
+                && existing.consumer_selection.as_ref() == Some(admitted.selection()),
+            "consumer challenge replay changed occurrence or selection"
+        );
+    }
+    intent.consumer_challenge_digest()?;
+    let remaining_ms = intent
+        .attempt_deadline_ms
+        .checked_sub(lillux::time::timestamp_millis())
+        .filter(|remaining| *remaining > 0)
+        .context("consumer original preparation deadline expired")?;
+    let remaining = lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?).min(
+        lillux::time::Duration::from_secs(u64::from(profile.contact_timeout_seconds()))
+            .saturating_sub(preparation_timer.elapsed()),
+    );
+    ensure!(
+        !remaining.is_zero(),
+        "consumer preparation exhausted signed timeout"
+    );
+    let deadline = lillux::time::MonotonicDeadline::after(remaining);
+    Ok(PreparedConsumerAttempt {
+        intent,
+        retained,
+        selection: admitted.selection().clone(),
+        deadline,
+    })
+}
+
+/// Actual invoking-verifier lane. Contact remains owned by the same retained
+/// attempt and occurrence gate; no operator principal is synthesized.
+pub fn verify_consumer_qualification_occurrence_for_callback(
+    state: &AppState,
+    token: &str,
+    intent: &RestoredVerifierAttemptIntent,
+    archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<RestoredVerifierAttemptRecord> {
+    verify_consumer_occurrence_with_invocation(
+        state,
+        ConsumerVerifierInvocation::Callback(token),
+        intent,
+        archive,
+        limits,
+        deadline,
+    )
+}
+
+/// Read one exact retained consumer attempt. Observation never starts or
+/// retries provider work and does not turn a retained record into qualification.
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ConsumerVerificationObservation {
+    /// Absence at this read is not permission to retry a pending start.
+    NotReserved { operation_id: String },
+    Retained {
+        attempt: RestoredVerifierAttemptRecord,
+        /// Exact bounded canonical CAS bytes decoded as opaque JSON. Only the
+        /// independently admitted product verifier may interpret their semantics.
+        evidence: Option<serde_json::Value>,
+    },
+}
+
+pub fn observe_consumer_verifier_attempt_for_callback(
+    state: &AppState,
+    token: &str,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+) -> Result<ConsumerVerificationObservation> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let admission = crate::operator_external_content::product_qualification::authenticate_consumer_callback_root(
+        state, &authority, &guard, limits, token,
+        "runtime.consumer_verification_observe", coordinate, qualification_operation_id,
+    )?;
+    let qualified = state
+        .state_store
+        .snapshot_qualification_operation(qualification_operation_id)?
+        .context("consumer qualification disappeared")?;
+    let occurrence = qualified
+        .occurrence
+        .as_ref()
+        .context("consumer observation has no retained occurrence")?;
+    let source = state
+        .state_store
+        .runtime_snapshot_operation(&qualified.intent.snapshot_operation_id)?
+        .context("consumer observation snapshot disappeared")?;
+    ensure!(
+        source.intent.owner_principal == admission.purpose().owner_fingerprint,
+        "consumer observation snapshot belongs to another owner"
+    );
+    let operation_id = ryeos_external_execution_contract::restored_runtime_measurement::consumer_verifier_operation_id(
+        qualification_operation_id, &occurrence.occurrence_id,
+        &admission.selection().verifier_artifact_hash, coordinate,
+        &source.intent.guest_runtime_manifest_hash,
+    )?;
+    // Serialize the short retained-record read with bearer revocation. No
+    // provider operation or CAS traversal runs under this gate.
+    let attempt = admission.with_live_callback(|| {
+        let Some(record) = state.state_store.restored_verifier_attempt(&operation_id)? else {
+            return Ok(None);
+        };
+        admission.require_attempt(&record.intent, &qualified.intent)?;
+        ensure!(
+            record.intent.operation_id == operation_id
+                && record.intent.derived_operation_id()? == operation_id
+                && record.consumer_selection.as_ref() == Some(admission.selection()),
+            "retained consumer observation changed attempt or executable selection"
+        );
+        Ok(Some(record))
+    })?;
+    let Some(attempt) = attempt else {
+        let final_admission = crate::operator_external_content::product_qualification::authenticate_consumer_callback_root(
+            state, &authority, &guard, limits, token,
+            "runtime.consumer_verification_observe", coordinate, qualification_operation_id,
+        )?;
+        return final_admission.with_live_callback(|| {
+            Ok(ConsumerVerificationObservation::NotReserved { operation_id })
+        });
+    };
+    let evidence = match attempt.observation.as_ref() {
+        None => None,
+        Some(ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierObservation::ConsumerRuntime { observation }) => {
+            observation.validate_for_intent(&attempt.intent)?;
+            let bytes = authority.cas_store()?.get_blob_bounded(
+                &observation.evidence_sha256,
+                ryeos_external_execution_contract::restored_runtime_measurement::MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
+            )?.context("retained consumer evidence blob is absent")?;
+            Some(observation.verify_evidence_bytes(&bytes)?)
+        }
+        Some(_) => anyhow::bail!("consumer observation cannot expose owner measurement evidence"),
+    };
+    // Keep potentially large CAS reads outside the bearer-store gate, then
+    // reauthenticate current root/profile/owner before exposing their bytes.
+    let final_admission = crate::operator_external_content::product_qualification::authenticate_consumer_callback_root(
+        state, &authority, &guard, limits, token,
+        "runtime.consumer_verification_observe", coordinate, qualification_operation_id,
+    )?;
+    final_admission.require_attempt(&attempt.intent, &qualified.intent)?;
+    final_admission
+        .with_live_callback(|| Ok(ConsumerVerificationObservation::Retained { attempt, evidence }))
+}
+
+enum ConsumerVerifierInvocation<'a> {
+    Operator(&'a HandlerContext),
+    Callback(&'a str),
+}
+
+impl ConsumerVerifierInvocation<'_> {
+    fn authenticate(
+        &self,
+        state: &AppState,
+        authority: &ryeos_state::PinnedStateAuthority,
+        guard: &ryeos_state::CasMutationGuard,
+        limits: ryeos_state::object_closure::ObjectClosureLimits,
+        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+        qualification_operation_id: &str,
+    ) -> Result<crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot>
+    {
+        use crate::operator_external_content::product_qualification::{
+            authenticate_consumer_callback_root, authenticate_consumer_root,
+        };
+        match self {
+            Self::Operator(context) => authenticate_consumer_root(
+                state,
+                authority,
+                guard,
+                limits,
+                context,
+                coordinate,
+                qualification_operation_id,
+            ),
+            Self::Callback(token) => authenticate_consumer_callback_root(
+                state,
+                authority,
+                guard,
+                limits,
+                token,
+                "runtime.consumer_verification_start",
+                coordinate,
+                qualification_operation_id,
+            ),
+        }
+    }
+}
+
+fn verify_consumer_occurrence_with_invocation(
+    state: &AppState,
+    invocation: ConsumerVerifierInvocation<'_>,
+    intent: &RestoredVerifierAttemptIntent,
+    archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<RestoredVerifierAttemptRecord> {
+    let remaining_ms = intent
+        .attempt_deadline_ms
+        .checked_sub(lillux::time::timestamp_millis())
+        .filter(|remaining| *remaining > 0)
+        .context("consumer original contact deadline expired")?;
+    let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
+        lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+    ));
     crate::hosted_operation::with_qualification_occurrence_contact(
         &intent.qualification_operation_id,
         || {
-            use crate::operator_external_content::product_qualification::authenticate_consumer_root;
             use ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose;
             let RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &intent.purpose
             else {
@@ -1119,12 +1470,11 @@ pub(crate) fn verify_consumer_qualification_occurrence(
             };
             let authority = state.state_store.pinned_state_authority()?;
             let guard = authority.acquire_shared_guard()?;
-            let admission = authenticate_consumer_root(
+            let admission = invocation.authenticate(
                 state,
                 &authority,
                 &guard,
                 limits,
-                context,
                 coordinate,
                 &intent.qualification_operation_id,
             )?;
@@ -1138,7 +1488,14 @@ pub(crate) fn verify_consumer_qualification_occurrence(
                 .occurrence
                 .clone()
                 .context("consumer occurrence absent")?;
-            let source = get_operation(state, context, &qualified.intent.snapshot_operation_id)?;
+            let source = state
+                .state_store
+                .runtime_snapshot_operation(&qualified.intent.snapshot_operation_id)?
+                .context("consumer snapshot disappeared")?;
+            ensure!(
+                source.intent.owner_principal == admission.purpose().owner_fingerprint,
+                "consumer snapshot belongs to another qualification owner"
+            );
             let locator = source
                 .locator
                 .clone()
@@ -1186,21 +1543,28 @@ pub(crate) fn verify_consumer_qualification_occurrence(
             state
                 .external_placement_backends
                 .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
+            ensure!(
+                !deadline.has_elapsed(),
+                "consumer preparation deadline expired before reservation"
+            );
             state
                 .state_store
                 .reserve_consumer_verifier_attempt(intent, admission)?;
             // Root authentication is intentionally repeated and consumed, not
             // cloned from reservation. The transaction checks live occurrence
             // and same-occurrence prerequisite immediately before first contact.
-            let claim_admission = authenticate_consumer_root(
+            let claim_admission = invocation.authenticate(
                 state,
                 &authority,
                 &guard,
                 limits,
-                context,
                 coordinate,
                 &intent.qualification_operation_id,
             )?;
+            ensure!(
+                !deadline.has_elapsed(),
+                "consumer original deadline expired before contact claim"
+            );
             let claim = state
                 .state_store
                 .claim_consumer_verifier_attempt(&intent.operation_id, claim_admission)?;
@@ -1211,10 +1575,12 @@ pub(crate) fn verify_consumer_qualification_occurrence(
                     RestoredVerifierAttemptClaim::StartAttempt(_) => unreachable!(),
                 });
             };
-            let deadline =
-                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
-                    u64::from(qualification.contact_timeout_seconds()),
-                ));
+            if deadline.has_elapsed() {
+                state
+                    .state_store
+                    .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                anyhow::bail!("consumer original deadline expired after contact claim");
+            }
             let attempted = state
                 .external_placement_backends
                 .verify_restored_snapshot_once(
@@ -1283,27 +1649,97 @@ pub fn terminate_qualification_occurrence(
         || {
             terminate_qualification_occurrence_under_contact_gate(
                 state,
-                context,
+                &QualificationTerminationInvocation::Operator(context),
                 qualification_operation_id,
             )
         },
     )
 }
 
+pub fn terminate_consumer_qualification_occurrence_for_callback(
+    state: &AppState,
+    token: &str,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+) -> Result<QualificationTerminationRecord> {
+    crate::hosted_operation::with_qualification_occurrence_contact(
+        qualification_operation_id,
+        || {
+            terminate_qualification_occurrence_under_contact_gate(
+                state,
+                &QualificationTerminationInvocation::Consumer {
+                    token,
+                    coordinate,
+                    limits,
+                },
+                qualification_operation_id,
+            )
+        },
+    )
+}
+
+enum QualificationTerminationInvocation<'a> {
+    Operator(&'a HandlerContext),
+    Consumer {
+        token: &'a str,
+        coordinate: &'a ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+        limits: ryeos_state::object_closure::ObjectClosureLimits,
+    },
+}
+
+impl QualificationTerminationInvocation<'_> {
+    fn authenticate_consumer(
+        &self,
+        state: &AppState,
+        qualification_operation_id: &str,
+    ) -> Result<
+        Option<crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot>,
+    > {
+        match self {
+            Self::Operator(context) => {
+                crate::operator_authority::require_admitted_operator(state, context)?;
+                Ok(None)
+            }
+            Self::Consumer {
+                token,
+                coordinate,
+                limits,
+            } => {
+                let authority = state.state_store.pinned_state_authority()?;
+                let guard = authority.acquire_shared_guard()?;
+                Ok(Some(crate::operator_external_content::product_qualification::authenticate_consumer_callback_root(
+                    state, &authority, &guard, *limits, token,
+                    "runtime.consumer_verification_settle", coordinate, qualification_operation_id,
+                )?))
+            }
+        }
+    }
+}
+
 fn terminate_qualification_occurrence_under_contact_gate(
     state: &AppState,
-    context: &HandlerContext,
+    invocation: &QualificationTerminationInvocation<'_>,
     qualification_operation_id: &str,
 ) -> Result<QualificationTerminationRecord> {
-    crate::operator_authority::require_admitted_operator(state, context)?;
+    let admission = invocation.authenticate_consumer(state, qualification_operation_id)?;
+    let owner = match (invocation, admission.as_ref()) {
+        (QualificationTerminationInvocation::Operator(context), None) => {
+            context.fingerprint.clone()
+        }
+        (QualificationTerminationInvocation::Consumer { .. }, Some(admission)) => {
+            admission.purpose().owner_fingerprint.clone()
+        }
+        _ => anyhow::bail!("qualification termination invocation lost authority"),
+    };
     let qualified = state
         .state_store
         .snapshot_qualification_operation(qualification_operation_id)?
         .context("snapshot qualification operation is absent")?;
     ensure!(
-        qualified.intent.owner_principal == context.fingerprint
+        qualified.intent.owner_principal == owner
             && qualified.phase == SnapshotQualificationPhase::OccurrenceBound,
-        "qualification termination has no operator-owned restored occurrence"
+        "qualification termination has no authenticated owned restored occurrence"
     );
     let occurrence = qualified
         .occurrence
@@ -1342,7 +1778,7 @@ fn terminate_qualification_occurrence_under_contact_gate(
         operation_id: String::new(),
         qualification_operation_id: qualified.intent.operation_id.clone(),
         occurrence_id: occurrence.occurrence_id.clone(),
-        owner_principal: context.fingerprint.clone(),
+        owner_principal: owner,
         provider_id: producer.backend().to_owned(),
         provider_spec_digest: qualification.provider_spec_digest().to_owned(),
         attempt_deadline_ms: now
@@ -1361,12 +1797,26 @@ fn terminate_qualification_occurrence_under_contact_gate(
         );
     }
     intent.validate_for(&qualified.intent, &occurrence)?;
-    state
-        .state_store
-        .reserve_qualification_termination(&intent)?;
-    let claim = state
-        .state_store
-        .claim_qualification_termination_attempt(&intent.operation_id)?;
+    match invocation.authenticate_consumer(state, qualification_operation_id)? {
+        Some(admission) => {
+            state
+                .state_store
+                .reserve_consumer_qualification_termination(&intent, admission)?;
+        }
+        None => {
+            state
+                .state_store
+                .reserve_qualification_termination(&intent)?;
+        }
+    }
+    let claim = match invocation.authenticate_consumer(state, qualification_operation_id)? {
+        Some(admission) => state
+            .state_store
+            .claim_consumer_qualification_termination(&intent.operation_id, admission)?,
+        None => state
+            .state_store
+            .claim_qualification_termination_attempt(&intent.operation_id)?,
+    };
     let first_contact = match claim {
         QualificationTerminationClaim::StartAttempt(_) => true,
         QualificationTerminationClaim::Reconcile(_) => false,

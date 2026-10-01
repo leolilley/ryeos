@@ -780,7 +780,9 @@ fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
     wire["execution_proof"]
         .as_object_mut()
         .unwrap()
-        .remove("scoped_attempt");
+        .remove("subordinate_attempt");
+    assert!(ProductQualificationEvidence::from_value(&wire).is_err());
+    wire["execution_proof"]["scoped_attempt"] = serde_json::Value::Null;
     assert!(ProductQualificationEvidence::from_value(&wire).is_err());
 
     let source = ProductProducerRecipeSourceIdentity {
@@ -813,33 +815,33 @@ fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
         retirement_evidence_digest: "2".repeat(64),
         callback_method_surface_digest: "3".repeat(64),
     };
-    evidence.execution_proof.scoped_attempt = Some(scoped);
+    evidence.execution_proof.subordinate_attempt =
+        Some(ProductQualificationSubordinateAttemptProof::ScopedProducer { proof: scoped });
     evidence.validate().unwrap();
 
     let mut wrong_scenario = evidence.clone();
-    wrong_scenario
-        .execution_proof
-        .scoped_attempt
-        .as_mut()
-        .unwrap()
-        .scenario_id = "other".into();
+    let Some(ProductQualificationSubordinateAttemptProof::ScopedProducer { proof }) =
+        &mut wrong_scenario.execution_proof.subordinate_attempt
+    else {
+        panic!("expected scoped proof")
+    };
+    proof.scenario_id = "other".into();
     assert!(wrong_scenario.validate().is_err());
     let mut wrong_source = evidence.clone();
-    wrong_source
-        .execution_proof
-        .scoped_attempt
-        .as_mut()
-        .unwrap()
-        .producer_source
-        .canonical_ref = "config:fixtures/other".into();
+    let Some(ProductQualificationSubordinateAttemptProof::ScopedProducer { proof }) =
+        &mut wrong_source.execution_proof.subordinate_attempt
+    else {
+        panic!("expected scoped proof")
+    };
+    proof.producer_source.canonical_ref = "config:fixtures/other".into();
     assert!(wrong_source.validate().is_err());
     let mut bad_digest = evidence.clone();
-    bad_digest
-        .execution_proof
-        .scoped_attempt
-        .as_mut()
-        .unwrap()
-        .observation_object_hash = "not-a-hash".into();
+    let Some(ProductQualificationSubordinateAttemptProof::ScopedProducer { proof }) =
+        &mut bad_digest.execution_proof.subordinate_attempt
+    else {
+        panic!("expected scoped proof")
+    };
+    proof.observation_object_hash = "not-a-hash".into();
     assert!(bad_digest.validate().is_err());
     let mut mixed = evidence.clone();
     mixed
@@ -857,7 +859,7 @@ fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
     let mut graph = evidence;
     graph.verifier.artifact_identity = graph_artifact_identity();
     graph.execution_proof = execution_proof(&graph.verifier.artifact_identity);
-    graph.execution_proof.scoped_attempt = mixed.execution_proof.scoped_attempt;
+    graph.execution_proof.subordinate_attempt = mixed.execution_proof.subordinate_attempt;
     assert!(graph.validate().is_err());
 }
 
@@ -888,7 +890,7 @@ pub(crate) fn execution_proof(
             binary_signer_fingerprint: "2".repeat(64),
         },
         participants: Vec::new(),
-        scoped_attempt: None,
+        subordinate_attempt: None,
     }
 }
 
@@ -1468,6 +1470,10 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
     purpose
         .validate_remote_consumer_coordinate(&coordinate, &selection)
         .unwrap();
+    let view = purpose.execution_view().unwrap();
+    assert_eq!(view.owner_fingerprint(), purpose.owner_fingerprint);
+    view.validate_remote_consumer_coordinate(&coordinate, &selection)
+        .unwrap();
     for field in ["purpose", "subject", "use", "scenario"] {
         let mut changed = coordinate.clone();
         match field {
@@ -1480,6 +1486,10 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
         assert!(
             purpose
                 .validate_remote_consumer_coordinate(&changed, &selection)
+                .is_err()
+        );
+        assert!(
+            view.validate_remote_consumer_coordinate(&changed, &selection)
                 .is_err()
         );
     }
@@ -1523,8 +1533,115 @@ fn product_evidence_refuses_predecessor_use_retention_schema() {
     let current = evidence();
     current.validate().unwrap();
     let mut predecessor = serde_json::to_value(current).unwrap();
-    predecessor["schema"] = json!("ryeos.product_qualification_evidence.v10");
-    assert!(ProductQualificationEvidence::from_value(&predecessor).is_err());
+    for schema in [
+        "ryeos.product_qualification_evidence.v10",
+        "ryeos.product_qualification_evidence.v12",
+    ] {
+        predecessor["schema"] = json!(schema);
+        assert!(ProductQualificationEvidence::from_value(&predecessor).is_err());
+    }
+}
+
+#[test]
+fn remote_subordinate_proof_binds_root_occurrence_and_timely_observation() {
+    use ryeos_external_execution_contract::restored_runtime_measurement::{
+        ConsumerArchiveBudget, ConsumerRuntimeVerificationCoordinate,
+        ConsumerRuntimeVerifierSelection, ConsumerVerifierAdapterObservation,
+        RemoteVerificationPurpose, RestoredVerifierAttemptIntent,
+    };
+    use ryeos_external_execution_contract::runtime_snapshot::{
+        RuntimeSnapshotQualificationTerminalObservation,
+        RuntimeSnapshotQualificationTerminationIntent,
+    };
+    let root = evidence().verifier;
+    let mut intent = RestoredVerifierAttemptIntent {
+        schema: 2,
+        operation_id: String::new(),
+        qualification_operation_id: "1".repeat(64),
+        restored_occurrence_id: "fixture-occurrence".into(),
+        verifier_artifact_hash: "2".repeat(64),
+        upload_sha256: "3".repeat(64),
+        upload_bytes: 1,
+        attempt_deadline_ms: 1000,
+        purpose: RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate: ConsumerRuntimeVerificationCoordinate {
+                schema: 1,
+                accepted_root_id: root.thread_id.clone(),
+                accepted_capsule_hash: root.admitted_launch_capsule_hash.clone(),
+                qualification_purpose_digest: "4".repeat(64),
+                scenario_id: "native_codex".into(),
+                scenario_source_digest: "5".repeat(64),
+                subject_digest: "6".repeat(64),
+                use_digest: "7".repeat(64),
+                prerequisite_measurement_attempt_id: "8".repeat(64),
+                prerequisite_measurement_observation_digest: "9".repeat(64),
+            },
+            nonce_hex: "a".repeat(64),
+            guest_runtime_manifest_hash: "b".repeat(64),
+        },
+    };
+    intent.operation_id = intent.derived_operation_id().unwrap();
+    let observation = ConsumerVerifierAdapterObservation {
+        schema: 1,
+        operation_id: intent.operation_id.clone(),
+        occurrence_id: intent.restored_occurrence_id.clone(),
+        verifier_artifact_hash: intent.verifier_artifact_hash.clone(),
+        challenge_digest: intent.consumer_challenge_digest().unwrap(),
+        upload_token_execution_id: "exe-upload".into(),
+        run_token_execution_id: "exe-run".into(),
+        upload_response_sha256: "c".repeat(64),
+        run_stream_sha256: "d".repeat(64),
+        evidence_sha256: "e".repeat(64),
+        evidence_bytes: 1,
+        contact_deadline_exceeded: false,
+    };
+    let mut termination_intent = RuntimeSnapshotQualificationTerminationIntent {
+        schema: 1,
+        operation_id: String::new(),
+        qualification_operation_id: intent.qualification_operation_id.clone(),
+        occurrence_id: intent.restored_occurrence_id.clone(),
+        owner_principal: "owner".into(),
+        provider_id: "provider".into(),
+        provider_spec_digest: "f".repeat(64),
+        attempt_deadline_ms: 2000,
+    };
+    termination_intent.operation_id = termination_intent.derived_operation_id().unwrap();
+    let terminal_observation = RuntimeSnapshotQualificationTerminalObservation {
+        schema: 1,
+        operation_id: termination_intent.operation_id.clone(),
+        occurrence_id: termination_intent.occurrence_id.clone(),
+        provider_response_sha256: "a".repeat(64),
+        terminated_at: "2026-10-01T00:00:00Z".into(),
+        contact_deadline_exceeded: false,
+    };
+    let proof = ProductQualificationRemoteConsumerProof {
+        launch_owner_digest: "b".repeat(64),
+        intent,
+        selection: ConsumerRuntimeVerifierSelection {
+            scenario_source_digest: "5".repeat(64),
+            verifier_artifact_hash: "2".repeat(64),
+            archive_budget: ConsumerArchiveBudget::new(8, 1024, 4096).unwrap(),
+        },
+        observation,
+        termination_intent,
+        terminal_observation,
+    };
+    proof.validate_for(&root).unwrap();
+    let mut other_root = root.clone();
+    other_root.thread_id = "T-other".into();
+    assert!(proof.validate_for(&other_root).is_err());
+    let mut other_capsule = root.clone();
+    other_capsule.admitted_launch_capsule_hash = "c".repeat(64);
+    assert!(proof.validate_for(&other_capsule).is_err());
+    let mut changed = proof.clone();
+    changed.termination_intent.occurrence_id = "another-occurrence".into();
+    assert!(changed.validate_for(&root).is_err());
+    let mut late = proof.clone();
+    late.terminal_observation.contact_deadline_exceeded = true;
+    assert!(late.validate_for(&root).is_err());
+    let mut missing = proof;
+    missing.observation.evidence_bytes = 0;
+    assert!(missing.validate_for(&root).is_err());
 }
 
 #[test]

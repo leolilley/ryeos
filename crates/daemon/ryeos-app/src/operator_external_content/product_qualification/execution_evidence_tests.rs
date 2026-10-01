@@ -7,23 +7,21 @@ use ryeos_engine::resolution::{KindComposedView, ResolutionStepName, ResolvedAnc
 use serde_json::json;
 
 #[test]
-fn zero_participant_qualification_requires_exact_scoped_witness_shape() {
+fn zero_participant_qualification_requires_exact_subordinate_authority() {
     use ryeos_engine::protocol_vocabulary::CallbackChannel;
-
-    assert!(require_zero_participant_lane(false, false, CallbackChannel::None).is_ok());
-    assert!(require_zero_participant_lane(true, true, CallbackChannel::Http).is_ok());
-    for scoped in [false, true] {
-        for purpose in [false, true] {
+    use ryeos_engine::protocols::QualificationCallbackAuthority::{RemoteConsumer, ScopedProducer};
+    for subordinate in [None, Some(ScopedProducer), Some(RemoteConsumer)] {
+        for purpose in [None, Some(ScopedProducer), Some(RemoteConsumer)] {
             for channel in [CallbackChannel::None, CallbackChannel::Http] {
-                if matches!(
-                    (scoped, purpose, channel),
-                    (false, false, CallbackChannel::None) | (true, true, CallbackChannel::Http)
-                ) {
-                    continue;
-                }
-                assert!(
-                    require_zero_participant_lane(scoped, purpose, channel).is_err(),
-                    "accepted scoped={scoped}, purpose={purpose}, channel={channel:?}"
+                let admitted = subordinate == purpose
+                    && matches!(
+                        (subordinate, channel),
+                        (None, CallbackChannel::None) | (Some(_), CallbackChannel::Http)
+                    );
+                assert_eq!(
+                    require_zero_participant_lane(subordinate, purpose, channel).is_ok(),
+                    admitted,
+                    "subordinate={subordinate:?}, purpose={purpose:?}, channel={channel:?}"
                 );
             }
         }

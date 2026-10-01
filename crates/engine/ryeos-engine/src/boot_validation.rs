@@ -2014,7 +2014,7 @@ composed_value_contract:
                 mode: LifecycleMode::DetachedOk,
             },
             callback_channel: CallbackChannel::None,
-            requires_qualification_purpose: false,
+            qualification_callback: None,
             session: None,
             execution_evidence: None,
         }
@@ -2100,7 +2100,7 @@ composed_value_contract:
                 mode: LifecycleMode::DetachedOk,
             },
             callback_channel: CallbackChannel::None,
-            requires_qualification_purpose: false,
+            qualification_callback: None,
             session: None,
             execution_evidence: None,
         };

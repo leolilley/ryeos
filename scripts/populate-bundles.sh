@@ -382,6 +382,7 @@ case "$BUNDLE_SET" in
           ryeos-external-guest-occurrence-owner \
           ryeos-external-guest-runtime-producer \
           ryeos-codex-guest-runtime-producer \
+          ryeos-independent-runtime-verifier \
           ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
           ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter)
     ;;
@@ -402,6 +403,7 @@ case "$BUNDLE_SET" in
           ryeos-external-guest-occurrence-owner ryeos-codex-external-configuration \
           ryeos-external-guest-runtime-producer \
           ryeos-codex-guest-runtime-producer \
+          ryeos-independent-runtime-verifier \
           ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
           ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter)
     ;;
@@ -455,6 +457,7 @@ build_static_external_guest_runtime_producer=0
 build_static_render_sandbox_lifecycle_adapter=0
 build_static_codex_external_configuration=0
 build_static_codex_guest_runtime_producer=0
+build_static_independent_runtime_verifier=0
 for p in "${pkgs[@]}"; do
   case "$p" in
     ryeos-session-exec) build_static_session_exec=1 ;;
@@ -469,6 +472,7 @@ for p in "${pkgs[@]}"; do
     ryeos-render-sandbox-lifecycle-adapter) build_static_render_sandbox_lifecycle_adapter=1 ;;
     ryeos-codex-external-configuration) build_static_codex_external_configuration=1 ;;
     ryeos-codex-guest-runtime-producer) build_static_codex_guest_runtime_producer=1 ;;
+    ryeos-independent-runtime-verifier) build_static_independent_runtime_verifier=1 ;;
     *) host_pkgs+=("$p") ;;
   esac
 done
@@ -525,6 +529,7 @@ static_build_labels=()
 (( build_static_render_sandbox_lifecycle_adapter == 1 )) && static_build_labels+=(ryeos-render-sandbox-lifecycle-adapter)
 (( build_static_codex_external_configuration == 1 )) && static_build_labels+=(ryeos-codex-external-configuration)
 (( build_static_codex_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-codex-guest-runtime-producer)
+(( build_static_independent_runtime_verifier == 1 )) && static_build_labels+=(ryeos-independent-runtime-verifier)
 if (( ${#static_build_labels[@]} > 0 )); then
   ryeos_term_update "building selected static worker binaries" "${static_build_labels[*]}"
   ryeos_term_suspend
@@ -558,6 +563,7 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDL
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-guest-runtime-producer"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-external-configuration"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-guest-runtime-producer"
+  require_static_payload "$PAYLOAD_STAGE/codex/independent-runtime-verifier"
   require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-candidate-launcher"
   require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-candidate-supervisor"
   require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-guest-restoration-verifier"

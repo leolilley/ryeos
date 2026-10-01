@@ -30,7 +30,9 @@ use ryeos_engine::protocol_vocabulary::{CallbackChannel, EnvInjectionSource, pro
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use ryeos_app::callback_token::launch_token_ttl;
-use ryeos_app::callback_token::{AdmittedScopedProducerGrant, effective_bundle_id_for_request};
+use ryeos_app::callback_token::{
+    AdmittedRemoteConsumerGrant, AdmittedScopedProducerGrant, effective_bundle_id_for_request,
+};
 use ryeos_app::env_contract::{EnvBinding, EnvSourceDetail};
 use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::launch_metadata::ResumeContext;
@@ -3007,22 +3009,25 @@ fn resolved_terminator_protocol<'a>(
 /// thread-auth authority are minted lazily from typed descriptor requirements;
 /// callback-free tools therefore receive neither credentials nor daemon-socket
 /// isolation access.
-fn admitted_scoped_producer_grant(
+fn admitted_qualification_root(
     state: &AppState,
     metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     thread_id: &str,
     launch_owner: &str,
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
-) -> Result<Option<AdmittedScopedProducerGrant>> {
+) -> Result<
+    Option<(
+        ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+        ryeos_state::objects::AdmittedLaunchCapsule,
+    )>,
+> {
     let Some(sealed) = metadata.sealed_root_request.as_ref() else {
         return Ok(None);
     };
     let Some(purpose) = sealed.qualification_purpose() else {
         return Ok(None);
     };
-    if purpose.policy_source.policy.producer_scenarios.is_empty() {
-        return Ok(None);
-    }
+    purpose.validate()?;
     if metadata.launch_driver
         != Some(ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor)
         || protocol.descriptor.callback_channel != CallbackChannel::Http
@@ -3058,11 +3063,88 @@ fn admitted_scoped_producer_grant(
     state
         .state_store
         .assert_launch_owner(thread_id, launch_owner)?;
+    let root = state
+        .state_store
+        .get_authoritative_root_thread_snapshot(thread_id)?
+        .context("qualification callback root is absent")?;
+    if root.chain_root_id != thread_id
+        || root.admitted_launch_capsule_hash.as_deref() != Some(capsule.content_hash()?.as_str())
+    {
+        bail!("qualification callback capsule differs from its born root");
+    }
+    Ok(Some((purpose.clone(), capsule)))
+}
+
+fn admitted_scoped_producer_grant(
+    state: &AppState,
+    metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    thread_id: &str,
+    launch_owner: &str,
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+) -> Result<Option<AdmittedScopedProducerGrant>> {
+    use ryeos_engine::protocols::QualificationCallbackAuthority;
+    if protocol.descriptor.qualification_callback
+        != Some(QualificationCallbackAuthority::ScopedProducer)
+    {
+        if protocol.descriptor.qualification_callback.is_none()
+            && metadata
+                .sealed_root_request
+                .as_ref()
+                .and_then(|request| request.qualification_purpose())
+                .is_some_and(|purpose| !purpose.policy_source.policy.producer_scenarios.is_empty())
+        {
+            bail!("producer qualification requires explicit signed callback authority");
+        }
+        return Ok(None);
+    }
+    let (purpose, _) =
+        admitted_qualification_root(state, metadata, thread_id, launch_owner, protocol)?
+            .context("scoped producer callback has no admitted qualification root")?;
+    if purpose.policy_source.policy.producer_scenarios.is_empty() {
+        bail!("scoped producer callback has no admitted producer scenario");
+    }
     let grant = AdmittedScopedProducerGrant {
-        purpose: purpose.clone(),
+        purpose,
         root_thread_id: thread_id.to_owned(),
         launch_owner: launch_owner.to_owned(),
         isolation_class: state.isolation.admission_class_provenance()?,
+    };
+    grant.validate()?;
+    Ok(Some(grant))
+}
+
+fn admitted_remote_consumer_grant(
+    state: &AppState,
+    metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    thread_id: &str,
+    launch_owner: &str,
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    root_raw_content_digest: &str,
+) -> Result<Option<AdmittedRemoteConsumerGrant>> {
+    if protocol.descriptor.qualification_callback
+        != Some(ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer)
+    {
+        return Ok(None);
+    }
+    let (purpose, capsule) =
+        admitted_qualification_root(state, metadata, thread_id, launch_owner, protocol)?
+            .context("remote consumer callback has no admitted qualification root")?;
+    let subject = metadata
+        .sealed_root_request
+        .as_ref()
+        .context("remote consumer root has no sealed subject")?
+        .admitted_program_subject()?;
+    if subject.canonical_ref != purpose.verifier_ref
+        || subject.raw_content_digest != root_raw_content_digest
+    {
+        bail!("remote consumer source differs from its admitted verifier executable closure");
+    }
+    let grant = AdmittedRemoteConsumerGrant {
+        purpose,
+        root_thread_id: thread_id.to_owned(),
+        launch_owner: launch_owner.to_owned(),
+        admitted_capsule_hash: capsule.content_hash()?,
+        root_raw_content_digest: root_raw_content_digest.into(),
     };
     grant.validate()?;
     Ok(Some(grant))
@@ -3161,6 +3243,7 @@ fn build_protocol_launch_env(
     effective_bundle_id: Option<String>,
     launch_owner: &str,
     scoped_producer_grant: Option<AdmittedScopedProducerGrant>,
+    remote_consumer_grant: Option<AdmittedRemoteConsumerGrant>,
 ) -> Result<ProtocolLaunchEnv> {
     let callback_socket_requested = protocol
         .descriptor
@@ -3180,8 +3263,18 @@ fn build_protocol_launch_env(
         .env_injections
         .iter()
         .any(|injection| injection.source == EnvInjectionSource::ThreadAuthToken);
-    if protocol.descriptor.requires_qualification_purpose != scoped_producer_grant.is_some()
-        || (scoped_producer_grant.is_some()
+    let callback_authority = match (&scoped_producer_grant, &remote_consumer_grant) {
+        (None, None) => None,
+        (Some(_), None) => {
+            Some(ryeos_engine::protocols::QualificationCallbackAuthority::ScopedProducer)
+        }
+        (None, Some(_)) => {
+            Some(ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer)
+        }
+        (Some(_), Some(_)) => bail!("qualification callback authorities cannot be combined"),
+    };
+    if protocol.descriptor.qualification_callback != callback_authority
+        || (callback_authority.is_some()
             && protocol.descriptor.callback_channel != CallbackChannel::Http)
     {
         bail!(
@@ -3212,7 +3305,7 @@ fn build_protocol_launch_env(
                     effective_bundle_id,
                     Some(item_ref.to_string()),
                     root_raw_content_digest.clone(),
-                    None,
+                    remote_consumer_grant.as_ref().map(|grant| grant.purpose.verifier_realized_definition_digest.clone()),
                     serde_json::Value::Null,
                     0,
                 )
@@ -3250,6 +3343,19 @@ fn build_protocol_launch_env(
                     Ok(false) => {
                         state.callback_tokens.invalidate(&token);
                         anyhow::bail!("fresh qualification callback capability disappeared before method restriction");
+                    }
+                    Err(error) => {
+                        state.callback_tokens.invalidate(&token);
+                        return Err(error);
+                    }
+                }
+            }
+            if let Some(grant) = remote_consumer_grant {
+                match state.callback_tokens.set_remote_consumer_grant(&token, grant) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        state.callback_tokens.invalidate(&token);
+                        bail!("fresh remote callback disappeared before authority binding");
                     }
                     Err(error) => {
                         state.callback_tokens.invalidate(&token);
@@ -5181,6 +5287,15 @@ pub async fn run_and_wait(
         protocol,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
+    let wait_remote_consumer_grant = admitted_remote_consumer_grant(
+        &state,
+        &wait_launch_metadata,
+        &tid,
+        &wait_launch_owner,
+        protocol,
+        &params.resolved.root_raw_content_digest,
+    )
+    .map_err(|error| guard.fail_before_spawn(error))?;
     let ProtocolLaunchEnv {
         bindings: protocol_env_bindings,
         callback_token,
@@ -5204,6 +5319,7 @@ pub async fn run_and_wait(
         effective_bundle_id_for_request(&params.resolved),
         &wait_launch_owner,
         wait_scoped_producer_grant.clone(),
+        wait_remote_consumer_grant,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     if let Some(token) = callback_token {
@@ -6262,6 +6378,7 @@ pub async fn run_detached(
         params.resolved.root_raw_content_digest.clone(),
         effective_bundle_id_for_request(&params.resolved),
         &detached_launch_owner,
+        None,
         None,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
@@ -9002,6 +9119,14 @@ async fn run_existing_recovered_thread(
             &thread_id,
             &resume_launch_owner,
             &protocol,
+        )?,
+        admitted_remote_consumer_grant(
+            &state,
+            &recovered_launch_metadata,
+            &thread_id,
+            &resume_launch_owner,
+            &protocol,
+            &params.resolved.root_raw_content_digest,
         )?,
     )
     .map_err(|error| guard.fail_before_spawn(error.context("protocol_contract_failed")))?;

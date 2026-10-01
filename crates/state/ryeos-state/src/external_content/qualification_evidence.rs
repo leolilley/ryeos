@@ -11,7 +11,7 @@ use super::products::qualification::{
 };
 use super::qualification_purpose::{QualificationLaunchPurpose, QualificationSubject};
 
-pub const CONTENT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.content_qualification_evidence.v5";
+pub const CONTENT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.content_qualification_evidence.v6";
 pub const CONTENT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.content_qualification.v1";
 pub const CONTENT_QUALIFICATION_CLAIM: &str = "activated_content_qualified";
 
@@ -122,7 +122,7 @@ impl ContentQualificationEvidence {
         {
             bail!("content qualification execution contradicts its sealed purpose");
         }
-        if let Some(scoped) = &self.execution_proof.scoped_attempt
+        if let Some(scoped) = self.execution_proof.subordinate_attempt.as_ref().and_then(super::products::qualification::ProductQualificationSubordinateAttemptProof::scoped_producer)
             && self
                 .purpose
                 .producer_recipe_sources
@@ -135,5 +135,39 @@ impl ContentQualificationEvidence {
             bail!("content qualification evidence exceeds its bound");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_testimony_refuses_predecessor_schema_and_subordinate_slot() {
+        let capsule =
+            crate::external_execution::admission::test_support::content_candidate_capsule(
+                &"a".repeat(64),
+            )
+            .unwrap();
+        let evidence = capsule
+            .retained_external_runtime_content_qualification
+            .unwrap()
+            .evidence;
+        let current = serde_json::to_value(evidence).unwrap();
+        ContentQualificationEvidence::from_value(&current).unwrap();
+        let mut predecessor = current.clone();
+        predecessor["schema"] = serde_json::json!("ryeos.content_qualification_evidence.v5");
+        assert!(ContentQualificationEvidence::from_value(&predecessor).is_err());
+        let mut missing = current.clone();
+        missing["execution_proof"]
+            .as_object_mut()
+            .unwrap()
+            .remove("subordinate_attempt");
+        assert!(ContentQualificationEvidence::from_value(&missing).is_err());
+        missing["execution_proof"]["scoped_attempt"] = Value::Null;
+        assert!(ContentQualificationEvidence::from_value(&missing).is_err());
+        let mut widened = current;
+        widened["execution_proof"]["scoped_attempt"] = Value::Null;
+        assert!(ContentQualificationEvidence::from_value(&widened).is_err());
     }
 }

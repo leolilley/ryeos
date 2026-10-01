@@ -11,7 +11,9 @@ mod consumer_definition_tests;
 pub(super) mod content_proof;
 pub mod launch;
 mod retained_verifier;
-pub(crate) use execution_evidence::{AuthenticatedConsumerRoot, authenticate_consumer_root};
+pub(crate) use execution_evidence::{
+    AuthenticatedConsumerRoot, authenticate_consumer_callback_root, authenticate_consumer_root,
+};
 pub(super) mod runtime_identity;
 
 use std::collections::BTreeMap;
@@ -52,7 +54,7 @@ use ryeos_state::external_content::runtime_member::exact_runtime_member_hash;
 use ryeos_state::objects::{
     Attestation, ExecutableSearchPathEntry, ExternalContentKind, ExternalContentMode,
     ExternalContentRealizationSet, SOURCE_CLOSURE_DERIVED_KEY, SessionProcessEnvironmentValue,
-    ThreadSnapshot, ThreadStatus,
+    ThreadSnapshot, ThreadStatus, canonical_value_digest,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -2226,10 +2228,16 @@ pub struct PreparedRetainedConsumerVerifier {
     purpose: ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
     coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
     selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement,
     payload: lillux::InheritedDescriptorAuthority,
 }
 
 impl PreparedRetainedConsumerVerifier {
+    pub fn requirement(
+        &self,
+    ) -> &ryeos_state::external_execution::admission::ExternalCandidateRequirement {
+        &self.requirement
+    }
     pub fn purpose(
         &self,
     ) -> &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose {
@@ -2270,6 +2278,150 @@ pub fn prepare_retained_consumer_verifier(
         coordinate,
         qualification_operation_id,
     )?;
+    restore_admitted_consumer_verifier(&authority, &guard, admitted)
+}
+
+/// Prepare inert delivery custody for the actual invoking verifier. This does
+/// not impersonate an operator or reserve provider contact. Subsequent journal
+/// admissions must independently authenticate and gate the live callback.
+pub fn prepare_retained_consumer_verifier_for_callback(
+    state: &AppState,
+    token: &str,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+) -> anyhow::Result<PreparedRetainedConsumerVerifier> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let admitted = execution_evidence::authenticate_consumer_callback_root(
+        state,
+        &authority,
+        &guard,
+        limits,
+        token,
+        "runtime.consumer_verification_inputs",
+        coordinate,
+        qualification_operation_id,
+    )?;
+    restore_admitted_consumer_verifier(&authority, &guard, admitted)
+}
+
+/// Read-only record inputs for the admitted product-edge verifier. Executable
+/// descriptors, credentials and contact permissions are deliberately absent.
+#[derive(Serialize)]
+pub struct ConsumerVerificationInputs {
+    pub purpose: ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    pub coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    pub selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    pub requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement,
+}
+
+pub fn consumer_verification_inputs_for_callback(
+    state: &AppState,
+    token: &str,
+    thread_id: &str,
+    requested: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+) -> anyhow::Result<ConsumerVerificationInputs> {
+    use crate::runtime_db::restored_verifier_attempt::RestoredVerifierAttemptPhase;
+    use ryeos_external_execution_contract::restored_runtime_measurement::{
+        ConsumerRuntimeVerificationCoordinate, RemoteVerificationPurpose,
+    };
+    requested.validate()?;
+    let cap = state
+        .callback_tokens
+        .validate_token_and_thread(token, thread_id)?;
+    let grant = cap
+        .remote_consumer_grant
+        .as_ref()
+        .context("consumer inputs have no admitted remote purpose")?;
+    grant.validate()?;
+    let purpose = &grant.purpose;
+    let source = purpose
+        .remote_verifier_sources
+        .get(&requested.scenario_id)
+        .context("consumer inputs select no admitted signed scenario")?;
+    let qualified_use = purpose
+        .consumer_content
+        .as_ref()
+        .and_then(|content| content.qualification_use.as_ref())
+        .context("consumer inputs have no admitted use")?;
+    let prerequisite = state
+        .state_store
+        .restored_verifier_attempt(&requested.prerequisite_measurement_attempt_id)?
+        .context("consumer input measurement selector is absent")?;
+    if prerequisite.phase != RestoredVerifierAttemptPhase::Observed
+        || prerequisite.intent.qualification_operation_id != requested.qualification_operation_id
+        || !matches!(
+            prerequisite.intent.purpose,
+            RemoteVerificationPurpose::OwnerMeasurement { .. }
+        )
+    {
+        bail!(
+            "consumer inputs require an observed owner measurement of the selected qualification"
+        );
+    }
+    let measurement = prerequisite
+        .observation
+        .as_ref()
+        .context("consumer input measurement observation is absent")?
+        .owner_measurement()?;
+    if measurement.contact_deadline_exceeded {
+        bail!("consumer input measurement exceeded its original contact deadline");
+    }
+    // Dynamic root/capsule coordinates cannot be prelaunch parameters: the
+    // capsule itself commits those parameters. Derive these facts exclusively
+    // from the protected bearer and its authenticated retained measurement.
+    let coordinate = ConsumerRuntimeVerificationCoordinate {
+        schema: 1,
+        accepted_root_id: grant.root_thread_id.clone(),
+        accepted_capsule_hash: grant.admitted_capsule_hash.clone(),
+        qualification_purpose_digest: canonical_value_digest(&serde_json::to_value(purpose)?)?,
+        scenario_id: requested.scenario_id.clone(),
+        scenario_source_digest: source.scenario_source_digest.clone(),
+        subject_digest: canonical_value_digest(&serde_json::to_value(&purpose.subject)?)?,
+        use_digest: canonical_value_digest(&serde_json::to_value(qualified_use)?)?,
+        prerequisite_measurement_attempt_id: prerequisite.intent.operation_id.clone(),
+        prerequisite_measurement_observation_digest: canonical_value_digest(
+            &serde_json::to_value(measurement)?,
+        )?,
+    };
+    requested.require_coordinate(&coordinate)?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let admitted = authenticate_consumer_callback_root(
+        state,
+        &authority,
+        &guard,
+        limits,
+        token,
+        "runtime.consumer_verification_inputs",
+        &coordinate,
+        &requested.qualification_operation_id,
+    )?;
+    let requirement = retained_consumer_requirement(&authority, &guard, admitted.purpose())?;
+    let inputs = ConsumerVerificationInputs {
+        purpose: admitted.purpose().clone(),
+        coordinate: admitted.coordinate().clone(),
+        selection: admitted.selection().clone(),
+        requirement,
+    };
+    // Transport ceiling, not the product-edge record's semantic allowance.
+    if ryeos_external_execution_contract::canonical_json(&inputs)?.len() > 128 * 1024 {
+        bail!("consumer verification inputs exceed callback response ceiling");
+    }
+    // Only an inert response may escape. Contact eligibility is rechecked by
+    // the reservation transaction; expiry/revocation still gate this read.
+    admitted.with_live_callback(|| Ok(inputs))
+}
+
+fn restore_admitted_consumer_verifier(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    admitted: AuthenticatedConsumerRoot,
+) -> anyhow::Result<PreparedRetainedConsumerVerifier> {
+    let requirement = retained_consumer_requirement(authority, guard, admitted.purpose())?;
+    let coordinate = admitted.coordinate();
     let view = admitted.purpose().execution_view()?;
     let source = view
         .remote_verifier_source(&coordinate.scenario_id)
@@ -2284,7 +2436,7 @@ pub fn prepare_retained_consumer_verifier(
         &view,
         &coordinate.scenario_id,
     )?;
-    authority.ensure_guard(&guard)?;
+    authority.ensure_guard(guard)?;
     // Foreign-target executable bytes remain sealed data on the controller.
     // No local execution capability or mutable path is introduced.
     let payload =
@@ -2293,8 +2445,76 @@ pub fn prepare_retained_consumer_verifier(
         purpose: admitted.purpose().clone(),
         coordinate: admitted.coordinate().clone(),
         selection: admitted.selection().clone(),
+        requirement,
         payload,
     })
+}
+
+/// Reproduce the admitted consumer recipe from exact retained Worker bytes.
+/// The enclosing purpose has already been authenticated by its born root.
+/// No current Bundle lookup, caller profile or executable permission is used.
+fn retained_consumer_requirement(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+) -> anyhow::Result<ryeos_state::external_execution::admission::ExternalCandidateRequirement> {
+    let content = purpose
+        .consumer_content
+        .as_ref()
+        .context("consumer purpose has no retained content")?;
+    let definitions = purpose
+        .consumer_definitions
+        .as_ref()
+        .context("consumer purpose has no retained definitions")?;
+    let context = purpose
+        .policy_source
+        .policy
+        .consumer_execution_context
+        .as_ref()
+        .context("consumer purpose has no signed execution context")?;
+    content.validate_for(context, definitions)?;
+    let (profile, owner) =
+        crate::source_closure_admission::compile_retained_structured_worker_profile(
+            authority,
+            guard,
+            &content.worker_source,
+        )?;
+    if profile.profile_hash != content.worker_profile_hash
+        || owner.canonical_ref != definitions.worker.canonical_ref
+        || owner.root_raw_content_digest != definitions.worker.raw_content_digest
+        || owner.signer_fingerprint != definitions.worker.publisher_fingerprint
+    {
+        bail!("retained consumer Worker profile or owner differs from accepted definitions");
+    }
+    let requirement = profile
+        .external_candidate_requirement()?
+        .context("retained consumer Worker has no external candidate requirement")?;
+    if requirement.runtime_product_declaration_id != content.runtime_realization.id
+        || requirement.runtime_product_declaration_id
+            != content.runtime_member.product_declaration_id
+        || requirement.runtime_recipe.executable_relative_path
+            != content.runtime_member.relative_path
+    {
+        bail!("retained consumer requirement differs from admitted runtime member");
+    }
+    let realizations = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .chain(content.environment_realizations.iter())
+            .chain(std::iter::once(&content.runtime_realization))
+            .cloned()
+            .collect(),
+    )?;
+    let reproduced = ryeos_state::external_execution::admission::ExternalCandidateQualificationUse::from_admitted_inputs(
+        &requirement, &profile, &content.worker_source, &realizations,
+        &content.executable_search, &content.process_environment,
+    )?;
+    if content.qualification_use.as_ref() != Some(&reproduced) {
+        bail!("retained consumer requirement differs from complete admitted use");
+    }
+    reproduced.require_qualified_use(&purpose.policy_source.policy.verifier_parameters)?;
+    Ok(requirement)
 }
 
 /// Exact current preflight data, not a remote-contact or publication grant.

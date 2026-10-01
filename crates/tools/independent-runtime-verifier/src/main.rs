@@ -153,7 +153,8 @@ async fn admitted_main() -> Result<()> {
     ensure!(
         mode.is_none()
             || mode.as_deref() == Some(OsStr::new("--scenario-driver"))
-            || mode.as_deref() == Some(OsStr::new("--scoped-resume-race-probe")),
+            || mode.as_deref() == Some(OsStr::new("--scoped-resume-race-probe"))
+            || mode.as_deref() == Some(OsStr::new("--consumer-controller")),
         "unsupported verifier mode"
     );
     let mut input = Vec::new();
@@ -161,6 +162,9 @@ async fn admitted_main() -> Result<()> {
         .take((INPUT_LIMIT + 1) as u64)
         .read_to_end(&mut input)?;
     ensure!(input.len() <= INPUT_LIMIT, "verifier input exceeds bound");
+    if mode.as_deref() == Some(OsStr::new("--consumer-controller")) {
+        return run_consumer_controller(&input).await;
+    }
     let parameters = Parameters::parse(&input)?;
     let realizations = std::env::var("RYEOS_EXTERNAL_REALIZATIONS")
         .context("daemon-protected realization set absent")?;
@@ -861,6 +865,69 @@ async fn admitted_main() -> Result<()> {
     bail!(
         "scoped producer and frozen files settled; Codex and guest records are internally checked, but collector identity, isolation, terminal and runtime provenance is incomplete; no qualification claims issued"
     )
+}
+
+/// The signed Tool selects this entrypoint and the exact finite policy input.
+/// No caller supplies root/capsule/purpose hashes. This cut observes the
+/// independent diagnostic, and cannot issue the still-unjoined Q claim.
+async fn run_consumer_controller(input: &[u8]) -> Result<()> {
+    use ryeos_independent_runtime_verifier::consumer_controller::{
+        ConsumerControllerInvocation, ConsumerControllerOutcome, run_controller_beat,
+    };
+    let parameters: ryeos_independent_runtime_verifier::consumer_record::ConsumerVerifierConfiguration =
+        serde_json::from_slice(input)?;
+    parameters.validate()?;
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(
+        parameters.controller.maximum_duration_ms,
+    ));
+    let thread_id = std::env::var("RYEOSD_THREAD_ID")
+        .context("protected invoking verifier thread identity absent")?;
+    ryeos_runtime::validate_runtime_thread_id(&thread_id).map_err(anyhow::Error::msg)?;
+    let client = UdsRuntimeClient::from_env()?;
+    let project = lillux::PinnedDirectory::open(Path::new("."))?
+        .context("admitted verifier working directory absent")?;
+    let name = format!("consumer-controller-{thread_id}");
+    let (private, invocation) = match project.open_child_directory(OsStr::new(&name))? {
+        Some(directory) => (directory, ConsumerControllerInvocation::Recover),
+        None => (
+            project.create_child(OsStr::new(&name), 0o700)?,
+            ConsumerControllerInvocation::Fresh,
+        ),
+    };
+    match run_controller_beat(
+        &client,
+        &private,
+        &thread_id,
+        &parameters.controller.inputs,
+        invocation,
+        deadline,
+    )
+    .await?
+    {
+        ConsumerControllerOutcome::Settled(observed) => {
+            // Bounded exact references are diagnostic output. They are not a
+            // ProductQualificationResult and cannot satisfy its claim schema.
+            println!(
+                "{}",
+                json!({
+                    "schema": "ryeos.codex.consumer_controller_diagnostic.v1",
+                    "remote_consumer_attempt": {
+                        "operation_id": observed.challenge.intent.operation_id,
+                        "evidence_sha256": observed.evidence_sha256,
+                        "termination_operation_id": observed.provider_terminal.operation_id,
+                        "terminal_observation_sha256": observed.provider_terminal.observation_sha256,
+                    },
+                    "qualification_claims_enabled": false,
+                })
+            );
+            bail!(
+                "independent consumer diagnostic settled; actual Q transcript and qualification semantics remain unjoined"
+            )
+        }
+        ConsumerControllerOutcome::Unresolved(_) => {
+            bail!("consumer diagnostic unresolved; observation/recovery required, no relaunch")
+        }
+    }
 }
 
 async fn abort_exact_scoped_child(

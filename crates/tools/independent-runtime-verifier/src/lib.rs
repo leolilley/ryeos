@@ -4,10 +4,12 @@
 //! still needs to own the native guest and real app-server observations.
 
 pub mod app_server;
+pub mod consumer_controller;
 pub mod consumer_observer;
 pub mod consumer_outer_owner;
 pub mod consumer_protocol;
 pub mod consumer_record;
+pub mod consumer_termination;
 pub mod guest_observation;
 pub mod native_guest;
 pub mod production_inputs;

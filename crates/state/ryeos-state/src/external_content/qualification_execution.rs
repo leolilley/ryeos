@@ -21,6 +21,7 @@ use crate::objects::canonical_value_digest;
 /// deliberately neither deserializable nor independently constructible.
 #[derive(Debug)]
 pub struct QualificationExecutionPurposeView<'a> {
+    purpose: &'a QualificationLaunchPurpose,
     enclosing_purpose_digest: String,
     policy_source: &'a ProductQualificationPolicySource,
     consumer_content: Option<&'a ProductQualificationConsumerContentIdentity>,
@@ -37,6 +38,7 @@ impl<'a> QualificationExecutionPurposeView<'a> {
     pub(crate) fn from_purpose(purpose: &'a QualificationLaunchPurpose) -> Result<Self> {
         purpose.validate()?;
         Ok(Self {
+            purpose,
             enclosing_purpose_digest: canonical_value_digest(&serde_json::to_value(purpose)?)?,
             policy_source: &purpose.policy_source,
             consumer_content: purpose.consumer_content.as_ref(),
@@ -52,6 +54,21 @@ impl<'a> QualificationExecutionPurposeView<'a> {
     /// launch owner, or verifier identity.
     pub fn has_same_enclosing_purpose(&self, sealed: &Self) -> bool {
         self.enclosing_purpose_digest == sealed.enclosing_purpose_digest
+    }
+
+    /// Delegate the full subject/source/use join to the same validated sealed
+    /// purpose; a partial execution view must not reconstruct that authority.
+    pub fn validate_remote_consumer_coordinate(
+        &self,
+        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+        selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    ) -> Result<()> {
+        self.purpose
+            .validate_remote_consumer_coordinate(coordinate, selection)
+    }
+
+    pub fn owner_fingerprint(&self) -> &'a str {
+        &self.purpose.owner_fingerprint
     }
 
     pub fn policy_source(&self) -> &'a ProductQualificationPolicySource {

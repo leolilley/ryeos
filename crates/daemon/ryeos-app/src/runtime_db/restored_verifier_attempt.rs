@@ -83,7 +83,29 @@ fn canonical<T: Serialize>(value: &T) -> Result<String> {
     )?)
 }
 
+pub(super) fn require_current_callback_launch(
+    conn: &Connection,
+    root: &str,
+    owner: &str,
+) -> Result<()> {
+    let live: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_launch_claim c
+         JOIN thread_runtime r ON r.thread_id=c.thread_id
+         WHERE c.thread_id=?1 AND c.claimed_by=?2
+         AND r.chain_root_id=?1 AND r.stop_requested_at_ms IS NULL
+         AND r.stop_intent IS NULL)",
+        params![root, owner],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        live,
+        "consumer callback lost its current unstopped launch owner"
+    );
+    Ok(())
+}
+
 fn admitted_consumer_selection(
+    conn: &Connection,
     intent: &RestoredVerifierAttemptIntent,
     qualification: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationIntent,
     admission: Option<&AuthenticatedConsumerRoot>,
@@ -92,9 +114,62 @@ fn admitted_consumer_selection(
         (RemoteVerificationPurpose::OwnerMeasurement { .. }, None) => Ok(None),
         (RemoteVerificationPurpose::ConsumerRuntime { .. }, Some(admission)) => {
             admission.require_attempt(intent, qualification)?;
+            if let Some(owner) = admission.callback_launch_owner() {
+                require_current_callback_launch(
+                    conn,
+                    &admission.coordinate().accepted_root_id,
+                    owner,
+                )?;
+            }
             Ok(Some(admission.selection().clone()))
         }
         _ => anyhow::bail!("verifier attempt requires its matching admission lane"),
+    }
+}
+
+#[cfg(test)]
+mod callback_launch_tests {
+    use super::*;
+
+    #[test]
+    fn remote_consumer_current_launch_refuses_replacement_stop_and_missing_authority() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Minimal relational fixture for the admission predicate, not a
+        // substitute for joined born-root/callback admission acceptance.
+        conn.execute_batch(
+            "CREATE TABLE thread_launch_claim(thread_id TEXT PRIMARY KEY, claimed_by TEXT);
+             CREATE TABLE thread_runtime(thread_id TEXT PRIMARY KEY, chain_root_id TEXT,
+                 stop_requested_at_ms INTEGER, stop_intent TEXT);
+             INSERT INTO thread_launch_claim VALUES('root','owner');
+             INSERT INTO thread_runtime VALUES('root','root',NULL,NULL);",
+        )
+        .unwrap();
+        require_current_callback_launch(&conn, "root", "owner").unwrap();
+        assert!(require_current_callback_launch(&conn, "root", "replacement").is_err());
+        assert!(require_current_callback_launch(&conn, "missing", "owner").is_err());
+        for sql in [
+            "UPDATE thread_runtime SET stop_requested_at_ms=1",
+            "UPDATE thread_runtime SET stop_requested_at_ms=NULL, stop_intent='cancel'",
+            "UPDATE thread_runtime SET stop_intent=NULL, chain_root_id='foreign'",
+            "DELETE FROM thread_runtime",
+        ] {
+            conn.execute(sql, []).unwrap();
+            assert!(require_current_callback_launch(&conn, "root", "owner").is_err());
+        }
+        conn.execute(
+            "INSERT INTO thread_runtime VALUES('root','root',NULL,NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE thread_launch_claim SET claimed_by='replacement'",
+            [],
+        )
+        .unwrap();
+        assert!(require_current_callback_launch(&conn, "root", "owner").is_err());
+        require_current_callback_launch(&conn, "root", "replacement").unwrap();
+        conn.execute("DELETE FROM thread_launch_claim", []).unwrap();
+        assert!(require_current_callback_launch(&conn, "root", "replacement").is_err());
     }
 }
 
@@ -490,9 +565,9 @@ impl RuntimeDb {
     pub(crate) fn reserve_consumer_verifier_attempt(
         &self,
         intent: &RestoredVerifierAttemptIntent,
-        admission: AuthenticatedConsumerRoot,
+        admission: &AuthenticatedConsumerRoot,
     ) -> Result<RestoredVerifierAttemptRecord> {
-        self.reserve_verifier_attempt(intent, Some(&admission))
+        self.reserve_verifier_attempt(intent, Some(admission))
     }
 
     fn reserve_verifier_attempt(
@@ -504,7 +579,7 @@ impl RuntimeDb {
         let qualification =
             super::runtime_snapshot_qualification::read(&tx, &intent.qualification_operation_id)?
                 .context("restored verifier qualification was not retained")?;
-        let selection = admitted_consumer_selection(intent, &qualification.intent, admission)?;
+        let selection = admitted_consumer_selection(&tx, intent, &qualification.intent, admission)?;
         if let Some(existing) = read(&tx, &intent.operation_id)? {
             ensure!(
                 existing.intent == *intent && existing.consumer_selection == selection,
@@ -581,9 +656,9 @@ impl RuntimeDb {
     pub(crate) fn claim_consumer_verifier_attempt(
         &self,
         operation_id: &str,
-        admission: AuthenticatedConsumerRoot,
+        admission: &AuthenticatedConsumerRoot,
     ) -> Result<RestoredVerifierAttemptClaim> {
-        self.claim_verifier_attempt(operation_id, Some(&admission))
+        self.claim_verifier_attempt(operation_id, Some(admission))
     }
 
     fn claim_verifier_attempt(
@@ -599,7 +674,7 @@ impl RuntimeDb {
         )?
         .context("restored verifier qualification disappeared before contact claim")?;
         ensure!(
-            admitted_consumer_selection(&record.intent, &qualification.intent, admission)?
+            admitted_consumer_selection(&tx, &record.intent, &qualification.intent, admission)?
                 == record.consumer_selection,
             "consumer claim changed admitted selection"
         );

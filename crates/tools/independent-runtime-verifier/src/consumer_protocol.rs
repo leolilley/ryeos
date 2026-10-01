@@ -39,11 +39,17 @@ impl ConsumerScriptedExpectation {
         let configuration = record.scripted_configuration()?;
         private_parent.require_owner_private_directory()?;
         private_parent.ensure_path_binding()?;
-        let (_, canary_directory) = private_parent.create_unique_child("consumer-canary", 0o700)?;
-        let (canary_value, canary_observation) =
-            crate::staging::create_controller_canary(&canary_directory)?;
-        let commands =
-            crate::staging::scripted_canary_commands(&canary_directory.path().join("canary"))?;
+        let expected_path = record.scripted_canary_path(challenge)?;
+        ensure!(
+            private_parent.path().join("consumer-canary/canary") == expected_path,
+            "consumer canary parent differs from exact occurrence work"
+        );
+        let canary_directory =
+            private_parent.create_child(std::ffi::OsStr::new("consumer-canary"), 0o700)?;
+        let canary_value = record.canary_value.clone();
+        let canary_observation =
+            crate::staging::create_preselected_controller_canary(&canary_directory, &canary_value)?;
+        let commands = record.scripted_canary_commands(challenge)?;
         let expected = Self {
             record_sha256,
             challenge_digest: challenge.intent.consumer_challenge_digest()?,
@@ -106,18 +112,26 @@ impl ConsumerScriptedExpectation {
         record: &ConsumerInputRecord,
         challenge: &ConsumerRuntimeChallenge,
     ) -> Result<()> {
-        self.recheck(record, challenge)?;
-        let file = self
-            .canary_directory
-            .open_pinned_regular(std::ffi::OsStr::new("canary"), false)?
-            .ok_or_else(|| anyhow::anyhow!("consumer controller canary is missing"))?;
-        let actual = file.read_stable_bounded(&self.canary_observation, 65)?;
+        let actual = self.observed_canary(record, challenge)?;
         crate::scripted_provider::check_requests(
             requests,
             format!("{}\n", self.canary_value).as_bytes(),
             &actual,
             crate::staging::CONTROLLER_CANARY_DENIAL,
         )
+    }
+
+    fn observed_canary(
+        &self,
+        record: &ConsumerInputRecord,
+        challenge: &ConsumerRuntimeChallenge,
+    ) -> Result<Vec<u8>> {
+        self.recheck(record, challenge)?;
+        let file = self
+            .canary_directory
+            .open_pinned_regular(std::ffi::OsStr::new("canary"), false)?
+            .ok_or_else(|| anyhow::anyhow!("consumer controller canary is missing"))?;
+        file.read_stable_bounded(&self.canary_observation, 65)
     }
 
     pub fn check_turn(
@@ -127,54 +141,64 @@ impl ConsumerScriptedExpectation {
         challenge: &ConsumerRuntimeChallenge,
     ) -> Result<()> {
         self.recheck(record, challenge)?;
-        let script = crate::scripted_provider::GUEST_COMMAND_SCRIPT;
-        let shell = crate::scripted_provider::GUEST_SHELL;
-        let routing = crate::routing_observation::RoutingScenario {
-            thread_id: collected.thread_id.clone(),
-            turn_id: collected.turn_id.clone(),
-            guest_cwd: "/workspace".into(),
-            local_refusal_command: self.commands.forbidden_local_write.clone(),
-            guest_command_script: script.into(),
-            secret_read_script: self.commands.guest_read.clone(),
-            patch_input: crate::scripted_provider::PATCH_INPUT.into(),
-            guest_command: format!("{shell} -c '{script}'"),
-            secret_read_command: format!("{shell} -c '{}'", self.commands.guest_read),
-            candidate_path: crate::scripted_provider::CANDIDATE_PATH.into(),
-            candidate_added_content: crate::scripted_provider::CANDIDATE_CONTENT.into(),
-            expected_command_output: self.configuration.expected_command_output.clone(),
-            secret_read_denial: crate::staging::CONTROLLER_CANARY_DENIAL.into(),
-            controller_canary_value: self.canary_value.clone(),
-        };
-        crate::routing_observation::check_notifications(&routing, &collected.notifications)?;
-        ensure!(collected.native_observation.len() as u64 <=
+        check_scripted_turn(collected, record, challenge)
+    }
+}
+
+fn check_scripted_turn(
+    collected: &ConsumerCollectedTurn,
+    record: &ConsumerInputRecord,
+    challenge: &ConsumerRuntimeChallenge,
+) -> Result<()> {
+    let commands = record.scripted_canary_commands(challenge)?;
+    let configuration = record.scripted_configuration()?;
+    let script = crate::scripted_provider::GUEST_COMMAND_SCRIPT;
+    let shell = crate::scripted_provider::GUEST_SHELL;
+    let routing = crate::routing_observation::RoutingScenario {
+        thread_id: collected.thread_id.clone(),
+        turn_id: collected.turn_id.clone(),
+        guest_cwd: "/workspace".into(),
+        local_refusal_command: commands.forbidden_local_write.clone(),
+        guest_command_script: script.into(),
+        secret_read_script: commands.guest_read.clone(),
+        patch_input: crate::scripted_provider::PATCH_INPUT.into(),
+        guest_command: format!("{shell} -c '{script}'"),
+        secret_read_command: format!("{shell} -c '{}'", commands.guest_read),
+        candidate_path: crate::scripted_provider::CANDIDATE_PATH.into(),
+        candidate_added_content: crate::scripted_provider::CANDIDATE_CONTENT.into(),
+        expected_command_output: configuration.expected_command_output.clone(),
+        secret_read_denial: crate::staging::CONTROLLER_CANARY_DENIAL.into(),
+        controller_canary_value: record.canary_value.clone(),
+    };
+    crate::routing_observation::check_notifications(&routing, &collected.notifications)?;
+    ensure!(collected.native_observation.len() as u64 <=
             ryeos_external_execution_contract::restored_runtime_measurement::MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
             "consumer native observation exceeds bound");
-        let observed: serde_json::Value = serde_json::from_slice(&collected.native_observation)?;
-        ensure!(
-            lillux::canonical_json(&observed)?.as_bytes() == collected.native_observation
-                && observed["schema"] == "ryeos.consumer-native-observation.v1"
-                && observed["operation_id"] == challenge.intent.operation_id
-                && observed["challenge_digest"] == self.challenge_digest
-                && observed["input_record_sha256"] == self.record_sha256,
-            "scripted native evidence differs from exact attempt"
-        );
-        crate::native_guest::check_production_applied_receipt(&observed, record)?;
-        crate::guest_observation::check_guest_protocol(
-            &observed,
-            &crate::guest_observation::GuestProtocolScenario {
-                shell,
-                guest_cwd_uri: "file:///workspace",
-                guest_command: script,
-                secret_read_command: &self.commands.guest_read,
-                expected_command_output: &self.configuration.expected_command_output,
-                controller_canary_value: &self.canary_value,
-                secret_read_denial: crate::staging::CONTROLLER_CANARY_DENIAL,
-                candidate_uri: crate::scripted_provider::CANDIDATE_URI,
-                candidate_relative_path: crate::scripted_provider::CANDIDATE_RELATIVE_PATH,
-                candidate_content: crate::scripted_provider::CANDIDATE_CONTENT.as_bytes(),
-            },
-        )
-    }
+    let observed: serde_json::Value = serde_json::from_slice(&collected.native_observation)?;
+    ensure!(
+        lillux::canonical_json(&observed)?.as_bytes() == collected.native_observation
+            && observed["schema"] == "ryeos.consumer-native-observation.v1"
+            && observed["operation_id"] == challenge.intent.operation_id
+            && observed["challenge_digest"] == challenge.intent.consumer_challenge_digest()?
+            && observed["input_record_sha256"] == lillux::sha256_hex(&record.canonical_bytes()?),
+        "scripted native evidence differs from exact attempt"
+    );
+    crate::native_guest::check_production_applied_receipt(&observed, record)?;
+    crate::guest_observation::check_guest_protocol(
+        &observed,
+        &crate::guest_observation::GuestProtocolScenario {
+            shell,
+            guest_cwd_uri: "file:///workspace",
+            guest_command: script,
+            secret_read_command: &commands.guest_read,
+            expected_command_output: &configuration.expected_command_output,
+            controller_canary_value: &record.canary_value,
+            secret_read_denial: crate::staging::CONTROLLER_CANARY_DENIAL,
+            candidate_uri: crate::scripted_provider::CANDIDATE_URI,
+            candidate_relative_path: crate::scripted_provider::CANDIDATE_RELATIVE_PATH,
+            candidate_content: crate::scripted_provider::CANDIDATE_CONTENT.as_bytes(),
+        },
+    )
 }
 
 pub struct ConsumerCollectedTurn {
@@ -204,6 +228,180 @@ pub struct ConsumerObservedProtocol {
     pub turn: ConsumerCollectedTurn,
     pub outer: crate::consumer_outer_owner::ConsumerOuterObservation,
     pub peer_requests: Vec<serde_json::Value>,
+    pub protocol_input: Vec<u8>,
+    pub protocol_output: Vec<u8>,
+    pub observed_canary: Vec<u8>,
+}
+
+/// Closed product-owned retained envelope. Parsing corroborates exact input
+/// and launch data; it does not qualify a runtime or prove provider death.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerRetainedEvidence {
+    schema: String,
+    operation_id: String,
+    occurrence_id: String,
+    challenge_digest: String,
+    verifier_artifact_hash: String,
+    input_record_sha256: String,
+    coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub notifications: Vec<serde_json::Value>,
+    pub native_observation: serde_json::Value,
+    pub outer_observation: crate::consumer_outer_owner::ConsumerOuterObservation,
+    pub peer_requests: Vec<serde_json::Value>,
+    protocol_input_b64: String,
+    protocol_output_b64: String,
+    observed_canary_b64: String,
+}
+
+impl ConsumerRetainedEvidence {
+    pub fn parse_for_observation(
+        bytes: &[u8],
+        record: &ConsumerInputRecord,
+        challenge: &ConsumerRuntimeChallenge,
+        observation: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerifierAdapterObservation,
+        deadline: MonotonicDeadline,
+    ) -> Result<Self> {
+        challenge.validate()?;
+        record.validate_attempt(&challenge.intent)?;
+        ensure!(
+            record.selection == challenge.selection,
+            "retained evidence changed verifier selection"
+        );
+        observation.validate_for_intent(&challenge.intent)?;
+        observation.verify_evidence_bytes(bytes)?;
+        let evidence: Self = serde_json::from_slice(bytes)?;
+        let input_digest = lillux::sha256_hex(&record.canonical_bytes()?);
+        let challenge_digest = challenge.intent.consumer_challenge_digest()?;
+        ensure!(
+            evidence.schema == "ryeos.codex.consumer-observation.v2"
+                && evidence.operation_id == challenge.intent.operation_id
+                && evidence.occurrence_id == challenge.intent.restored_occurrence_id
+                && evidence.challenge_digest == challenge_digest
+                && evidence.verifier_artifact_hash == challenge.intent.verifier_artifact_hash
+                && evidence.input_record_sha256 == input_digest
+                && evidence.coordinate == record.coordinate,
+            "retained consumer envelope changed exact attempt inputs"
+        );
+        ensure!(
+            !evidence.thread_id.is_empty()
+                && evidence.thread_id.len() <= 1024
+                && !evidence.turn_id.is_empty()
+                && evidence.turn_id.len() <= 1024
+                && evidence.notifications.len() <= 1024
+                && evidence.peer_requests.len() <= 1024,
+            "retained consumer protocol identities or collections exceed bound"
+        );
+        ensure!(
+            evidence.native_observation["schema"] == "ryeos.consumer-native-observation.v1"
+                && evidence.native_observation["operation_id"] == challenge.intent.operation_id
+                && evidence.native_observation["challenge_digest"] == challenge_digest
+                && evidence.native_observation["input_record_sha256"] == input_digest,
+            "retained native observation changed exact attempt inputs"
+        );
+        crate::native_guest::check_production_applied_receipt(
+            &evidence.native_observation,
+            record,
+        )?;
+        let outer_bytes =
+            lillux::canonical_json(&serde_json::to_value(&evidence.outer_observation)?)?
+                .into_bytes();
+        crate::consumer_outer_owner::ConsumerOuterObservation::parse_for_inputs(
+            &outer_bytes,
+            record,
+            challenge,
+        )?;
+        let (sent, output) = evidence.protocol_transcript()?;
+        evidence
+            .outer_observation
+            .check_complete_transcript(&sent, &output)?;
+        ensure!(
+            crate::app_server::check_retained_scripted_transcript(
+                &sent,
+                &output,
+                &evidence.thread_id,
+                &evidence.turn_id,
+                deadline
+            )? == evidence.notifications,
+            "retained notifications differ from complete output transcript"
+        );
+        ensure!(
+            evidence.observed_canary_b64.len() == 88,
+            "retained canary encoding has wrong length"
+        );
+        let observed_canary = decode_retained_transcript(&evidence.observed_canary_b64)?;
+        ensure!(
+            observed_canary.len() == 65,
+            "retained canary observation has wrong length"
+        );
+        crate::scripted_provider::check_requests(
+            &evidence.peer_requests,
+            format!("{}\n", record.canary_value).as_bytes(),
+            &observed_canary,
+            crate::staging::CONTROLLER_CANARY_DENIAL,
+        )?;
+        check_scripted_turn(
+            &ConsumerCollectedTurn {
+                thread_id: evidence.thread_id.clone(),
+                turn_id: evidence.turn_id.clone(),
+                notifications: evidence.notifications.clone(),
+                native_observation: lillux::canonical_json(&evidence.native_observation)?
+                    .into_bytes(),
+            },
+            record,
+            challenge,
+        )?;
+        ensure!(
+            !deadline.has_elapsed(),
+            "retained consumer semantic check exceeded deadline"
+        );
+        Ok(evidence)
+    }
+
+    pub fn protocol_transcript(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        Ok((
+            decode_retained_transcript(&self.protocol_input_b64)?,
+            decode_retained_transcript(&self.protocol_output_b64)?,
+        ))
+    }
+}
+
+fn decode_retained_transcript(encoded: &str) -> Result<Vec<u8>> {
+    use base64::Engine as _;
+    const MAX_BYTES: usize = 1024 * 1024;
+    ensure!(
+        encoded.len() <= MAX_BYTES.div_ceil(3) * 4,
+        "retained protocol transcript exceeds bound"
+    );
+    let encoding = base64::engine::general_purpose::STANDARD;
+    let bytes = encoding.decode(encoded)?;
+    ensure!(
+        bytes.len() <= MAX_BYTES && encoding.encode(&bytes) == encoded,
+        "retained protocol transcript is not canonical bounded base64"
+    );
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod retained_transcript_tests {
+    use super::decode_retained_transcript;
+    use base64::Engine as _;
+
+    #[test]
+    fn retained_transcript_decode_is_exact_canonical_and_bounded() {
+        let encoding = base64::engine::general_purpose::STANDARD;
+        let bytes = b"{\"method\":\"notification\"}\n\xff";
+        assert_eq!(
+            decode_retained_transcript(&encoding.encode(bytes)).unwrap(),
+            bytes
+        );
+        assert!(decode_retained_transcript("Zg").is_err());
+        assert!(decode_retained_transcript("Zg==\n").is_err());
+        assert!(decode_retained_transcript(&encoding.encode(vec![0; 1024 * 1024 + 1])).is_err());
+        assert_eq!(decode_retained_transcript("").unwrap(), Vec::<u8>::new());
+    }
 }
 
 impl ConsumerObservedProtocol {
@@ -217,6 +415,7 @@ impl ConsumerObservedProtocol {
         challenge: &ConsumerRuntimeChallenge,
         deadline: MonotonicDeadline,
     ) -> Result<Vec<u8>> {
+        use base64::Engine as _;
         use ryeos_external_execution_contract::restored_runtime_measurement::MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES;
         ensure!(!deadline.has_elapsed(), "consumer evidence export expired");
         challenge.validate()?;
@@ -229,12 +428,28 @@ impl ConsumerObservedProtocol {
         );
         let native: serde_json::Value = serde_json::from_slice(&self.turn.native_observation)?;
         ensure!(
+            self.protocol_input.len() <= 1024 * 1024 && self.protocol_output.len() <= 1024 * 1024,
+            "consumer complete transcript exceeds bound"
+        );
+        self.outer
+            .check_complete_transcript(&self.protocol_input, &self.protocol_output)?;
+        ensure!(
+            crate::app_server::check_retained_scripted_transcript(
+                &self.protocol_input,
+                &self.protocol_output,
+                &self.turn.thread_id,
+                &self.turn.turn_id,
+                deadline
+            )? == self.turn.notifications,
+            "consumer exported notifications differ from complete transcript"
+        );
+        ensure!(
             native.is_object()
                 && lillux::canonical_json(&native)?.as_bytes() == self.turn.native_observation,
             "consumer native evidence is not a canonical object"
         );
         let value = serde_json::json!({
-            "schema": "ryeos.codex.consumer-observation.v1",
+            "schema": "ryeos.codex.consumer-observation.v2",
             "operation_id": challenge.intent.operation_id,
             "occurrence_id": challenge.intent.restored_occurrence_id,
             "challenge_digest": challenge.intent.consumer_challenge_digest()?,
@@ -247,6 +462,9 @@ impl ConsumerObservedProtocol {
             "native_observation": native,
             "outer_observation": self.outer,
             "peer_requests": self.peer_requests,
+            "protocol_input_b64": base64::engine::general_purpose::STANDARD.encode(&self.protocol_input),
+            "protocol_output_b64": base64::engine::general_purpose::STANDARD.encode(&self.protocol_output),
+            "observed_canary_b64": base64::engine::general_purpose::STANDARD.encode(&self.observed_canary),
         });
         let bytes = lillux::canonical_json(&value)?.into_bytes();
         ensure!(
@@ -334,10 +552,17 @@ pub fn collect_owned_consumer_protocol(
         !active_deadline.has_elapsed(),
         "consumer final observation expired"
     );
+    let (sent, output) = app.wire_transcript();
+    outer.check_complete_transcript(sent, output)?;
     Ok(ConsumerObservedProtocol {
         turn,
         outer,
         peer_requests: requests,
+        protocol_input: sent.to_vec(),
+        protocol_output: output.to_vec(),
+        observed_canary: inputs
+            .expectation
+            .observed_canary(inputs.record, inputs.challenge)?,
     })
 }
 

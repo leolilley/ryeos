@@ -6,8 +6,9 @@
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::{
-    ConsumerRuntimeVerificationCoordinate, ConsumerRuntimeVerifierSelection,
-    RemoteVerificationPurpose, RestoredVerifierAttemptIntent,
+    CONSUMER_INPUT_RECORD_NAME, ConsumerRuntimeChallenge, ConsumerRuntimeVerificationCoordinate,
+    ConsumerRuntimeVerifierSelection, MAX_CONSUMER_INPUT_RECORD_BYTES, RemoteVerificationPurpose,
+    RestoredVerifierAttemptIntent,
 };
 use ryeos_external_execution_contract::staging_package::GuestStagingEntry;
 use ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose;
@@ -16,8 +17,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::QualificationExecutionEnvironment;
 
-pub const CONSUMER_INPUT_RECORD_NAME: &str = "consumer-input.json";
-pub const MAX_CONSUMER_INPUT_RECORD_BYTES: usize = 96 * 1024;
 /// Exact archive mode shared by publication, import and subordinate selection.
 const CONSUMER_VERIFIER_MODE: u32 = 0o500;
 /// Dedicated command-environment startup input, never an admission credential.
@@ -91,6 +90,108 @@ mod control_tests {
     use super::*;
 
     #[test]
+    fn callback_inputs_cannot_choose_record_schema_or_supply_executable() {
+        let hash = "a".repeat(64);
+        let coordinate = ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-root".into(),
+            accepted_capsule_hash: hash.clone(),
+            qualification_purpose_digest: hash.clone(),
+            scenario_id: "consumer".into(),
+            scenario_source_digest: hash.clone(),
+            subject_digest: hash.clone(),
+            use_digest: hash.clone(),
+            prerequisite_measurement_attempt_id: hash.clone(),
+            prerequisite_measurement_observation_digest: hash,
+        };
+        let error =
+            ConsumerInputRecord::from_callback_inputs(serde_json::json!({"schema":1}), &coordinate)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot supply the product record schema")
+        );
+        let error = ConsumerInputRecord::from_callback_inputs(
+            serde_json::json!({"executable":"/ambient/codex"}),
+            &coordinate,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+        let error = ConsumerInputRecord::from_callback_inputs(
+            serde_json::json!({"canary_value":"a".repeat(64)}),
+            &coordinate,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot supply the verifier canary")
+        );
+        let error = ConsumerInputRecord::from_callback_inputs(
+            serde_json::json!({"padding":"x".repeat(128 * 1024)}),
+            &coordinate,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exceed transport ceiling"));
+    }
+
+    #[test]
+    fn controller_record_recovery_refuses_missing_or_malformed_original_without_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        directory.tighten_owner_private_directory().unwrap();
+        let hash = "a".repeat(64);
+        let coordinate: ConsumerRuntimeVerificationCoordinate = serde_json::from_value(serde_json::json!({
+            "schema":1,"accepted_root_id":"T-root","accepted_capsule_hash":hash,
+            "qualification_purpose_digest":hash,"scenario_id":"consumer","scenario_source_digest":hash,
+            "subject_digest":hash,"use_digest":hash,"prerequisite_measurement_attempt_id":hash,
+            "prerequisite_measurement_observation_digest":hash,
+        })).unwrap();
+        let missing = RetainedControllerConsumerRecord::reopen(
+            &directory,
+            serde_json::json!({}),
+            &coordinate,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            missing.to_string().contains("recovery cannot regenerate"),
+            "{missing:#}"
+        );
+        assert!(directory.entries_no_follow_bounded(1).unwrap().is_empty());
+        let original = directory
+            .atomic_create_pinned_regular(
+                std::ffi::OsStr::new(CONTROLLER_RECORD_NAME),
+                b"{}",
+                0o400,
+            )
+            .unwrap()
+            .unwrap();
+        let observation = original.observation().unwrap();
+        let fresh = RetainedControllerConsumerRecord::prepare_fresh(
+            &directory,
+            serde_json::json!({}),
+            &coordinate,
+        )
+        .err()
+        .unwrap();
+        assert!(fresh.to_string().contains("already exists"), "{fresh:#}");
+        assert!(
+            RetainedControllerConsumerRecord::reopen(
+                &directory,
+                serde_json::json!({}),
+                &coordinate
+            )
+            .is_err()
+        );
+        assert_eq!(
+            original.read_stable_bounded(&observation, 2).unwrap(),
+            b"{}"
+        );
+    }
+
+    #[test]
     fn outer_completion_encoding_is_bounded_and_strict_not_settlement_evidence() {
         let request = ConsumerOuterCompletionRequest {
             schema: "ryeos.codex.consumer_outer_completion.v1".into(),
@@ -120,7 +221,11 @@ mod control_tests {
             "provider_executable_manifest_hash":hash, "execution_environment_digest":hash,
         });
         let value = serde_json::json!({
-            "schema":"ryeos.codex.consumer_verifier.v1",
+            "schema":"ryeos.codex.consumer_verifier.v2",
+            "controller": {
+                "inputs": {"scenario_id":"consumer", "qualification_operation_id":"a".repeat(64), "prerequisite_measurement_attempt_id":"b".repeat(64)},
+                "maximum_duration_ms":300_000,
+            },
             "expected_command_output":"/workspace\nripgrep fixture\n",
             "responses_origin":"http://127.0.0.1:1234",
             "outer_network":"shared_guest_loopback",
@@ -129,6 +234,24 @@ mod control_tests {
         let configuration: ConsumerVerifierConfiguration =
             serde_json::from_value(value.clone()).unwrap();
         configuration.validate().unwrap();
+        let mut missing_controller = value.clone();
+        missing_controller
+            .as_object_mut()
+            .unwrap()
+            .remove("controller");
+        assert!(
+            serde_json::from_value::<ConsumerVerifierConfiguration>(missing_controller).is_err()
+        );
+        for duration in [0, 300_001, u64::MAX] {
+            let mut changed = value.clone();
+            changed["controller"]["maximum_duration_ms"] = duration.into();
+            assert!(
+                serde_json::from_value::<ConsumerVerifierConfiguration>(changed)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
         let mut missing = value.clone();
         missing.as_object_mut().unwrap().remove("outer_network");
         assert!(serde_json::from_value::<ConsumerVerifierConfiguration>(missing).is_err());
@@ -189,11 +312,19 @@ fn require_private_disjoint_control(
 #[serde(deny_unknown_fields)]
 pub struct ConsumerVerifierConfiguration {
     pub schema: String,
+    pub controller: ConsumerControllerSelection,
     pub expected_command_output: String,
     pub responses_origin: String,
     pub outer_network: ConsumerOuterNetwork,
     pub external_candidate_qualification_context:
         ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerControllerSelection {
+    pub inputs: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
+    pub maximum_duration_ms: u64,
 }
 
 /// Explicit signed scenario routing. This shares only the disposable guest's
@@ -207,10 +338,15 @@ pub enum ConsumerOuterNetwork {
 }
 
 impl ConsumerVerifierConfiguration {
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "ryeos.codex.consumer_verifier.v1",
+            self.schema == "ryeos.codex.consumer_verifier.v2",
             "unsupported consumer verifier configuration"
+        );
+        self.controller.inputs.validate()?;
+        ensure!(
+            (1..=300_000).contains(&self.controller.maximum_duration_ms),
+            "consumer controller duration exceeds its finite allowance"
         );
         self.external_candidate_qualification_context.validate()?;
         crate::scripted_provider::validate_configuration(
@@ -928,13 +1064,164 @@ impl ImportedConsumerInputs {
 #[serde(deny_unknown_fields)]
 pub struct ConsumerInputRecord {
     pub schema: u32,
+    /// Controller-side admitted verifier expectation, never daemon authority
+    /// or a credential. Retain the original record before contact/recovery.
+    pub canary_value: String,
     pub purpose: QualificationLaunchPurpose,
     pub coordinate: ConsumerRuntimeVerificationCoordinate,
     pub selection: ConsumerRuntimeVerifierSelection,
     pub requirement: ExternalCandidateRequirement,
 }
 
+/// Private preparation file in the enclosing verifier workspace, not a new
+/// contact journal. The existing daemon attempt remains the contact owner.
+pub struct RetainedControllerConsumerRecord {
+    directory: lillux::PinnedDirectory,
+    observation: lillux::OpenRegularFileObservation,
+    record: ConsumerInputRecord,
+    bytes: Vec<u8>,
+}
+
+const CONTROLLER_RECORD_NAME: &str = "controller-consumer-input.json";
+
+impl RetainedControllerConsumerRecord {
+    /// Fresh preparation only; an existing file is uncertainty, never permission
+    /// to overwrite or silently adopt an earlier occurrence.
+    pub fn prepare_fresh(
+        directory: &lillux::PinnedDirectory,
+        protected_inputs: serde_json::Value,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<Self> {
+        directory.require_owner_private_directory()?;
+        directory.ensure_path_binding()?;
+        let name = std::ffi::OsStr::new(CONTROLLER_RECORD_NAME);
+        ensure!(
+            directory.open_pinned_regular(name, false)?.is_none(),
+            "consumer preparation already exists; no replacement permitted"
+        );
+        let record =
+            ConsumerInputRecord::from_callback_inputs(protected_inputs.clone(), coordinate)?;
+        directory
+            .atomic_create_pinned_regular(name, &record.canonical_bytes()?, 0o400)?
+            .context("consumer record preparation raced; no contact permitted")?;
+        Self::reopen(directory, protected_inputs, coordinate)
+    }
+
+    /// Recovery only: missing original bytes refuse without generating any
+    /// new canary. The enclosing daemon journal remains the contact authority.
+    pub fn reopen(
+        directory: &lillux::PinnedDirectory,
+        protected_inputs: serde_json::Value,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<Self> {
+        directory.require_owner_private_directory()?;
+        directory.ensure_path_binding()?;
+        let file = directory
+            .open_pinned_regular(std::ffi::OsStr::new(CONTROLLER_RECORD_NAME), false)?
+            .context("original controller record is absent; recovery cannot regenerate it")?;
+        let observation = file.observation()?;
+        ensure!(
+            observation.permission_mode()? == 0o400,
+            "retained controller record is not private read-only input"
+        );
+        let bytes =
+            file.read_stable_bounded(&observation, MAX_CONSUMER_INPUT_RECORD_BYTES as u64)?;
+        let record = ConsumerInputRecord::parse(&bytes)?;
+        let current = ConsumerInputRecord::from_callback_inputs_with_canary(
+            protected_inputs,
+            coordinate,
+            record.canary_value.clone(),
+        )?;
+        ensure!(
+            current.canonical_bytes()? == bytes,
+            "retained consumer record differs from protected callback inputs"
+        );
+        let retained = Self {
+            directory: directory.try_clone()?,
+            observation,
+            record,
+            bytes,
+        };
+        retained.recheck()?;
+        Ok(retained)
+    }
+
+    pub fn record(&self) -> &ConsumerInputRecord {
+        &self.record
+    }
+
+    pub fn bytes_for_contact(&self) -> Result<&[u8]> {
+        self.recheck()?;
+        Ok(&self.bytes)
+    }
+
+    fn recheck(&self) -> Result<()> {
+        self.directory.require_owner_private_directory()?;
+        self.directory.ensure_path_binding()?;
+        let file = self
+            .directory
+            .open_pinned_regular(std::ffi::OsStr::new(CONTROLLER_RECORD_NAME), false)?
+            .context("retained controller record disappeared")?;
+        ensure!(
+            file.read_stable_bounded(&self.observation, MAX_CONSUMER_INPUT_RECORD_BYTES as u64)?
+                == self.bytes,
+            "retained controller record changed before contact"
+        );
+        Ok(())
+    }
+}
+
 impl ConsumerInputRecord {
+    /// Render this product's language from the authenticated callback response.
+    /// Transport authentication is the caller's responsibility; this parser
+    /// cannot grant contact or independently prove a born-root identity.
+    /// Call once during fresh preparation and retain the exact canonical bytes
+    /// before contact. Recovery loads those bytes or refuses; it never renders
+    /// a new random expectation for an existing attempt.
+    pub fn from_callback_inputs(
+        inputs: serde_json::Value,
+        expected: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<Self> {
+        Self::from_callback_inputs_with_canary(
+            inputs,
+            expected,
+            lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
+        )
+    }
+
+    fn from_callback_inputs_with_canary(
+        mut inputs: serde_json::Value,
+        expected: &ConsumerRuntimeVerificationCoordinate,
+        canary_value: String,
+    ) -> Result<Self> {
+        expected.validate()?;
+        ensure!(
+            serde_json::to_vec(&inputs)?.len() <= 128 * 1024,
+            "consumer callback inputs exceed transport ceiling"
+        );
+        let object = inputs
+            .as_object_mut()
+            .context("consumer callback inputs are not an object")?;
+        ensure!(
+            !object.contains_key("schema"),
+            "consumer callback inputs cannot supply the product record schema"
+        );
+        ensure!(
+            !object.contains_key("canary_value"),
+            "consumer callback inputs cannot supply the verifier canary"
+        );
+        object.insert("schema".into(), 2.into());
+        object.insert("canary_value".into(), canary_value.into());
+        let record: Self = serde_json::from_value(inputs)?;
+        ensure!(
+            &record.coordinate == expected,
+            "consumer callback inputs differ from requested exact coordinate"
+        );
+        record.validate()?;
+        record.canonical_bytes()?;
+        Ok(record)
+    }
+
     /// Decode only the retained signed policy's finite protocol parameters.
     /// Mandatory use context is compared with admission-derived retained use;
     /// no fixture paths, caller hashes or ambient configuration are consulted.
@@ -956,6 +1243,10 @@ impl ConsumerInputRecord {
         let configuration: ConsumerVerifierConfiguration =
             serde_json::from_value(parameters.clone())?;
         configuration.validate()?;
+        configuration
+            .controller
+            .inputs
+            .require_coordinate(&self.coordinate)?;
         Ok(configuration)
     }
 
@@ -1238,6 +1529,15 @@ impl ConsumerInputRecord {
     /// that channel; arbitrary deserialized intent data is not run authority.
     pub fn validate_attempt(&self, intent: &RestoredVerifierAttemptIntent) -> Result<()> {
         self.validate()?;
+        ensure!(
+            intent.qualification_operation_id
+                == self
+                    .scripted_configuration()?
+                    .controller
+                    .inputs
+                    .qualification_operation_id,
+            "consumer attempt differs from signed qualification selection"
+        );
         let RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &intent.purpose else {
             anyhow::bail!("owner measurement cannot consume a consumer input archive");
         };
@@ -1255,6 +1555,28 @@ impl ConsumerInputRecord {
         );
         intent.consumer_challenge_digest()?;
         Ok(())
+    }
+
+    pub fn scripted_canary_path(
+        &self,
+        challenge: &ConsumerRuntimeChallenge,
+    ) -> Result<std::path::PathBuf> {
+        challenge.validate()?;
+        self.validate_attempt(&challenge.intent)?;
+        ensure!(
+            self.selection == challenge.selection,
+            "consumer canary changed protected selection"
+        );
+        Ok(std::path::PathBuf::from(ryeos_external_execution_contract::restored_runtime_measurement::RESTORATION_VERIFIER_REMOTE_DIRECTORY)
+            .join(format!("consumer-observer-{}", challenge.intent.operation_id))
+            .join("consumer-canary").join("canary"))
+    }
+
+    pub fn scripted_canary_commands(
+        &self,
+        challenge: &ConsumerRuntimeChallenge,
+    ) -> Result<crate::staging::ScriptedCanaryCommands> {
+        crate::staging::scripted_canary_commands(&self.scripted_canary_path(challenge)?)
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self> {
@@ -1283,7 +1605,11 @@ impl ConsumerInputRecord {
     }
 
     pub fn validate(&self) -> Result<QualificationExecutionEnvironment> {
-        ensure!(self.schema == 1, "unsupported consumer input record schema");
+        ensure!(self.schema == 2, "unsupported consumer input record schema");
+        ensure!(
+            lillux::valid_hash(&self.canary_value),
+            "consumer preselected canary is not canonical"
+        );
         self.purpose
             .validate_remote_consumer_coordinate(&self.coordinate, &self.selection)?;
         self.requirement.validate()?;

@@ -1,0 +1,39 @@
+# ryeos:signed:2026-10-01T01:17:03Z:1b8924c7c1bcf16fb2327df194a65fb6128ba0a832c170473eac1ed46325504c:DsrgQw0SBdMKn7jDiRAlYS2iA1yK9fWr8WMzor/rxJ0sMyBahG/o8cv/n8EFjEGFYAxiXD0GHbFwjqDtPhheBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex/qualification
+version: "1.0.0"
+description: Observe the exact admitted consumer runtime through restricted daemon callbacks; qualification remains refused until the Q transcript joins.
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/qualification_consumer_callback
+effects: live
+required_caps: []
+config:
+  command: bin:independent-runtime-verifier
+  args: [--consumer-controller]
+  input_data: "${params_json}"
+  timeout_secs: 300
+config_schema:
+  type: object
+  additionalProperties: false
+  required: [schema, controller, expected_command_output, responses_origin, outer_network, external_candidate_qualification_context]
+  properties:
+    schema: {type: string, enum: [ryeos.codex.consumer_verifier.v2]}
+    controller:
+      type: object
+      additionalProperties: false
+      required: [inputs, maximum_duration_ms]
+      properties:
+        maximum_duration_ms: {type: integer, minimum: 1, maximum: 300000}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [scenario_id, qualification_operation_id, prerequisite_measurement_attempt_id]
+          properties:
+            scenario_id: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$'}
+            qualification_operation_id: {type: string, pattern: '^[0-9a-f]{64}$'}
+            prerequisite_measurement_attempt_id: {type: string, pattern: '^[0-9a-f]{64}$'}
+    expected_command_output: {type: string}
+    responses_origin: {type: string}
+    outer_network: {type: string, enum: [shared_guest_loopback]}
+    # The typed admitted-use parser checks this exact value against the sealed
+    # purpose. It is data agreement, never caller-created admission authority.
+    external_candidate_qualification_context: {type: object}

@@ -77,16 +77,74 @@ pub fn compile_admitted_structured_worker_profile(
     let authority = captured.source_authority()?;
     authority.ensure_guard(guard)?;
     let cas = authority.cas_store()?;
-    let entry = match &captured.binding().logical_binding {
+    compile_structured_worker_from_cas(&cas, captured.binding(), captured.manifest())
+}
+
+/// Reconstruct data beneath an already authenticated retained projection.
+/// This neither admits source nor creates executable authority. The caller
+/// must join the returned owner/profile with its accepted enclosing purpose.
+pub(crate) fn compile_retained_structured_worker_profile(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    projection: &EffectiveSourceClosureProjection,
+) -> anyhow::Result<(
+    AdmittedStructuredSessionProfile,
+    ryeos_state::objects::SourceOwnerIdentity,
+)> {
+    authority.ensure_guard(guard)?;
+    projection.validate()?;
+    let cas = authority.cas_store()?;
+    let binding = ryeos_state::objects::EffectiveSourceBinding::from_value(
+        &ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            &cas,
+            &projection.binding_hash,
+            ryeos_state::objects::MAX_SOURCE_BINDING_BYTES as u64,
+        )?,
+    )?;
+    let manifest = ryeos_state::objects::SourceClosureManifest::from_value(
+        &ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            &cas,
+            &projection.content_manifest_hash,
+            ryeos_state::objects::MAX_SOURCE_MANIFEST_BYTES as u64,
+        )?,
+    )?;
+    ensure!(
+        binding.digest()? == projection.binding_hash
+            && binding.content_manifest_hash == projection.content_manifest_hash
+            && manifest.digest()? == projection.content_manifest_hash
+            && binding.owner_key()? == projection.owner_key
+            && manifest.totals.file_count == projection.file_count
+            && manifest.totals.total_bytes == projection.total_bytes,
+        "retained Worker source differs from authenticated projection"
+    );
+    let profile = compile_structured_worker_from_cas(&cas, &binding, &manifest)?;
+    authority.ensure_guard(guard)?;
+    Ok((profile, binding.owner))
+}
+
+fn compile_structured_worker_from_cas(
+    cas: &lillux::CasStore,
+    binding: &ryeos_state::objects::EffectiveSourceBinding,
+    manifest: &ryeos_state::objects::SourceClosureManifest,
+) -> anyhow::Result<AdmittedStructuredSessionProfile> {
+    binding.validate_content_manifest(manifest)?;
+    let entry = match &binding.logical_binding {
         ryeos_state::objects::SourceLogicalBinding::Worker { entry, .. } => entry,
         _ => anyhow::bail!("structured-session source has a non-Worker logical binding"),
     };
     let mut source_files = std::collections::BTreeMap::new();
-    for file in &captured.manifest().entries {
+    for file in &manifest.entries {
         let bytes = cas
-            .get_blob(&file.blob_hash)?
+            .get_blob_bounded(&file.blob_hash, file.size)?
             .ok_or_else(|| anyhow::anyhow!("captured Worker source blob is absent"))?;
-        source_files.insert(file.path.clone(), bytes);
+        ensure!(
+            bytes.len() as u64 == file.size && lillux::sha256_hex(&bytes) == file.blob_hash,
+            "retained Worker source blob differs from exact manifest"
+        );
+        ensure!(
+            source_files.insert(file.path.clone(), bytes).is_none(),
+            "structured-session source has duplicate logical paths"
+        );
     }
     let profile_bytes = source_files.get(entry).ok_or_else(|| {
         anyhow::anyhow!("structured-session entry is absent from captured source")

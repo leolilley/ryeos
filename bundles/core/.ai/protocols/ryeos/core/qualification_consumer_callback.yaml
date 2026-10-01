@@ -1,9 +1,9 @@
-# ryeos:signed:2026-10-01T01:13:28Z:70352d0de41d16cce2811e124d587e62d863c63209e891dc51eb8d1f5331562b:TgoAH6gBXkWOzUXZAfGWf6ka2rTOa/F8NNr28HOWqeIsDRj0l8+GMlT1E9rosDdaZNQqXiE1bVUDWH5d7Q3mAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-01T01:13:28Z:e27206a68ddfaadd110d470abeade5adcedae4543cdd2436de815e909c189884:7xHJvvTPBZzvYAf9qoqJmgtUwtY2MMTzhAr4BOFyfW9i8w7px8OKLroJ8dV6avXAspYLqtVf7S5PWo3QHcCBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
-name: qualification_scoped_callback
+name: qualification_consumer_callback
 category: ryeos/core
 abi_version: v1
-description: Dedicated direct verifier callback protocol for one daemon-owned scoped producer.
+description: Independent verifier callback protocol for one exact retained remote consumer attempt.
 stdin:
   shape: opaque
 stdout:
@@ -24,10 +24,10 @@ capabilities:
 lifecycle:
   mode: managed
 callback_channel: http
-qualification_callback: scoped_producer
+qualification_callback: remote_consumer
 execution_evidence:
   handler: handler:ryeos/core/scoped-qualification-execution-evidence
-  config: {}
+  config: { subordinate: remote_consumer }
   limits:
     max_request_bytes: 2097152
     max_response_bytes: 2097152

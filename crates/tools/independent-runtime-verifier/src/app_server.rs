@@ -35,6 +35,83 @@ pub trait AppServerTransport {
     ) -> Result<Vec<u8>>;
 }
 
+/// Read-only transport over already authenticated bytes. It performs no I/O,
+/// sends no command and owns no process. The existing protocol state machine
+/// checks the exact scripted input rather than a second protocol interpreter.
+struct RetainedTranscriptTransport<'a> {
+    input: &'a [u8],
+    output: &'a [u8],
+}
+
+impl AppServerTransport for RetainedTranscriptTransport<'_> {
+    fn write_all_until(&mut self, bytes: &[u8], deadline: MonotonicDeadline) -> Result<()> {
+        ensure!(!deadline.has_elapsed(), "retained transcript check expired");
+        ensure!(
+            self.input.starts_with(bytes),
+            "retained transcript changed scripted request bytes"
+        );
+        self.input = &self.input[bytes.len()..];
+        Ok(())
+    }
+
+    fn read_frame_until(
+        &mut self,
+        delimiter: u8,
+        maximum_bytes: usize,
+        deadline: MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        ensure!(!deadline.has_elapsed(), "retained transcript check expired");
+        if self.output.is_empty() {
+            return Ok(Vec::new());
+        }
+        let count = self
+            .output
+            .iter()
+            .position(|byte| *byte == delimiter)
+            .map(|index| index + 1)
+            .unwrap_or(self.output.len());
+        ensure!(
+            count <= maximum_bytes,
+            "retained transcript frame exceeds bound"
+        );
+        let frame = self.output[..count].to_vec();
+        self.output = &self.output[count..];
+        Ok(frame)
+    }
+}
+
+/// Recheck the full scripted conversation using the production collector.
+/// Separate input/output pipes establish protocol correlation, not cross-pipe
+/// causal chronology, source authentication or namespace settlement.
+pub fn check_retained_scripted_transcript(
+    input: &[u8],
+    output: &[u8],
+    expected_thread: &str,
+    expected_turn: &str,
+    deadline: MonotonicDeadline,
+) -> Result<Vec<Value>> {
+    ensure!(
+        input.len() <= MAX_TOTAL_BYTES && output.len() <= MAX_TOTAL_BYTES,
+        "retained transcript exceeds protocol bound"
+    );
+    let mut protocol =
+        AppServerProtocol::new(RetainedTranscriptTransport { input, output }, deadline);
+    protocol.initialize_scripted()?;
+    let thread = protocol.start_scripted_thread()?;
+    let turn = protocol.start_scripted_turn(&thread)?;
+    ensure!(
+        thread.thread_id == expected_thread && turn == expected_turn,
+        "retained transcript changed started thread or turn"
+    );
+    protocol.await_scripted_turn_completed(&thread, &turn)?;
+    protocol.drain_wire_until_eof(deadline)?;
+    ensure!(
+        protocol.transport.input.is_empty() && protocol.transport.output.is_empty(),
+        "retained transcript has unaccounted bytes"
+    );
+    Ok(protocol.notifications)
+}
+
 /// Shared Codex protocol state, independent of the enclosing process owner.
 /// A namespace owner can use this same collector without manufacturing an
 /// exact-child owner or starting an additional Worker/session lifecycle.
@@ -761,6 +838,74 @@ mod tests {
             invalid.scripted_phase = ScriptedPhase::TurnCompleted;
             assert!(invalid.drain_wire_until_eof(deadline).is_err());
         }
+    }
+
+    #[test]
+    fn retained_scripted_transcript_reuses_correlation_and_accounts_for_tail() {
+        let deadline = MonotonicDeadline::after(lillux::time::Duration::from_secs(5));
+        let mut live = memory_protocol("thread-one");
+        live.initialize_scripted().unwrap();
+        let thread = live.start_scripted_thread().unwrap();
+        let turn = live.start_scripted_turn(&thread).unwrap();
+        live.await_scripted_turn_completed(&thread, &turn).unwrap();
+        let (input, output) = live.wire_transcript();
+        let mut output = output.to_vec();
+        output.extend_from_slice(b"{\"method\":\"tail\",\"params\":{}}\n");
+        let observed =
+            check_retained_scripted_transcript(input, &output, "thread-one", "turn-one", deadline)
+                .unwrap();
+        assert_eq!(observed.last().unwrap()["method"], "tail");
+        assert!(
+            check_retained_scripted_transcript(
+                input,
+                &output,
+                "other-thread",
+                "turn-one",
+                deadline
+            )
+            .is_err()
+        );
+        assert!(
+            check_retained_scripted_transcript(
+                input,
+                &output[..output.len() - 1],
+                "thread-one",
+                "turn-one",
+                deadline
+            )
+            .is_err()
+        );
+        let mut extra = input.to_vec();
+        extra.extend_from_slice(b"{}\n");
+        assert!(
+            check_retained_scripted_transcript(&extra, &output, "thread-one", "turn-one", deadline)
+                .is_err()
+        );
+        let mut changed = input.to_vec();
+        changed[0] = b' ';
+        assert!(
+            check_retained_scripted_transcript(
+                &changed,
+                &output,
+                "thread-one",
+                "turn-one",
+                deadline
+            )
+            .is_err()
+        );
+        let wrong_response = String::from_utf8(output)
+            .unwrap()
+            .replace("\"id\":2", "\"id\":9");
+        assert!(
+            check_retained_scripted_transcript(
+                input,
+                wrong_response.as_bytes(),
+                "thread-one",
+                "turn-one",
+                deadline
+            )
+            .is_err()
+        );
     }
 
     #[test]

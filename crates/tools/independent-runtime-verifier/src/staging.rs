@@ -630,12 +630,26 @@ pub(crate) fn create_controller_canary(
     // Hashing fresh OS randomness produces a printable, shell-safe probe
     // value without turning a deterministic fixture string into a secret.
     let value = lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>());
+    let observation = create_preselected_controller_canary(controller, &value)?;
+    Ok((value, observation))
+}
+
+/// The admitted controller may preselect this synthetic probe value before
+/// delivery. It is data, not a credential, path choice or execution authority.
+pub(crate) fn create_preselected_controller_canary(
+    controller: &PinnedDirectory,
+    value: &str,
+) -> Result<lillux::OpenRegularFileObservation> {
+    ensure!(
+        lillux::valid_hash(value),
+        "preselected controller canary is not canonical"
+    );
     let file = controller
         .atomic_create_pinned_regular(OsStr::new("canary"), format!("{value}\n").as_bytes(), 0o600)?
         .context("controller canary already exists")?;
     let observation = file.observation()?;
-    check_controller_canary(controller, &value, &observation)?;
-    Ok((value, observation))
+    check_controller_canary(controller, value, &observation)?;
+    Ok(observation)
 }
 
 pub(crate) fn check_controller_canary(
@@ -1475,6 +1489,18 @@ mod tests {
             .unwrap();
         check_exact_candidate(&replacement).unwrap();
         assert!(check_exact_candidate(&candidate).is_err());
+    }
+
+    #[test]
+    fn preselected_controller_canary_is_create_only_and_exact() {
+        let temp = tempfile::tempdir().unwrap();
+        let controller = PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        assert!(create_preselected_controller_canary(&controller, "not-a-hash").is_err());
+        let expected = "a".repeat(64);
+        let original = create_preselected_controller_canary(&controller, &expected).unwrap();
+        check_controller_canary(&controller, &expected, &original).unwrap();
+        assert!(create_preselected_controller_canary(&controller, &expected).is_err());
+        assert!(check_controller_canary(&controller, &"b".repeat(64), &original).is_err());
     }
 
     #[test]
