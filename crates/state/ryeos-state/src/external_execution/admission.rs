@@ -1440,11 +1440,13 @@ pub mod test_support {
         requirement: &ExternalCandidateRequirement,
     ) -> anyhow::Result<AdmittedStructuredSessionProfile> {
         let contract = json!({
+            "schema_version": crate::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
             "external_candidate": requirement,
             "workload_client": null,
             "workload_realization_id": "codex",
             "auxiliary_configs": [],
             "runtime_configs": [],
+            "configuration_absence": {"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
         });
         Ok(AdmittedStructuredSessionProfile {
             profile_hash: canonical_value_digest(&contract)?,
@@ -1454,6 +1456,11 @@ pub mod test_support {
             baseline_destination: "config.conf".into(),
             auxiliary_configs: Vec::new(),
             runtime_configs: Vec::new(),
+            configuration_absence: crate::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
         })
     }
 

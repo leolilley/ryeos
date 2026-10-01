@@ -5715,6 +5715,11 @@ session:
             schema_hashes: BTreeMap::from([("fixture.json".to_owned(), "b".repeat(64))]),
             baseline_source: "baseline.toml".to_owned(),
             baseline_destination: "config.toml".to_owned(),
+            configuration_absence: ryeos_state::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
             auxiliary_configs: Vec::new(),
             runtime_configs: Vec::new(),
         };
@@ -5811,6 +5816,11 @@ session:
             schema_hashes: BTreeMap::new(),
             baseline_source: "baseline.conf".into(),
             baseline_destination: "baseline.conf".into(),
+            configuration_absence: ryeos_state::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
             auxiliary_configs: Vec::new(),
             runtime_configs: vec![SessionRuntimeConfigurationFile {
                 source: "policy.conf".into(),
@@ -5846,6 +5856,11 @@ session:
             schema_hashes: BTreeMap::new(),
             baseline_source: "baseline.conf".into(),
             baseline_destination: "runtime.conf".into(),
+            configuration_absence: ryeos_state::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
             auxiliary_configs: vec![SessionConfigurationFile {
                 source: "environment.conf".into(),
                 destination: "environment.conf".into(),

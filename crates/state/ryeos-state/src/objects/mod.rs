@@ -151,8 +151,10 @@ pub use guest_runtime_materialization::{
 pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};
 pub use persistent_session_capsule::{
-    AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
+    AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile, ConfigurationAbsence,
     CredentialSubjectProjectionContract, ExecutableSearchPathEntry,
+    MAX_CONFIGURATION_ABSENCE_ANCESTORS, MAX_CONFIGURATION_ABSENCE_ENTRIES,
+    MAX_CONFIGURATION_ABSENCE_INSPECTIONS, MAX_CONFIGURATION_ABSENCE_PATH_BYTES,
     MAX_EXECUTABLE_SEARCH_PATH_ENTRIES, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
     MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES, MAX_SESSION_AUXILIARY_CONFIGS,
     MAX_SESSION_CONFIGURATION_FILE_BYTES, MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES,
@@ -162,7 +164,8 @@ pub use persistent_session_capsule::{
     PortableSessionStateClass, PortableSessionStateContract, PortableSessionStateSelector,
     PreparedSessionProcessEnvironment, RetainedExternalRuntimeContentQualification,
     RetainedExternalRuntimeQualification, SESSION_PROCESS_ENVIRONMENT_ENV,
-    SESSION_RUNTIME_ENDPOINTS_ROOT, SESSION_RUNTIME_VIEWS_ROOT, SessionConfigurationFile,
+    SESSION_RUNTIME_ENDPOINTS_ROOT, SESSION_RUNTIME_VIEWS_ROOT,
+    STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, SessionConfigurationFile,
     SessionProcessEnvironmentPathKind, SessionProcessEnvironmentValue,
     SessionRuntimeConfigurationFile, SessionRuntimeViewDelivery, runtime_view_mount_destination,
     session_runtime_endpoint_destination, validate_session_auxiliary_configs,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-10-01T08:57:57Z:909f5b6d239e0a21a6e38425c7fd3bf1b1e3092237c8b3f600ce5c645e69786e:CBU3ScEDnXuKuEqlqZHkTiCs/0Ajz6qDC+DOGAIXHkt/Ys9tGkxG8oR33ee4DxySBTSWkNhjDC6wQiEazrJECQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-01T11:01:14Z:57a90625ec2a7a2d348c2df30769c8404fe7a719c24211bfecfd707eeb4dfc55:yxSsLF6/qDKqO28fAGFeNQyGR+8y6sov7GlgGFdwBgm2oyukDQ8XIv8+qWKC/ma1zCoIGdRaJ5G0+E0lyuGnCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
@@ -511,10 +511,14 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn("workload_client: null", environment)
 
     def test_minimal_profile_has_no_workload_ingress_or_socket_allowance(self) -> None:
-        self.assertEqual(self.profile["schema_version"], 10)
+        self.assertEqual(self.profile["schema_version"], 11)
         self.assertIsNone(self.profile["external_candidate"])
         self.assertEqual(self.profile["auxiliary_configs"], [])
         self.assertEqual(self.profile["runtime_configs"], [])
+        self.assertEqual(self.profile["configuration_absence"], {
+            "absolute_paths": [], "startup_ancestor_paths": [],
+            "route_ancestor_paths": [],
+        })
         self.assertEqual(self.profile["transport"], "stdio_jsonrpc")
         self.assertIsNone(self.profile["workload_client"])
         immutable_args = "\n".join(self.profile["workload_args"])
@@ -948,6 +952,143 @@ class CodexContractTests(unittest.TestCase):
                              (BUNDLE / "schema/app-server-0.147.0/v2" / name).read_bytes())
         setup = next(route for route in profile["routes"] if route["id"] == "session.start")
         self.assertNotIn("experimentalRawEvents", setup["fixed_params"])
+
+    def test_external_original_config_initialization_uses_pinned_rpc_shapes(self) -> None:
+        profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
+        self.assertEqual(profile["schema_version"], 11)
+        self.assertEqual(profile["configuration_absence"], {
+            "absolute_paths": ["/etc/codex/config.toml", "/etc/codex/managed_config.toml",
+                               "/etc/codex/requirements.toml"],
+            "startup_ancestor_paths": [".codex/config.toml"],
+            "route_ancestor_paths": [".codex/config.toml"],
+        })
+        for name in ("structured-session.profile.json", "authoring.profile.json"):
+            ordinary = json.loads((SOURCE / name).read_text())
+            self.assertEqual(ordinary["schema_version"], 11)
+            self.assertEqual(ordinary["configuration_absence"], {
+                "absolute_paths": [], "startup_ancestor_paths": [], "route_ancestor_paths": [],
+            })
+        self.assertEqual(profile["initialization"][2:], [
+            {"method": "configRequirements/read", "effect_class": "pure_read",
+             "params": None, "response_schema": "schema/QNoManagedRequirements.json",
+             "notification": None},
+            {"method": "config/read", "effect_class": "pure_read",
+             "params": {"cwd": "/workspace", "includeLayers": True},
+             "response_schema": "schema/QOriginalConfigGate.json", "notification": None},
+        ])
+        routes = {route["id"]: route for route in profile["routes"]}
+        for route_id in ("session.start", "session.resume"):
+            self.assertTrue({"permissions", "runtimeWorkspaceRoots", "config"}.issubset(
+                routes[route_id]["forbidden_non_null_fields"]))
+        session_methods = {routes[route_id]["method"]
+                           for route_id in profile["route_sets"]["session"]}
+        self.assertTrue(session_methods.isdisjoint({
+            "config/value/write", "config/batchWrite", "experimentalFeatures/enablement/set",
+            "account/login/start", "account/logout", "account/login/cancel",
+        }))
+        self.assertNotIn("--config-file", profile["workload_args"])
+        self.assertEqual(profile["external_candidate"]["provider_configuration_destination"],
+                         "environments.toml")
+
+    def test_external_original_config_schemas_join_signed_baseline_and_argv(self) -> None:
+        # Schema integrity only: behavioral validation of the response cases
+        # belongs to the existing bridge JSON-schema validator, without adding
+        # a Python dependency or a second policy implementation here.
+        profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
+        baseline = tomllib.loads((SOURCE / profile["baseline_config"]).read_text())
+        argv = profile["workload_args"]
+        flags = {}
+        for index, argument in enumerate(argv):
+            if argument == "-c":
+                override = tomllib.loads(argv[index + 1])
+                self.assertTrue(flags.keys().isdisjoint(override))
+                flags.update(override)
+        gate = json.loads((SOURCE / "schema/QOriginalConfigGate.json").read_text())
+        definitions = gate["definitions"]
+        self.assertEqual(definitions["RawSessionFlags"], {"const": flags})
+        raw_user = definitions["RawUserConfig"]
+        self.assertFalse(raw_user["additionalProperties"])
+        self.assertEqual(set(raw_user["required"]), set(baseline))
+        self.assertEqual({name: rule["const"] for name, rule in raw_user["properties"].items()
+                          if name != "projects"}, baseline)
+        trust = raw_user["properties"]["projects"]["additionalProperties"]
+        self.assertEqual(trust["properties"], {"trust_level": {"const": "trusted"}})
+        self.assertFalse(trust["additionalProperties"])
+        merged = definitions["MergedConfig"]
+        self.assertFalse(merged["additionalProperties"])
+        actual_features = merged["properties"]["features"]["const"]
+        expected_features = dict(baseline["features"])
+        # config_processor.rs:52-110 overwrites exactly these seven flags;
+        # values below come from pinned defaults and the signed CLI overrides.
+        expected_features.update({
+            "auth_elicitation": True, "mcp_2026_07_28": False,
+            "memories": False, "mentions_v2": True, "remote_control": False,
+            "remote_plugin": False, "tool_suggest": True,
+        })
+        self.assertEqual(actual_features, expected_features)
+        # This false value is a DEFAULT. Pinned model metadata may still select
+        # CodeMode, so source-family proof must cover its nested handlers.
+        self.assertEqual(actual_features["code_mode"], {"enabled": False})
+        self.assertEqual(actual_features["code_mode_host"], True)
+        shell = merged["properties"]["shell_environment_policy"]["const"]
+        self.assertEqual(shell["filters"], {
+            key.lower(): value for key, value in baseline["shell_environment_policy"]["filters"].items()
+        })
+        for key in ("exclude", "set", "include_only", "experimental_use_profile"):
+            self.assertIsNone(shell[key])
+        for name in ("profile", "tools", "experimental_thread_config_endpoint"):
+            self.assertIn(name, merged["required"])
+            self.assertEqual(merged["properties"][name], {"const": None})
+        requirements = json.loads((SOURCE / "schema/QNoManagedRequirements.json").read_text())
+        self.assertEqual(requirements["required"], ["requirements"])
+        self.assertEqual(requirements["properties"], {"requirements": {"const": None}})
+        self.assertFalse(requirements["additionalProperties"])
+
+    def test_external_original_config_response_fixture_provenance(self) -> None:
+        # Source-derived serializer cases, never an assertion that a launched
+        # process loaded these values or that the inventory/claims gate passed.
+        document = json.loads((BUNDLE / "fixtures/external-original-config-responses.json").read_text())
+        self.assertEqual(document["upstream_revision"],
+                         "be6e8eac029b183056b7e4402879f15d2c85f61b")
+        cases = {case["id"]: case for case in document["cases"]}
+        self.assertEqual(len(cases), len(document["cases"]))
+        self.assertEqual({name for name, case in cases.items() if case["accept"]}, {
+            "pinned_baseline", "trust_only_home_mutation", "disabled_empty_project_layer",
+            "empty_cloud_layer", "requirements_absent_policy",
+        })
+        self.assertTrue({
+            "requirements_missing", "requirements_empty_object", "requirements_feature_constraint",
+            "inherited_mcp", "raw_inherited_mcp", "disabled_nonempty_project", "remote_thread_loader",
+            "legacy_profile", "profile_user_layer", "image_feature_changed", "new_feature",
+            "missing_injected_flag", "wrong_injected_default", "lossy_tools_projection",
+            "raw_hidden_tools_field", "provider_input_in_session_flags", "trust_mutation_extra_authority",
+            "missing_layers", "null_disabled_reason", "missing_user_profile_null",
+            "unknown_layer_kind", "layers_overflow", "unmerged_uppercase_filters",
+            "missing_required_option", "unknown_top_level_config",
+        }.issubset(cases))
+        for case in document["cases"]:
+            self.assertTrue((SOURCE / "schema" / case["schema"]).is_file())
+            if not case["accept"]:
+                self.assertTrue(case["reason"])
+                continue
+            if case["schema"] != "QOriginalConfigGate.json":
+                continue
+            response = case["response"]
+            for layer in response["layers"]:
+                # fingerprint.rs:44 hashes sorted compact UTF-8 JSON.
+                canonical = json.dumps(layer["config"], sort_keys=True,
+                                       ensure_ascii=False, separators=(",", ":")).encode()
+                self.assertEqual(layer["version"], "sha256:" + hashlib.sha256(canonical).hexdigest())
+                if layer["name"]["type"] == "user":
+                    self.assertIn("profile", layer["name"])
+                    self.assertIsNone(layer["name"]["profile"])
+            self.assertIsNone(response["config"]["tools"])
+            self.assertIsNone(response["config"]["profile"])
+            self.assertEqual(response["config"]["history"], {"persistence": "save-all", "max_bytes": None})
+        positive = cases["pinned_baseline"]["response"]
+        self.assertNotIn("auth_elicitation", positive["layers"][0]["config"]["features"])
+        self.assertIn("auth_elicitation", positive["config"]["features"])
+        self.assertNotIn("environments", positive["layers"][0]["config"])
 
     def test_worker_source_digest_covers_the_complete_profile_closure(self) -> None:
         for path in (

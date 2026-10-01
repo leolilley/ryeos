@@ -1,5 +1,5 @@
 {
-  "schema_version": 10,
+  "schema_version": 11,
   "external_candidate": {
     "schema": 7,
     "runtime_authority": "captured_product",
@@ -79,6 +79,15 @@
   "baseline_destination": "config.toml",
   "auxiliary_configs": [],
   "runtime_configs": [],
+  "configuration_absence": {
+    "absolute_paths": [
+      "/etc/codex/config.toml",
+      "/etc/codex/managed_config.toml",
+      "/etc/codex/requirements.toml"
+    ],
+    "startup_ancestor_paths": [".codex/config.toml"],
+    "route_ancestor_paths": [".codex/config.toml"]
+  },
   "portable_state": {
     "schema": 1,
     "restore_contract": "ryeos.worker_session.restore.v1",
@@ -250,6 +259,23 @@
       "params": {},
       "response_schema": null,
       "notification": "initialized"
+    },
+    {
+      "method": "configRequirements/read",
+      "effect_class": "pure_read",
+      "params": null,
+      "response_schema": "schema/QNoManagedRequirements.json",
+      "notification": null
+    },
+    {
+      "method": "config/read",
+      "effect_class": "pure_read",
+      "params": {
+        "cwd": "/workspace",
+        "includeLayers": true
+      },
+      "response_schema": "schema/QOriginalConfigGate.json",
+      "notification": null
     }
   ],
   "recovery": {
@@ -468,7 +494,9 @@
         "baseInstructions",
         "serviceName",
         "modelProvider",
-        "sandbox"
+        "sandbox",
+        "permissions",
+        "runtimeWorkspaceRoots"
       ],
       "forbidden_fields": [
         "approvalPolicy",
@@ -564,7 +592,9 @@
         "config",
         "baseInstructions",
         "modelProvider",
-        "sandbox"
+        "sandbox",
+        "permissions",
+        "runtimeWorkspaceRoots"
       ],
       "forbidden_fields": [
         "approvalPolicy"

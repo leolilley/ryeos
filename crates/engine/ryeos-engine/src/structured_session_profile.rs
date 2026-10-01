@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
 use ryeos_state::objects::{
-    AdmittedStructuredSessionProfile, MAX_SESSION_CONFIGURATION_FILE_BYTES,
+    AdmittedStructuredSessionProfile, ConfigurationAbsence, MAX_SESSION_CONFIGURATION_FILE_BYTES,
     MAX_STRUCTURED_SESSION_PROFILE_BYTES, SessionConfigurationFile,
     SessionRuntimeConfigurationFile, validate_session_auxiliary_configs,
     validate_session_runtime_configs,
@@ -20,9 +20,8 @@ use ryeos_state::objects::{
 
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-/// v10 commits an external provider's generated private configuration
-/// destination so capture/restore exclusions are sealed before node contact.
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 10;
+/// v11 seals the finite absence inventory checked before workload bootstrap.
+pub use ryeos_state::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION;
 
 /// The closed workload transport vocabulary. The admission compiler and the
 /// bridge must accept exactly this set; adding a transport is a schema
@@ -75,6 +74,7 @@ pub fn compile(
         "baseline_destination",
         "auxiliary_configs",
         "runtime_configs",
+        "configuration_absence",
         "external_candidate",
         "portable_state",
         "credential_subject",
@@ -1006,6 +1006,10 @@ pub fn compile(
         serde_json::from_value(object["runtime_configs"].clone())
             .context("decode signed runtime configuration inventory")?;
     validate_session_runtime_configs(&runtime_configs)?;
+    let configuration_absence: ConfigurationAbsence =
+        serde_json::from_value(object["configuration_absence"].clone())
+            .context("decode signed configuration absence inventory")?;
+    configuration_absence.validate_runtime_configs(&runtime_configs)?;
     for config in &runtime_configs {
         let bytes = source_files
             .get(&config.source)
@@ -1036,6 +1040,7 @@ pub fn compile(
         baseline_destination,
         auxiliary_configs,
         runtime_configs,
+        configuration_absence,
     };
     admitted.validate()?;
     Ok(admitted)
@@ -1962,6 +1967,7 @@ mod tests {
             "baseline_destination":"runtime.conf",
             "auxiliary_configs":[],
             "runtime_configs":[],
+            "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
             "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
@@ -2028,6 +2034,64 @@ mod tests {
         profile["routes"][0]["http_path"] = json!("/session");
         profile["routes"][0]["http_body_schema"] = json!("schema/request.json");
         profile["routes"][0]["http_path_parameters"] = json!({});
+    }
+
+    #[test]
+    fn configuration_absence_is_required_and_retained_without_reinterpretation() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        profile["configuration_absence"] = json!({"absolute_paths":["/etc/fixture/policy"],"startup_ancestor_paths":["runtime.conf"],"route_ancestor_paths":["runtime.conf"]});
+        let admitted = compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).unwrap();
+        // The same leaf as the HOME baseline is legal: cwd and HOME differ.
+        admitted.validate().unwrap();
+        let mut changed = admitted.clone();
+        changed.configuration_absence.absolute_paths[0] = "/etc/fixture/other".into();
+        assert!(changed.validate().is_err());
+        let mut missing = serde_json::to_value(&admitted).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("configuration_absence");
+        assert!(serde_json::from_value::<AdmittedStructuredSessionProfile>(missing).is_err());
+        let mut predecessor = admitted.clone();
+        predecessor.contract["schema_version"] = json!(10);
+        predecessor.profile_hash =
+            ryeos_state::objects::canonical_value_digest(&predecessor.contract).unwrap();
+        assert!(predecessor.validate().is_err());
+        let mut old_contract = admitted.clone();
+        old_contract
+            .contract
+            .as_object_mut()
+            .unwrap()
+            .remove("configuration_absence");
+        old_contract.profile_hash =
+            ryeos_state::objects::canonical_value_digest(&old_contract.contract).unwrap();
+        assert!(old_contract.validate().is_err());
+        profile
+            .as_object_mut()
+            .unwrap()
+            .remove("configuration_absence");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+        profile["schema_version"] = json!(10);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+    }
+
+    #[test]
+    fn configuration_absence_refuses_positive_runtime_file_overlap() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        profile["runtime_configs"] =
+            json!([{"source":"policy", "destination":"/etc/fixture/policy"}]);
+        let mut files = schemas();
+        files.insert("policy".into(), b"enabled=false".to_vec());
+        for absent in [
+            "/etc/fixture",
+            "/etc/fixture/policy",
+            "/etc/fixture/policy/child",
+        ] {
+            profile["configuration_absence"] = json!({"absolute_paths":[absent],"startup_ancestor_paths":[],"route_ancestor_paths":[]});
+            assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        }
     }
 
     #[test]

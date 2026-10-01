@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T09:49:55Z:5bd445421739ac9d93e897cece9717b44c337f4f7c9bf32d5c93c02e24c7edd8:LDaNMxsi1m3OEHMRkj/lOQp0/bEqrsPUIxFqAzJyN0vXzGBf9ra1QMrb3N60yFvVtHYT4BJSnyuJN3gkrf8xAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T11:01:14Z:d7a4f7ab3af268511ab9ce5faf4532b81f75650afb8687badd299702aae449ed:kifOjBGCmTBY8a2G1p0t9rvdOy9MBdrha/U6L2sB2TM5xMtcTY0QQBTVSM8RnOldkzwCa2WJedSG853WNSMjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -429,3 +429,61 @@ chosen semantics. All five ordinary runtime claims stay
 disabled until actual required evidence exists; three probes or a routing projection
 cannot replace it. One Q turn also does not promise a hard internal model request,
 token or USD cap. Unknown post-contact charges remain unknown.
+
+
+## Finite original configuration inputs
+
+Structured-session profile 11 requires a closed `configuration_absence` inventory.
+Its three sorted, unique lists select absolute paths, startup-workspace ancestor
+members and route-workspace ancestor members. Their combined bound is 16 entries;
+original and expanded paths are at most 4096 bytes. Expansion includes filesystem
+root, refuses depth above 64 directories and more than 1024 unique inspections,
+and finishes before inspecting anything. Explicit empty inventories preserve the
+other products' selected semantics; missing predecessor fields are refused.
+Persistent-session capsule 21 retains the exact inventory independently and checks
+its equality with the original compiled contract. No new database table or owner
+is introduced. Existing absolute runtime configuration files cannot contradict
+an absence candidate at the same path or an ancestor/descendant path.
+
+The actual structured workload owner checks this inventory before starting its
+subprocess. Startup cwd is the original controller B; route cwd is separately
+selected by the signed external recipe. Existing Lillux no-follow inspection
+accepts only missing entries/parents and refuses files, directories, links,
+special entries, unsafe ancestors and inspection errors. It neither reads ambient
+secret contents nor deletes host files. Existing private HOME, baseline, exclusive
+credential-operation and descriptor custody remain separate. This observes the
+existing trusted host/controller boundary; it is not protection against later
+privileged host mutation or proof of absence of every upstream file read.
+
+The external Codex profile selects Linux system/managed/requirements paths and
+`.codex/config.toml` along both cwd ancestry chains. Its existing signed initializer
+then calls `configRequirements/read` with literal null params and requires exactly
+`{"requirements":null}`. It calls `config/read` with local cwd `/workspace` and
+`includeLayers:true`, validating the finite merged effects and every raw layer,
+including disabled layers, through the existing signed JSON-schema mechanism.
+Raw session flags match the original signed argv; the HOME layer matches the
+selected baseline plus a bounded trust-only project mutation. Other admitted
+layers must be empty. Missing/unknown inputs, profiles, managed requirements,
+inherited MCP and lossy tools projections refuse. The pinned merged serializer's
+seven loaded feature injections and lowercase environment-filter keys are distinct
+from raw TOML layers. Refusal errors expose only schema identity and instance digest.
+Both start and resume reject non-null permissions/runtime-workspace substitution.
+
+The sealed provider adapter input remains a separate descriptor-linked
+`environments.toml`, selected through the original process/launch/peer evidence.
+It is not an extra argv override or witnessed by `config/read`. Noise environment
+overrides remain excluded by the admitted environment and cleared inheritance.
+Pinned linked-worktree config lookup imports hooks from outside these ancestry
+chains; the signed hooks prohibition and nonempty-layer refusal cover that effect
+without claiming every upstream read is absent. `code_mode.enabled=false` sets a
+default; model metadata may still select CodeMode, so the complete conditional
+and nested tool-family source proof remains required.
+
+Source-derived serializer fixtures and actual validator regressions are separate
+from evidence that a live process loaded these values. The inventory and RPC
+checks do not alone witness accepted-thread configuration, a tool registry, Q
+canary denial or local-fallback refusal. Original custody/setup/turn/native capture
+joins and all operational acceptance gates remain necessary. All five ordinary
+runtime claims stay disabled until their actual required evidence exists. Any
+changed profile or schema refreshes and re-signs every Worker binding to the shared
+source directory; older retained evidence cannot substitute for that closure.

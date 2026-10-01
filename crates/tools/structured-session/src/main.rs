@@ -8,6 +8,7 @@ use lillux::time::{Duration, MonotonicDeadline};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+mod configuration_absence;
 mod workload_client_broker;
 
 const WIRE_PROTOCOL: &str = "ryeos.structured-session";
@@ -279,6 +280,7 @@ struct StructuredSessionProfile {
     baseline_destination: String,
     auxiliary_configs: Vec<ryeos_state::objects::SessionConfigurationFile>,
     runtime_configs: Vec<ryeos_state::objects::SessionRuntimeConfigurationFile>,
+    configuration_absence: ryeos_state::objects::ConfigurationAbsence,
     portable_state: Option<ryeos_state::objects::PortableSessionStateContract>,
     credential_subject: Option<ryeos_state::objects::CredentialSubjectProjectionContract>,
     initialization: Vec<InitializationStep>,
@@ -693,6 +695,9 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
         &profile.auxiliary_configs,
     )?;
     ryeos_state::objects::validate_session_runtime_configs(&profile.runtime_configs)?;
+    profile
+        .configuration_absence
+        .validate_runtime_configs(&profile.runtime_configs)?;
     if let Some(requirement) = &profile.external_candidate {
         // The controller's exclusive-session start owner admits and prepares
         // the exact connector, configuration adapter, capability, and contact
@@ -2111,6 +2116,13 @@ impl StructuredWorkload {
             .as_ref()
             .map(|requirement| requirement.runtime_recipe.cwd.clone())
             .unwrap_or_else(|| workspace.to_owned());
+        // Inspect the actual local startup and route filesystem before the
+        // workload can bootstrap or select a thread configuration loader.
+        configuration_absence::require_absent(
+            &profile.configuration_absence,
+            workspace,
+            &route_workspace,
+        )?;
         let mut process_environment = BTreeMap::from([
             ("LANG".to_owned(), "C".to_owned()),
             ("LC_ALL".to_owned(), "C".to_owned()),
@@ -4454,6 +4466,102 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt as _;
 
+    fn original_configuration_schema_fixtures() -> (HashMap<String, Value>, Value) {
+        let schemas = HashMap::from([
+            (
+                "QNoManagedRequirements.json".to_owned(),
+                serde_json::from_str(include_str!(
+                    "../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/QNoManagedRequirements.json"
+                )).unwrap(),
+            ),
+            (
+                "QOriginalConfigGate.json".to_owned(),
+                serde_json::from_str(include_str!(
+                    "../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/QOriginalConfigGate.json"
+                )).unwrap(),
+            ),
+        ]);
+        let fixtures = serde_json::from_str(include_str!(
+            "../../../../bundles/codex/fixtures/external-original-config-responses.json"
+        ))
+        .unwrap();
+        (schemas, fixtures)
+    }
+
+    #[test]
+    fn original_configuration_responses_follow_the_admitted_schema_validator() {
+        let (schemas, fixtures) = original_configuration_schema_fixtures();
+        assert_eq!(fixtures["schema"], json!(1));
+        let cases = fixtures["cases"].as_array().unwrap();
+        assert_eq!(
+            cases.len(),
+            31,
+            "review the complete source-derived fixture inventory"
+        );
+        let mut ids = HashSet::new();
+        let mut accepted = 0;
+        for case in cases {
+            let id = case["id"].as_str().unwrap();
+            assert!(ids.insert(id), "duplicate fixture {id}");
+            let schema = case["schema"].as_str().unwrap();
+            assert!(
+                schemas.contains_key(schema),
+                "unadmitted fixture schema {schema}"
+            );
+            let expected = case["accept"].as_bool().unwrap();
+            let result = validate_schema_from_map(&schemas, schema, &case["response"]);
+            assert_eq!(result.is_ok(), expected, "fixture {id}: {result:?}");
+            accepted += usize::from(expected);
+        }
+        assert_eq!(accepted, 5);
+    }
+
+    #[test]
+    fn original_configuration_refusals_do_not_echo_private_mcp_or_endpoint_values() {
+        let (schemas, fixtures) = original_configuration_schema_fixtures();
+        let baseline = &fixtures["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["id"] == "pinned_baseline")
+            .unwrap()["response"];
+        validate_schema_from_map(&schemas, "QOriginalConfigGate.json", baseline).unwrap();
+        for (field, value, sensitive_values) in [
+            (
+                "mcp_servers",
+                json!({"private-service": {"url": "https://private-mcp.invalid/hidden-endpoint", "bearer_token": "private-mcp-token-marker"}}),
+                vec![
+                    "private-service",
+                    "https://private-mcp.invalid/hidden-endpoint",
+                    "private-mcp-token-marker",
+                ],
+            ),
+            (
+                "experimental_thread_config_endpoint",
+                json!("https://private-thread-config.invalid/secret-marker"),
+                vec!["https://private-thread-config.invalid/secret-marker"],
+            ),
+        ] {
+            let mut response = baseline.clone();
+            response["config"][field] = value;
+            let error = validate_schema_from_map(&schemas, "QOriginalConfigGate.json", &response)
+                .expect_err("unadmitted effect input must refuse");
+            let message = format!("{error:#}");
+            assert!(message.contains("value failed schema"));
+            assert!(message.contains("instance digest"));
+            assert!(
+                !message.contains(field),
+                "refusal exposed raw field {field}"
+            );
+            for sensitive in sensitive_values {
+                assert!(
+                    !message.contains(sensitive),
+                    "refusal exposed private input"
+                );
+            }
+        }
+    }
+
     #[test]
     fn admitted_profile_file_accepts_new_bound_and_refuses_oversize() {
         let root = tempfile::tempdir().unwrap();
@@ -4684,6 +4792,7 @@ mod tests {
             "baseline_destination":"config.toml",
             "auxiliary_configs":[],
             "runtime_configs":[],
+            "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
             "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
@@ -5180,6 +5289,7 @@ server.serve_forever()
             "baseline_destination":"fixture.conf",
             "auxiliary_configs":[],
             "runtime_configs":[],
+            "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
             "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
@@ -5248,6 +5358,45 @@ server.serve_forever()
             "ceremony_clear":false
         }]);
         serde_json::from_value(profile).unwrap()
+    }
+
+    #[test]
+    fn configuration_absence_refuses_before_any_workload_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let forbidden = root.path().join("ambient-config");
+        std::fs::write(&forbidden, b"private input must not be read").unwrap();
+        let mut profile = gating_approval_profile();
+        profile.configuration_absence.absolute_paths = vec![forbidden.to_str().unwrap().into()];
+        let (_, controls) = sync_channel(1);
+        let (results, _) = sync_channel(1);
+        let mut lifecycle = BridgeLifecycle::default();
+        let error = StructuredWorkload::start(
+            &mut lifecycle,
+            "/deliberately-absent-executable",
+            root.path().to_str().unwrap(),
+            root.path().to_str().unwrap(),
+            profile,
+            "session".into(),
+            HashSet::new(),
+            HashMap::new(),
+            Arc::new(Mutex::new(EventQueue::default())),
+            controls,
+            results,
+            "unused",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .err()
+        .expect("present ambient configuration must refuse");
+        assert!(
+            error
+                .to_string()
+                .contains("configuration absence requires an absent entry")
+        );
+        assert!(lifecycle.process.is_none());
+        assert!(lifecycle.diagnostics.is_none());
+        assert!(lifecycle.executable_authorities.is_empty());
     }
 
     #[test]
