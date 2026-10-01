@@ -277,6 +277,11 @@ pub fn check_q_conversation(
             "Q semantic Delta changed its retained digest"
         );
     }
+    check_setup_configuration(
+        expected,
+        &request.session_setup,
+        &transcript.stream.setup_final_response,
+    )?;
     let (thread, start, completion) = check_lifecycle(&transcript.stream, &manifest.turn_id)?;
     ensure!(
         canonical_value_digest(&start)? == manifest.turn_start_digest
@@ -342,6 +347,48 @@ fn observations(body: &Value) -> Result<&Vec<Value>> {
     body.get("session_observations")
         .and_then(Value::as_array)
         .context("Q frame has no observations")
+}
+
+/// Compare actual setup facts, not a tool inventory or an independent model pin.
+/// Provider and permissions belong to this finite external-authoring product.
+fn check_setup_configuration(
+    expected: &QCommandExpectation,
+    signed_setup: &Value,
+    setup_final: &Value,
+) -> Result<()> {
+    let setup = result(setup_final)?;
+    ensure!(
+        text(setup, "cwd")? == expected.cwd && text(setup, "modelProvider")? == "openai",
+        "Q setup changed its admitted external cwd or provider"
+    );
+    for (pointer, value) in [
+        ("/activePermissionProfile/id", "danger-full-access"),
+        ("/approvalsReviewer", "user"),
+        ("/approvalPolicy", "never"),
+        ("/sandbox/type", "dangerFullAccess"),
+    ] {
+        ensure!(
+            setup.pointer(pointer).and_then(Value::as_str) == Some(value),
+            "Q setup changed its admitted permission predicate {pointer}"
+        );
+    }
+    let observed_model = text(setup, "model")?;
+    identifier(observed_model)?;
+    let payload = signed_setup
+        .get("payload")
+        .and_then(Value::as_object)
+        .context("Q signed setup has no payload")?;
+    if let Some(requested) = payload.get("model").filter(|value| !value.is_null()) {
+        let requested = requested
+            .as_str()
+            .context("Q signed setup model is not text")?;
+        identifier(requested)?;
+        ensure!(
+            observed_model == requested,
+            "Q setup changed its explicitly selected model"
+        );
+    }
+    Ok(())
 }
 
 fn check_lifecycle(
@@ -1092,8 +1139,11 @@ mod tests {
         QualificationWorkerTranscriptStream {
             schema: QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA.into(),
             fixture_content: None,
-            setup_final_response: json!({"response":{"result":{"thread":{"id":"thread-one"}}},
-                "session_observations":[{"kind":"remote_thread","id":"thread-one"}]}),
+            setup_final_response: json!({"response":{"result":{
+                "thread":{"id":"thread-one"}, "cwd":"/workspace", "modelProvider":"openai",
+                "model":"q-model", "activePermissionProfile":{"id":"danger-full-access"},
+                "approvalsReviewer":"user", "approvalPolicy":"never", "sandbox":{"type":"dangerFullAccess"}
+            }}, "session_observations":[{"kind":"remote_thread","id":"thread-one"}]}),
             final_response: json!({"response":{"result":{"turn":{"id":"turn-one","status":"inProgress"}}},
                 "session_observations":[{"kind":"state","expected":"idle","next":"turn_running","turn_id":"turn-one"}]}),
             delta_response: Some(json!({"events":[],"session_observations":[{
@@ -1456,6 +1506,74 @@ mod tests {
         let mut wire = serde_json::to_value(&expected).unwrap();
         wire.as_object_mut().unwrap().remove("command_shell");
         assert!(serde_json::from_value::<QCommandExpectation>(wire).is_err());
+    }
+
+    #[test]
+    fn setup_configuration_joins_actual_fields_and_only_explicit_model_selection() {
+        let expected = expectation();
+        let setup = json!({"route_id":"session.start", "payload":{"experimentalRawEvents":true}});
+        let valid = stream().setup_final_response;
+        check_setup_configuration(&expected, &setup, &valid).unwrap();
+        for (pointer, changed_value) in [
+            ("/cwd", json!("/controller")),
+            ("/modelProvider", json!("other-provider")),
+            ("/activePermissionProfile/id", json!("read-only")),
+            ("/approvalsReviewer", json!("auto_review")),
+            ("/approvalPolicy", json!("on-request")),
+            ("/sandbox/type", json!("readOnly")),
+        ] {
+            for value in [changed_value, Value::Null] {
+                let mut changed = valid.clone();
+                *changed["response"]["result"].pointer_mut(pointer).unwrap() = value;
+                assert!(
+                    check_setup_configuration(&expected, &setup, &changed).is_err(),
+                    "{pointer}"
+                );
+            }
+            let mut changed = valid.clone();
+            let (parent, key) = pointer.rsplit_once('/').unwrap();
+            changed["response"]["result"]
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(
+                check_setup_configuration(&expected, &setup, &changed).is_err(),
+                "{pointer}"
+            );
+        }
+        // An unselected/default model is observed, never promoted to an exact pin.
+        let mut selected = setup.clone();
+        selected["payload"]["model"] = Value::Null;
+        check_setup_configuration(&expected, &selected, &valid).unwrap();
+        selected["payload"]["model"] = json!("q-model");
+        check_setup_configuration(&expected, &selected, &valid).unwrap();
+        for model in [
+            json!("other-model"),
+            json!(true),
+            json!(""),
+            json!(" model "),
+        ] {
+            selected["payload"]["model"] = model;
+            assert!(check_setup_configuration(&expected, &selected, &valid).is_err());
+        }
+        for model in [
+            Value::Null,
+            json!(""),
+            json!(" model "),
+            json!("x".repeat(257)),
+        ] {
+            let mut changed = valid.clone();
+            changed["response"]["result"]["model"] = model;
+            assert!(check_setup_configuration(&expected, &setup, &changed).is_err());
+        }
+        let mut changed = valid;
+        changed["response"]["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("model");
+        assert!(check_setup_configuration(&expected, &setup, &changed).is_err());
     }
 
     #[test]
