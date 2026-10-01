@@ -6,12 +6,17 @@
 
 use anyhow::{Context as _, Result, bail, ensure};
 use ryeos_app::external_placement::{
-    ExternalCandidateCleanupLifeline, ExternalCandidateStartProgress, ExternalQualificationStart,
+    ExternalCandidateCleanupLifeline, ExternalCandidateStartProgress,
+    ExternalQualificationControllerTransport, ExternalQualificationStart,
+    inspect_external_qualification_controller_transport,
 };
 use ryeos_app::operator_external_content::product_qualification::PreparedExternalQualificationRoot;
 use ryeos_state::external_execution::ExecutionChannelBinding;
 
 use super::external_qualification_inputs::PreparedExternalQualificationGuest;
+use super::external_qualification_relay::{
+    ExternalQualificationRelayCursor, ExternalQualificationRelayPump,
+};
 
 /// One transport-only attempt from retained operation coordinates. The
 /// accepted root, signed Worker program, backend binding, scenario and limits
@@ -91,12 +96,29 @@ pub fn run_consumer_runtime_verification_transport(
 /// value requests cleanup; a future provider owner must retain it throughout
 /// connector use and independently prove eventual settlement.
 pub(crate) struct ExternalQualificationReady {
+    // Rust drops fields in declaration order. Join every relay contact before
+    // the cleanup lifeline can request provider cancellation, including errors.
+    relay: Option<ExternalQualificationRelayPump>,
     binding: ExecutionChannelBinding,
     root: PreparedExternalQualificationRoot,
     _cleanup: ExternalCandidateCleanupLifeline,
 }
 
 impl ExternalQualificationReady {
+    pub(crate) fn ensure_relay_running(&self) -> Result<()> {
+        if let Some(relay) = &self.relay {
+            relay.ensure_running()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stop_relay(&mut self) -> Result<()> {
+        if let Some(mut relay) = self.relay.take() {
+            relay.stop_and_join()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn binding(&self) -> &ExecutionChannelBinding {
         &self.binding
     }
@@ -111,7 +133,8 @@ impl ExternalQualificationReady {
 
     /// Release the process-local cancellation obligation only after the app
     /// has rejoined exact normal provider terminal evidence in its journal.
-    pub(crate) fn disarm_after_normal_terminal(self) -> Result<()> {
+    pub(crate) fn disarm_after_normal_terminal(mut self) -> Result<()> {
+        self.stop_relay()?;
         self._cleanup.disarm_after_qualification_normal_terminal()
     }
 }
@@ -137,7 +160,7 @@ pub(crate) fn reserve_and_await_external_qualification_ready(
         limits,
         prepared,
     )?;
-    await_external_qualification_ready(start)
+    await_external_qualification_ready(state, start)
 }
 
 /// Run one prepared Q occurrence through its only signed Worker command and
@@ -170,17 +193,35 @@ pub(crate) fn run_prepared_external_qualification_to_normal_terminal(
 /// Consume the one-use start owner and its original guest descriptors until
 /// signed Ready and controller Release are both durable.
 fn await_external_qualification_ready(
+    state: &ryeos_app::state::AppState,
     mut start: ExternalQualificationStart<'_>,
 ) -> Result<ExternalQualificationReady> {
     let deadline = start.deadline();
     let cleanup = start.take_cleanup_lifeline()?;
-    let ready = (|| -> Result<ExecutionChannelBinding> {
+    let ready = (|| -> Result<(ExecutionChannelBinding, Option<ExternalQualificationRelayPump>)> {
+        let mut transport = None;
+        let mut relay = None;
+
         loop {
             ensure!(
                 !deadline.has_elapsed(),
                 "external qualification did not reach authenticated readiness before its deadline"
             );
-            match start.advance().map_err(anyhow::Error::from)? {
+            let progress = start.advance().map_err(anyhow::Error::from)?;
+            // The start and relay contacts share a rejecting placement gate.
+            // Alternate in this thread until Ready, never race two contacts.
+            if !matches!(progress, ExternalCandidateStartProgress::CleanupProved | ExternalCandidateStartProgress::CleanupRequired) {
+                if transport.is_none() {
+                    transport = inspect_external_qualification_controller_transport(state, start.placement())?;
+                    if let Some(ExternalQualificationControllerTransport::Relay { poll_interval_ms, poll_deadline_ms, maximum_frames }) = transport {
+                        relay = Some(ExternalQualificationRelayCursor::new(poll_interval_ms, poll_deadline_ms, maximum_frames)?);
+                    }
+                }
+                if let Some(relay) = &mut relay {
+                    relay.advance_if_due(state, start.placement())?;
+                }
+            }
+            match progress {
                 ExternalCandidateStartProgress::Ready(binding) => {
                     ensure!(
                         binding.placement_thread_id == start.placement()
@@ -191,7 +232,9 @@ fn await_external_qualification_ready(
                             && binding.candidate_export_max_bytes == 0,
                         "external qualification readiness changed its zero-export placement"
                     );
-                    return Ok(binding);
+                    ensure!(transport.is_some(), "Q Ready has no retained controller transport");
+                    let pump = relay.take().map(|cursor| ExternalQualificationRelayPump::start(state, start.placement().to_owned(), cursor)).transpose()?;
+                    return Ok((binding, pump));
                 }
                 ExternalCandidateStartProgress::AllocationPending
                 | ExternalCandidateStartProgress::OccurrenceBound
@@ -214,7 +257,8 @@ fn await_external_qualification_ready(
         }
     })();
     match ready {
-        Ok(binding) => Ok(ExternalQualificationReady {
+        Ok((binding, relay)) => Ok(ExternalQualificationReady {
+            relay,
             binding,
             root: start.into_authenticated_root(),
             _cleanup: cleanup,

@@ -17,6 +17,7 @@ pub mod external_guest_runtime_product;
 pub mod external_qualification_inputs;
 pub(crate) mod external_qualification_local_materials;
 pub(crate) mod external_qualification_local_worker;
+pub(crate) mod external_qualification_relay;
 pub mod external_qualification_start;
 pub mod launch;
 pub(crate) mod launch_claim;

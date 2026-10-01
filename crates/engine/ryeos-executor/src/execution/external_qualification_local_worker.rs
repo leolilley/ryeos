@@ -159,6 +159,7 @@ impl ExternalQualificationLocalWorker {
         coordinate: &ConsumerRuntimeVerificationCoordinate,
         selected: &SignedQualificationWorkerRequest,
     ) -> Result<QualificationWorkerCommandOutcome> {
+        self.ready.ensure_relay_running()?;
         ensure!(
             self.wire_max_bytes == selected.wire_max_bytes,
             "Q selected Request changed the attached signed wire maximum"
@@ -207,6 +208,7 @@ impl ExternalQualificationLocalWorker {
             u64::try_from(remaining_ms)?,
         ));
         loop {
+            self.ready.ensure_relay_running()?;
             let outcome = ryeos_app::external_qualification_command::read_qualification_worker_command_outcome(
                 state,
                 self.ready.placement(),
@@ -318,6 +320,19 @@ impl ExternalQualificationLocalWorker {
             self.wait_for_signed_turn_completion(state, selected)?;
             Ok(())
         })();
+        // A failed send no longer needs guest traffic. Stop all relay
+        // contact before retiring this failed local owner or handing cleanup
+        // to the Ready lifeline. Normal retirement still needs the pump for
+        // the later native completion exchange.
+        let turn = match turn {
+            Err(error) => match self.ready.stop_relay() {
+                Ok(()) => Err(error),
+                Err(relay_error) => {
+                    Err(error.context(format!("Q relay shutdown also failed: {relay_error:#}")))
+                }
+            },
+            Ok(()) => Ok(()),
+        };
         let retirement = self.retire_for_native_completion(state);
         match (turn, retirement) {
             (Ok(()), Ok(())) => self.retain_terminal_transcript(state, coordinate),
@@ -363,6 +378,7 @@ pub(crate) fn run_external_qualification_to_normal_terminal(
         {
             break native;
         }
+        worker.ready().ensure_relay_running()?;
         // Completion must be authored before its execution deadline. The
         // signed native death observation may arrive later, during the
         // binding's post-execution observation window.
@@ -375,6 +391,10 @@ pub(crate) fn run_external_qualification_to_normal_terminal(
         native.placement_thread_id == placement && native.binding_digest == binding_digest,
         "Q native settlement changed its exact channel"
     );
+
+    // Join the last bounded file contact before physical local cleanup or
+    // provider termination can acquire the same placement contact gate.
+    worker.ready.stop_relay()?;
 
     // Physical view closure is local cleanup, independent of the expired
     // guest protocol deadline. It retains original descriptors and has its
