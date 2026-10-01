@@ -28877,3 +28877,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "state_store/qualification_transcript_publication_tests.rs"]
+mod qualification_transcript_publication_tests;

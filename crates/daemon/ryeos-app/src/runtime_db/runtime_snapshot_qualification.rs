@@ -342,6 +342,31 @@ pub(crate) mod tests {
         RestoredVerifierAdapterObservation,
     ) {
         let db = RuntimeDb::new_in_memory().unwrap();
+        let (source, locator, readiness, intent, occurrence, verifier, observation) =
+            populate_retained_owner_measurement_fixture(&db);
+        (
+            db,
+            source,
+            locator,
+            readiness,
+            intent,
+            occurrence,
+            verifier,
+            observation,
+        )
+    }
+
+    pub(crate) fn populate_retained_owner_measurement_fixture(
+        db: &RuntimeDb,
+    ) -> (
+        RuntimeSnapshotIntent,
+        RuntimeSnapshotLocator,
+        RuntimeSnapshotReadinessObservation,
+        RuntimeSnapshotQualificationIntent,
+        RuntimeSnapshotQualificationOccurrence,
+        RestoredVerifierAttemptIntent,
+        RestoredVerifierAdapterObservation,
+    ) {
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let mut source = RuntimeSnapshotIntent {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
@@ -514,7 +539,6 @@ pub(crate) mod tests {
             contact_deadline_exceeded: false,
         };
         (
-            db,
             source,
             locator,
             readiness,

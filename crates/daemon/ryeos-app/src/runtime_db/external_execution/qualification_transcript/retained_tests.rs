@@ -31,8 +31,8 @@ fn canonical<T: serde::Serialize>(value: &T) -> String {
     lillux::canonical_json(&serde_json::to_value(value).unwrap()).unwrap()
 }
 
-struct Fixture {
-    db: RuntimeDb,
+struct Fixture<'a> {
+    db: &'a RuntimeDb,
     binding: ExecutionChannelBinding,
     owner: SigningKey,
     supervisor: SigningKey,
@@ -40,10 +40,10 @@ struct Fixture {
     settlement: Option<AuthenticatedExecutionFrame>,
 }
 
-impl Fixture {
-    fn new(with_capture: bool) -> Self {
-        let (db, _, _, _, qualification, occurrence, verifier, observation) =
-            crate::runtime_db::runtime_snapshot_qualification::tests::retained_owner_measurement_fixture();
+impl<'a> Fixture<'a> {
+    fn new(db: &'a RuntimeDb, with_capture: bool) -> Self {
+        let (_, _, _, qualification, occurrence, verifier, observation) =
+            crate::runtime_db::runtime_snapshot_qualification::tests::populate_retained_owner_measurement_fixture(db);
         db.bind_restored_verifier_observation(&observation).unwrap();
         let requirement = fixture_requirement();
         let program = AdmittedExternalQualificationSessionProgram {
@@ -163,6 +163,55 @@ impl Fixture {
                 ],
             )
             .unwrap();
+        // Typed retained activation/package testimony closes the full cold
+        // journal invariant. It does not claim a provider call/package upload.
+        let contract = backend.backend_contract();
+        let guest_input_identity = "9".repeat(64);
+        let attachment_deadline_ms = reservation.contact_deadline_ms
+            + i64::from(contract.observation_timeout_seconds) * 1_000;
+        let post_execution_timeout_seconds =
+            contract.observation_timeout_seconds + contract.cleanup_timeout_seconds;
+        let channel_max_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
+        let activation_request_digest = external_supervisor_activation_request_digest(
+            &reservation,
+            &allocation_occurrence,
+            &contract,
+            attachment_deadline_ms,
+            post_execution_timeout_seconds,
+            channel_max_bytes,
+            &guest_input_identity,
+        )
+        .unwrap();
+        let delivery = fixture_guest_package_delivery(
+            &reservation.binding_hash,
+            &reservation.request_digest,
+            &allocation_occurrence.occurrence_id,
+            &activation_request_digest,
+            &guest_input_identity,
+        );
+        let activation = ExternalSupervisorActivationIntent {
+            schema: 3,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: allocation_occurrence.occurrence_id.clone(),
+            supervisor_runtime_hash: program.runtime_manifest_hash.clone(),
+            guest_input_identity,
+            activation_request_digest,
+            attachment_deadline_ms,
+            execution_timeout_seconds: reservation.timeout_seconds,
+            post_execution_timeout_seconds,
+            channel_max_bytes,
+            delivery,
+        };
+        activation
+            .validate_contract(&reservation, &allocation_occurrence, &contract)
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO external_execution_supervisor_activation_intent VALUES(?1,?2)",
+                params![placement, canonical(&activation)],
+            )
+            .unwrap();
         db.conn.execute("INSERT INTO external_execution_channel(placement_thread_id,binding_digest,binding_json,state) VALUES(?1,?2,?3,'prepared')",
             params![placement,binding.digest().unwrap(),canonical(&binding)]).unwrap();
         let fixture = Self {
@@ -278,8 +327,15 @@ impl Fixture {
         .unwrap();
         let placement = &reservation.placement_thread_id;
         let digest = self.binding.digest().unwrap();
-        self.db.conn.execute("INSERT INTO external_execution_connector(placement_thread_id,channel_binding_digest,execution_binding_hash,connector_protocol,connector_artifact_hash,connector_artifact_bytes,capability_generation,capability_hash,state,prepared_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'prepared',1)",
-            params![placement,digest,reservation.binding_hash,artifacts.connector_protocol,artifacts.connector_artifact_hash,artifacts.connector_artifact_bytes,"c".repeat(64),"d".repeat(64)]).unwrap();
+        // Use the real current connector contract/generation derivation instead
+        // of an arbitrary generation that the complete cold validator rejects.
+        let capability_generation = self
+            .db
+            .external_connector_capability_generation(placement)
+            .unwrap();
+        self.db
+            .prepare_external_connector(placement, &capability_generation, &"d".repeat(64))
+            .unwrap();
         self.db.conn.execute("INSERT INTO external_qualification_worker_process(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_identity_json,daemon_generation_id,phase,attached_at_ms,provider_configuration_json) VALUES(?1,?2,?3,?4,?5,?6,?7,'retained-generation','attached',1,?8)",
             params![placement,owner.coordinate.accepted_root_id,owner.coordinate.accepted_capsule_hash,owner.qualification_operation_id,owner.qualification_occurrence.occurrence_id,digest,canonical(&identity),canonical(&configuration)]).unwrap();
         self.db.conn.execute("INSERT INTO external_qualification_worker_command(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_incarnation_digest,setup_request_digest,request_digest,state,reserved_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'reserved',1)",
@@ -435,7 +491,8 @@ fn retained_backend(
 
 #[test]
 fn retained_null_fixture_publication_requires_native_application_and_replays_exactly() {
-    let mut fixture = Fixture::new(false);
+    let db = RuntimeDb::new_in_memory().unwrap();
+    let mut fixture = Fixture::new(&db, false);
     let placement = &fixture.binding.placement_thread_id;
     assert!(
         fixture
@@ -567,7 +624,8 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
 
 #[test]
 fn retained_capture_publication_requires_original_verified_receiver_and_exact_content() {
-    let mut fixture = Fixture::new(true);
+    let db = RuntimeDb::new_in_memory().unwrap();
+    let mut fixture = Fixture::new(&db, true);
     fixture.retain_terminal_testimony();
     fixture.settle_native();
     let placement = &fixture.binding.placement_thread_id;
@@ -758,4 +816,16 @@ fn retained_capture_publication_requires_original_verified_receiver_and_exact_co
         read_record(&fixture.db.conn, placement).unwrap(),
         Some(first)
     );
+}
+
+// Seed the SAME RuntimeDb owned by the StateStore under test. This reuses the
+// signed journal flow above; process/native facts remain explicit testimony.
+pub(super) fn seed_publication_fixture(
+    db: &RuntimeDb,
+    with_capture: bool,
+) -> ExecutionChannelBinding {
+    let mut fixture = Fixture::new(db, with_capture);
+    fixture.retain_terminal_testimony();
+    fixture.settle_native();
+    fixture.binding.clone()
 }

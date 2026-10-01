@@ -357,3 +357,13 @@ mod tests {
 #[cfg(test)]
 #[path = "qualification_transcript/retained_tests.rs"]
 mod retained_tests;
+
+#[cfg(test)]
+impl RuntimeDb {
+    pub(crate) fn seed_retained_qualification_transcript_test_fixture(
+        &self,
+        with_capture: bool,
+    ) -> ryeos_state::external_execution::ExecutionChannelBinding {
+        retained_tests::seed_publication_fixture(self, with_capture)
+    }
+}
