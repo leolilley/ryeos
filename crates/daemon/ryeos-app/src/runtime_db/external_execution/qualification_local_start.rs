@@ -1754,8 +1754,10 @@ mod tests {
             "{error:#}"
         );
         assert!(!tx.is_autocommit());
-        tx.execute("UPDATE credential_profile SET state='revoked'", [])
-            .unwrap();
+        // Revocation fences fresh use while unresolved Q custody keeps its
+        // original lock; a terminal revoked state is deliberately forbidden.
+        tx.execute("UPDATE credential_profile SET state='revoking',credential_generation=2,authority_revision=2", []).unwrap();
+        require_historical_credential_custody(&tx, &claimed).unwrap();
         assert!(require_live_credential_custody(&tx, &claimed).is_err());
         tx.rollback().unwrap();
         require_live_credential_custody(&conn, &claimed).unwrap();
