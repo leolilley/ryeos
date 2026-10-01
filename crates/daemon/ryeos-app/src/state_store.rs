@@ -16537,12 +16537,14 @@ impl StateStore {
         placement: &str,
         process_identity: &crate::process::ExecutionProcessIdentity,
         daemon_generation_id: &str,
+        configuration: &crate::external_connector::PreparedProviderConfigurationObservation,
     ) -> Result<runtime_db::external_execution::QualificationWorkerProcessRecord> {
         let _permit = self.acquire_write_permit()?;
         self.lock()?.runtime_db.attach_qualification_worker_process(
             placement,
             process_identity,
             daemon_generation_id,
+            configuration,
         )
     }
 
@@ -16778,6 +16780,7 @@ impl StateStore {
                 &source.owner_principal,
                 &source.command,
                 &source.batches,
+                &source.provider_configuration,
             )?;
         let authority = self.pinned_state_authority()?;
         authority.ensure_guard(permit.cas_guard())?;

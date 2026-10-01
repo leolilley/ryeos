@@ -2694,8 +2694,8 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // descriptor borrow, without backend workspace or process-scope authority.
 // Epoch 120 retains distinct one-use Q setup and turn contact/settlement.
 // Epoch 121 retains Q credential profile custody through exact local retirement.
-// Epoch 122 retains exact controller Q fixture stage intention and verified custody.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 122;
+// Epoch 123 binds sealed provider configuration inputs to the held Q Worker.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 123;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -4505,6 +4505,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "INTEGER",
                         pk: false,
                         not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "provider_configuration_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
                     },
                 ],
             },

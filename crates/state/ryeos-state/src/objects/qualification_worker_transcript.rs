@@ -13,11 +13,12 @@
 
 use anyhow::{Context as _, ensure};
 use base64::Engine as _;
+use ryeos_external_execution_contract::ProviderConfigurationLaunchInput;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const QUALIFICATION_WORKER_TRANSCRIPT_KIND: &str = "qualification_worker_transcript";
-pub const QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA: u32 = 2;
+pub const QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA: u32 = 3;
 pub const QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA: &str =
     "ryeos.qualification_worker_transcript_stream.v2";
 pub const MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES: u64 = 1024 * 1024;
@@ -47,6 +48,9 @@ pub struct QualificationWorkerTranscriptManifest {
     pub qualification_occurrence_id: String,
     pub channel_binding_digest: String,
     pub process_incarnation_digest: String,
+    /// Bounded public projection retained from the exact original process launch.
+    /// It describes one provider configuration, not a complete tool inventory.
+    pub provider_configuration: ProviderConfigurationLaunchInput,
     pub setup_request_digest: String,
     pub setup_final_response_digest: String,
     /// Exact durable daemon-owned successful setup send return.
@@ -199,8 +203,9 @@ impl QualificationWorkerTranscriptManifest {
         super::validate_object_kind(&self.kind, QUALIFICATION_WORKER_TRANSCRIPT_KIND)?;
         ensure!(
             self.schema == QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
-            "Q Worker transcript is not the current v2 schema"
+            "Q Worker transcript is not the current v3 schema"
         );
+        self.provider_configuration.validate()?;
         let owner = self
             .owner_principal
             .strip_prefix("fp:")
@@ -517,6 +522,21 @@ mod tests {
             qualification_occurrence_id: "occurrence".into(),
             channel_binding_digest: "e".repeat(64),
             process_incarnation_digest: "f".repeat(64),
+            provider_configuration: ProviderConfigurationLaunchInput {
+                schema: 1,
+                configuration_sha256: "5".repeat(64),
+                configuration_bytes: 100,
+                command_environment: ryeos_external_execution_contract::ProviderCommandEnvironmentProjection {
+                    environment_id: "ryeos-external-candidate".into(),
+                    default_environment_id: "ryeos-external-candidate".into(),
+                    include_local: false,
+                    transport: ryeos_external_execution_contract::ProviderCommandEnvironmentTransport::CommandConnector,
+                },
+                provider_declaration_id: "codex-hosted".into(),
+                configuration_destination: "environments.toml".into(),
+                configuration_adapter_artifact_hash: "6".repeat(64),
+                configuration_adapter_artifact_bytes: 100,
+            },
             setup_request_digest: "4".repeat(64),
             setup_final_response_digest: lillux::sha256_hex(setup_final_json.as_bytes()),
             setup_owner_send_settled_at_ms: 1,
@@ -543,6 +563,49 @@ mod tests {
             }],
         };
         (manifest, bytes)
+    }
+
+    #[test]
+    fn provider_launch_input_is_required_current_and_manifest_bound() {
+        let (manifest, _) = manifest_and_chunk();
+        manifest.validate().unwrap();
+        let value = manifest.to_value().unwrap();
+        let mut missing = value.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_configuration");
+        assert!(serde_json::from_value::<QualificationWorkerTranscriptManifest>(missing).is_err());
+        let mut null = value;
+        null["provider_configuration"] = Value::Null;
+        assert!(serde_json::from_value::<QualificationWorkerTranscriptManifest>(null).is_err());
+        let mut previous = manifest.clone();
+        previous.schema = 2;
+        assert!(previous.validate().is_err());
+        let mut local = manifest.clone();
+        local
+            .provider_configuration
+            .command_environment
+            .include_local = true;
+        assert!(local.validate().is_err());
+        let reference = QualificationWorkerTranscriptReference {
+            manifest_hash: super::super::canonical_value_digest(&manifest.to_value().unwrap())
+                .unwrap(),
+            manifest,
+        };
+        for change_adapter in [false, true] {
+            let mut changed = reference.clone();
+            if change_adapter {
+                changed
+                    .manifest
+                    .provider_configuration
+                    .configuration_adapter_artifact_hash = "7".repeat(64);
+            } else {
+                changed.manifest.provider_configuration.configuration_sha256 = "7".repeat(64);
+            }
+            changed.manifest.validate().unwrap();
+            assert!(changed.validate().is_err());
+        }
     }
 
     #[test]

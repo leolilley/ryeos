@@ -656,16 +656,17 @@ pub(crate) fn start_external_qualification_local_worker(
                     // Connector preparation is one-shot and follows authenticated Q
                     // Ready. Its relay and mount descriptors join the process owner.
                     let connector =
-                        ryeos_app::external_connector::prepare_external_candidate_connector(
+                        ryeos_app::external_connector::prepare_qualification_candidate_connector(
                             state,
                             &placement,
-                            &credential_home_path,
+                            &credential_home,
                         )?;
                     let (
                         connector_mounts,
                         inherited_fds,
                         connector_lifelines,
                         connector_settlement,
+                        configuration_observation,
                     ) = connector.into_parts();
                     mounts.extend(connector_mounts);
                     lifelines.extend(connector_lifelines);
@@ -719,7 +720,9 @@ pub(crate) fn start_external_qualification_local_worker(
                         }
                     };
                     let process_identity = held.process_identity.clone();
-                    if let Err(error) = owner.attach_worker_process(&held.process_identity) {
+                    if let Err(error) = owner
+                        .attach_worker_process(&held.process_identity, &configuration_observation)
+                    {
                         let reaped = held.abort_and_reap();
                         return Ok(LaunchOutcome::Failed {
                             error: fence_start_failure(

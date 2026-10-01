@@ -8,6 +8,7 @@
 //! its receipt does not establish request-correlated semantic success.
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::ProviderConfigurationLaunchInput;
 use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate;
 use ryeos_state::objects::{
     MAX_QUALIFICATION_WORKER_TRANSCRIPT_BYTES, MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES,
@@ -77,7 +78,9 @@ pub(crate) fn prepare_qualification_worker_transcript(
     owner_principal: &str,
     command: &QualificationWorkerCommandRecord,
     batches: &[QualificationWorkerObservationBatchRecord],
+    provider_configuration: &ProviderConfigurationLaunchInput,
 ) -> Result<PreparedQualificationWorkerTranscript> {
+    provider_configuration.validate()?;
     ensure!(
         command.phase == QualificationWorkerCommandPhase::TurnCompleted
             && command.owner_send_settled_at_ms.is_some()
@@ -174,6 +177,7 @@ pub(crate) fn prepare_qualification_worker_transcript(
         qualification_occurrence_id: command.qualification_occurrence_id.clone(),
         channel_binding_digest: command.channel_binding_digest.clone(),
         process_incarnation_digest: command.process_incarnation_digest.clone(),
+        provider_configuration: provider_configuration.clone(),
         setup_request_digest: command.setup_request_digest.clone(),
         setup_final_response_digest,
         setup_owner_send_settled_at_ms: command

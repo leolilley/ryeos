@@ -8,6 +8,12 @@
 
 pub mod guest_import_authorization;
 pub mod guest_supervisor_descriptors;
+pub mod provider_configuration;
+pub use provider_configuration::{
+    PROVIDER_CONFIGURATION_RESPONSE_PROTOCOL, PROVIDER_CONFIGURATION_RESPONSE_SCHEMA,
+    ProviderCommandEnvironmentProjection, ProviderCommandEnvironmentTransport,
+    ProviderConfigurationLaunchInput, ProviderConfigurationResponse,
+};
 pub mod qualification_fixture;
 pub mod relay_file;
 pub mod restored_runtime_measurement;

@@ -3,6 +3,7 @@
 //! These checks do not establish native death, provider settlement, writer
 //! exclusion or an issued qualification. Those facts have separate owners.
 use anyhow::{Context as _, Result, bail, ensure};
+use ryeos_external_execution_contract::ProviderConfigurationLaunchInput;
 use ryeos_state::objects::{QualificationWorkerTranscriptStream, canonical_value_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -126,7 +127,13 @@ pub fn check_q_conversation(
         "Q lifecycle differs from the journaled turn"
     );
     let notifications = collect_notifications(&transcript.stream)?;
-    check_notifications(expected, &thread, &manifest.turn_id, &notifications)
+    check_notifications(
+        expected,
+        &manifest.provider_configuration,
+        &thread,
+        &manifest.turn_id,
+        &notifications,
+    )
 }
 
 fn require_route(request: &Value, route: &str) -> Result<()> {
@@ -340,11 +347,20 @@ fn check_command_item(
 
 fn check_notifications(
     expected: &QCommandExpectation,
+    provider_configuration: &ProviderConfigurationLaunchInput,
     thread: &str,
     turn: &str,
     notifications: &[Value],
 ) -> Result<CheckedQConversation> {
     expected.validate()?;
+    // The protected reader and daemon source join authenticate this original
+    // launch input. The projection alone does not prove process authority or
+    // complete effect/tool inventory confinement.
+    provider_configuration.validate()?;
+    ensure!(
+        provider_configuration.command_environment.environment_id == expected.environment_id,
+        "Q provider configuration changed the expected sole default environment"
+    );
     ensure!(
         !notifications.is_empty() && notifications.len() <= MAX_EVENTS,
         "Q notification count exceeds bound"
@@ -396,10 +412,17 @@ fn check_notifications(
                         let id = text(item, "call_id")?;
                         identifier(id)?;
                         let arguments: Value = serde_json::from_str(text(item, "arguments")?)?;
+                        let mut expected_arguments = json!({"cmd":expected.command,
+                            "workdir":expected.cwd,"login":false,"yield_time_ms":10000});
+                        // A sole environment's upstream schema omits its ID.
+                        // Only omission can use the authenticated default;
+                        // explicit null/local/changed IDs remain mismatches.
+                        if arguments.get("environment_id").is_some() {
+                            expected_arguments["environment_id"] =
+                                Value::String(expected.environment_id.clone());
+                        }
                         ensure!(
-                            arguments
-                                == json!({"environment_id":expected.environment_id,"cmd":expected.command,
-                            "workdir":expected.cwd,"login":false,"yield_time_ms":10000}),
+                            arguments == expected_arguments,
                             "Q raw command arguments changed the exact remote invocation"
                         );
                         call = Some(id.to_owned());
@@ -639,6 +662,26 @@ mod tests {
         ]
     }
 
+    // Structural test data; production receives this only through the
+    // protected manifest reader and exact daemon process/source join.
+    fn provider_configuration() -> ProviderConfigurationLaunchInput {
+        ProviderConfigurationLaunchInput {
+            schema: 1,
+            configuration_sha256: "a".repeat(64),
+            configuration_bytes: 100,
+            command_environment: ryeos_external_execution_contract::ProviderCommandEnvironmentProjection {
+                environment_id: "ryeos-external-candidate".into(),
+                default_environment_id: "ryeos-external-candidate".into(),
+                include_local: false,
+                transport: ryeos_external_execution_contract::ProviderCommandEnvironmentTransport::CommandConnector,
+            },
+            provider_declaration_id: "codex-hosted".into(),
+            configuration_destination: "environments.toml".into(),
+            configuration_adapter_artifact_hash: "b".repeat(64),
+            configuration_adapter_artifact_bytes: 100,
+        }
+    }
+
     fn stream() -> QualificationWorkerTranscriptStream {
         QualificationWorkerTranscriptStream {
             schema: QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA.into(),
@@ -656,21 +699,111 @@ mod tests {
     }
 
     #[test]
+    fn omitted_environment_requires_matching_original_launch_projection() {
+        let expected = expectation();
+        let mut events = notifications(&expected);
+        let original_arguments = events[0]
+            .pointer("/params/item/arguments")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        let mut arguments: Value = serde_json::from_str(original_arguments).unwrap();
+        arguments.as_object_mut().unwrap().remove("environment_id");
+        events[0]["params"]["item"]["arguments"] =
+            serde_json::to_string(&arguments).unwrap().into();
+        check_notifications(
+            &expected,
+            &provider_configuration(),
+            "thread-one",
+            "turn-one",
+            &events,
+        )
+        .unwrap();
+        for index in 0..4 {
+            let mut configuration = provider_configuration();
+            match index {
+                0 => configuration.command_environment.include_local = true,
+                1 => configuration.command_environment.default_environment_id = "local".into(),
+                2 => {
+                    configuration.command_environment.environment_id = "other".into();
+                    configuration.command_environment.default_environment_id = "other".into();
+                }
+                _ => configuration.configuration_sha256.clear(),
+            }
+            assert!(
+                check_notifications(&expected, &configuration, "thread-one", "turn-one", &events)
+                    .is_err()
+            );
+        }
+        for value in [Value::Null, json!("local"), json!("other")] {
+            let mut changed = events.clone();
+            let mut explicit = arguments.clone();
+            explicit["environment_id"] = value;
+            changed[0]["params"]["item"]["arguments"] =
+                serde_json::to_string(&explicit).unwrap().into();
+            assert!(
+                check_notifications(
+                    &expected,
+                    &provider_configuration(),
+                    "thread-one",
+                    "turn-one",
+                    &changed
+                )
+                .is_err()
+            );
+        }
+        let mut extra = arguments;
+        extra["unexpected"] = true.into();
+        events[0]["params"]["item"]["arguments"] = serde_json::to_string(&extra).unwrap().into();
+        assert!(
+            check_notifications(
+                &expected,
+                &provider_configuration(),
+                "thread-one",
+                "turn-one",
+                &events
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn actual_ids_and_terminal_outputs_are_correlated_without_scripted_call_ids() {
         let expected = expectation();
         let events = notifications(&expected);
-        let checked = check_notifications(&expected, "thread-one", "turn-one", &events).unwrap();
+        let checked = check_notifications(
+            &expected,
+            &provider_configuration(),
+            "thread-one",
+            "turn-one",
+            &events,
+        )
+        .unwrap();
         assert_eq!(checked.command_call_id, "learned-call");
         // App-server item completion and raw model-visible result are separate
         // projections; either relative order is acceptable for the same call.
         let mut reversed_results = events.clone();
         reversed_results.swap(3, 4);
-        check_notifications(&expected, "thread-one", "turn-one", &reversed_results).unwrap();
+        check_notifications(
+            &expected,
+            &provider_configuration(),
+            "thread-one",
+            "turn-one",
+            &reversed_results,
+        )
+        .unwrap();
         for index in [0, 3, 4, 6] {
             let mut missing = events.clone();
             missing.remove(index);
             assert!(
-                check_notifications(&expected, "thread-one", "turn-one", &missing).is_err(),
+                check_notifications(
+                    &expected,
+                    &provider_configuration(),
+                    "thread-one",
+                    "turn-one",
+                    &missing
+                )
+                .is_err(),
                 "accepted missing {index}"
             );
         }
@@ -701,7 +834,14 @@ mod tests {
             let mut changed = events.clone();
             *changed[index].pointer_mut(pointer).unwrap() = replacement;
             assert!(
-                check_notifications(&expected, "thread-one", "turn-one", &changed).is_err(),
+                check_notifications(
+                    &expected,
+                    &provider_configuration(),
+                    "thread-one",
+                    "turn-one",
+                    &changed
+                )
+                .is_err(),
                 "accepted {pointer}"
             );
         }
@@ -716,7 +856,16 @@ mod tests {
                     }}),
                 ),
             );
-            assert!(check_notifications(&expected, "thread-one", "turn-one", &extra).is_err());
+            assert!(
+                check_notifications(
+                    &expected,
+                    &provider_configuration(),
+                    "thread-one",
+                    "turn-one",
+                    &extra
+                )
+                .is_err()
+            );
         }
         let mut changed_kind = events.clone();
         changed_kind.insert(
@@ -728,7 +877,16 @@ mod tests {
                 }}),
             ),
         );
-        assert!(check_notifications(&expected, "thread-one", "turn-one", &changed_kind).is_err());
+        assert!(
+            check_notifications(
+                &expected,
+                &provider_configuration(),
+                "thread-one",
+                "turn-one",
+                &changed_kind
+            )
+            .is_err()
+        );
         let mut changed = events.clone();
         let args: Value =
             serde_json::from_str(changed[0]["params"]["item"]["arguments"].as_str().unwrap())
@@ -742,7 +900,16 @@ mod tests {
             args[field] = value;
             changed[0]["params"]["item"]["arguments"] =
                 serde_json::to_string(&args).unwrap().into();
-            assert!(check_notifications(&expected, "thread-one", "turn-one", &changed).is_err());
+            assert!(
+                check_notifications(
+                    &expected,
+                    &provider_configuration(),
+                    "thread-one",
+                    "turn-one",
+                    &changed
+                )
+                .is_err()
+            );
         }
     }
 

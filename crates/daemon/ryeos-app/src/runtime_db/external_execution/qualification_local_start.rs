@@ -641,6 +641,20 @@ fn require_current_start(conn: &Connection, record: &QualificationLocalStartReco
     Ok(())
 }
 
+/// Recheck original credential custody inside the caller's existing transaction.
+/// Held-process attachment must join this check atomically without opening a
+/// second transaction on the same runtime connection.
+pub(super) fn require_live_credential_start_tx(
+    conn: &Connection,
+    placement: &str,
+) -> Result<QualificationLocalStartRecord> {
+    let record =
+        read_local_start(conn, placement)?.context("Q credential check has no original start")?;
+    require_current_start(conn, &record)?;
+    require_live_credential_custody(conn, &record)?;
+    Ok(record)
+}
+
 fn transition(
     conn: &Connection,
     current: &QualificationLocalStartRecord,
@@ -904,10 +918,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<QualificationLocalStartRecord> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read_local_start(&tx, placement)?
-            .context("Q credential check has no original start")?;
-        require_current_start(&tx, &record)?;
-        require_live_credential_custody(&tx, &record)?;
+        let record = require_live_credential_start_tx(&tx, placement)?;
         tx.commit()?;
         Ok(record)
     }
@@ -1525,6 +1536,32 @@ mod tests {
         // A cold read of lost custody cannot treat an unlocked profile as safe.
         conn.execute_batch("DROP TRIGGER credential_profile_qualification_custody_guard; UPDATE credential_profile SET lock_owner=NULL;").unwrap();
         assert!(require_historical_credential_custody(&conn, &claimed).is_err());
+    }
+
+    #[test]
+    fn credential_check_borrows_outer_transaction_without_renewing_original_generation() {
+        let (conn, original) = fixture_journal();
+        let claimed = claim_fixture_credential(&conn, &original);
+        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+        require_live_credential_custody(&tx, &claimed).unwrap();
+        // This fixture's original daemon is intentionally stale. The borrowed
+        // check must reach that semantic fence, rather than fail a nested BEGIN.
+        let error =
+            require_live_credential_start_tx(&tx, &claimed.placement_thread_id).unwrap_err();
+        assert!(
+            error.to_string().contains("another daemon generation"),
+            "{error:#}"
+        );
+        assert!(!tx.is_autocommit());
+        tx.execute("UPDATE credential_profile SET state='revoked'", [])
+            .unwrap();
+        assert!(require_live_credential_custody(&tx, &claimed).is_err());
+        tx.rollback().unwrap();
+        require_live_credential_custody(&conn, &claimed).unwrap();
+        assert_eq!(
+            read_local_start(&conn, &claimed.placement_thread_id).unwrap(),
+            Some(claimed)
+        );
     }
 
     #[test]

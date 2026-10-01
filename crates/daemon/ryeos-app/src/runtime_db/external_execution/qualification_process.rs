@@ -32,6 +32,7 @@ pub(crate) struct QualificationWorkerProcessRecord {
     pub qualification_occurrence_id: String,
     pub channel_binding_digest: String,
     pub process_identity: crate::process::ExecutionProcessIdentity,
+    pub provider_configuration: ryeos_external_execution_contract::ProviderConfigurationLaunchInput,
     pub daemon_generation_id: String,
     pub phase: QualificationWorkerProcessPhase,
     pub attached_at_ms: i64,
@@ -66,6 +67,7 @@ impl QualificationWorkerProcessRecord {
             validate_sha256("qualification Worker process identity", hash)?;
         }
         crate::process::validate_execution_process_identity_shape(&self.process_identity)?;
+        self.provider_configuration.validate()?;
         ensure!(
             self.process_identity.process_scope.is_none(),
             "qualification Worker requires its signed trusted process-group owner"
@@ -122,7 +124,7 @@ fn read_process(
     conn.query_row(
         "SELECT accepted_root_id,accepted_capsule_hash,qualification_operation_id,
                 qualification_occurrence_id,channel_binding_digest,process_identity_json,
-                daemon_generation_id,phase,attached_at_ms,terminal_at_ms
+                daemon_generation_id,phase,attached_at_ms,terminal_at_ms,provider_configuration_json
          FROM external_qualification_worker_process WHERE placement_thread_id=?1",
         [placement],
         |row| {
@@ -137,6 +139,7 @@ fn read_process(
                 row.get::<_, String>(7)?,
                 row.get::<_, i64>(8)?,
                 row.get::<_, Option<i64>>(9)?,
+                row.get::<_, String>(10)?,
             ))
         },
     )
@@ -153,6 +156,7 @@ fn read_process(
             phase,
             attached_at_ms,
             terminal_at_ms,
+            provider_configuration_json,
         )| {
             ensure!(
                 process_identity_json.len() <= 64 * 1024,
@@ -173,6 +177,7 @@ fn read_process(
                 qualification_occurrence_id,
                 channel_binding_digest,
                 process_identity,
+                provider_configuration: decode_configuration_input(&provider_configuration_json)?,
                 daemon_generation_id,
                 phase: QualificationWorkerProcessPhase::parse(&phase)?,
                 attached_at_ms,
@@ -185,12 +190,62 @@ fn read_process(
     .transpose()
 }
 
+fn decode_configuration_input(
+    encoded: &str,
+) -> Result<ryeos_external_execution_contract::ProviderConfigurationLaunchInput> {
+    ensure!(
+        encoded.len() <= 4096,
+        "retained provider configuration input exceeds its public journal bound"
+    );
+    let input: ryeos_external_execution_contract::ProviderConfigurationLaunchInput =
+        serde_json::from_str(encoded).context("decode retained provider configuration input")?;
+    input.validate()?;
+    ensure!(
+        lillux::canonical_json(&serde_json::to_value(&input)?)? == encoded,
+        "retained provider configuration input is not canonical"
+    );
+    Ok(input)
+}
+
+fn require_configuration_binding(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+    input: &ryeos_external_execution_contract::ProviderConfigurationLaunchInput,
+) -> Result<()> {
+    input.validate()?;
+    let retained = read_retained_binding(conn, &reservation.binding_hash)?
+        .context("provider configuration input lost its original signed binding")?;
+    let contract = retained.backend_contract();
+    let selected = contract.workload.session_artifacts()?;
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+        bail!("provider configuration input has no qualification owner");
+    };
+    ensure!(
+        input.provider_declaration_id == selected.provider_declaration_id
+            && input.configuration_destination == selected.provider_configuration_destination
+            && input.configuration_adapter_artifact_hash
+                == selected.configuration_adapter_artifact_hash
+            && input.configuration_adapter_artifact_bytes
+                == selected.configuration_adapter_artifact_bytes
+            && input.provider_declaration_id == owner.program.requirement.provider_declaration_id
+            && input.configuration_destination
+                == owner.program.requirement.provider_configuration_destination,
+        "provider configuration input differs from its original admitted adapter or destination"
+    );
+    Ok(())
+}
+
 fn require_retained_process_owner(
     conn: &Connection,
     record: &QualificationWorkerProcessRecord,
 ) -> Result<()> {
     let allocation = read(conn, &record.placement_thread_id)?
         .context("qualification Worker process lost its allocation")?;
+    require_configuration_binding(
+        conn,
+        &allocation.reservation,
+        &record.provider_configuration,
+    )?;
     let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
     else {
         bail!("qualification Worker process changed allocation owner");
@@ -363,6 +418,7 @@ impl RuntimeDb {
         placement: &str,
         process_identity: &crate::process::ExecutionProcessIdentity,
         daemon_generation_id: &str,
+        configuration: &crate::external_connector::PreparedProviderConfigurationObservation,
     ) -> Result<QualificationWorkerProcessRecord> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         ensure!(
@@ -381,6 +437,19 @@ impl RuntimeDb {
             bail!("qualification Worker requires a Q allocation owner");
         };
         let channel = load_binding(&tx, placement)?;
+        let credential_start =
+            qualification_local_start::require_live_credential_start_tx(&tx, placement)?;
+        let credential_home_id = &credential_start
+            .credential_custody
+            .as_ref()
+            .context("Q configuration attachment lost credential custody")?
+            .home_id;
+        let configuration_input = configuration.require_for(
+            placement,
+            &allocation.reservation.binding_hash,
+            credential_home_id,
+        )?;
+        require_configuration_binding(&tx, &allocation.reservation, configuration_input)?;
         let channel_binding_digest = channel.digest()?;
         let channel_state: String = tx.query_row(
             "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
@@ -429,6 +498,7 @@ impl RuntimeDb {
             qualification_occurrence_id: owner.qualification_occurrence.occurrence_id.clone(),
             channel_binding_digest,
             process_identity: process_identity.clone(),
+            provider_configuration: configuration_input.clone(),
             daemon_generation_id: daemon_generation_id.to_owned(),
             phase: QualificationWorkerProcessPhase::Attached,
             attached_at_ms: now,
@@ -436,13 +506,19 @@ impl RuntimeDb {
         };
         record.validate()?;
         let process_json = lillux::canonical_json(&serde_json::to_value(process_identity)?)?;
+        let configuration_json =
+            lillux::canonical_json(&serde_json::to_value(&record.provider_configuration)?)?;
+        ensure!(
+            configuration_json.len() <= 4096,
+            "provider configuration input exceeds journal bound"
+        );
         ensure!(
             process_json.len() <= 64 * 1024,
             "qualification Worker process identity exceeds journal bound"
         );
         tx.execute(
             "INSERT INTO external_qualification_worker_process VALUES
-             (?1,?2,?3,?4,?5,?6,?7,?8,'attached',?9,NULL)",
+             (?1,?2,?3,?4,?5,?6,?7,?8,'attached',?9,NULL,?10)",
             params![
                 record.placement_thread_id,
                 record.accepted_root_id,
@@ -453,6 +529,7 @@ impl RuntimeDb {
                 process_json,
                 record.daemon_generation_id,
                 record.attached_at_ms,
+                configuration_json,
             ],
         )?;
         qualification_local_start::attach_local_worker_tx(

@@ -10,8 +10,9 @@ use std::io::Write as _;
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::{
-    MAX_PROVIDER_CONFIGURATION_BYTES, MAX_PROVIDER_CONFIGURATION_REQUEST_BYTES,
-    ProviderConfigurationRequest, ProviderConnectorExecutable, from_json_slice_strict,
+    MAX_PROVIDER_CONFIGURATION_REQUEST_BYTES, ProviderCommandEnvironmentProjection,
+    ProviderCommandEnvironmentTransport, ProviderConfigurationRequest,
+    ProviderConfigurationResponse, ProviderConnectorExecutable, from_json_slice_strict,
 };
 use serde::Serialize;
 
@@ -54,14 +55,15 @@ fn main() -> Result<()> {
     let request: ProviderConfigurationRequest =
         from_json_slice_strict(&bytes, MAX_PROVIDER_CONFIGURATION_REQUEST_BYTES)
             .context("decode strict provider configuration request")?;
-    let configuration = render(&request)?;
+    let response = render(&request)?;
+    let encoded = response.canonical_bytes()?;
     std::io::stdout()
         .lock()
-        .write_all(configuration.as_bytes())
+        .write_all(&encoded)
         .context("write Codex provider configuration")
 }
 
-fn render(request: &ProviderConfigurationRequest) -> Result<String> {
+fn render(request: &ProviderConfigurationRequest) -> Result<ProviderConfigurationResponse> {
     request.validate()?;
     let connector_program = match &request.connector_executable {
         ProviderConnectorExecutable::InheritedDescriptor { descriptor } => {
@@ -104,11 +106,15 @@ fn render(request: &ProviderConfigurationRequest) -> Result<String> {
         }],
     })
     .context("serialize closed Codex provider configuration")?;
-    ensure!(
-        !configuration.is_empty() && configuration.len() <= MAX_PROVIDER_CONFIGURATION_BYTES,
-        "Codex provider configuration exceeds its byte bound"
-    );
-    Ok(configuration)
+    ProviderConfigurationResponse::new(
+        configuration,
+        ProviderCommandEnvironmentProjection {
+            environment_id: ENVIRONMENT_ID.into(),
+            default_environment_id: ENVIRONMENT_ID.into(),
+            include_local: false,
+            transport: ProviderCommandEnvironmentTransport::CommandConnector,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -131,7 +137,20 @@ mod tests {
             connector_capability: "private-capability".into(),
         };
         let encoded = render(&request).unwrap();
-        let value: toml::Value = toml::from_str(&encoded).unwrap();
+        let wire = encoded.canonical_bytes().unwrap();
+        let decoded = ProviderConfigurationResponse::decode(&wire).unwrap();
+        assert_eq!(decoded.configuration(), encoded.configuration());
+        assert_eq!(decoded.command_environment().environment_id, ENVIRONMENT_ID);
+        assert_eq!(
+            decoded.command_environment().default_environment_id,
+            ENVIRONMENT_ID
+        );
+        assert!(!decoded.command_environment().include_local);
+        assert_eq!(
+            decoded.command_environment().transport,
+            ProviderCommandEnvironmentTransport::CommandConnector
+        );
+        let value: toml::Value = toml::from_str(encoded.configuration()).unwrap();
         assert_eq!(value["default"].as_str(), Some(ENVIRONMENT_ID));
         assert_eq!(value["include_local"].as_bool(), Some(false));
         let environments = value["environments"].as_array().unwrap();
@@ -163,7 +182,8 @@ mod tests {
         request.connector_executable = ProviderConnectorExecutable::InheritedDescriptor {
             descriptor: executable.inherited_descriptor().unwrap(),
         };
-        let descriptor_value: toml::Value = toml::from_str(&render(&request).unwrap()).unwrap();
+        let descriptor_value: toml::Value =
+            toml::from_str(render(&request).unwrap().configuration()).unwrap();
         assert_eq!(
             descriptor_value["environments"][0]["program"].as_str(),
             executable.path().to_str()

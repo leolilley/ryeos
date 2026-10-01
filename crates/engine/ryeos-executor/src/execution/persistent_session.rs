@@ -3824,8 +3824,13 @@ fn spawn_capsule_process_held(
                 "prepare external candidate connector",
             )
         })?;
-        let (connector_mounts, connector_descriptors, connector_lifelines, settlement) =
-            connector.into_parts();
+        let (
+            connector_mounts,
+            connector_descriptors,
+            connector_lifelines,
+            settlement,
+            _configuration_observation,
+        ) = connector.into_parts();
         retirement_observer = Some(settlement);
         mounts.extend(connector_mounts);
         inherited_fds.extend(connector_descriptors);

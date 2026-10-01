@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T07:22:43Z:efd96c3751a086cb5884f7feba8adf9b65c6f5dc204b1ce6a697b6b7ce4274b4:ISKW1e89CgQjIg0axfd6q2FlnzqSiNfityCIrGqtJzNfl8AdgR3ErlMu6fnwC/4TRCl00ZnFi3WtMk60bm/jDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T08:45:01Z:cfa6953d54b3ec81feca232721fc61f03c16a71fe054ebbef3c0d2387e5c7d0a:iaTwrYDOdpUrvIaENCnBYrDN5rh4pjU+gVV1PjgbMObrKAgTSMexQV5Co6GHT4ICBaKFevTQLwJq1X+Vdui3Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -125,7 +125,7 @@ Both sends use the original channel deadline; successful setup does not renew
 it. A fresh turn admission refusal retires the attached owner through existing
 cleanup, without repeating setup.
 
-The v2 transcript retains the exact setup Final, its digest, signed setup-request
+The schema 3 transcript manifest retains the exact setup Final, its digest, signed setup-request
 digest and owner-send marker alongside the turn Delta/Final and completed-turn
 fence. Pushed batches are the whole Q session's ordered observations, including
 setup. Their receipt order does not establish that a turn request caused them;
@@ -184,7 +184,7 @@ remains eligible for the existing maintenance cutoff. If it has expired or is
 missing, exact-stage recovery refuses; a new stage cannot substitute for the
 recorded ID. This boundary does not promise unlimited pending recovery. Once the
 two-root receipt is retained, that maintenance path preserves it. Runtime epoch
-122 joins placement, exact owner/program,
+123 joins placement, exact owner/program,
 binding, completion, native settlement, capture reference and stage identity.
 Bounded metadata/blob verification uses the original signed fixture and native
 predecessor, outside the StateStore/RuntimeDb lock. The verified receiver row and
@@ -268,7 +268,7 @@ Historical release uses the retained process identity without requiring a curren
 callback, active generation or original disposable-directory descriptors.
 Launch/send/readiness failures attempt the same release and preserve uncertainty.
 No-Create rollback releases safe credential custody before its terminal cleanup.
-Runtime epoch 122 and required-null journal fields are current-only; there is no
+Runtime epoch 123 and required-null journal fields are current-only; there is no
 predecessor decoder.
 
 ## Finite result and issuance joins
@@ -334,3 +334,59 @@ never manufacture an operator HandlerContext or use historical evidence as
 fresh contact permission. Preserve the single checked Bundle generation and
 all original acceptance gates. The earlier scoped-producer verifier remains
 a separate authority lane, with its existing claim meaning.
+
+## Original provider configuration input
+
+The signed provider configuration adapter returns one current, closed response:
+private rendered configuration plus a finite public command-environment projection.
+Provider syntax and interpretation belong to the signed adapter; the daemon does
+not parse Codex TOML or evaluate a policy language. The projection supports a sole
+command-connector environment, matching default ID and include_local=false. It
+contains no credential, capability, endpoint, inherited descriptor or HOME value.
+The existing 1 MiB adapter stdout bound includes the entire response envelope.
+Private response storage and owned encoded/stdout/stderr buffers zeroize on drop;
+this is not a claim of erasure of every library serializer scratch allocation.
+
+The connector owner hashes the exact rendered bytes supplied to the sealed memfd
+and retains their byte length and admitted adapter hash/size, declaration and
+relative destination. A public value alone grants no process or contact authority.
+Q preparation borrows the original credential-home PinnedDirectory used by its
+held Worker; the ordinary path cannot substitute a Q configuration observation.
+The private home ID must match original live credential custody. Neither the home
+ID nor its directory path enters the public transcript.
+
+While the Worker is still held, its one-use attachment transaction binds that
+opaque observation to the exact process, original execution binding and Q start.
+Current credential checks borrow this SAME transaction; they do not open a nested
+SQLite transaction or move freshness outside attachment. Missing/mismatched home,
+placement, adapter/destination or channel refuses held release. Existing abort/reap
+cleanup remains available. The bounded canonical public configuration JSON is a
+required immutable field of the existing Q process row, not a new evidence service,
+CAS object or root. Runtime epoch 123 owns this storage contract. Authenticated peer
+and cold/historical process readers rejoin the original retained adapter binding.
+
+Transcript manifest schema 3 requires that exact process observation. Structural
+source/retained reading compares it to the terminal process, alongside original
+setup/turn, process incarnation and channel. Stream schema remains v2 because the
+chunk stream shape did not change. Original protected chunk readback carries only
+the public observation. A lost ACK cannot authorize rerendering configuration,
+selecting a replacement HOME/process or renewing original contact.
+
+Pinned Codex omits environment_id from a sole environment's advertised command
+schema. Its checker accepts that omitted field only after the authenticated launch
+projection proves the sole default matches the signed expectation and the existing
+protected setup/turn selection. Explicit changed/local IDs and other argument
+substitutions still refuse. This finite correction is not general defaulting and
+does not change the claim allowance.
+
+This evidence describes daemon-owned launch INPUTS and their held-process and
+connector association. It does not prove independent configuration consumption or
+close the merged HOME/system/project/managed configuration, extension/model inputs,
+or complete effective tool inventory. Image generation and goals can create local
+controller effects in the pinned defaults; an empty MCP table does not erase lower
+configuration layers. External-product controls and a bounded effect-family/source
+proof must close these separate inputs. The shared ordinary authoring product must
+retain its own explicitly chosen semantics. All five ordinary runtime claims stay
+disabled until actual required evidence exists; three probes or a routing projection
+cannot replace it. One Q turn also does not promise a hard internal model request,
+token or USD cap. Unknown post-contact charges remain unknown.

@@ -629,11 +629,13 @@ impl QualificationLocalOwner<'_> {
     pub fn attach_worker_process(
         &self,
         identity: &crate::process::ExecutionProcessIdentity,
+        configuration: &crate::external_connector::PreparedProviderConfigurationObservation,
     ) -> Result<()> {
         self.state.state_store.attach_qualification_worker_process(
             self.placement,
             identity,
             crate::runtime_db::daemon_generation_id(),
+            configuration,
         )?;
         Ok(())
     }

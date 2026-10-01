@@ -6,6 +6,7 @@
 
 use super::*;
 use anyhow::ensure;
+use ryeos_external_execution_contract::ProviderConfigurationLaunchInput;
 use ryeos_state::objects::QualificationWorkerTranscriptManifest;
 
 use super::qualification_batch::{QualificationWorkerObservationBatchRecord, read_batches};
@@ -17,6 +18,7 @@ use super::qualification_process::require_terminal_qualification_worker_process;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct QualificationWorkerTranscriptSource {
     pub owner_principal: String,
+    pub provider_configuration: ProviderConfigurationLaunchInput,
     pub command: QualificationWorkerCommandRecord,
     pub batches: Vec<QualificationWorkerObservationBatchRecord>,
 }
@@ -54,6 +56,7 @@ fn source(conn: &Connection, placement: &str) -> Result<QualificationWorkerTrans
     let batches = read_batches(conn, placement)?;
     Ok(QualificationWorkerTranscriptSource {
         owner_principal: owner.operator_principal.clone(),
+        provider_configuration: process.provider_configuration.clone(),
         command,
         batches,
     })
@@ -84,6 +87,7 @@ fn require_manifest_source(
     }
     ensure!(
         manifest.owner_principal == source.owner_principal
+            && manifest.provider_configuration == source.provider_configuration
             && manifest.placement_thread_id == command.placement_thread_id
             && manifest.accepted_root_id == command.accepted_root_id
             && manifest.accepted_capsule_hash == command.accepted_capsule_hash

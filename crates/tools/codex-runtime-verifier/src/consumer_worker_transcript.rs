@@ -96,6 +96,10 @@ pub(crate) fn validate_reference_for_record(
     original.scripted_configuration()?;
     let inputs = original.consumer_invocation()?;
     let manifest = &reference.manifest;
+    // Required bounded projection from the exact death-settled launch process.
+    // Authentication comes from this protected read and the daemon's immutable
+    // manifest/source equality, not from a caller-supplied environment ID.
+    manifest.provider_configuration.validate()?;
     original
         .purpose
         .require_consumer_invocation(&manifest.qualification_operation_id, &original.coordinate)?;

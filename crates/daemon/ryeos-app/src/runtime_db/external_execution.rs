@@ -203,6 +203,9 @@ CREATE TABLE external_qualification_worker_process (
     phase TEXT NOT NULL CHECK (phase IN ('attached','terminal')),
     attached_at_ms INTEGER NOT NULL,
     terminal_at_ms INTEGER,
+    provider_configuration_json TEXT NOT NULL CHECK (
+        length(CAST(provider_configuration_json AS BLOB)) <= 4096
+        AND json_valid(provider_configuration_json)),
     CHECK ((phase='attached' AND terminal_at_ms IS NULL)
         OR (phase='terminal' AND terminal_at_ms IS NOT NULL
             AND terminal_at_ms >= attached_at_ms))
@@ -232,6 +235,7 @@ WHEN OLD.phase!='attached' OR NEW.phase!='terminal'
  OR NEW.qualification_occurrence_id!=OLD.qualification_occurrence_id
  OR NEW.channel_binding_digest!=OLD.channel_binding_digest
  OR NEW.process_identity_json!=OLD.process_identity_json
+ OR NEW.provider_configuration_json!=OLD.provider_configuration_json
  OR NEW.daemon_generation_id!=OLD.daemon_generation_id
  OR NEW.attached_at_ms!=OLD.attached_at_ms
 BEGIN SELECT RAISE(ABORT, 'qualification Worker process identity is immutable'); END;
