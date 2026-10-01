@@ -3713,6 +3713,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             channel_authority,
             program,
             guest_inputs: None,
+            qualification_activation: None,
             record,
         })
     }
@@ -3783,6 +3784,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             channel_authority,
             program,
             guest_inputs: None,
+            qualification_activation: None,
             record,
         })
     }
@@ -3893,6 +3895,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             channel_authority,
             program,
             guest_inputs: None,
+            qualification_activation: None,
             record,
         })
     }
@@ -4104,6 +4107,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             channel_authority,
             program: generic_program,
             guest_inputs: None,
+            qualification_activation: None,
             record,
         })
     }
@@ -4402,6 +4406,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             channel_authority,
             program: AdmittedExternalExecutionProgram::StructuredSession(program.clone()),
             guest_inputs: None,
+            qualification_activation: None,
             record,
         })
     }
@@ -4426,7 +4431,7 @@ fn qualification_startup_budget_ms(contract: &ExternalPlacementBackendContract) 
 /// program and live occurrence before using StateStore's Q-specific claim.
 pub struct ExternalQualificationStart<'a> {
     state: &'a AppState,
-    context: crate::handler_context::HandlerContext,
+    invocation: crate::external_qualification_invocation::QualificationInvocation,
     coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
     qualification_operation_id: String,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
@@ -4498,7 +4503,7 @@ impl ExternalQualificationStart<'_> {
         ensure!(
             owner.coordinate == self.coordinate
                 && owner.qualification_operation_id == self.qualification_operation_id
-                && owner.operator_principal == self.context.fingerprint
+                && owner.operator_principal == self.root.purpose().owner_fingerprint
                 && owner.program == *self.root.program()
                 && prepared.record.reservation.admitted_capsule_hash
                     == self.coordinate.accepted_capsule_hash,
@@ -4512,7 +4517,7 @@ impl ExternalQualificationStart<'_> {
         ensure!(
             qualified.phase
                 == crate::runtime_db::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound
-                && qualified.intent.owner_principal == self.context.fingerprint
+                && qualified.intent.owner_principal == self.root.purpose().owner_fingerprint
                 && qualified.occurrence.as_ref() == Some(&owner.qualification_occurrence),
             "external qualification startup lost its exact operator-owned occurrence"
         );
@@ -4527,15 +4532,17 @@ impl ExternalQualificationStart<'_> {
         let first_contact = prepared.record.phase == ExternalAllocationPhase::Reserved;
         let first_activation =
             prepared.record.phase == ExternalAllocationPhase::Bound && !activation_exists;
-        let binding = if first_contact || first_activation {
+        let needs_live_execution =
+            first_contact || prepared.record.phase == ExternalAllocationPhase::Bound;
+        let (refreshed_root, binding) = if needs_live_execution {
             prepared.record.reservation.startup_deadline()?;
             ensure!(
                 !self.deadline.has_elapsed(),
                 "external qualification startup deadline expired before first contact"
             );
-            let refreshed = crate::operator_external_content::product_qualification::prepare_external_qualification_root(
+            let refreshed = crate::operator_external_content::product_qualification::prepare_external_qualification_root_for_invocation(
                 self.state,
-                &self.context,
+                &self.invocation,
                 &self.coordinate,
                 &self.qualification_operation_id,
                 self.limits,
@@ -4556,9 +4563,9 @@ impl ExternalQualificationStart<'_> {
                     && binding.capacity_owner() == prepared.record.reservation.capacity_owner,
                 "external qualification startup changed its signed placement generation"
             );
-            Some(binding)
+            (Some(refreshed), Some(binding))
         } else {
-            None
+            (None, None)
         };
         if first_activation {
             let inputs = self.guest_inputs.take().context(
@@ -4573,16 +4580,14 @@ impl ExternalQualificationStart<'_> {
         let admission = if first_contact {
             let authority = self.state.state_store.pinned_state_authority()?;
             let guard = authority.acquire_shared_guard()?;
-            let admission =
-                crate::operator_external_content::product_qualification::authenticate_consumer_root(
-                    self.state,
-                    &authority,
-                    &guard,
-                    self.limits,
-                    &self.context,
-                    &self.coordinate,
-                    &self.qualification_operation_id,
-                )?;
+            let admission = self.invocation.authenticate(
+                self.state,
+                &authority,
+                &guard,
+                self.limits,
+                &self.coordinate,
+                &self.qualification_operation_id,
+            )?;
             ensure!(
                 admission.purpose() == self.root.purpose()
                     && admission.accepted_project_authority()
@@ -4598,20 +4603,27 @@ impl ExternalQualificationStart<'_> {
         let state = self.state;
         let deadline = self.deadline;
         let advance = move || {
-            let decision = if let Some(admission) = admission {
+            let decision = if first_contact {
                 prepared.claim_qualification(
                     state,
-                    admission,
+                    admission.context("external qualification first contact lost admission")?,
                     binding
                         .as_ref()
                         .context("external qualification contact lost its current binding")?,
                 )?
             } else {
+                if prepared.record.phase == ExternalAllocationPhase::Bound {
+                    prepared.qualification_activation = Some(QualificationActivationAdmission {
+                        state: state.clone(),
+                        root: refreshed_root
+                            .context("external qualification startup lost its invoking root")?,
+                    });
+                }
                 prepared.claim()?
             };
             advance_claimed_external_start(decision, deadline)
         };
-        if first_contact || first_activation {
+        if needs_live_execution {
             let expected_generation = &self
                 .root
                 .purpose()
@@ -4650,9 +4662,29 @@ pub fn prepare_external_qualification_start<'a>(
     root: crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
 ) -> Result<ExternalQualificationStart<'a>> {
-    let refreshed = crate::operator_external_content::product_qualification::prepare_external_qualification_root(
+    prepare_external_qualification_start_for_invocation(
         state,
-        context,
+        &crate::external_qualification_invocation::QualificationInvocation::operator(context),
+        coordinate,
+        qualification_operation_id,
+        limits,
+        root,
+        guest_inputs,
+    )
+}
+
+pub fn prepare_external_qualification_start_for_invocation<'a>(
+    state: &'a AppState,
+    invocation: &crate::external_qualification_invocation::QualificationInvocation,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    root: crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+    guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+) -> Result<ExternalQualificationStart<'a>> {
+    let refreshed = crate::operator_external_content::product_qualification::prepare_external_qualification_root_for_invocation(
+        state,
+        invocation,
         coordinate,
         qualification_operation_id,
         limits,
@@ -4663,6 +4695,7 @@ pub fn prepare_external_qualification_start<'a>(
             && refreshed.program() == root.program(),
         "external qualification start changed its authenticated accepted root"
     );
+    let root = refreshed;
     let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
         coordinate,
         qualification_operation_id,
@@ -4684,7 +4717,7 @@ pub fn prepare_external_qualification_start<'a>(
     ensure!(
         qualified.phase
             == crate::runtime_db::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound
-            && qualified.intent.owner_principal == context.fingerprint,
+            && qualified.intent.owner_principal == root.purpose().owner_fingerprint,
         "external qualification start has no operator-owned bound occurrence"
     );
     let occurrence = qualified
@@ -4695,7 +4728,7 @@ pub fn prepare_external_qualification_start<'a>(
             coordinate: coordinate.clone(),
             qualification_operation_id: qualification_operation_id.to_owned(),
             qualification_occurrence: occurrence,
-            operator_principal: context.fingerprint.clone(),
+            operator_principal: root.purpose().owner_fingerprint.clone(),
             program: root.program().clone(),
         },
     );
@@ -4755,16 +4788,14 @@ pub fn prepare_external_qualification_start<'a>(
     let admission = {
         let authority = state.state_store.pinned_state_authority()?;
         let guard = authority.acquire_shared_guard()?;
-        let admitted =
-            crate::operator_external_content::product_qualification::authenticate_consumer_root(
-                state,
-                &authority,
-                &guard,
-                limits,
-                context,
-                coordinate,
-                qualification_operation_id,
-            )?;
+        let admitted = invocation.authenticate(
+            state,
+            &authority,
+            &guard,
+            limits,
+            coordinate,
+            qualification_operation_id,
+        )?;
         ensure!(
             admitted.purpose() == root.purpose()
                 && admitted.accepted_project_authority() == &root.capsule().project_authority,
@@ -4795,7 +4826,7 @@ pub fn prepare_external_qualification_start<'a>(
     let cleanup = ExternalCandidateCleanupLifeline::new(state, &placement);
     Ok(ExternalQualificationStart {
         state,
-        context: (*context).clone(),
+        invocation: invocation.clone(),
         coordinate: coordinate.clone(),
         qualification_operation_id: qualification_operation_id.to_owned(),
         limits,
@@ -6008,6 +6039,12 @@ fn require_current_contact_binding<'a>(
     Ok(installed)
 }
 
+struct QualificationActivationAdmission {
+    state: AppState,
+    root:
+        crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+}
+
 pub(crate) struct PreparedExternalPlacement {
     state_store: Arc<crate::state_store::StateStore>,
     vault: Arc<dyn NodeVault>,
@@ -6022,6 +6059,7 @@ pub(crate) struct PreparedExternalPlacement {
     // and rejoins the original born capsule; it cannot reconstruct fresh inputs.
     program: AdmittedExternalExecutionProgram,
     guest_inputs: Option<ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
+    qualification_activation: Option<QualificationActivationAdmission>,
     record: ExternalAllocationRecord,
 }
 
@@ -6200,6 +6238,7 @@ impl PreparedExternalPlacement {
                         channel_authority: self.channel_authority,
                         program: self.program,
                         guest_inputs: self.guest_inputs,
+                        qualification_activation: self.qualification_activation,
                         _controller_lifetime: self.controller_lifetime,
                         record,
                     },
@@ -6245,6 +6284,7 @@ pub(crate) struct ExternalPlacementReconciliation {
     channel_authority: ExternalChannelAuthority,
     program: AdmittedExternalExecutionProgram,
     guest_inputs: Option<ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
+    qualification_activation: Option<QualificationActivationAdmission>,
     // Reconciliation and termination are provider mutations/observations too;
     // they must not overlap a replacement controller generation.
     _controller_lifetime: Arc<StateLockLease>,
@@ -6422,11 +6462,29 @@ impl ExternalPlacementReconciliation {
                 .is_none_or(|observation| observation.activation_state == "started"),
             "attached external channel contradicts supervisor activation"
         );
-        let release = self.state_store.admit_external_ready_and_author_release(
-            placement,
-            self.channel_authority.owner_signing_key(),
-            live_deadline,
-        )?;
+        let release = if matches!(
+            &self.record.reservation.owner,
+            ExternalAllocationOwner::QualificationCandidate(_)
+        ) {
+            let proof = self
+                .qualification_activation
+                .as_ref()
+                .context("qualification Release has no live invoking owner")?;
+            self.state_store
+                .admit_external_qualification_ready_and_author_release(
+                    &proof.state,
+                    placement,
+                    self.channel_authority.owner_signing_key(),
+                    live_deadline,
+                    proof.root.authenticate_invocation(&proof.state)?,
+                )?
+        } else {
+            self.state_store.admit_external_ready_and_author_release(
+                placement,
+                self.channel_authority.owner_signing_key(),
+                live_deadline,
+            )?
+        };
         if release.is_some() {
             Ok(ExternalCandidateStartProgress::Ready(binding))
         } else {
@@ -6579,7 +6637,23 @@ impl ExternalPlacementReconciliation {
                 } else {
                     None
                 };
-                if let Some(commitment) = relay.as_ref() {
+                if matches!(
+                    &current.reservation.owner,
+                    ExternalAllocationOwner::QualificationCandidate(_)
+                ) {
+                    let proof = self
+                        .qualification_activation
+                        .as_ref()
+                        .context("fresh qualification activation has no live invoking owner")?;
+                    self.state_store
+                        .begin_external_qualification_supervisor_activation(
+                            &proof.state,
+                            placement,
+                            &intent,
+                            relay.as_ref(),
+                            proof.root.authenticate_invocation(&proof.state)?,
+                        )
+                } else if let Some(commitment) = relay.as_ref() {
                     self.state_store
                         .begin_external_relay_supervisor_activation(placement, &intent, commitment)
                 } else {
@@ -9258,6 +9332,7 @@ mod tests {
             ),
             program: AdmittedExternalExecutionProgram::StructuredSession(program()),
             guest_inputs: None,
+            qualification_activation: None,
             record: store
                 .external_allocation(&reservation.placement_thread_id)
                 .unwrap()

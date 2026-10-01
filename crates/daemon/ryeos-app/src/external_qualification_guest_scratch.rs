@@ -38,9 +38,25 @@ pub fn prove_retained_qualification_transport_completed(
     qualification_operation_id: &str,
     limits: ObjectClosureLimits,
 ) -> Result<bool> {
-    let root = crate::operator_external_content::product_qualification::prepare_external_qualification_root(
+    prove_retained_qualification_transport_completed_for_invocation(
         state,
-        context,
+        &crate::external_qualification_invocation::QualificationInvocation::operator(context),
+        coordinate,
+        qualification_operation_id,
+        limits,
+    )
+}
+
+pub fn prove_retained_qualification_transport_completed_for_invocation(
+    state: &AppState,
+    invocation: &crate::external_qualification_invocation::QualificationInvocation,
+    coordinate: &ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ObjectClosureLimits,
+) -> Result<bool> {
+    let root = crate::operator_external_content::product_qualification::prepare_external_qualification_root_for_invocation(
+        state,
+        invocation,
         coordinate,
         qualification_operation_id,
         limits,
@@ -55,7 +71,7 @@ pub fn prove_retained_qualification_transport_completed(
             &placement,
             coordinate,
             qualification_operation_id,
-            &context.fingerprint,
+            &root.purpose().owner_fingerprint,
             &root.program().digest()?,
         )
 }
@@ -163,12 +179,28 @@ pub fn prepare_original_qualification_guest_scratch(
     qualification_operation_id: &str,
     limits: ObjectClosureLimits,
 ) -> Result<PreparedQualificationGuestScratch> {
+    prepare_original_qualification_guest_scratch_for_invocation(
+        state,
+        &crate::external_qualification_invocation::QualificationInvocation::operator(context),
+        coordinate,
+        qualification_operation_id,
+        limits,
+    )
+}
+
+pub fn prepare_original_qualification_guest_scratch_for_invocation(
+    state: &AppState,
+    invocation: &crate::external_qualification_invocation::QualificationInvocation,
+    coordinate: &ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ObjectClosureLimits,
+) -> Result<PreparedQualificationGuestScratch> {
     crate::hosted_operation::with_qualification_occurrence_contact(
         qualification_operation_id,
         || {
             prepare_original_qualification_guest_scratch_under_gate(
                 state,
-                context,
+                invocation,
                 coordinate,
                 qualification_operation_id,
                 limits,
@@ -179,7 +211,7 @@ pub fn prepare_original_qualification_guest_scratch(
 
 fn prepare_original_qualification_guest_scratch_under_gate(
     state: &AppState,
-    context: &HandlerContext,
+    invocation: &crate::external_qualification_invocation::QualificationInvocation,
     coordinate: &ConsumerRuntimeVerificationCoordinate,
     qualification_operation_id: &str,
     limits: ObjectClosureLimits,
@@ -187,9 +219,9 @@ fn prepare_original_qualification_guest_scratch_under_gate(
     state
         .controller_lifetime
         .ensure_protects_app_root(&state.config.app_root)?;
-    let root = crate::operator_external_content::product_qualification::prepare_external_qualification_root(
+    let root = crate::operator_external_content::product_qualification::prepare_external_qualification_root_for_invocation(
         state,
-        context,
+        invocation,
         coordinate,
         qualification_operation_id,
         limits,
@@ -201,16 +233,14 @@ fn prepare_original_qualification_guest_scratch_under_gate(
     )?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
-    let admission =
-        crate::operator_external_content::product_qualification::authenticate_consumer_root(
-            state,
-            &authority,
-            &guard,
-            limits,
-            context,
-            coordinate,
-            qualification_operation_id,
-        )?;
+    let admission = invocation.authenticate(
+        state,
+        &authority,
+        &guard,
+        limits,
+        coordinate,
+        qualification_operation_id,
+    )?;
     ensure!(
         admission.purpose() == root.purpose()
             && admission.accepted_project_authority() == &root.capsule().project_authority,

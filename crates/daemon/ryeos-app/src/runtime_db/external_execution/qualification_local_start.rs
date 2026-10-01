@@ -633,16 +633,57 @@ impl RuntimeDb {
     pub(crate) fn authorize_qualification_local_spawn(
         &self,
         placement: &str,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<QualificationLocalStartRecord> {
-        let record = read_local_start(&self.conn, placement)?
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let allocation =
+            read(&tx, placement)?.context("qualification local spawn lost allocation")?;
+        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+        let record = read_local_start(&tx, placement)?
             .context("qualification local spawn has no original start")?;
         ensure!(
             record.phase == QualificationLocalStartPhase::WorkspaceReady
                 && record.directory_borrow_intent.is_some(),
             "qualification local spawn requires its one-use original directory borrow"
         );
-        require_current_start(&self.conn, &record)?;
+        require_current_start(&tx, &record)?;
+        tx.commit()?;
         Ok(record)
+    }
+
+    /// Rejoin the original attached process and current released Q channel
+    /// before the held process may execute. This check performs no process I/O.
+    pub(crate) fn authorize_qualification_worker_release(
+        &self,
+        placement: &str,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
+    ) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let allocation =
+            read(&tx, placement)?.context("qualification Worker release lost allocation")?;
+        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+        let local = read_local_start(&tx, placement)?
+            .context("qualification Worker release lost its original local start")?;
+        ensure!(
+            local.phase == QualificationLocalStartPhase::WorkerAttached,
+            "qualification Worker release requires its original attached process"
+        );
+        require_current_start(&tx, &local)?;
+        let process = qualification_process::require_current_attached_worker(&tx, placement)?;
+        ensure!(
+            local.worker_incarnation_digest.as_deref()
+                == Some(
+                    process
+                        .process_identity
+                        .owner_incarnation_digest()?
+                        .as_str()
+                )
+                && process.channel_binding_digest == local.channel_binding_digest
+                && process.daemon_generation_id == local.daemon_generation_id,
+            "qualification Worker release changed its exact attached incarnation"
+        );
+        tx.commit()?;
+        Ok(())
     }
 
     /// Commit one possible descriptor borrow before cloning the original

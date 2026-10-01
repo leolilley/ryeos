@@ -232,6 +232,23 @@ fn require_retained_process_owner(
     Ok(())
 }
 
+/// Rejoin the original attached Worker while the caller holds its current
+/// accepted-root admission and the runtime writer transaction.
+pub(super) fn require_current_attached_worker(
+    conn: &Connection,
+    placement: &str,
+) -> Result<QualificationWorkerProcessRecord> {
+    let record = read_process(conn, placement)?
+        .context("qualification Worker release lost its attached process")?;
+    require_retained_process_owner(conn, &record)?;
+    ensure!(
+        record.phase == QualificationWorkerProcessPhase::Attached
+            && record.daemon_generation_id == daemon_generation_id(),
+        "qualification Worker release lost its current attached process"
+    );
+    Ok(record)
+}
+
 /// Join a completion issuer to the exact death-proven local Worker row inside
 /// its own writer transaction. The returned record is evidence custody, not
 /// fresh contact or a standalone success permit.

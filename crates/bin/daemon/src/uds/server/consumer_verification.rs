@@ -120,6 +120,26 @@ pub(super) async fn start(
         let input = ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord::parse(
             request.record.as_bytes(),
         )?;
+        ensure!(
+            input.purpose == *prepared.purpose()
+                && input.coordinate == *prepared.coordinate()
+                && input.selection == *prepared.selection()
+                && input.requirement == *prepared.requirement(),
+            "consumer START input differs from its authenticated retained authority"
+        );
+        // Actual Q owns a separate allocation, with the restored owner
+        // measurement as provenance. Complete its signed Worker/native/local/
+        // provider lifecycle before the independent diagnostic can be observed.
+        // A lost START acknowledgement permits observation, never a second Q.
+        ryeos_executor::execution::external_qualification_start::run_consumer_runtime_verification_transport_for_callback(
+            &state, &token, &request.coordinate, &request.qualification_operation_id,
+        )?;
+        // Q does not consume or renew the later diagnostic contact timeout.
+        // The same live callback/root is rechecked after Q; its enclosing
+        // signed lifetime has continued to run throughout this blocking owner.
+        let prepared = ryeos_app::operator_external_content::product_qualification::prepare_retained_consumer_verifier_for_callback(
+            &state, &token, &request.coordinate, &request.qualification_operation_id, limits,
+        )?;
         let attempt = ryeos_app::operator_runtime_snapshot::prepare_consumer_verifier_attempt_for_callback(
             &state, &token, &prepared, &request.qualification_operation_id, limits,
         )?;

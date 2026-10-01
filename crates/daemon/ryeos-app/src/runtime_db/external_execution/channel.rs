@@ -1447,6 +1447,36 @@ impl RuntimeDb {
         signing_key: &lillux::crypto::SigningKey,
         live_deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        self.admit_external_ready_and_author_release_with_proof(
+            placement,
+            signing_key,
+            live_deadline,
+            None,
+        )
+    }
+
+    pub(crate) fn admit_external_qualification_ready_and_author_release(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+        live_deadline: lillux::time::MonotonicDeadline,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        self.admit_external_ready_and_author_release_with_proof(
+            placement,
+            signing_key,
+            live_deadline,
+            Some(proof),
+        )
+    }
+
+    fn admit_external_ready_and_author_release_with_proof(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+        live_deadline: lillux::time::MonotonicDeadline,
+        qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let binding = load_binding(&tx, placement)?;
         let binding_digest = binding.digest()?;
@@ -1580,6 +1610,15 @@ impl RuntimeDb {
             );
             retained
         } else {
+            match &allocation.reservation.owner {
+                ExternalAllocationOwner::QualificationCandidate(_) => {
+                    require_new_owner(&tx, &allocation.reservation, None, qualification_proof)?;
+                }
+                _ => ensure!(
+                    qualification_proof.is_none(),
+                    "Q release changed its allocation owner kind"
+                ),
+            }
             // Sample after the writer lock and all readiness validation,
             // immediately before the first Release can become durable. Wall
             // clock recovery never extends this live caller's original cap.

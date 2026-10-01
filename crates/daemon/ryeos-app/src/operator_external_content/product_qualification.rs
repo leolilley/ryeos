@@ -2244,6 +2244,9 @@ fn resolve_current_bundle_producer_recipe_for_purpose_in_generation(
 /// retains authenticated immutable inputs, but grants no placement, provider
 /// contact, channel, or qualification claim.
 pub struct PreparedExternalQualificationRoot {
+    invocation: crate::external_qualification_invocation::QualificationInvocation,
+    coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: String,
     capsule: ryeos_state::objects::AdmittedLaunchCapsule,
     purpose: ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
     program: AdmittedExternalQualificationSessionProgram,
@@ -2252,6 +2255,35 @@ pub struct PreparedExternalQualificationRoot {
 }
 
 impl PreparedExternalQualificationRoot {
+    /// Re-authenticate a new effect under the original invocation. Historical
+    /// observations and cleanup use retained custody instead of this method.
+    pub(crate) fn authenticate_invocation(
+        &self,
+        state: &AppState,
+    ) -> anyhow::Result<AuthenticatedConsumerRoot> {
+        let authority = state.state_store.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let limits = state
+            .node_policy
+            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .closure_limits()?;
+        let admitted = self.invocation.authenticate(
+            state,
+            &authority,
+            &guard,
+            limits,
+            &self.coordinate,
+            &self.qualification_operation_id,
+        )?;
+        if admitted.purpose() != &self.purpose
+            || admitted.accepted_project_authority() != &self.capsule.project_authority
+            || self.capsule.content_hash()? != self.coordinate.accepted_capsule_hash
+        {
+            bail!("Q fresh effect changed its original invoking root");
+        }
+        authority.ensure_guard(&guard)?;
+        Ok(admitted)
+    }
     pub fn capsule(&self) -> &ryeos_state::objects::AdmittedLaunchCapsule {
         &self.capsule
     }
@@ -2370,14 +2402,31 @@ pub fn prepare_external_qualification_root(
     qualification_operation_id: &str,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
 ) -> anyhow::Result<PreparedExternalQualificationRoot> {
+    prepare_external_qualification_root_for_invocation(
+        state,
+        &crate::external_qualification_invocation::QualificationInvocation::operator(context),
+        coordinate,
+        qualification_operation_id,
+        limits,
+    )
+}
+
+/// Resolve the same retained Worker under the actual invoking verifier or
+/// independently admitted operator. Invocation identity is not source authority.
+pub fn prepare_external_qualification_root_for_invocation(
+    state: &AppState,
+    invocation: &crate::external_qualification_invocation::QualificationInvocation,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+) -> anyhow::Result<PreparedExternalQualificationRoot> {
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
-    let admission = authenticate_consumer_root(
+    let admission = invocation.authenticate(
         state,
         &authority,
         &guard,
         limits,
-        context,
         coordinate,
         qualification_operation_id,
     )?;
@@ -2421,7 +2470,7 @@ pub fn prepare_external_qualification_root(
         &authority,
         &guard,
         limits,
-        context.fingerprint.as_str(),
+        admission.owner_principal(),
         witness_hash,
         witness_source,
         super::product_receipt::ProductSourceVerification::Retained,
@@ -2447,6 +2496,9 @@ pub fn prepare_external_qualification_root(
     }
     authority.ensure_guard(&guard)?;
     Ok(PreparedExternalQualificationRoot {
+        invocation: invocation.clone(),
+        coordinate: coordinate.clone(),
+        qualification_operation_id: qualification_operation_id.to_owned(),
         capsule,
         purpose: purpose.clone(),
         program,

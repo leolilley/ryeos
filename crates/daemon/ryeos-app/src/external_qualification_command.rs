@@ -390,9 +390,18 @@ pub fn execute_signed_qualification_worker_request(
                         == expected_process.owner_incarnation_digest()?,
                 "Q Worker command was already contacted or changed process"
             );
+            // Reservation is not permission to send later under an expired or
+            // revoked caller. Consume fresh admission at the durable contact
+            // boundary, then release its bearer gate before waiting on I/O.
+            let admission = root.authenticate_invocation(state)?;
             state
                 .state_store
-                .mark_qualification_worker_command_possible_contact(placement, &selected.digest)?;
+                .mark_qualification_worker_command_possible_contact(
+                    state,
+                    placement,
+                    &selected.digest,
+                    admission,
+                )?;
             let digest = selected.digest.clone();
             let wire_max_bytes = selected.wire_max_bytes;
             let mut on_delta =

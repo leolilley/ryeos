@@ -1897,8 +1897,9 @@ fn require_retained_owner(
 }
 
 /// A Q allocation's first contact depends on the same live occurrence and
-/// observed owner measurement in this writer transaction. Historical root
-/// launch claims are not part of this gate; they may end before Q contact.
+/// observed owner measurement in this writer transaction. Callback launch
+/// claims are additionally checked by the ephemeral proof at first contact;
+/// the completed-root operator lane has no live callback claim.
 fn require_contactable_qualification_owner(
     conn: &Connection,
     reservation: &ExternalAllocationReservation,
@@ -2015,12 +2016,21 @@ fn require_new_owner(
             );
             require_contactable_direct_owner(conn, reservation)
         }
-        ExternalAllocationOwner::QualificationCandidate(_) => {
+        ExternalAllocationOwner::QualificationCandidate(owner) => {
             ensure!(
                 direct_proof.is_none()
                     && qualification_proof.is_some_and(|proof| proof.matches(reservation)),
                 "external qualification contact requires authenticated accepted root, product member and occurrence"
             );
+            let proof = qualification_proof
+                .context("external qualification contact lost its accepted-root proof")?;
+            if let Some(launch_owner) = proof.callback_launch_owner() {
+                super::restored_verifier_attempt::require_current_callback_launch(
+                    conn,
+                    &owner.coordinate.accepted_root_id,
+                    launch_owner,
+                )?;
+            }
             require_contactable_qualification_owner(conn, reservation)
         }
     }
@@ -2460,7 +2470,7 @@ impl RuntimeDb {
         placement: &str,
         intent: &ExternalSupervisorActivationIntent,
     ) -> Result<bool> {
-        self.begin_external_supervisor_activation_with_relay(placement, intent, None)
+        self.begin_external_supervisor_activation_with_relay(placement, intent, None, None)
     }
 
     pub(crate) fn begin_external_relay_supervisor_activation(
@@ -2473,6 +2483,22 @@ impl RuntimeDb {
             placement,
             intent,
             Some(relay_bootstrap),
+            None,
+        )
+    }
+
+    pub(crate) fn begin_external_qualification_supervisor_activation_with_verified_owner(
+        &self,
+        placement: &str,
+        intent: &ExternalSupervisorActivationIntent,
+        relay_bootstrap: Option<&ExternalRelayBootstrapCommitment>,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
+    ) -> Result<bool> {
+        self.begin_external_supervisor_activation_with_relay(
+            placement,
+            intent,
+            relay_bootstrap,
+            Some(proof),
         )
     }
 
@@ -2481,6 +2507,7 @@ impl RuntimeDb {
         placement: &str,
         intent: &ExternalSupervisorActivationIntent,
         relay_bootstrap: Option<&ExternalRelayBootstrapCommitment>,
+        qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
     ) -> Result<bool> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read(&tx, placement)?.context("external allocation is absent")?;
@@ -2542,6 +2569,15 @@ impl RuntimeDb {
             record.phase == ExternalAllocationPhase::Bound,
             "new external supervisor activation requires an executable bound occurrence"
         );
+        match &record.reservation.owner {
+            ExternalAllocationOwner::QualificationCandidate(_) => {
+                require_new_owner(&tx, &record.reservation, None, qualification_proof)?;
+            }
+            _ => ensure!(
+                qualification_proof.is_none(),
+                "Q supervisor activation changed its allocation owner kind"
+            ),
+        }
         channel::require_current_execution_owner(&tx, &record.reservation)?;
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         record.reservation.require_startup_time(now)?;

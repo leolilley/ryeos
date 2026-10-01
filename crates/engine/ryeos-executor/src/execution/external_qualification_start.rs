@@ -10,6 +10,7 @@ use ryeos_app::external_placement::{
     ExternalQualificationControllerTransport, ExternalQualificationStart,
     inspect_external_qualification_controller_transport,
 };
+use ryeos_app::external_qualification_invocation::QualificationInvocation;
 use ryeos_app::operator_external_content::product_qualification::PreparedExternalQualificationRoot;
 use ryeos_state::external_execution::ExecutionChannelBinding;
 
@@ -31,6 +32,37 @@ pub fn run_consumer_runtime_verification_transport(
     coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
     qualification_operation_id: &str,
 ) -> Result<()> {
+    run_consumer_runtime_verification_transport_for_invocation(
+        state,
+        QualificationInvocation::operator(context),
+        coordinate,
+        qualification_operation_id,
+    )
+}
+
+/// Drive the same Q lifecycle under the verifier's actual callback authority.
+/// The bearer remains process-local; every app admission rechecks its exact
+/// callback, accepted root and qualification operation before granting contact.
+pub fn run_consumer_runtime_verification_transport_for_callback(
+    state: &ryeos_app::state::AppState,
+    token: &str,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+) -> Result<()> {
+    run_consumer_runtime_verification_transport_for_invocation(
+        state,
+        QualificationInvocation::callback(token),
+        coordinate,
+        qualification_operation_id,
+    )
+}
+
+fn run_consumer_runtime_verification_transport_for_invocation(
+    state: &ryeos_app::state::AppState,
+    invocation: QualificationInvocation,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+) -> Result<()> {
     let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
         coordinate,
         qualification_operation_id,
@@ -39,18 +71,18 @@ pub fn run_consumer_runtime_verification_transport(
         .node_policy
         .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    if ryeos_app::external_qualification_guest_scratch::prove_retained_qualification_transport_completed(
+    if ryeos_app::external_qualification_guest_scratch::prove_retained_qualification_transport_completed_for_invocation(
         state,
-        context,
+        &invocation,
         coordinate,
         qualification_operation_id,
         limits,
     )? {
         return Ok(());
     }
-    let scratch = ryeos_app::external_qualification_guest_scratch::prepare_original_qualification_guest_scratch(
+    let scratch = ryeos_app::external_qualification_guest_scratch::prepare_original_qualification_guest_scratch_for_invocation(
         state,
-        context,
+        &invocation,
         coordinate,
         qualification_operation_id,
         limits,
@@ -60,17 +92,17 @@ pub fn run_consumer_runtime_verification_transport(
             scratch.placement() == placement,
             "Q prepared scratch changed its stable placement"
         );
-        let prepared = super::external_qualification_inputs::prepare_external_qualification_guest(
+        let prepared = super::external_qualification_inputs::prepare_external_qualification_guest_for_invocation(
             state,
-            context,
+            &invocation,
             coordinate,
             qualification_operation_id,
             limits,
             scratch.pinned_root()?,
         )?;
-        run_prepared_external_qualification_to_normal_terminal(
+        run_prepared_external_qualification_to_normal_terminal_for_invocation(
             state,
-            context,
+            &invocation,
             coordinate,
             qualification_operation_id,
             limits,
@@ -143,23 +175,23 @@ impl ExternalQualificationReady {
 /// polling. Callers cannot leave a successfully reserved owner without this
 /// process-local cancellation obligation. The one-shot connector remains for
 /// a future local provider spawn owner that can retain all of its resources.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn reserve_and_await_external_qualification_ready(
+fn reserve_and_await_external_qualification_ready_for_invocation(
     state: &ryeos_app::state::AppState,
-    context: &ryeos_app::handler_context::HandlerContext,
+    invocation: &QualificationInvocation,
     coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
     qualification_operation_id: &str,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     prepared: PreparedExternalQualificationGuest,
 ) -> Result<ExternalQualificationReady> {
-    let start = super::external_qualification_inputs::reserve_external_qualification_guest(
-        state,
-        context,
-        coordinate,
-        qualification_operation_id,
-        limits,
-        prepared,
-    )?;
+    let start =
+        super::external_qualification_inputs::reserve_external_qualification_guest_for_invocation(
+            state,
+            invocation,
+            coordinate,
+            qualification_operation_id,
+            limits,
+            prepared,
+        )?;
     await_external_qualification_ready(state, start)
 }
 
@@ -168,18 +200,17 @@ pub(crate) fn reserve_and_await_external_qualification_ready(
 /// verifier verdict or portable product qualification claim. The caller must
 /// first provide independently authenticated Q guest inputs; admission still
 /// refuses any signed backend lacking the required offline capabilities.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_prepared_external_qualification_to_normal_terminal(
+fn run_prepared_external_qualification_to_normal_terminal_for_invocation(
     state: &ryeos_app::state::AppState,
-    context: &ryeos_app::handler_context::HandlerContext,
+    invocation: &QualificationInvocation,
     coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
     qualification_operation_id: &str,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     prepared: PreparedExternalQualificationGuest,
 ) -> Result<()> {
-    let ready = reserve_and_await_external_qualification_ready(
+    let ready = reserve_and_await_external_qualification_ready_for_invocation(
         state,
-        context,
+        invocation,
         coordinate,
         qualification_operation_id,
         limits,

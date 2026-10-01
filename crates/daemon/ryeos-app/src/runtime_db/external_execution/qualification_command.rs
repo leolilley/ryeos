@@ -555,8 +555,8 @@ impl RuntimeDb {
         crate::process::validate_execution_process_identity_shape(&process_identity)?;
         ensure!(
             lillux::canonical_json(&serde_json::to_value(&process_identity)?)? == process.5
-                && process_identity.process_scope.is_some(),
-            "Q command process identity is not its exact scoped attachment"
+                && process_identity.process_scope.is_none(),
+            "Q command process identity is not its exact trusted attachment"
         );
         let connector_state: (String, String) = tx.query_row(
             "SELECT state,channel_binding_digest FROM external_execution_connector
@@ -611,6 +611,7 @@ impl RuntimeDb {
         &self,
         placement: &str,
         request_digest: &str,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read_command(&tx, placement)?.context("Q command was not reserved")?;
@@ -625,7 +626,7 @@ impl RuntimeDb {
             allocation.phase == ExternalAllocationPhase::Bound,
             "Q command is not bound"
         );
-        require_contactable_qualification_owner(&tx, &allocation.reservation)?;
+        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
         let process_state: String = tx.query_row(
             "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
             [placement],

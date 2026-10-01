@@ -42,6 +42,7 @@ mod external_lifecycle_adapter;
 pub mod external_placement;
 pub mod external_qualification_command;
 pub mod external_qualification_guest_scratch;
+pub mod external_qualification_invocation;
 pub mod external_qualification_local;
 pub mod external_qualification_transcript;
 pub mod federated_follow;

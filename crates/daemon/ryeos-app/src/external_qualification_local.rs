@@ -495,15 +495,27 @@ impl QualificationLocalOwner<'_> {
     /// taken time after the directory was first borrowed.
     pub fn authorize_spawn(&self) -> Result<()> {
         self.state
-            .state_store
-            .authorize_qualification_local_spawn(self.placement)?;
-        self.state
             .engine
             .with_checked_bundle_generation(|generation| {
                 self.root
                     .current_local_worker_resolution(generation)
                     .map(|_| ())
-            })
+            })?;
+        let admission = self.root.authenticate_invocation(self.state)?;
+        self.state
+            .state_store
+            .authorize_qualification_local_spawn(self.state, self.placement, admission)
+            .map(|_| ())
+    }
+
+    /// Attachment retains an already-created process even after caller expiry.
+    /// Executable release separately requires fresh invoking authority; a
+    /// refused release leaves the exact held process available for retirement.
+    pub fn authorize_worker_release(&self) -> Result<()> {
+        let admission = self.root.authenticate_invocation(self.state)?;
+        self.state
+            .state_store
+            .authorize_qualification_worker_release(self.state, self.placement, admission)
     }
 
     pub fn attach_worker_process(

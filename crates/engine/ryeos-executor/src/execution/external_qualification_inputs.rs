@@ -7,6 +7,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_app::external_qualification_invocation::QualificationInvocation;
 use ryeos_app::operator_external_content::product_qualification::PreparedExternalQualificationRoot;
 use ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority;
 use ryeos_external_execution_contract::{
@@ -56,10 +57,30 @@ pub fn reserve_external_qualification_guest<'a>(
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     prepared: PreparedExternalQualificationGuest,
 ) -> Result<ryeos_app::external_placement::ExternalQualificationStart<'a>> {
-    let (root, inputs) = prepared.into_parts();
-    ryeos_app::external_placement::prepare_external_qualification_start(
+    reserve_external_qualification_guest_for_invocation(
         state,
-        context,
+        &QualificationInvocation::operator(context),
+        coordinate,
+        qualification_operation_id,
+        limits,
+        prepared,
+    )
+}
+
+/// Preserve the actual invoking lane through the app's owned startup lifeline.
+/// The app reauthenticates this identity before reservation and first contact.
+pub fn reserve_external_qualification_guest_for_invocation<'a>(
+    state: &'a ryeos_app::state::AppState,
+    invocation: &QualificationInvocation,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    prepared: PreparedExternalQualificationGuest,
+) -> Result<ryeos_app::external_placement::ExternalQualificationStart<'a>> {
+    let (root, inputs) = prepared.into_parts();
+    ryeos_app::external_placement::prepare_external_qualification_start_for_invocation(
+        state,
+        invocation,
         coordinate,
         qualification_operation_id,
         limits,
@@ -76,9 +97,29 @@ pub fn prepare_external_qualification_guest(
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     private_parent: &lillux::PinnedDirectory,
 ) -> Result<PreparedExternalQualificationGuest> {
-    let root = ryeos_app::operator_external_content::product_qualification::prepare_external_qualification_root(
+    prepare_external_qualification_guest_for_invocation(
         state,
-        context,
+        &QualificationInvocation::operator(context),
+        coordinate,
+        qualification_operation_id,
+        limits,
+        private_parent,
+    )
+}
+
+/// Authenticate retained Q inputs using the real operator or callback lane.
+/// Invocation identity selects authentication, never replacement input bytes.
+pub fn prepare_external_qualification_guest_for_invocation(
+    state: &ryeos_app::state::AppState,
+    invocation: &QualificationInvocation,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    private_parent: &lillux::PinnedDirectory,
+) -> Result<PreparedExternalQualificationGuest> {
+    let root = ryeos_app::operator_external_content::product_qualification::prepare_external_qualification_root_for_invocation(
+        state,
+        invocation,
         coordinate,
         qualification_operation_id,
         limits,

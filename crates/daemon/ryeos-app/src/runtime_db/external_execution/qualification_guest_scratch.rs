@@ -562,8 +562,16 @@ impl RuntimeDb {
         owner_principal: &str,
         program_digest: &str,
         scratch_root: &std::path::Path,
+        callback_launch_owner: Option<&str>,
     ) -> Result<QualificationGuestScratchRecord> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        if let Some(launch_owner) = callback_launch_owner {
+            super::super::restored_verifier_attempt::require_current_callback_launch(
+                &tx,
+                &coordinate.accepted_root_id,
+                launch_owner,
+            )?;
+        }
         let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
             coordinate,
             qualification_operation_id,

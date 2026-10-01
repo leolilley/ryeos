@@ -683,6 +683,22 @@ pub(crate) fn start_external_qualification_local_worker(
                             attached_process: None,
                         });
                     }
+                    // An attached held child is cleanup custody, not permission to
+                    // execute after its invoking callback expires or is revoked.
+                    if let Err(error) = owner.authorize_worker_release() {
+                        let reaped = held.abort_and_reap();
+                        return Ok(LaunchOutcome::Failed {
+                            error: fence_start_failure(
+                                owner,
+                                error.context(format!(
+                                    "Q held Worker release authorization failed; reap: {reaped:?}"
+                                )),
+                                "Q held Worker release authorization failed",
+                            ),
+                            connector_settlement,
+                            attached_process: Some(process_identity),
+                        });
+                    }
                     // A later termination cannot overtake a held child: the Q contact
                     // gate stays held through release, then pool readiness runs alone.
                     let running = match held.release_after_attachment() {

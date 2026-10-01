@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T01:33:35Z:b5279f31e5904fd06239231a77336eaf6fa1adc3e442e501b715ecf88843895e:0OFV1yhvfQQQf0AL9aJhgeElUw4tz3eAoz9LHWwEXMm4my/U7z6gNw/WJ00GwIR1Ru3hlmqgAP6yvKV8zOZsAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T01:55:35Z:7a4bd6315e8d387efd35a96985e85148f6c013fb3c97b951c11915decd12e92d:UPH89qgK5bLRvNqx1GDoFVKdIR48836/ONi9Zme6AlQcGk7+tqayDmcHcPIj6wZ493z4iNYfbaruiEQS8vWnDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -44,13 +44,32 @@ refusal. Consumer-context qualification publication remains disabled. Source
 wiring, protocol checks and an independent diagnostic do not establish that the
 actual qualification Worker, Q, followed its required conversation.
 
-The Q integration must keep the admitted verifier running while its existing
-Q owner completes the Worker turn, retains the exact transcript and settles
-native, controller and Q allocation custody. The signed verifier must interpret
-that authenticated transcript before the restored diagnostic occurrence is
-terminated and the verifier root completes. Publication follows all evidence
-joins. Requiring a completed root before Q contact while settling its restored
-prerequisite during the running callback creates an ordering cycle.
+The START blocking owner now drives the existing Q lifecycle first, after
+joining the supplied input to its authenticated retained authority. Q uses an
+independently allocated occurrence; the already observed restored owner
+measurement is its provenance, not a claim of the same runtime instance. After
+Q's signed turn, native settlement, local cleanup and provider terminal, START
+re-authenticates the original callback and prepares the diagnostic contact
+deadline. The enclosing signed verifier lifetime has continued throughout;
+starting the diagnostic deadline does not renew it. These are source contracts,
+not evidence that the installed lifecycle has passed.
+
+The actual invocation is retained as process-local operator or callback
+identity. Scratch/allocation reservation, first allocation contact, supervisor
+activation, channel Release, local spawn, held Worker release and one-use
+Request contact each consume fresh admission. Callback revocation/expiry and
+the exact unstopped launch claim are checked through short writer transactions;
+no bearer-store gate is held across a complete launch or Request. Exact process
+attachment, observations and cleanup remain available after expiry. A refused
+held release aborts/reaps the already-created process and retains its identity
+for retirement. Historical activation and Release records cannot grant a fresh
+workload contact. Independent operator recovery keeps its distinct admission.
+
+The signed verifier still must receive and interpret the authenticated actual
+Q transcript before the restored diagnostic occurrence is terminated and the
+verifier root completes. Publication follows all evidence joins. Requiring a
+completed root before Q contact while settling its restored prerequisite during
+the running callback creates an ordering cycle.
 
 Carry the existing authenticated callback invocation through Q admission;
 never manufacture an operator HandlerContext or use historical evidence as
