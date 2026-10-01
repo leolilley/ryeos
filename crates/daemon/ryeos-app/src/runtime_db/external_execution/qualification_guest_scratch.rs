@@ -760,8 +760,9 @@ mod tests {
         lillux::PinnedDirectory,
         QualificationGuestScratchRecord,
     )> {
-        let private =
-            lillux::PinnedDirectory::open_or_create(&path.join("qualification-guest-inputs"))?;
+        let private = lillux::PinnedDirectory::open(path)?
+            .context("Q scratch fixture has no private parent")?
+            .create_child(OsStr::new("qualification-guest-inputs"), 0o700)?;
         private.require_owner_private_directory()?;
         let operation = "1".repeat(64);
         let coordinate = ConsumerRuntimeVerificationCoordinate {
