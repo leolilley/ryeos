@@ -1990,6 +1990,21 @@ pub(crate) fn preflight_external_qualification_program(
         _ => bail!("qualification program matches multiple signed placement bindings"),
     };
     let contract = binding.backend_contract();
+    let channel_max_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
+    let channel_max_frames = u32::try_from(
+        channel_max_bytes
+            .div_ceil(ryeos_state::external_execution::MAX_CHUNK_BYTES as u64)
+            .saturating_mul(4)
+            .clamp(64, 65_536),
+    )?;
+    // Validate before allocation/provider contact, not only when the already
+    // contacted occurrence attaches its channel. Earlier traffic cannot use
+    // the signed allowance reserved for native Q settlement and capture.
+    ryeos_state::external_execution::validate_channel_journal_limits(
+        ExternalExecutionMode::QualificationStructuredSession {},
+        channel_max_frames,
+        channel_max_bytes,
+    )?;
     state.external_candidate_connectors.qualify(&contract)?;
     let provider = state.external_provider_configurations.qualify(&contract)?;
     require_connector_process_group_authority(

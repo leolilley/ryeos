@@ -46,12 +46,12 @@ fn require_q_program(
 
 const DATABASE_NAME: &str = "external-candidate.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4547; // RYEG
-const SCHEMA_EPOCH: i64 = 12;
+const SCHEMA_EPOCH: i64 = 13;
 
 const OWNER_SQL: &str = r#"
 CREATE TABLE external_guest_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=12),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=13),
     bootstrap_digest TEXT NOT NULL,
     binding_digest TEXT NOT NULL UNIQUE,
     journal_nonce TEXT NOT NULL UNIQUE,
@@ -1002,8 +1002,8 @@ impl LiveGuestJournal {
             exit,
         };
         observation.validate(&self.0.binding)?;
-        let (fixture_capture, stage_id) = match (program.fixture(), capture) {
-            (None, None) => (None, None),
+        let (fixture_capture, fixture_content, stage_id) = match (program.fixture(), capture) {
+            (None, None) => (None, None, None),
             (Some(fixture), Some((bytes, blob_hash, mode))) => {
                 use crate::objects::qualification_fixture::{
                     Q_FIXTURE_CAPTURE_KIND, Q_FIXTURE_CAPTURE_SCHEMA, QFixtureCaptureMetadata,
@@ -1028,6 +1028,11 @@ impl LiveGuestJournal {
                     size_bytes: bytes.len() as u64,
                 };
                 reference.verify_for(&metadata, fixture, &self.0.binding, &observation, bytes)?;
+                let content =
+                    crate::objects::qualification_fixture::QFixtureCaptureContent::from_bytes(
+                        metadata.clone(),
+                        bytes,
+                    )?;
                 let key = DurableCasPublicationKey::qualification_fixture_occurrence(
                     &binding_digest,
                     completion.digest(),
@@ -1049,14 +1054,15 @@ impl LiveGuestJournal {
                     "Q fixture CAS write changed its exact identity"
                 );
                 let receipt = stage.retain_qualification_fixture(&guard, &reference)?;
-                (Some(reference), Some(receipt.staging_id))
+                (Some(reference), Some(content), Some(receipt.staging_id))
             }
             _ => anyhow::bail!("native Q fixture presence differs from admitted program"),
         };
         let observation = NativeQualificationScopeSettlement {
-            schema: 2,
+            schema: 3,
             observation,
             fixture_capture,
+            fixture_content,
         };
         observation.validate(&self.0.binding)?;
         let json = lillux::canonical_json(&serde_json::to_value(&observation)?)?;
@@ -2517,10 +2523,11 @@ impl GuestStore {
             match (
                 program.fixture(),
                 settlement.fixture_capture.as_ref(),
+                settlement.fixture_content.as_ref(),
                 stage_id.as_deref(),
             ) {
-                (None, None, None) => {}
-                (Some(fixture), Some(reference), Some(stage_id)) => {
+                (None, None, None, None) => {}
+                (Some(fixture), Some(reference), Some(content), Some(stage_id)) => {
                     let key = DurableCasPublicationKey::qualification_fixture_occurrence(
                         &self.binding.digest()?,
                         &settlement.observation.completion_frame_digest,
@@ -2563,6 +2570,16 @@ impl GuestStore {
                         &settlement.observation,
                         &bytes,
                     )?;
+                    ensure!(
+                        content.metadata == metadata
+                            && content.verify_for(
+                                reference,
+                                fixture,
+                                &self.binding,
+                                &settlement.observation
+                            )? == bytes,
+                        "Q settlement content differs from its authenticated retained CAS bytes"
+                    );
                 }
                 _ => {
                     anyhow::bail!("Q fixture retained program, reference and stage presence differ")

@@ -248,20 +248,48 @@ impl QFixtureCaptureContent {
         binding: &ExecutionChannelBinding,
         expected_native: &NativeQualificationScopeSettlementObservation,
     ) -> Result<Vec<u8>> {
-        reference.validate()?;
+        // Check the signed fixture before the transfer decoder can allocate.
         self.metadata
             .validate_for(contract, binding, expected_native)?;
         ensure!(
+            self.bytes_base64.len() as u64 <= contract.max_bytes.div_ceil(3) * 4,
+            "Q fixture transfer encoding exceeds its signed ceiling"
+        );
+        self.decode_reference(reference)
+    }
+
+    /// Global structural/content identity only. A frame validator can use this
+    /// without fabricating a signed fixture contract. Guest/receiver admission
+    /// must still call verify_for with the actual originally selected contract.
+    pub fn verify_reference(
+        &self,
+        reference: &QFixtureCaptureReference,
+        binding: &ExecutionChannelBinding,
+        expected_native: &NativeQualificationScopeSettlementObservation,
+    ) -> Result<Vec<u8>> {
+        binding.validate()?;
+        expected_native.validate(binding)?;
+        self.metadata.validate()?;
+        ensure!(
+            self.metadata.native_settlement == *expected_native,
+            "Q fixture transfer changed its original native completion"
+        );
+        self.decode_reference(reference)
+    }
+
+    fn decode_reference(&self, reference: &QFixtureCaptureReference) -> Result<Vec<u8>> {
+        reference.validate()?;
+        self.metadata.validate()?;
+        ensure!(
             reference.metadata_hash == self.metadata.digest()?
                 && reference.blob_hash == self.metadata.blob_hash
-                && reference.size_bytes == self.metadata.size_bytes
-                && reference.size_bytes <= contract.max_bytes,
+                && reference.size_bytes == self.metadata.size_bytes,
             "Q fixture transfer changed its retained metadata reference"
         );
         let encoded_size = reference.size_bytes.div_ceil(3) * 4;
         ensure!(
             self.bytes_base64.len() as u64 == encoded_size
-                && encoded_size <= contract.max_bytes.div_ceil(3) * 4,
+                && encoded_size <= MAX_Q_FIXTURE_BYTES.div_ceil(3) * 4,
             "Q fixture transfer encoding changed its bounded declared size"
         );
         let mut bytes = vec![0; usize::try_from(reference.size_bytes)?];
@@ -272,7 +300,10 @@ impl QFixtureCaptureContent {
             decoded == bytes.len() && STANDARD.encode(&bytes) == self.bytes_base64,
             "Q fixture transfer bytes are not exact canonical base64"
         );
-        reference.verify_for(&self.metadata, contract, binding, expected_native, &bytes)?;
+        ensure!(
+            lillux::sha256_hex(&bytes) == reference.blob_hash,
+            "Q fixture transfer changed its exact captured bytes"
+        );
         Ok(bytes)
     }
 }
@@ -397,6 +428,30 @@ mod tests {
             .is_err()
         );
         assert!(QFixtureCaptureContent::from_bytes(metadata, b"other").is_err());
+    }
+
+    #[test]
+    fn structural_transfer_check_never_substitutes_for_signed_fixture_validation() {
+        let (mut contract, binding, native, reference, content) = transfer_fixture(b"after");
+        assert_eq!(
+            content
+                .verify_reference(&reference, &binding, &native)
+                .unwrap(),
+            b"after"
+        );
+        contract.leaf = "different.txt".into();
+        assert!(
+            content
+                .verify_for(&reference, &contract, &binding, &native)
+                .is_err()
+        );
+        let mut other_native = native;
+        other_native.completion_request_digest = "9".repeat(64);
+        assert!(
+            content
+                .verify_reference(&reference, &binding, &other_native)
+                .is_err()
+        );
     }
 
     #[test]

@@ -523,6 +523,17 @@ impl ExternalSupervisorBootstrap {
             (1..=64 * 1024 * 1024).contains(&self.channel_max_bytes),
             "external supervisor channel byte bound is invalid"
         );
+        // Do not call binding_max_frames here: it validates this bootstrap.
+        super::validate_channel_journal_limits(
+            self.candidate_program.execution_mode(),
+            u32::try_from(
+                self.channel_max_bytes
+                    .div_ceil(MAX_CHUNK_BYTES as u64)
+                    .saturating_mul(4)
+                    .clamp(64, 65_536),
+            )?,
+            self.channel_max_bytes,
+        )?;
         if let ExternalControllerTransportSelection::ControllerFileRelay(relay) = &self.controller {
             let required_frames = self
                 .channel_max_bytes
@@ -1274,6 +1285,16 @@ mod tests {
         value.candidate_export_max_bytes = 0;
         value.validate().unwrap();
         value
+    }
+
+    #[test]
+    fn q_bootstrap_refuses_channel_without_reserved_settlement_capacity() {
+        let mut bootstrap = relay_bootstrap();
+        bootstrap.channel_max_bytes = super::super::Q_FINISH_BYTES;
+        assert!(bootstrap.validate().is_err());
+        bootstrap.channel_max_bytes += 1;
+        bootstrap.validate().unwrap();
+        assert_eq!(bootstrap.binding_max_frames().unwrap(), 64);
     }
 
     #[test]

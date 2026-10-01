@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T06:23:47Z:1d2b99becbccd64f7a2bea404e07a2d372689f6689e8ccea756ca40596da297c:rc1wwMw97x8V8cXfXCUGkgs7dI23oTpoLQ5lMP4KFA27a+iuFpBVPgCE9KE0faGMbEHNRLkftTzh8AcZUOKUDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T07:04:06Z:6203734004b3167d62b90c7ccf46f6b81dfa87c9dc8b47b3bb7ba83e1cbfffb8:Hhr9UXje9dhxzRux3+GQDtYyL/Zt8lT2+SfB4hN/m8XoX05phnfwExtqDOp4DHp8CNGTRDx+9LQQd0Oyi+YTBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -155,18 +155,29 @@ directory, owner, mount, links, modes, byte bound and stable file identity. A
 failed or lost capture does not permit another native read. The guest journal
 joins these bytes to the original applied runtime and completion command, retains
 exact metadata and blob CAS roots under a distinct Q occurrence receipt, then
-commits its settlement row before acknowledging completion. Guest epoch 12
+commits its settlement row before acknowledging completion. Guest epoch 13
 retains the exact admitted program and stage identity for cold verification.
 
 The capture metadata includes the original capture-free native observation.
-The signed schema 2 settlement wrapper references that metadata; the metadata
-never references the wrapper. The CAS object has exactly one blob edge; program,
+The signed schema 3 settlement wrapper carries a required-null pair of capture
+reference and bounded canonical content. The metadata never references that
+wrapper. Reference-only or content-only testimony refuses; a reference alone
+does not establish controller custody. The CAS object has exactly one blob edge; program,
 contract, native-observation and derived ProjectFile digests are commitments,
 not extra CAS links. These facts describe immutable custody, not product
 semantics or a completed five-claim qualification.
 
-Controller capture transfer and durable receiver custody are not implemented by
-this cut. Normal controller settlement and provider termination explicitly
+Channel binding schema 5 reserves eight frames and 128 KiB per direction inside
+the existing signed ceilings for the complete Q finish exchange: one completion,
+one protocol EOF, one native settlement and their exact first lifecycle receipts.
+A supervisor may acknowledge the owner receipt once; duplicate polling receipts
+remain ordinary traffic. Live and cold journals refuse a second Q EOF. The
+separate cancellation reserve remains available. Preflight rejects insufficient
+signed capacity before provider contact. These bounds are transport accounting,
+not execution or claim authority.
+
+Bounded controller transfer content is implemented; durable receiver custody is
+not implemented by this cut. Normal controller settlement and provider termination explicitly
 refuse a nonnull capture reference until that custody is verified. Cancellation
 and cleanup remain available. Source review and authored tests do not establish
 an installed or Render proof.
