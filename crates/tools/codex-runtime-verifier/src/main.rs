@@ -27,7 +27,7 @@ use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
-    io::Read as _,
+    io::{Read as _, Write as _},
     path::Path,
 };
 
