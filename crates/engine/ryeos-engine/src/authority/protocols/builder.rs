@@ -343,7 +343,7 @@ mod tests {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::Http,
-            requires_qualification_purpose: false,
+            qualification_callback: None,
             session: None,
             execution_evidence: None,
         }
@@ -377,7 +377,7 @@ mod tests {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::None,
-            requires_qualification_purpose: false,
+            qualification_callback: None,
             session: None,
             execution_evidence: None,
         }

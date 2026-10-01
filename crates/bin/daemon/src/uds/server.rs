@@ -37,6 +37,7 @@ use ryeos_app::thread_lifecycle::{
 use ryeos_runtime::callback_client::MAX_RUNTIME_REPLAY_PAGE_LIMIT;
 
 mod accounting;
+mod consumer_verification;
 mod dedicated_sessions;
 mod routing;
 #[cfg(feature = "crash-qualification-test-support")]
@@ -290,6 +291,10 @@ pub(crate) async fn dispatch_runtime_method(
     } else if matches!(
         method,
         "runtime.poll_input"
+            | "runtime.consumer_verification_inputs"
+            | "runtime.consumer_verification_observe"
+            | "runtime.consumer_verification_settle"
+            | "runtime.consumer_verification_start"
             | "runtime.author_item"
             | "runtime.project_snapshot"
             | "runtime.provider_attempt_prepare"
@@ -384,6 +389,18 @@ pub(crate) async fn dispatch_runtime_method(
 
     if let Some(cap) = callback_cap.as_ref() {
         cap.runtime_method_surface.authorize(method)?;
+        if matches!(
+            method,
+            "runtime.consumer_verification_inputs"
+                | "runtime.consumer_verification_observe"
+                | "runtime.consumer_verification_settle"
+                | "runtime.consumer_verification_start"
+        ) && cap.remote_consumer_grant.is_none()
+        {
+            return Err(anyhow!(
+                "consumer verification inputs require an admitted remote grant"
+            ));
+        }
         // The ordinary managed-runtime method surface is deliberately broad.
         // It must never itself confer authority to start or observe a
         // qualification producer: only the root's protected launch grant can.
@@ -627,6 +644,30 @@ pub(crate) async fn dispatch_runtime_method(
             })?;
             accounting::handle_provider_attempt_local_stream_control(&clean_params, state, cap)
         }
+        "runtime.consumer_verification_inputs" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("consumer inputs require callback authority"))?;
+            consumer_verification::inputs(&clean_params, state, cap).await
+        }
+        "runtime.consumer_verification_observe" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("consumer observation requires callback authority"))?;
+            consumer_verification::observe(&clean_params, state, cap).await
+        }
+        "runtime.consumer_verification_settle" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("consumer settlement requires callback authority"))?;
+            consumer_verification::settle(&clean_params, state, cap).await
+        }
+        "runtime.consumer_verification_start" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("consumer start requires callback authority"))?;
+            consumer_verification::start(&clean_params, state, cap).await
+        }
         "runtime.scoped_child_expected_source"
         | "runtime.scoped_child_expected_isolation_class"
         | "runtime.scoped_child_start"
@@ -692,6 +733,9 @@ fn enforce_aggregate_work_deadline_at_ms(
             | "runtime.scoped_child_start"
             | "runtime.scoped_child_write"
             | "runtime.scoped_child_close_input"
+            | "runtime.consumer_verification_inputs"
+            | "runtime.consumer_verification_observe"
+            | "runtime.consumer_verification_start"
     ) {
         return Ok(());
     }
@@ -788,6 +832,8 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.provider_attempt_mark_issued"
             | "runtime.provider_attempt_local_stream_start"
             | "runtime.scoped_child_start"
+            | "runtime.consumer_verification_settle"
+            | "runtime.consumer_verification_start"
             | "runtime.scoped_child_write"
             | "runtime.scoped_child_close_input"
     )
@@ -831,6 +877,8 @@ fn is_sensitive_runtime_read_method(method: &str) -> bool {
             | "runtime.scoped_child_expected_source"
             | "runtime.scoped_child_expected_isolation_class"
             | "runtime.scoped_child_read"
+            | "runtime.consumer_verification_inputs"
+            | "runtime.consumer_verification_observe"
     )
 }
 
@@ -1827,6 +1875,54 @@ mod tests {
 
     #[test]
     fn scoped_child_start_and_observe_have_distinct_admission_classes() {
+        assert!(is_running_runtime_mutation(
+            "runtime.consumer_verification_start"
+        ));
+        assert!(!is_sensitive_runtime_read_method(
+            "runtime.consumer_verification_start"
+        ));
+        assert!(!is_unrestricted_runtime_read_method(
+            "runtime.consumer_verification_start"
+        ));
+        assert!(!is_stop_completion_method(
+            "runtime.consumer_verification_start"
+        ));
+        assert!(is_running_runtime_mutation(
+            "runtime.consumer_verification_settle"
+        ));
+        assert!(!is_sensitive_runtime_read_method(
+            "runtime.consumer_verification_settle"
+        ));
+        assert!(!is_unrestricted_runtime_read_method(
+            "runtime.consumer_verification_settle"
+        ));
+        assert!(!is_stop_completion_method(
+            "runtime.consumer_verification_settle"
+        ));
+        assert!(is_sensitive_runtime_read_method(
+            "runtime.consumer_verification_observe"
+        ));
+        assert!(!is_unrestricted_runtime_read_method(
+            "runtime.consumer_verification_observe"
+        ));
+        assert!(!is_running_runtime_mutation(
+            "runtime.consumer_verification_observe"
+        ));
+        assert!(!is_stop_completion_method(
+            "runtime.consumer_verification_observe"
+        ));
+        assert!(is_sensitive_runtime_read_method(
+            "runtime.consumer_verification_inputs"
+        ));
+        assert!(!is_unrestricted_runtime_read_method(
+            "runtime.consumer_verification_inputs"
+        ));
+        assert!(!is_running_runtime_mutation(
+            "runtime.consumer_verification_inputs"
+        ));
+        assert!(!is_stop_completion_method(
+            "runtime.consumer_verification_inputs"
+        ));
         assert!(is_sensitive_runtime_read_method(
             "runtime.scoped_child_expected_source"
         ));

@@ -10,13 +10,11 @@ use std::{ffi::OsStr, path::Path};
 use anyhow::{Context as _, Result, ensure};
 use lillux::{PinnedDirectory, time::MonotonicDeadline};
 use ryeos_external_execution_contract::restored_runtime_measurement::{
-    ConsumerRuntimeChallenge, RESTORATION_VERIFIER_REMOTE_DIRECTORY,
+    CONSUMER_INPUT_RECORD_NAME, ConsumerRuntimeChallenge, MAX_CONSUMER_INPUT_RECORD_BYTES,
+    RESTORATION_VERIFIER_REMOTE_DIRECTORY,
 };
 
-use crate::consumer_record::{
-    CONSUMER_INPUT_RECORD_NAME, ConsumerInputRecord, ImportedConsumerInputs,
-    MAX_CONSUMER_INPUT_RECORD_BYTES,
-};
+use crate::consumer_record::{ConsumerInputRecord, ImportedConsumerInputs};
 
 pub const CONSUMER_STARTUP_FLAG: &str = "--consumer-challenge-b64";
 

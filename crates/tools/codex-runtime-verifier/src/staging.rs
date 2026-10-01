@@ -656,7 +656,7 @@ pub(crate) fn create_preselected_controller_canary(
         .atomic_create_pinned_regular(OsStr::new("canary"), format!("{value}\n").as_bytes(), 0o600)?
         .context("controller canary already exists")?;
     let observation = file.observation()?;
-    check_controller_canary(controller, &value, &observation)?;
+    check_controller_canary(controller, value, &observation)?;
     Ok(observation)
 }
 
@@ -1540,6 +1540,18 @@ mod tests {
         assert!(
             check_exact_candidate(&candidate, &crate::CandidateFixture::test_fixture()).is_err()
         );
+    }
+
+    #[test]
+    fn preselected_controller_canary_is_create_only_and_exact() {
+        let temp = tempfile::tempdir().unwrap();
+        let controller = PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        assert!(create_preselected_controller_canary(&controller, "not-a-hash").is_err());
+        let expected = "a".repeat(64);
+        let original = create_preselected_controller_canary(&controller, &expected).unwrap();
+        check_controller_canary(&controller, &expected, &original).unwrap();
+        assert!(create_preselected_controller_canary(&controller, &expected).is_err());
+        assert!(check_controller_canary(&controller, &"b".repeat(64), &original).is_err());
     }
 
     #[test]

@@ -78,6 +78,111 @@ impl UdsRuntimeClient {
         }
     }
 
+    /// Read authenticated consumer record inputs for this exact verifier root.
+    /// No executable, provider credential or contact permission is returned.
+    pub async fn consumer_verification_inputs(
+        &self,
+        thread_id: &str,
+        selection: Value,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({
+            "thread_id": thread_id,
+            "selection": selection,
+        });
+        self.inject_callback_token(&mut params);
+        self.consumer_callback_until("runtime.consumer_verification_inputs", params, deadline)
+            .await
+    }
+
+    /// Start one exact consumer attempt. The daemon owns executable selection,
+    /// archive creation and the original deadline; record semantics stay here.
+    pub async fn consumer_verification_start(
+        &self,
+        thread_id: &str,
+        qualification_operation_id: &str,
+        coordinate: Value,
+        record: &str,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({
+            "thread_id": thread_id,
+            "qualification_operation_id": qualification_operation_id,
+            "coordinate": coordinate,
+            "record": record,
+        });
+        self.inject_callback_token(&mut params);
+        self.consumer_callback_until("runtime.consumer_verification_start", params, deadline)
+            .await
+    }
+
+    /// Terminate the exact restored qualification occurrence through its
+    /// existing one-shot journal. Provider death is not namespace settlement.
+    pub async fn consumer_verification_settle(
+        &self,
+        thread_id: &str,
+        qualification_operation_id: &str,
+        coordinate: Value,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({
+            "thread_id": thread_id,
+            "qualification_operation_id": qualification_operation_id,
+            "coordinate": coordinate,
+        });
+        self.inject_callback_token(&mut params);
+        self.consumer_callback_until("runtime.consumer_verification_settle", params, deadline)
+            .await
+    }
+
+    /// Observe one exact retained consumer attempt without starting provider work.
+    pub async fn consumer_verification_observe(
+        &self,
+        thread_id: &str,
+        qualification_operation_id: &str,
+        coordinate: Value,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({
+            "thread_id": thread_id,
+            "qualification_operation_id": qualification_operation_id,
+            "coordinate": coordinate,
+        });
+        self.inject_callback_token(&mut params);
+        self.consumer_callback_until("runtime.consumer_verification_observe", params, deadline)
+            .await
+    }
+
+    /// Bound the whole connection/write/read operation by one original clock.
+    /// Dropping a timed-out dedicated connection cannot replay request bytes;
+    /// a daemon-side contact owner remains retained and requires observation.
+    async fn consumer_callback_until(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Value, CallbackError> {
+        let remaining = deadline.remaining();
+        if remaining.is_zero() {
+            return Err(Self::map_rpc_error(RpcError::Timeout {
+                method: method.into(),
+                timeout_secs: 0,
+            }));
+        }
+        match tokio::time::timeout(
+            remaining,
+            self.rpc.request_dedicated(method, params, Some(remaining)),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(Self::map_rpc_error),
+            Err(_) => Err(Self::map_rpc_error(RpcError::Timeout {
+                method: method.into(),
+                timeout_secs: remaining.as_secs(),
+            })),
+        }
+    }
+
     /// Read the pre-launch producer source pinned by this root's sealed
     /// qualification purpose. This selects no executable or child attempt.
     pub async fn scoped_child_expected_source(
@@ -914,6 +1019,24 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn consumer_callback_expiry_refuses_before_connection() {
+        let client = super::UdsRuntimeClient::new(
+            std::path::PathBuf::from("/nonexistent/consumer-test.sock"),
+            "callback-test".into(),
+            "thread-test".into(),
+        );
+        let result = client
+            .consumer_callback_until(
+                "runtime.consumer_verification_start",
+                serde_json::json!({}),
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO),
+            )
+            .await;
+        assert!(matches!(result, Err(super::CallbackError::Transport(error))
+            if error.to_string().contains("no response") && error.to_string().contains("0s")));
+    }
+
     use super::*;
 
     #[tokio::test]

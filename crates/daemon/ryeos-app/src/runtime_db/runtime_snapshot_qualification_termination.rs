@@ -157,6 +157,40 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn require_consumer_termination_admission(
+    conn: &Connection,
+    intent: &RuntimeSnapshotQualificationTerminationIntent,
+    admission: Option<
+        &crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    >,
+) -> Result<()> {
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    let qualification =
+        super::runtime_snapshot_qualification::read(conn, &intent.qualification_operation_id)?
+            .context("consumer termination qualification disappeared")?;
+    admission.require_termination(intent, &qualification.intent)?;
+    ensure!(
+        qualification.phase
+            == super::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound,
+        "consumer termination has no bound occurrence"
+    );
+    let occurrence = qualification
+        .occurrence
+        .as_ref()
+        .context("consumer termination occurrence absent")?;
+    intent.validate_for(&qualification.intent, occurrence)?;
+    let owner = admission
+        .callback_launch_owner()
+        .context("consumer termination requires callback admission")?;
+    super::restored_verifier_attempt::require_current_callback_launch(
+        conn,
+        &admission.coordinate().accepted_root_id,
+        owner,
+    )
+}
+
 impl RuntimeDb {
     pub fn qualification_termination_operation(
         &self,
@@ -169,7 +203,18 @@ impl RuntimeDb {
         &self,
         intent: &RuntimeSnapshotQualificationTerminationIntent,
     ) -> Result<QualificationTerminationRecord> {
+        self.reserve_qualification_termination_with_admission(intent, None)
+    }
+
+    pub(crate) fn reserve_qualification_termination_with_admission(
+        &self,
+        intent: &RuntimeSnapshotQualificationTerminationIntent,
+        admission: Option<
+            &crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+        >,
+    ) -> Result<QualificationTerminationRecord> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        require_consumer_termination_admission(&tx, intent, admission)?;
         if let Some(existing) = read(&tx, &intent.operation_id)? {
             ensure!(
                 existing.intent == *intent,
@@ -208,9 +253,20 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<QualificationTerminationClaim> {
+        self.claim_qualification_termination_with_admission(operation_id, None)
+    }
+
+    pub(crate) fn claim_qualification_termination_with_admission(
+        &self,
+        operation_id: &str,
+        admission: Option<
+            &crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+        >,
+    ) -> Result<QualificationTerminationClaim> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record =
             read(&tx, operation_id)?.context("qualification termination was not reserved")?;
+        require_consumer_termination_admission(&tx, &record.intent, admission)?;
         match record.phase {
             QualificationTerminationPhase::Terminal => {
                 tx.commit()?;

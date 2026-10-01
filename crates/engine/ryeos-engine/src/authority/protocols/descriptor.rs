@@ -51,8 +51,8 @@ pub struct ProtocolDescriptor {
     /// This callback protocol may launch only under an independently admitted
     /// product-qualification purpose. The executor binds the purpose and
     /// narrows its callback bearer before exposing either to the verifier.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub requires_qualification_purpose: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualification_callback: Option<QualificationCallbackAuthority>,
 
     /// Optional bidirectional request/response channel carried independently
     /// of stdio. Absence means this is an ordinary one-shot protocol.
@@ -66,8 +66,13 @@ pub struct ProtocolDescriptor {
     pub execution_evidence: Option<ryeos_handler_protocol::ExecutionEvidenceProjectorDeclWire>,
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
+/// Signed selection of qualification authority, not a Tool-kind shortcut.
+/// Local containment and remote occurrence authority are distinct promises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum QualificationCallbackAuthority {
+    ScopedProducer,
+    RemoteConsumer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,6 +321,31 @@ pub fn validate_persistent_session_protocol(
 mod tests {
     use super::*;
 
+    #[test]
+    fn qualification_callback_authority_is_explicit_and_identity_bearing() {
+        let mut descriptor = method_protocol();
+        let ordinary = serde_json::to_value(&descriptor).unwrap();
+        descriptor.qualification_callback = Some(QualificationCallbackAuthority::ScopedProducer);
+        let local = serde_json::to_value(&descriptor).unwrap();
+        descriptor.qualification_callback = Some(QualificationCallbackAuthority::RemoteConsumer);
+        let remote = serde_json::to_value(&descriptor).unwrap();
+        assert_ne!(ordinary, local);
+        assert_ne!(local, remote);
+        assert_eq!(remote["qualification_callback"], "remote_consumer");
+        assert_eq!(
+            serde_json::from_value::<ProtocolDescriptor>(remote.clone())
+                .unwrap()
+                .qualification_callback,
+            Some(QualificationCallbackAuthority::RemoteConsumer)
+        );
+        let mut unsupported = remote;
+        unsupported["qualification_callback"] = serde_json::json!("arbitrary_callback");
+        assert!(serde_json::from_value::<ProtocolDescriptor>(unsupported).is_err());
+        let mut predecessor = ordinary;
+        predecessor["requires_qualification_purpose"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ProtocolDescriptor>(predecessor).is_err());
+    }
+
     fn method_protocol() -> ProtocolDescriptor {
         ProtocolDescriptor {
             kind: "protocol".to_string(),
@@ -343,7 +373,7 @@ mod tests {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::Http,
-            requires_qualification_purpose: false,
+            qualification_callback: None,
             session: None,
             execution_evidence: None,
         }
@@ -376,7 +406,7 @@ mod tests {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::None,
-            requires_qualification_purpose: false,
+            qualification_callback: None,
             session: Some(PersistentSessionProtocol {
                 process_mode: mode,
                 cleanup_authority,

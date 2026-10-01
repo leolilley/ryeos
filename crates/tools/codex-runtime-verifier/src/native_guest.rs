@@ -238,12 +238,10 @@ pub fn run_probe_entrypoint() -> std::process::ExitCode {
 /// owns this private cwd plus finish delivery. No daemon callback, provider
 /// credentials, Worker identity or qualification claims are manufactured.
 pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
-    use crate::consumer_record::{
-        CONSUMER_INPUT_RECORD_NAME, CONSUMER_INPUT_ROOT_ENV, ConsumerInputRecord,
-        MAX_CONSUMER_INPUT_RECORD_BYTES,
-    };
+    use crate::consumer_record::{CONSUMER_INPUT_ROOT_ENV, ConsumerInputRecord};
     use ryeos_external_execution_contract::restored_runtime_measurement::{
-        ConsumerRuntimeChallenge, MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
+        CONSUMER_INPUT_RECORD_NAME, ConsumerRuntimeChallenge, MAX_CONSUMER_INPUT_RECORD_BYTES,
+        MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
     };
     ensure!(
         !encoded_challenge.is_empty() && encoded_challenge.len() <= 8192,

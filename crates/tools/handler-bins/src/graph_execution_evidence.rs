@@ -119,7 +119,7 @@ pub fn project(request: ExecutionEvidenceProjectRequest) -> HandlerResponse {
         Ok((result, calls)) => ExecutionEvidenceProjectResponse::Projected {
             result,
             calls,
-            scoped_attempt: None,
+            subordinate_attempt: None,
         },
         Err(error) => ExecutionEvidenceProjectResponse::Refused {
             message: format!("{error:#}"),
@@ -852,7 +852,7 @@ mod tests {
                 ExecutionEvidenceProjectResponse::Projected {
                     result,
                     calls,
-                    scoped_attempt: None,
+                    subordinate_attempt: None,
                 },
         } = project(request)
         else {

@@ -15249,6 +15249,57 @@ impl StateStore {
             .bind_qualification_terminal_observation(observation)
     }
 
+    /// Consumer cleanup uses the existing journal, with revocation serialized
+    /// through durable reservation. Independent operator recovery is unchanged.
+    pub(crate) fn reserve_consumer_qualification_termination(
+        &self,
+        intent: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationIntent,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<
+        runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationRecord,
+    > {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let root = g
+                .state_db
+                .read_authoritative_thread_snapshot(
+                    &admission.coordinate().accepted_root_id,
+                    &admission.coordinate().accepted_root_id,
+                )?
+                .ok_or_else(|| anyhow!("consumer cleanup root disappeared"))?;
+            if root.status != ryeos_state::objects::ThreadStatus::Running {
+                bail!("consumer cleanup root is not running at reservation");
+            }
+            g.runtime_db
+                .reserve_qualification_termination_with_admission(intent, Some(&admission))
+        })
+    }
+
+    pub(crate) fn claim_consumer_qualification_termination(
+        &self,
+        operation_id: &str,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationClaim>
+    {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let root = g
+                .state_db
+                .read_authoritative_thread_snapshot(
+                    &admission.coordinate().accepted_root_id,
+                    &admission.coordinate().accepted_root_id,
+                )?
+                .ok_or_else(|| anyhow!("consumer cleanup root disappeared"))?;
+            if root.status != ryeos_state::objects::ThreadStatus::Running {
+                bail!("consumer cleanup root is not running at claim");
+            }
+            g.runtime_db
+                .claim_qualification_termination_with_admission(operation_id, Some(&admission))
+        })
+    }
+
     pub(crate) fn quarantine_qualification_termination_attempt(
         &self,
         operation_id: &str,
@@ -15355,10 +15406,23 @@ impl StateStore {
             .require_recovery()?
             .begin_staged_cas_roots_admitted(permit.cas_guard(), "consumer-verifier-input")?;
         let hash = stage.store_blob_admitted(permit.cas_guard(), &cas, &bytes)?;
-        let record = self
-            .lock()?
-            .runtime_db
-            .reserve_consumer_verifier_attempt(intent, &hash, admission)?;
+        let record = admission.with_live_callback(|| {
+            let g = self.lock()?;
+            if admission.callback_launch_owner().is_some() {
+                let root = g
+                    .state_db
+                    .read_authoritative_thread_snapshot(
+                        &admission.coordinate().accepted_root_id,
+                        &admission.coordinate().accepted_root_id,
+                    )?
+                    .ok_or_else(|| anyhow!("consumer callback root disappeared"))?;
+                if root.status != ryeos_state::objects::ThreadStatus::Running {
+                    bail!("consumer callback root is not running at reservation");
+                }
+            }
+            g.runtime_db
+                .reserve_consumer_verifier_attempt(intent, &hash, &admission)
+        })?;
         if let Err(error) = stage.finish_admitted(permit.cas_guard()) {
             tracing::warn!(%error, operation_id = %intent.operation_id,
                 "consumer input retained while temporary roots remain recoverable");
@@ -15374,9 +15438,23 @@ impl StateStore {
         admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
     ) -> Result<runtime_db::restored_verifier_attempt::RestoredVerifierAttemptClaim> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?
-            .runtime_db
-            .claim_consumer_verifier_attempt(operation_id, admission)
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            if admission.callback_launch_owner().is_some() {
+                let root = g
+                    .state_db
+                    .read_authoritative_thread_snapshot(
+                        &admission.coordinate().accepted_root_id,
+                        &admission.coordinate().accepted_root_id,
+                    )?
+                    .ok_or_else(|| anyhow!("consumer callback root disappeared"))?;
+                if root.status != ryeos_state::objects::ThreadStatus::Running {
+                    bail!("consumer callback root is not running at claim");
+                }
+            }
+            g.runtime_db
+                .claim_consumer_verifier_attempt(operation_id, &admission)
+        })
     }
 
     pub(crate) fn bind_restored_verifier_observation(

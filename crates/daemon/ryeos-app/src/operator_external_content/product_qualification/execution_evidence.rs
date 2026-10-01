@@ -16,7 +16,8 @@ use ryeos_handler_protocol::{
 use ryeos_state::external_content::products::qualification::{
     ProductQualificationEvidence, ProductQualificationExecutionProof,
     ProductQualificationParticipant, ProductQualificationProjectorIdentity,
-    ProductQualificationVerifier, VerifierProcessSettlementAuthority,
+    ProductQualificationSubordinateAttemptProof, ProductQualificationVerifier,
+    VerifierProcessSettlementAuthority,
 };
 use ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView;
 use ryeos_state::external_content::runtime_member::exact_runtime_member_hash;
@@ -56,9 +57,37 @@ pub(crate) struct AuthenticatedConsumerRoot {
     purpose: ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
     accepted_project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     operator_grant_digest: String,
+    /// Original callback expiry, absent for independent operator recovery.
+    callback_expiry: Option<lillux::time::MonotonicDeadline>,
+    callback_admission: Option<ConsumerCallbackAdmission>,
+}
+
+struct ConsumerCallbackAdmission {
+    store: std::sync::Arc<crate::callback_token::CallbackCapabilityStore>,
+    token: String,
+    grant: crate::callback_token::AdmittedRemoteConsumerGrant,
 }
 
 impl AuthenticatedConsumerRoot {
+    pub(crate) fn with_live_callback<T>(
+        &self,
+        admit: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        match &self.callback_admission {
+            Some(callback) => callback.store.with_remote_consumer_admission(
+                &callback.token,
+                &callback.grant,
+                admit,
+            ),
+            None => admit(),
+        }
+    }
+
+    pub(crate) fn callback_launch_owner(&self) -> Option<&str> {
+        self.callback_admission
+            .as_ref()
+            .map(|callback| callback.grant.launch_owner.as_str())
+    }
     pub(crate) fn qualification_operation_id(&self) -> &str {
         &self.qualification_operation_id
     }
@@ -83,6 +112,12 @@ impl AuthenticatedConsumerRoot {
         qualification: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationIntent,
     ) -> anyhow::Result<()> {
         use ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose;
+        if self
+            .callback_expiry
+            .is_some_and(|expiry| expiry.has_elapsed())
+        {
+            bail!("consumer callback expired before attempt admission");
+        }
         if qualification.operation_id != self.qualification_operation_id
             || qualification.qualification_profile_digest != self.qualification_profile_digest
             || qualification.owner_principal != self.owner
@@ -96,6 +131,25 @@ impl AuthenticatedConsumerRoot {
 
     pub(crate) fn coordinate(&self) -> &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate{
         &self.coordinate
+    }
+
+    pub(crate) fn require_termination(
+        &self,
+        intent: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationIntent,
+        qualification: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationIntent,
+    ) -> anyhow::Result<()> {
+        if self
+            .callback_expiry
+            .is_some_and(|expiry| expiry.has_elapsed())
+            || intent.qualification_operation_id != self.qualification_operation_id
+            || qualification.operation_id != self.qualification_operation_id
+            || qualification.qualification_profile_digest != self.qualification_profile_digest
+            || qualification.owner_principal != self.owner
+            || intent.owner_principal != self.owner
+        {
+            bail!("consumer termination differs from live authenticated qualification authority");
+        }
+        Ok(())
     }
 
     pub(crate) fn selection(&self) -> &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection{
@@ -122,18 +176,114 @@ pub(crate) fn authenticate_consumer_root(
     qualification_operation_id: &str,
 ) -> anyhow::Result<AuthenticatedConsumerRoot> {
     crate::operator_authority::require_admitted_operator(state, context)?;
-    let operator_fingerprint = context
-        .fingerprint
+    authenticate_consumer_root_for_owner(
+        state,
+        authority,
+        guard,
+        limits,
+        &context.fingerprint,
+        coordinate,
+        qualification_operation_id,
+    )
+}
+
+/// Authenticate the actual live invoking verifier, without synthesizing an
+/// operator HandlerContext. The bearer store and admitted root independently
+/// corroborate its purpose, source and current launch owner.
+pub(crate) fn authenticate_consumer_callback_root(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    token: &str,
+    method: &str,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+) -> anyhow::Result<AuthenticatedConsumerRoot> {
+    use crate::callback_token::CallbackRuntimeMethodSurface;
+    let cap = state
+        .callback_tokens
+        .validate_token_and_thread(token, &coordinate.accepted_root_id)?;
+    let expected = CallbackRuntimeMethodSurface::qualification_remote_consumer();
+    expected.authorize(method)?;
+    if cap.runtime_method_surface != expected {
+        bail!("consumer callback has no exact remote method ceiling");
+    }
+    let grant = cap
+        .remote_consumer_grant
+        .as_ref()
+        .context("consumer callback has no admitted remote purpose")?;
+    grant.validate()?;
+    if cap.thread_id != grant.root_thread_id
+        || cap.chain_root_id != grant.root_thread_id
+        || cap.launch_owner.as_deref() != Some(grant.launch_owner.as_str())
+        || cap.item_ref.as_deref() != Some(grant.purpose.verifier_ref.as_str())
+        || cap.root_raw_content_digest != grant.root_raw_content_digest
+        || cap.effective_definition_digest.as_deref()
+            != Some(grant.purpose.verifier_realized_definition_digest.as_str())
+        || grant.admitted_capsule_hash != coordinate.accepted_capsule_hash
+    {
+        bail!("consumer callback differs from its admitted verifier root");
+    }
+    state
+        .state_store
+        .assert_launch_owner(&cap.thread_id, &grant.launch_owner)?;
+    let root = state
+        .state_store
+        .get_authoritative_root_thread_snapshot(&cap.thread_id)?
+        .context("consumer callback root absent")?;
+    if root.status != ThreadStatus::Running {
+        bail!("consumer callback root is not running");
+    }
+    let mut admitted = authenticate_consumer_root_for_owner(
+        state,
+        authority,
+        guard,
+        limits,
+        &grant.purpose.owner_fingerprint,
+        coordinate,
+        qualification_operation_id,
+    )?;
+    if admitted.purpose() != &grant.purpose {
+        bail!("consumer callback purpose differs from its sealed root");
+    }
+    // Recheck expiry/revocation after bounded CAS verification. No cached
+    // witness may mint contact after its live bearer has been withdrawn.
+    state
+        .callback_tokens
+        .validate_token_and_thread(token, &coordinate.accepted_root_id)?;
+    state
+        .state_store
+        .assert_launch_owner(&cap.thread_id, &grant.launch_owner)?;
+    admitted.callback_expiry = Some(cap.expires_at);
+    admitted.callback_admission = Some(ConsumerCallbackAdmission {
+        store: state.callback_tokens.clone(),
+        token: token.to_owned(),
+        grant: grant.clone(),
+    });
+    Ok(admitted)
+}
+
+fn authenticate_consumer_root_for_owner(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    owner_fingerprint: &str,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+) -> anyhow::Result<AuthenticatedConsumerRoot> {
+    authority.ensure_guard(guard)?;
+    let operator_fingerprint = owner_fingerprint
         .strip_prefix("fp:")
         .context("consumer operator principal is not canonical")?;
     let operator_grant_digest =
         crate::operator_authority::admitted_operator_authority_digest(state, operator_fingerprint)?;
-    authority.ensure_guard(guard)?;
     let qualified = state
         .state_store
         .snapshot_qualification_operation(qualification_operation_id)?
         .context("consumer verification qualification is absent")?;
-    if qualified.intent.owner_principal != context.fingerprint
+    if qualified.intent.owner_principal != owner_fingerprint
         || qualified.phase
             != crate::runtime_db::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound
         || qualified.occurrence.is_none()
@@ -181,7 +331,7 @@ pub(crate) fn authenticate_consumer_root(
         .context("consumer verification accepted root is absent")?;
     if root.thread_id != coordinate.accepted_root_id
         || root.chain_root_id != coordinate.accepted_root_id
-        || root.requested_by.as_deref() != Some(context.fingerprint.as_str())
+        || root.requested_by.as_deref() != Some(owner_fingerprint)
         || root.admitted_launch_capsule_hash.as_deref()
             != Some(coordinate.accepted_capsule_hash.as_str())
     {
@@ -210,7 +360,7 @@ pub(crate) fn authenticate_consumer_root(
     purpose.validate()?;
     let planning = state
         .state_store
-        .launch_planning_record_for_owner(&purpose.launch_id, &context.fingerprint)?
+        .launch_planning_record_for_owner(&purpose.launch_id, owner_fingerprint)?
         .context("consumer verification root has no owner-bound launch reservation")?;
     if planning.state != "bound"
         || planning.reserved_thread_id != root.thread_id
@@ -218,7 +368,7 @@ pub(crate) fn authenticate_consumer_root(
     {
         bail!("consumer verification root differs from its accepted launch reservation");
     }
-    if purpose.owner_fingerprint != context.fingerprint {
+    if purpose.owner_fingerprint != owner_fingerprint {
         bail!("consumer verification differs from sealed qualification purpose");
     }
     purpose.validate_remote_consumer_coordinate(coordinate, selection)?;
@@ -243,12 +393,14 @@ pub(crate) fn authenticate_consumer_root(
     Ok(AuthenticatedConsumerRoot {
         qualification_operation_id: qualified.intent.operation_id.clone(),
         qualification_profile_digest: qualified.intent.qualification_profile_digest.clone(),
-        owner: context.fingerprint.clone(),
+        owner: owner_fingerprint.to_owned(),
         coordinate: coordinate.clone(),
         selection: selection.clone(),
         purpose: purpose.clone(),
         accepted_project_authority: capsule.project_authority.clone(),
         operator_grant_digest,
+        callback_expiry: None,
+        callback_admission: None,
     })
 }
 
@@ -561,17 +713,27 @@ pub(super) fn prove(
                 .collect(),
         },
     )?;
-    let (result, calls, scoped_attempt) = match response {
+    let (result, calls, subordinate_attempt) = match response {
         ExecutionEvidenceProjectResponse::Projected {
             result,
             calls,
-            scoped_attempt,
-        } => (result, calls, scoped_attempt),
+            subordinate_attempt,
+        } => (result, calls, subordinate_attempt),
         ExecutionEvidenceProjectResponse::Refused { message } => {
             bail!("execution evidence contract refused terminal: {message}")
         }
     };
-    let scoped_proof = if let Some(candidate) = scoped_attempt.as_ref() {
+    let scoped_attempt = match subordinate_attempt.as_ref() {
+        Some(ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire::ScopedProducer { coordinate }) => Some(coordinate),
+        _ => None,
+    };
+    let remote_proof = match subordinate_attempt.as_ref() {
+        Some(candidate @ ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire::RemoteConsumer { .. }) => {
+            Some(corroborate_remote_consumer_references(state, authority, terminal, capsule, purpose, candidate, root_settlement_digest.as_ref().map(|(digest, _)| digest.as_str()))?.0)
+        },
+        _ => None,
+    };
+    let scoped_proof = if let Some(candidate) = scoped_attempt {
         // Re-resolve at proof, not only at launch/release. A clean observation
         // of a different signed recipe cannot qualify the consumer runtime.
         super::resolve_current_bundle_producer_recipe_for_purpose(
@@ -633,6 +795,16 @@ pub(super) fn prove(
             project_context_resolver,
         )?);
     }
+    let subordinate_proof = match (scoped_proof, remote_proof) {
+        (Some(proof), None) => {
+            Some(ProductQualificationSubordinateAttemptProof::ScopedProducer { proof })
+        }
+        (None, Some(proof)) => {
+            Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof })
+        }
+        (None, None) => None,
+        _ => bail!("qualification cannot combine subordinate authority lanes"),
+    };
     // A callback-free direct verifier has no subordinate operation. A
     // qualification-only callback verifier must instead name exactly one
     // daemon-corroborated scoped attempt; neither lane can silently claim
@@ -647,8 +819,8 @@ pub(super) fn prove(
         };
         let protocol = current.request_engine.protocols.require(protocol_ref)?;
         require_zero_participant_lane(
-            scoped_proof.is_some(),
-            protocol.descriptor.requires_qualification_purpose,
+            subordinate_authority(subordinate_proof.as_ref()),
+            protocol.descriptor.qualification_callback,
             protocol.descriptor.callback_channel,
         )?;
     }
@@ -659,28 +831,244 @@ pub(super) fn prove(
             projection_contract_digest: contract_digest.to_owned(),
             projector: projector_identity(&projector.projector),
             participants,
-            scoped_attempt: scoped_proof,
+            subordinate_attempt: subordinate_proof,
         },
         root_settlement_digest,
     ))
 }
 
+/// Historical record authentication, not contact eligibility or semantic
+/// qualification. Journal reads already validate the exact owner-measurement
+/// prerequisite after occurrence termination. Never require an expired bearer.
+#[allow(clippy::too_many_arguments)]
+fn corroborate_remote_consumer_references(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    terminal: &ThreadSnapshot,
+    capsule: &AdmittedLaunchCapsule,
+    purpose: &QualificationExecutionPurposeView<'_>,
+    candidate: &ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire,
+    authenticated_settlement_digest: Option<&str>,
+) -> anyhow::Result<(
+    ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof,
+    Value,
+)> {
+    use crate::runtime_db::restored_verifier_attempt::RestoredVerifierAttemptPhase;
+    use crate::runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationPhase;
+    use ryeos_external_execution_contract::restored_runtime_measurement::{
+        MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES, RemoteVerificationPurpose,
+        RestoredVerifierObservation,
+    };
+    let ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire::RemoteConsumer {
+        operation_id,
+        evidence_sha256,
+        termination_operation_id,
+        terminal_observation_sha256,
+    } = candidate
+    else {
+        bail!("remote corroboration requires a remote candidate")
+    };
+    let attempt = state
+        .state_store
+        .restored_verifier_attempt(operation_id)?
+        .context("remote proof has no retained verifier attempt")?;
+    if attempt.phase != RestoredVerifierAttemptPhase::Observed {
+        bail!("remote proof requires an observed verifier attempt");
+    }
+    let selection = attempt
+        .consumer_selection
+        .context("remote proof has no protected consumer selection")?;
+    let RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &attempt.intent.purpose
+    else {
+        bail!("remote proof cannot substitute owner measurement");
+    };
+    purpose.validate_remote_consumer_coordinate(coordinate, &selection)?;
+    let consumer_input_blob_hash = attempt
+        .consumer_input_blob_hash
+        .context("remote proof has no retained canonical input")?;
+    let input_bytes = authority.cas_store()?.get_blob_bounded(
+            &consumer_input_blob_hash,
+            ryeos_state::external_content::qualification_consumer_record::MAX_CONSUMER_INPUT_RECORD_BYTES as u64,
+        )?.context("remote proof retained input blob absent")?;
+    if lillux::sha256_hex(&input_bytes) != consumer_input_blob_hash {
+        bail!("remote proof retained input bytes differ from their journal hash");
+    }
+    let input =
+        ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord::parse(
+            &input_bytes,
+        )?;
+    input.validate_attempt(&attempt.intent)?;
+    if !input
+        .purpose
+        .execution_view()?
+        .has_same_enclosing_purpose(purpose)
+        || input.selection != selection
+    {
+        bail!("remote proof input differs from the exact accepted purpose or selection");
+    }
+    if coordinate.accepted_root_id != terminal.thread_id
+        || terminal.admitted_launch_capsule_hash.as_deref()
+            != Some(coordinate.accepted_capsule_hash.as_str())
+        || capsule.content_hash()? != coordinate.accepted_capsule_hash
+    {
+        bail!("remote proof differs from its authenticated terminal capsule");
+    }
+    let Some(RestoredVerifierObservation::ConsumerRuntime { observation }) = attempt.observation
+    else {
+        bail!("remote proof has no retained consumer observation");
+    };
+    observation.validate_for_intent(&attempt.intent)?;
+    if observation.evidence_sha256 != *evidence_sha256 || observation.contact_deadline_exceeded {
+        bail!("remote proof substituted or exceeded its evidence observation");
+    }
+    let termination = state
+        .state_store
+        .qualification_termination_operation(termination_operation_id)?
+        .context("remote proof has no retained termination")?;
+    if termination.phase != QualificationTerminationPhase::Terminal
+        || termination.intent.qualification_operation_id
+            != attempt.intent.qualification_operation_id
+        || termination.intent.occurrence_id != attempt.intent.restored_occurrence_id
+        || termination.intent.owner_principal != purpose.owner_fingerprint()
+    {
+        bail!("remote proof termination has no exact settled occurrence and owner");
+    }
+    let terminal_observation = termination
+        .observation
+        .context("remote proof terminal observation is absent")?;
+    terminal_observation.validate_for(&termination.intent)?;
+    if terminal_observation.contact_deadline_exceeded
+        || canonical_value_digest(&serde_json::to_value(&terminal_observation)?)?
+            != *terminal_observation_sha256
+    {
+        bail!("remote proof terminal observation is not exact and timely");
+    }
+    let settlement = state
+        .state_store
+        .latest_thread_process_settlement(&terminal.thread_id)?
+        .context("remote proof enclosing verifier settlement is absent")?;
+    if authenticated_settlement_digest != Some(settlement.digest()?.as_str()) {
+        bail!("remote proof enclosing settlement differs from authenticated verifier settlement");
+    }
+    let bytes = authority
+        .cas_store()?
+        .get_blob_bounded(evidence_sha256, MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES)?
+        .context("remote proof evidence blob is absent")?;
+    let evidence = observation.verify_evidence_bytes(&bytes)?;
+    Ok((ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof {
+        launch_owner_digest: canonical_value_digest(&serde_json::to_value(&settlement.launch_owner)?)?,
+        consumer_input_blob_hash,
+        intent: attempt.intent, selection, observation,
+        termination_intent: termination.intent, terminal_observation,
+    }, evidence))
+}
+
+fn subordinate_authority(
+    proof: Option<&ProductQualificationSubordinateAttemptProof>,
+) -> Option<ryeos_engine::protocols::QualificationCallbackAuthority> {
+    use ryeos_engine::protocols::QualificationCallbackAuthority;
+    proof.map(|proof| match proof {
+        ProductQualificationSubordinateAttemptProof::ScopedProducer { .. } => {
+            QualificationCallbackAuthority::ScopedProducer
+        }
+        ProductQualificationSubordinateAttemptProof::RemoteConsumer { .. } => {
+            QualificationCallbackAuthority::RemoteConsumer
+        }
+    })
+}
+
+/// Historical joins use retained authority and signed process settlement,
+/// never a live callback bearer. Reconstruct the full proof rather than only
+/// checking that the claimed operation IDs occur in a journal.
+fn verify_retained_remote_consumer(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    evidence: &ProductQualificationEvidence,
+    remote: &ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof,
+    history_limits: ExecutionEvidenceLimitsWire,
+) -> anyhow::Result<()> {
+    let limits = state
+        .node_policy
+        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let capsule = AdmittedLaunchCapsule::from_current_value(
+        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            &authority.cas_store()?,
+            &evidence.verifier.admitted_launch_capsule_hash,
+            limits.max_object_bytes,
+        )?,
+    )?;
+    let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+        &capsule,
+    )?;
+    let purpose = sealed
+        .qualification_purpose()
+        .context("remote retained root has no qualification purpose")?;
+    let purpose = purpose.execution_view()?;
+    let terminal = state
+        .state_store
+        .get_authoritative_root_thread_snapshot(&evidence.verifier.thread_id)?
+        .context("remote retained verifier terminal absent")?;
+    require_terminal_invocation(&terminal, &capsule)?;
+    if terminal.status != ThreadStatus::Completed
+        || terminal.error.is_some()
+        || ryeos_state::objects::thread_snapshot::hash_snapshot(&terminal)?
+            != evidence.verifier.terminal_snapshot_hash
+    {
+        bail!("remote retained verifier differs from its successful terminal");
+    }
+    let events = history(authority, guard, &terminal, history_limits)?;
+    let settlement =
+        direct_process_settlement(state, &terminal, &capsule.artifact_identity, &events)?;
+    if settlement.as_ref().map(|(digest, _)| digest.as_str())
+        != evidence
+            .verifier
+            .process_settlement_witness_digest
+            .as_deref()
+        || settlement.as_ref().map(|(_, authority)| *authority)
+            != evidence.verifier.process_settlement_authority
+    {
+        bail!("remote retained enclosing process settlement changed");
+    }
+    let candidate =
+        ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire::RemoteConsumer {
+            operation_id: remote.intent.operation_id.clone(),
+            evidence_sha256: remote.observation.evidence_sha256.clone(),
+            termination_operation_id: remote.termination_intent.operation_id.clone(),
+            terminal_observation_sha256: canonical_value_digest(&serde_json::to_value(
+                &remote.terminal_observation,
+            )?)?,
+        };
+    let (reconstructed, _) = corroborate_remote_consumer_references(
+        state,
+        authority,
+        &terminal,
+        &capsule,
+        &purpose,
+        &candidate,
+        settlement.as_ref().map(|(digest, _)| digest.as_str()),
+    )?;
+    if &reconstructed != remote {
+        bail!("remote retained proof differs from full historical corroboration");
+    }
+    Ok(())
+}
+
 fn require_zero_participant_lane(
-    has_scoped_attempt: bool,
-    requires_qualification_purpose: bool,
+    subordinate: Option<ryeos_engine::protocols::QualificationCallbackAuthority>,
+    protocol_authority: Option<ryeos_engine::protocols::QualificationCallbackAuthority>,
     callback_channel: ryeos_engine::protocol_vocabulary::CallbackChannel,
 ) -> anyhow::Result<()> {
     use ryeos_engine::protocol_vocabulary::CallbackChannel;
-    if !matches!(
-        (
-            has_scoped_attempt,
-            requires_qualification_purpose,
-            callback_channel
-        ),
-        (false, false, CallbackChannel::None) | (true, true, CallbackChannel::Http)
-    ) {
+    if subordinate != protocol_authority
+        || !matches!(
+            (subordinate, callback_channel),
+            (None, CallbackChannel::None) | (Some(_), CallbackChannel::Http)
+        )
+    {
         bail!(
-            "zero-participant qualification protocol has unaccounted callback authority or scoped attempt"
+            "zero-participant qualification protocol differs from its exact subordinate authority"
         );
     }
     Ok(())
@@ -931,19 +1319,31 @@ pub(in crate::operator_external_content) fn verify_current(
         };
         let protocol = state.engine.protocols.require(protocol_ref)?;
         require_zero_participant_lane(
-            proof.scoped_attempt.is_some(),
-            protocol.descriptor.requires_qualification_purpose,
+            subordinate_authority(proof.subordinate_attempt.as_ref()),
+            protocol.descriptor.qualification_callback,
             protocol.descriptor.callback_channel,
         )?;
     }
-    if let Some(scoped) = &proof.scoped_attempt {
+    if let Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof: remote }) =
+        &proof.subordinate_attempt
+    {
+        verify_retained_remote_consumer(
+            state,
+            authority,
+            guard,
+            evidence,
+            remote,
+            projector.declaration.limits,
+        )?;
+    }
+    if let Some(scoped) = proof.subordinate_attempt.as_ref().and_then(ryeos_state::external_content::products::qualification::ProductQualificationSubordinateAttemptProof::scoped_producer) {
         let AdmittedLaunchArtifactIdentity::DirectItemExecutor { protocol_ref, .. } =
             &current.artifact_identity
         else {
             bail!("current scoped qualification verifier is not a direct execution");
         };
         let protocol = state.engine.protocols.require(protocol_ref)?;
-        if !protocol.descriptor.requires_qualification_purpose
+        if protocol.descriptor.qualification_callback != Some(ryeos_engine::protocols::QualificationCallbackAuthority::ScopedProducer)
             || protocol.descriptor.callback_channel
                 != ryeos_engine::protocol_vocabulary::CallbackChannel::Http
             || scoped.callback_method_surface_digest

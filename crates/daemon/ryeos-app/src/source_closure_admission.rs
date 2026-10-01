@@ -81,7 +81,8 @@ pub fn compile_admitted_structured_worker_profile(
 }
 
 /// Reconstruct data beneath an already authenticated retained projection.
-/// The caller must join the returned owner and profile to its accepted root.
+/// This neither admits source nor creates executable authority. The caller
+/// must join the returned owner/profile with its accepted enclosing purpose.
 pub(crate) fn compile_retained_structured_worker_profile(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,

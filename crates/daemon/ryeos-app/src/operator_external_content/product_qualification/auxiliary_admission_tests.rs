@@ -563,7 +563,7 @@ fn seed_auxiliary_qualification_in_context(
                 binary_signer_fingerprint: projector.binary_signer_fingerprint.clone(),
             },
             participants: vec![],
-            scoped_attempt: None,
+            subordinate_attempt: None,
         },
         result,
     };

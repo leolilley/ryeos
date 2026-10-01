@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-26T08:50:39Z:68ee75943aa01edf3a92a40cc97ac541ed3201ef6d2a8f3f55028d0d87c03fb6:79UqONttCcNPILYDb4WeoINOnfBNi1UHuLcRb+WWtb3Nx9fpF9qZBJOwIfLC2V482N+R0Ep3ixOb26Qt3sihDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-01T01:13:28Z:70352d0de41d16cce2811e124d587e62d863c63209e891dc51eb8d1f5331562b:TgoAH6gBXkWOzUXZAfGWf6ka2rTOa/F8NNr28HOWqeIsDRj0l8+GMlT1E9rosDdaZNQqXiE1bVUDWH5d7Q3mAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: qualification_scoped_callback
 category: ryeos/core
@@ -24,7 +24,7 @@ capabilities:
 lifecycle:
   mode: managed
 callback_channel: http
-requires_qualification_purpose: true
+qualification_callback: scoped_producer
 execution_evidence:
   handler: handler:ryeos/core/scoped-qualification-execution-evidence
   config: {}

@@ -19,6 +19,10 @@ pub const RESTORED_OWNER_MEASUREMENT_PROTOCOL: &str = "ryeos.restored-owner-meas
 pub const RESTORATION_VERIFIER_REMOTE_DIRECTORY: &str = "/ryeos/qualification";
 pub const RESTORATION_VERIFIER_REMOTE_NAME: &str = "ryeos-external-guest-restoration-verifier";
 pub const CONSUMER_VERIFIER_REMOTE_NAME: &str = "ryeos-external-guest-consumer-verifier";
+/// One opaque record authored by the admitted verifier. The transport fixes
+/// its member and allowance; only the product edge interprets its language.
+pub const CONSUMER_INPUT_RECORD_NAME: &str = "consumer-input.json";
+pub const MAX_CONSUMER_INPUT_RECORD_BYTES: usize = 96 * 1024;
 pub const MAX_RESTORATION_VERIFIER_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_RESTORED_OWNER_CHALLENGE_BYTES: usize = 4096;
 pub const MAX_RESTORED_OWNER_RESULT_BYTES: usize = 4096;
@@ -132,6 +136,81 @@ impl ConsumerVerifierAdapterObservation {
             "consumer evidence is not an exact canonical object"
         );
         Ok(value)
+    }
+}
+
+/// Bounded selectors for the protected input read. Dynamic root and purpose
+/// commitments are daemon-derived; these values confer no contact authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerVerificationInputSelection {
+    pub scenario_id: String,
+    pub qualification_operation_id: String,
+    pub prerequisite_measurement_attempt_id: String,
+}
+
+impl ConsumerVerificationInputSelection {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.scenario_id.is_empty()
+                && self.scenario_id.len() <= 128
+                && self
+                    .scenario_id
+                    .bytes()
+                    .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') }),
+            "consumer input scenario selector is invalid"
+        );
+        require_hash(&self.qualification_operation_id, "qualification selector")?;
+        require_hash(
+            &self.prerequisite_measurement_attempt_id,
+            "measurement selector",
+        )
+    }
+
+    pub fn require_coordinate(
+        &self,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<()> {
+        self.validate()?;
+        coordinate.validate()?;
+        ensure!(
+            coordinate.scenario_id == self.scenario_id
+                && coordinate.prerequisite_measurement_attempt_id
+                    == self.prerequisite_measurement_attempt_id,
+            "protected consumer inputs changed requested selectors"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod input_selection_tests {
+    use super::*;
+
+    #[test]
+    fn input_selectors_cannot_supply_root_or_observation_authority() {
+        let selection = serde_json::json!({
+            "scenario_id":"consumer", "qualification_operation_id":"a".repeat(64),
+            "prerequisite_measurement_attempt_id":"b".repeat(64),
+        });
+        let parsed: ConsumerVerificationInputSelection =
+            serde_json::from_value(selection.clone()).unwrap();
+        parsed.validate().unwrap();
+        for field in [
+            "accepted_root_id",
+            "accepted_capsule_hash",
+            "qualification_purpose_digest",
+            "prerequisite_measurement_observation_digest",
+        ] {
+            let mut forged = selection.clone();
+            forged[field] = "c".repeat(64).into();
+            assert!(serde_json::from_value::<ConsumerVerificationInputSelection>(forged).is_err());
+        }
+        for scenario in ["", "consumer/another", &"c".repeat(129)] {
+            let mut changed = parsed.clone();
+            changed.scenario_id = scenario.into();
+            assert!(changed.validate().is_err());
+        }
     }
 }
 
@@ -640,15 +719,67 @@ impl RemoteVerificationPurpose {
                 nonce_hex,
                 guest_runtime_manifest_hash,
             } => {
-                coordinate.validate()?;
                 require_hash(nonce_hex, "consumer challenge nonce")?;
-                require_hash(guest_runtime_manifest_hash, "consumer owner runtime")?;
-                serde_json::json!({"kind": "consumer_runtime", "coordinate": coordinate,
-                    "guest_runtime_manifest_hash": guest_runtime_manifest_hash})
+                return consumer_verification_purpose_digest(
+                    coordinate,
+                    guest_runtime_manifest_hash,
+                );
             }
         };
         Ok(hex::encode(Sha256::digest(canonical_json(&value)?)))
     }
+}
+
+fn consumer_verification_purpose_digest(
+    coordinate: &ConsumerRuntimeVerificationCoordinate,
+    guest_runtime_manifest_hash: &str,
+) -> Result<String> {
+    coordinate.validate()?;
+    require_hash(guest_runtime_manifest_hash, "consumer owner runtime")?;
+    Ok(hex::encode(Sha256::digest(canonical_json(
+        &serde_json::json!({
+            "kind":"consumer_runtime", "coordinate":coordinate,
+            "guest_runtime_manifest_hash":guest_runtime_manifest_hash,
+        }),
+    )?)))
+}
+
+fn verifier_operation_id(
+    qualification: &str,
+    occurrence: &str,
+    artifact: &str,
+    purpose_digest: &str,
+) -> Result<String> {
+    Ok(hex::encode(Sha256::digest(canonical_json(&(
+        "ryeos.restored-verifier-attempt.v2",
+        qualification,
+        occurrence,
+        artifact,
+        purpose_digest,
+    ))?)))
+}
+
+/// Exact pending journal coordinate, not reservation or contact authority.
+/// The caller must authenticate these stable fields from retained ownership.
+pub fn consumer_verifier_operation_id(
+    qualification: &str,
+    occurrence: &str,
+    artifact: &str,
+    coordinate: &ConsumerRuntimeVerificationCoordinate,
+    guest_runtime_manifest_hash: &str,
+) -> Result<String> {
+    require_hash(qualification, "consumer qualification")?;
+    require_hash(artifact, "consumer verifier artifact")?;
+    ensure!(
+        !occurrence.is_empty() && occurrence.len() <= 256,
+        "consumer occurrence identity is invalid"
+    );
+    verifier_operation_id(
+        qualification,
+        occurrence,
+        artifact,
+        &consumer_verification_purpose_digest(coordinate, guest_runtime_manifest_hash)?,
+    )
 }
 
 impl RestoredVerifierAttemptIntent {
@@ -798,14 +929,12 @@ impl RestoredVerifierAttemptIntent {
     /// retained attempt data, not coordinates that mint another contact.
     /// Reservation replay compares the entire intent, including those fields.
     pub fn derived_operation_id(&self) -> Result<String> {
-        let coordinates = (
-            "ryeos.restored-verifier-attempt.v2",
+        verifier_operation_id(
             &self.qualification_operation_id,
             &self.restored_occurrence_id,
             &self.verifier_artifact_hash,
-            self.purpose.coordinate_digest()?,
-        );
-        Ok(hex::encode(Sha256::digest(canonical_json(&coordinates)?)))
+            &self.purpose.coordinate_digest()?,
+        )
     }
 }
 
@@ -1083,6 +1212,25 @@ mod tests {
             guest_runtime_manifest_hash: "7".repeat(64),
         };
         let consumer_identity = attempt.derived_operation_id().unwrap();
+        let RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate,
+            guest_runtime_manifest_hash,
+            ..
+        } = &attempt.purpose
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            consumer_verifier_operation_id(
+                &attempt.qualification_operation_id,
+                &attempt.restored_occurrence_id,
+                &attempt.verifier_artifact_hash,
+                coordinate,
+                guest_runtime_manifest_hash,
+            )
+            .unwrap(),
+            consumer_identity
+        );
         attempt.operation_id = consumer_identity.clone();
         let challenge = ConsumerRuntimeChallenge {
             schema: 1,

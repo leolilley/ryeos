@@ -839,7 +839,7 @@ mod tests {
         intent.heads[0].evidence_schema = RETIRED_EVIDENCE_SCHEMA_V9.into();
         intent.plan_sha256 = plan_hash(&intent.heads).unwrap();
         intent.validate().unwrap();
-        intent.heads[0].evidence_schema = "ryeos.product_qualification_evidence.v13".into();
+        intent.heads[0].evidence_schema = "ryeos.product_qualification_evidence.v14".into();
         intent.plan_sha256 = plan_hash(&intent.heads).unwrap();
         assert!(intent.validate().is_err());
         intent.heads[0].evidence_schema = RETIRED_EVIDENCE_SCHEMA_V5.into();
@@ -857,7 +857,7 @@ mod tests {
             "ryeos.product_qualification_evidence.v4",
             "ryeos.product_qualification_evidence.v8",
             "ryeos.product_qualification_evidence.v10",
-            "ryeos.product_qualification_evidence.v13",
+            "ryeos.product_qualification_evidence.v14",
         ] {
             assert!(!reviewed_retired_evidence_schema(schema));
         }

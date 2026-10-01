@@ -287,6 +287,21 @@ pub struct ExecutionEvidenceCandidateScopedAttemptWire {
     pub observation_object_hash: String,
 }
 
+/// References interpreted by the signed projector, never execution authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionEvidenceCandidateSubordinateAttemptWire {
+    ScopedProducer {
+        coordinate: ExecutionEvidenceCandidateScopedAttemptWire,
+    },
+    RemoteConsumer {
+        operation_id: String,
+        evidence_sha256: String,
+        termination_operation_id: String,
+        terminal_observation_sha256: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionEvidenceProjectResponse {
@@ -296,7 +311,7 @@ pub enum ExecutionEvidenceProjectResponse {
         /// Handler interpretation of one subordinate process coordinate.
         /// The daemon must corroborate it against the exact attempt journal.
         #[serde(deserialize_with = "deserialize_required_nullable")]
-        scoped_attempt: Option<ExecutionEvidenceCandidateScopedAttemptWire>,
+        subordinate_attempt: Option<ExecutionEvidenceCandidateSubordinateAttemptWire>,
     },
     Refused {
         message: String,
@@ -1320,25 +1335,54 @@ mod tests {
     }
 
     #[test]
-    fn execution_evidence_scoped_coordinate_is_required_nullable() {
+    fn execution_evidence_subordinate_coordinate_is_required_nullable() {
         let projected = serde_json::json!({
             "status": "projected",
             "result": {"accepted": true},
             "calls": [],
-            "scoped_attempt": null,
+            "subordinate_attempt": null,
         });
         assert!(
             serde_json::from_value::<ExecutionEvidenceProjectResponse>(projected.clone()).is_ok()
         );
         let mut missing = projected.clone();
-        missing.as_object_mut().unwrap().remove("scoped_attempt");
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("subordinate_attempt");
         assert!(serde_json::from_value::<ExecutionEvidenceProjectResponse>(missing).is_err());
-        let mut selected = projected;
-        selected["scoped_attempt"] = serde_json::json!({
-            "attempt_id": format!("scoped-{}", "a".repeat(64)),
-            "scenario_id": "native_codex",
-            "observation_object_hash": "b".repeat(64),
+        let mut predecessor = projected.clone();
+        predecessor
+            .as_object_mut()
+            .unwrap()
+            .remove("subordinate_attempt");
+        predecessor["scoped_attempt"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<ExecutionEvidenceProjectResponse>(predecessor).is_err());
+        let mut selected = projected.clone();
+        selected["subordinate_attempt"] = serde_json::json!({
+            "kind": "scoped_producer",
+            "coordinate": {
+                "attempt_id": format!("scoped-{}", "a".repeat(64)),
+                "scenario_id": "native_codex",
+                "observation_object_hash": "b".repeat(64),
+            },
         });
-        assert!(serde_json::from_value::<ExecutionEvidenceProjectResponse>(selected).is_ok());
+        assert!(
+            serde_json::from_value::<ExecutionEvidenceProjectResponse>(selected.clone()).is_ok()
+        );
+        selected["subordinate_attempt"]["operation_id"] = serde_json::json!("c".repeat(64));
+        assert!(serde_json::from_value::<ExecutionEvidenceProjectResponse>(selected).is_err());
+
+        let mut remote = projected;
+        remote["subordinate_attempt"] = serde_json::json!({
+            "kind": "remote_consumer",
+            "operation_id": "a".repeat(64),
+            "evidence_sha256": "b".repeat(64),
+            "termination_operation_id": "c".repeat(64),
+            "terminal_observation_sha256": "d".repeat(64),
+        });
+        assert!(serde_json::from_value::<ExecutionEvidenceProjectResponse>(remote.clone()).is_ok());
+        remote["subordinate_attempt"]["coordinate"] = serde_json::json!({});
+        assert!(serde_json::from_value::<ExecutionEvidenceProjectResponse>(remote).is_err());
     }
 }

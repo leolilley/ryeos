@@ -897,6 +897,43 @@ impl CallbackCapabilityStore {
         self.capabilities.lock().unwrap().remove(token);
     }
 
+    /// Linearize a short durable admission against bearer revocation. Never
+    /// perform provider contact or CAS traversal while holding this gate.
+    /// Lock order is callback store, then StateStore, then runtime transaction.
+    pub(crate) fn with_remote_consumer_admission<T>(
+        &self,
+        token: &str,
+        grant: &AdmittedRemoteConsumerGrant,
+        admit: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.with_live_admission(token, |cap| {
+            if cap.remote_consumer_grant.as_ref() != Some(grant)
+                || cap.runtime_method_surface
+                    != CallbackRuntimeMethodSurface::qualification_remote_consumer()
+            {
+                bail!("consumer callback lost its exact live admission");
+            }
+            admit()
+        })
+    }
+
+    fn with_live_admission<T>(
+        &self,
+        token: &str,
+        admit: impl FnOnce(&CallbackCapability) -> Result<T>,
+    ) -> Result<T> {
+        let map = self.capabilities.lock().unwrap();
+        let cap = map
+            .get(token)
+            .ok_or_else(|| anyhow::anyhow!("revoked consumer callback"))?;
+        if cap.expires_at.has_elapsed() {
+            bail!("consumer callback expired before durable admission");
+        }
+        let result = admit(cap);
+        drop(map);
+        result
+    }
+
     /// Validate callback token + thread_id without requiring project_path.
     /// Used by runtime.* UDS methods that don't carry project_path in params.
     pub fn validate_token_and_thread(
@@ -1412,6 +1449,52 @@ mod tests {
         assert!(
             store
                 .validate(&cap.token, "T-test", PathBuf::from("/p").as_path())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_consumer_live_gate_serializes_revocation_and_refuses_expiry() {
+        let store = CallbackCapabilityStore::new();
+        let cap = store.generate(
+            "T-test",
+            PathBuf::from("/p"),
+            Duration::from_secs(300),
+            Vec::new(),
+            provenance(PathBuf::from("/p")),
+            "0".repeat(64),
+        );
+        store
+            .with_live_admission(&cap.token, |live| {
+                assert_eq!(live.thread_id, "T-test");
+                assert!(
+                    store.capabilities.try_lock().is_err(),
+                    "revocation gate must remain held through admission"
+                );
+                Ok(())
+            })
+            .unwrap();
+        store.invalidate(&cap.token);
+        assert!(
+            store
+                .with_live_admission::<()>(&cap.token, |_| panic!(
+                    "revoked callback reached admission"
+                ))
+                .is_err()
+        );
+        let expired = store.generate(
+            "T-test",
+            PathBuf::from("/p"),
+            Duration::ZERO,
+            Vec::new(),
+            provenance(PathBuf::from("/p")),
+            "0".repeat(64),
+        );
+        assert!(
+            store
+                .with_live_admission::<()>(&expired.token, |_| panic!(
+                    "expired callback reached admission"
+                ))
                 .is_err()
         );
     }

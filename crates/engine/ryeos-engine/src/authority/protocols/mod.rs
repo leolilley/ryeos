@@ -18,8 +18,8 @@ pub use builder::{
 };
 pub use descriptor::{
     PersistentSessionChannel, PersistentSessionCleanupAuthority, PersistentSessionFraming,
-    PersistentSessionProtocol, ProtocolDescriptor, validate_method_runtime_protocol,
-    validate_persistent_session_protocol,
+    PersistentSessionProtocol, ProtocolDescriptor, QualificationCallbackAuthority,
+    validate_method_runtime_protocol, validate_persistent_session_protocol,
 };
 pub use registry::{
     ProtocolError, ProtocolRegistry, VerifiedProtocol, validate_admitted_protocol_descriptor,
