@@ -10,7 +10,7 @@ use ryeos_state::objects::qualification_fixture::{
 };
 use ryeos_state::{CasMutationGuard, DurableCasPublicationKey, PinnedStateAuthority};
 
-pub(super) const JOURNAL_SQL: &str = r#"
+pub(crate) const JOURNAL_SQL: &str = r#"
 CREATE TABLE external_qualification_fixture_receiver (
     placement_thread_id TEXT PRIMARY KEY,
     binding_digest TEXT NOT NULL,

@@ -2001,7 +2001,7 @@ pub(crate) fn preflight_external_qualification_program(
     // contacted occurrence attaches its channel. Earlier traffic cannot use
     // the signed allowance reserved for native Q settlement and capture.
     ryeos_state::external_execution::validate_channel_journal_limits(
-        ExternalExecutionMode::QualificationStructuredSession {},
+        ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {},
         channel_max_frames,
         channel_max_bytes,
     )?;

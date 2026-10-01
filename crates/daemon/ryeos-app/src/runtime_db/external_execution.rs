@@ -35,10 +35,7 @@ pub(crate) use qualification_command::{
 };
 pub(crate) use qualification_evidence::QualificationHistoricalTransportEvidence;
 pub(super) use qualification_fixture_receiver::JOURNAL_SQL as QUALIFICATION_FIXTURE_RECEIVER_SQL;
-pub(crate) use qualification_fixture_receiver::{
-    QualificationFixtureReceiverRecord, QualificationScopeSettlementPlan,
-    VerifiedQualificationFixtureCustody, verify_qualification_fixture_receiver_custody,
-};
+pub(crate) use qualification_fixture_receiver::verify_qualification_fixture_receiver_custody;
 pub(super) use qualification_guest_scratch::JOURNAL_SQL as QUALIFICATION_GUEST_SCRATCH_SQL;
 pub(crate) use qualification_guest_scratch::{
     QualificationGuestScratchPhase, QualificationGuestScratchRecord,
