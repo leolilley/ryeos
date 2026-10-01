@@ -2243,6 +2243,8 @@ mod tests {
             node_config: Arc::new(ryeos_app::node_config::NodeConfigSnapshot {
                 external_execution: Vec::new(),
                 runtime_snapshot_production: Vec::new(),
+                runtime_snapshot_qualification: Vec::new(),
+                guest_runtime_materialization: Vec::new(),
                 bundles: vec![],
                 routes: vec![],
                 commands: vec![],
