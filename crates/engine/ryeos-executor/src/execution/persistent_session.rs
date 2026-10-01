@@ -2631,14 +2631,15 @@ where
     }))?;
     let lifecycle = capsule.lifecycle.clone();
     let wire = capsule.wire.clone();
-    state.persistent_sessions.execute_attributed(
+    state.persistent_sessions.execute_attributed_owned_start(
         &pool_key,
         &lifecycle,
         &wire,
         Some(request_identity),
         request_body,
-        || {
+        |original_start| {
             start_capsule_process(
+                original_start,
                 state,
                 capsule_hash,
                 &capsule,
@@ -2902,6 +2903,7 @@ fn decode_retained_protocol_descriptor(
 }
 
 fn start_capsule_process(
+    original_start: &ryeos_app::persistent_session::PersistentSessionPooledStart,
     state: &AppState,
     capsule_hash: &str,
     capsule: &AdmittedPersistentSessionCapsule,
@@ -2923,6 +2925,9 @@ fn start_capsule_process(
         &state.config.runtime_root().cache(),
         &workspace_name,
     )?;
+    // The ORIGINAL group owns this same guard before any held contact. A
+    // callback error must not let its local temporary holder remove scratch.
+    original_start.retain_before_contact(vec![Box::new(Arc::clone(&workspace_lifeline))])?;
     let mut held = spawn_capsule_process_held(
         state,
         capsule_hash,
@@ -2942,9 +2947,16 @@ fn start_capsule_process(
         None,
         None,
         None,
+        Some((original_start, Arc::clone(&workspace_lifeline))),
     )?;
-    held.lifelines.push(Box::new(workspace_lifeline));
     let pooled_owner_coordinate = workspace_name;
+    let cleanup_observer = resource_cleanup_observer(
+        state,
+        &held.process.process_identity,
+        PersistentResourceOwner::Pooled(pooled_owner_coordinate.clone()),
+    );
+    original_start
+        .retain_cleanup_obligations(cleanup_observer.clone(), held.retirement_observer.clone())?;
     if let Err(error) = state
         .state_store
         .attach_pooled_resource_owner(&pooled_owner_coordinate, &held.process.process_identity)
@@ -3012,11 +3024,7 @@ fn start_capsule_process(
             )).context(ryeos_app::persistent_session::PersistentSessionCleanupUnproved),
         });
     }
-    let cleanup_observer = resource_cleanup_observer(
-        state,
-        &held.process.process_identity,
-        PersistentResourceOwner::Pooled(pooled_owner_coordinate.clone()),
-    );
+
     let resource_attribution_sink =
         resource_attribution_sink(state, &held.process.process_identity);
     let resource_eligibility = resource_eligibility(state, &held.process.process_identity);
@@ -3658,6 +3666,10 @@ fn spawn_capsule_process_held(
     process_scope_allocation: Option<&lillux::ProcessScopeAllocation>,
     process_scope: Option<lillux::ProcessScope>,
     placement_thread_id: Option<&str>,
+    pooled_start: Option<(
+        &ryeos_app::persistent_session::PersistentSessionPooledStart,
+        Arc<ryeos_app::temp_dir_guard::TempDirGuard>,
+    )>,
 ) -> Result<HeldPersistentSession> {
     let resolution = exact.resolution_output.restore();
     // A typed source-entry consumer does not require a project-code shadow.
@@ -3707,13 +3719,14 @@ fn spawn_capsule_process_held(
                 .expect("disabled isolation has a private copy budget"),
         )?
     };
-    let (mounts, external_env, mut leases) = match bound {
-        Some(bound) => {
-            let (mounts, env, leases) = bound.into_spawn_parts();
-            (mounts, Some(env), leases)
-        }
-        None => (Vec::new(), None, Vec::new()),
+    let (mounts, external_env) = match bound.as_ref() {
+        Some(bound) => (
+            bound.mounts().to_vec(),
+            Some(bound.sealed_set_env().to_owned()),
+        ),
+        None => (Vec::new(), None),
     };
+    let mut leases = Vec::new();
     if realization_workspace != workspace && !exact.evidence_attachments.is_empty() {
         // The runtime view keeps executable dependencies out of the retained
         // candidate. Evidence also has an admitted project-relative address
@@ -3766,8 +3779,8 @@ fn spawn_capsule_process_held(
         Some(source) => {
             mounts.extend_from_slice(source.mounts());
             (
-                Some(source.sealed_identity_env()),
-                Some(source.execution_entry_path()),
+                Some(source.sealed_identity_env().to_owned()),
+                Some(source.execution_entry_path().to_path_buf()),
             )
         }
         None => (None, None),
@@ -3886,6 +3899,71 @@ fn spawn_capsule_process_held(
             ryeos_app::external_placement::ExternalCandidateCleanupLifeline::new(state, placement),
         ));
     }
+    let mut lifelines: Vec<Box<dyn Send + Sync>> = Vec::new();
+    if let Some(view) = workspace_view {
+        lifelines.push(Box::new(view.clone()));
+    }
+    lifelines.extend(
+        leases
+            .into_iter()
+            .map(|lease| Box::new(lease) as Box<dyn Send + Sync>),
+    );
+    match pooled_start.as_ref() {
+        Some((original_start, original_workspace))
+            if session_protocol.cleanup_authority
+                == PersistentSessionCleanupAuthority::TrustedProcessGroup =>
+        {
+            // Capture the COMPLETE actual bindings before any held contact.
+            // This is not a launch permit; executable prerequisites stay closed.
+            let bound = bound.map(Arc::new);
+            let source = source.map(Arc::new);
+            let mut original_bindings: Vec<Box<dyn Send + Sync>> = Vec::new();
+            if let Some(bound) = bound.as_ref() {
+                original_bindings.push(Box::new(Arc::clone(bound)));
+            }
+            if let Some(source) = source.as_ref() {
+                original_bindings.push(Box::new(Arc::clone(source)));
+            }
+            original_start.retain_before_contact(original_bindings)?;
+            let custody = custody::PreparedTrustedSessionCustody::capture(
+                state,
+                capsule_hash,
+                workspace,
+                Arc::clone(original_workspace),
+                bound,
+                source,
+            )?;
+            lifelines.push(Box::new(custody));
+            original_start.retain_before_contact(lifelines)?;
+            lifelines = Vec::new();
+        }
+        Some((original_start, _)) => {
+            if let Some(bound) = bound {
+                lifelines.push(Box::new(bound));
+            }
+            if let Some(source) = source {
+                lifelines.push(Box::new(source));
+            }
+            original_start.retain_before_contact(lifelines)?;
+            lifelines = Vec::new();
+        }
+        None => {
+            if let Some(bound) = bound {
+                lifelines.push(Box::new(bound));
+            }
+            if let Some(source) = source {
+                lifelines.push(Box::new(source));
+            }
+        }
+    }
+    if let Some((original_start, _)) = pooled_start.as_ref() {
+        original_start.retain_before_contact(external_lifelines)?;
+    } else {
+        lifelines.extend(external_lifelines);
+    }
+    if let Some((original_start, _)) = pooled_start.as_ref() {
+        original_start.retain_cleanup_obligations(None, retirement_observer.clone())?;
+    }
     let process = (|| {
         let session_process_environment = (!capsule.process_environment.is_empty())
             .then(|| {
@@ -3903,8 +3981,8 @@ fn spawn_capsule_process_held(
                     ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot
                 }
             }),
-            source_env,
-            source_entry,
+            source_env.as_deref(),
+            source_entry.as_deref(),
             executable_search_env.as_deref(),
         )?;
         let mut runtime_environment = runtime_environment.clone();
@@ -3963,22 +4041,6 @@ fn spawn_capsule_process_held(
                 .context(ryeos_app::persistent_session::PersistentSessionCleanupUnproved),
         }
     })?;
-    let mut lifelines: Vec<Box<dyn Send + Sync>> = Vec::with_capacity(leases.len());
-    // The pool owns the exact worker epoch/process; retain its alias in the
-    // same lifecycle carrier until that process is retired. A launch plan's
-    // temporary descriptor retention alone ends too early for workspace close.
-    if let Some(view) = workspace_view {
-        lifelines.push(Box::new(view.clone()));
-    }
-    lifelines.extend(
-        leases
-            .into_iter()
-            .map(|lease| Box::new(lease) as Box<dyn Send + Sync>),
-    );
-    if let Some(source) = source {
-        lifelines.push(Box::new(source));
-    }
-    lifelines.extend(external_lifelines);
     Ok(HeldPersistentSession {
         process,
         socket: daemon_socket,
@@ -4147,6 +4209,7 @@ pub fn start_exclusive_capsule(
         scope_allocation.as_ref(),
         scope,
         Some(&identity.placement_thread_id),
+        None,
     )
     .map_err(|error| {
         // Preparation itself can fail after reservation but before spawn.

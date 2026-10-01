@@ -28,13 +28,14 @@ pub(super) struct PreparedTrustedSessionCustody {
     scratch_name: String,
     workspace_identity: lillux::secure_fs::PinnedDirectoryIdentity,
     workspace: Arc<TempDirGuard>,
-    external: Option<BoundExternalRealizations>,
-    source: Option<BoundSourceClosure>,
+    external: Option<Arc<BoundExternalRealizations>>,
+    source: Option<Arc<BoundSourceClosure>>,
     cleanup_agreement: AdmittedTrustedResourceCleanupContract,
 }
 
 impl PreparedTrustedSessionCustody {
-    /// Capture only already-redeemed private bindings. The capsule and retained
+    /// Capture only already-redeemed private bindings. The caller must retain
+    /// these SAME Arc-backed original owners in its pool slot before validation. The capsule and retained
     /// signed protocol are reopened in the SAME current StateStore and trust
     /// domain; caller-provided digests cannot mint this value.
     pub(super) fn capture(
@@ -42,8 +43,8 @@ impl PreparedTrustedSessionCustody {
         capsule_hash: &str,
         workspace_path: &Path,
         workspace: Arc<TempDirGuard>,
-        external: Option<BoundExternalRealizations>,
-        source: Option<BoundSourceClosure>,
+        external: Option<Arc<BoundExternalRealizations>>,
+        source: Option<Arc<BoundSourceClosure>>,
     ) -> Result<Self> {
         let capsule = load_capsule(state, capsule_hash)?;
         validate_capsule_current_trust(&state.engine, &capsule)?;

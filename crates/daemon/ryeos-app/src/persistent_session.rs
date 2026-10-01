@@ -303,6 +303,7 @@ struct SessionProcess {
     /// Retired explicitly after proved process cleanup, even when callers
     /// retain another Arc to this session. Not evidence of process death.
     lifelines: Mutex<Vec<Box<dyn Send + Sync>>>,
+    pooled_start: Option<Arc<PersistentSessionPooledStart>>,
 }
 
 const MAX_PENDING_SESSION_REQUESTS: usize = 32;
@@ -504,12 +505,26 @@ impl SessionProcess {
             }
         }
         lifelines.clear();
+        if let Some(start) = &self.pooled_start {
+            start.prove_cleanup();
+        }
         Ok(())
     }
 }
 
 impl Drop for SessionProcess {
     fn drop(&mut self) {
+        if self
+            .cleanup_unproved
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+        {
+            if let Some(start) = &self.pooled_start {
+                start.retain_unsettled();
+            }
+            return;
+        }
         self.closed.store(true, Ordering::Release);
         self.backlog.changed.notify_all();
         self.observation_sender
@@ -524,6 +539,9 @@ impl Drop for SessionProcess {
         {
             if let Err(error) = running.abort_and_reap_checked() {
                 tracing::error!(%error, "persistent-session drop cleanup could not be proved");
+                if let Some(start) = &self.pooled_start {
+                    start.retain_unsettled();
+                }
                 return;
             }
         }
@@ -535,6 +553,13 @@ impl Drop for SessionProcess {
             && let Err(error) = observer()
         {
             tracing::error!(%error, "persistent-session resource settlement failed after drop reap");
+            if let Some(start) = &self.pooled_start {
+                start.retain_unsettled();
+            }
+            return;
+        }
+        if let Some(start) = &self.pooled_start {
+            start.prove_cleanup();
         }
     }
 }
@@ -687,7 +712,268 @@ struct GroupContract {
 struct SessionGroup {
     contract: GroupContract,
     processes: Vec<Arc<SessionProcess>>,
-    spawning: usize,
+    starts: Vec<Arc<PersistentSessionPooledStart>>,
+}
+
+/// Pool-minted original owner, retained inside the EXISTING SessionGroup before
+/// its callback can prepare or contact a process. This is retention, not spawn,
+/// resource admission, physical removal, or settlement authority. No decoder,
+/// public constructor, pool back-reference or alternate registry exists.
+pub struct PersistentSessionPooledStart {
+    retained: Mutex<PooledStartRetention>,
+    callback_in_flight: AtomicBool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PooledStartPhase {
+    Preparing,
+    Registered,
+    Unsettled,
+    Settled,
+}
+
+struct PooledStartRetention {
+    phase: PooledStartPhase,
+    lifelines: Vec<Box<dyn Send + Sync>>,
+    resource_observer: Option<PersistentSessionCleanupObserver>,
+    retirement_observer: Option<PersistentSessionCleanupObserver>,
+    // ALL actually supplied closure owners are rooted before fallible checks.
+    // Only the separate admitted originals below may execute as obligations.
+    obligation_owners: Vec<PersistentSessionCleanupObserver>,
+    admission_refused: bool,
+}
+
+impl PersistentSessionPooledStart {
+    fn new() -> Self {
+        Self {
+            retained: Mutex::new(PooledStartRetention {
+                phase: PooledStartPhase::Preparing,
+                lifelines: Vec::new(),
+                resource_observer: None,
+                retirement_observer: None,
+                obligation_owners: Vec::new(),
+                admission_refused: false,
+            }),
+            callback_in_flight: AtomicBool::new(true),
+        }
+    }
+
+    /// Move actual ORIGINAL guards/bindings into the already owned start slot.
+    /// The trusted executor does this before its held-spawn call. This method
+    /// cannot release a process or grant cleanup from a supplied record.
+    pub fn retain_before_contact(&self, lifelines: Vec<Box<dyn Send + Sync>>) -> Result<()> {
+        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        retained.lifelines.extend(lifelines); // Root supplied owners even on refusal.
+        if retained.phase != PooledStartPhase::Preparing || retained.admission_refused {
+            retained.admission_refused = true;
+            bail!("pooled start no longer accepts pre-contact retention");
+        }
+        Ok(())
+    }
+
+    /// Stage ALL supplied owners first; atomically validate both kinds before
+    /// changing any executable original. Repeated SAME Arc capture is idempotent.
+    pub fn retain_cleanup_obligations(
+        &self,
+        resource: Option<PersistentSessionCleanupObserver>,
+        retirement: Option<PersistentSessionCleanupObserver>,
+    ) -> Result<()> {
+        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        stage_pooled_obligation_owners(&mut retained, &resource, &retirement);
+        if retained.phase != PooledStartPhase::Preparing || retained.admission_refused {
+            retained.admission_refused = true;
+            bail!("pooled start no longer accepts cleanup obligations");
+        }
+        let result = admit_original_pooled_obligations(&mut retained, resource, retirement);
+        if result.is_err() {
+            retained.admission_refused = true;
+        }
+        result
+    }
+
+    fn retain_ready_parts(&self, started: &mut StartedPersistentSession) -> Result<()> {
+        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        retained.lifelines.append(&mut started.lifelines);
+        stage_pooled_obligation_owners(
+            &mut retained,
+            &started.cleanup_observer,
+            &started.retirement_observer,
+        );
+        if retained.admission_refused {
+            bail!("pooled start previously substituted an original cleanup obligation");
+        }
+        let result = admit_original_pooled_obligations(
+            &mut retained,
+            started.cleanup_observer.clone(),
+            started.retirement_observer.clone(),
+        );
+        if result.is_err() {
+            retained.admission_refused = true;
+        }
+        result?;
+        // Started omission never erases a pre-contact obligation. The SAME
+        // original Arcs reach ready_process and its once-only process owner.
+        started.cleanup_observer = retained.resource_observer.clone();
+        started.retirement_observer = retained.retirement_observer.clone();
+        Ok(())
+    }
+
+    fn is_in_flight(&self) -> bool {
+        self.callback_in_flight.load(Ordering::Acquire)
+    }
+
+    fn complete_callback(&self) {
+        // Called only with PoolState held AFTER final admission/failure state.
+        self.callback_in_flight.store(false, Ordering::Release);
+    }
+
+    fn has_retained_custody(&self) -> bool {
+        let retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        !retained.lifelines.is_empty()
+            || retained.resource_observer.is_some()
+            || retained.retirement_observer.is_some()
+            || !retained.obligation_owners.is_empty()
+    }
+
+    fn publish(&self) {
+        self.retained
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .phase = PooledStartPhase::Registered;
+    }
+
+    fn retain_unsettled(&self) {
+        self.retained
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .phase = PooledStartPhase::Unsettled;
+    }
+
+    /// Private pool call only AFTER checked reap and every existing observer.
+    /// It cannot remove a preserved scratch or clear its durable resource row.
+    fn prove_cleanup(&self) {
+        let (lifelines, resource, retirement, supplied_owners) = {
+            let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+            retained.phase = PooledStartPhase::Settled;
+            (
+                std::mem::take(&mut retained.lifelines),
+                retained.resource_observer.take(),
+                retained.retirement_observer.take(),
+                std::mem::take(&mut retained.obligation_owners),
+            )
+        };
+        // Guard/closure destruction may do filesystem/accounting work.
+        drop(resource);
+        drop(retirement);
+        drop(supplied_owners);
+        drop(lifelines);
+    }
+}
+
+fn stage_pooled_obligation_owners(
+    retained: &mut PooledStartRetention,
+    resource: &Option<PersistentSessionCleanupObserver>,
+    retirement: &Option<PersistentSessionCleanupObserver>,
+) {
+    for supplied in [resource.as_ref(), retirement.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if !retained
+            .obligation_owners
+            .iter()
+            .any(|owner| Arc::ptr_eq(owner, supplied))
+        {
+            retained.obligation_owners.push(Arc::clone(supplied));
+        }
+    }
+}
+
+fn admit_original_pooled_obligations(
+    retained: &mut PooledStartRetention,
+    resource: Option<PersistentSessionCleanupObserver>,
+    retirement: Option<PersistentSessionCleanupObserver>,
+) -> Result<()> {
+    for (original, supplied) in [
+        (&retained.resource_observer, &resource),
+        (&retained.retirement_observer, &retirement),
+    ] {
+        if let (Some(original), Some(supplied)) = (original, supplied) {
+            if !Arc::ptr_eq(original, supplied) {
+                bail!("pooled start substituted an original cleanup obligation");
+            }
+        }
+    }
+    let selected_resource = retained.resource_observer.as_ref().or(resource.as_ref());
+    let selected_retirement = retained
+        .retirement_observer
+        .as_ref()
+        .or(retirement.as_ref());
+    if let (Some(resource), Some(retirement)) = (selected_resource, selected_retirement) {
+        if Arc::ptr_eq(resource, retirement) {
+            bail!("one cleanup closure cannot substitute two distinct pooled obligations");
+        }
+    }
+    // Commit both only after ALL checks; new other-kind owners are not
+    // executable when a different original kind makes the call fail.
+    if retained.resource_observer.is_none() {
+        retained.resource_observer = resource;
+    }
+    if retained.retirement_observer.is_none() {
+        retained.retirement_observer = retirement;
+    }
+    Ok(())
+}
+
+impl SessionGroup {
+    fn process_count(&self) -> usize {
+        self.processes.len().saturating_add(
+            self.starts
+                .iter()
+                .filter(|start| {
+                    !self.processes.iter().any(|process| {
+                        process
+                            .pooled_start
+                            .as_ref()
+                            .is_some_and(|owned| Arc::ptr_eq(owned, start))
+                    })
+                })
+                .count(),
+        )
+    }
+}
+
+/// A callback/ready unwind retains the same original group slot and poisons
+/// admission. Weak pool ownership prevents a registry/custody reference cycle.
+struct PooledStartProgress {
+    inner: Weak<PoolInner>,
+    original_start: Arc<PersistentSessionPooledStart>,
+    active: bool,
+}
+
+impl Drop for PooledStartProgress {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Some(inner) = self.inner.upgrade() {
+            let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.cleanup_unproved.get_or_insert_with(|| {
+                "pooled start callback/readiness unwound before ownership publication".to_owned()
+            });
+            self.original_start.retain_unsettled();
+            self.original_start.complete_callback();
+            inner.changed.notify_all();
+        } else {
+            self.original_start.retain_unsettled();
+        }
+    }
+}
+
+struct PooledReadyFailure {
+    error: anyhow::Error,
+    cleanup_unproved: bool,
+    original_start: Arc<PersistentSessionPooledStart>,
 }
 
 struct PoolState {
@@ -710,8 +996,23 @@ struct ExclusiveSessionEntry {
     process: Arc<SessionProcess>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PooledStartPauseStage {
+    OutcomePublication,
+    ReaderAdmission,
+}
+#[cfg(test)]
+struct PooledStartTestPause {
+    stage: PooledStartPauseStage,
+    entered: SyncSender<()>,
+    release: Mutex<Receiver<()>>,
+}
+
 struct PoolInner {
     state: Mutex<PoolState>,
+    #[cfg(test)]
+    pooled_start_test_pause: Mutex<Option<Arc<PooledStartTestPause>>>,
     changed: Condvar,
     limits: PersistentSessionPoolLimits,
     enabled: bool,
@@ -968,6 +1269,8 @@ impl PersistentSessionPool {
         limits.validate()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let inner = Arc::new(PoolInner {
+            #[cfg(test)]
+            pooled_start_test_pause: Mutex::new(None),
             state: Mutex::new(PoolState {
                 groups: HashMap::new(),
                 exclusive: HashMap::new(),
@@ -1556,10 +1859,39 @@ impl PersistentSessionPool {
         request_body: Value,
         mut spawn: F,
         cancelled: C,
-        mut on_delta: D,
+        on_delta: D,
     ) -> Result<Value>
     where
         F: FnMut() -> Result<StartedPersistentSession>,
+        C: Fn() -> bool,
+        D: FnMut(Value) -> Result<()>,
+    {
+        self.execute_attributed_owned_start(
+            pool_key,
+            lifecycle,
+            wire,
+            request_identity,
+            request_body,
+            |_| spawn(),
+            cancelled,
+            on_delta,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_attributed_owned_start<F, C, D>(
+        &self,
+        pool_key: &str,
+        lifecycle: &PersistentSessionLifecycleContract,
+        wire: &PersistentSessionWireContract,
+        request_identity: Option<&PersistentSessionRequestIdentity>,
+        request_body: Value,
+        mut spawn: F,
+        cancelled: C,
+        mut on_delta: D,
+    ) -> Result<Value>
+    where
+        F: FnMut(&PersistentSessionPooledStart) -> Result<StartedPersistentSession>,
         C: Fn() -> bool,
         D: FnMut(Value) -> Result<()>,
     {
@@ -1572,7 +1904,8 @@ impl PersistentSessionPool {
         wire.validate()?;
         let deadline =
             MonotonicDeadline::after(Duration::from_millis(lifecycle.request_timeout_ms));
-        let process = self.acquire(pool_key, lifecycle, wire, &mut spawn, &cancelled, deadline)?;
+        let process =
+            self.acquire_owned(pool_key, lifecycle, wire, &mut spawn, &cancelled, deadline)?;
         let resource_request_lease = match &process.resource_eligibility {
             Some(eligible) => match eligible() {
                 Ok(lease) => Some(lease),
@@ -1945,6 +2278,20 @@ impl PersistentSessionPool {
         sweep_stream_registry(&self.streams);
     }
 
+    #[cfg(test)]
+    fn pause_pooled_start(&self, stage: PooledStartPauseStage) {
+        let pause = self.inner.pooled_start_test_pause.lock().unwrap().clone();
+        if let Some(pause) = pause.filter(|pause| pause.stage == stage) {
+            pause.entered.send(()).unwrap();
+            pause
+                .release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("finite owned-start test pause was not released");
+        }
+    }
+
     fn acquire<F, C>(
         &self,
         key: &str,
@@ -1956,6 +2303,22 @@ impl PersistentSessionPool {
     ) -> Result<Arc<SessionProcess>>
     where
         F: FnMut() -> Result<StartedPersistentSession>,
+        C: Fn() -> bool,
+    {
+        self.acquire_owned(key, lifecycle, wire, &mut |_| spawn(), cancelled, deadline)
+    }
+
+    fn acquire_owned<F, C>(
+        &self,
+        key: &str,
+        lifecycle: &PersistentSessionLifecycleContract,
+        wire: &PersistentSessionWireContract,
+        spawn: &mut F,
+        cancelled: &C,
+        deadline: MonotonicDeadline,
+    ) -> Result<Arc<SessionProcess>>
+    where
+        F: FnMut(&PersistentSessionPooledStart) -> Result<StartedPersistentSession>,
         C: Fn() -> bool,
     {
         let expected = GroupContract {
@@ -1999,7 +2362,7 @@ impl PersistentSessionPool {
                 .or_insert_with(|| SessionGroup {
                     contract: expected.clone(),
                     processes: Vec::new(),
-                    spawning: 0,
+                    starts: Vec::new(),
                 });
             if group.contract.lifecycle != expected.lifecycle
                 || group.contract.wire != expected.wire
@@ -2020,7 +2383,7 @@ impl PersistentSessionPool {
                 }
                 return Ok(Arc::clone(process));
             }
-            if group.processes.len() + group.spawning < usize::from(lifecycle.max_processes)
+            if group.process_count() < usize::from(lifecycle.max_processes)
                 && total_processes < self.inner.limits.max_total_processes
                 && total_address_space.saturating_add(lifecycle.max_address_space_bytes)
                     <= self.inner.limits.max_total_address_space_bytes
@@ -2030,83 +2393,139 @@ impl PersistentSessionPool {
                 if cancelled() || deadline.has_elapsed() {
                     bail!("persistent-session request ended before worker spawn");
                 }
-                group.spawning += 1;
+                let original_start = Arc::new(PersistentSessionPooledStart::new());
+                group.starts.push(Arc::clone(&original_start));
                 drop(state);
-                let started = match spawn() {
-                    Ok(started) => {
-                        ready_process(started, wire, lifecycle, Arc::clone(&self.streams.backlog))
-                    }
-                    Err(error) => Err(ReadyProcessFailure {
+                let mut progress = PooledStartProgress {
+                    inner: Arc::downgrade(&self.inner),
+                    original_start: Arc::clone(&original_start),
+                    active: true,
+                };
+                let started = match spawn(&original_start) {
+                    Ok(started) => ready_pooled_process(
+                        started,
+                        Arc::clone(&original_start),
+                        wire,
+                        lifecycle,
+                        Arc::clone(&self.streams.backlog),
+                    ),
+                    Err(error) => Err(PooledReadyFailure {
+                        cleanup_unproved: original_start.has_retained_custody()
+                            || error.is::<PersistentSessionCleanupUnproved>(),
                         error,
-                        cleanup_unproved: false,
+                        original_start: Arc::clone(&original_start),
                     }),
                 };
-                let mut state = self
-                    .inner
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if self.inner.shutdown.load(Ordering::Acquire) {
-                    let group = state.groups.get_mut(key).ok_or_else(|| {
-                        anyhow!("persistent-session group disappeared during shutdown")
-                    })?;
-                    group.spawning = group.spawning.saturating_sub(1);
-                    if group.processes.is_empty() && group.spawning == 0 {
-                        state.groups.remove(key);
+                let failure_reason = if let Err(failure) = &started {
+                    if failure.cleanup_unproved {
+                        failure.original_start.retain_unsettled();
+                    } else {
+                        failure.original_start.prove_cleanup();
                     }
-                    drop(state);
-                    let cleanup_error = match started {
-                        Ok(process) => process.retire().err(),
-                        Err(failure) if failure.cleanup_unproved => Some(failure.error),
-                        Err(_) => None,
-                    };
-                    if let Some(error) = cleanup_error {
-                        self.poison_after_unproved_cleanup(error.to_string());
-                        self.inner.changed.notify_all();
-                        return Err(anyhow!(
-                            "persistent-session spawn crossed daemon shutdown and cleanup could not be proved: {error}"
-                        ));
-                    }
-                    self.inner.changed.notify_all();
-                    bail!("persistent-session admission is closed for daemon shutdown");
-                }
-                let failure = {
-                    let group = state.groups.get_mut(key).ok_or_else(|| {
-                        anyhow!("persistent-session group disappeared during spawn")
-                    })?;
-                    group.spawning = group.spawning.saturating_sub(1);
-                    match started {
-                        Ok(process) => {
-                            let process = Arc::new(process);
-                            if let Err(error) = process.start_reader(wire.clone()) {
-                                let cleanup = process.retire().err();
-                                return Err(match cleanup {
-                                    Some(cleanup) => error.context(format!(
-                                        "persistent-session reader start cleanup failed: {cleanup}"
-                                    )),
-                                    None => error,
-                                });
-                            }
-                            process.leased.store(true, Ordering::Release);
-                            group.processes.push(Arc::clone(&process));
-                            self.inner.changed.notify_all();
-                            return Ok(process);
-                        }
-                        Err(failure) => failure,
-                    }
+                    Some(failure.error.to_string()) // Outside PoolState/owner destruction.
+                } else {
+                    None
                 };
-                if failure.cleanup_unproved && state.cleanup_unproved.is_none() {
-                    state.cleanup_unproved = Some(failure.error.to_string());
+                #[cfg(test)]
+                self.pause_pooled_start(PooledStartPauseStage::OutcomePublication);
+                let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+                match started {
+                    Ok(process) => {
+                        let process = Arc::new(process);
+                        let group = match state.groups.get_mut(key) {
+                            Some(group) => group,
+                            None => {
+                                drop(state);
+                                return Err(anyhow!(
+                                    "persistent-session original start group disappeared"
+                                ));
+                            }
+                        };
+                        process.leased.store(true, Ordering::Release);
+                        // The SAME start stays owned/in-flight through reader admission.
+                        group.processes.push(Arc::clone(&process));
+                        original_start.publish();
+                        let closed = self.inner.shutdown.load(Ordering::Acquire);
+                        drop(state);
+                        #[cfg(test)]
+                        self.pause_pooled_start(PooledStartPauseStage::ReaderAdmission);
+                        let admission = if closed {
+                            Err(anyhow!(
+                                "persistent-session admission is closed for daemon shutdown"
+                            ))
+                        } else {
+                            process.start_reader(wire.clone())
+                        };
+                        if admission.is_ok() {
+                            let mut state =
+                                self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+                            if !self.inner.shutdown.load(Ordering::Acquire)
+                                && !process.closed.load(Ordering::Acquire)
+                            {
+                                let group = state
+                                    .groups
+                                    .get_mut(key)
+                                    .expect("original owned start prevents group removal");
+                                group
+                                    .starts
+                                    .retain(|slot| !Arc::ptr_eq(slot, &original_start));
+                                original_start.complete_callback();
+                                progress.active = false;
+                                self.inner.changed.notify_all();
+                                return Ok(process);
+                            }
+                            drop(state);
+                        }
+                        let error = admission.err().unwrap_or_else(|| {
+                            anyhow!("persistent-session start crossed daemon shutdown")
+                        });
+                        let cleanup = process.retire().err(); // No PoolState mutex.
+                        let cleanup_reason = cleanup.as_ref().map(ToString::to_string);
+                        if cleanup.is_none() {
+                            self.remove(key, &process);
+                        } else {
+                            original_start.retain_unsettled();
+                        }
+                        let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+                        if let Some(reason) = cleanup_reason {
+                            state.cleanup_unproved.get_or_insert(reason);
+                        }
+                        if let Some(group) = state.groups.get_mut(key) {
+                            group
+                                .starts
+                                .retain(|slot| !Arc::ptr_eq(slot, &original_start));
+                        }
+                        original_start.complete_callback();
+                        progress.active = false;
+                        if state.groups.get(key).is_some_and(|group| {
+                            group.processes.is_empty() && group.starts.is_empty()
+                        }) {
+                            state.groups.remove(key);
+                        }
+                        self.inner.changed.notify_all();
+                        return Err(match cleanup { Some(cleanup) => error.context(format!("persistent-session pre-registry cleanup remains unproved: {cleanup}")), None => error });
+                    }
+                    Err(failure) => {
+                        if failure.cleanup_unproved {
+                            state
+                                .cleanup_unproved
+                                .get_or_insert(failure_reason.unwrap());
+                        } else if let Some(group) = state.groups.get_mut(key) {
+                            group
+                                .starts
+                                .retain(|slot| !Arc::ptr_eq(slot, &failure.original_start));
+                        }
+                        failure.original_start.complete_callback();
+                        progress.active = false;
+                        if state.groups.get(key).is_some_and(|group| {
+                            group.processes.is_empty() && group.starts.is_empty()
+                        }) {
+                            state.groups.remove(key);
+                        }
+                        self.inner.changed.notify_all();
+                        return Err(failure.error);
+                    }
                 }
-                if state
-                    .groups
-                    .get(key)
-                    .is_some_and(|group| group.processes.is_empty() && group.spawning == 0)
-                {
-                    state.groups.remove(key);
-                }
-                self.inner.changed.notify_all();
-                return Err(failure.error);
             }
             let remaining = deadline.remaining();
             let wait = remaining.min(IO_POLL_INTERVAL);
@@ -2130,7 +2549,7 @@ impl PersistentSessionPool {
             group
                 .processes
                 .retain(|candidate| !Arc::ptr_eq(candidate, process));
-            if group.processes.is_empty() && group.spawning == 0 {
+            if group.processes.is_empty() && group.starts.is_empty() {
                 state.groups.remove(key);
             }
         }
@@ -2145,7 +2564,7 @@ impl PersistentSessionPool {
         if state
             .groups
             .get(key)
-            .is_some_and(|group| group.processes.is_empty() && group.spawning == 0)
+            .is_some_and(|group| group.processes.is_empty() && group.starts.is_empty())
         {
             state.groups.remove(key);
         }
@@ -2198,7 +2617,10 @@ impl PersistentSessionPool {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            while state.groups.values().any(|group| group.spawning != 0)
+            while state
+                .groups
+                .values()
+                .any(|group| group.starts.iter().any(|start| start.is_in_flight()))
                 || state.exclusive_starts_in_flight != 0
             {
                 let remaining = deadline.remaining();
@@ -2212,7 +2634,10 @@ impl PersistentSessionPool {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 state = next;
                 if wait.timed_out()
-                    && (state.groups.values().any(|group| group.spawning != 0)
+                    && (state
+                        .groups
+                        .values()
+                        .any(|group| group.starts.iter().any(|start| start.is_in_flight()))
                         || state.exclusive_starts_in_flight != 0)
                 {
                     bail!("persistent-session shutdown timed out waiting for admitted starts");
@@ -2278,9 +2703,14 @@ impl PersistentSessionPool {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state
             .groups
-            .retain(|_, group| !group.processes.is_empty() || group.spawning != 0);
+            .retain(|_, group| !group.processes.is_empty() || !group.starts.is_empty());
         if let Some(reason) = prior_unproved {
             cleanup_errors.push(reason);
+        }
+        if let Some(reason) = state.cleanup_unproved.as_ref() {
+            if !cleanup_errors.contains(reason) {
+                cleanup_errors.push(reason.clone());
+            }
         }
         if !cleanup_errors.is_empty() {
             let reason = cleanup_errors.join("; ");
@@ -2290,10 +2720,12 @@ impl PersistentSessionPool {
         if state
             .groups
             .values()
-            .any(|group| !group.processes.is_empty())
+            .any(|group| !group.processes.is_empty() || !group.starts.is_empty())
             || !state.exclusive.is_empty()
         {
-            bail!("persistent-session shutdown left an owned process in the pool registry");
+            bail!(
+                "persistent-session shutdown left an owned process or start in the pool registry"
+            );
         }
         self.inner.changed.notify_all();
         Ok(reaped)
@@ -2557,7 +2989,7 @@ fn aggregate_process_capacity(state: &PoolState) -> (usize, u64, u64) {
         .groups
         .values()
         .fold((0usize, 0u64, 0u64), |totals, group| {
-            let count = group.processes.len().saturating_add(group.spawning);
+            let count = group.process_count();
             let count_u64 = u64::try_from(count).unwrap_or(u64::MAX);
             (
                 totals.0.saturating_add(count),
@@ -2880,6 +3312,39 @@ fn bounded_stream_error(error: &str) -> String {
     format!("{OMITTED}{tail}")
 }
 
+fn ready_pooled_process(
+    mut started: StartedPersistentSession,
+    original_start: Arc<PersistentSessionPooledStart>,
+    wire: &PersistentSessionWireContract,
+    lifecycle: &PersistentSessionLifecycleContract,
+    backlog: Arc<BacklogBudget>,
+) -> std::result::Result<SessionProcess, PooledReadyFailure> {
+    if let Err(error) = original_start.retain_ready_parts(&mut started) {
+        let cleanup = started.running.abort_and_reap_checked();
+        return Err(PooledReadyFailure {
+            error: match cleanup {
+                Ok(()) => error,
+                Err(cleanup) => error.context(format!(
+                    "readiness obligation mismatch reap unproved: {cleanup}"
+                )),
+            },
+            cleanup_unproved: true,
+            original_start,
+        });
+    }
+    match ready_process(started, wire, lifecycle, backlog) {
+        Ok(mut process) => {
+            process.pooled_start = Some(original_start);
+            Ok(process)
+        }
+        Err(failure) => Err(PooledReadyFailure {
+            error: failure.error,
+            cleanup_unproved: failure.cleanup_unproved,
+            original_start,
+        }),
+    }
+}
+
 fn ready_process(
     started: StartedPersistentSession,
     wire: &PersistentSessionWireContract,
@@ -3097,6 +3562,7 @@ fn ready_process(
         backlog,
         _reader_budget: reader_budget,
         lifelines: Mutex::new(lifelines),
+        pooled_start: None,
     })
 }
 
@@ -3818,7 +4284,7 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
                                 group
                                     .processes
                                     .retain(|candidate| !Arc::ptr_eq(candidate, &process));
-                                if group.processes.is_empty() && group.spawning == 0 {
+                                if group.processes.is_empty() && group.starts.is_empty() {
                                     state.groups.remove(&key);
                                 }
                             }
@@ -4215,6 +4681,610 @@ while True:
             wire_protocol: "test.session".to_owned(),
             wire_version: 1,
             max_frame_bytes: 4096,
+        }
+    }
+
+    fn owned_start_scratch() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Arc<crate::temp_dir_guard::TempDirGuard>,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("cache")).unwrap();
+        let (path, guard) = crate::temp_dir_guard::create_projectless_workspace(
+            &root.path().join("cache"),
+            "owned-start-control",
+        )
+        .unwrap();
+        std::fs::write(path.join("sentinel"), b"original-slot-bytes").unwrap();
+        (root, path, guard)
+    }
+
+    fn owned_start_lifecycle() -> PersistentSessionLifecycleContract {
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        lifecycle.request_timeout_ms = 2_000;
+        lifecycle.idle_timeout_ms = 60_000;
+        lifecycle
+    }
+
+    #[test]
+    fn owned_pooled_start_retains_original_scratch_before_callback_error() {
+        let pool = PersistentSessionPool::new();
+        let (_root, path, guard) = owned_start_scratch();
+        let key = "a".repeat(64);
+        let error = pool
+            .execute_attributed_owned_start(
+                &key,
+                &owned_start_lifecycle(),
+                &test_wire(),
+                None,
+                serde_json::json!({}),
+                |original| {
+                    let state = pool.inner.state.lock().unwrap();
+                    let group = state.groups.get(&key).unwrap();
+                    assert_eq!(group.starts.len(), 1);
+                    assert!(std::ptr::eq(Arc::as_ptr(&group.starts[0]), original));
+                    assert_eq!(aggregate_process_capacity(&state).0, 1);
+                    drop(state);
+                    original.retain_before_contact(vec![Box::new(Arc::clone(&guard))])?;
+                    Err(anyhow!("control refuses before actual process contact"))
+                },
+                || false,
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("before actual process contact"));
+        drop(guard);
+        assert_eq!(
+            std::fs::read(path.join("sentinel")).unwrap(),
+            b"original-slot-bytes"
+        );
+        let state = pool.inner.state.lock().unwrap();
+        assert!(state.cleanup_unproved.is_some());
+        assert_eq!(aggregate_process_capacity(&state).0, 1);
+        assert_eq!(state.groups[&key].starts.len(), 1);
+        assert!(!state.groups[&key].starts[0].is_in_flight());
+        drop(state);
+        pool.remove_empty_group(&key);
+        assert!(
+            pool.shutdown_and_reap_all(Duration::from_millis(200))
+                .is_err()
+        );
+        assert!(path.join("sentinel").is_file());
+        // Resource-free local control: no journal/restart/device proof asserted.
+    }
+
+    #[test]
+    fn owned_pooled_start_unwind_keeps_same_group_capacity_and_original_bytes() {
+        let pool = PersistentSessionPool::new();
+        let (_root, path, guard) = owned_start_scratch();
+        let key = "b".repeat(64);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.execute_attributed_owned_start(
+                &key,
+                &owned_start_lifecycle(),
+                &test_wire(),
+                None,
+                serde_json::json!({}),
+                |original| {
+                    original.retain_before_contact(vec![Box::new(Arc::clone(&guard))])?;
+                    panic!("control callback unwind before process contact");
+                },
+                || false,
+                |_| Ok(()),
+            )
+        }));
+        assert!(result.is_err());
+        drop(guard);
+        let state = pool.inner.state.lock().unwrap();
+        assert!(state.cleanup_unproved.is_some());
+        assert_eq!(aggregate_process_capacity(&state).0, 1);
+        assert_eq!(state.groups[&key].starts.len(), 1);
+        assert!(!state.groups[&key].starts[0].is_in_flight());
+        assert!(path.join("sentinel").is_file());
+    }
+
+    #[test]
+    fn owned_pooled_start_ready_refusal_keeps_lifelines_when_observer_refuses() {
+        let pool = PersistentSessionPool::new();
+        let (_root, path, guard) = owned_start_scratch();
+        let key = "c".repeat(64);
+        let mut wire = test_wire();
+        wire.wire_protocol = "different.actual.ready.protocol".to_owned();
+        let observer_called = Arc::new(AtomicBool::new(false));
+        let error = pool
+            .execute_attributed_owned_start(
+                &key,
+                &owned_start_lifecycle(),
+                &wire,
+                None,
+                serde_json::json!({}),
+                |original| {
+                    original.retain_before_contact(vec![Box::new(Arc::clone(&guard))])?;
+                    let mut started = fake_framed_session()?;
+                    let called = Arc::clone(&observer_called);
+                    started.retirement_observer = Some(Arc::new(move || {
+                        called.store(true, Ordering::Release);
+                        Err(anyhow!("local retirement uncertainty control"))
+                    }));
+                    Ok(started)
+                },
+                || false,
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("local retirement uncertainty"));
+        assert!(observer_called.load(Ordering::Acquire));
+        drop(guard);
+        let state = pool.inner.state.lock().unwrap();
+        assert!(state.cleanup_unproved.is_some());
+        let group = &state.groups[&key];
+        assert!(group.processes.is_empty());
+        assert_eq!(group.starts.len(), 1);
+        assert!(group.starts[0].has_retained_custody());
+        assert!(!group.starts[0].is_in_flight());
+        assert!(path.join("sentinel").is_file());
+    }
+
+    #[test]
+    fn owned_pooled_start_shutdown_crossing_retains_published_owner_on_uncertainty() {
+        let pool = PersistentSessionPool::new();
+        let (_root, path, guard) = owned_start_scratch();
+        let key = "d".repeat(64);
+        let error = pool
+            .execute_attributed_owned_start(
+                &key,
+                &owned_start_lifecycle(),
+                &test_wire(),
+                None,
+                serde_json::json!({}),
+                |original| {
+                    original.retain_before_contact(vec![Box::new(Arc::clone(&guard))])?;
+                    let mut started = fake_framed_session()?;
+                    started.retirement_observer =
+                        Some(Arc::new(|| Err(anyhow!("shutdown uncertainty control"))));
+                    pool.inner.shutdown.store(true, Ordering::Release);
+                    Ok(started)
+                },
+                || false,
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("shutdown uncertainty"));
+        drop(guard);
+        let state = pool.inner.state.lock().unwrap();
+        assert!(state.cleanup_unproved.is_some());
+        let group = &state.groups[&key];
+        assert!(group.starts.is_empty());
+        assert_eq!(group.processes.len(), 1);
+        assert!(
+            group.processes[0]
+                .pooled_start
+                .as_ref()
+                .unwrap()
+                .has_retained_custody()
+        );
+        assert!(group.processes[0].retire().is_err());
+        assert_eq!(
+            std::fs::read(path.join("sentinel")).unwrap(),
+            b"original-slot-bytes"
+        );
+    }
+
+    #[test]
+    fn owned_pooled_start_proved_retirement_releases_original_guard_with_extra_holder() {
+        let pool = PersistentSessionPool::new();
+        let (_root, path, guard) = owned_start_scratch();
+        let key = "e".repeat(64);
+        pool.execute_attributed_owned_start(
+            &key,
+            &owned_start_lifecycle(),
+            &test_wire(),
+            None,
+            serde_json::json!({"message":"owned-start"}),
+            |original| {
+                original.retain_before_contact(vec![Box::new(Arc::clone(&guard))])?;
+                fake_framed_session()
+            },
+            || false,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let process = {
+            let state = pool.inner.state.lock().unwrap();
+            let group = &state.groups[&key];
+            assert!(group.starts.is_empty());
+            assert_eq!(group.processes.len(), 1);
+            Arc::clone(&group.processes[0])
+        };
+        drop(guard);
+        assert!(path.join("sentinel").is_file());
+        assert!(
+            process
+                .pooled_start
+                .as_ref()
+                .unwrap()
+                .has_retained_custody()
+        );
+        assert_eq!(
+            pool.shutdown_and_reap_all(Duration::from_secs(2)).unwrap(),
+            1
+        );
+        assert!(!path.exists());
+        assert!(
+            !process
+                .pooled_start
+                .as_ref()
+                .unwrap()
+                .has_retained_custody()
+        );
+        process.retire().unwrap();
+    }
+
+    fn install_owned_start_pause(
+        pool: &PersistentSessionPool,
+        stage: PooledStartPauseStage,
+    ) -> (Receiver<()>, SyncSender<()>) {
+        let (entered_tx, entered_rx) = sync_channel(1);
+        let (release_tx, release_rx) = sync_channel(1);
+        *pool.inner.pooled_start_test_pause.lock().unwrap() =
+            Some(Arc::new(PooledStartTestPause {
+                stage,
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            }));
+        (entered_rx, release_tx)
+    }
+
+    fn wait_owned_start_shutdown_entered(pool: &PersistentSessionPool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !pool.inner.shutdown.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "actual shutdown store was not observed"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn owned_pooled_start_shutdown_waits_for_failure_publication_and_current_quarantine() {
+        let pool = PersistentSessionPool::new();
+        let (_root, path, guard) = owned_start_scratch();
+        let key = "f".repeat(64);
+        let (entered, release) =
+            install_owned_start_pause(&pool, PooledStartPauseStage::OutcomePublication);
+        let worker_pool = pool.clone();
+        let worker_key = key.clone();
+        let worker_guard = Arc::clone(&guard);
+        let worker = std::thread::spawn(move || {
+            let mut wire = test_wire();
+            wire.wire_protocol = "refused.actual.ready.protocol".to_owned();
+            worker_pool.execute_attributed_owned_start(
+                &worker_key,
+                &owned_start_lifecycle(),
+                &wire,
+                None,
+                serde_json::json!({}),
+                |original| {
+                    original.retain_before_contact(vec![Box::new(Arc::clone(&worker_guard))])?;
+                    let mut started = fake_framed_session()?;
+                    started.retirement_observer =
+                        Some(Arc::new(|| Err(anyhow!("failure-publication uncertainty"))));
+                    Ok(started)
+                },
+                || false,
+                |_| Ok(()),
+            )
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        {
+            let state = pool.inner.state.lock().unwrap();
+            assert!(state.cleanup_unproved.is_none()); // Exact formerly vulnerable window.
+            let slot = &state.groups[&key].starts[0];
+            assert!(slot.retained.lock().unwrap().phase == PooledStartPhase::Unsettled);
+            assert!(slot.is_in_flight()); // Phase is NOT callback completion.
+        }
+        let shutdown_pool = pool.clone();
+        let (done_tx, done_rx) = sync_channel(1);
+        let shutdown = std::thread::spawn(move || {
+            done_tx
+                .send(shutdown_pool.shutdown_and_reap_all(Duration::from_secs(2)))
+                .unwrap()
+        });
+        wait_owned_start_shutdown_entered(&pool);
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        release.send(()).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .is_err()
+        );
+        shutdown.join().unwrap();
+        drop(guard);
+        let state = pool.inner.state.lock().unwrap();
+        assert!(state.cleanup_unproved.is_some());
+        assert_eq!(state.groups[&key].starts.len(), 1);
+        assert!(!state.groups[&key].starts[0].is_in_flight());
+        assert!(path.join("sentinel").is_file());
+    }
+
+    #[test]
+    fn owned_pooled_start_shutdown_waits_through_reader_admission() {
+        let pool = PersistentSessionPool::new();
+        let (_root, path, guard) = owned_start_scratch();
+        let key = "1".repeat(64);
+        let (entered, release) =
+            install_owned_start_pause(&pool, PooledStartPauseStage::ReaderAdmission);
+        let worker_pool = pool.clone();
+        let worker_key = key.clone();
+        let worker_guard = Arc::clone(&guard);
+        let worker = std::thread::spawn(move || {
+            worker_pool.execute_attributed_owned_start(
+                &worker_key,
+                &owned_start_lifecycle(),
+                &test_wire(),
+                None,
+                serde_json::json!({}),
+                |original| {
+                    original.retain_before_contact(vec![Box::new(Arc::clone(&worker_guard))])?;
+                    fake_framed_session()
+                },
+                || false,
+                |_| Ok(()),
+            )
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        {
+            let state = pool.inner.state.lock().unwrap();
+            let group = &state.groups[&key];
+            assert_eq!(group.processes.len(), 1);
+            assert_eq!(group.starts.len(), 1);
+            assert!(group.starts[0].is_in_flight());
+            assert_eq!(aggregate_process_capacity(&state).0, 1); // SAME occurrence counted once.
+        }
+        let shutdown_pool = pool.clone();
+        let (done_tx, done_rx) = sync_channel(1);
+        let shutdown = std::thread::spawn(move || {
+            done_tx
+                .send(shutdown_pool.shutdown_and_reap_all(Duration::from_secs(2)))
+                .unwrap()
+        });
+        wait_owned_start_shutdown_entered(&pool);
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        release.send(()).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .is_ok()
+        );
+        shutdown.join().unwrap();
+        drop(guard);
+        assert!(!path.exists());
+        assert!(pool.inner.state.lock().unwrap().groups.is_empty());
+    }
+
+    #[test]
+    fn owned_pooled_start_original_refusing_obligation_survives_started_omission_once() {
+        let pool = PersistentSessionPool::new();
+        let (_root, path, guard) = owned_start_scratch();
+        let key = "2".repeat(64);
+        let calls = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&calls);
+        let original_observer: PersistentSessionCleanupObserver = Arc::new(move || {
+            counted.fetch_add(1, Ordering::AcqRel);
+            Err(anyhow!(
+                "original pre-contact obligation refuses retirement"
+            ))
+        });
+        pool.execute_attributed_owned_start(
+            &key,
+            &owned_start_lifecycle(),
+            &test_wire(),
+            None,
+            serde_json::json!({}),
+            |original| {
+                original.retain_before_contact(vec![Box::new(Arc::clone(&guard))])?;
+                original.retain_cleanup_obligations(None, Some(Arc::clone(&original_observer)))?;
+                original.retain_cleanup_obligations(None, Some(Arc::clone(&original_observer)))?;
+                let started = fake_framed_session()?;
+                assert!(
+                    started.cleanup_observer.is_none() && started.retirement_observer.is_none()
+                );
+                Ok(started)
+            },
+            || false,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(pool.shutdown_and_reap_all(Duration::from_secs(2)).is_err());
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        drop(guard);
+        let process = {
+            let state = pool.inner.state.lock().unwrap();
+            assert!(state.cleanup_unproved.is_some());
+            Arc::clone(&state.groups[&key].processes[0])
+        };
+        assert!(process.retire().is_err());
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(
+            process
+                .pooled_start
+                .as_ref()
+                .unwrap()
+                .has_retained_custody()
+        );
+        assert!(path.join("sentinel").is_file());
+    }
+
+    #[test]
+    fn owned_pooled_start_reader_refusal_keeps_original_owner_and_obligation() {
+        let pool = PersistentSessionPool::new();
+        let (_root, path, guard) = owned_start_scratch();
+        let key = "3".repeat(64);
+        let (entered, release) =
+            install_owned_start_pause(&pool, PooledStartPauseStage::ReaderAdmission);
+        let worker_pool = pool.clone();
+        let worker_key = key.clone();
+        let worker_guard = Arc::clone(&guard);
+        let calls = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&calls);
+        let worker = std::thread::spawn(move || {
+            worker_pool.execute_attributed_owned_start(
+                &worker_key,
+                &owned_start_lifecycle(),
+                &test_wire(),
+                None,
+                serde_json::json!({}),
+                |original| {
+                    original.retain_before_contact(vec![Box::new(Arc::clone(&worker_guard))])?;
+                    let counted = Arc::clone(&counted);
+                    original.retain_cleanup_obligations(
+                        None,
+                        Some(Arc::new(move || {
+                            counted.fetch_add(1, Ordering::AcqRel);
+                            Err(anyhow!("reader refusal original retirement uncertainty"))
+                        })),
+                    )?;
+                    fake_framed_session()
+                },
+                || false,
+                |_| Ok(()),
+            )
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        let process = {
+            let state = pool.inner.state.lock().unwrap();
+            Arc::clone(&state.groups[&key].processes[0])
+        };
+        // Close the ACTUAL pre-reader channel to exercise the real refusal.
+        assert!(process.reader.lock().unwrap().take().is_some());
+        release.send(()).unwrap();
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(format!("{error:#}").contains("reader already started"));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        drop(guard);
+        let state = pool.inner.state.lock().unwrap();
+        assert!(state.cleanup_unproved.is_some());
+        assert_eq!(state.groups[&key].processes.len(), 1);
+        assert!(state.groups[&key].starts.is_empty());
+        assert!(
+            process
+                .pooled_start
+                .as_ref()
+                .unwrap()
+                .has_retained_custody()
+        );
+        assert!(!process.pooled_start.as_ref().unwrap().is_in_flight());
+        assert!(path.join("sentinel").is_file());
+    }
+
+    #[test]
+    fn owned_pooled_start_mismatched_obligations_retain_all_supplied_owners_without_execution() {
+        struct ClosureOwner(Arc<AtomicBool>);
+        impl Drop for ClosureOwner {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        for stage in [0, 1, 2] {
+            let supplied_at_ready = stage == 1;
+            let pool = PersistentSessionPool::new();
+            let (_root, path, guard) = owned_start_scratch();
+            let key = if supplied_at_ready { "4" } else { "5" }.repeat(64);
+            let resource_dropped = Arc::new(AtomicBool::new(false));
+            let retirement_dropped = Arc::new(AtomicBool::new(false));
+            let supplied_calls = Arc::new(AtomicU64::new(0));
+            let resource_owner = ClosureOwner(Arc::clone(&resource_dropped));
+            let resource_calls = Arc::clone(&supplied_calls);
+            let supplied_resource: PersistentSessionCleanupObserver = Arc::new(move || {
+                std::hint::black_box(&resource_owner);
+                resource_calls.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            });
+            let retirement_owner = ClosureOwner(Arc::clone(&retirement_dropped));
+            let retirement_calls = Arc::clone(&supplied_calls);
+            let supplied_retirement: PersistentSessionCleanupObserver = Arc::new(move || {
+                std::hint::black_box(&retirement_owner);
+                retirement_calls.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            });
+            let original_calls = Arc::new(AtomicU64::new(0));
+            let called = Arc::clone(&original_calls);
+            let original_retirement: PersistentSessionCleanupObserver = Arc::new(move || {
+                called.fetch_add(1, Ordering::AcqRel);
+                Err(anyhow!(
+                    "original refusing obligation remains authoritative"
+                ))
+            });
+            let error = pool
+                .execute_attributed_owned_start(
+                    &key,
+                    &owned_start_lifecycle(),
+                    &test_wire(),
+                    None,
+                    serde_json::json!({}),
+                    |original| {
+                        original.retain_before_contact(vec![Box::new(Arc::clone(&guard))])?;
+                        original.retain_cleanup_obligations(
+                            None,
+                            Some(Arc::clone(&original_retirement)),
+                        )?;
+                        if supplied_at_ready {
+                            let mut started = fake_framed_session()?;
+                            started.cleanup_observer = Some(Arc::clone(&supplied_resource));
+                            started.retirement_observer = Some(Arc::clone(&supplied_retirement));
+                            Ok(started)
+                        } else {
+                            let refusal = original.retain_cleanup_obligations(
+                                Some(Arc::clone(&supplied_resource)),
+                                Some(Arc::clone(&supplied_retirement)),
+                            );
+                            if stage == 2 {
+                                assert!(refusal.is_err()); // Ignoring Err cannot bypass refusal.
+                                fake_framed_session()
+                            } else {
+                                refusal?;
+                                panic!("mismatched original obligation was accepted");
+                            }
+                        }
+                    },
+                    || false,
+                    |_| Ok(()),
+                )
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("substituted an original cleanup obligation"));
+            // Remove EVERY caller holder; only the original pool slot may retain
+            // these actual RAII owners. Neither supplied closure may execute.
+            drop(supplied_resource);
+            drop(supplied_retirement);
+            drop(guard);
+            assert!(!resource_dropped.load(Ordering::Acquire));
+            assert!(!retirement_dropped.load(Ordering::Acquire));
+            assert_eq!(supplied_calls.load(Ordering::Acquire), 0);
+            assert_eq!(original_calls.load(Ordering::Acquire), 0);
+            let state = pool.inner.state.lock().unwrap();
+            assert!(state.cleanup_unproved.is_some());
+            let slot = &state.groups[&key].starts[0];
+            assert!(!slot.is_in_flight());
+            let retained = slot.retained.lock().unwrap();
+            assert!(retained.resource_observer.is_none()); // Failed tuple made no partial admission.
+            assert!(Arc::ptr_eq(
+                retained.retirement_observer.as_ref().unwrap(),
+                &original_retirement
+            ));
+            assert!(path.join("sentinel").is_file());
         }
     }
 
