@@ -27,5 +27,6 @@ toml = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+rmp-serde = { workspace = true }
 ryeos-state = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }

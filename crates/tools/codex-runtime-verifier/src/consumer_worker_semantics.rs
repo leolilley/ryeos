@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_codex_external_configuration::qualification_request::{
     Q_CONTROLLER_CANARY_DENIAL, controller_canary_commands, resolve_controller_canary_turn,
+    validate_controller_canary_conversation,
 };
 use ryeos_external_execution_contract::ProviderConfigurationLaunchInput;
 use ryeos_external_execution_contract::qualification_fixture::{
@@ -220,15 +221,7 @@ pub fn check_q_conversation(
         .and_then(|scenario| scenario.consumer_worker_request.as_ref())
         .context("Q semantic check has no original signed conversation")?;
     request.validate()?;
-    require_route(&request.session_setup, "session.start")?;
-    require_route(&request.body, "turn.start")?;
-    ensure!(
-        request
-            .session_setup
-            .pointer("/payload/experimentalRawEvents")
-            == Some(&Value::Bool(true)),
-        "Q signed setup did not opt into actual raw tool observations"
-    );
+    validate_controller_canary_conversation(&request.session_setup, &request.body)?;
     let manifest = &transcript.reference.manifest;
     let canary = manifest
         .controller_canary
@@ -297,17 +290,6 @@ pub fn check_q_conversation(
         &manifest.turn_id,
         &notifications,
     )
-}
-
-fn require_route(request: &Value, route: &str) -> Result<()> {
-    let object = request.as_object().context("Q request is not an object")?;
-    ensure!(
-        object.len() == 2
-            && object.get("route_id").and_then(Value::as_str) == Some(route)
-            && object.get("payload").is_some_and(Value::is_object),
-        "Q request changed its finite route envelope"
-    );
-    Ok(())
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {

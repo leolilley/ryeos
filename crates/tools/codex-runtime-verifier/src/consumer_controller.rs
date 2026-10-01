@@ -465,4 +465,724 @@ mod tests {
             assert!(serde_json::from_value::<ObservationResponse>(bad).is_err());
         }
     }
+    // Pure retained-input fixtures adapted from State's private qualification tests.
+    // The fake endpoint exercises client behavior; it authenticates no real root,
+    // signature, provider or namespace and grants no execution authority.
+    use base64::Engine as _;
+    use ryeos_external_execution_contract::restored_runtime_measurement::{
+        ConsumerArchiveBudget, ConsumerRuntimeVerificationCoordinate,
+        ConsumerVerificationInputSelection,
+    };
+    use ryeos_state::external_content::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource;
+    use ryeos_state::external_content::products::qualification::*;
+    use ryeos_state::external_content::products::transfer::ProductWitnessSource;
+    use ryeos_state::external_content::qualification_purpose::{
+        QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, QualificationLaunchPurpose, QualificationSubject,
+    };
+    use ryeos_state::objects::*;
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+    fn policy() -> ProductQualificationPolicy {
+        ProductQualificationPolicy {
+            schema: PRODUCT_QUALIFICATION_POLICY_SCHEMA.into(),
+            verifier_ref: "tool:fixtures/qualify_runtime".into(),
+            subject_declaration_id: "runtime".into(),
+            allowed_claims: vec!["command_probe".into(), "extension_probe".into()],
+            minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
+            verifier_parameters: json!({"scope":"bounded_fixture"}),
+            consumer_execution_context: None,
+            producer_scenarios: BTreeMap::new(),
+        }
+    }
+
+    fn launch_purpose() -> QualificationLaunchPurpose {
+        let policy = policy();
+        QualificationLaunchPurpose {
+            schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
+            launch_id: format!("L-{}", "a".repeat(32)),
+            owner_fingerprint: "fp:operator".into(),
+            subject: QualificationSubject::CapturedProduct {
+                product_witness_hash: "b".repeat(64),
+                witness_source: ProductWitnessSource::LocalCapture {},
+                relationship_name: "runtime_to_worker".into(),
+            },
+            policy_source: ProductQualificationPolicySource {
+                canonical_ref: "config:fixtures/qualification_policy".into(),
+                raw_content_digest: "c".repeat(64),
+                effective_definition_digest: "d".repeat(64),
+                publisher_fingerprint: "e".repeat(64),
+                policy: policy.clone(),
+            },
+            consumer_definitions: None,
+            consumer_content: None,
+            consumer_invocation: None,
+            producer_recipe_sources: BTreeMap::new(),
+            remote_verifier_sources: BTreeMap::new(),
+            subject_declaration_id: policy.subject_declaration_id.clone(),
+            subject_manifest_hash: "f".repeat(64),
+            required_claims: vec!["command_probe".into()],
+            admitted_parameters_digest: policy.admitted_parameters_digest().unwrap(),
+            verifier_ref: policy.verifier_ref.clone(),
+            verifier_effective_definition_digest: "1".repeat(64),
+            verifier_realized_definition_digest: "2".repeat(64),
+        }
+    }
+
+    fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
+        let mut purpose = launch_purpose();
+        let context = ProductQualificationConsumerExecutionContext {
+            worker_ref: "worker:codex/external-hosted-authoring".into(),
+            product_declaration_id: "guest-runtime".into(),
+            environment_ref: "config:codex/environments/external-authoring".into(),
+            worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
+            environment_binding: "environment".into(),
+        };
+        purpose.policy_source.policy.consumer_execution_context = Some(context.clone());
+        purpose.policy_source.policy.producer_scenarios.insert(
+            "direct_codex".into(),
+            ProductQualificationProducerScenario {
+                recipe_ref: "config:codex/direct-probe".into(),
+                remote_verifier: None,
+                consumer_worker_request: None,
+            },
+        );
+        purpose.producer_recipe_sources.insert(
+            "direct_codex".into(),
+            ProductProducerRecipeSourceIdentity {
+                bundle_generation_identity: "generation-1".into(),
+                canonical_ref: "config:codex/direct-probe".into(),
+                raw_content_digest: "a".repeat(64),
+                effective_definition_digest: "b".repeat(64),
+                publisher_fingerprint: "c".repeat(64),
+                recipe_digest: "d".repeat(64),
+            },
+        );
+        assert!(purpose.validate().is_err());
+        let definition = |reference: &str| ProductQualificationBundleDefinitionIdentity {
+            canonical_ref: reference.into(),
+            raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
+            publisher_fingerprint: "c".repeat(64),
+        };
+        purpose.consumer_definitions = Some(ProductQualificationConsumerDefinitionIdentity {
+            bundle_generation_identity: "generation-1".into(),
+            worker: definition(&context.worker_ref),
+            environment: definition(&context.environment_ref),
+            worker_execution: definition(&context.worker_execution_ref),
+        });
+        assert!(purpose.validate().is_err());
+        purpose.consumer_content = Some(ProductQualificationConsumerContentIdentity {
+            qualification_use: None,
+            definitions: purpose.consumer_definitions.as_ref().unwrap().clone(),
+            declaration_authority: QualificationConsumerDeclarationAuthority::CapturedProduct {
+                relationship_definition: definition("config:codex/guest-runtime-products"),
+            },
+            worker_source: EffectiveSourceClosureProjection {
+                schema: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+                binding_hash: "1".repeat(64),
+                content_manifest_hash: "2".repeat(64),
+                owner_key: "3".repeat(64),
+                file_count: 1,
+                total_bytes: 1,
+            },
+            worker_profile_hash: "4".repeat(64),
+            runtime_realization: ryeos_state::objects::ExternalContentRealization {
+                id: "guest-runtime".into(),
+                kind: ExternalContentKind::Tree,
+                mode: ExternalContentMode::Pinned,
+                manifest_hash: purpose.subject_manifest_hash.clone(),
+                entry_count: 1,
+                total_bytes: 1,
+                mount_root: ExternalContentMountRoot::ExecutionRuntime,
+                mount: "guest-runtime".into(),
+            },
+            worker_preselection_effective_definition_digest: "5".repeat(64),
+            worker_literals: ExternalContentRealizationSet::new(vec![
+                ryeos_state::objects::ExternalContentRealization {
+                    id: "codex".into(),
+                    kind: ExternalContentKind::File,
+                    mode: ExternalContentMode::Pinned,
+                    manifest_hash: "6".repeat(64),
+                    entry_count: 1,
+                    total_bytes: 1,
+                    mount_root: ExternalContentMountRoot::ExecutionRuntime,
+                    mount: "codex".into(),
+                },
+            ])
+            .unwrap(),
+            environment_realized_effective_definition_digest: "7".repeat(64),
+            environment_realizations: ExternalContentRealizationSet::new(vec![
+                ryeos_state::objects::ExternalContentRealization {
+                    id: "authoring-tools".into(),
+                    kind: ExternalContentKind::Tree,
+                    mode: ExternalContentMode::Pinned,
+                    manifest_hash: "8".repeat(64),
+                    entry_count: 1,
+                    total_bytes: 1,
+                    mount_root: ExternalContentMountRoot::ExecutionRuntime,
+                    mount: "authoring-tools".into(),
+                },
+            ])
+            .unwrap(),
+            executable_search: vec![ExecutableSearchPathEntry {
+                realization_id: "authoring-tools".into(),
+                relative_directory: "bin".into(),
+            }],
+            process_environment: BTreeMap::new(),
+            runtime_member: ProductQualificationConsumerRuntimeMemberIdentity {
+                product_declaration_id: "guest-runtime".into(),
+                relative_path: "bin/codex".into(),
+                executable_sha256: "9".repeat(64),
+            },
+        });
+        purpose.validate().unwrap();
+        purpose
+    }
+
+    fn remote_fixture() -> (
+        QualificationRemoteVerifierSource,
+        ProductQualificationPolicySource,
+    ) {
+        let key = lillux::crypto::SigningKey::from_bytes(&[17u8; 32]).verifying_key();
+        let publisher = lillux::crypto::fingerprint(&key);
+        let mut policy = launch_purpose().policy_source;
+        policy.publisher_fingerprint = publisher.clone();
+        let selection = ProductQualificationRemoteVerifierSelection {
+            binary_ref: "bin:fixtures/consumer-verifier".into(),
+            guest_target_triple: "x86_64-unknown-linux-musl".into(),
+        };
+        let producer_source = ProductProducerRecipeSourceIdentity {
+            bundle_generation_identity: "generation-1".into(),
+            canonical_ref: "config:fixtures/recipe".into(),
+            raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
+            publisher_fingerprint: publisher.clone(),
+            recipe_digest: "c".repeat(64),
+        };
+        let scenario = ProductQualificationProducerScenario {
+            recipe_ref: producer_source.canonical_ref.clone(),
+            remote_verifier: Some(selection.clone()),
+            consumer_worker_request: None,
+        };
+        let source = QualificationRemoteVerifierSource {
+            policy_resolution_blob_hash: "1".repeat(64),
+            recipe_resolution_blob_hash: "2".repeat(64),
+            scenario_source_digest: scenario
+                .remote_verifier_source_digest(&producer_source)
+                .unwrap(),
+            selection,
+            producer_source: producer_source.clone(),
+            payload_bytes: 1024,
+            payload_mode: 0o755,
+            signed_items: vec![
+                RetainedSignedBundleItem {
+                    resolved_ref: policy.canonical_ref.clone(),
+                    bundle_name: "fixtures".into(),
+                    signer_fingerprint: publisher.clone(),
+                    signed_blob_hash: "d".repeat(64),
+                    raw_content_digest: policy.raw_content_digest.clone(),
+                    signature_envelope: RetainedSignatureEnvelope {
+                        prefix: "#".into(),
+                        suffix: None,
+                        after_shebang: false,
+                    },
+                },
+                RetainedSignedBundleItem {
+                    resolved_ref: producer_source.canonical_ref.clone(),
+                    bundle_name: "fixtures".into(),
+                    signer_fingerprint: publisher.clone(),
+                    signed_blob_hash: "e".repeat(64),
+                    raw_content_digest: producer_source.raw_content_digest.clone(),
+                    signature_envelope: RetainedSignatureEnvelope {
+                        prefix: "#".into(),
+                        suffix: None,
+                        after_shebang: false,
+                    },
+                },
+            ],
+            signed_bundle_manifests: vec![RetainedSignedBundleManifest {
+                bundle_name: "fixtures".into(),
+                signer_fingerprint: publisher.clone(),
+                signed_blob_hash: "f".repeat(64),
+                body_digest: "1".repeat(64),
+            }],
+            signer_keys: vec![RetainedBundleSignerKey {
+                signer_fingerprint: publisher.clone(),
+                verifying_key: format!(
+                    "ed25519:{}",
+                    base64::engine::general_purpose::STANDARD.encode(key.to_bytes())
+                ),
+            }],
+            executor: RetainedBundleExecutorSource {
+                bundle_name: "fixtures".into(),
+                item_ref: "bin/x86_64-unknown-linux-musl/consumer-verifier".into(),
+                target_triple: "x86_64-unknown-linux-musl".into(),
+                signer_fingerprint: publisher,
+                signed_manifest_ref_blob_hash: "2".repeat(64),
+                manifest_object_blob_hash: "3".repeat(64),
+                item_source_object_hash: "4".repeat(64),
+                signed_sidecar_blob_hash: "5".repeat(64),
+                payload_blob_hash: "6".repeat(64),
+            },
+        };
+        policy
+            .policy
+            .producer_scenarios
+            .insert("remote_codex".into(), scenario);
+        (source, policy)
+    }
+
+    fn callback_record()
+    -> ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord {
+        use ryeos_state::external_execution::admission::{
+            ExternalCandidateQualificationUse, QUALIFICATION_CONTEXT_SCHEMA,
+        };
+        let mut purpose = consumer_launch_purpose_fixture();
+        let (source, mut policy) = remote_fixture();
+        policy.policy.consumer_execution_context = purpose
+            .policy_source
+            .policy
+            .consumer_execution_context
+            .clone();
+        policy.policy.allowed_claims = vec![
+            "independent_candidate_diagnostic".into(),
+            "qualification_worker_command".into(),
+        ];
+        let content = purpose.consumer_content.as_mut().unwrap();
+        let realizations = ExternalContentRealizationSet::new(
+            content
+                .worker_literals
+                .iter()
+                .chain(content.environment_realizations.iter())
+                .chain(std::iter::once(&content.runtime_realization))
+                .cloned()
+                .collect(),
+        )
+        .unwrap();
+        let mut requirement =
+            ryeos_state::external_execution::admission::test_support::fixture_requirement();
+        requirement.runtime_product_declaration_id = content.runtime_realization.id.clone();
+        requirement.runtime_recipe.executable_relative_path =
+            content.runtime_member.relative_path.clone();
+        let qualified_use = ExternalCandidateQualificationUse {
+            schema: QUALIFICATION_CONTEXT_SCHEMA.into(),
+            requirement_digest: requirement.qualification_requirement_digest().unwrap(),
+            profile_hash: content.worker_profile_hash.clone(),
+            source_binding_hash: content.worker_source.binding_hash.clone(),
+            source_content_manifest_hash: content.worker_source.content_manifest_hash.clone(),
+            provider_executable_manifest_hash: content
+                .worker_literals
+                .iter()
+                .next()
+                .unwrap()
+                .manifest_hash
+                .clone(),
+            execution_environment_digest:
+                ExternalCandidateQualificationUse::admitted_execution_environment_digest(
+                    &realizations,
+                    &content.executable_search,
+                    &content.process_environment,
+                )
+                .unwrap(),
+        };
+        content.qualification_use = Some(qualified_use.clone());
+        policy.policy.verifier_parameters = json!({
+            "schema":"ryeos.codex.consumer_verifier.v4",
+            "controller":{"scenario_id":"remote_codex","maximum_duration_ms":300000},
+            "expected_command_output":"/workspace\nripgrep fixture\n",
+            "responses_origin":"http://127.0.0.1:1234",
+            "outer_network":"shared_guest_loopback",
+            "qualification_worker":{
+                "schema":"ryeos.codex.q_command.v3", "environment_id":"ryeos-external-candidate",
+                "command":"printf after > /ryeos/qualification-fixture/result; printf probe", "command_shell":"zsh",
+                "command_presentation":"zsh -c 'printf after > /ryeos/qualification-fixture/result; printf probe'",
+                "cwd":"/workspace", "output":"probe", "exit_code":0,
+                "expected_final_content_b64":"YWZ0ZXI="
+            },
+            "external_candidate_qualification_context":qualified_use,
+        });
+        policy.policy.producer_scenarios.get_mut("remote_codex").unwrap().consumer_worker_request =
+            Some(ProductQualificationConsumerWorkerRequest {
+                schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+                credential_profile_id: Some("fixture-profile".into()),
+                fixture: Some(ryeos_external_execution_contract::qualification_fixture::QFixtureContract {
+                    schema: 1, mount_destination: "/ryeos/qualification-fixture".into(), leaf: "result".into(),
+                    initial_content_b64: base64::engine::general_purpose::STANDARD.encode(b"before"),
+                    initial_blob_hash: lillux::sha256_hex(b"before"), max_bytes: 64,
+                }),
+                controller_canary: Some(ryeos_state::external_execution::qualification_controller_canary::QControllerCanaryContract::OriginalControllerReadAndLocalRefusalV1),
+                session_setup: json!({"route_id":"session.start","payload":{"experimentalRawEvents":true}}),
+                body: json!({"route_id":"turn.start","payload":{"input":[{"type":"text","text":ryeos_codex_external_configuration::qualification_request::Q_CONTROLLER_CANARY_PATH_SLOT}]}}),
+            });
+        purpose.policy_source = policy;
+        purpose.required_claims = vec!["qualification_worker_command".into()];
+        purpose.producer_recipe_sources =
+            BTreeMap::from([("remote_codex".into(), source.producer_source.clone())]);
+        purpose.remote_verifier_sources = BTreeMap::from([("remote_codex".into(), source)]);
+        purpose.consumer_invocation = Some(ConsumerVerificationInputSelection {
+            scenario_id: "remote_codex".into(),
+            qualification_operation_id: "a".repeat(64),
+            prerequisite_measurement_attempt_id: "b".repeat(64),
+        });
+        purpose.admitted_parameters_digest = purpose
+            .policy_source
+            .policy
+            .admitted_parameters_digest()
+            .unwrap();
+        let source = &purpose.remote_verifier_sources["remote_codex"];
+        let selection = ConsumerRuntimeVerifierSelection {
+            scenario_source_digest: source.scenario_source_digest.clone(),
+            verifier_artifact_hash: source.executor.payload_blob_hash.clone(),
+            archive_budget: ConsumerArchiveBudget::new(32, 65536, 131072).unwrap(),
+        };
+        let coordinate = ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-controller-fixture".into(),
+            accepted_capsule_hash: "a".repeat(64),
+            qualification_purpose_digest: canonical_value_digest(
+                &serde_json::to_value(&purpose).unwrap(),
+            )
+            .unwrap(),
+            scenario_id: "remote_codex".into(),
+            scenario_source_digest: selection.scenario_source_digest.clone(),
+            subject_digest: canonical_value_digest(
+                &serde_json::to_value(&purpose.subject).unwrap(),
+            )
+            .unwrap(),
+            use_digest: canonical_value_digest(
+                &serde_json::to_value(
+                    purpose
+                        .consumer_content
+                        .as_ref()
+                        .unwrap()
+                        .qualification_use
+                        .as_ref()
+                        .unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            prerequisite_measurement_attempt_id: "b".repeat(64),
+            prerequisite_measurement_observation_digest: "c".repeat(64),
+        };
+        let record =
+            ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord {
+                schema: 2,
+                purpose,
+                coordinate,
+                selection,
+                requirement,
+                scenario_input: json!({"canary_value":"d".repeat(64)}),
+            };
+        record.validate().unwrap();
+        record
+    }
+
+    fn callback_inputs(
+        record: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
+    ) -> Value {
+        let mut inputs = serde_json::to_value(record).unwrap();
+        inputs.as_object_mut().unwrap().remove("schema");
+        inputs.as_object_mut().unwrap().remove("scenario_input");
+        inputs
+    }
+
+    fn with_forbidden_field(
+        stage: &str,
+        key: &str,
+        value: Value,
+    ) -> ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord {
+        let mut record = callback_record();
+        let request = record
+            .purpose
+            .policy_source
+            .policy
+            .producer_scenarios
+            .get_mut("remote_codex")
+            .unwrap()
+            .consumer_worker_request
+            .as_mut()
+            .unwrap();
+        let request = if stage == "setup" {
+            &mut request.session_setup
+        } else {
+            &mut request.body
+        };
+        request["payload"][key] = value;
+        record.purpose.admitted_parameters_digest = record
+            .purpose
+            .policy_source
+            .policy
+            .admitted_parameters_digest()
+            .unwrap();
+        record.coordinate.qualification_purpose_digest =
+            canonical_value_digest(&serde_json::to_value(&record.purpose).unwrap()).unwrap();
+        // Prove the refusal is NOT an unrelated generic purpose/hash/coordinate failure.
+        record.validate().unwrap();
+        record
+    }
+
+    /// A protocol-shaped fake callback peer, not a daemon admission fixture.
+    /// Every request uses the production UDS client and framing; no provider is called.
+    async fn controller_with_fake_inputs(
+        directory: &lillux::PinnedDirectory,
+        record: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
+        invocation: ConsumerControllerInvocation,
+    ) -> (Result<ConsumerControllerOutcome>, Vec<String>) {
+        let socket_dir = tempfile::tempdir().unwrap();
+        let path = socket_dir.path().join("callback.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let inputs = callback_inputs(record);
+        let root = record.coordinate.accepted_root_id.clone();
+        let expected_root = root.clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let peer = tokio::spawn(async move {
+            let mut stopped = stopped;
+            let mut methods = Vec::new();
+            loop {
+                let (mut stream, _) = tokio::select! {
+                    _ = &mut stopped => break,
+                    incoming = listener.accept() => incoming.unwrap(),
+                };
+                let bytes = ryeos_runtime::framing::recv_frame_with_limit(&mut stream, 256 * 1024)
+                    .await
+                    .unwrap();
+                let request: Value = rmp_serde::from_slice(&bytes).unwrap();
+                assert_eq!(request["params"]["thread_id"], expected_root);
+                assert_eq!(request["params"]["callback_token"], "fixture-callback");
+                assert_eq!(request["params"]["thread_auth_token"], "fixture-thread");
+                let method = request["method"].as_str().unwrap().to_owned();
+                let result = match method.as_str() {
+                    "runtime.consumer_verification_inputs" => {
+                        assert_eq!(
+                            request["params"]["selection"],
+                            json!({"scenario_id":"remote_codex"})
+                        );
+                        inputs.clone()
+                    }
+                    // Deliberately count and acknowledge an illicit START, rather than
+                    // making a connection failure masquerade as precontact refusal.
+                    "runtime.consumer_verification_start" => json!({}),
+                    "runtime.consumer_verification_observe" => {
+                        json!({"status":"not_reserved","operation_id":"e".repeat(64)})
+                    }
+                    _ => panic!("unexpected callback method {method}"),
+                };
+                methods.push(method);
+                let response = rmp_serde::to_vec_named(
+                    &json!({"request_id":request["request_id"],"result":result}),
+                )
+                .unwrap();
+                ryeos_runtime::send_frame(&mut stream, &response)
+                    .await
+                    .unwrap();
+            }
+            methods
+        });
+        let client = ryeos_runtime::callback_uds::UdsRuntimeClient::new(
+            path,
+            "fixture-callback".into(),
+            "fixture-thread".into(),
+        );
+        let outcome = run_controller_beat(
+            &client,
+            directory,
+            &root,
+            "remote_codex",
+            invocation,
+            MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+        )
+        .await;
+        stop.send(()).unwrap();
+        let methods = tokio::time::timeout(std::time::Duration::from_secs(5), peer)
+            .await
+            .unwrap()
+            .unwrap();
+        (outcome, methods)
+    }
+
+    #[tokio::test]
+    async fn coherent_closed_conversation_reaches_start_and_recovery_only_observes() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        directory.tighten_owner_private_directory().unwrap();
+        let record = callback_record();
+        let valid =
+            ConsumerInputRecord::from_callback_inputs(callback_inputs(&record), &record.coordinate)
+                .unwrap();
+        valid.validate().unwrap();
+        valid
+            .scripted_configuration()
+            .unwrap()
+            .qualification_worker
+            .expected_fixture_content(
+                record.purpose.policy_source.policy.producer_scenarios["remote_codex"]
+                    .consumer_worker_request
+                    .as_ref()
+                    .unwrap()
+                    .fixture
+                    .as_ref(),
+            )
+            .unwrap();
+        let (result, methods) =
+            controller_with_fake_inputs(&directory, &record, ConsumerControllerInvocation::Fresh)
+                .await;
+        assert!(matches!(
+            result.unwrap(),
+            ConsumerControllerOutcome::Unresolved(_)
+        ));
+        assert_eq!(
+            methods,
+            [
+                "runtime.consumer_verification_inputs",
+                "runtime.consumer_verification_start",
+                "runtime.consumer_verification_observe"
+            ]
+        );
+        let file = directory
+            .open_pinned_regular(
+                std::ffi::OsStr::new("controller-consumer-input.json"),
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        let original = file.observation().unwrap();
+        let bytes = file.read_stable_bounded(&original, 96 * 1024).unwrap();
+        let (result, methods) =
+            controller_with_fake_inputs(&directory, &record, ConsumerControllerInvocation::Recover)
+                .await;
+        assert!(matches!(
+            result.unwrap(),
+            ConsumerControllerOutcome::Unresolved(_)
+        ));
+        assert_eq!(
+            methods,
+            [
+                "runtime.consumer_verification_inputs",
+                "runtime.consumer_verification_observe"
+            ]
+        );
+        let current = directory
+            .open_pinned_regular(
+                std::ffi::OsStr::new("controller-consumer-input.json"),
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            current.read_stable_bounded(&original, 96 * 1024).unwrap(),
+            bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn forbidden_q_setup_and_turn_refuse_before_start_or_record_mutation() {
+        let cases = [
+            ("setup", "config", json!({})),
+            (
+                "setup",
+                "environments",
+                json!([{"environmentId":"local","cwd":"/"}]),
+            ),
+            ("setup", "cwd", json!("/controller")),
+            ("setup", "runtimeWorkspaceRoots", json!(["/controller"])),
+            ("setup", "permissions", json!("danger-full-access")),
+            ("setup", "approvalPolicy", json!("never")),
+            ("setup", "approvalsReviewer", json!("user")),
+            ("setup", "sandbox", json!("danger-full-access")),
+            ("setup", "dynamicTools", json!([])),
+            ("setup", "selectedCapabilityRoots", json!([])),
+            ("setup", "developerInstructions", json!("override")),
+            ("setup", "baseInstructions", json!("override")),
+            ("setup", "modelProvider", json!("other-provider")),
+            ("setup", "serviceName", json!("other-service")),
+            ("setup", "threadSource", json!("other-source")),
+            ("setup", "futureOverride", json!(true)),
+            (
+                "turn",
+                "environments",
+                json!([{"environmentId":"local","cwd":"/"}]),
+            ),
+            ("turn", "cwd", json!("/controller")),
+            ("turn", "runtimeWorkspaceRoots", json!(["/controller"])),
+            ("turn", "permissions", json!("danger-full-access")),
+            ("turn", "approvalPolicy", json!("never")),
+            ("turn", "approvalsReviewer", json!("user")),
+            ("turn", "sandboxPolicy", json!({"type":"dangerFullAccess"})),
+            ("turn", "model", json!("other-model")),
+            ("turn", "effort", json!("high")),
+            ("turn", "collaborationMode", json!({"mode":"plan"})),
+            ("turn", "additionalContext", json!([])),
+            ("turn", "threadId", json!("another-thread")),
+            ("turn", "futureOverride", json!(true)),
+            ("turn", "config", json!({})),
+            ("turn", "dynamicTools", json!([])),
+            ("turn", "selectedCapabilityRoots", json!([])),
+        ];
+        // Every unsupported field is checked both present-non-null and
+        // present-null, on both the fresh and recovery controller paths.
+        for (stage, key, value) in cases
+            .into_iter()
+            .flat_map(|(stage, key, value)| [(stage, key, value), (stage, key, Value::Null)])
+        {
+            let null = value.is_null();
+            let record = with_forbidden_field(stage, key, value);
+            for recovery in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let directory = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+                directory.tighten_owner_private_directory().unwrap();
+                let name = std::ffi::OsStr::new("controller-consumer-input.json");
+                // A retained rejected record models recovery of old bytes. Construct
+                // data directly, not fake fresh acceptance through the new validator.
+                let previous = if recovery {
+                    let bytes = lillux::canonical_json(&serde_json::to_value(&record).unwrap())
+                        .unwrap()
+                        .into_bytes();
+                    let file = directory
+                        .atomic_create_pinned_regular(name, &bytes, 0o400)
+                        .unwrap()
+                        .unwrap();
+                    Some((file.observation().unwrap(), bytes))
+                } else {
+                    None
+                };
+                let invocation = if recovery {
+                    ConsumerControllerInvocation::Recover
+                } else {
+                    ConsumerControllerInvocation::Fresh
+                };
+                let (result, methods) =
+                    controller_with_fake_inputs(&directory, &record, invocation).await;
+                let error = match result {
+                    Err(error) => format!("{error:#}"),
+                    Ok(_) => panic!("accepted {stage}.{key}; null={null}, recovery={recovery}"),
+                };
+                let expected = if stage == "setup" {
+                    "Q setup requires raw events and admits only optional model selection"
+                } else {
+                    "Q canary turn payload must contain only its original input"
+                };
+                assert!(
+                    error.contains(expected),
+                    "{stage}.{key}, null={null}, recovery={recovery}: {error}"
+                );
+                assert_eq!(
+                    methods,
+                    ["runtime.consumer_verification_inputs"],
+                    "{stage}.{key}, null={null}, recovery={recovery}"
+                );
+                match previous {
+                    None => assert!(directory.entries_no_follow_bounded(1).unwrap().is_empty()),
+                    Some((observation, bytes)) => {
+                        let file = directory.open_pinned_regular(name, false).unwrap().unwrap();
+                        assert_eq!(
+                            file.read_stable_bounded(&observation, 96 * 1024).unwrap(),
+                            bytes
+                        );
+                        assert_eq!(directory.entries_no_follow_bounded(1).unwrap().len(), 1);
+                    }
+                }
+            }
+        }
+    }
 }

@@ -2856,6 +2856,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "lillux",
+ "rmp-serde",
  "ryeos-codex-external-configuration",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",

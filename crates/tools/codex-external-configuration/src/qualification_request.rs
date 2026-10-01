@@ -84,6 +84,45 @@ pub fn validate_controller_canary_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// The finite Q setup cannot add an environment, capability, or configuration
+/// override. Model selection is optional data, not evidence of tool availability.
+pub fn validate_controller_canary_setup(setup: &Value) -> Result<()> {
+    let root = setup.as_object().context("Q setup is not an object")?;
+    ensure!(
+        root.len() == 2 && root.get("route_id").and_then(Value::as_str) == Some("session.start"),
+        "Q setup changed its finite route envelope"
+    );
+    let payload = root
+        .get("payload")
+        .and_then(Value::as_object)
+        .context("Q setup has no payload")?;
+    ensure!(
+        payload
+            .keys()
+            .all(|key| matches!(key.as_str(), "experimentalRawEvents" | "model"))
+            && payload.get("experimentalRawEvents") == Some(&Value::Bool(true)),
+        "Q setup requires raw events and admits only optional model selection"
+    );
+    if let Some(model) = payload.get("model").filter(|value| !value.is_null()) {
+        let model = model.as_str().context("Q setup model is not text")?;
+        ensure!(
+            !model.is_empty()
+                && model.len() <= 256
+                && model.trim() == model
+                && !model.chars().any(char::is_control),
+            "Q setup model is not a bounded canonical identifier"
+        );
+    }
+    Ok(())
+}
+
+/// Validate the original signed setup and turn together before retaining a
+/// consumer record. This pure product check grants no contact authority.
+pub fn validate_controller_canary_conversation(setup: &Value, turn: &Value) -> Result<()> {
+    validate_controller_canary_setup(setup)?;
+    validate_controller_canary_turn(turn)
+}
+
 /// Only one text input in the existing exact turn.start envelope is bindable.
 /// No caller-selected JSON pointer, recursive replacement, or shell expansion.
 /// The outer request validator separately bounds setup + resolved turn together.
@@ -236,6 +275,92 @@ mod tests {
             template: template(),
             controller_canary_path: "/private/Q-abc/controller-canary/canary".into(),
         }
+    }
+
+    fn setup() -> Value {
+        json!({"route_id":"session.start","payload":{"experimentalRawEvents":true}})
+    }
+
+    #[test]
+    fn canary_setup_accepts_only_bounded_optional_model_and_required_raw_events() {
+        validate_controller_canary_conversation(&setup(), &template()).unwrap();
+        for model in [Value::Null, json!("codex-model"), json!("é".repeat(128))] {
+            let mut value = setup();
+            value["payload"]["model"] = model;
+            validate_controller_canary_conversation(&value, &template()).unwrap();
+        }
+        for model in [
+            json!(""),
+            json!(" leading"),
+            json!("trailing "),
+            json!("a\nb"),
+            json!("a\u{7f}b"),
+            json!("é".repeat(129)),
+            json!(false),
+            json!([]),
+            json!({}),
+        ] {
+            let mut value = setup();
+            value["payload"]["model"] = model;
+            assert!(validate_controller_canary_setup(&value).is_err());
+        }
+        for raw in [Value::Null, json!(false), json!("true"), json!(1)] {
+            let mut value = setup();
+            value["payload"]["experimentalRawEvents"] = raw;
+            assert!(validate_controller_canary_setup(&value).is_err());
+        }
+        let mut missing = setup();
+        missing["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("experimentalRawEvents");
+        assert!(validate_controller_canary_setup(&missing).is_err());
+    }
+
+    #[test]
+    fn canary_conversation_refuses_setup_overrides_and_changed_turn() {
+        for key in [
+            "config",
+            "environments",
+            "cwd",
+            "runtimeWorkspaceRoots",
+            "permissions",
+            "approvalPolicy",
+            "approvalsReviewer",
+            "sandbox",
+            "dynamicTools",
+            "selectedCapabilityRoots",
+            "developerInstructions",
+            "baseInstructions",
+            "modelProvider",
+            "serviceName",
+            "threadSource",
+            "futureOverride",
+        ] {
+            for value in [Value::Null, json!({"unexpected":true})] {
+                let mut changed = setup();
+                changed["payload"][key] = value;
+                assert!(
+                    validate_controller_canary_conversation(&changed, &template()).is_err(),
+                    "{key}"
+                );
+            }
+        }
+        for changed in [
+            Value::Null,
+            json!([]),
+            json!({"route_id":"thread/start","payload":{}}),
+            json!({"route_id":"session.start","payload":null}),
+            json!({"route_id":"session.start","payload":{"experimentalRawEvents":true},"extra":null}),
+        ] {
+            assert!(validate_controller_canary_conversation(&changed, &template()).is_err());
+        }
+        let mut changed_turn = template();
+        changed_turn["payload"]["environments"] = Value::Null;
+        assert!(validate_controller_canary_conversation(&setup(), &changed_turn).is_err());
+        changed_turn = template();
+        changed_turn["payload"]["input"][0]["text"] = json!("missing original slot");
+        assert!(validate_controller_canary_conversation(&setup(), &changed_turn).is_err());
     }
 
     #[test]

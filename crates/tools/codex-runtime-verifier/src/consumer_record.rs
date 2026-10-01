@@ -1640,6 +1640,18 @@ impl ConsumerInputRecord {
 
     pub fn validate(&self) -> Result<QualificationExecutionEnvironment> {
         self.0.validate()?;
+        let invocation = self.consumer_invocation()?;
+        let request = self
+            .purpose
+            .policy_source
+            .policy
+            .producer_scenarios
+            .get(&invocation.scenario_id)
+            .and_then(|scenario| scenario.consumer_worker_request.as_ref())
+            .context("consumer record has no original signed Q conversation")?;
+        ryeos_codex_external_configuration::qualification_request::validate_controller_canary_conversation(
+            &request.session_setup, &request.body,
+        )?;
         self.canary_value()?;
         let content = self
             .purpose
