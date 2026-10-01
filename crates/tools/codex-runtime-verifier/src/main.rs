@@ -651,7 +651,7 @@ async fn admitted_main() -> Result<()> {
             && observation.prepared_directory_sources == locator.prepared_directory_sources
             && observation.recipe_generation == expected_source.bundle_generation_identity
             && observation.scenario_digest == locator.scenario_digest
-            && observation.process_identity["schema_version"] == 5
+            && is_current_scoped_process_identity_format(&observation.process_identity)
             && observation.process_identity["target_pid"]
                 .as_i64()
                 .is_some_and(|pid| pid > 0)
@@ -1435,6 +1435,16 @@ struct ScopedObservationCut {
     launcher_refusal: Option<String>,
 }
 
+/// Current resource-free scoped producer wire only. The caller independently
+/// joins the exact scope recovery, process birth, launch and source evidence.
+fn is_current_scoped_process_identity_format(identity: &serde_json::Value) -> bool {
+    identity
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(6)
+        && identity.get("resource_settlement_authority") == Some(&serde_json::Value::Null)
+}
+
 fn retained_observation_coordinate(value: &serde_json::Value) -> Result<String> {
     Ok(lillux::sha256_hex(
         lillux::canonical_json(value)?.as_bytes(),
@@ -1455,6 +1465,32 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn scoped_process_identity_requires_current_version_and_explicit_null_settlement() {
+        // Format predicate only; these values do not assert process or scope proof.
+        let current = json!({"schema_version":6,"resource_settlement_authority":null});
+        assert!(is_current_scoped_process_identity_format(&current));
+        let mut predecessor = current.clone();
+        predecessor["schema_version"] = json!(5);
+        assert!(!is_current_scoped_process_identity_format(&predecessor));
+        let mut missing = current.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("resource_settlement_authority");
+        assert!(!is_current_scoped_process_identity_format(&missing));
+        for authority in [
+            json!({"authority":"local_process_scope"}),
+            json!({"authority":"trusted_process_group","cleanup_contract_digest":"a".repeat(64)}),
+        ] {
+            let mut resource_bearing = current.clone();
+            resource_bearing["resource_settlement_authority"] = authority;
+            assert!(!is_current_scoped_process_identity_format(
+                &resource_bearing
+            ));
+        }
+    }
 
     #[test]
     fn consumer_cli_requires_one_exact_canonical_challenge() {
