@@ -42,6 +42,11 @@ pub struct NodeExecutionResourcePolicy {
     /// termination, reap and terminal meter capture. It is captured into the
     /// exact process identity; project content cannot narrow it away.
     pub cleanup_allowance_ms: u64,
+    /// Optional exact ceiling for trusted resource cleanup. Omission denies
+    /// trusted resource authority and preserves predecessor policy identities.
+    /// This does not qualify a driver, resource observer or runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_cleanup_contract_digest: Option<String>,
     pub resources: Vec<NodeExecutionResourceDescriptor>,
 }
 
@@ -165,6 +170,9 @@ impl NodeExecutionAdmissionPolicy {
 impl NodeExecutionResourcePolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
         self.admission.validate()?;
+        if let Some(digest) = &self.trusted_cleanup_contract_digest {
+            validate_digest("node trusted resource cleanup contract digest", digest)?;
+        }
         if self.cleanup_allowance_ms == 0 || self.cleanup_allowance_ms > 10 * 60 * 1000 {
             bail!("node resource cleanup allowance is outside its operational bound");
         }
@@ -358,6 +366,44 @@ mod tests {
         assert!(policy.validate().is_err());
         policy.host_env_passthrough = vec!["Z_VALUE".into(), "A_VALUE".into()];
         assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn node_trusted_cleanup_contract_omission_denies_and_preserves_identity() {
+        let mut policy = NodeExecutionResourcePolicy {
+            admission: ryeos_engine::contracts::ExecutionResourceAdmissionPolicy {
+                limits: ryeos_engine::contracts::ExecutionTargetLimits {
+                    max_requirements: 1,
+                    max_resource_count: 1,
+                    max_facts_per_requirement: 4,
+                },
+                max_total_resource_count: 1,
+                max_concurrent_exclusive_allocations: 1,
+                allowed_classes: vec!["accelerator".to_owned()],
+                allowed_allocations: vec![
+                    ryeos_engine::contracts::ExecutionResourceAllocation::Exclusive,
+                ],
+                allowed_access: vec![
+                    ryeos_engine::contracts::ExecutionResourceAccess::DeploymentVisible,
+                ],
+            },
+            cleanup_allowance_ms: 1_000,
+            trusted_cleanup_contract_digest: None,
+            resources: Vec::new(),
+        };
+        let old = serde_json::to_value(&policy).unwrap();
+        assert!(old.get("trusted_cleanup_contract_digest").is_none());
+        let decoded: NodeExecutionResourcePolicy = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(decoded.trusted_cleanup_contract_digest, None);
+        assert_eq!(serde_json::to_value(decoded).unwrap(), old);
+        assert!(policy.validate().is_ok());
+        for invalid in [String::new(), "A".repeat(64), "a".repeat(63)] {
+            policy.trusted_cleanup_contract_digest = Some(invalid);
+            assert!(policy.validate().is_err());
+        }
+        policy.trusted_cleanup_contract_digest = Some("a".repeat(64));
+        assert!(policy.validate().is_ok());
+        assert_ne!(serde_json::to_value(policy).unwrap(), old);
     }
 
     #[test]

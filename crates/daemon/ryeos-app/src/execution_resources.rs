@@ -1142,6 +1142,7 @@ mod tests {
                 allowed_access: vec![ExecutionResourceAccess::DeploymentVisible],
             },
             cleanup_allowance_ms: 1_000,
+            trusted_cleanup_contract_digest: None,
             resources: vec![descriptor()],
         }
     }

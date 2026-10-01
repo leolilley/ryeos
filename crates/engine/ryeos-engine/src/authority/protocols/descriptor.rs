@@ -164,6 +164,11 @@ pub struct PersistentSessionProtocol {
     /// before any workload contact; predecessor descriptors cannot acquire a
     /// cleanup default by omission.
     pub cleanup_authority: PersistentSessionCleanupAuthority,
+    /// Exact trusted resource cleanup contract, independently admitted by the
+    /// node. Omission carries no resource cleanup claim; CPU pooled and
+    /// resource-free exclusive protocols retain their existing identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_cleanup_contract: Option<String>,
     pub workspace_authority: PersistentSessionWorkspaceAuthority,
     pub network_authority: PersistentSessionNetworkAuthority,
     #[serde(default)]
@@ -233,6 +238,7 @@ pub fn validate_persistent_session_protocol(
         .session
         .as_ref()
         .ok_or_else(|| "does not declare a persistent session channel".to_owned())?;
+    validate_session_resource_cleanup_contract(session)?;
     if descriptor.callback_channel != CallbackChannel::None
         || descriptor.stdin.shape != StdinShape::Opaque
         || descriptor.stdout.shape != StdoutShape::OpaqueBytes
@@ -318,6 +324,32 @@ pub fn validate_persistent_session_protocol(
         return Err("persistent session descriptor is not canonical or bounded".to_owned());
     }
     Ok(session)
+}
+
+/// Portable contract shape only; this cannot admit node or driver authority.
+pub fn validate_session_resource_cleanup_contract(
+    session: &PersistentSessionProtocol,
+) -> Result<(), String> {
+    if let Some(digest) = &session.resource_cleanup_contract {
+        if session.cleanup_authority != PersistentSessionCleanupAuthority::TrustedProcessGroup
+            || digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(
+                "resource cleanup contract requires trusted authority and a canonical digest"
+                    .to_owned(),
+            );
+        }
+    } else if session.process_mode == PersistentSessionProcessMode::PooledRequests
+        && session.cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup
+    {
+        return Err(
+            "trusted pooled protocol requires an explicit resource cleanup contract".to_owned(),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -413,6 +445,9 @@ mod tests {
             session: Some(PersistentSessionProtocol {
                 process_mode: mode,
                 cleanup_authority,
+                resource_cleanup_contract: (mode == PersistentSessionProcessMode::PooledRequests
+                    && cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup)
+                    .then(|| "a".repeat(64)),
                 workspace_authority: PersistentSessionWorkspaceAuthority::RuntimeWorkspace,
                 network_authority: PersistentSessionNetworkAuthority::NodePolicy,
                 runtime_env_allowlist: Vec::new(),
@@ -495,6 +530,62 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn resource_cleanup_contract_is_explicit_canonical_and_trusted_only() {
+        let mut descriptor = persistent_protocol(
+            PersistentSessionProcessMode::PooledRequests,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
+        );
+        assert!(validate_persistent_session_protocol(&descriptor).is_ok());
+        for invalid in [
+            None,
+            Some(String::new()),
+            Some("A".repeat(64)),
+            Some("a".repeat(63)),
+        ] {
+            descriptor
+                .session
+                .as_mut()
+                .unwrap()
+                .resource_cleanup_contract = invalid;
+            assert!(validate_persistent_session_protocol(&descriptor).is_err());
+        }
+        descriptor
+            .session
+            .as_mut()
+            .unwrap()
+            .resource_cleanup_contract = Some("a".repeat(64));
+        descriptor.session.as_mut().unwrap().cleanup_authority =
+            PersistentSessionCleanupAuthority::NotRequired;
+        assert!(validate_persistent_session_protocol(&descriptor).is_err());
+        descriptor.session.as_mut().unwrap().process_mode =
+            PersistentSessionProcessMode::ExclusiveSession;
+        descriptor.session.as_mut().unwrap().cleanup_authority =
+            PersistentSessionCleanupAuthority::LocalProcessScope;
+        assert!(validate_persistent_session_protocol(&descriptor).is_err());
+    }
+
+    #[test]
+    fn resource_free_protocol_cleanup_omission_preserves_serialized_identity() {
+        for (mode, cleanup) in [
+            (
+                PersistentSessionProcessMode::PooledRequests,
+                PersistentSessionCleanupAuthority::NotRequired,
+            ),
+            (
+                PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            ),
+        ] {
+            let descriptor = persistent_protocol(mode, cleanup);
+            let before = serde_json::to_value(&descriptor).unwrap();
+            assert!(before["session"].get("resource_cleanup_contract").is_none());
+            let decoded: ProtocolDescriptor = serde_json::from_value(before.clone()).unwrap();
+            assert!(validate_persistent_session_protocol(&decoded).is_ok());
+            assert_eq!(serde_json::to_value(decoded).unwrap(), before);
+        }
     }
 
     #[test]
