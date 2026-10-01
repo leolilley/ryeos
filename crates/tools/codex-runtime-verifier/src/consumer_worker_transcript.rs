@@ -93,9 +93,12 @@ pub(crate) fn validate_reference_for_record(
 ) -> Result<()> {
     original.validate()?;
     reference.validate()?;
-    let inputs = original.scripted_configuration()?.controller.inputs;
-    inputs.require_coordinate(&original.coordinate)?;
+    original.scripted_configuration()?;
+    let inputs = original.consumer_invocation()?;
     let manifest = &reference.manifest;
+    original
+        .purpose
+        .require_consumer_invocation(&manifest.qualification_operation_id, &original.coordinate)?;
     let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
         &original.coordinate,
         &inputs.qualification_operation_id,

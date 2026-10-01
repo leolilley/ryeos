@@ -1714,6 +1714,7 @@ pub mod test_support {
                 policy_source: product.policy_source.clone(),
                 consumer_definitions: None,
                 consumer_content: None,
+                consumer_invocation: None,
                 producer_recipe_sources: BTreeMap::new(),
                 remote_verifier_sources: BTreeMap::new(),
                 subject_declaration_id: product.verifier.subject_declaration_id.clone(),

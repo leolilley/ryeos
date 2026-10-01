@@ -44,17 +44,19 @@ pub async fn run_controller_beat(
     client: &ryeos_runtime::callback_uds::UdsRuntimeClient,
     private_directory: &lillux::PinnedDirectory,
     thread_id: &str,
-    selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
+    scenario_id: &str,
     invocation: ConsumerControllerInvocation,
     deadline: MonotonicDeadline,
 ) -> Result<ConsumerControllerOutcome> {
     use crate::consumer_record::RetainedControllerConsumerRecord;
     use anyhow::Context as _;
     ensure!(!deadline.has_elapsed(), "consumer controller beat expired");
+    let selection = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationScenarioSelection {
+        scenario_id: scenario_id.to_owned(),
+    };
     selection.validate()?;
-    let qualification_operation_id = &selection.qualification_operation_id;
     let inputs = client
-        .consumer_verification_inputs(thread_id, serde_json::to_value(selection)?, deadline)
+        .consumer_verification_inputs(thread_id, serde_json::to_value(&selection)?, deadline)
         .await
         .context("protected consumer input read refused")?;
     ensure!(
@@ -63,7 +65,11 @@ pub async fn run_controller_beat(
     );
     let coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate =
         serde_json::from_value(inputs.get("coordinate").context("protected consumer coordinate absent")?.clone())?;
-    selection.require_coordinate(&coordinate)?;
+    coordinate.validate()?;
+    ensure!(
+        coordinate.scenario_id == scenario_id,
+        "protected consumer inputs changed static scenario"
+    );
     ensure!(
         coordinate.accepted_root_id == thread_id,
         "protected consumer inputs name another invoking root"
@@ -86,13 +92,15 @@ pub async fn run_controller_beat(
             .allowed_claims,
         &retained.record().purpose.required_claims,
     )?;
+    let sealed_invocation = retained.record().consumer_invocation()?;
+    let qualification_operation_id = &sealed_invocation.qualification_operation_id;
     ensure!(
         retained
             .record()
             .scripted_configuration()?
             .controller
-            .inputs
-            == *selection,
+            .scenario_id
+            == scenario_id,
         "consumer invoking selectors differ from the retained signed policy"
     );
     if matches!(invocation, ConsumerControllerInvocation::Fresh) {
@@ -330,6 +338,9 @@ pub fn check_observation_response(
         "consumer controller observation deadline expired"
     );
     original.validate()?;
+    original
+        .purpose
+        .require_consumer_invocation(qualification_operation_id, &original.coordinate)?;
     ensure!(
         lillux::valid_hash(qualification_operation_id),
         "consumer qualification identity is invalid"

@@ -139,8 +139,34 @@ impl ConsumerVerifierAdapterObservation {
     }
 }
 
-/// Bounded selectors for the protected input read. Dynamic root and purpose
-/// commitments are daemon-derived; these values confer no contact authority.
+/// Closed static selector for the protected input read. Operation and
+/// prerequisite identities come only from the sealed launch purpose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerVerificationScenarioSelection {
+    pub scenario_id: String,
+}
+
+impl ConsumerVerificationScenarioSelection {
+    pub fn validate(&self) -> Result<()> {
+        validate_consumer_scenario_id(&self.scenario_id)
+    }
+}
+
+fn validate_consumer_scenario_id(scenario_id: &str) -> Result<()> {
+    ensure!(
+        !scenario_id.is_empty()
+            && scenario_id.len() <= 128
+            && scenario_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+        "consumer input scenario selector is invalid"
+    );
+    Ok(())
+}
+
+/// Exact invocation retained in the sealed purpose after owner admission.
+/// These identities confer no contact authority by themselves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsumerVerificationInputSelection {
@@ -151,15 +177,7 @@ pub struct ConsumerVerificationInputSelection {
 
 impl ConsumerVerificationInputSelection {
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            !self.scenario_id.is_empty()
-                && self.scenario_id.len() <= 128
-                && self
-                    .scenario_id
-                    .bytes()
-                    .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') }),
-            "consumer input scenario selector is invalid"
-        );
+        validate_consumer_scenario_id(&self.scenario_id)?;
         require_hash(&self.qualification_operation_id, "qualification selector")?;
         require_hash(
             &self.prerequisite_measurement_attempt_id,
@@ -186,6 +204,39 @@ impl ConsumerVerificationInputSelection {
 #[cfg(test)]
 mod input_selection_tests {
     use super::*;
+
+    #[test]
+    fn scenario_read_selection_cannot_supply_invocation_identities() {
+        let wire = serde_json::json!({"scenario_id":"consumer"});
+        serde_json::from_value::<ConsumerVerificationScenarioSelection>(wire.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+        for field in [
+            "qualification_operation_id",
+            "prerequisite_measurement_attempt_id",
+            "accepted_root_id",
+        ] {
+            let mut changed = wire.clone();
+            changed[field] = "a".repeat(64).into();
+            assert!(
+                serde_json::from_value::<ConsumerVerificationScenarioSelection>(changed).is_err()
+            );
+        }
+        for scenario_id in ["", "consumer/other", &"c".repeat(129)] {
+            assert!(
+                ConsumerVerificationScenarioSelection {
+                    scenario_id: scenario_id.into()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<ConsumerVerificationScenarioSelection>(serde_json::json!({}))
+                .is_err()
+        );
+    }
 
     #[test]
     fn input_selectors_cannot_supply_root_or_observation_authority() {

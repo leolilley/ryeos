@@ -2669,7 +2669,7 @@ pub fn consumer_verification_inputs_for_callback(
     state: &AppState,
     token: &str,
     thread_id: &str,
-    requested: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
+    requested: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationScenarioSelection,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
 ) -> anyhow::Result<ConsumerVerificationInputs> {
     use crate::runtime_db::restored_verifier_attempt::RestoredVerifierAttemptPhase;
@@ -2686,6 +2686,16 @@ pub fn consumer_verification_inputs_for_callback(
         .context("consumer inputs have no admitted remote purpose")?;
     grant.validate()?;
     let purpose = &grant.purpose;
+    let invocation = purpose
+        .consumer_invocation
+        .as_ref()
+        .context("consumer inputs have no sealed occurrence invocation")?;
+    invocation.validate()?;
+    if requested.scenario_id != invocation.scenario_id {
+        bail!("consumer inputs changed the sealed invocation scenario");
+    }
+    // Only the sealed purpose selects actual occurrence/measurement IDs.
+    let requested = invocation;
     let source = purpose
         .remote_verifier_sources
         .get(&requested.scenario_id)

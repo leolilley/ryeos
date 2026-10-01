@@ -14,7 +14,7 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 struct InputsRequest {
     thread_id: String,
-    selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
+    selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationScenarioSelection,
 }
 
 fn parse_inputs(params: &Value, thread_id: &str) -> Result<InputsRequest> {
@@ -258,8 +258,7 @@ mod tests {
 
     fn inputs_request() -> Value {
         json!({"thread_id":"T-root", "selection": {
-            "scenario_id":"consumer", "qualification_operation_id":"a".repeat(64),
-            "prerequisite_measurement_attempt_id":"b".repeat(64),
+            "scenario_id":"consumer",
         }})
     }
 
@@ -283,7 +282,7 @@ mod tests {
             "prerequisite_measurement_attempt_id",
         ] {
             let mut bad = inputs_request();
-            bad["selection"][field] = json!("not-an-operation");
+            bad["selection"][field] = json!("a".repeat(64));
             assert!(parse_inputs(&bad, "T-root").is_err());
         }
     }

@@ -835,7 +835,7 @@ async fn run_consumer_controller(input: &[u8]) -> Result<()> {
         &client,
         &private,
         &thread_id,
-        &parameters.controller.inputs,
+        &parameters.controller.scenario_id,
         invocation,
         deadline,
     )

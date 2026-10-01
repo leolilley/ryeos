@@ -8,6 +8,7 @@ use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent;
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     ConsumerRuntimeChallenge, ConsumerRuntimeVerificationCoordinate,
+    ConsumerVerificationInputSelection, ConsumerVerificationScenarioSelection,
 };
 use ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord as StateConsumerInputRecord;
 use serde::{Deserialize, Serialize};
@@ -220,9 +221,9 @@ mod control_tests {
             "provider_executable_manifest_hash":hash, "execution_environment_digest":hash,
         });
         let value = serde_json::json!({
-            "schema":"ryeos.codex.consumer_verifier.v3",
+            "schema":"ryeos.codex.consumer_verifier.v4",
             "controller": {
-                "inputs": {"scenario_id":"consumer", "qualification_operation_id":"a".repeat(64), "prerequisite_measurement_attempt_id":"b".repeat(64)},
+                "scenario_id":"consumer",
                 "maximum_duration_ms":300_000,
             },
             "expected_command_output":"/workspace\nripgrep fixture\n",
@@ -245,14 +246,50 @@ mod control_tests {
             .unwrap()
             .remove("qualification_worker");
         assert!(serde_json::from_value::<ConsumerVerifierConfiguration>(missing_q).is_err());
-        let mut predecessor = value.clone();
-        predecessor["schema"] = "ryeos.codex.consumer_verifier.v2".into();
-        assert!(
-            serde_json::from_value::<ConsumerVerifierConfiguration>(predecessor)
-                .unwrap()
-                .validate()
-                .is_err()
-        );
+        for schema in [
+            "ryeos.codex.consumer_verifier.v2",
+            "ryeos.codex.consumer_verifier.v3",
+        ] {
+            let mut predecessor = value.clone();
+            predecessor["schema"] = schema.into();
+            assert!(
+                serde_json::from_value::<ConsumerVerifierConfiguration>(predecessor)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
+        for field in [
+            "qualification_operation_id",
+            "prerequisite_measurement_attempt_id",
+            "inputs",
+        ] {
+            let mut injected = value.clone();
+            injected["controller"][field] = serde_json::json!("a".repeat(64));
+            assert!(serde_json::from_value::<ConsumerVerifierConfiguration>(injected).is_err());
+        }
+        let mut old_controller = value.clone();
+        old_controller["controller"] = serde_json::json!({
+            "inputs":{"scenario_id":"consumer", "qualification_operation_id":"a".repeat(64), "prerequisite_measurement_attempt_id":"b".repeat(64)},
+            "maximum_duration_ms":300_000,
+        });
+        assert!(serde_json::from_value::<ConsumerVerifierConfiguration>(old_controller).is_err());
+        let mut missing_scenario = value.clone();
+        missing_scenario["controller"]
+            .as_object_mut()
+            .unwrap()
+            .remove("scenario_id");
+        assert!(serde_json::from_value::<ConsumerVerifierConfiguration>(missing_scenario).is_err());
+        for scenario in ["", "has/slash", " leading", &"a".repeat(129)] {
+            let mut changed = value.clone();
+            changed["controller"]["scenario_id"] = scenario.into();
+            assert!(
+                serde_json::from_value::<ConsumerVerifierConfiguration>(changed)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
         let mut missing_controller = value.clone();
         missing_controller
             .as_object_mut()
@@ -345,7 +382,7 @@ pub struct ConsumerVerifierConfiguration {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsumerControllerSelection {
-    pub inputs: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
+    pub scenario_id: String,
     pub maximum_duration_ms: u64,
 }
 
@@ -362,10 +399,13 @@ pub enum ConsumerOuterNetwork {
 impl ConsumerVerifierConfiguration {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "ryeos.codex.consumer_verifier.v3",
+            self.schema == "ryeos.codex.consumer_verifier.v4",
             "unsupported consumer verifier configuration"
         );
-        self.controller.inputs.validate()?;
+        ConsumerVerificationScenarioSelection {
+            scenario_id: self.controller.scenario_id.clone(),
+        }
+        .validate()?;
         ensure!(
             (1..=300_000).contains(&self.controller.maximum_duration_ms),
             "consumer controller duration exceeds its finite allowance"
@@ -1286,11 +1326,27 @@ impl ConsumerInputRecord {
         let configuration: ConsumerVerifierConfiguration =
             serde_json::from_value(parameters.clone())?;
         configuration.validate()?;
-        configuration
-            .controller
-            .inputs
-            .require_coordinate(&self.coordinate)?;
+        let invocation = self.consumer_invocation()?;
+        ensure!(
+            configuration.controller.scenario_id == invocation.scenario_id,
+            "consumer static scenario differs from sealed invocation"
+        );
         Ok(configuration)
+    }
+
+    /// Occurrence selectors come only from the authenticated sealed purpose.
+    /// The static policy chooses a scenario and cannot carry dynamic IDs.
+    pub(crate) fn consumer_invocation(&self) -> Result<&ConsumerVerificationInputSelection> {
+        let invocation = self
+            .purpose
+            .consumer_invocation
+            .as_ref()
+            .context("consumer input has no sealed invocation")?;
+        self.purpose.require_consumer_invocation(
+            &invocation.qualification_operation_id,
+            &self.coordinate,
+        )?;
+        Ok(invocation)
     }
 
     /// Open a dedicated privately extracted consumer archive. The caller must
@@ -1542,16 +1598,9 @@ impl ConsumerInputRecord {
     /// run channel. The caller still verifies the archive digest and authenticates
     /// that channel; arbitrary deserialized intent data is not run authority.
     pub fn validate_attempt(&self, intent: &RestoredVerifierAttemptIntent) -> Result<()> {
-        self.validate()?;
-        ensure!(
-            intent.qualification_operation_id
-                == self
-                    .scripted_configuration()?
-                    .controller
-                    .inputs
-                    .qualification_operation_id,
-            "consumer attempt differs from signed qualification selection"
-        );
+        self.scripted_configuration()?;
+        self.purpose
+            .require_consumer_invocation(&intent.qualification_operation_id, &self.coordinate)?;
         self.0.validate_attempt(intent)
     }
 

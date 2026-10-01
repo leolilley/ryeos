@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T04:05:39Z:da28fd91e432dccf3a4a78c874326996e9371cc416b9d435c82fd39cc471f42c:va6g8ag5UV6FzIt8cEJSM2nA+KcndS57WmUJ1D9m1iW8DUpWhbVxv/Dcmqt6KfIbyAQrXJHoI5x31k1CnBYcCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T04:33:31Z:9aa6ee9a9d1b124776145a4939635ea1401a83cf58b3bf0125b3fb068465b5f1:OlIfsLGxrsJKcClW4gDeIPclp65sivDWPUQ0l93bjKos2m4bZuguiJCdTFl5SXOSsNWQ81GJeqMYW8y2YECiAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -10,12 +10,28 @@ An ordinary Tool launch cannot mint the sealed qualification-purpose grant.
 
 ## Invocation and protected inputs
 
-The signed Codex configuration v3 selects the scenario, qualification operation,
-prerequisite owner-measurement attempt and a finite controller duration. The
-inputs callback accepts these bounded selectors. The daemon derives root,
-capsule, purpose, subject, admitted use and scenario-source commitments from
-the live admitted callback grant. It derives the measurement observation digest
-from the canonical inner owner-measurement observation. The capsule hash cannot
+The signed Codex configuration v4 selects the scenario and a finite controller
+duration. The actual qualification operation and prerequisite owner-measurement
+attempt belong to the invocation, not those static signed parameters. The launch
+request carries a typed selection; the daemon authenticates its observed owner
+measurement, exact qualification, original live occurrence and current protected
+source selection before root admission and rechecks before sealing. Current-only
+purpose v6 commits that full invocation as a required nullable field. Nonconsumer
+purposes retain null; unsupported consumer lanes acquire no authority.
+
+The inputs callback accepts only the closed scenario selector. The daemon derives
+operation and prerequisite IDs from the sealed purpose, and root, capsule,
+subject, admitted use and scenario-source commitments from the live admitted
+callback grant. The measurement observation digest comes from the canonical
+inner owner-measurement observation. Later authentication joins qualification
+operation explicitly as well as scenario/prerequisite, because the coordinate
+does not contain the operation ID. Static parameter digest equality, checked
+Bundle generation and original deadlines remain mandatory.
+
+Author static signed recipe, scenario, policy and node profile before creating
+the actual occurrence and measurement. Launch with those real retained selectors
+without rewriting/reloading static policy afterward. This avoids changing the
+selected Bundle generation to insert per-run IDs. The capsule hash still cannot
 be a prelaunch parameter, because the capsule commits those parameters.
 
 The daemon authenticates the resulting coordinate against the born root,
@@ -136,7 +152,7 @@ required observations refuse rather than truncate or reconstruct evidence.
 Existing execution arguments, provider, credentials, routes and lifecycle State
 authority are preserved. Raw events still need an explicit signed setup opt-in.
 
-Current-only consumer-verifier configuration v3 requires a finite signed Q
+Current-only consumer-verifier configuration v4 requires a finite signed Q
 command expectation: remote environment, command, command presentation, cwd,
 output and successful exit code. The product interpreter binds the actual setup
 thread and turn to the retained request, lifecycle observations and manifest;
@@ -221,11 +237,30 @@ refuses a Q reference. Immutable publication/recovery retains the Q manifest and
 chunks in its verified closure. Historical reads require neither an unexpired
 callback nor an active current credential, and grant no fresh execution.
 
+## Ordinary Worker admission remains separate
+
+Ordinary external Worker admission still requires `bounded_candidate_capture`,
+`candidate_only_execution`, `controller_credential_exclusion`,
+`native_writer_exclusion` and `no_local_execution_fallback`. The finite two-claim
+consumer workflow does not satisfy that admission. Its exact successful Q
+command and settlement are not explicit local-fallback refusal or a production-Q
+synthetic controller-canary denial. Its read-only workspace and zero exports do
+not provide a positive Q capture. The separate independent diagnostic proves
+its own negative probes and capture on a distinct occurrence; identical artifact
+bytes do not move those facts to Q's runtime instance.
+
+Keep the ordinary admission gate closed until its actual evidence obligations
+are satisfied. Extend finite signed probes only with deliberate bounded meanings
+and the existing execution/return authority. Never echo the five names into the
+allowlist, probe real credential bytes, fabricate an export from a read-only
+workspace, or relabel diagnostic testimony as production-Q exclusion.
+
 These are reviewed source contracts, not installed qualification evidence.
 There is not yet an admitted authored Q scenario with final captured-product
 identities, credential selection and raw-event setup. The current product
-relationship has no consumer qualification policy binding. Compilation and
-every required operational acceptance gate remain open. This source preparation
+relationship has no consumer qualification policy binding. The focused libraries/binaries type-check passed at `c41137ef5` before this
+invocation correction. Validation of the combined correction and every required
+operational acceptance gate remain open. This source preparation
 authorizes no installation, paid execution or publication.
 
 Carry the existing authenticated callback invocation through Q admission;

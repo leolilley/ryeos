@@ -58,6 +58,8 @@ impl ConsumerInputRecord {
 
     pub fn validate_attempt(&self, intent: &RestoredVerifierAttemptIntent) -> Result<()> {
         self.validate()?;
+        self.purpose
+            .require_consumer_invocation(&intent.qualification_operation_id, &self.coordinate)?;
         let RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &intent.purpose else {
             anyhow::bail!("owner measurement cannot consume a consumer input archive");
         };

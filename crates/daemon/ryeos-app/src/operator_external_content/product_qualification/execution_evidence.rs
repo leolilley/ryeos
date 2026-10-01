@@ -375,6 +375,7 @@ fn authenticate_consumer_root_for_owner(
     if purpose.owner_fingerprint != owner_fingerprint {
         bail!("consumer verification differs from sealed qualification purpose");
     }
+    purpose.require_consumer_invocation(qualification_operation_id, coordinate)?;
     purpose.validate_remote_consumer_coordinate(coordinate, selection)?;
     let content = purpose
         .consumer_content
@@ -904,6 +905,9 @@ fn corroborate_remote_consumer_references(
             &input_bytes,
         )?;
     input.validate_attempt(&attempt.intent)?;
+    input
+        .purpose
+        .require_consumer_invocation(&attempt.intent.qualification_operation_id, coordinate)?;
     if !input
         .purpose
         .execution_view()?

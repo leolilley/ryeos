@@ -108,12 +108,29 @@ impl InstalledRuntimeSnapshotQualificationBinding {
         &self,
         coordinate: &ConsumerRuntimeVerificationCoordinate,
     ) -> Result<&ConsumerRuntimeVerifierSelection> {
+        coordinate.validate()?;
+        self.consumer_verifier_for_source(
+            &coordinate.scenario_id,
+            &coordinate.scenario_source_digest,
+        )
+    }
+
+    /// Exact static source selection before a verifier root exists.
+    pub(crate) fn consumer_verifier_for_source(
+        &self,
+        scenario_id: &str,
+        scenario_source_digest: &str,
+    ) -> Result<&ConsumerRuntimeVerifierSelection> {
         let selection = self
             .document
             .consumer_verifiers
-            .get(&coordinate.scenario_id)
+            .get(scenario_id)
             .context("signed qualification profile has no selected consumer verifier")?;
-        selection.validate_coordinate(coordinate)?;
+        selection.validate()?;
+        ensure!(
+            selection.scenario_source_digest == scenario_source_digest,
+            "signed qualification profile selected a different consumer source"
+        );
         Ok(selection)
     }
     pub(crate) fn id(&self) -> &str {

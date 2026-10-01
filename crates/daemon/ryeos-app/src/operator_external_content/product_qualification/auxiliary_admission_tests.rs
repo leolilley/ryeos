@@ -343,6 +343,7 @@ fn seed_auxiliary_qualification_in_context(
     let finalized =
         finalized_current(fixture, &current).context("relock finalized auxiliary checker")?;
     let purpose = QualificationLaunchPurpose {
+        consumer_invocation: None,
         schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
         launch_id: format!("L-{}", "1".repeat(32)),
         owner_fingerprint: fixture.context.fingerprint.clone(),
@@ -1181,6 +1182,7 @@ fn pinned_fixture(fixture: &Fixture) -> Result<PinnedFixture> {
         }),
     )?;
     let request = launch::ProductQualificationLaunchRequest {
+        consumer_invocation: None,
         launch_id: format!("L-{}", "2".repeat(32)),
         witness_hash,
         witness_source: ProductWitnessSource::LocalCapture {},
@@ -1389,6 +1391,7 @@ fn seal_complete_launch(
         finalized_current(fixture, &current).context("relock complete verifier for sealing")?;
     let consumer_content = prepared.consumer_content_identity()?;
     let purpose = QualificationLaunchPurpose {
+        consumer_invocation: None,
         schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
         launch_id: prepared.launch_id.clone(),
         owner_fingerprint: prepared.owner_fingerprint.clone(),

@@ -15401,6 +15401,16 @@ impl StateStore {
             .quarantine_snapshot_qualification_attempt(operation_id)
     }
 
+    pub(crate) fn observed_consumer_invocation_prerequisite(
+        &self,
+        owner_principal: &str,
+        selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
+    ) -> Result<runtime_db::runtime_snapshot_qualification::SnapshotQualificationRecord> {
+        self.lock()?
+            .runtime_db
+            .observed_consumer_invocation_prerequisite(owner_principal, selection)
+    }
+
     pub(crate) fn restored_verifier_attempt(
         &self,
         operation_id: &str,

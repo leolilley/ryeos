@@ -86,6 +86,8 @@ impl UdsRuntimeClient {
     }
 
     /// Read authenticated consumer record inputs for this exact verifier root.
+    /// Selection is closed to the static scenario; operation and prerequisite
+    /// identities are derived from the sealed purpose by the daemon.
     /// No executable, provider credential or contact permission is returned.
     pub async fn consumer_verification_inputs(
         &self,

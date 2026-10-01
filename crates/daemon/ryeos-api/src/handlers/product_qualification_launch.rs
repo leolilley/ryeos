@@ -505,6 +505,12 @@ async fn handle_source(
     let consumer_definitions = consumer_content
         .as_ref()
         .map(|content| content.definitions.clone());
+    let consumer_invocation = match &prepared {
+        PreparedQualificationLaunch::CapturedProduct(product) => {
+            product.consumer_invocation.clone()
+        }
+        PreparedQualificationLaunch::ActivatedContent { .. } => None,
+    };
     let purpose = QualificationLaunchPurpose {
         schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.to_string(),
         launch_id: prepared.launch_id().to_owned(),
@@ -513,6 +519,7 @@ async fn handle_source(
         policy_source: prepared.policy_source().clone(),
         consumer_definitions,
         consumer_content,
+        consumer_invocation,
         producer_recipe_sources,
         remote_verifier_sources,
         subject_declaration_id: prepared

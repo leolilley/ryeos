@@ -503,7 +503,51 @@ mod tests {
             },
             contact_deadline_exceeded: false,
         };
+        let invocation = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection {
+            scenario_id: "codex-runtime".into(),
+            qualification_operation_id: intent.operation_id.clone(),
+            prerequisite_measurement_attempt_id: verifier.operation_id.clone(),
+        };
+        // Prelaunch selectors require actual observed owner evidence. No
+        // accepted-root/capsule identifiers have been minted at this point.
+        assert!(
+            db.observed_consumer_invocation_prerequisite(&intent.owner_principal, &invocation)
+                .is_err()
+        );
         db.bind_restored_verifier_observation(&observation).unwrap();
+        let admitted_occurrence = db
+            .observed_consumer_invocation_prerequisite(&intent.owner_principal, &invocation)
+            .unwrap();
+        assert_eq!(admitted_occurrence.intent, intent);
+        assert!(
+            db.observed_consumer_invocation_prerequisite(&"0".repeat(64), &invocation)
+                .is_err()
+        );
+        let mut wrong_operation = invocation.clone();
+        wrong_operation.qualification_operation_id = "0".repeat(64);
+        assert!(
+            db.observed_consumer_invocation_prerequisite(&intent.owner_principal, &wrong_operation)
+                .is_err()
+        );
+        let mut absent_measurement = invocation.clone();
+        absent_measurement.prerequisite_measurement_attempt_id = "0".repeat(64);
+        assert!(
+            db.observed_consumer_invocation_prerequisite(
+                &intent.owner_principal,
+                &absent_measurement
+            )
+            .is_err()
+        );
+        let expires_at =
+            admitted_occurrence.created_at_ms + i64::from(intent.maximum_lifetime_seconds) * 1000;
+        assert!(
+            super::super::restored_verifier_attempt::require_live_occurrence(
+                &db.conn,
+                &admitted_occurrence,
+                expires_at
+            )
+            .is_err()
+        );
         assert!(db.restored_verifier_blob_roots().unwrap().is_empty());
         assert!(
             db.restored_verifier_attempt(&verifier.operation_id)
@@ -572,6 +616,14 @@ mod tests {
         };
         termination.operation_id = termination.derived_operation_id().unwrap();
         db.reserve_qualification_termination(&termination).unwrap();
+        let refused_invocation = db
+            .observed_consumer_invocation_prerequisite(&intent.owner_principal, &invocation)
+            .unwrap_err();
+        assert!(
+            refused_invocation
+                .to_string()
+                .contains("retained termination intent")
+        );
         assert!(matches!(
             db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
             super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::StartAttempt(_)
@@ -696,6 +748,20 @@ mod tests {
                 String::from_utf8(ryeos_external_execution_contract::canonical_json(&consumer).unwrap()).unwrap(),
                 String::from_utf8(ryeos_external_execution_contract::canonical_json(&selection).unwrap()).unwrap(), consumer_input_blob_hash, now],
         ).unwrap();
+        let mut consumer_as_prerequisite = invocation.clone();
+        consumer_as_prerequisite.prerequisite_measurement_attempt_id =
+            consumer.operation_id.clone();
+        let refused_consumer = db
+            .observed_consumer_invocation_prerequisite(
+                &intent.owner_principal,
+                &consumer_as_prerequisite,
+            )
+            .unwrap_err();
+        assert!(
+            refused_consumer
+                .to_string()
+                .contains("not owner measurement")
+        );
         assert_eq!(
             db.restored_verifier_blob_roots().unwrap(),
             vec![consumer_input_blob_hash.clone()]

@@ -1,7 +1,7 @@
-# ryeos:signed:2026-10-01T03:00:38Z:3ab94e590cdba8ef2d13d2f5968d29be7432015ce51ec6cd4e275b2fc7df0560:J2j55KIMy3vTxnn5o+hkN5BbdLufVwSqdzay75XIPcpZzFSG9Dh+tAnSfp9cZXJuWOUIMZ9x4uyVZ2m0humvDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-01T04:33:31Z:a8c1c0c6deb69a74c13c54108e1dec91c93bb231b7be81920756ba6ce230b512:2e/XN2vi3BBN2/nxQRu9njXdy7jzjw5iHadry95dxq1UBultJKor7eyKRWslK6DxIyXEBWaiVkqsgXHdPp5dAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
-description: Observe the exact admitted consumer runtime through restricted daemon callbacks; qualification remains refused until the Q transcript joins.
+description: Check the actual Q command and independent diagnostic through restricted daemon callbacks; propose finite claims for issuer corroboration.
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/qualification_consumer_callback
 effects: live
@@ -16,21 +16,14 @@ config_schema:
   additionalProperties: false
   required: [schema, controller, expected_command_output, responses_origin, outer_network, qualification_worker, external_candidate_qualification_context]
   properties:
-    schema: {type: string, enum: [ryeos.codex.consumer_verifier.v3]}
+    schema: {type: string, enum: [ryeos.codex.consumer_verifier.v4]}
     controller:
       type: object
       additionalProperties: false
-      required: [inputs, maximum_duration_ms]
+      required: [scenario_id, maximum_duration_ms]
       properties:
+        scenario_id: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$'}
         maximum_duration_ms: {type: integer, minimum: 1, maximum: 300000}
-        inputs:
-          type: object
-          additionalProperties: false
-          required: [scenario_id, qualification_operation_id, prerequisite_measurement_attempt_id]
-          properties:
-            scenario_id: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$'}
-            qualification_operation_id: {type: string, pattern: '^[0-9a-f]{64}$'}
-            prerequisite_measurement_attempt_id: {type: string, pattern: '^[0-9a-f]{64}$'}
     expected_command_output: {type: string}
     responses_origin: {type: string}
     outer_network: {type: string, enum: [shared_guest_loopback]}

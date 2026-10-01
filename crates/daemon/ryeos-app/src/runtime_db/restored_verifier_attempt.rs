@@ -414,12 +414,38 @@ pub(super) fn read_retained_consumer_prerequisite(
     owner_principal: &str,
     coordinate: &ConsumerRuntimeVerificationCoordinate,
 ) -> Result<RestoredVerifierAttemptRecord> {
+    coordinate.validate()?;
+    let record = read_retained_owner_measurement_prerequisite(
+        conn,
+        qualification_operation_id,
+        owner_principal,
+        &coordinate.prerequisite_measurement_attempt_id,
+    )?;
+    let observation = record
+        .observation
+        .as_ref()
+        .context("consumer prerequisite observation absent")?
+        .owner_measurement()?;
+    ensure!(
+        ryeos_state::objects::canonical_value_digest(&serde_json::to_value(observation)?)?
+            == coordinate.prerequisite_measurement_observation_digest,
+        "consumer prerequisite differs from its retained observation digest"
+    );
+    Ok(record)
+}
+
+fn read_retained_owner_measurement_prerequisite(
+    conn: &Connection,
+    qualification_operation_id: &str,
+    owner_principal: &str,
+    measurement_attempt_id: &str,
+) -> Result<RestoredVerifierAttemptRecord> {
     // Reject a consumer prerequisite before `read` follows its own prerequisite.
     // This both enforces the owner-only root and bounds corrupt-record recursion.
     let raw: Option<String> = conn
         .query_row(
             "SELECT intent_json FROM restored_verifier_attempt WHERE operation_id=?1",
-            [&coordinate.prerequisite_measurement_attempt_id],
+            [measurement_attempt_id],
             |row| row.get(0),
         )
         .optional()?;
@@ -436,7 +462,7 @@ pub(super) fn read_retained_consumer_prerequisite(
         ),
         "consumer prerequisite is not owner measurement"
     );
-    let record = read(conn, &coordinate.prerequisite_measurement_attempt_id)?
+    let record = read(conn, measurement_attempt_id)?
         .context("consumer verification prerequisite is absent")?;
     ensure!(
         record.phase == RestoredVerifierAttemptPhase::Observed
@@ -461,9 +487,8 @@ pub(super) fn read_retained_consumer_prerequisite(
         .as_ref()
         .context("consumer prerequisite observation is absent")?
         .owner_measurement()?
-        .validate_consumer_prerequisite(
+        .validate_for_retained(
             &record.intent,
-            coordinate,
             &source.intent,
             source
                 .locator
@@ -476,6 +501,15 @@ pub(super) fn read_retained_consumer_prerequisite(
             &qualification.intent,
             occurrence,
         )?;
+    ensure!(
+        !record
+            .observation
+            .as_ref()
+            .unwrap()
+            .owner_measurement()?
+            .contact_deadline_exceeded,
+        "consumer prerequisite owner measurement exceeded its contact deadline"
+    );
     Ok(record)
 }
 
@@ -561,6 +595,37 @@ impl RuntimeDb {
             read(&tx, &observation.operation_id)?.context("consumer observation vanished")?;
         tx.commit()?;
         Ok(current)
+    }
+
+    /// Read-only prelaunch admission. No born root/capsule coordinate exists
+    /// yet; these exact selectors never grant contact or renew occurrence life.
+    pub(crate) fn observed_consumer_invocation_prerequisite(
+        &self,
+        owner_principal: &str,
+        selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
+    ) -> Result<super::runtime_snapshot_qualification::SnapshotQualificationRecord> {
+        selection.validate()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        read_retained_owner_measurement_prerequisite(
+            &tx,
+            &selection.qualification_operation_id,
+            owner_principal,
+            &selection.prerequisite_measurement_attempt_id,
+        )?;
+        let qualification = super::runtime_snapshot_qualification::read(
+            &tx,
+            &selection.qualification_operation_id,
+        )?
+        .context("consumer invocation qualification is absent")?;
+        ensure!(qualification.phase == super::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound,
+            "consumer invocation has no bound occurrence");
+        require_live_occurrence(
+            &tx,
+            &qualification,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )?;
+        tx.commit()?;
+        Ok(qualification)
     }
 
     /// Load authenticated prerequisite evidence without granting contact.

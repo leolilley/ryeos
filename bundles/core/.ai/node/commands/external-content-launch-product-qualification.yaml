@@ -1,13 +1,13 @@
-# ryeos:signed:2026-09-29T01:35:17Z:05d90543a1741758a2c391306cf05f8fd6a2af682c468aaaf0740a15ee6c8f93:FOnURTDzTFaUfa9khBiMRCXh55yEA+2TZ5dtjbDWWT89ExMoVdKML20+IdxH+CWEoKhDxt36oXBXicmi8DtvDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-01T04:33:31Z:f75420b58e8a8817259f16bf9c6caf959e05a73a887f27d5ce2b929b7498e585:nZbxCBaIKzmsadbao6O/JRVAW8ownb8RoqdHeqUze6o3V2650+LZ2/6XijVvvZmTfztBqPZBdYQjUN0rigBdAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, launch-product-qualification]
-description: Launch the signed verifier for one exact product qualification relationship, with exact auxiliary Root selections when its signed slots require qualified dependencies
+description: Launch the signed verifier for one exact product qualification relationship, with exact auxiliary Root selections when its signed slots require qualified dependencies; consumer policies require the actual scenario, qualification operation and prerequisite owner-measurement invocation
 parameter_binding:
   mode: tail_object
   input_flag: input
   single_json_object_arg: true
   flag_key_normalization: hyphen_to_underscore
 help:
-  usage: "ryeos external-content launch-product-qualification '{\"launch_id\":\"<launch-id>\",\"witness_hash\":\"<exact-witness-hash>\",\"witness_source\":{\"kind\":\"local_capture\"},\"relationship_name\":\"<signed-qualification-relationship>\",\"project_context\":{\"snapshot_hash\":\"<exact-lowercase-project-snapshot-hash>\"}}'; use \"project_context\":null only for a signed projectless fixed-pin verifier"
+  usage: "ryeos external-content launch-product-qualification '{\"launch_id\":\"<launch-id>\",\"witness_hash\":\"<exact-witness-hash>\",\"witness_source\":{\"kind\":\"local_capture\"},\"relationship_name\":\"<signed-qualification-relationship>\",\"project_context\":{\"snapshot_hash\":\"<exact-lowercase-project-snapshot-hash>\"}}'; use \"project_context\":null only for a signed projectless fixed-pin verifier; consumer policies additionally require a consumer_invocation object containing scenario_id, qualification_operation_id and prerequisite_measurement_attempt_id"
 dispatch:
   kind: execute_ref
   execute: service:external-content/launch-product-qualification

@@ -632,6 +632,7 @@ pub(crate) fn launch_purpose() -> QualificationLaunchPurpose {
         },
         consumer_definitions: None,
         consumer_content: None,
+        consumer_invocation: None,
         producer_recipe_sources: BTreeMap::new(),
         remote_verifier_sources: BTreeMap::new(),
         subject_declaration_id: policy.subject_declaration_id.clone(),
@@ -1601,9 +1602,13 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
             .collect(),
     )
     .unwrap();
+    let mut requirement = crate::external_execution::admission::test_support::fixture_requirement();
+    requirement.runtime_product_declaration_id = content.runtime_realization.id.clone();
+    requirement.runtime_recipe.executable_relative_path =
+        content.runtime_member.relative_path.clone();
     let qualified_use = crate::external_execution::admission::ExternalCandidateQualificationUse {
         schema: crate::external_execution::admission::QUALIFICATION_CONTEXT_SCHEMA.into(),
-        requirement_digest: "1".repeat(64), profile_hash: content.worker_profile_hash.clone(),
+        requirement_digest: requirement.qualification_requirement_digest().unwrap(), profile_hash: content.worker_profile_hash.clone(),
         source_binding_hash: content.worker_source.binding_hash.clone(),
         source_content_manifest_hash: content.worker_source.content_manifest_hash.clone(),
         provider_executable_manifest_hash: "2".repeat(64),
@@ -1612,6 +1617,11 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
     };
     purpose.policy_source.policy.verifier_parameters = qualified_use.parameters().unwrap();
     content.qualification_use = Some(qualified_use);
+    purpose.consumer_invocation = Some(ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection {
+        scenario_id: "remote_codex".into(),
+        qualification_operation_id: "a".repeat(64),
+        prerequisite_measurement_attempt_id: "b".repeat(64),
+    });
     purpose.admitted_parameters_digest = purpose
         .policy_source
         .policy
@@ -1633,6 +1643,84 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
         use_digest: canonical_value_digest(&serde_json::to_value(purpose.consumer_content.as_ref().unwrap().qualification_use.as_ref().unwrap()).unwrap()).unwrap(),
         prerequisite_measurement_attempt_id: "b".repeat(64), prerequisite_measurement_observation_digest: "c".repeat(64),
     };
+    purpose
+        .require_consumer_invocation(&"a".repeat(64), &coordinate)
+        .unwrap();
+    assert!(
+        purpose
+            .require_consumer_invocation(&"d".repeat(64), &coordinate)
+            .is_err()
+    );
+    let mut wrong_prerequisite = coordinate.clone();
+    wrong_prerequisite.prerequisite_measurement_attempt_id = "d".repeat(64);
+    assert!(
+        purpose
+            .require_consumer_invocation(&"a".repeat(64), &wrong_prerequisite)
+            .is_err()
+    );
+    assert!(
+        purpose
+            .validate_remote_consumer_coordinate(&wrong_prerequisite, &selection)
+            .is_err()
+    );
+    let mut missing_invocation = purpose.clone();
+    missing_invocation.consumer_invocation = None;
+    assert!(missing_invocation.validate().is_err());
+    let mut unknown_scenario = purpose.clone();
+    unknown_scenario
+        .consumer_invocation
+        .as_mut()
+        .unwrap()
+        .scenario_id = "absent".into();
+    assert!(unknown_scenario.validate().is_err());
+    let mut changed_operation = purpose.clone();
+    changed_operation
+        .consumer_invocation
+        .as_mut()
+        .unwrap()
+        .qualification_operation_id = "d".repeat(64);
+    changed_operation.validate().unwrap();
+    assert_ne!(
+        canonical_value_digest(&serde_json::to_value(&purpose).unwrap()).unwrap(),
+        canonical_value_digest(&serde_json::to_value(&changed_operation).unwrap()).unwrap()
+    );
+    assert_eq!(
+        purpose.admitted_parameters_digest,
+        changed_operation.admitted_parameters_digest
+    );
+    let record = crate::external_content::qualification_consumer_record::ConsumerInputRecord {
+        schema: 2,
+        purpose: purpose.clone(),
+        coordinate: coordinate.clone(),
+        selection: selection.clone(),
+        requirement,
+        scenario_input: json!({}),
+    };
+    let mut attempt = ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent {
+        schema: 2,
+        operation_id: String::new(),
+        qualification_operation_id: "a".repeat(64),
+        restored_occurrence_id: "fixture-occurrence".into(),
+        verifier_artifact_hash: selection.verifier_artifact_hash.clone(),
+        upload_sha256: "e".repeat(64), upload_bytes: 1,
+        purpose: ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate: coordinate.clone(), nonce_hex: "f".repeat(64), guest_runtime_manifest_hash: "e".repeat(64),
+        },
+        attempt_deadline_ms: 1000,
+    };
+    attempt.operation_id = attempt.derived_operation_id().unwrap();
+    record.validate_attempt(&attempt).unwrap();
+    attempt.qualification_operation_id = "d".repeat(64);
+    // A self-consistent attempt for another operation still cannot consume this sealed record.
+    attempt.operation_id = attempt.derived_operation_id().unwrap();
+    attempt.consumer_challenge_digest().unwrap();
+    assert!(
+        record
+            .validate_attempt(&attempt)
+            .unwrap_err()
+            .to_string()
+            .contains("sealed invocation")
+    );
     // Pure data joins do not prove a born root or prerequisite measurement.
     purpose
         .validate_remote_consumer_coordinate(&coordinate, &selection)
