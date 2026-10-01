@@ -61,6 +61,7 @@ pub(crate) fn restore_workspace_outputs_before_view(
     capture: &WorkspaceOutputCapture,
     policy: &ProjectSnapshotPolicy,
     budget: &PrivateMaterializationBudget,
+    process_pin_owner: Option<&ryeos_app::state_store::StateStore>,
 ) -> anyhow::Result<()> {
     authority.ensure_guard(guard)?;
     capture.validate()?;
@@ -108,6 +109,7 @@ pub(crate) fn restore_workspace_outputs_before_view(
                 manifest_hash,
                 root.storage,
                 budget,
+                process_pin_owner,
             )?;
         }
         target.ensure_path_binding()?;
@@ -411,14 +413,14 @@ mod tests {
             capture.result_project_snapshot_hash = "d".repeat(64);
             assert!(
                 restore_workspace_outputs_before_view(
-                    &authority, &guard, &source, &capture, &policy, &budget
+                    &authority, &guard, &source, &capture, &policy, &budget, None
                 )
                 .is_err()
             );
             assert!(!target.path().join("products").exists());
             capture.result_project_snapshot_hash = snapshot_hash;
             restore_workspace_outputs_before_view(
-                &authority, &guard, &source, &capture, &policy, &budget,
+                &authority, &guard, &source, &capture, &policy, &budget, None,
             )
             .unwrap();
             assert!(!target.path().join("products/absent").exists());
@@ -449,7 +451,7 @@ mod tests {
             assert!(source.ensure_path_binding().is_err());
             assert!(
                 restore_workspace_outputs_before_view(
-                    &authority, &guard, &source, &capture, &policy, &budget
+                    &authority, &guard, &source, &capture, &policy, &budget, None
                 )
                 .is_err()
             );

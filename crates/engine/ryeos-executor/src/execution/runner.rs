@@ -3967,7 +3967,13 @@ fn restore_process_workspace_output_generation(
     .ok_or_else(|| anyhow::anyhow!("workspace output capture policy is unavailable"))?;
     partition.validate_result_source_policy(&result, &policy)?;
     super::workspace_outputs::restore_workspace_outputs_before_view(
-        authority, guard, source, &capture, &policy, budget,
+        authority,
+        guard,
+        source,
+        &capture,
+        &policy,
+        budget,
+        Some(&state.state_store),
     )
 }
 

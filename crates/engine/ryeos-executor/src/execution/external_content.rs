@@ -1916,6 +1916,7 @@ pub(crate) fn restore_workspace_output_tree(
     manifest_hash: &str,
     storage: ryeos_state::external_content::products::ProductStorage,
     budget: &PrivateMaterializationBudget,
+    process_pin_owner: Option<&ryeos_app::state_store::StateStore>,
 ) -> anyhow::Result<()> {
     authority.ensure_guard(guard)?;
     if !target.entries_no_follow_bounded(1)?.is_empty() {
@@ -1924,15 +1925,18 @@ pub(crate) fn restore_workspace_output_tree(
     let cas = authority.cas_store()?;
     let cache =
         ExternalMaterializationCache::from_runtime_state_root(authority.runtime_directory().path());
+    // Production callers supply their ORIGINAL controller-owned store. CAS
+    // authority alone is sufficient for valid reuse or absent construction,
+    // but never waives current pins before deleting a corrupt generation.
+    let repair = match process_pin_owner {
+        Some(store) => ExternalRepairAuthority::Protected(store),
+        None => ExternalRepairAuthority::PreserveOnly,
+    };
     match storage {
         ryeos_state::external_content::products::ProductStorage::Content => {
             let closure = ryeos_state::VerifiedExternalContentClosure::load(&cas, manifest_hash)?;
-            let generation = cache.materialize_with(
-                &cas,
-                &closure,
-                ExternalContentKind::Tree,
-                ExternalRepairAuthority::PreserveOnly,
-            )?;
+            let generation =
+                cache.materialize_with(&cas, &closure, ExternalContentKind::Tree, repair)?;
             copy_materialized_tree(&generation.root, target, closure.manifest(), budget)?;
             verify_materialized_tree(&cas, target, closure.manifest())?;
         }
@@ -1951,7 +1955,7 @@ pub(crate) fn restore_workspace_output_tree(
                 manifest_hash,
                 &manifest,
                 ExternalContentKind::Tree,
-                ExternalRepairAuthority::PreserveOnly,
+                repair,
             )?;
             // Large shared objects must never become writable workspace
             // hardlinks. The existing private-copy budget owns reflink/copy.
@@ -3180,6 +3184,155 @@ mod tests {
             lillux::PinnedDirectory::open_or_create(&other_cache.root).unwrap();
             assert!(bind(&other).is_err());
             assert!(cache.sweep_to_budget_protected(0, &other).is_err());
+            assert!(path.join("unexpected").exists());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restoration_repairs_only_idle_unpinned_same_owner_generations() {
+        use super::super::cache::tests::{open_custody_store, storage_pin};
+        use ryeos_app::runtime_db::process_resource_custody::ProcessMaterializationCache;
+        use ryeos_state::external_content::products::ProductStorage;
+        use std::os::unix::fs::MetadataExt as _;
+        for storage in [ProductStorage::Content, ProductStorage::LargeContent] {
+            let dir = tempfile::tempdir().unwrap();
+            let app = dir.path().join("app");
+            let owner = open_custody_store(&app);
+            let authority = owner.pinned_state_authority().unwrap();
+            // All store/anchor initialization precedes the original CAS guard;
+            // opening another namespace while holding it is not this test's authority.
+            let other_app = dir.path().join("other-app");
+            let other = open_custody_store(&other_app);
+            let other_cache =
+                ExternalMaterializationCache::from_runtime_state_root(&other_app.join(".ai/state"));
+            lillux::PinnedDirectory::open_or_create(&other_cache.root).unwrap();
+            let guard = authority.acquire_shared_guard().unwrap();
+            let cas = authority.cas_store().unwrap();
+            let small = store_tree_closure(&cas, &[("payload", b"small runtime")]);
+            let large_store = authority.large_object_store().unwrap();
+            let input = dir.path().join("large-input");
+            let large_bytes = b"storage-only large runtime";
+            fs::write(&input, large_bytes).unwrap();
+            let file = fs::File::open(&input).unwrap();
+            let metadata = file.metadata().unwrap();
+            let ingested = large_store
+                .ingest_open_regular(
+                    file,
+                    ryeos_state::PinnedLargeObjectSourceIdentity {
+                        containing_device: metadata.dev(),
+                        inode: metadata.ino(),
+                        size: metadata.len(),
+                    },
+                    "payload",
+                    None,
+                )
+                .unwrap();
+            let manifest = ryeos_state::objects::ExternalLargeContentManifestObject {
+                schema: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA.to_owned(),
+                kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.to_owned(),
+                entry_count: 1,
+                total_bytes: ingested.size,
+                entries: vec![ryeos_state::objects::ExternalLargeContentManifestEntry {
+                    path: "payload".to_owned(),
+                    kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                    mode: Some(0o644),
+                    blob_hash: None,
+                    file_sha256: Some(ingested.file_sha256),
+                    size: Some(ingested.size),
+                    chunk_size: Some(ingested.chunk_size),
+                    chunk_hashes: ingested.chunk_hashes,
+                    target: None,
+                }],
+            };
+            manifest.validate().unwrap();
+            let large_hash = cas.store_object(&manifest.to_value().unwrap()).unwrap();
+            let hash = match storage {
+                ProductStorage::Content => small.manifest_hash(),
+                ProductStorage::LargeContent => &large_hash,
+            };
+            let cache = ExternalMaterializationCache::from_runtime_state_root(
+                authority.runtime_directory().path(),
+            );
+            let generation = match storage {
+                ProductStorage::Content => cache
+                    .materialize_with(
+                        &cas,
+                        &small,
+                        ExternalContentKind::Tree,
+                        ExternalRepairAuthority::Protected(&owner),
+                    )
+                    .unwrap(),
+                ProductStorage::LargeContent => cache
+                    .materialize_large_with(
+                        &cas,
+                        &large_store,
+                        hash,
+                        &manifest,
+                        ExternalContentKind::Tree,
+                        ExternalRepairAuthority::Protected(&owner),
+                    )
+                    .unwrap(),
+            };
+            let path = generation.source_path.clone();
+            fs::write(path.join("unexpected"), b"drift").unwrap();
+            let target =
+                lillux::PinnedDirectory::open_or_create(&dir.path().join("output")).unwrap();
+            let budget = PrivateMaterializationBudget::new(4096);
+            let restore = |store| {
+                restore_workspace_output_tree(
+                    &authority, &guard, &target, hash, storage, &budget, store,
+                )
+            };
+            assert!(
+                restore(Some(&owner)).is_err(),
+                "live generation must not be repaired"
+            );
+            assert!(target.entries_no_follow().unwrap().is_empty());
+            drop(generation);
+            assert!(
+                restore(None).is_err(),
+                "CAS authority alone must not authorize deletion"
+            );
+            assert!(restore(Some(&other)).is_err());
+            assert!(path.join("unexpected").exists());
+            assert!(target.entries_no_follow().unwrap().is_empty());
+            restore(Some(&owner)).unwrap();
+            let expected: &[u8] = match storage {
+                ProductStorage::Content => b"small runtime",
+                ProductStorage::LargeContent => large_bytes,
+            };
+            assert_eq!(fs::read(target.path().join("payload")).unwrap(), expected);
+            assert!(!path.join("unexpected").exists());
+            assert_ne!(
+                fs::metadata(path.join("payload")).unwrap().ino(),
+                fs::metadata(target.path().join("payload")).unwrap().ino()
+            );
+            // Durable retention still wins after the successful restore's
+            // temporary lease drops. Do not clear custody to manufacture a pass.
+            owner
+                .reserve_process_resource_launch(&storage_pin(
+                    &app,
+                    ProcessMaterializationCache::ExternalContent,
+                    hash,
+                ))
+                .unwrap();
+            fs::write(path.join("unexpected"), b"retained drift").unwrap();
+            let second =
+                lillux::PinnedDirectory::open_or_create(&dir.path().join("second-output")).unwrap();
+            assert!(
+                restore_workspace_output_tree(
+                    &authority,
+                    &guard,
+                    &second,
+                    hash,
+                    storage,
+                    &budget,
+                    Some(&owner)
+                )
+                .is_err()
+            );
+            assert!(second.entries_no_follow().unwrap().is_empty());
             assert!(path.join("unexpected").exists());
         }
     }
