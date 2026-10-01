@@ -10,6 +10,7 @@ pub mod consumer_outer_owner;
 pub mod consumer_protocol;
 pub mod consumer_record;
 pub mod consumer_termination;
+pub mod consumer_worker_transcript;
 pub mod guest_observation;
 pub mod native_guest;
 pub mod production_inputs;

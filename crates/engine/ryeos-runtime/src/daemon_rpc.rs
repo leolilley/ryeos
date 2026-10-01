@@ -263,6 +263,58 @@ impl DaemonRpcClient {
         Self::parse_response(&response_bytes, request_id)
     }
 
+    /// One dedicated RPC with an explicit response allocation ceiling and
+    /// the caller's original deadline. Oversized/partial responses discard
+    /// this one-use connection; request bytes are never replayed.
+    pub async fn request_dedicated_with_response_limit(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: lillux::time::MonotonicDeadline,
+        maximum_response_bytes: usize,
+    ) -> Result<Value, RpcError> {
+        let remaining = deadline.remaining();
+        if remaining.is_zero() {
+            return Err(RpcError::Timeout {
+                method: method.into(),
+                timeout_secs: 0,
+            });
+        }
+        let operation = async {
+            let request_id = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let frame = RpcRequestFrame {
+                request_id,
+                method,
+                params: &params,
+            };
+            let payload = rmp_serde::to_vec_named(&frame)?;
+            let mut stream = UnixStream::connect(&self.socket_path).await?;
+            framing::send_frame(&mut stream, &payload).await?;
+            let response_bytes =
+                framing::recv_frame_with_limit(&mut stream, maximum_response_bytes).await?;
+            if response_bytes.is_empty() {
+                return Err(RpcError::ConnectionClosed);
+            }
+            Self::parse_response(&response_bytes, request_id)
+        };
+        let result = tokio::time::timeout(remaining, operation).await;
+        // Synchronous decoding is bounded by bytes but cannot be preempted by
+        // an async timer. Recheck the original clock before exposing a result.
+        if deadline.has_elapsed() {
+            return Err(RpcError::Timeout {
+                method: method.into(),
+                timeout_secs: remaining.as_secs(),
+            });
+        }
+        match result {
+            Ok(result) => result,
+            Err(_) => Err(RpcError::Timeout {
+                method: method.into(),
+                timeout_secs: remaining.as_secs(),
+            }),
+        }
+    }
+
     /// One authoritative lifecycle handoff on a dedicated connection.
     ///
     /// Once the daemon begins applying such a request, a transport timeout
@@ -415,6 +467,38 @@ mod tests {
             "expected Timeout, got: {err:?}"
         );
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn dedicated_response_limit_discards_oversized_prefix_without_replay() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("bounded.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = framing::recv_frame(&mut stream).await.unwrap();
+            assert!(!request.is_empty());
+            stream.write_all(&1025u32.to_be_bytes()).await.unwrap();
+            // No response body is sent. Refusal must close this dedicated
+            // connection rather than await the body or send another request.
+            let mut byte = [0u8; 1];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+        });
+        let client = DaemonRpcClient::new(socket_path);
+        let error = client
+            .request_dedicated_with_response_limit(
+                "runtime.consumer_verification_observe",
+                serde_json::json!({}),
+                lillux::time::MonotonicDeadline::after(Duration::from_secs(1)),
+                1024,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, RpcError::Io(ref error) if error.kind() == std::io::ErrorKind::InvalidData)
+        );
+        task.await.unwrap();
     }
 
     #[tokio::test]

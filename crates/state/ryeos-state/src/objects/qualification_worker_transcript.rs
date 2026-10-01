@@ -11,6 +11,7 @@
 //! native death, provider settlement, or a qualification.
 
 use anyhow::{Context as _, ensure};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -68,6 +69,101 @@ pub struct QualificationWorkerTranscriptManifest {
     pub stream_sha256: String,
     pub stream_bytes: u64,
     pub chunks: Vec<QualificationWorkerTranscriptChunk>,
+}
+
+/// Exact manifest identity for bounded historical transcript readback. Root,
+/// occurrence and purpose authority must be joined by the admitting reader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationWorkerTranscriptReference {
+    pub manifest_hash: String,
+    pub manifest: QualificationWorkerTranscriptManifest,
+}
+
+impl QualificationWorkerTranscriptReference {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        hash("Q transcript manifest", &self.manifest_hash)?;
+        ensure!(
+            super::canonical_value_digest(&self.manifest.to_value()?)? == self.manifest_hash,
+            "Q transcript reference changed its exact manifest"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationWorkerTranscriptChunkSelection {
+    pub manifest_hash: String,
+    pub chunk_index: u32,
+}
+
+impl QualificationWorkerTranscriptChunkSelection {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        hash("Q transcript selected manifest", &self.manifest_hash)?;
+        ensure!(
+            u64::from(self.chunk_index)
+                < MAX_QUALIFICATION_WORKER_TRANSCRIPT_BYTES
+                    .div_ceil(MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES),
+            "Q transcript selected chunk exceeds the transcript ceiling"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationWorkerTranscriptChunkResponse {
+    pub manifest_hash: String,
+    pub chunk_index: u32,
+    pub blob_hash: String,
+    pub size_bytes: u64,
+    pub bytes_b64: String,
+}
+
+impl QualificationWorkerTranscriptChunkResponse {
+    /// Decode at most one declared chunk. A valid response proves exact bytes
+    /// only; complete stream verification and product interpretation follow.
+    pub fn verify_for(
+        &self,
+        reference: &QualificationWorkerTranscriptReference,
+        selection: &QualificationWorkerTranscriptChunkSelection,
+    ) -> anyhow::Result<Vec<u8>> {
+        reference.validate()?;
+        selection.validate()?;
+        ensure!(
+            selection.manifest_hash == reference.manifest_hash
+                && self.manifest_hash == reference.manifest_hash
+                && self.chunk_index == selection.chunk_index,
+            "Q transcript chunk response changed its selected manifest or index"
+        );
+        let chunk = reference
+            .manifest
+            .chunks
+            .get(usize::try_from(selection.chunk_index)?)
+            .context("Q transcript selected chunk is absent from its manifest")?;
+        ensure!(
+            self.blob_hash == chunk.blob_hash && self.size_bytes == chunk.size_bytes,
+            "Q transcript chunk response changed its declared blob or size"
+        );
+        // Manifest validation bounds this size to one MiB. Check the exact
+        // padded encoding length before the decoder can allocate its output.
+        let encoded_bytes = chunk.size_bytes.div_ceil(3) * 4;
+        ensure!(
+            self.bytes_b64.len() == usize::try_from(encoded_bytes)?,
+            "Q transcript chunk response exceeds or differs from its encoded size"
+        );
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.bytes_b64)
+            .context("decode Q transcript chunk")?;
+        ensure!(
+            bytes.len() == usize::try_from(chunk.size_bytes)?
+                && lillux::sha256_hex(&bytes) == chunk.blob_hash
+                && base64::engine::general_purpose::STANDARD.encode(&bytes) == self.bytes_b64,
+            "Q transcript chunk response changed its exact canonical bytes"
+        );
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -420,6 +516,100 @@ mod tests {
             }],
         };
         (manifest, bytes)
+    }
+
+    #[test]
+    fn bounded_readback_preserves_exact_manifest_and_stream() {
+        let (manifest, bytes) = manifest_and_chunk();
+        let reference = QualificationWorkerTranscriptReference {
+            manifest_hash: super::super::canonical_value_digest(&manifest.to_value().unwrap())
+                .unwrap(),
+            manifest,
+        };
+        let selection = QualificationWorkerTranscriptChunkSelection {
+            manifest_hash: reference.manifest_hash.clone(),
+            chunk_index: 0,
+        };
+        let response = QualificationWorkerTranscriptChunkResponse {
+            manifest_hash: reference.manifest_hash.clone(),
+            chunk_index: 0,
+            blob_hash: reference.manifest.chunks[0].blob_hash.clone(),
+            size_bytes: bytes.len() as u64,
+            bytes_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        };
+        let decoded = response.verify_for(&reference, &selection).unwrap();
+        assert_eq!(decoded, bytes);
+        reference.manifest.verify_chunks(&[decoded]).unwrap();
+
+        let mut wrong_reference = reference.clone();
+        wrong_reference.manifest.accepted_root_id = "T-substituted".into();
+        assert!(wrong_reference.validate().is_err());
+        wrong_reference.manifest_hash =
+            super::super::canonical_value_digest(&wrong_reference.manifest.to_value().unwrap())
+                .unwrap();
+        wrong_reference.validate().unwrap();
+        assert!(response.verify_for(&wrong_reference, &selection).is_err());
+
+        for changed in [
+            QualificationWorkerTranscriptChunkResponse {
+                chunk_index: 1,
+                ..response.clone()
+            },
+            QualificationWorkerTranscriptChunkResponse {
+                blob_hash: "0".repeat(64),
+                ..response.clone()
+            },
+            QualificationWorkerTranscriptChunkResponse {
+                size_bytes: response.size_bytes + 1,
+                ..response.clone()
+            },
+            QualificationWorkerTranscriptChunkResponse {
+                bytes_b64: base64::engine::general_purpose::STANDARD
+                    .encode(vec![b'x'; bytes.len()]),
+                ..response.clone()
+            },
+            QualificationWorkerTranscriptChunkResponse {
+                bytes_b64: "!".repeat(response.bytes_b64.len()),
+                ..response.clone()
+            },
+            QualificationWorkerTranscriptChunkResponse {
+                bytes_b64: format!("{}AAAA", response.bytes_b64),
+                ..response.clone()
+            },
+        ] {
+            assert!(changed.verify_for(&reference, &selection).is_err());
+        }
+        let absent = QualificationWorkerTranscriptChunkSelection {
+            chunk_index: 1,
+            ..selection.clone()
+        };
+        let absent_response = QualificationWorkerTranscriptChunkResponse {
+            chunk_index: 1,
+            ..response.clone()
+        };
+        assert!(absent_response.verify_for(&reference, &absent).is_err());
+        assert!(
+            QualificationWorkerTranscriptChunkSelection {
+                chunk_index: 112,
+                ..selection.clone()
+            }
+            .validate()
+            .is_err()
+        );
+
+        let mut value = serde_json::to_value(&reference).unwrap();
+        value["extra"] = json!(true);
+        assert!(serde_json::from_value::<QualificationWorkerTranscriptReference>(value).is_err());
+        let mut value = serde_json::to_value(&selection).unwrap();
+        value["extra"] = json!(true);
+        assert!(
+            serde_json::from_value::<QualificationWorkerTranscriptChunkSelection>(value).is_err()
+        );
+        let mut value = serde_json::to_value(&response).unwrap();
+        value["extra"] = json!(true);
+        assert!(
+            serde_json::from_value::<QualificationWorkerTranscriptChunkResponse>(value).is_err()
+        );
     }
 
     #[test]

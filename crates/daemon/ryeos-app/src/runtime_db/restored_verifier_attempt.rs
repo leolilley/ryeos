@@ -480,6 +480,20 @@ pub(super) fn read_retained_consumer_prerequisite(
 }
 
 impl RuntimeDb {
+    /// Historical disclosure depends on the enclosing callback launch, not
+    /// provider liveness. The writer lock closes claim/stop races at this read.
+    pub(crate) fn disclose_to_current_consumer_callback<T>(
+        &self,
+        root: &str,
+        launch_owner: &str,
+        value: T,
+    ) -> Result<T> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        require_current_callback_launch(&tx, root, launch_owner)?;
+        tx.commit()?;
+        Ok(value)
+    }
+
     /// Consumer input is rooted from reservation onward; evidence is rooted
     /// after observation. Both are Blob roots owned by the existing attempt.
     pub(crate) fn restored_verifier_blob_roots(&self) -> Result<Vec<String>> {

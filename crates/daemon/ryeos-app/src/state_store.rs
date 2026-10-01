@@ -18913,6 +18913,44 @@ impl StateStore {
         Ok(())
     }
 
+    /// Linearize an already prepared historical response with the enclosing
+    /// callback's current root and launch authority. The value is prepared
+    /// before this gate so disclosure performs no provider or chunk I/O.
+    pub(crate) fn disclose_to_current_consumer_callback<T>(
+        &self,
+        admission: &crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+        value: T,
+    ) -> Result<T> {
+        let launch_owner = admission
+            .callback_launch_owner()
+            .context("consumer disclosure requires its actual callback admission")?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let coordinate = admission.coordinate();
+            let root = authoritative_snapshot_for_transition(
+                &g,
+                &coordinate.accepted_root_id,
+                &coordinate.accepted_root_id,
+            )?;
+            anyhow::ensure!(
+                root.status == ThreadStatus::Running
+                    && root.error.is_none()
+                    && root.thread_id == coordinate.accepted_root_id
+                    && root.chain_root_id == coordinate.accepted_root_id
+                    && root.requested_by.as_deref() == Some(admission.owner_principal())
+                    && root.project_authority == *admission.accepted_project_authority()
+                    && root.admitted_launch_capsule_hash.as_deref()
+                        == Some(coordinate.accepted_capsule_hash.as_str()),
+                "consumer disclosure lost its exact running accepted root"
+            );
+            g.runtime_db.disclose_to_current_consumer_callback(
+                &coordinate.accepted_root_id,
+                launch_owner,
+                value,
+            )
+        })
+    }
+
     /// Return the descriptor-stable process identity only when the caller is
     /// still the thread's exact launch owner. Owner validation and identity
     /// read share the StateStore lock so callback quiescence cannot borrow a

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T01:55:35Z:7a4bd6315e8d387efd35a96985e85148f6c013fb3c97b951c11915decd12e92d:UPH89qgK5bLRvNqx1GDoFVKdIR48836/ONi9Zme6AlQcGk7+tqayDmcHcPIj6wZ493z4iNYfbaruiEQS8vWnDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T02:11:45Z:9cc123cf2cdc3c28df225f0303bf5776f7250b17fc8b64689bd3a6fc2233bf7f:CHUHx2cZif5PPBFHXsVlN7QOwotRNxi13xLkg+tt4HyZEmDUVlsu0Zt08xtLZjiA3MbIexbR3twfrpXxaGUKAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -65,11 +65,42 @@ held release aborts/reaps the already-created process and retains its identity
 for retirement. Historical activation and Release records cannot grant a fresh
 workload contact. Independent operator recovery keeps its distinct admission.
 
-The signed verifier still must receive and interpret the authenticated actual
-Q transcript before the restored diagnostic occurrence is terminated and the
-verifier root completes. Publication follows all evidence joins. Requiring a
-completed root before Q contact while settling its restored prerequisite during
-the running callback creates an ordering cycle.
+The signed verifier receives the actual Q transcript through protected OBSERVE.
+The daemon joins the retained manifest to Q's exact historical command, request,
+root, capsule, native/local settlement and provider terminal. A read selects only
+an index in that manifest; it never grants arbitrary CAS access. Each chunk is
+at most 1 MiB and the complete wire transcript is at most 112 MiB. The product
+verifier independently checks chunk and stream digests, canonical bytes and the
+signed request. These wire limits do not describe peak resident memory: chunks,
+assembled bytes and parsed JSON may coexist.
+
+Q has already settled before the independent diagnostic starts. After observing
+that diagnostic, the controller settles its provider before downloading Q's
+retained chunks. Historical Q readback does not require the diagnostic occurrence
+to remain live. The enclosing verifier callback, exact unstopped launch owner,
+root and original deadline must remain current throughout disclosure. A slow
+read cannot defer that diagnostic cleanup. Publication follows independent
+interpretation and all evidence joins, including enclosing root settlement.
+Requiring a completed root before Q contact would create an ordering cycle.
+
+## Remaining product semantic contract
+
+Authenticated transport bytes do not establish a successful Codex conversation.
+The current Q driver sends one signed generic Request. The existing Codex bounded
+turn workflow requires session setup followed by a turn. There is no authored
+signed Q scenario joining that sequence, and the credential-free scripted peer
+currently belongs to the separate diagnostic. The ordinary authoring profile
+also omits observations needed to independently establish exact output and
+request behavior; omitted raw events cannot be reconstructed from hashes.
+
+The next product cut must author a finite signed Q session/turn scenario, retain
+the required bounded observations, and bind a credential-free fixture to that
+actual Q run. Reuse the existing bounded turn and fixture owners with their
+native lifecycle evidence. Product-owned interpretation must check the actual
+retained bytes against the signed expectations. Do not synthesize a Codex wire
+transcript from projected events or infer Q success from the later diagnostic.
+Until that contract and its joins exist, the controller remains explicitly
+diagnostic and consumer qualification publication remains refused.
 
 Carry the existing authenticated callback invocation through Q admission;
 never manufacture an operator HandlerContext or use historical evidence as

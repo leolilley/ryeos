@@ -26,6 +26,7 @@ pub struct SettledConsumerObservation {
     pub evidence_sha256: String,
     pub evidence: ConsumerRetainedEvidence,
     pub provider_terminal: crate::consumer_termination::ConsumerProviderTerminalReference,
+    pub qualification_worker: crate::consumer_worker_transcript::VerifiedConsumerWorkerTranscript,
 }
 
 pub enum ConsumerControllerOutcome {
@@ -127,6 +128,9 @@ pub async fn run_controller_beat(
     // its provider occurrence even if later product semantics refuse; provider
     // death does not repair a bad transcript or prove namespace settlement.
     let response: ObservationResponse = serde_json::from_value(value.clone())?;
+    // Settle the restored diagnostic first. Q is already settled and its CAS
+    // transcript remains readable under the live enclosing callback. A large
+    // transcript download must not consume the remaining cleanup deadline.
     let terminal = if matches!(
         response,
         ObservationResponse::Retained {
@@ -150,6 +154,31 @@ pub async fn run_controller_beat(
         )
     } else {
         None
+    };
+    let qualification_worker = match &response {
+        ObservationResponse::Retained {
+            attempt:
+                AttemptRecord {
+                    phase: AttemptPhase::Observed,
+                    ..
+                },
+            qualification_worker,
+            ..
+        } => Some(match qualification_worker {
+            Some(reference) => {
+                crate::consumer_worker_transcript::read_consumer_worker_transcript(
+                    client,
+                    retained.record(),
+                    reference.clone(),
+                    deadline,
+                )
+                .await
+            }
+            None => Err(anyhow::anyhow!(
+                "observed consumer omitted the actual Q transcript"
+            )),
+        }),
+        _ => None,
     };
     retained.bytes_for_contact()?;
     match check_observation_response(
@@ -182,6 +211,8 @@ pub async fn run_controller_beat(
                     evidence,
                     evidence_sha256,
                     provider_terminal,
+                    qualification_worker: qualification_worker
+                        .context("observed consumer has no Q transcript read")??,
                 },
             ))
         }
@@ -230,6 +261,8 @@ enum ObservationResponse {
     Retained {
         attempt: AttemptRecord,
         evidence: Option<serde_json::Value>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        qualification_worker: Option<ryeos_state::objects::QualificationWorkerTranscriptReference>,
     },
 }
 
@@ -282,7 +315,7 @@ pub fn check_observation_response(
         );
         Ok(())
     };
-    let (attempt, evidence) = match response {
+    let (attempt, evidence, qualification_worker) = match response {
         ObservationResponse::NotReserved { operation_id } => {
             check_id(&operation_id)?;
             ensure!(
@@ -291,7 +324,11 @@ pub fn check_observation_response(
             );
             return Ok(ConsumerControllerObservation::NotReserved { operation_id });
         }
-        ObservationResponse::Retained { attempt, evidence } => (attempt, evidence),
+        ObservationResponse::Retained {
+            attempt,
+            evidence,
+            qualification_worker,
+        } => (attempt, evidence, qualification_worker),
     };
     check_id(&attempt.intent.operation_id)?;
     original.validate_attempt(&attempt.intent)?;
@@ -308,7 +345,9 @@ pub fn check_observation_response(
     match attempt.phase {
         AttemptPhase::Reserved | AttemptPhase::AttemptPending | AttemptPhase::Quarantined => {
             ensure!(
-                attempt.observation.is_none() && evidence.is_none(),
+                attempt.observation.is_none()
+                    && evidence.is_none()
+                    && qualification_worker.is_none(),
                 "non-observed consumer attempt exposed terminal evidence"
             );
             let operation_id = attempt.intent.operation_id;
@@ -323,6 +362,12 @@ pub fn check_observation_response(
             })
         }
         AttemptPhase::Observed => {
+            qualification_worker
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("observed consumer has no actual Q transcript reference")
+                })?
+                .validate()?;
             let Some(RestoredVerifierObservation::ConsumerRuntime { observation }) =
                 attempt.observation
             else {

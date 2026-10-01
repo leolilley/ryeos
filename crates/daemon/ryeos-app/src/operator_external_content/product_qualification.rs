@@ -2699,7 +2699,9 @@ pub fn consumer_verification_inputs_for_callback(
     }
     // Only an inert response may escape. Contact eligibility is rechecked by
     // the reservation transaction; expiry/revocation still gate this read.
-    admitted.with_live_callback(|| Ok(inputs))
+    state
+        .state_store
+        .disclose_to_current_consumer_callback(&admitted, inputs)
 }
 
 fn restore_admitted_consumer_verifier(

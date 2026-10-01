@@ -190,7 +190,9 @@ pub use qualification_worker_transcript::{
     MAX_QUALIFICATION_WORKER_TRANSCRIPT_BYTES, MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES,
     QUALIFICATION_WORKER_TRANSCRIPT_KIND, QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
     QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA, QualificationWorkerTranscriptChunk,
-    QualificationWorkerTranscriptManifest, QualificationWorkerTranscriptStream,
+    QualificationWorkerTranscriptChunkResponse, QualificationWorkerTranscriptChunkSelection,
+    QualificationWorkerTranscriptManifest, QualificationWorkerTranscriptReference,
+    QualificationWorkerTranscriptStream,
 };
 pub use retained_lifecycle_artifacts::{
     RETAINED_LIFECYCLE_ARTIFACTS_KIND, RETAINED_LIFECYCLE_ARTIFACTS_SCHEMA,

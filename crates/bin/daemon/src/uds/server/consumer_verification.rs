@@ -59,6 +59,7 @@ struct ObserveRequest {
     thread_id: String,
     qualification_operation_id: String,
     coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    transcript_chunk: Option<ryeos_state::objects::QualificationWorkerTranscriptChunkSelection>,
 }
 
 /// Product-edge record bytes are opaque to the generic transport. The daemon
@@ -164,6 +165,10 @@ pub(super) async fn settle(
     cap: &CallbackCapability,
 ) -> Result<Value> {
     let request = parse_observe(params, &cap.thread_id)?;
+    ensure!(
+        request.transcript_chunk.is_none(),
+        "consumer settlement cannot select transcript bytes"
+    );
     let state = state.clone();
     let token = cap.token.clone();
     // The existing durable termination journal owns a claimed provider
@@ -189,6 +194,9 @@ fn parse_observe(params: &Value, thread_id: &str) -> Result<ObserveRequest> {
         "consumer observation names another root"
     );
     request.coordinate.validate()?;
+    if let Some(selection) = &request.transcript_chunk {
+        selection.validate()?;
+    }
     ensure!(
         lillux::valid_hash(&request.qualification_operation_id),
         "consumer observation requires exact operation digests"
@@ -209,6 +217,14 @@ pub(super) async fn observe(
             .node_policy
             .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
+        if let Some(selection) = &request.transcript_chunk {
+            return serde_json::to_value(
+                ryeos_app::operator_runtime_snapshot::observe_consumer_worker_transcript_chunk_for_callback(
+                    &state, &token, &request.coordinate, &request.qualification_operation_id,
+                    selection, limits,
+                )?
+            ).map_err(Into::into);
+        }
         serde_json::to_value(
             ryeos_app::operator_runtime_snapshot::observe_consumer_verifier_attempt_for_callback(
                 &state,

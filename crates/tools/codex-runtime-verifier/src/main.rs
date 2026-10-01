@@ -846,7 +846,7 @@ async fn run_consumer_controller(input: &[u8]) -> Result<()> {
             println!(
                 "{}",
                 json!({
-                    "schema": "ryeos.codex.consumer_controller_diagnostic.v1",
+                    "schema": "ryeos.codex.consumer_controller_diagnostic.v2",
                     "remote_consumer_attempt": {
                         "operation_id": observed.challenge.intent.operation_id,
                         "evidence_sha256": observed.evidence_sha256,
@@ -854,10 +854,11 @@ async fn run_consumer_controller(input: &[u8]) -> Result<()> {
                         "terminal_observation_sha256": observed.provider_terminal.observation_sha256,
                     },
                     "qualification_claims_enabled": false,
+                    "qualification_worker_transcript_manifest_hash": observed.qualification_worker.reference.manifest_hash,
                 })
             );
             bail!(
-                "independent consumer diagnostic settled; actual Q transcript and qualification semantics remain unjoined"
+                "independent consumer diagnostic settled and Q bytes authenticated; signed Q session/turn semantics remain unproved"
             )
         }
         ConsumerControllerOutcome::Unresolved(_) => {

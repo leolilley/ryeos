@@ -6,6 +6,13 @@ use serde_json::{Value, json};
 use crate::callback::*;
 use crate::daemon_rpc::{DaemonRpcClient, RpcError};
 
+// A one-MiB chunk expands to about 1.4 MiB in padded base64. Ordinary
+// consumer evidence permits five MiB of canonical JSON; MessagePack doubles
+// can occupy nine bytes where JSON uses three (for example, 0.0). Reserve
+// three times that evidence allowance plus one MiB for the retained envelope.
+const CONSUMER_TRANSCRIPT_RESPONSE_MAX_BYTES: usize = 2 * 1024 * 1024;
+const CONSUMER_RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 pub struct UdsRuntimeClient {
     rpc: DaemonRpcClient,
     callback_token: String,
@@ -153,6 +160,28 @@ impl UdsRuntimeClient {
             .await
     }
 
+    /// Read one ordered chunk from the exact retained Q Worker transcript.
+    /// This reuses protected observation and the caller's original deadline;
+    /// it cannot request arbitrary CAS content or restart consumer work.
+    pub async fn consumer_verification_transcript_chunk(
+        &self,
+        thread_id: &str,
+        qualification_operation_id: &str,
+        coordinate: Value,
+        selection: Value,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({
+            "thread_id": thread_id,
+            "qualification_operation_id": qualification_operation_id,
+            "coordinate": coordinate,
+            "transcript_chunk": selection,
+        });
+        self.inject_callback_token(&mut params);
+        self.consumer_callback_until("runtime.consumer_verification_observe", params, deadline)
+            .await
+    }
+
     /// Bound the whole connection/write/read operation by one original clock.
     /// Dropping a timed-out dedicated connection cannot replay request bytes;
     /// a daemon-side contact owner remains retained and requires observation.
@@ -169,18 +198,15 @@ impl UdsRuntimeClient {
                 timeout_secs: 0,
             }));
         }
-        match tokio::time::timeout(
-            remaining,
-            self.rpc.request_dedicated(method, params, Some(remaining)),
-        )
-        .await
-        {
-            Ok(result) => result.map_err(Self::map_rpc_error),
-            Err(_) => Err(Self::map_rpc_error(RpcError::Timeout {
-                method: method.into(),
-                timeout_secs: remaining.as_secs(),
-            })),
-        }
+        let maximum_response_bytes = if params.get("transcript_chunk").is_some() {
+            CONSUMER_TRANSCRIPT_RESPONSE_MAX_BYTES
+        } else {
+            CONSUMER_RESPONSE_MAX_BYTES
+        };
+        self.rpc
+            .request_dedicated_with_response_limit(method, params, deadline, maximum_response_bytes)
+            .await
+            .map_err(Self::map_rpc_error)
     }
 
     /// Read the pre-launch producer source pinned by this root's sealed
@@ -1038,6 +1064,48 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn transcript_chunk_uses_protected_observation_with_exact_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("callback.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let frame = crate::framing::recv_frame(&mut stream).await.unwrap();
+            let request: Value = rmp_serde::from_slice(&frame).unwrap();
+            assert_eq!(request["method"], "runtime.consumer_verification_observe");
+            assert_eq!(
+                request["params"],
+                json!({
+                    "thread_id":"T-runtime", "qualification_operation_id":"qualification",
+                    "coordinate":{"accepted_root_id":"T-runtime"},
+                    "transcript_chunk":{"manifest_hash":"a".repeat(64),"chunk_index":3},
+                    "callback_token":"callback-test", "thread_auth_token":"thread-test",
+                })
+            );
+            let response = rmp_serde::to_vec_named(&json!({
+                "request_id":request["request_id"], "result":{"status":"transcript_chunk"},
+            }))
+            .unwrap();
+            crate::framing::send_frame(&mut stream, &response)
+                .await
+                .unwrap();
+        });
+        let client = UdsRuntimeClient::new(socket, "callback-test".into(), "thread-test".into());
+        let result = client
+            .consumer_verification_transcript_chunk(
+                "T-runtime",
+                "qualification",
+                json!({"accepted_root_id":"T-runtime"}),
+                json!({"manifest_hash":"a".repeat(64), "chunk_index":3}),
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, json!({"status":"transcript_chunk"}));
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn attachment_wire_has_thread_authority_and_no_process_claim() {
