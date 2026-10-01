@@ -688,16 +688,17 @@ fn walk_tree(
 }
 
 fn digest_file(
-    archive: &lillux::PinnedRegularFile,
-    source: Option<&lillux::PinnedRegularFile>,
+    archive: &std::fs::File,
+    source: Option<&std::fs::File>,
 ) -> Result<(u64, u32, u32, u32, String)> {
     use std::os::unix::fs::MetadataExt as _;
-    let mut archived = archive.try_clone_descriptor()?;
+    // Both descriptors come from no-follow traversal of their pinned parents.
+    let mut archived = archive.try_clone()?;
     archived.seek(SeekFrom::Start(0))?;
     let metadata = archived.metadata()?;
     let mode = metadata.mode() & 0o7777;
     if let Some(source) = source {
-        let mut original = source.try_clone_descriptor()?;
+        let mut original = source.try_clone()?;
         original.seek(SeekFrom::Start(0))?;
         let source_metadata = original.metadata()?;
         ensure!(

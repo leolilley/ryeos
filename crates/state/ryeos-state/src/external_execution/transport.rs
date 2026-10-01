@@ -94,6 +94,18 @@ pub struct ExternalCapturedNetworkInputs {
     pub hosts_digest: String,
 }
 
+impl std::fmt::Debug for ExternalCapturedNetworkInputs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExternalCapturedNetworkInputs")
+            .field("schema", &self.schema)
+            .field("policy_digest", &self.policy_digest)
+            .field("resolver_digest", &self.resolver_digest)
+            .field("hosts_digest", &self.hosts_digest)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ExternalCapturedNetworkInputs {
     pub fn from_bytes(
         policy: &ExternalNetworkInputPolicy,
@@ -1018,8 +1030,6 @@ impl ExternalRelayResponseEnvelope {
         request_digest: &str,
         binding_digest: Option<&str>,
     ) -> Result<T> {
-        use lillux::crypto::Verifier as _;
-
         bootstrap.controller.relay()?;
         ensure!(
             u64::try_from(bytes.len())? <= bootstrap.controller.relay()?.maximum_file_bytes,
