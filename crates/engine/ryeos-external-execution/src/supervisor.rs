@@ -33,7 +33,7 @@ pub trait ExternalCandidateLauncherClient {
     fn complete_qualification(
         &mut self,
         frame: &AuthenticatedExecutionFrame,
-    ) -> Result<ryeos_state::external_execution::NativeNamespaceExit>;
+    ) -> Result<crate::backends::linux::NativeQualificationCompletion>;
     fn capture(
         &mut self,
         frame: &AuthenticatedExecutionFrame,
@@ -463,12 +463,18 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
         wire: &[u8],
         signing_key: &lillux::crypto::SigningKey,
         occurrence_digest: &str,
+        authority: &PinnedStateAuthority,
+        program: &ryeos_state::external_execution::admission::AdmittedExternalExecutionProgram,
     ) -> Result<SupervisorApplicationOutcome> {
+        let ryeos_state::external_execution::admission::AdmittedExternalExecutionProgram::QualificationStructuredSession(program) = program else {
+            anyhow::bail!("qualification completion has no originally admitted Q program");
+        };
         ensure!(
             matches!(
                 self.journal.binding().execution_mode,
                 ExternalExecutionMode::QualificationStructuredSession {}
-            ) && self.pending_protocol.is_none(),
+            ) && self.pending_protocol.is_none()
+                && program.digest()? == self.journal.binding().candidate_program_digest,
             "qualification completion cannot overtake a live protocol application"
         );
         let completion = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
@@ -478,13 +484,22 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
         )?;
         let fresh = match self.journal.record_and_claim(wire)? {
             GuestApplicationClaim::New(token) => {
-                let (exit, performed) = self
+                let (settled, performed) = self
                     .journal
                     .apply_once(token, |frame| self.launcher.complete_qualification(frame))?;
                 self.journal.record_qualification_scope_settlement(
+                    authority,
+                    program,
                     &completion,
                     occurrence_digest,
-                    exit,
+                    settled.exit,
+                    settled.fixture_capture.as_ref().map(|capture| {
+                        (
+                            capture.bytes.as_slice(),
+                            capture.blob_hash.as_str(),
+                            capture.normalized_mode,
+                        )
+                    }),
                 )?;
                 let acknowledged = self.journal.finish(performed)?;
                 self.launcher
@@ -494,17 +509,21 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
             GuestApplicationClaim::AlreadyClaimed | GuestApplicationClaim::AlreadyApplied => {
                 let retained = self
                     .journal
-                    .qualification_scope_settlement_for_completion(&completion)?
+                    .qualification_scope_settlement_for_completion(authority, program, &completion)?
                     .context(
                         "qualification completion is uncertain without a native settlement row",
                     )?;
                 ensure!(
-                    retained.launcher_occurrence_digest == occurrence_digest,
+                    retained.observation.launcher_occurrence_digest == occurrence_digest,
                     "qualification completion changed its retained launcher occurrence"
                 );
                 let acknowledged = self
                     .journal
-                    .reconcile_qualification_scope_settlement_application(&completion)?;
+                    .reconcile_qualification_scope_settlement_application(
+                        authority,
+                        program,
+                        &completion,
+                    )?;
                 self.launcher
                     .acknowledge_finish(acknowledged.frame_digest())?;
                 false
@@ -513,8 +532,12 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
                 anyhow::bail!("qualification completion was durably revoked")
             }
         };
-        self.journal
-            .ensure_qualification_scope_settled_frame(signing_key, &completion)?;
+        self.journal.ensure_qualification_scope_settled_frame(
+            authority,
+            program,
+            signing_key,
+            &completion,
+        )?;
         Ok(if fresh {
             SupervisorApplicationOutcome::Applied
         } else {
@@ -577,7 +600,7 @@ mod tests {
         fn complete_qualification(
             &mut self,
             _frame: &AuthenticatedExecutionFrame,
-        ) -> Result<ryeos_state::external_execution::NativeNamespaceExit> {
+        ) -> Result<crate::backends::linux::NativeQualificationCompletion> {
             anyhow::bail!("test launcher does not admit qualification completion")
         }
 

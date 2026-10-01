@@ -185,7 +185,7 @@ pub enum ExecutionChannelPayload {
     /// Guest projection of an immutable native reap row, never a provider or
     /// semantic qualification result.
     QualificationScopeSettled {
-        observation: NativeQualificationScopeSettlementObservation,
+        observation: NativeQualificationScopeSettlement,
     },
     ProtocolBytes {
         bytes_base64: String,
@@ -290,6 +290,28 @@ pub struct NativeQualificationScopeSettlementObservation {
     pub completion_request_digest: String,
     pub mechanism: NativeWriterExclusionMechanism,
     pub exit: NativeNamespaceExit,
+}
+
+/// Current signed settlement wrapper. The nested native predecessor remains
+/// capture-free so immutable capture metadata cannot form a hash cycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeQualificationScopeSettlement {
+    pub schema: u32,
+    pub observation: NativeQualificationScopeSettlementObservation,
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub fixture_capture: Option<crate::objects::qualification_fixture::QFixtureCaptureReference>,
+}
+
+impl NativeQualificationScopeSettlement {
+    pub fn validate(&self, binding: &ExecutionChannelBinding) -> Result<()> {
+        ensure!(self.schema == 2, "unsupported Q scope settlement wrapper");
+        self.observation.validate(binding)?;
+        if let Some(capture) = &self.fixture_capture {
+            capture.validate()?;
+        }
+        Ok(())
+    }
 }
 
 impl NativeQualificationScopeSettlementObservation {
@@ -862,6 +884,49 @@ mod tests {
             supervisor,
         )
     }
+    #[test]
+    fn q_settlement_wrapper_requires_current_schema_and_explicit_capture_presence() {
+        let (mut binding, _, _) = binding();
+        binding.execution_mode = ExternalExecutionMode::QualificationStructuredSession {};
+        binding.candidate_export_max_bytes = 0;
+        let native = NativeQualificationScopeSettlementObservation {
+            schema: 1,
+            binding_digest: binding.digest().unwrap(),
+            launcher_occurrence_digest: "1".repeat(64),
+            applied_runtime_receipt_digest: "2".repeat(64),
+            completion_frame_digest: "3".repeat(64),
+            completion_request_digest: "4".repeat(64),
+            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+            exit: NativeNamespaceExit::Signal(9),
+        };
+        let settlement = NativeQualificationScopeSettlement {
+            schema: 2,
+            observation: native.clone(),
+            fixture_capture: None,
+        };
+        settlement.validate(&binding).unwrap();
+        let wire = serde_json::to_value(&settlement).unwrap();
+        assert!(wire["fixture_capture"].is_null());
+        let mut missing = wire.clone();
+        missing.as_object_mut().unwrap().remove("fixture_capture");
+        assert!(serde_json::from_value::<NativeQualificationScopeSettlement>(missing).is_err());
+        assert!(
+            serde_json::from_value::<NativeQualificationScopeSettlement>(
+                serde_json::to_value(&native).unwrap()
+            )
+            .is_err()
+        );
+        let mut old = settlement.clone();
+        old.schema = 1;
+        assert!(old.validate(&binding).is_err());
+        let mut changed = settlement;
+        changed.observation.binding_digest = "f".repeat(64);
+        assert!(changed.validate(&binding).is_err());
+        let mut cyclic = wire;
+        cyclic["observation"]["fixture_capture"] = serde_json::json!(null);
+        assert!(serde_json::from_value::<NativeQualificationScopeSettlement>(cyclic).is_err());
+    }
+
     #[test]
     fn channel_schema_is_independent_from_enclosing_external_documents() {
         let (binding, _, _) = binding();

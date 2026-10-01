@@ -2566,7 +2566,7 @@ pub fn apply_external_qualification_native_settlement(
             runtime_applied_frame_digest: retained.runtime_applied.digest().to_owned(),
             protocol_eof_frame_digest: retained.protocol_eof.digest().to_owned(),
             settlement_frame_digest: retained.settlement.digest().to_owned(),
-            observation: observation.clone(),
+            observation: observation.observation.clone(),
         }))
     })
 }

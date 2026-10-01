@@ -19,22 +19,39 @@ use super::journal::{self, ApplicationClaim, JournalOwner};
 use super::{
     AuthenticatedExecutionFrame, ChannelDirection, ExecutionChannelBinding,
     ExecutionChannelPayload, ExternalExecutionMode, NativeNamespaceExit,
-    NativeQualificationScopeSettlementObservation, NativeWriterExclusionMechanism,
-    SignedExecutionFrame,
+    NativeQualificationScopeSettlement, NativeQualificationScopeSettlementObservation,
+    NativeWriterExclusionMechanism, SignedExecutionFrame,
 };
 use crate::{
     DurableCasPublicationKey, DurableCasUploadStage, DurableExternalCandidateReceipt,
     PinnedStateAuthority,
 };
 
+fn require_q_program(
+    program: &super::qualification_session::AdmittedExternalQualificationSessionProgram,
+    binding: &ExecutionChannelBinding,
+) -> Result<()> {
+    program.validate()?;
+    binding.validate()?;
+    ensure!(
+        matches!(
+            binding.execution_mode,
+            ExternalExecutionMode::QualificationStructuredSession {}
+        ) && program.digest()? == binding.candidate_program_digest
+            && program.runtime_manifest_hash == binding.supervisor_runtime_hash,
+        "Q settlement changed its admitted program"
+    );
+    Ok(())
+}
+
 const DATABASE_NAME: &str = "external-candidate.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4547; // RYEG
-const SCHEMA_EPOCH: i64 = 11;
+const SCHEMA_EPOCH: i64 = 12;
 
 const OWNER_SQL: &str = r#"
 CREATE TABLE external_guest_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=11),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=12),
     bootstrap_digest TEXT NOT NULL,
     binding_digest TEXT NOT NULL UNIQUE,
     journal_nonce TEXT NOT NULL UNIQUE,
@@ -167,6 +184,8 @@ CREATE TABLE external_guest_qualification_settlement (
     binding_digest TEXT PRIMARY KEY,
     completion_frame_digest TEXT NOT NULL UNIQUE,
     observation_json TEXT NOT NULL,
+    program_json TEXT NOT NULL,
+    durable_stage_id TEXT,
     FOREIGN KEY(binding_digest) REFERENCES external_execution_channel(binding_digest)
 );
 CREATE TRIGGER external_guest_qualification_settlement_no_update
@@ -889,10 +908,46 @@ impl LiveGuestJournal {
     /// lost launcher response without this row remains claimed/unknown.
     pub fn record_qualification_scope_settlement(
         &self,
+        authority: &PinnedStateAuthority,
+        program: &super::qualification_session::AdmittedExternalQualificationSessionProgram,
         completion: &AuthenticatedExecutionFrame,
         launcher_occurrence_digest: &str,
         exit: NativeNamespaceExit,
-    ) -> Result<NativeQualificationScopeSettlementObservation> {
+        capture: Option<(&[u8], &str, u32)>,
+    ) -> Result<NativeQualificationScopeSettlement> {
+        require_q_program(program, &self.0.binding)?;
+        ensure!(
+            self.0.state_runtime_identity_json
+                == lillux::canonical_json(&serde_json::to_value(
+                    authority.runtime_directory().identity()?
+                )?)?,
+            "Q fixture CAS authority changed"
+        );
+        if let Some(retained) =
+            self.qualification_scope_settlement_for_completion(authority, program, completion)?
+        {
+            ensure!(
+                retained.observation.launcher_occurrence_digest == launcher_occurrence_digest
+                    && retained.observation.exit == exit,
+                "Q settlement replay changed native outcome"
+            );
+            match (&retained.fixture_capture, capture, program.fixture()) {
+                (None, None, None) => {}
+                (Some(reference), Some((bytes, blob_hash, mode)), Some(fixture)) => {
+                    ensure!(
+                        bytes.len() as u64 <= fixture.max_bytes
+                            && mode == crate::objects::ProjectFile::REGULAR_MODE
+                            && reference.blob_hash == blob_hash
+                            && reference.blob_hash == lillux::sha256_hex(bytes)
+                            && reference.size_bytes == bytes.len() as u64,
+                        "Q settlement replay changed captured bytes"
+                    );
+                }
+                _ => anyhow::bail!("Q settlement replay changed fixture presence"),
+            }
+            return Ok(retained);
+        }
+        let guard = authority.acquire_shared_guard()?;
         ensure_same_file(&self.0.directory, &self.0.database_file)?;
         ensure!(
             matches!(
@@ -947,20 +1002,84 @@ impl LiveGuestJournal {
             exit,
         };
         observation.validate(&self.0.binding)?;
+        let (fixture_capture, stage_id) = match (program.fixture(), capture) {
+            (None, None) => (None, None),
+            (Some(fixture), Some((bytes, blob_hash, mode))) => {
+                use crate::objects::qualification_fixture::{
+                    Q_FIXTURE_CAPTURE_KIND, Q_FIXTURE_CAPTURE_SCHEMA, QFixtureCaptureMetadata,
+                    QFixtureCaptureReference, q_fixture_contract_digest,
+                };
+                ensure!(
+                    bytes.len() as u64 <= fixture.max_bytes && bytes.len() as u64 <= 65536,
+                    "native Q fixture bytes exceed their bound"
+                );
+                let metadata = QFixtureCaptureMetadata {
+                    kind: Q_FIXTURE_CAPTURE_KIND.into(),
+                    schema: Q_FIXTURE_CAPTURE_SCHEMA,
+                    fixture_contract_digest: q_fixture_contract_digest(fixture)?,
+                    native_settlement: observation.clone(),
+                    blob_hash: blob_hash.into(),
+                    size_bytes: bytes.len() as u64,
+                    normalized_mode: mode,
+                };
+                let reference = QFixtureCaptureReference {
+                    metadata_hash: metadata.digest()?,
+                    blob_hash: blob_hash.into(),
+                    size_bytes: bytes.len() as u64,
+                };
+                reference.verify_for(&metadata, fixture, &self.0.binding, &observation, bytes)?;
+                let key = DurableCasPublicationKey::qualification_fixture_occurrence(
+                    &binding_digest,
+                    completion.digest(),
+                )?;
+                let mut stage = authority
+                    .require_recovery()?
+                    .begin_durable_cas_upload_admitted(
+                        &guard,
+                        &self.0.bootstrap_digest,
+                        "qualification-fixture",
+                        &key,
+                        None,
+                    )?;
+                let cas = authority.cas_store()?;
+                ensure!(
+                    stage.store_blob(&guard, &cas, bytes)? == reference.blob_hash
+                        && stage.store_object(&guard, &cas, &metadata.to_value()?)?
+                            == reference.metadata_hash,
+                    "Q fixture CAS write changed its exact identity"
+                );
+                let receipt = stage.retain_qualification_fixture(&guard, &reference)?;
+                (Some(reference), Some(receipt.staging_id))
+            }
+            _ => anyhow::bail!("native Q fixture presence differs from admitted program"),
+        };
+        let observation = NativeQualificationScopeSettlement {
+            schema: 2,
+            observation,
+            fixture_capture,
+        };
+        observation.validate(&self.0.binding)?;
         let json = lillux::canonical_json(&serde_json::to_value(&observation)?)?;
+        let program_json = lillux::canonical_json(&serde_json::to_value(program)?)?;
         tx.execute(
-            "INSERT OR IGNORE INTO external_guest_qualification_settlement VALUES(?1,?2,?3)",
-            params![&binding_digest, completion.digest(), &json],
+            "INSERT OR IGNORE INTO external_guest_qualification_settlement VALUES(?1,?2,?3,?4,?5)",
+            params![
+                &binding_digest,
+                completion.digest(),
+                &json,
+                &program_json,
+                &stage_id
+            ],
         )?;
-        let retained: String = tx.query_row(
-            "SELECT observation_json FROM external_guest_qualification_settlement
+        let retained: (String, String, Option<String>) = tx.query_row(
+            "SELECT observation_json,program_json,durable_stage_id FROM external_guest_qualification_settlement
              WHERE binding_digest=?1 AND completion_frame_digest=?2",
             params![&binding_digest, completion.digest()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         ensure!(
-            retained == json,
-            "native qualification settlement changed its durable row"
+            retained == (json, program_json, stage_id),
+            "native qualification settlement changed its durable row or CAS custody"
         );
         tx.commit()?;
         Ok(observation)
@@ -968,8 +1087,13 @@ impl LiveGuestJournal {
 
     pub fn qualification_scope_settlement_for_completion(
         &self,
+        authority: &PinnedStateAuthority,
+        program: &super::qualification_session::AdmittedExternalQualificationSessionProgram,
         completion: &AuthenticatedExecutionFrame,
-    ) -> Result<Option<NativeQualificationScopeSettlementObservation>> {
+    ) -> Result<Option<NativeQualificationScopeSettlement>> {
+        require_q_program(program, &self.0.binding)?;
+        self.0.validate()?;
+        self.0.validate_retained_content(authority)?;
         ensure_same_file(&self.0.directory, &self.0.database_file)?;
         ensure!(
             matches!(
@@ -989,7 +1113,11 @@ impl LiveGuestJournal {
             )
             .optional()?;
         raw.map(|raw| {
-            let observation: NativeQualificationScopeSettlementObservation =
+            let retained_program: String = self.0.conn.query_row(
+                "SELECT program_json FROM external_guest_qualification_settlement WHERE binding_digest=?1 AND completion_frame_digest=?2",
+                params![self.0.binding.digest()?, completion.digest()], |row| row.get(0))?;
+            ensure!(retained_program == lillux::canonical_json(&serde_json::to_value(program)?)?, "Q settlement reader changed admitted program");
+            let observation: NativeQualificationScopeSettlement =
                 serde_json::from_str(&raw)?;
             observation.validate(&self.0.binding)?;
             let (occurrence, receipt_digest): (String, String) = self.0.conn.query_row(
@@ -1000,9 +1128,9 @@ impl LiveGuestJournal {
             )?;
             ensure!(
                 raw == lillux::canonical_json(&serde_json::to_value(&observation)?)?
-                    && observation.completion_frame_digest == completion.digest()
-                    && observation.launcher_occurrence_digest == occurrence
-                    && observation.applied_runtime_receipt_digest == receipt_digest
+                    && observation.observation.completion_frame_digest == completion.digest()
+                    && observation.observation.launcher_occurrence_digest == occurrence
+                    && observation.observation.applied_runtime_receipt_digest == receipt_digest
                     && occurrence
                         == retained_launcher_occurrence_digest(
                             &self.0.conn,
@@ -1010,7 +1138,7 @@ impl LiveGuestJournal {
                         )?
                     && matches!(&completion.frame().payload,
                         ExecutionChannelPayload::QualificationComplete { completion_request_digest }
-                        if completion_request_digest == &observation.completion_request_digest),
+                        if completion_request_digest == &observation.observation.completion_request_digest),
                 "retained qualification settlement changed its completion authority"
             );
             Ok(observation)
@@ -1020,9 +1148,11 @@ impl LiveGuestJournal {
 
     pub fn reconcile_qualification_scope_settlement_application(
         &self,
+        authority: &PinnedStateAuthority,
+        program: &super::qualification_session::AdmittedExternalQualificationSessionProgram,
         completion: &AuthenticatedExecutionFrame,
     ) -> Result<GuestApplicationAck> {
-        self.qualification_scope_settlement_for_completion(completion)?
+        self.qualification_scope_settlement_for_completion(authority, program, completion)?
             .context("claimed qualification completion has no native settlement row")?;
         let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
         journal::finish_application(
@@ -1044,11 +1174,13 @@ impl LiveGuestJournal {
     /// Sign only the exact row after its initiating command is durably applied.
     pub fn ensure_qualification_scope_settled_frame(
         &self,
+        authority: &PinnedStateAuthority,
+        program: &super::qualification_session::AdmittedExternalQualificationSessionProgram,
         signing_key: &lillux::crypto::SigningKey,
         completion: &AuthenticatedExecutionFrame,
     ) -> Result<Option<AuthenticatedExecutionFrame>> {
         let observation = self
-            .qualification_scope_settlement_for_completion(completion)?
+            .qualification_scope_settlement_for_completion(authority, program, completion)?
             .context("qualification scope frame has no native settlement row")?;
         let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
         self.0.owner().require_owner(&tx, &self.0.binding)?;
@@ -2283,8 +2415,7 @@ impl GuestStore {
                 )
                 .optional()?;
             if let Some((completion_digest, json)) = retained {
-                let observation: NativeQualificationScopeSettlementObservation =
-                    serde_json::from_str(&json)?;
+                let observation: NativeQualificationScopeSettlement = serde_json::from_str(&json)?;
                 observation.validate(&self.binding)?;
                 let (applied_occurrence, _, receipt_digest, _): (String, String, String, String) =
                     applied
@@ -2293,9 +2424,9 @@ impl GuestStore {
                         .clone();
                 ensure!(
                     json == lillux::canonical_json(&serde_json::to_value(&observation)?)?
-                        && observation.completion_frame_digest == completion_digest
-                        && observation.launcher_occurrence_digest == applied_occurrence
-                        && observation.applied_runtime_receipt_digest == receipt_digest,
+                        && observation.observation.completion_frame_digest == completion_digest
+                        && observation.observation.launcher_occurrence_digest == applied_occurrence
+                        && observation.observation.applied_runtime_receipt_digest == receipt_digest,
                     "qualification settlement changed its native occurrence or applied runtime"
                 );
                 let (command_wire, application): (String, String) = self.conn.query_row(
@@ -2314,7 +2445,7 @@ impl GuestStore {
                 ensure!(
                     matches!(&command.frame().payload,
                         ExecutionChannelPayload::QualificationComplete { completion_request_digest }
-                        if completion_request_digest == &observation.completion_request_digest)
+                        if completion_request_digest == &observation.observation.completion_request_digest)
                         && matches!(application.as_str(), "claimed" | "applied"),
                     "qualification settlement changed its initiating command"
                 );
@@ -2367,6 +2498,77 @@ impl GuestStore {
             "external guest recovery changed receiver CAS authority"
         );
         let guard = authority.acquire_shared_guard()?;
+        let q_rows = self.conn.prepare(
+            "SELECT observation_json,program_json,durable_stage_id FROM external_guest_qualification_settlement WHERE binding_digest=?1")?
+            .query_map([self.binding.digest()?], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,Option<String>>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (raw, program_json, stage_id) in q_rows {
+            use crate::objects::qualification_fixture::QFixtureCaptureMetadata;
+            let settlement: NativeQualificationScopeSettlement = serde_json::from_str(&raw)?;
+            settlement.validate(&self.binding)?;
+            let program: super::qualification_session::AdmittedExternalQualificationSessionProgram =
+                serde_json::from_str(&program_json)?;
+            require_q_program(&program, &self.binding)?;
+            ensure!(
+                program_json == lillux::canonical_json(&serde_json::to_value(&program)?)?
+                    && raw == lillux::canonical_json(&serde_json::to_value(&settlement)?)?,
+                "Q settlement retained noncanonical authority"
+            );
+            match (
+                program.fixture(),
+                settlement.fixture_capture.as_ref(),
+                stage_id.as_deref(),
+            ) {
+                (None, None, None) => {}
+                (Some(fixture), Some(reference), Some(stage_id)) => {
+                    let key = DurableCasPublicationKey::qualification_fixture_occurrence(
+                        &self.binding.digest()?,
+                        &settlement.observation.completion_frame_digest,
+                    )?;
+                    let stage = authority
+                        .require_recovery()?
+                        .open_durable_cas_upload_admitted(
+                            &guard,
+                            stage_id,
+                            &self.bootstrap_digest,
+                        )?;
+                    stage.ensure_publication_contract(&key, None)?;
+                    let receipt = stage.qualification_fixture_receipt()?;
+                    ensure!(
+                        receipt.metadata_hash == reference.metadata_hash
+                            && receipt.blob_hash == reference.blob_hash,
+                        "Q fixture lost its exact durable CAS custody"
+                    );
+                    let cas = authority.cas_store()?;
+                    let value = cas
+                        .get_object_bounded(&reference.metadata_hash, 4096)?
+                        .context("Q fixture metadata is absent")?;
+                    let metadata = QFixtureCaptureMetadata::from_value(&value)?;
+                    let (file, size) = cas
+                        .open_blob(&reference.blob_hash)?
+                        .context("Q fixture blob is absent")?;
+                    ensure!(
+                        size == reference.size_bytes && size <= fixture.max_bytes,
+                        "Q fixture retained blob size changed"
+                    );
+                    let bytes = lillux::secure_fs::read_open_regular_file_exact_bounded(
+                        file,
+                        size,
+                        fixture.max_bytes,
+                    )?;
+                    reference.verify_for(
+                        &metadata,
+                        fixture,
+                        &self.binding,
+                        &settlement.observation,
+                        &bytes,
+                    )?;
+                }
+                _ => {
+                    anyhow::bail!("Q fixture retained program, reference and stage presence differ")
+                }
+            }
+        }
         let mut captures = self.conn.prepare(
             "SELECT quiesce_frame_digest,occurrence_digest,durable_stage_id,
                     snapshot_hash,output_capture_hash,completion_request_digest,writer_exclusion_evidence_hash
@@ -2666,7 +2868,10 @@ impl JournalOwner for GuestOwner<'_> {
                 .query_row(
                     "SELECT observation_json FROM external_guest_qualification_settlement
                  WHERE binding_digest=?1 AND completion_frame_digest=?2",
-                    params![binding.digest()?, &observation.completion_frame_digest],
+                    params![
+                        binding.digest()?,
+                        &observation.observation.completion_frame_digest
+                    ],
                     |row| row.get(0),
                 )
                 .optional()?;

@@ -132,6 +132,19 @@ fn command_fields(program: &AdmittedExternalExecutionProgram) -> Result<Launcher
 }
 
 impl ExternalCandidateLauncherSpec {
+    /// The fixture comes only from the exact Q program committed by the
+    /// channel. There is no independently mutable launcher fixture field.
+    pub(crate) fn qualification_fixture(
+        &self,
+    ) -> Option<&ryeos_external_execution_contract::qualification_fixture::QFixtureContract> {
+        match &self.candidate_program {
+            AdmittedExternalExecutionProgram::QualificationStructuredSession(program) => {
+                program.fixture()
+            }
+            _ => None,
+        }
+    }
+
     /// Compile the exact profile-owned recipe after channel attachment. The
     /// runtime tree itself is supplied independently as one exact descriptor;
     /// this conversion cannot select an ambient executable or extra mount.
@@ -321,6 +334,13 @@ impl ExternalCandidateLauncherSpec {
                 "external runtime mount layer or access is invalid"
             );
         }
+        validate_qualification_fixture_mounts(
+            self.binding.execution_mode,
+            self.qualification_fixture(),
+            self.runtime_mounts
+                .iter()
+                .map(|mount| Path::new(&mount.destination)),
+        )?;
         ensure!(
             lillux::canonical_json(&serde_json::to_value(self)?)?.len()
                 <= MAX_LAUNCHER_BOOTSTRAP_BYTES,
@@ -352,6 +372,33 @@ impl ExternalCandidateLauncherSpec {
     }
 }
 
+/// Check the derived Q mount against every admitted namespace destination
+/// before any native directory is created. Path components, not string
+/// prefixes, define collisions; the fixed fixture never overlays /workspace.
+pub(crate) fn validate_qualification_fixture_mounts<'a>(
+    mode: ryeos_external_execution_contract::ExternalExecutionMode,
+    fixture: Option<&ryeos_external_execution_contract::qualification_fixture::QFixtureContract>,
+    destinations: impl IntoIterator<Item = &'a Path>,
+) -> Result<()> {
+    let Some(fixture) = fixture else {
+        return Ok(());
+    };
+    ensure!(
+        mode == ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {},
+        "only a Q program may admit its finite fixture mount"
+    );
+    fixture.validate()?;
+    let target = Path::new(&fixture.mount_destination);
+    for destination in destinations {
+        require_absolute_normalized(destination, "fixture peer mount")?;
+        ensure!(
+            !destination.starts_with(target) && !target.starts_with(destination),
+            "Q fixture mount overlaps an admitted mount"
+        );
+    }
+    Ok(())
+}
+
 fn require_absolute_normalized(path: &Path, label: &str) -> Result<()> {
     ensure!(
         path.is_absolute(),
@@ -372,6 +419,8 @@ pub struct PreparedExternalCandidateLauncherRequest {
     pub request: lillux::SubprocessRequest,
     pub bootstrap_digest: String,
     pub authority: ryeos_state::PinnedStateAuthority,
+    /// Exact already validated program retained for live supervisor joins.
+    pub candidate_program: AdmittedExternalExecutionProgram,
 }
 
 /// Bind exact node-owned descriptors into a credential-free dedicated
@@ -463,6 +512,7 @@ pub fn prepare_launcher_subprocess_request(
         request,
         bootstrap_digest,
         authority,
+        candidate_program: spec.candidate_program.clone(),
     })
 }
 
@@ -531,6 +581,69 @@ mod tests {
         AdmittedExternalCandidateProgram, ExternalCandidateRequirement,
         ExternalCandidateRuntimeRecipe, MAX_EXTERNAL_RUNTIME_RECIPE_BYTES, PROTOCOL,
     };
+
+    #[test]
+    fn fixture_mount_requires_q_mode_and_disjoint_normalized_destinations() {
+        use ryeos_external_execution_contract::ExternalExecutionMode;
+        use ryeos_external_execution_contract::qualification_fixture::{
+            Q_FIXTURE_MOUNT_DESTINATION, QFixtureContract,
+        };
+        let fixture = QFixtureContract {
+            schema: 1,
+            mount_destination: Q_FIXTURE_MOUNT_DESTINATION.into(),
+            leaf: "candidate.txt".into(),
+            initial_content_b64: String::new(),
+            initial_blob_hash: lillux::sha256_hex(b""),
+            max_bytes: 65536,
+        };
+        let q = ExternalExecutionMode::QualificationStructuredSession {};
+        for destination in [
+            "/",
+            "/ryeos",
+            Q_FIXTURE_MOUNT_DESTINATION,
+            "/ryeos/qualification-fixture/child",
+            "/ryeos/../runtime",
+        ] {
+            assert!(
+                validate_qualification_fixture_mounts(q, Some(&fixture), [Path::new(destination)])
+                    .is_err(),
+                "{destination}"
+            );
+        }
+        validate_qualification_fixture_mounts(
+            q,
+            Some(&fixture),
+            [
+                Path::new("/workspace"),
+                Path::new("/runtime"),
+                Path::new("/ryeos/qualification-fixture-other"),
+            ],
+        )
+        .unwrap();
+        for mode in [
+            ExternalExecutionMode::StructuredSession {},
+            ExternalExecutionMode::DirectCommand {
+                stdout_max_bytes: 1,
+                stderr_max_bytes: 1,
+            },
+        ] {
+            assert!(
+                validate_qualification_fixture_mounts(
+                    mode,
+                    Some(&fixture),
+                    [Path::new("/runtime")]
+                )
+                .is_err()
+            );
+            validate_qualification_fixture_mounts(mode, None, [Path::new("/runtime")]).unwrap();
+        }
+        let mut substituted = fixture;
+        substituted.mount_destination = "/workspace".into();
+        assert!(
+            validate_qualification_fixture_mounts(q, Some(&substituted), [Path::new("/runtime")])
+                .is_err()
+        );
+    }
 
     fn program() -> AdmittedExternalCandidateProgram {
         let runtime_recipe = ExternalCandidateRuntimeRecipe {

@@ -81,7 +81,8 @@ impl ChannelPhase {
             }
             QualificationScopeSettled { observation }
                 if self == Self::Stopping
-                    && completion == Some(observation.completion_request_digest.as_str()) =>
+                    && completion
+                        == Some(observation.observation.completion_request_digest.as_str()) =>
             {
                 Self::Stopped
             }

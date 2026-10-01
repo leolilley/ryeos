@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T04:33:31Z:9aa6ee9a9d1b124776145a4939635ea1401a83cf58b3bf0125b3fb068465b5f1:OlIfsLGxrsJKcClW4gDeIPclp65sivDWPUQ0l93bjKos2m4bZuguiJCdTFl5SXOSsNWQ81GJeqMYW8y2YECiAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T06:23:47Z:1d2b99becbccd64f7a2bea404e07a2d372689f6689e8ccea756ca40596da297c:rc1wwMw97x8V8cXfXCUGkgs7dI23oTpoLQ5lMP4KFA27a+iuFpBVPgCE9KE0faGMbEHNRLkftTzh8AcZUOKUDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -107,8 +107,8 @@ Requiring a completed root before Q contact would create an ordering cycle.
 
 ## Finite session setup and turn
 
-The signed consumer request contract is current-only v3. It requires an explicit
-nullable credential-profile selector and commits an opaque session setup request
+The signed consumer request contract is current-only v4. It requires explicit
+nullable credential-profile and finite-fixture selectors and commits an opaque session setup request
 and an opaque turn request, with a combined 8 KiB ceiling
 and distinct canonical digests. The daemon sends those exact two values through
 one attached exclusive Worker. It does not interpret Codex response pointers:
@@ -132,6 +132,44 @@ setup. Their receipt order does not establish that a turn request caused them;
 the request-correlated Delta/Final and turn observation gates remain distinct.
 Structural readback authenticates both signed request digests and both actual
 Final byte sequences. It still grants no semantic success or qualification.
+
+## Bounded native fixture custody
+
+A selected signed scenario may admit one separate fixture at
+`/ryeos/qualification-fixture`: one safe regular, nonexecutable leaf and at most
+64 KiB of raw content. Surrounding signed policy, bootstrap and encoded transport
+limits also apply. Null admits no fixture. Session program schema 2 selects it
+only from the scenario in the sealed invocation and binds it in the program
+digest. A callback, runtime profile or scratch path cannot replace that selection.
+
+The native launcher creates fresh backing beneath its original pinned private
+parent. It refuses overlapping namespace destinations and descriptor-rooted
+backing-directory aliases with admitted mounts. The fixture and held sandbox
+remain in one native owner, with the fixture included in held/applied mount
+commitments. `/workspace` remains read-only for Q and ordinary candidate exports
+remain closed.
+
+After the authenticated completion command, only that sandbox's once-reaped
+Lillux proof permits the one-shot fixture read. Capture validates the entire
+directory, owner, mount, links, modes, byte bound and stable file identity. A
+failed or lost capture does not permit another native read. The guest journal
+joins these bytes to the original applied runtime and completion command, retains
+exact metadata and blob CAS roots under a distinct Q occurrence receipt, then
+commits its settlement row before acknowledging completion. Guest epoch 12
+retains the exact admitted program and stage identity for cold verification.
+
+The capture metadata includes the original capture-free native observation.
+The signed schema 2 settlement wrapper references that metadata; the metadata
+never references the wrapper. The CAS object has exactly one blob edge; program,
+contract, native-observation and derived ProjectFile digests are commitments,
+not extra CAS links. These facts describe immutable custody, not product
+semantics or a completed five-claim qualification.
+
+Controller capture transfer and durable receiver custody are not implemented by
+this cut. Normal controller settlement and provider termination explicitly
+refuse a nonnull capture reference until that custody is verified. Cancellation
+and cleanup remain available. Source review and authored tests do not establish
+an installed or Render proof.
 
 ## Actual production Q semantics and remaining joins
 

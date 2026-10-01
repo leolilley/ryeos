@@ -167,6 +167,11 @@ impl RuntimeDb {
             bail!("Q native settlement has the wrong signed payload")
         };
         observation.validate(&binding)?;
+        ensure!(
+            observation.fixture_capture.is_none(),
+            "Q fixture normal settlement requires verified controller capture custody"
+        );
+        let observation = &observation.observation;
         let mut completions = signed(
             ChannelDirection::OwnerToSupervisor,
             "qualification_complete",
@@ -2007,6 +2012,11 @@ pub(super) fn require_applied_qualification_normal_settlement_tx(
         bail!("Q normal settlement lost its signed native scope death");
     };
     observation.validate(&binding)?;
+    ensure!(
+        observation.fixture_capture.is_none(),
+        "Q fixture normal termination requires verified controller capture custody"
+    );
+    let observation = &observation.observation;
     let receipt_json = lillux::canonical_json(&serde_json::to_value(receipt)?)?;
     ensure!(
         observation.completion_frame_digest == completion.digest()

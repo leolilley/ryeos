@@ -24,10 +24,10 @@ pub(crate) struct OwnedQualificationFixture {
 
 /// Bounded observed content only. The guest journal must independently join
 /// native/runtime/completion identities before constructing durable metadata.
-pub(crate) struct CapturedQualificationFixture {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) blob_hash: String,
-    pub(crate) normalized_mode: u32,
+pub struct CapturedQualificationFixture {
+    pub bytes: Vec<u8>,
+    pub blob_hash: String,
+    pub normalized_mode: u32,
 }
 
 impl OwnedQualificationFixture {
