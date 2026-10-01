@@ -2208,7 +2208,11 @@ mod tests {
         }
         let mut files = BTreeMap::new();
         collect(&root, &root, &mut files);
-        for name in ["authoring.profile.json", "structured-session.profile.json"] {
+        for name in [
+            "authoring.profile.json",
+            "structured-session.profile.json",
+            "external-authoring.profile.json",
+        ] {
             compile(&files[name], &files).unwrap();
         }
         // Early lifecycle authority must be correlated before the daemon ACK
