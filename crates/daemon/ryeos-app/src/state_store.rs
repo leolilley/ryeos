@@ -15772,6 +15772,23 @@ impl StateStore {
         owner_principal: &str,
         program_digest: &str,
     ) -> Result<bool> {
+        // A negative readiness probe grants no proof and must remain usable
+        // before allocation and during failure cleanup.
+        if !self
+            .lock()?
+            .runtime_db
+            .completed_qualification_guest_scratch_transport(
+                placement,
+                coordinate,
+                qualification_operation_id,
+                owner_principal,
+                program_digest,
+            )?
+        {
+            return Ok(false);
+        }
+        let guard = self.state_authority.acquire_shared_guard()?;
+        self.verify_external_q_fixture_custody_admitted(&guard, placement)?;
         self.lock()?
             .runtime_db
             .completed_qualification_guest_scratch_transport(
@@ -15786,12 +15803,17 @@ impl StateStore {
     /// Read the exact closed Q transport, local cleanup, native settlement,
     /// provider terminal and structural transcript at one retained DB view.
     /// The result grants no Worker semantic success or qualification claim.
-    pub(crate) fn qualification_historical_transport_evidence(
+    pub(crate) fn qualification_historical_transport_evidence_admitted(
         &self,
+        guard: &ryeos_state::CasMutationGuard,
         coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
         qualification_operation_id: &str,
         owner_principal: &str,
     ) -> Result<runtime_db::external_execution::QualificationHistoricalTransportEvidence> {
+        let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+            coordinate, qualification_operation_id,
+        )?;
+        self.verify_external_q_fixture_custody_admitted(guard, &placement)?;
         self.lock()?
             .runtime_db
             .qualification_historical_transport_evidence(
@@ -16899,10 +16921,131 @@ impl StateStore {
         placement: &str,
     ) -> Result<Option<runtime_db::external_execution::RetainedExternalQualificationScopeSettlement>>
     {
-        let _permit = self.acquire_write_permit()?;
-        self.lock()?
+        use ryeos_state::external_execution::ExecutionChannelPayload;
+        use ryeos_state::recovery::DurableCasPublicationKey;
+
+        let permit = self.acquire_write_permit()?;
+        let Some(plan) = self
+            .lock()?
             .runtime_db
-            .apply_external_qualification_scope_settlement(placement)
+            .prepare_external_qualification_scope_settlement(placement)?
+        else {
+            return Ok(None);
+        };
+        let ExecutionChannelPayload::QualificationScopeSettled { observation } =
+            &plan.evidence.settlement.frame().payload
+        else {
+            bail!("Q receiver lost its exact signed settlement");
+        };
+        let verified = match (
+            plan.owner.program.fixture(),
+            observation.fixture_capture.as_ref(),
+            observation.fixture_content.as_ref(),
+        ) {
+            (None, None, None) => None,
+            (Some(fixture), Some(reference), Some(content)) => {
+                let bytes = content.verify_for(
+                    reference,
+                    fixture,
+                    &plan.evidence.binding,
+                    &observation.observation,
+                )?;
+                let key = DurableCasPublicationKey::qualification_fixture_occurrence(
+                    &plan.evidence.binding.digest()?,
+                    plan.evidence.completion.digest(),
+                )?;
+                let recovery = self.state_authority.require_recovery()?;
+                let record = if let Some(record) = &plan.receiver_stage {
+                    record.clone()
+                } else {
+                    // Only empty, expirable staging exists before the DB locator.
+                    // Never store or protect roots until the chosen ID is durable.
+                    let stage = recovery.begin_durable_cas_upload_admitted(
+                        permit.cas_guard(),
+                        &plan.owner.operator_principal,
+                        "qualification-fixture-receiver",
+                        &key,
+                        None,
+                    )?;
+                    let stage_id = stage.staging_id().to_owned();
+                    drop(stage);
+                    self.lock()?
+                        .runtime_db
+                        .bind_receiver_stage(&plan, &stage_id)?
+                };
+                {
+                    // Per-stage locking happens outside the StateStore/DB lock.
+                    let mut stage = recovery.open_durable_cas_upload_admitted(
+                        permit.cas_guard(),
+                        &record.stage_id,
+                        &plan.owner.operator_principal,
+                    )?;
+                    stage.ensure_publication_contract(&key, None)?;
+                    if stage.admitted_target_hash().is_none() {
+                        let cas = self.state_authority.cas_store()?;
+                        anyhow::ensure!(
+                            stage.store_blob(permit.cas_guard(), &cas, &bytes)?
+                                == reference.blob_hash
+                                && stage.store_object(
+                                    permit.cas_guard(),
+                                    &cas,
+                                    &content.metadata.to_value()?,
+                                )? == reference.metadata_hash,
+                            "Q receiver CAS write changed its signed capture"
+                        );
+                        stage.retain_qualification_fixture(permit.cas_guard(), reference)?;
+                    }
+                }
+                Some(
+                    runtime_db::external_execution::verify_qualification_fixture_receiver_custody(
+                        &self.state_authority,
+                        permit.cas_guard(),
+                        &plan,
+                        &record,
+                    )?,
+                )
+            }
+            _ => bail!("Q receiver fixture presence differs from its admitted program"),
+        };
+        let retained = self
+            .lock()?
+            .runtime_db
+            .finish_external_qualification_scope_settlement(&plan, verified.as_ref())?;
+        Ok(Some(retained))
+    }
+
+    /// Authenticate the original receiver stage and exact CAS bytes. The DB
+    /// plan and finish reader separately enforce immutable signed frame joins.
+    fn verify_external_q_fixture_custody_admitted(
+        &self,
+        guard: &ryeos_state::CasMutationGuard,
+        placement: &str,
+    ) -> Result<()> {
+        self.state_authority.ensure_guard(guard)?;
+        let plan = {
+            let state = self.lock()?;
+            if !state
+                .runtime_db
+                .q_fixture_receiver_custody_required(placement)?
+            {
+                return Ok(());
+            }
+            state
+                .runtime_db
+                .retained_q_fixture_receiver_plan(placement)?
+                .context("Q fixture receiver lost its retained custody plan")?
+        };
+        let record = plan
+            .receiver_stage
+            .as_ref()
+            .context("Q fixture receiver lost its original durable stage")?;
+        runtime_db::external_execution::verify_qualification_fixture_receiver_custody(
+            &self.state_authority,
+            guard,
+            &plan,
+            record,
+        )?;
+        Ok(())
     }
 
     pub(crate) fn retained_external_candidate_import(
@@ -17177,6 +17320,8 @@ impl StateStore {
         placement: &str,
         intent: &runtime_db::external_execution::ExternalTerminationIntent,
     ) -> Result<bool> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        self.verify_external_q_fixture_custody_admitted(&guard, placement)?;
         self.lock()?
             .runtime_db
             .begin_external_termination(placement, intent)
@@ -17187,6 +17332,8 @@ impl StateStore {
         placement: &str,
         observation: &runtime_db::external_execution::ExternalTerminalObservation,
     ) -> Result<()> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        self.verify_external_q_fixture_custody_admitted(&guard, placement)?;
         self.lock()?
             .runtime_db
             .settle_external_terminal(placement, observation)
@@ -17196,6 +17343,8 @@ impl StateStore {
         &self,
         placement: &str,
     ) -> Result<()> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        self.verify_external_q_fixture_custody_admitted(&guard, placement)?;
         self.lock()?
             .runtime_db
             .ensure_external_qualification_normal_terminal(placement)
@@ -17205,6 +17354,17 @@ impl StateStore {
         &self,
         placement: &str,
     ) -> Result<bool> {
+        // This is also the pre-revocation cleanup probe. An absent normal
+        // intent must not require a fixture that was never captured.
+        if !self
+            .lock()?
+            .runtime_db
+            .has_external_qualification_normal_termination_intent(placement)?
+        {
+            return Ok(false);
+        }
+        let guard = self.state_authority.acquire_shared_guard()?;
+        self.verify_external_q_fixture_custody_admitted(&guard, placement)?;
         self.lock()?
             .runtime_db
             .has_external_qualification_normal_termination_intent(placement)

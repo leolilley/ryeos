@@ -1881,12 +1881,13 @@ const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence 
 
 fn runtime_schema_sql() -> String {
     format!(
-        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         external_execution::GUARD_SQL,
         ryeos_state::external_execution::journal::CHANNEL_SQL,
         external_execution::JOURNAL_SQL,
         external_execution::QUALIFICATION_LOCAL_START_SQL,
         external_execution::QUALIFICATION_GUEST_SCRATCH_SQL,
+        external_execution::QUALIFICATION_FIXTURE_RECEIVER_SQL,
         external_execution::RELAY_TRANSFER_SQL,
         scoped_child_attempt::JOURNAL_SQL,
         runtime_snapshot_bootstrap::JOURNAL_SQL,
@@ -2693,7 +2694,8 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // descriptor borrow, without backend workspace or process-scope authority.
 // Epoch 120 retains distinct one-use Q setup and turn contact/settlement.
 // Epoch 121 retains Q credential profile custody through exact local retirement.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 121;
+// Epoch 122 retains exact controller Q fixture stage intention and verified custody.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 122;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -3993,6 +3995,65 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "INTEGER",
                         pk: false,
                         not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_qualification_fixture_receiver",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "binding_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "completion_frame_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "settlement_frame_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "program_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reference_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "stage_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "verified_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
                     },
                 ],
             },

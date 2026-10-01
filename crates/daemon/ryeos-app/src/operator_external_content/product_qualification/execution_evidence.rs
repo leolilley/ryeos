@@ -1071,7 +1071,8 @@ fn corroborate_qualification_worker_transcript(
     let operation = qualification_operation_id;
     let retained = state
         .state_store
-        .qualification_historical_transport_evidence(
+        .qualification_historical_transport_evidence_admitted(
+            guard,
             &input.coordinate,
             operation,
             &input.purpose.owner_fingerprint,

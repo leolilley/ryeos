@@ -22,7 +22,8 @@ pub(crate) fn read_retained_reference(
     coordinate.validate()?;
     let retained = state
         .state_store
-        .qualification_historical_transport_evidence(
+        .qualification_historical_transport_evidence_admitted(
+            guard,
             coordinate,
             qualification_operation_id,
             owner_principal,

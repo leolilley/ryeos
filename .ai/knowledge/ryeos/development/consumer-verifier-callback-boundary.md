@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T07:04:06Z:6203734004b3167d62b90c7ccf46f6b81dfa87c9dc8b47b3bb7ba83e1cbfffb8:Hhr9UXje9dhxzRux3+GQDtYyL/Zt8lT2+SfB4hN/m8XoX05phnfwExtqDOp4DHp8CNGTRDx+9LQQd0Oyi+YTBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T07:15:01Z:675989c2aa5a75e235627d966fa44d0fa3ead80ffd3b4f5642fa62ffb60f904f:dkrtXuHPRetLIssjpMjMlEv9XRtTq4hmv/WOyypuarGUT+0ABonkX4icKsHHCbHz3yCZDtDKXjyKc7fZPGzTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -176,11 +176,23 @@ separate cancellation reserve remains available. Preflight rejects insufficient
 signed capacity before provider contact. These bounds are transport accounting,
 not execution or claim authority.
 
-Bounded controller transfer content is implemented; durable receiver custody is
-not implemented by this cut. Normal controller settlement and provider termination explicitly
-refuse a nonnull capture reference until that custody is verified. Cancellation
-and cleanup remain available. Source review and authored tests do not establish
-an installed or Render proof.
+The controller records its own immutable receiver-stage locator before writing
+or protecting any CAS root. An empty stage abandoned before that locator may
+expire; retries reopen the chosen original stage and cannot create another
+permanent receipt. Runtime epoch 122 joins placement, exact owner/program,
+binding, completion, native settlement, capture reference and stage identity.
+Bounded metadata/blob verification uses the original signed fixture and native
+predecessor, outside the StateStore/RuntimeDb lock. The verified receiver row and
+settlement frame application commit together before acknowledgement.
+
+Normal provider termination, recovery/lifeline disarm, positive completed-scratch
+replay and historical/issuer reads recheck that original stage and CAS bytes.
+Historical callers reuse their existing CAS guard; they do not renew a callback
+or require current execution contact. An absent normal-intent or readiness probe
+remains negative without demanding a capture that never happened. Revocation
+and cancellation cleanup remain independent of normal fixture evidence. SQL
+readback alone is not authenticated CAS custody. These source joins and authored
+tests do not establish installed execution, product semantics or a Render proof.
 
 ## Actual production Q semantics and remaining joins
 
@@ -251,7 +263,7 @@ Historical release uses the retained process identity without requiring a curren
 callback, active generation or original disposable-directory descriptors.
 Launch/send/readiness failures attempt the same release and preserve uncertainty.
 No-Create rollback releases safe credential custody before its terminal cleanup.
-Runtime epoch 121 and required-null journal fields are current-only; there is no
+Runtime epoch 122 and required-null journal fields are current-only; there is no
 predecessor decoder.
 
 ## Finite result and issuance joins

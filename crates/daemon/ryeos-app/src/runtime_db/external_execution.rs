@@ -15,6 +15,7 @@ pub(crate) mod connector;
 mod qualification_batch;
 mod qualification_command;
 mod qualification_evidence;
+mod qualification_fixture_receiver;
 mod qualification_guest_scratch;
 mod qualification_local_start;
 mod qualification_process;
@@ -33,6 +34,11 @@ pub(crate) use qualification_command::{
     QualificationWorkerCommandPhase, QualificationWorkerCommandRecord,
 };
 pub(crate) use qualification_evidence::QualificationHistoricalTransportEvidence;
+pub(super) use qualification_fixture_receiver::JOURNAL_SQL as QUALIFICATION_FIXTURE_RECEIVER_SQL;
+pub(crate) use qualification_fixture_receiver::{
+    QualificationFixtureReceiverRecord, QualificationScopeSettlementPlan,
+    VerifiedQualificationFixtureCustody, verify_qualification_fixture_receiver_custody,
+};
 pub(super) use qualification_guest_scratch::JOURNAL_SQL as QUALIFICATION_GUEST_SCRATCH_SQL;
 pub(crate) use qualification_guest_scratch::{
     QualificationGuestScratchPhase, QualificationGuestScratchRecord,
@@ -1868,6 +1874,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     qualification_command::validate_commands(conn)?;
     qualification_batch::validate_batches(conn)?;
     qualification_transcript::validate_transcripts(conn)?;
+    qualification_fixture_receiver::validate_receivers(conn)?;
     relay_bootstrap::validate_no_orphans(conn)?;
     relay_transfer::validate_transfers(conn)?;
     Ok(())
