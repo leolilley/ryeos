@@ -578,6 +578,13 @@ pub struct RestoredVerifierAdapterObservation {
 }
 
 impl RestoredVerifierAdapterObservation {
+    /// Digest of the owner observation's exact typed protocol bytes,
+    /// excluding its journal enum envelope. This is the prerequisite
+    /// coordinate commitment, not a state CAS object's digest.
+    pub fn digest(&self) -> Result<String> {
+        Ok(hex::encode(Sha256::digest(canonical_json(self)?)))
+    }
+
     /// Bind a prerequisite observation to a proposed consumer coordinate.
     /// The caller must load the observed journal row and independently admit
     /// the accepted root and current occurrence; deserialized data is not
@@ -604,8 +611,7 @@ impl RestoredVerifierAdapterObservation {
         ensure!(
             !self.contact_deadline_exceeded
                 && coordinate.prerequisite_measurement_attempt_id == intent.operation_id
-                && coordinate.prerequisite_measurement_observation_digest
-                    == hex::encode(Sha256::digest(canonical_json(self)?)),
+                && coordinate.prerequisite_measurement_observation_digest == self.digest()?,
             "consumer prerequisite differs from timely same-occurrence owner measurement"
         );
         Ok(())

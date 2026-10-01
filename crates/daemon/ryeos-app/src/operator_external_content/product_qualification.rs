@@ -2741,9 +2741,7 @@ pub fn consumer_verification_inputs_for_callback(
         subject_digest: canonical_value_digest(&serde_json::to_value(&purpose.subject)?)?,
         use_digest: canonical_value_digest(&serde_json::to_value(qualified_use)?)?,
         prerequisite_measurement_attempt_id: prerequisite.intent.operation_id.clone(),
-        prerequisite_measurement_observation_digest: canonical_value_digest(
-            &serde_json::to_value(measurement)?,
-        )?,
+        prerequisite_measurement_observation_digest: measurement.digest()?,
     };
     requested.require_coordinate(&coordinate)?;
     let authority = state.state_store.pinned_state_authority()?;

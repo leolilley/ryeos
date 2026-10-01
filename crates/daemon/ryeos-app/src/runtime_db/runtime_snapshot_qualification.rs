@@ -683,9 +683,7 @@ mod tests {
             subject_digest: "d".repeat(64),
             use_digest: "e".repeat(64),
             prerequisite_measurement_attempt_id: verifier.operation_id.clone(),
-            prerequisite_measurement_observation_digest: hex::encode(Sha256::digest(
-                ryeos_external_execution_contract::canonical_json(&observation).unwrap(),
-            )),
+            prerequisite_measurement_observation_digest: observation.digest().unwrap(),
         };
         // Consumer validation is a data join, not contact permission. This
         // occurrence is already terminated; journal admission still refuses.
@@ -891,7 +889,35 @@ mod tests {
                     &occurrence,
                 )
             };
+        // The shared owner, callback author and retained journal reader must
+        // commit the exact typed protocol bytes, not a state CAS object or
+        // the tagged journal envelope.
+        assert_eq!(
+            observation.digest().unwrap(),
+            hex::encode(Sha256::digest(
+                ryeos_external_execution_contract::canonical_json(&observation).unwrap(),
+            ))
+        );
         check_prerequisite(&observation, &coordinate).unwrap();
+        let mut object_coordinate = coordinate.clone();
+        object_coordinate.prerequisite_measurement_observation_digest =
+            ryeos_state::objects::canonical_value_digest(
+                &serde_json::to_value(&observation).unwrap(),
+            )
+            .unwrap();
+        assert!(check_prerequisite(&observation, &object_coordinate).is_err());
+        let mut envelope_coordinate = coordinate.clone();
+        envelope_coordinate.prerequisite_measurement_observation_digest =
+            ryeos_state::objects::canonical_value_digest(
+                &serde_json::to_value(
+                    ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierObservation::OwnerMeasurement {
+                        observation: observation.clone(),
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(check_prerequisite(&observation, &envelope_coordinate).is_err());
         // Unlike the content-only validator, the journal-owned read refuses
         // this occurrence because termination has already been retained.
         let refusal = db
@@ -914,9 +940,8 @@ mod tests {
         let mut late_observation = observation.clone();
         late_observation.contact_deadline_exceeded = true;
         let mut late_coordinate = coordinate.clone();
-        late_coordinate.prerequisite_measurement_observation_digest = hex::encode(Sha256::digest(
-            ryeos_external_execution_contract::canonical_json(&late_observation).unwrap(),
-        ));
+        late_coordinate.prerequisite_measurement_observation_digest =
+            late_observation.digest().unwrap();
         assert!(check_prerequisite(&late_observation, &late_coordinate).is_err());
         assert!(matches!(
             db.claim_restored_verifier_attempt(&verifier.operation_id)

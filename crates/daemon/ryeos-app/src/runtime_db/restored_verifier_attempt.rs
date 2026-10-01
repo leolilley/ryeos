@@ -427,8 +427,7 @@ pub(super) fn read_retained_consumer_prerequisite(
         .context("consumer prerequisite observation absent")?
         .owner_measurement()?;
     ensure!(
-        ryeos_state::objects::canonical_value_digest(&serde_json::to_value(observation)?)?
-            == coordinate.prerequisite_measurement_observation_digest,
+        observation.digest()? == coordinate.prerequisite_measurement_observation_digest,
         "consumer prerequisite differs from its retained observation digest"
     );
     Ok(record)
