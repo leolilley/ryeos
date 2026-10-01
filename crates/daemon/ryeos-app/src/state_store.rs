@@ -33,6 +33,18 @@ pub use runtime_db::{
     StopIntent, WorkerProcessRecord,
 };
 
+/// Minted only after actual exact scratch removal/absence by this StateStore.
+/// No Clone, serde constructor, public observations or worker input bridge.
+pub(crate) struct ResourceScratchPhysicalReceipt {
+    expected: runtime_db::ProcessResourceReservationRecord,
+}
+
+impl ResourceScratchPhysicalReceipt {
+    pub(crate) fn into_expected(self) -> runtime_db::ProcessResourceReservationRecord {
+        self.expected
+    }
+}
+
 mod projection_access;
 mod scoped_child;
 
@@ -6766,6 +6778,13 @@ impl StateStore {
         &self,
         reservation: &runtime_db::ProcessResourceReservationRecord,
     ) -> Result<()> {
+        if reservation
+            .runtime_custody
+            .as_ref()
+            .is_some_and(|custody| custody.workspace.is_resource_owned_scratch())
+        {
+            bail!("resource-owned scratch reservation requires its ORIGINAL guard");
+        }
         let g = self.lock()?;
         if !self
             .process_attachment_admission_open
@@ -6774,6 +6793,200 @@ impl StateStore {
             bail!("process resource reservation is closed for daemon shutdown");
         }
         g.runtime_db.reserve_process_resource_launch(reservation)
+    }
+
+    /// Preserve the ORIGINAL guard BEFORE the first possible reservation
+    /// commit. Every error, including a lost commit ACK, leaves it preserved;
+    /// this method neither blindly retries insertion nor removes the scratch.
+    pub fn reserve_process_resource_launch_with_scratch(
+        &self,
+        reservation: &runtime_db::ProcessResourceReservationRecord,
+        original: &crate::temp_dir_guard::TempDirGuard,
+    ) -> Result<()> {
+        if self.read_only {
+            bail!("read-only StateStore cannot own scratch reservation");
+        }
+        let custody =
+            runtime_db::process_resource_custody::never_issued_scratch_custody(reservation)?;
+        custody.require_retained()?;
+        let parent = self.resource_scratch_parent(custody)?;
+        self.require_original_resource_scratch(custody, &parent, original)?;
+        original.preserve_for_explicit_cleanup();
+        let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("scratch reservation is closed for daemon shutdown; original guard retained");
+        }
+        g.runtime_db.reserve_process_resource_launch(reservation)
+    }
+
+    /// Only a stored NEVER-ISSUED reservation can use this finite first cut.
+    /// The receipt records physical disposal; pins/capacity remain retained.
+    pub fn remove_never_issued_resource_scratch(
+        &self,
+        expected: &runtime_db::ProcessResourceReservationRecord,
+        original: &crate::temp_dir_guard::TempDirGuard,
+    ) -> Result<runtime_db::ProcessResourceReservationRecord> {
+        self.remove_or_reconcile_never_issued_resource_scratch(expected, Some(original))
+    }
+
+    /// Recovery keeps ORIGINAL birth coordinates and permits a new daemon
+    /// incarnation. It never rewrites that generation or creates a new owner.
+    pub fn recover_never_issued_resource_scratch(
+        &self,
+        expected: &runtime_db::ProcessResourceReservationRecord,
+    ) -> Result<runtime_db::ProcessResourceReservationRecord> {
+        self.remove_or_reconcile_never_issued_resource_scratch(expected, None)
+    }
+
+    fn remove_or_reconcile_never_issued_resource_scratch(
+        &self,
+        expected: &runtime_db::ProcessResourceReservationRecord,
+        original: Option<&crate::temp_dir_guard::TempDirGuard>,
+    ) -> Result<runtime_db::ProcessResourceReservationRecord> {
+        use runtime_db::process_resource_custody::{
+            ProcessCustodyPhysicalState, ProcessWorkspaceCustody, never_issued_scratch_custody,
+        };
+        if self.read_only {
+            bail!("read-only StateStore cannot remove resource scratch");
+        }
+        let custody = never_issued_scratch_custody(expected)?;
+        let parent = self.resource_scratch_parent(custody)?;
+        let ProcessWorkspaceCustody::ResourceOwnedScratch {
+            scratch_name,
+            workspace_identity,
+            ..
+        } = &custody.workspace
+        else {
+            unreachable!("validated scratch")
+        };
+        let name = std::ffi::OsStr::new(scratch_name);
+        // Validate ORIGINAL armed authority BEFORE any transition or removal.
+        if let Some(original) = original {
+            self.require_original_resource_scratch(custody, &parent, original)?;
+        }
+        let g = self.lock()?;
+        let stored = g
+            .runtime_db
+            .process_resource_reservation(&expected.owner_kind, &expected.owner_coordinate)?
+            .ok_or_else(|| anyhow!("scratch reservation absent; outcome must be reconciled"))?;
+        if &stored != expected {
+            bail!("scratch recovery lost its exact birth reservation");
+        }
+        if custody.physical_state == ProcessCustodyPhysicalState::PhysicallyRemoved {
+            if parent.open_entry(name, false)?.is_some() {
+                bail!("recorded removed scratch has a replacement entry; refuse further removal");
+            }
+            parent.ensure_path_binding()?;
+            return Ok(stored);
+        }
+        if custody.physical_state == ProcessCustodyPhysicalState::Retained {
+            match parent.open_entry(name, false)? {
+                Some(lillux::PinnedDirectoryEntry::Directory(directory))
+                    if directory.identity()? == *workspace_identity => {}
+                _ => bail!("scratch absence/replacement has no PRE-EXISTING cleanup intent"),
+            }
+        }
+        let intent = g.runtime_db.claim_never_issued_scratch_cleanup(expected)?;
+        match parent.open_entry(name, false)? {
+            Some(lillux::PinnedDirectoryEntry::Directory(directory)) => {
+                directory.ensure_path_binding()?;
+                if directory.identity()? != *workspace_identity {
+                    bail!("scratch root incarnation changed; cleanup intent remains pinned");
+                }
+                if let Some(original) = original {
+                    original.remove_now()?;
+                } else {
+                    directory.remove_contents_recursive()?;
+                    if !parent.remove_empty_child_if_same(name, &directory)? {
+                        bail!("recovered scratch remained nonempty");
+                    }
+                }
+            }
+            Some(_) => bail!("scratch cleanup entry is no longer a directory"),
+            None => {
+                // Exact absence is accepted only AFTER retained cleanup intent
+                // under this original namespace, never from an Ok no-op guard.
+                if original.is_some() {
+                    bail!("original armed scratch disappeared before removal");
+                }
+            }
+        }
+        parent.ensure_path_binding()?;
+        if parent.open_entry(name, false)?.is_some() {
+            bail!("scratch physical removal did not produce exact parent absence");
+        }
+        let receipt = ResourceScratchPhysicalReceipt { expected: intent };
+        g.runtime_db.record_never_issued_scratch_removal(receipt)
+    }
+
+    fn resource_scratch_parent(
+        &self,
+        custody: &runtime_db::process_resource_custody::ProcessResourceRuntimeCustody,
+    ) -> Result<lillux::PinnedDirectory> {
+        use runtime_db::process_resource_custody::ProcessWorkspaceCustody;
+        let ProcessWorkspaceCustody::ResourceOwnedScratch {
+            runtime_directory_identity,
+            parent_directory_identity,
+            ..
+        } = &custody.workspace
+        else {
+            bail!("physical scratch owner is absent")
+        };
+        let runtime = self.state_authority.runtime_directory();
+        runtime.ensure_path_binding()?;
+        if runtime.identity()? != *runtime_directory_identity {
+            bail!("scratch runtime namespace differs from ORIGINAL owner");
+        }
+        let cache = runtime
+            .open_child_directory(std::ffi::OsStr::new("cache"))?
+            .ok_or_else(|| anyhow!("scratch runtime cache is missing"))?;
+        let parent = cache
+            .open_child_directory(std::ffi::OsStr::new("executions"))?
+            .ok_or_else(|| anyhow!("scratch original parent is missing"))?;
+        parent.ensure_path_binding()?;
+        if parent.identity()? != *parent_directory_identity {
+            bail!("scratch parent incarnation differs from ORIGINAL owner");
+        }
+        Ok(parent)
+    }
+
+    fn require_original_resource_scratch(
+        &self,
+        custody: &runtime_db::process_resource_custody::ProcessResourceRuntimeCustody,
+        expected_parent: &lillux::PinnedDirectory,
+        original: &crate::temp_dir_guard::TempDirGuard,
+    ) -> Result<()> {
+        use runtime_db::process_resource_custody::ProcessWorkspaceCustody;
+        let ProcessWorkspaceCustody::ResourceOwnedScratch {
+            scratch_name,
+            workspace_identity,
+            ..
+        } = &custody.workspace
+        else {
+            bail!("original scratch owner is absent")
+        };
+        let (parent, name) = original.owned_scratch_parent()?;
+        let root = original.owned_scratch_root()?;
+        parent.ensure_path_binding()?;
+        root.ensure_path_binding()?;
+        if original.path().is_none()
+            || !original.owns_effective_path(root.path())
+            || name != std::ffi::OsStr::new(scratch_name)
+            || parent.identity()? != expected_parent.identity()?
+            || root.identity()? != *workspace_identity
+        {
+            bail!("scratch guard is disarmed or differs from its ORIGINAL physical owner");
+        }
+        let bound = expected_parent
+            .open_child_directory(name)?
+            .ok_or_else(|| anyhow!("original scratch owner is absent under its parent"))?;
+        if bound.identity()? != *workspace_identity {
+            bail!("original scratch parent binding changed");
+        }
+        Ok(())
     }
 
     pub fn begin_trusted_process_resource_spawn(
@@ -25751,6 +25964,531 @@ mod tests {
             },
             recovery,
         )
+    }
+
+    /// Storage-only trusted coordinates; no admitted capsule, process or GPU.
+    #[cfg(target_os = "linux")]
+    fn scratch_reservation_fixture(
+        store: &StateStore,
+        coordinate: &str,
+    ) -> (
+        Arc<crate::temp_dir_guard::TempDirGuard>,
+        runtime_db::ProcessResourceReservationRecord,
+    ) {
+        use runtime_db::process_resource_custody::*;
+        let runtime = store.state_authority.runtime_directory();
+        let (_, original) = crate::temp_dir_guard::create_projectless_workspace(
+            &runtime.path().join("cache"),
+            coordinate,
+        )
+        .unwrap();
+        std::fs::write(
+            original.path().unwrap().join("sentinel"),
+            b"retained original scratch",
+        )
+        .unwrap();
+        let (parent, name) = original.owned_scratch_parent().unwrap();
+        let (mut reservation, _) = process_resource_reservation_fixture(coordinate);
+        reservation.owner_kind = "pooled_session".to_owned();
+        reservation.launch_authority =
+            runtime_db::ProcessResourceLaunchAuthority::TrustedProcessGroup {
+                cleanup_contract_digest: "7".repeat(64),
+                host_lifetime: lillux::ProcessHostLifetime::capture_current().unwrap(),
+                phase: runtime_db::TrustedResourceLaunchPhase::Reserved,
+            };
+        reservation.runtime_custody = Some(ProcessResourceRuntimeCustody {
+            version: ProcessResourceRuntimeCustody::VERSION,
+            session_capsule_hash: "1".repeat(64),
+            execution_realization_hash: "2".repeat(64),
+            source_binding_hash: Some("3".repeat(64)),
+            materializations: vec![ProcessMaterializationCustody {
+                cache: ProcessMaterializationCache::ExternalContent,
+                manifest_hash: "4".repeat(64),
+            }],
+            workspace: ProcessWorkspaceCustody::ResourceOwnedScratch {
+                runtime_directory_identity: runtime.identity().unwrap(),
+                parent_directory_identity: parent.identity().unwrap(),
+                scratch_name: name.to_str().unwrap().to_owned(),
+                workspace_identity: original.owned_scratch_root().unwrap().identity().unwrap(),
+            },
+            physical_state: ProcessCustodyPhysicalState::Retained,
+        });
+        (original, reservation)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scratch_preservation_precedes_reservation_commit_and_survives_lost_ack() {
+        let store = test_store();
+        let (original, reservation) = scratch_reservation_fixture(&store, "scratch-precommit");
+        let path = original.path().unwrap();
+        assert!(store.reserve_process_resource_launch(&reservation).is_err());
+        store.close_process_attachment_admission().unwrap();
+        assert!(
+            store
+                .reserve_process_resource_launch_with_scratch(&reservation, &original)
+                .is_err()
+        );
+        assert!(store.process_resource_reservations().unwrap().is_empty());
+        drop(original);
+        assert!(
+            path.join("sentinel").exists(),
+            "first possible commit must never be followed by automatic rollback"
+        );
+
+        let store = test_store();
+        let (original, reservation) =
+            scratch_reservation_fixture(&store, "scratch-lost-reserve-ack");
+        let path = original.path().unwrap();
+        // Discard the successful acknowledgement and original process-local
+        // guard. The authoritative stored birth and bytes must remain intact.
+        store
+            .reserve_process_resource_launch_with_scratch(&reservation, &original)
+            .unwrap();
+        assert!(
+            store
+                .reserve_process_resource_launch_with_scratch(&reservation, &original)
+                .is_err()
+        );
+        drop(original);
+        assert!(path.join("sentinel").exists());
+        assert_eq!(
+            store
+                .process_resource_reservation(
+                    &reservation.owner_kind,
+                    &reservation.owner_coordinate
+                )
+                .unwrap(),
+            Some(reservation.clone())
+        );
+        assert!(
+            store
+                .clear_process_resource_reservation(&reservation)
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .process_resource_cas_roots()
+                .unwrap(),
+            reservation
+                .runtime_custody
+                .as_ref()
+                .unwrap()
+                .cas_roots()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scratch_physical_receipt_retains_roots_and_refuses_replacement_after_removal() {
+        use runtime_db::process_resource_custody::ProcessCustodyPhysicalState;
+        let store = test_store();
+        let (original, reservation) =
+            scratch_reservation_fixture(&store, "scratch-physical-receipt");
+        let path = original.path().unwrap();
+        store
+            .reserve_process_resource_launch_with_scratch(&reservation, &original)
+            .unwrap();
+        let roots = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .process_resource_cas_roots()
+            .unwrap();
+        let pins = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .process_resource_materialization_pins()
+            .unwrap();
+        let removed = store
+            .remove_never_issued_resource_scratch(&reservation, &original)
+            .unwrap();
+        assert!(!path.exists());
+        assert!(original.path().is_none());
+        assert_eq!(
+            removed.runtime_custody.as_ref().unwrap().physical_state,
+            ProcessCustodyPhysicalState::PhysicallyRemoved
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .process_resource_cas_roots()
+                .unwrap(),
+            roots
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .process_resource_materialization_pins()
+                .unwrap(),
+            pins
+        );
+        assert!(
+            store.clear_process_resource_reservation(&removed).is_err(),
+            "physical removal cannot release resource/financial custody"
+        );
+        assert_eq!(
+            store
+                .recover_never_issued_resource_scratch(&removed)
+                .unwrap(),
+            removed
+        );
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("replacement"), b"must remain").unwrap();
+        assert!(
+            store
+                .recover_never_issued_resource_scratch(&removed)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(path.join("replacement")).unwrap(),
+            b"must remain"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scratch_disarmed_guard_with_live_root_cannot_mint_physical_receipt() {
+        use runtime_db::process_resource_custody::ProcessCustodyPhysicalState;
+        let store = test_store();
+        let (original, reservation) = scratch_reservation_fixture(&store, "scratch-disarmed");
+        let path = original.path().unwrap();
+        store
+            .reserve_process_resource_launch_with_scratch(&reservation, &original)
+            .unwrap();
+        original.disarm().unwrap();
+        original.remove_now().unwrap(); // Existing Ok no-op is NOT proof.
+        assert!(path.join("sentinel").exists());
+        assert!(
+            store
+                .remove_never_issued_resource_scratch(&reservation, &original)
+                .is_err()
+        );
+        assert_eq!(
+            store.process_resource_reservations().unwrap()[0]
+                .runtime_custody
+                .as_ref()
+                .unwrap()
+                .physical_state,
+            ProcessCustodyPhysicalState::Retained
+        );
+
+        // The SAME actual-scratch owner also refuses rollback once the real
+        // one-shot stored spawn-intent transition has committed. No subprocess
+        // is launched; this is the issued storage boundary, not GPU evidence.
+        let store = test_store();
+        let (original, reserved) =
+            scratch_reservation_fixture(&store, "scratch-issued-no-rollback");
+        let path = original.path().unwrap();
+        store
+            .reserve_process_resource_launch_with_scratch(&reserved, &original)
+            .unwrap();
+        let intent = store
+            .begin_trusted_process_resource_spawn(&reserved)
+            .unwrap()
+            .into_reservation();
+        let roots = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .process_resource_cas_roots()
+            .unwrap();
+        let pins = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .process_resource_materialization_pins()
+            .unwrap();
+        assert!(
+            store
+                .begin_trusted_process_resource_spawn(&reserved)
+                .is_err()
+        );
+        assert!(
+            store
+                .remove_never_issued_resource_scratch(&intent, &original)
+                .is_err()
+        );
+        assert!(
+            store
+                .recover_never_issued_resource_scratch(&intent)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(path.join("sentinel")).unwrap(),
+            b"retained original scratch"
+        );
+        assert_eq!(original.path(), Some(path));
+        assert_eq!(store.process_resource_reservations().unwrap(), vec![intent]);
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .process_resource_cas_roots()
+                .unwrap(),
+            roots
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .process_resource_materialization_pins()
+                .unwrap(),
+            pins
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scratch_replaced_parent_or_root_keeps_original_custody_and_replacement_bytes() {
+        use runtime_db::process_resource_custody::ProcessCustodyPhysicalState;
+        for replace_parent in [false, true] {
+            let store = test_store();
+            let (original, reservation) =
+                scratch_reservation_fixture(&store, "scratch-replacement");
+            let path = original.path().unwrap();
+            store
+                .reserve_process_resource_launch_with_scratch(&reservation, &original)
+                .unwrap();
+            let replaced = if replace_parent {
+                path.parent().unwrap().to_owned()
+            } else {
+                path.clone()
+            };
+            let saved = replaced.with_extension("original");
+            std::fs::rename(&replaced, &saved).unwrap();
+            std::fs::create_dir(&replaced).unwrap();
+            let replacement = if replace_parent {
+                std::fs::create_dir(&path).unwrap();
+                path.clone()
+            } else {
+                replaced
+            };
+            std::fs::write(replacement.join("replacement"), b"do not delete").unwrap();
+            assert!(
+                store
+                    .recover_never_issued_resource_scratch(&reservation)
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read(replacement.join("replacement")).unwrap(),
+                b"do not delete"
+            );
+            let retained = store.process_resource_reservations().unwrap().remove(0);
+            assert_eq!(
+                retained.runtime_custody.as_ref().unwrap().physical_state,
+                ProcessCustodyPhysicalState::Retained
+            );
+            assert_eq!(
+                store
+                    .lock()
+                    .unwrap()
+                    .runtime_db
+                    .process_resource_cas_roots()
+                    .unwrap(),
+                reservation
+                    .runtime_custody
+                    .as_ref()
+                    .unwrap()
+                    .cas_roots()
+                    .unwrap()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scratch_failed_physical_removal_keeps_original_guard_intent_and_pins() {
+        use runtime_db::process_resource_custody::ProcessCustodyPhysicalState;
+        use std::os::unix::fs::PermissionsExt as _;
+        let store = test_store();
+        let (original, reservation) = scratch_reservation_fixture(&store, "scratch-removal-denied");
+        let path = original.path().unwrap();
+        store
+            .reserve_process_resource_launch_with_scratch(&reservation, &original)
+            .unwrap();
+        let pins = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .process_resource_materialization_pins()
+            .unwrap();
+        // Actual unprivileged filesystem unlink refusal, not worker evidence.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let failed = store.remove_never_issued_resource_scratch(&reservation, &original);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            failed.is_err(),
+            "control requires the unprivileged filesystem denial"
+        );
+        assert_eq!(original.path(), Some(path.clone()));
+        assert!(path.join("sentinel").exists());
+        let intent = store.process_resource_reservations().unwrap().remove(0);
+        assert_eq!(
+            intent.runtime_custody.as_ref().unwrap().physical_state,
+            ProcessCustodyPhysicalState::CleanupIntent
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .process_resource_materialization_pins()
+                .unwrap(),
+            pins
+        );
+        store
+            .remove_never_issued_resource_scratch(&intent, &original)
+            .unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scratch_missing_root_before_cleanup_intent_cannot_mint_receipt() {
+        use runtime_db::process_resource_custody::ProcessCustodyPhysicalState;
+        let store = test_store();
+        let (original, reservation) =
+            scratch_reservation_fixture(&store, "scratch-missing-no-intent");
+        store
+            .reserve_process_resource_launch_with_scratch(&reservation, &original)
+            .unwrap();
+        let roots = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .process_resource_cas_roots()
+            .unwrap();
+        original.remove_now().unwrap(); // Host fixture removal WITHOUT intent.
+        assert!(
+            store
+                .recover_never_issued_resource_scratch(&reservation)
+                .is_err()
+        );
+        assert_eq!(
+            store.process_resource_reservations().unwrap()[0]
+                .runtime_custody
+                .as_ref()
+                .unwrap()
+                .physical_state,
+            ProcessCustodyPhysicalState::Retained
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .process_resource_cas_roots()
+                .unwrap(),
+            roots
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scratch_recovery_preserves_birth_authority_after_physical_removal_lost_ack() {
+        use runtime_db::process_resource_custody::ProcessCustodyPhysicalState;
+        let root = tempfile::tempdir().unwrap();
+        let key = root.path().join("node-key.pem");
+        let identity = crate::identity::NodeIdentity::create(&key).unwrap();
+        let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+        let trust = Arc::new(trust);
+        let runtime = root.path().join(".ai/state");
+        let open = || {
+            StateStore::new_with_head_trust(
+                root.path().to_owned(),
+                runtime.clone(),
+                runtime.join("runtime.sqlite3"),
+                signer.clone(),
+                WriteBarrier::new(),
+                trust.clone(),
+            )
+            .unwrap()
+        };
+        let store = open();
+        let (original, reservation) =
+            scratch_reservation_fixture(&store, "scratch-restart-lost-ack");
+        let path = original.path().unwrap();
+        store
+            .reserve_process_resource_launch_with_scratch(&reservation, &original)
+            .unwrap();
+        let birth = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .fixture_previous_scratch_daemon_birth(
+                &reservation,
+                "fixture-original-daemon-incarnation",
+            )
+            .unwrap();
+        let intent = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .claim_never_issued_scratch_cleanup(&birth)
+            .unwrap();
+        original.remove_now().unwrap(); // Simulate crash BEFORE receipt ACK.
+        assert!(!path.exists());
+        let roots = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .process_resource_cas_roots()
+            .unwrap();
+        drop(original);
+        drop(store);
+        let reopened = open();
+        assert_ne!(
+            intent.daemon_generation_id,
+            runtime_db::daemon_generation_id()
+        );
+        assert_eq!(
+            reopened.process_resource_reservations().unwrap(),
+            vec![intent.clone()]
+        );
+        assert_eq!(
+            reopened
+                .lock()
+                .unwrap()
+                .runtime_db
+                .process_resource_cas_roots()
+                .unwrap(),
+            roots
+        );
+        let removed = reopened
+            .recover_never_issued_resource_scratch(&intent)
+            .unwrap();
+        assert_eq!(removed.daemon_generation_id, birth.daemon_generation_id);
+        assert_eq!(
+            removed.runtime_custody.as_ref().unwrap().physical_state,
+            ProcessCustodyPhysicalState::PhysicallyRemoved
+        );
+        assert_eq!(
+            reopened
+                .lock()
+                .unwrap()
+                .runtime_db
+                .process_resource_cas_roots()
+                .unwrap(),
+            roots
+        );
     }
 
     #[test]

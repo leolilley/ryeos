@@ -27,6 +27,46 @@ pub struct ProcessMaterializationCustody {
     pub manifest_hash: String,
 }
 
+/// Physical disposition is separate from process/resource settlement. Every
+/// phase remains a CAS/cache root until a future authorized final clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessCustodyPhysicalState {
+    Retained,
+    CleanupIntent,
+    PhysicallyRemoved,
+}
+
+/// A workspace name is never physical cleanup authority. Resource-owned
+/// scratch belongs to the SAME exact resource reservation/owner journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "owner", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProcessWorkspaceCustody {
+    ExistingExecutionWorkspace {
+        workspace_id: String,
+        workspace_identity: lillux::secure_fs::PinnedDirectoryIdentity,
+    },
+    ResourceOwnedScratch {
+        runtime_directory_identity: lillux::secure_fs::PinnedDirectoryIdentity,
+        parent_directory_identity: lillux::secure_fs::PinnedDirectoryIdentity,
+        scratch_name: String,
+        workspace_identity: lillux::secure_fs::PinnedDirectoryIdentity,
+    },
+}
+
+impl ProcessWorkspaceCustody {
+    pub(crate) fn is_resource_owned_scratch(&self) -> bool {
+        matches!(self, Self::ResourceOwnedScratch { .. })
+    }
+
+    fn leaf(&self) -> &str {
+        match self {
+            Self::ExistingExecutionWorkspace { workspace_id, .. } => workspace_id,
+            Self::ResourceOwnedScratch { scratch_name, .. } => scratch_name,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessResourceRuntimeCustody {
@@ -38,15 +78,12 @@ pub struct ProcessResourceRuntimeCustody {
     #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub source_binding_hash: Option<String>,
     pub materializations: Vec<ProcessMaterializationCustody>,
-    /// An existing workspace owner coordinate, never a removal pathname.
-    pub workspace_id: String,
-    /// Captured from the ORIGINAL directory authority before possible spawn.
-    /// Retaining/deserializing this value does not recreate that authority.
-    pub workspace_identity: lillux::secure_fs::PinnedDirectoryIdentity,
+    pub workspace: ProcessWorkspaceCustody,
+    pub physical_state: ProcessCustodyPhysicalState,
 }
 
 impl ProcessResourceRuntimeCustody {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     pub fn validate(&self) -> Result<()> {
         if self.version != Self::VERSION {
@@ -77,16 +114,32 @@ impl ProcessResourceRuntimeCustody {
         {
             bail!("process runtime custody materializations are not bounded, sorted and unique");
         }
-        if self.workspace_id.is_empty()
-            || self.workspace_id.len() > 256
-            || self.workspace_id == "."
-            || self.workspace_id == ".."
-            || !self
-                .workspace_id
+        let leaf = self.workspace.leaf();
+        if leaf.is_empty()
+            || leaf.len() > 256
+            || leaf == "."
+            || leaf == ".."
+            || !leaf
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
             bail!("process runtime custody workspace is not a bounded owner coordinate");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn require_retained(&self) -> Result<()> {
+        self.validate()?;
+        if self.physical_state != ProcessCustodyPhysicalState::Retained {
+            bail!("resource custody physical cleanup fences spawn/attachment");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_owner_kind(&self, owner_kind: &str) -> Result<()> {
+        self.validate()?;
+        if self.workspace.is_resource_owned_scratch() && owner_kind != "pooled_session" {
+            bail!("resource-owned scratch requires its existing pooled resource owner");
         }
         Ok(())
     }
@@ -121,7 +174,7 @@ pub(super) fn decode_owner_custody(
     let custody = encoded
         .map(|encoded| {
             let custody: ProcessResourceRuntimeCustody = serde_json::from_str(encoded)?;
-            custody.validate()?;
+            custody.validate_owner_kind(owner_kind)?;
             if lillux::canonical_json(&serde_json::to_value(&custody)?)? != encoded {
                 bail!("resource owner runtime custody is not canonical");
             }
@@ -173,6 +226,142 @@ impl super::RuntimeDb {
     }
 }
 
+/// Physical cleanup is fenced by the SAME authoritative reservation row.
+/// These methods authorize no issued-process, driver or financial settlement.
+impl super::RuntimeDb {
+    pub(crate) fn claim_never_issued_scratch_cleanup(
+        &self,
+        expected: &super::ProcessResourceReservationRecord,
+    ) -> Result<super::ProcessResourceReservationRecord> {
+        let custody = never_issued_scratch_custody(expected)?;
+        if !matches!(
+            custody.physical_state,
+            ProcessCustodyPhysicalState::Retained | ProcessCustodyPhysicalState::CleanupIntent
+        ) {
+            bail!("scratch physical cleanup is already recorded; reconcile absence instead");
+        }
+        let mut next = expected.clone();
+        next.runtime_custody
+            .as_mut()
+            .expect("validated custody")
+            .physical_state = ProcessCustodyPhysicalState::CleanupIntent;
+        self.compare_never_issued_scratch_transition(expected, &next)?;
+        Ok(next)
+    }
+
+    /// Only StateStore's exact physical owner can mint this non-serde receipt.
+    pub(crate) fn record_never_issued_scratch_removal(
+        &self,
+        receipt: crate::state_store::ResourceScratchPhysicalReceipt,
+    ) -> Result<super::ProcessResourceReservationRecord> {
+        let expected = receipt.into_expected();
+        let custody = never_issued_scratch_custody(&expected)?;
+        if custody.physical_state != ProcessCustodyPhysicalState::CleanupIntent {
+            bail!("physical receipt has no retained scratch cleanup intent");
+        }
+        let mut removed = expected.clone();
+        removed
+            .runtime_custody
+            .as_mut()
+            .expect("validated custody")
+            .physical_state = ProcessCustodyPhysicalState::PhysicallyRemoved;
+        self.compare_never_issued_scratch_transition(&expected, &removed)?;
+        // Intentionally retain this row and all roots: no financial/driver or
+        // final-clear capability is introduced by a physical receipt.
+        Ok(removed)
+    }
+
+    fn compare_never_issued_scratch_transition(
+        &self,
+        expected: &super::ProcessResourceReservationRecord,
+        next: &super::ProcessResourceReservationRecord,
+    ) -> Result<()> {
+        never_issued_scratch_custody(expected)?;
+        never_issued_scratch_custody(next)?;
+        let birth = super::process_resource_reservation_id(expected)?;
+        if birth != super::process_resource_reservation_id(next)? {
+            bail!("scratch cleanup changed its immutable reservation birth authority");
+        }
+        let before = lillux::canonical_json(&serde_json::to_value(expected)?)?;
+        let after = lillux::canonical_json(&serde_json::to_value(next)?)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE process_resource_reservation SET reservation=?5, updated_at_ms=?6
+              WHERE reservation_id=?1 AND owner_kind=?2 AND owner_coordinate=?3 AND reservation=?4
+                AND NOT EXISTS (SELECT 1 FROM process_resource_owner o
+                  WHERE o.owner_kind=?2 AND o.owner_coordinate=?3)",
+            rusqlite::params![
+                birth,
+                expected.owner_kind,
+                expected.owner_coordinate,
+                before,
+                after,
+                i64::try_from(lillux::time::timestamp_millis())?
+            ],
+        )?;
+        if changed != 1 {
+            bail!("scratch cleanup lost its exact never-issued reservation owner");
+        }
+        tx.commit().map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+impl super::RuntimeDb {
+    /// Test-only staging of a previous daemon's ORIGINAL birth row, before
+    /// recovery. No production generation rewrite or wire constructor exists.
+    pub(crate) fn fixture_previous_scratch_daemon_birth(
+        &self,
+        current: &super::ProcessResourceReservationRecord,
+        old_generation: &str,
+    ) -> Result<super::ProcessResourceReservationRecord> {
+        never_issued_scratch_custody(current)?;
+        let mut old = current.clone();
+        old.daemon_generation_id = old_generation.to_owned();
+        let changed = self.conn.execute(
+            "UPDATE process_resource_reservation SET reservation_id=?1, reservation=?2
+             WHERE reservation_id=?3 AND owner_kind=?4 AND owner_coordinate=?5 AND reservation=?6",
+            rusqlite::params![
+                super::process_resource_reservation_id(&old)?,
+                lillux::canonical_json(&serde_json::to_value(&old)?)?,
+                super::process_resource_reservation_id(current)?,
+                current.owner_kind,
+                current.owner_coordinate,
+                lillux::canonical_json(&serde_json::to_value(current)?)?
+            ],
+        )?;
+        if changed != 1 {
+            bail!("old-daemon fixture lost its exact original reservation");
+        }
+        Ok(old)
+    }
+}
+
+pub(crate) fn never_issued_scratch_custody(
+    reservation: &super::ProcessResourceReservationRecord,
+) -> Result<&ProcessResourceRuntimeCustody> {
+    reservation.validate()?;
+    if reservation.owner_kind != "pooled_session"
+        || !matches!(
+            reservation.launch_authority,
+            super::ProcessResourceLaunchAuthority::TrustedProcessGroup {
+                phase: super::TrustedResourceLaunchPhase::Reserved,
+                ..
+            }
+        )
+    {
+        bail!("scratch removal requires an authoritative never-issued pooled reservation");
+    }
+    let custody = reservation
+        .runtime_custody
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("scratch removal lost retained custody"))?;
+    if !custody.workspace.is_resource_owned_scratch() {
+        bail!("scratch removal cannot borrow an execution-workspace journal coordinate");
+    }
+    Ok(custody)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,12 +383,15 @@ mod tests {
                     manifest_hash: "5".repeat(64),
                 },
             ],
-            workspace_id: "workspace-custody".to_owned(),
-            workspace_identity: lillux::PinnedDirectory::open(tmp.path())
-                .unwrap()
-                .unwrap()
-                .identity()
-                .unwrap(),
+            physical_state: ProcessCustodyPhysicalState::Retained,
+            workspace: ProcessWorkspaceCustody::ExistingExecutionWorkspace {
+                workspace_id: "workspace-custody".to_owned(),
+                workspace_identity: lillux::PinnedDirectory::open(tmp.path())
+                    .unwrap()
+                    .unwrap()
+                    .identity()
+                    .unwrap(),
+            },
         }
     }
 
@@ -214,7 +406,12 @@ mod tests {
         assert!(changed.validate().is_err());
         for name in ["..", "root/child", "/tmp/root", "root\n"] {
             changed = original.clone();
-            changed.workspace_id = name.to_owned();
+            let ProcessWorkspaceCustody::ExistingExecutionWorkspace { workspace_id, .. } =
+                &mut changed.workspace
+            else {
+                unreachable!()
+            };
+            *workspace_id = name.to_owned();
             assert!(changed.validate().is_err());
         }
     }

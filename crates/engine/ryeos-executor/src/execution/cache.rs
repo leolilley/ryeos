@@ -1436,12 +1436,15 @@ pub(super) mod tests {
                     cache,
                     manifest_hash: generation.to_owned(),
                 }],
-                workspace_id: "storage-workspace".to_owned(),
-                workspace_identity: lillux::PinnedDirectory::open(root)
-                    .unwrap()
-                    .unwrap()
-                    .identity()
-                    .unwrap(),
+                physical_state: ProcessCustodyPhysicalState::Retained,
+                workspace: ProcessWorkspaceCustody::ExistingExecutionWorkspace {
+                    workspace_id: "storage-workspace".to_owned(),
+                    workspace_identity: lillux::PinnedDirectory::open(root)
+                        .unwrap()
+                        .unwrap()
+                        .identity()
+                        .unwrap(),
+                },
             }),
             launch_authority: ProcessResourceLaunchAuthority::TrustedProcessGroup {
                 cleanup_contract_digest: "7".repeat(64),

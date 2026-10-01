@@ -229,7 +229,7 @@ impl ProcessResourceReservationRecord {
             ) {
                 bail!("session runtime custody cannot identify a thread launch capsule");
             }
-            custody.validate()?;
+            custody.validate_owner_kind(&self.owner_kind)?;
         } else if matches!(
             self.launch_authority,
             ProcessResourceLaunchAuthority::TrustedProcessGroup { .. }
@@ -324,6 +324,9 @@ fn process_resource_reservation_id(
     // a new allocation identity. Keep the primary key stable across it.
     let mut allocation_identity = reservation.clone();
     allocation_identity.launch_authority = reservation.launch_authority.allocation_identity();
+    if let Some(custody) = &mut allocation_identity.runtime_custody {
+        custody.physical_state = process_resource_custody::ProcessCustodyPhysicalState::Retained;
+    }
     let canonical = lillux::canonical_json(&serde_json::to_value(allocation_identity)?)?;
     Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
@@ -440,6 +443,9 @@ fn consume_process_resource_reservation(
         .context("resource-bearing process has no pre-contact reservation")?;
     let reservation: ProcessResourceReservationRecord = serde_json::from_str(&encoded)?;
     reservation.validate()?;
+    if let Some(custody) = &reservation.runtime_custody {
+        custody.require_retained()?;
+    }
     if reservation.daemon_generation_id != daemon_generation_id()
         || reservation.selections != process_identity.resource_selections
         || Some(reservation.allocation_limit) != process_identity.resource_allocation_limit
@@ -558,11 +564,13 @@ fn attach_process_resource_owner(
         {
             bail!("exact resource owner occurrence was reused with different authority");
         }
-        process_resource_custody::decode_owner_custody(
+        if let Some(custody) = process_resource_custody::decode_owner_custody(
             custody.as_deref(),
             &kind,
             process_identity,
-        )?;
+        )? {
+            custody.require_retained()?;
+        }
         return Ok(());
     }
 
@@ -2705,7 +2713,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 105 retains required-nullable resource runtime custody, transferred
 // atomically into the existing owner. Populated custody cannot be generically
 // cleared before its original workspace/content cleanup owner is joined.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 105;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 106;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -17371,6 +17379,9 @@ impl RuntimeDb {
         reservation: &ProcessResourceReservationRecord,
     ) -> Result<()> {
         reservation.validate()?;
+        if let Some(custody) = &reservation.runtime_custody {
+            custody.require_retained()?;
+        }
         if reservation.daemon_generation_id != daemon_generation_id() {
             bail!("resource reservation belongs to another daemon generation");
         }
@@ -26932,8 +26943,8 @@ mod tests {
         root: &Path,
     ) -> process_resource_custody::ProcessResourceRuntimeCustody {
         use process_resource_custody::{
-            ProcessMaterializationCache, ProcessMaterializationCustody,
-            ProcessResourceRuntimeCustody,
+            ProcessCustodyPhysicalState, ProcessMaterializationCache,
+            ProcessMaterializationCustody, ProcessResourceRuntimeCustody, ProcessWorkspaceCustody,
         };
         ProcessResourceRuntimeCustody {
             version: ProcessResourceRuntimeCustody::VERSION,
@@ -26950,13 +26961,133 @@ mod tests {
                     manifest_hash: "5".repeat(64),
                 },
             ],
-            workspace_id: "resource-test-workspace".to_owned(),
-            workspace_identity: lillux::PinnedDirectory::open(root)
-                .unwrap()
-                .unwrap()
-                .identity()
-                .unwrap(),
+            physical_state: ProcessCustodyPhysicalState::Retained,
+            workspace: ProcessWorkspaceCustody::ExistingExecutionWorkspace {
+                workspace_id: "resource-test-workspace".to_owned(),
+                workspace_identity: lillux::PinnedDirectory::open(root)
+                    .unwrap()
+                    .unwrap()
+                    .identity()
+                    .unwrap(),
+            },
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn physical_cleanup_phase_fences_spawn_consume_and_repeat_attachment() {
+        use process_resource_custody::ProcessCustodyPhysicalState;
+        let (_tmp, db) = fresh_db();
+        let mut identity = resource_process_identity(901, 901, "fixture-scratch-fence", 1);
+        let lifetime = lillux::ProcessHostLifetime::capture_current().unwrap();
+        identity.boot_id = serde_json::to_value(&lifetime).unwrap()["backend"]["boot_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let owner_incarnation =
+            ryeos_accounting::HexDigest::new(identity.owner_incarnation_digest().unwrap()).unwrap();
+        for operation in &mut identity.resource_operations {
+            operation.owner_incarnation = owner_incarnation.clone();
+        }
+        identity.resource_settlement_authority = Some(
+            crate::process::ProcessResourceSettlementAuthority::TrustedProcessGroup {
+                cleanup_contract_digest: "7".repeat(64),
+            },
+        );
+        let reserved = ProcessResourceReservationRecord {
+            owner_kind: "pooled_session".to_owned(),
+            owner_coordinate: "physical-custody-fence".to_owned(),
+            daemon_generation_id: daemon_generation_id().to_owned(),
+            selections: identity.resource_selections.clone(),
+            allocation_limit: 1,
+            runtime_custody: Some(resource_runtime_custody_fixture(_tmp.path())),
+            launch_authority: ProcessResourceLaunchAuthority::TrustedProcessGroup {
+                cleanup_contract_digest: "7".repeat(64),
+                host_lifetime: lifetime,
+                phase: TrustedResourceLaunchPhase::Reserved,
+            },
+        };
+        db.reserve_process_resource_launch(&reserved).unwrap();
+        let birth = process_resource_reservation_id(&reserved).unwrap();
+        let mut cleaning = reserved.clone();
+        cleaning.runtime_custody.as_mut().unwrap().physical_state =
+            ProcessCustodyPhysicalState::CleanupIntent;
+        let encoded = lillux::canonical_json(&serde_json::to_value(&cleaning).unwrap()).unwrap();
+        // Storage-only phase fixture: no physical, driver or process evidence.
+        db.conn
+            .execute(
+                "UPDATE process_resource_reservation SET reservation=?1 WHERE reservation_id=?2",
+                params![encoded, birth],
+            )
+            .unwrap();
+        assert_eq!(process_resource_reservation_id(&cleaning).unwrap(), birth);
+        assert!(db.begin_trusted_process_resource_spawn(&cleaning).is_err());
+        assert!(db.reserve_process_resource_launch(&cleaning).is_err());
+        let mut cleaning_issued = cleaning.clone();
+        let ProcessResourceLaunchAuthority::TrustedProcessGroup { phase, .. } =
+            &mut cleaning_issued.launch_authority
+        else {
+            unreachable!()
+        };
+        *phase = TrustedResourceLaunchPhase::SpawnIntent;
+        db.conn
+            .execute(
+                "UPDATE process_resource_reservation SET reservation=?1 WHERE reservation_id=?2",
+                params![
+                    lillux::canonical_json(&serde_json::to_value(&cleaning_issued).unwrap())
+                        .unwrap(),
+                    birth
+                ],
+            )
+            .unwrap();
+        assert!(
+            db.attach_pooled_resource_owner(&reserved.owner_coordinate, &identity)
+                .is_err(),
+            "consume must fence physical cleanup despite an otherwise exact held identity"
+        );
+        assert_eq!(
+            db.process_resource_reservations().unwrap(),
+            vec![cleaning_issued]
+        );
+        let mut retained_issued = cleaning;
+        retained_issued
+            .runtime_custody
+            .as_mut()
+            .unwrap()
+            .physical_state = ProcessCustodyPhysicalState::Retained;
+        let ProcessResourceLaunchAuthority::TrustedProcessGroup { phase, .. } =
+            &mut retained_issued.launch_authority
+        else {
+            unreachable!()
+        };
+        *phase = TrustedResourceLaunchPhase::SpawnIntent;
+        db.conn
+            .execute(
+                "UPDATE process_resource_reservation SET reservation=?1 WHERE reservation_id=?2",
+                params![
+                    lillux::canonical_json(&serde_json::to_value(&retained_issued).unwrap())
+                        .unwrap(),
+                    birth
+                ],
+            )
+            .unwrap();
+        db.attach_pooled_resource_owner(&reserved.owner_coordinate, &identity)
+            .unwrap();
+        let roots = db.process_resource_cas_roots().unwrap();
+        let mut owner_custody = retained_issued.runtime_custody.unwrap();
+        owner_custody.physical_state = ProcessCustodyPhysicalState::CleanupIntent;
+        db.conn.execute("UPDATE process_resource_owner SET runtime_custody=?1 WHERE owner_kind='pooled_session' AND owner_coordinate=?2",
+            params![lillux::canonical_json(&serde_json::to_value(&owner_custody).unwrap()).unwrap(), reserved.owner_coordinate]).unwrap();
+        assert!(
+            db.attach_pooled_resource_owner(&reserved.owner_coordinate, &identity)
+                .is_err(),
+            "repeat ACK must not bypass the physical custody fence"
+        );
+        assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
+        assert!(
+            db.clear_pooled_resource_owner(&reserved.owner_coordinate, &identity)
+                .is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]

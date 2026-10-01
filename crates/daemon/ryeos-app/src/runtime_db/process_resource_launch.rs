@@ -166,6 +166,9 @@ impl RuntimeDb {
         expected: &ProcessResourceReservationRecord,
     ) -> Result<TrustedResourceSpawnPermit> {
         expected.validate()?;
+        if let Some(custody) = &expected.runtime_custody {
+            custody.require_retained()?;
+        }
         if expected.daemon_generation_id != daemon_generation_id() {
             bail!("trusted held-spawn intent belongs to another daemon generation");
         }
