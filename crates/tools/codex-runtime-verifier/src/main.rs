@@ -142,23 +142,58 @@ fn ordinary_main() -> Result<()> {
         .block_on(admitted_main())
 }
 
-async fn admitted_main() -> Result<()> {
-    let mut args = std::env::args_os().skip(1);
+/// The immutable signed Tool literal is separate from policy stdin. No environment
+/// fallback or legacy consumer spelling can select product interpretation.
+fn decode_admitted_arguments(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<(
+    Option<std::ffi::OsString>,
+    Option<ryeos_codex_runtime_verifier::finite_product_contract::FiniteProductContract>,
+)> {
+    let mut args = args.into_iter();
     let mode = args.next();
+    let contract = if mode.as_deref() == Some(OsStr::new("--consumer-controller")) {
+        ensure!(
+            args.next().as_deref() == Some(OsStr::new("--product-contract")),
+            "consumer controller requires --product-contract canonical JSON literal"
+        );
+        let literal = args
+            .next()
+            .context("consumer product contract literal absent")?;
+        let literal = literal
+            .to_str()
+            .context("consumer product contract literal is not UTF-8")?;
+        Some(
+            ryeos_codex_runtime_verifier::finite_product_contract::FiniteProductContract::parse(
+                literal.as_bytes(),
+            )?,
+        )
+    } else {
+        ensure!(
+            mode.is_none() || mode.as_deref() == Some(OsStr::new("--scoped-resume-race-probe")),
+            "unsupported verifier mode"
+        );
+        None
+    };
     ensure!(args.next().is_none(), "unexpected verifier arguments");
-    ensure!(
-        mode.is_none()
-            || mode.as_deref() == Some(OsStr::new("--scoped-resume-race-probe"))
-            || mode.as_deref() == Some(OsStr::new("--consumer-controller")),
-        "unsupported verifier mode"
-    );
+    Ok((mode, contract))
+}
+
+async fn admitted_main() -> Result<()> {
+    let (mode, product_contract) = decode_admitted_arguments(std::env::args_os().skip(1))?;
     let mut input = Vec::new();
     std::io::stdin()
         .take((INPUT_LIMIT + 1) as u64)
         .read_to_end(&mut input)?;
     ensure!(input.len() <= INPUT_LIMIT, "verifier input exceeds bound");
     if mode.as_deref() == Some(OsStr::new("--consumer-controller")) {
-        return run_consumer_controller(&input).await;
+        return run_consumer_controller(
+            &input,
+            product_contract
+                .as_ref()
+                .context("consumer product contract absent")?,
+        )
+        .await;
     }
     let parameters = Parameters::parse(&input)?;
     ensure!(
@@ -807,7 +842,10 @@ async fn admitted_main() -> Result<()> {
 /// No caller supplies root/capsule/purpose hashes. The result proposes only
 /// checked finite claims; the issuer later corroborates this process's death
 /// and the exact retained Q and independent diagnostic evidence.
-async fn run_consumer_controller(input: &[u8]) -> Result<()> {
+async fn run_consumer_controller(
+    input: &[u8],
+    product_contract: &ryeos_codex_runtime_verifier::finite_product_contract::FiniteProductContract,
+) -> Result<()> {
     use ryeos_codex_runtime_verifier::consumer_controller::{
         ConsumerControllerInvocation, ConsumerControllerOutcome, run_controller_beat,
     };
@@ -836,6 +874,7 @@ async fn run_consumer_controller(input: &[u8]) -> Result<()> {
         &private,
         &thread_id,
         &parameters.controller.scenario_id,
+        product_contract,
         invocation,
         deadline,
     )
@@ -1489,6 +1528,24 @@ mod tests {
             assert!(!is_current_scoped_process_identity_format(
                 &resource_bearing
             ));
+        }
+    }
+
+    #[test]
+    fn consumer_cli_requires_separate_immutable_product_contract() {
+        assert!(decode_admitted_arguments(Vec::<std::ffi::OsString>::new()).is_ok());
+        assert!(decode_admitted_arguments(["--scoped-resume-race-probe".into()]).is_ok());
+        for args in [
+            vec!["--consumer-controller"],
+            vec!["--consumer-controller", "--product-contract"],
+            vec!["--consumer-controller", "{}"],
+            vec!["--consumer-controller", "--product-contract", "{}"],
+            vec!["--product-contract", "{}"],
+            vec!["--scoped-resume-race-probe", "--product-contract", "{}"],
+        ] {
+            assert!(
+                decode_admitted_arguments(args.into_iter().map(std::ffi::OsString::from)).is_err()
+            );
         }
     }
 

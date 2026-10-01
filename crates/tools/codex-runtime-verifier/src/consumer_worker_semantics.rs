@@ -270,8 +270,10 @@ pub fn check_q_conversation(
             "Q semantic Delta changed its retained digest"
         );
     }
+    let product_contract = original.product_contract()?;
     check_setup_configuration(
         expected,
+        &product_contract,
         &request.session_setup,
         &transcript.stream.setup_final_response,
     )?;
@@ -335,19 +337,27 @@ fn observations(body: &Value) -> Result<&Vec<Value>> {
 /// Provider and permissions belong to this finite external-authoring product.
 fn check_setup_configuration(
     expected: &QCommandExpectation,
+    product_contract: &crate::finite_product_contract::FiniteProductContract,
     signed_setup: &Value,
     setup_final: &Value,
 ) -> Result<()> {
+    product_contract.validate()?;
+    let predicates = product_contract.setup();
     let setup = result(setup_final)?;
     ensure!(
-        text(setup, "cwd")? == expected.cwd && text(setup, "modelProvider")? == "openai",
+        text(setup, "cwd")? == expected.cwd
+            && expected.cwd == product_contract.inputs().cwd
+            && text(setup, "modelProvider")? == predicates.model_provider,
         "Q setup changed its admitted external cwd or provider"
     );
     for (pointer, value) in [
-        ("/activePermissionProfile/id", "danger-full-access"),
-        ("/approvalsReviewer", "user"),
-        ("/approvalPolicy", "never"),
-        ("/sandbox/type", "dangerFullAccess"),
+        (
+            "/activePermissionProfile/id",
+            predicates.permission_profile.as_str(),
+        ),
+        ("/approvalsReviewer", predicates.approvals_reviewer.as_str()),
+        ("/approvalPolicy", predicates.approval_policy.as_str()),
+        ("/sandbox/type", predicates.sandbox.as_str()),
     ] {
         ensure!(
             setup.pointer(pointer).and_then(Value::as_str) == Some(value),
@@ -1492,10 +1502,15 @@ mod tests {
 
     #[test]
     fn setup_configuration_joins_actual_fields_and_only_explicit_model_selection() {
+        let record = crate::consumer_controller::tests::callback_record();
+        let product_contract = crate::finite_product_contract::fixture_for_content(
+            record.purpose.consumer_content.as_ref().unwrap(),
+        )
+        .unwrap();
         let expected = expectation();
         let setup = json!({"route_id":"session.start", "payload":{"experimentalRawEvents":true}});
         let valid = stream().setup_final_response;
-        check_setup_configuration(&expected, &setup, &valid).unwrap();
+        check_setup_configuration(&expected, &product_contract, &setup, &valid).unwrap();
         for (pointer, changed_value) in [
             ("/cwd", json!("/controller")),
             ("/modelProvider", json!("other-provider")),
@@ -1508,7 +1523,8 @@ mod tests {
                 let mut changed = valid.clone();
                 *changed["response"]["result"].pointer_mut(pointer).unwrap() = value;
                 assert!(
-                    check_setup_configuration(&expected, &setup, &changed).is_err(),
+                    check_setup_configuration(&expected, &product_contract, &setup, &changed)
+                        .is_err(),
                     "{pointer}"
                 );
             }
@@ -1521,16 +1537,16 @@ mod tests {
                 .unwrap()
                 .remove(key);
             assert!(
-                check_setup_configuration(&expected, &setup, &changed).is_err(),
+                check_setup_configuration(&expected, &product_contract, &setup, &changed).is_err(),
                 "{pointer}"
             );
         }
         // An unselected/default model is observed, never promoted to an exact pin.
         let mut selected = setup.clone();
         selected["payload"]["model"] = Value::Null;
-        check_setup_configuration(&expected, &selected, &valid).unwrap();
+        check_setup_configuration(&expected, &product_contract, &selected, &valid).unwrap();
         selected["payload"]["model"] = json!("q-model");
-        check_setup_configuration(&expected, &selected, &valid).unwrap();
+        check_setup_configuration(&expected, &product_contract, &selected, &valid).unwrap();
         for model in [
             json!("other-model"),
             json!(true),
@@ -1538,7 +1554,9 @@ mod tests {
             json!(" model "),
         ] {
             selected["payload"]["model"] = model;
-            assert!(check_setup_configuration(&expected, &selected, &valid).is_err());
+            assert!(
+                check_setup_configuration(&expected, &product_contract, &selected, &valid).is_err()
+            );
         }
         for model in [
             Value::Null,
@@ -1548,14 +1566,16 @@ mod tests {
         ] {
             let mut changed = valid.clone();
             changed["response"]["result"]["model"] = model;
-            assert!(check_setup_configuration(&expected, &setup, &changed).is_err());
+            assert!(
+                check_setup_configuration(&expected, &product_contract, &setup, &changed).is_err()
+            );
         }
         let mut changed = valid;
         changed["response"]["result"]
             .as_object_mut()
             .unwrap()
             .remove("model");
-        assert!(check_setup_configuration(&expected, &setup, &changed).is_err());
+        assert!(check_setup_configuration(&expected, &product_contract, &setup, &changed).is_err());
     }
 
     #[test]

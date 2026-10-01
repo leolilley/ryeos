@@ -4,6 +4,8 @@
 //! checks data agreement; the controller must authenticate the accepted root,
 //! retained signed source and archive before guest delivery.
 
+use crate::finite_product_contract::FiniteProductContract;
+
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent;
 use ryeos_external_execution_contract::restored_runtime_measurement::{
@@ -88,6 +90,13 @@ impl ConsumerOuterCompletionRequest {
 #[cfg(test)]
 mod control_tests {
     use super::*;
+    fn product_contract() -> FiniteProductContract {
+        let record = crate::consumer_controller::tests::callback_record();
+        crate::finite_product_contract::fixture_for_content(
+            record.purpose.consumer_content.as_ref().unwrap(),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn callback_inputs_cannot_choose_record_schema_or_supply_executable() {
@@ -104,9 +113,12 @@ mod control_tests {
             prerequisite_measurement_attempt_id: hash.clone(),
             prerequisite_measurement_observation_digest: hash,
         };
-        let error =
-            ConsumerInputRecord::from_callback_inputs(serde_json::json!({"schema":1}), &coordinate)
-                .unwrap_err();
+        let error = ConsumerInputRecord::from_callback_inputs(
+            serde_json::json!({"schema":1}),
+            &coordinate,
+            &product_contract(),
+        )
+        .unwrap_err();
         assert!(
             error
                 .to_string()
@@ -115,12 +127,14 @@ mod control_tests {
         let error = ConsumerInputRecord::from_callback_inputs(
             serde_json::json!({"executable":"/ambient/codex"}),
             &coordinate,
+            &product_contract(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("unknown field"));
         let error = ConsumerInputRecord::from_callback_inputs(
             serde_json::json!({"canary_value":"a".repeat(64)}),
             &coordinate,
+            &product_contract(),
         )
         .unwrap_err();
         assert!(
@@ -128,9 +142,23 @@ mod control_tests {
                 .to_string()
                 .contains("cannot supply the verifier canary")
         );
+        for forbidden in ["product_contract_json", "scenario_input"] {
+            let error = ConsumerInputRecord::from_callback_inputs(
+                serde_json::json!({forbidden: "caller-selected"}),
+                &coordinate,
+                &product_contract(),
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot supply the verifier canary")
+            );
+        }
         let error = ConsumerInputRecord::from_callback_inputs(
             serde_json::json!({"padding":"x".repeat(128 * 1024)}),
             &coordinate,
+            &product_contract(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("exceed transport ceiling"));
@@ -152,6 +180,7 @@ mod control_tests {
             &directory,
             serde_json::json!({}),
             &coordinate,
+            &product_contract(),
         )
         .err()
         .unwrap();
@@ -173,6 +202,7 @@ mod control_tests {
             &directory,
             serde_json::json!({}),
             &coordinate,
+            &product_contract(),
         )
         .err()
         .unwrap();
@@ -181,7 +211,8 @@ mod control_tests {
             RetainedControllerConsumerRecord::reopen(
                 &directory,
                 serde_json::json!({}),
-                &coordinate
+                &coordinate,
+                &product_contract(),
             )
             .is_err()
         );
@@ -1134,6 +1165,7 @@ pub struct ConsumerInputRecord(StateConsumerInputRecord);
 #[serde(deny_unknown_fields)]
 struct CodexConsumerScenarioInput {
     canary_value: String,
+    product_contract_json: String,
 }
 
 impl std::ops::Deref for ConsumerInputRecord {
@@ -1162,6 +1194,7 @@ impl RetainedControllerConsumerRecord {
         directory: &lillux::PinnedDirectory,
         protected_inputs: serde_json::Value,
         coordinate: &ConsumerRuntimeVerificationCoordinate,
+        product_contract: &FiniteProductContract,
     ) -> Result<Self> {
         directory.require_owner_private_directory()?;
         directory.ensure_path_binding()?;
@@ -1170,12 +1203,15 @@ impl RetainedControllerConsumerRecord {
             directory.open_pinned_regular(name, false)?.is_none(),
             "consumer preparation already exists; no replacement permitted"
         );
-        let record =
-            ConsumerInputRecord::from_callback_inputs(protected_inputs.clone(), coordinate)?;
+        let record = ConsumerInputRecord::from_callback_inputs(
+            protected_inputs.clone(),
+            coordinate,
+            product_contract,
+        )?;
         directory
             .atomic_create_pinned_regular(name, &record.canonical_bytes()?, 0o400)?
             .context("consumer record preparation raced; no contact permitted")?;
-        Self::reopen(directory, protected_inputs, coordinate)
+        Self::reopen(directory, protected_inputs, coordinate, product_contract)
     }
 
     /// Recovery only: missing original bytes refuse without generating any
@@ -1184,6 +1220,7 @@ impl RetainedControllerConsumerRecord {
         directory: &lillux::PinnedDirectory,
         protected_inputs: serde_json::Value,
         coordinate: &ConsumerRuntimeVerificationCoordinate,
+        product_contract: &FiniteProductContract,
     ) -> Result<Self> {
         directory.require_owner_private_directory()?;
         directory.ensure_path_binding()?;
@@ -1198,10 +1235,15 @@ impl RetainedControllerConsumerRecord {
         let bytes =
             file.read_stable_bounded(&observation, MAX_CONSUMER_INPUT_RECORD_BYTES as u64)?;
         let record = ConsumerInputRecord::parse(&bytes)?;
+        ensure!(
+            record.product_contract()?.canonical_bytes()? == product_contract.canonical_bytes()?,
+            "original consumer product contract differs from immutable invocation"
+        );
         let current = ConsumerInputRecord::from_callback_inputs_with_canary(
             protected_inputs,
             coordinate,
             record.canary_value()?,
+            product_contract,
         )?;
         ensure!(
             current.canonical_bytes()? == bytes,
@@ -1252,11 +1294,13 @@ impl ConsumerInputRecord {
     pub fn from_callback_inputs(
         inputs: serde_json::Value,
         expected: &ConsumerRuntimeVerificationCoordinate,
+        product_contract: &FiniteProductContract,
     ) -> Result<Self> {
         Self::from_callback_inputs_with_canary(
             inputs,
             expected,
             lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
+            product_contract,
         )
     }
 
@@ -1264,6 +1308,7 @@ impl ConsumerInputRecord {
         mut inputs: serde_json::Value,
         expected: &ConsumerRuntimeVerificationCoordinate,
         canary_value: String,
+        product_contract: &FiniteProductContract,
     ) -> Result<Self> {
         expected.validate()?;
         ensure!(
@@ -1278,13 +1323,18 @@ impl ConsumerInputRecord {
             "consumer callback inputs cannot supply the product record schema"
         );
         ensure!(
-            !object.contains_key("canary_value") && !object.contains_key("scenario_input"),
+            !object.contains_key("canary_value")
+                && !object.contains_key("scenario_input")
+                && !object.contains_key("product_contract_json"),
             "consumer callback inputs cannot supply the verifier canary or scenario challenge"
         );
         object.insert("schema".into(), 2.into());
         object.insert(
             "scenario_input".into(),
-            serde_json::to_value(CodexConsumerScenarioInput { canary_value })?,
+            serde_json::to_value(CodexConsumerScenarioInput {
+                canary_value,
+                product_contract_json: String::from_utf8(product_contract.canonical_bytes()?)?,
+            })?,
         );
         let record = Self(serde_json::from_value(inputs)?);
         ensure!(
@@ -1294,6 +1344,21 @@ impl ConsumerInputRecord {
         record.validate()?;
         record.canonical_bytes()?;
         Ok(record)
+    }
+
+    /// Product-owned immutable input, not a callback assertion or an observed registry.
+    /// Both the controller and the admitted guest reparse these original bytes.
+    pub(crate) fn product_contract(&self) -> Result<FiniteProductContract> {
+        let scenario: CodexConsumerScenarioInput =
+            serde_json::from_value(self.scenario_input.clone())?;
+        let contract = FiniteProductContract::parse(scenario.product_contract_json.as_bytes())?;
+        contract.validate_content(
+            self.purpose
+                .consumer_content
+                .as_ref()
+                .context("consumer input record has no accepted content")?,
+        )?;
+        Ok(contract)
     }
 
     pub(crate) fn canary_value(&self) -> Result<String> {
@@ -1653,6 +1718,7 @@ impl ConsumerInputRecord {
             &request.session_setup, &request.body,
         )?;
         self.canary_value()?;
+        self.product_contract()?;
         let content = self
             .purpose
             .consumer_content

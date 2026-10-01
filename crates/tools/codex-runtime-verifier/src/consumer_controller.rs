@@ -3,6 +3,8 @@
 //! invocation requests START through the protected callback; recovery never
 //! does. The caller obtains observations through that same protected surface.
 
+use crate::finite_product_contract::FiniteProductContract;
+
 use anyhow::{Result, ensure};
 use lillux::time::MonotonicDeadline;
 use ryeos_external_execution_contract::restored_runtime_measurement::{
@@ -45,11 +47,13 @@ pub async fn run_controller_beat(
     private_directory: &lillux::PinnedDirectory,
     thread_id: &str,
     scenario_id: &str,
+    product_contract: &FiniteProductContract,
     invocation: ConsumerControllerInvocation,
     deadline: MonotonicDeadline,
 ) -> Result<ConsumerControllerOutcome> {
     use crate::consumer_record::RetainedControllerConsumerRecord;
     use anyhow::Context as _;
+    product_contract.validate()?;
     ensure!(!deadline.has_elapsed(), "consumer controller beat expired");
     let selection = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationScenarioSelection {
         scenario_id: scenario_id.to_owned(),
@@ -76,12 +80,18 @@ pub async fn run_controller_beat(
     );
     let coordinate_value = serde_json::to_value(&coordinate)?;
     let retained = match invocation {
-        ConsumerControllerInvocation::Fresh => {
-            RetainedControllerConsumerRecord::prepare_fresh(private_directory, inputs, &coordinate)?
-        }
-        ConsumerControllerInvocation::Recover => {
-            RetainedControllerConsumerRecord::reopen(private_directory, inputs, &coordinate)?
-        }
+        ConsumerControllerInvocation::Fresh => RetainedControllerConsumerRecord::prepare_fresh(
+            private_directory,
+            inputs,
+            &coordinate,
+            product_contract,
+        )?,
+        ConsumerControllerInvocation::Recover => RetainedControllerConsumerRecord::reopen(
+            private_directory,
+            inputs,
+            &coordinate,
+            product_contract,
+        )?,
     };
     crate::consumer_result::selected_claims(
         &retained
@@ -446,7 +456,7 @@ pub fn check_observation_response(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
@@ -597,18 +607,34 @@ mod tests {
                 mount: "guest-runtime".into(),
             },
             worker_preselection_effective_definition_digest: "5".repeat(64),
-            worker_literals: ExternalContentRealizationSet::new(vec![
-                ryeos_state::objects::ExternalContentRealization {
-                    id: "codex".into(),
-                    kind: ExternalContentKind::File,
-                    mode: ExternalContentMode::Pinned,
-                    manifest_hash: "6".repeat(64),
-                    entry_count: 1,
-                    total_bytes: 1,
-                    mount_root: ExternalContentMountRoot::ExecutionRuntime,
-                    mount: "codex".into(),
-                },
-            ])
+            worker_literals: ExternalContentRealizationSet::new(
+                [
+                    "codex",
+                    "codex-code-mode-host",
+                    "codex-zsh",
+                    "codex-bwrap",
+                    "codex-rg",
+                ]
+                .into_iter()
+                .enumerate()
+                .map(
+                    |(index, id)| ryeos_state::objects::ExternalContentRealization {
+                        id: id.into(),
+                        kind: ExternalContentKind::File,
+                        mode: ExternalContentMode::Pinned,
+                        manifest_hash: if index == 0 {
+                            "6".repeat(64)
+                        } else {
+                            format!("{:064x}", index + 6)
+                        },
+                        entry_count: 1,
+                        total_bytes: 1,
+                        mount_root: ExternalContentMountRoot::ExecutionRuntime,
+                        mount: id.into(),
+                    },
+                )
+                .collect(),
+            )
             .unwrap(),
             environment_realized_effective_definition_digest: "7".repeat(64),
             environment_realizations: ExternalContentRealizationSet::new(vec![
@@ -732,7 +758,7 @@ mod tests {
         (source, policy)
     }
 
-    fn callback_record()
+    pub(crate) fn callback_record()
     -> ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord {
         use ryeos_state::external_execution::admission::{
             ExternalCandidateQualificationUse, QUALIFICATION_CONTEXT_SCHEMA,
@@ -865,6 +891,10 @@ mod tests {
             prerequisite_measurement_attempt_id: "b".repeat(64),
             prerequisite_measurement_observation_digest: "c".repeat(64),
         };
+        let contract = crate::finite_product_contract::fixture_for_content(
+            purpose.consumer_content.as_ref().unwrap(),
+        )
+        .unwrap();
         let record =
             ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord {
                 schema: 2,
@@ -872,10 +902,19 @@ mod tests {
                 coordinate,
                 selection,
                 requirement,
-                scenario_input: json!({"canary_value":"d".repeat(64)}),
+                scenario_input: json!({"canary_value":"d".repeat(64), "product_contract_json": String::from_utf8(contract.canonical_bytes().unwrap()).unwrap()}),
             };
         record.validate().unwrap();
         record
+    }
+
+    fn product_contract(
+        record: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
+    ) -> FiniteProductContract {
+        crate::finite_product_contract::fixture_for_content(
+            record.purpose.consumer_content.as_ref().unwrap(),
+        )
+        .unwrap()
     }
 
     fn callback_inputs(
@@ -928,6 +967,7 @@ mod tests {
         directory: &lillux::PinnedDirectory,
         record: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
         invocation: ConsumerControllerInvocation,
+        product_contract: &FiniteProductContract,
     ) -> (Result<ConsumerControllerOutcome>, Vec<String>) {
         let socket_dir = tempfile::tempdir().unwrap();
         let path = socket_dir.path().join("callback.sock");
@@ -989,6 +1029,7 @@ mod tests {
             directory,
             &root,
             "remote_codex",
+            product_contract,
             invocation,
             MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
         )
@@ -1007,9 +1048,12 @@ mod tests {
         let directory = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
         directory.tighten_owner_private_directory().unwrap();
         let record = callback_record();
-        let valid =
-            ConsumerInputRecord::from_callback_inputs(callback_inputs(&record), &record.coordinate)
-                .unwrap();
+        let valid = ConsumerInputRecord::from_callback_inputs(
+            callback_inputs(&record),
+            &record.coordinate,
+            &product_contract(&record),
+        )
+        .unwrap();
         valid.validate().unwrap();
         valid
             .scripted_configuration()
@@ -1024,9 +1068,13 @@ mod tests {
                     .as_ref(),
             )
             .unwrap();
-        let (result, methods) =
-            controller_with_fake_inputs(&directory, &record, ConsumerControllerInvocation::Fresh)
-                .await;
+        let (result, methods) = controller_with_fake_inputs(
+            &directory,
+            &record,
+            ConsumerControllerInvocation::Fresh,
+            &product_contract(&record),
+        )
+        .await;
         assert!(matches!(
             result.unwrap(),
             ConsumerControllerOutcome::Unresolved(_)
@@ -1048,9 +1096,13 @@ mod tests {
             .unwrap();
         let original = file.observation().unwrap();
         let bytes = file.read_stable_bounded(&original, 96 * 1024).unwrap();
-        let (result, methods) =
-            controller_with_fake_inputs(&directory, &record, ConsumerControllerInvocation::Recover)
-                .await;
+        let (result, methods) = controller_with_fake_inputs(
+            &directory,
+            &record,
+            ConsumerControllerInvocation::Recover,
+            &product_contract(&record),
+        )
+        .await;
         assert!(matches!(
             result.unwrap(),
             ConsumerControllerOutcome::Unresolved(_)
@@ -1151,8 +1203,13 @@ mod tests {
                 } else {
                     ConsumerControllerInvocation::Fresh
                 };
-                let (result, methods) =
-                    controller_with_fake_inputs(&directory, &record, invocation).await;
+                let (result, methods) = controller_with_fake_inputs(
+                    &directory,
+                    &record,
+                    invocation,
+                    &product_contract(&record),
+                )
+                .await;
                 let error = match result {
                     Err(error) => format!("{error:#}"),
                     Ok(_) => panic!("accepted {stage}.{key}; null={null}, recovery={recovery}"),
@@ -1184,5 +1241,128 @@ mod tests {
                 }
             }
         }
+    }
+    #[tokio::test]
+    async fn product_contract_mismatch_refuses_before_start_without_replacing_original() {
+        let record = callback_record();
+        let contract = product_contract(&record);
+        let mut changed = serde_json::to_value(&contract).unwrap();
+        changed["target"]["profile_hash"] = json!("f".repeat(64));
+        let changed =
+            FiniteProductContract::parse(lillux::canonical_json(&changed).unwrap().as_bytes())
+                .unwrap();
+        for recovery in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let directory = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+            directory.tighten_owner_private_directory().unwrap();
+            let name = std::ffi::OsStr::new("controller-consumer-input.json");
+            let original = if recovery {
+                // Actual fresh record validation/persistence, without starting a provider.
+                let retained =
+                    crate::consumer_record::RetainedControllerConsumerRecord::prepare_fresh(
+                        &directory,
+                        callback_inputs(&record),
+                        &record.coordinate,
+                        &contract,
+                    )
+                    .unwrap();
+                let bytes = retained.bytes_for_contact().unwrap().to_vec();
+                let observation = directory
+                    .open_pinned_regular(name, false)
+                    .unwrap()
+                    .unwrap()
+                    .observation()
+                    .unwrap();
+                Some((observation, bytes))
+            } else {
+                None
+            };
+            let invocation = if recovery {
+                ConsumerControllerInvocation::Recover
+            } else {
+                ConsumerControllerInvocation::Fresh
+            };
+            let (result, methods) =
+                controller_with_fake_inputs(&directory, &record, invocation, &changed).await;
+            let error = format!("{:#}", result.err().unwrap());
+            assert!(
+                error.contains(if recovery {
+                    "original consumer product contract differs from immutable invocation"
+                } else {
+                    "finite product target differs"
+                }),
+                "{error}"
+            );
+            assert_eq!(methods, ["runtime.consumer_verification_inputs"]);
+            if let Some((observation, bytes)) = original {
+                let file = directory.open_pinned_regular(name, false).unwrap().unwrap();
+                assert_eq!(
+                    file.read_stable_bounded(&observation, 96 * 1024).unwrap(),
+                    bytes
+                );
+                assert_eq!(directory.entries_no_follow_bounded(1).unwrap().len(), 1);
+            } else {
+                assert!(directory.entries_no_follow_bounded(1).unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn guest_record_requires_same_canonical_content_bound_product_contract() {
+        let record = callback_record();
+        let contract = product_contract(&record);
+        let valid = ConsumerInputRecord::from_callback_inputs(
+            callback_inputs(&record),
+            &record.coordinate,
+            &contract,
+        )
+        .unwrap();
+        let bytes = valid.canonical_bytes().unwrap();
+        let guest = ConsumerInputRecord::parse(&bytes).unwrap();
+        assert_eq!(
+            guest.product_contract().unwrap().canonical_bytes().unwrap(),
+            contract.canonical_bytes().unwrap()
+        );
+        for value in [
+            Value::Null,
+            json!(format!(
+                " {}",
+                String::from_utf8(contract.canonical_bytes().unwrap()).unwrap()
+            )),
+        ] {
+            let mut changed = serde_json::to_value(&*valid).unwrap();
+            changed["scenario_input"]["product_contract_json"] = value;
+            let bytes = lillux::canonical_json(&changed).unwrap().into_bytes();
+            assert!(ConsumerInputRecord::parse(&bytes).is_err());
+        }
+        let mut changed = serde_json::to_value(&*valid).unwrap();
+        changed["scenario_input"]
+            .as_object_mut()
+            .unwrap()
+            .remove("product_contract_json");
+        assert!(
+            ConsumerInputRecord::parse(lillux::canonical_json(&changed).unwrap().as_bytes())
+                .is_err()
+        );
+        let mut contract_value = serde_json::to_value(&contract).unwrap();
+        contract_value["helpers"]["codex-rg"] = json!("f".repeat(64));
+        changed["scenario_input"]["product_contract_json"] =
+            json!(lillux::canonical_json(&contract_value).unwrap());
+        let error =
+            ConsumerInputRecord::parse(lillux::canonical_json(&changed).unwrap().as_bytes())
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("finite product helper"),
+            "{error:#}"
+        );
+        // The additional retained literal does not exempt the aggregate record bound.
+        changed["scenario_input"]["canary_value"] = json!("d".repeat(96 * 1024));
+        let oversized = lillux::canonical_json(&changed).unwrap().into_bytes();
+        let error = ConsumerInputRecord::parse(&oversized).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("consumer input record exceeds its bound")
+        );
     }
 }

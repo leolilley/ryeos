@@ -13,6 +13,7 @@ mod consumer_result;
 pub mod consumer_termination;
 pub mod consumer_worker_semantics;
 pub mod consumer_worker_transcript;
+pub mod finite_product_contract;
 pub mod guest_observation;
 pub mod native_guest;
 pub mod production_inputs;
