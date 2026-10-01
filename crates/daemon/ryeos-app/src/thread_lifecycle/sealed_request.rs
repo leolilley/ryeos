@@ -995,6 +995,12 @@ impl SealedRootExecutionRequest {
         &self.item_ref
     }
 
+    /// The admitted thread profile name, distinct from the source item kind.
+    /// Runtime terminal snapshots retain this profile (for example graph_run).
+    pub fn thread_profile(&self) -> &str {
+        &self.kind
+    }
+
     /// Exact caller-authored reference bindings sealed at admission. Recovery
     /// consumers use this typed projection rather than reaching into capsule
     /// JSON and thereby becoming coupled to the sealed wire layout.

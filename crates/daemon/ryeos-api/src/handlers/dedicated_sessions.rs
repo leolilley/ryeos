@@ -8194,25 +8194,11 @@ fn verify_candidate_evaluation_testimony(
         candidate_snapshot_hash,
         base_snapshot_hash,
     )?;
-    let evaluator_result_digest =
-        ryeos_state::objects::canonical_value_digest(evaluator_result_value).map_err(internal)?;
-    let evaluator_claim_evidence_digest =
-        ryeos_state::objects::canonical_value_digest(&evaluator_result.evidence)
-            .map_err(internal)?;
-    if !evaluator_result.accepted
-        || evaluation
-            .pointer("/result/result_digest")
-            .and_then(Value::as_str)
-            != Some(evaluator_result_digest.as_str())
-        || evaluation
-            .pointer("/result/claim_evidence_digest")
-            .and_then(Value::as_str)
-            != Some(evaluator_claim_evidence_digest.as_str())
-    {
-        return Err(internal(
-            "retained evaluator result differs from accepted testimony",
-        ));
-    }
+    validate_retained_candidate_evaluator_result(
+        evaluator_result_value,
+        &evaluator_result,
+        evaluation,
+    )?;
 
     // The append-only adoption fact is the durable commit boundary. Do not
     // require this recorded-service root to have reached its later handler
@@ -9026,7 +9012,7 @@ fn extract_candidate_evaluation_result(
     if canonical.kind != subject.kind
         || subject.canonical_ref != sealed.item_ref()
         || evaluator.item_ref != sealed.item_ref()
-        || evaluator.kind_name != subject.kind
+        || evaluator.kind_name != sealed.thread_profile()
         || evaluator.executor_ref != sealed.executor_ref()
     {
         return Err(internal(
@@ -9083,6 +9069,35 @@ enum CandidateEvaluatorResultContract<'a> {
         definition_ref: &'a str,
         effective_definition_digest: &'a str,
     },
+}
+
+/// Recheck the same full-result and authored-evidence identities retained at
+/// initial qualification. Projection never changes the meaning of result_digest.
+fn validate_retained_candidate_evaluator_result(
+    evaluator_result_value: &Value,
+    evaluator_result: &CandidateEvaluationResult,
+    evaluation: &Value,
+) -> Result<(), HandlerError> {
+    let evaluator_result_digest =
+        ryeos_state::objects::canonical_value_digest(evaluator_result_value).map_err(internal)?;
+    let evaluator_claim_evidence_digest =
+        ryeos_state::objects::canonical_value_digest(&evaluator_result.evidence)
+            .map_err(internal)?;
+    if !evaluator_result.accepted
+        || evaluation
+            .pointer("/result/result_digest")
+            .and_then(Value::as_str)
+            != Some(evaluator_result_digest.as_str())
+        || evaluation
+            .pointer("/result/claim_evidence_digest")
+            .and_then(Value::as_str)
+            != Some(evaluator_claim_evidence_digest.as_str())
+    {
+        return Err(internal(
+            "retained evaluator result differs from accepted testimony",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_candidate_evaluation_payload(
@@ -10710,6 +10725,10 @@ pub const DISCARD_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+#[path = "dedicated_sessions/evaluator_contract_tests.rs"]
+mod evaluator_contract_tests;
 
 #[cfg(test)]
 mod tests {
