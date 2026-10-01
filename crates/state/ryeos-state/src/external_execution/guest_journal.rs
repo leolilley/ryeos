@@ -3125,9 +3125,23 @@ mod tests {
         String,
         GuestJournalStoreIdentity,
     ) {
+        live_store_for_binding(root, authority, binding())
+    }
+
+    fn live_store_for_binding(
+        root: &tempfile::TempDir,
+        authority: &PinnedStateAuthority,
+        (binding, owner, supervisor): (ExecutionChannelBinding, SigningKey, SigningKey),
+    ) -> (
+        LiveGuestJournal,
+        ExecutionChannelBinding,
+        SigningKey,
+        SigningKey,
+        String,
+        GuestJournalStoreIdentity,
+    ) {
         let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
         directory.tighten_owner_private_directory().unwrap();
-        let (binding, owner, supervisor) = binding();
         let bootstrap = "9".repeat(64);
         let prepared =
             PreparedGuestJournal::create(directory, authority, &bootstrap, binding.clone())
@@ -3182,6 +3196,363 @@ mod tests {
         let authority = db.pinned_authority().unwrap();
         drop(db);
         (root, authority)
+    }
+
+    fn qualification_fixture_program()
+    -> super::super::qualification_session::AdmittedExternalQualificationSessionProgram {
+        use super::super::admission::test_support::{
+            fixture_qualification_use, fixture_requirement,
+        };
+        use super::super::qualification_session::{
+            AdmittedExternalQualificationSessionProgram, QUALIFICATION_SESSION_PROGRAM_SCHEMA,
+        };
+        use crate::external_content::products::qualification::ProductQualificationConsumerRuntimeMemberIdentity;
+        use ryeos_external_execution_contract::qualification_fixture::{
+            Q_FIXTURE_CONTRACT_SCHEMA, Q_FIXTURE_MOUNT_DESTINATION, QFixtureContract,
+        };
+        let requirement = fixture_requirement();
+        let program = AdmittedExternalQualificationSessionProgram {
+            schema: QUALIFICATION_SESSION_PROGRAM_SCHEMA,
+            qualification_purpose_digest: "7".repeat(64),
+            consumer_content_digest: "8".repeat(64),
+            qualification_use: fixture_qualification_use(&requirement).unwrap(),
+            runtime_manifest_kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+            runtime_content_kind: crate::objects::ExternalContentKind::Tree,
+            runtime_manifest_hash: "e".repeat(64),
+            runtime_member: ProductQualificationConsumerRuntimeMemberIdentity {
+                product_declaration_id: requirement.runtime_product_declaration_id.clone(),
+                relative_path: requirement.runtime_recipe.executable_relative_path.clone(),
+                executable_sha256: "6".repeat(64),
+            },
+            runtime_recipe_digest: requirement.runtime_recipe.digest().unwrap(),
+            requirement,
+            fixture: Some(QFixtureContract {
+                schema: Q_FIXTURE_CONTRACT_SCHEMA,
+                mount_destination: Q_FIXTURE_MOUNT_DESTINATION.into(),
+                leaf: "result.txt".into(),
+                initial_content_b64: STANDARD.encode(b"before\n"),
+                initial_blob_hash: lillux::sha256_hex(b"before\n"),
+                max_bytes: 64,
+            }),
+        };
+        program.validate().unwrap();
+        program
+    }
+
+    #[test]
+    fn qualification_fixture_custody_survives_interrupted_completion_and_cold_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_root, authority) = state_authority();
+        let program = qualification_fixture_program();
+        let (mut binding, owner, supervisor) = binding();
+        binding.execution_mode = ExternalExecutionMode::QualificationStructuredSession {};
+        binding.candidate_export_max_bytes = 0;
+        binding.candidate_program_digest = program.digest().unwrap();
+        binding.validate().unwrap();
+        let (live, binding, owner, supervisor, bootstrap, store_identity) =
+            live_store_for_binding(&root, &authority, (binding, owner, supervisor));
+        let occurrence =
+            retained_launcher_occurrence_digest(&live.0.conn, &binding.digest().unwrap()).unwrap();
+        let (release, release_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        let GuestApplicationClaim::New(token) = live.record_and_claim(&release).unwrap() else {
+            panic!("fresh release must be claimable")
+        };
+        let (_, performed) = live.apply_once(token, |_| Ok(())).unwrap();
+        live.finish(performed).unwrap();
+        // Journal input data exercises custody; it does not manufacture an opaque
+        // native namespace-reap proof or test native filesystem capture itself.
+        let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 101,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 2,
+                destination_access_sha256: [5; 32],
+            },
+        };
+        live.record_applied_runtime(&occurrence, &receipt).unwrap();
+        let applied = live
+            .ensure_runtime_applied_frame(&supervisor)
+            .unwrap()
+            .unwrap();
+        let GuestApplicationClaim::New(token) = live
+            .claim(
+                ChannelDirection::SupervisorToOwner,
+                applied.frame().sequence,
+                applied.digest(),
+            )
+            .unwrap()
+        else {
+            panic!("runtime projection must be claimable")
+        };
+        let (_, performed) = live.apply_once(token, |_| Ok(())).unwrap();
+        live.finish(performed).unwrap();
+        let eof = live
+            .author_supervisor_frame(&supervisor, ExecutionChannelPayload::ProtocolEof)
+            .unwrap();
+        let GuestApplicationClaim::New(token) = live
+            .claim(
+                ChannelDirection::SupervisorToOwner,
+                eof.frame().sequence,
+                eof.digest(),
+            )
+            .unwrap()
+        else {
+            panic!("EOF must be claimable")
+        };
+        let (_, performed) = live.apply_once(token, |_| Ok(())).unwrap();
+        live.finish(performed).unwrap();
+        let (completion_wire, _) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(release_digest.clone()),
+            eof.frame().sequence,
+            ExecutionChannelPayload::QualificationComplete {
+                completion_request_digest: "1".repeat(64),
+            },
+        );
+        let completion = SignedExecutionFrame::decode_and_verify(
+            &completion_wire,
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        let GuestApplicationClaim::New(token) = live.record_and_claim(&completion_wire).unwrap()
+        else {
+            panic!("completion must have one effect opportunity")
+        };
+        let effects = std::cell::Cell::new(0);
+        let (_, performed) = live
+            .apply_once(token, |_| {
+                effects.set(effects.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        let bytes = b"after\n";
+        let blob_hash = lillux::sha256_hex(bytes);
+        let capture = Some((
+            bytes.as_slice(),
+            blob_hash.as_str(),
+            ProjectFile::REGULAR_MODE,
+        ));
+        assert!(
+            live.record_qualification_scope_settlement(
+                &authority,
+                &program,
+                &completion,
+                &occurrence,
+                NativeNamespaceExit::Code(0),
+                None,
+            )
+            .is_err()
+        );
+        let settlement = live
+            .record_qualification_scope_settlement(
+                &authority,
+                &program,
+                &completion,
+                &occurrence,
+                NativeNamespaceExit::Code(0),
+                capture,
+            )
+            .unwrap();
+        let row = || {
+            live.0.conn.query_row(
+            "SELECT observation_json,program_json,durable_stage_id FROM external_guest_qualification_settlement WHERE binding_digest=?1",
+            [binding.digest().unwrap()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+        ).unwrap()
+        };
+        let original_row = row();
+        let reference = settlement.fixture_capture.as_ref().unwrap();
+        {
+            let guard = authority.acquire_shared_guard().unwrap();
+            let stage = authority
+                .require_recovery()
+                .unwrap()
+                .open_durable_cas_upload_admitted(&guard, &original_row.2, &bootstrap)
+                .unwrap();
+            stage
+                .ensure_publication_contract(
+                    &DurableCasPublicationKey::qualification_fixture_occurrence(
+                        &binding.digest().unwrap(),
+                        completion.digest(),
+                    )
+                    .unwrap(),
+                    None,
+                )
+                .unwrap();
+            let retained = stage.qualification_fixture_receipt().unwrap();
+            assert_eq!(retained.metadata_hash, reference.metadata_hash);
+            assert_eq!(retained.blob_hash, reference.blob_hash);
+        }
+        // Crash prefix: the capture and nonexpiring roots exist, but Complete is
+        // still claimed. Signing must wait; recovery finishes without recapture.
+        assert!(
+            live.ensure_qualification_scope_settled_frame(
+                &authority,
+                &program,
+                &supervisor,
+                &completion,
+            )
+            .is_err()
+        );
+        drop(performed);
+        assert_eq!(
+            live.record_qualification_scope_settlement(
+                &authority,
+                &program,
+                &completion,
+                &occurrence,
+                NativeNamespaceExit::Code(0),
+                capture,
+            )
+            .unwrap(),
+            settlement
+        );
+        assert_eq!(row(), original_row);
+        let mut changed_program = program.clone();
+        changed_program.fixture.as_mut().unwrap().leaf = "different.txt".into();
+        changed_program.validate().unwrap();
+        assert!(
+            live.qualification_scope_settlement_for_completion(
+                &authority,
+                &changed_program,
+                &completion,
+            )
+            .is_err()
+        );
+        let changed_bytes = b"AFTER\n";
+        assert!(
+            live.record_qualification_scope_settlement(
+                &authority,
+                &program,
+                &completion,
+                &occurrence,
+                NativeNamespaceExit::Code(0),
+                Some((
+                    changed_bytes.as_slice(),
+                    &lillux::sha256_hex(changed_bytes),
+                    ProjectFile::REGULAR_MODE
+                )),
+            )
+            .is_err()
+        );
+        let (changed_wire, _) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(release_digest),
+            eof.frame().sequence,
+            ExecutionChannelPayload::QualificationComplete {
+                completion_request_digest: "2".repeat(64),
+            },
+        );
+        let changed_completion =
+            SignedExecutionFrame::decode_and_verify(&changed_wire, &binding, binding.issued_at_ms)
+                .unwrap();
+        assert!(
+            live.record_qualification_scope_settlement(
+                &authority,
+                &program,
+                &changed_completion,
+                &occurrence,
+                NativeNamespaceExit::Code(0),
+                capture,
+            )
+            .is_err()
+        );
+        assert_eq!(row(), original_row);
+        live.reconcile_qualification_scope_settlement_application(
+            &authority,
+            &program,
+            &completion,
+        )
+        .unwrap();
+        assert_eq!(effects.get(), 1);
+        assert!(matches!(
+            live.record_and_claim(&completion_wire).unwrap(),
+            GuestApplicationClaim::AlreadyApplied
+        ));
+        let signed = live
+            .ensure_qualification_scope_settled_frame(
+                &authority,
+                &program,
+                &supervisor,
+                &completion,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(matches!(&signed.frame().payload,
+            ExecutionChannelPayload::QualificationScopeSettled { observation } if observation == &settlement));
+        assert!(
+            live.ensure_qualification_scope_settled_frame(
+                &authority,
+                &program,
+                &supervisor,
+                &completion,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(row(), original_row);
+        drop(live);
+        let reopen = || -> Result<()> {
+            let directory = lillux::PinnedDirectory::open(root.path())?.unwrap();
+            RecoveredGuestJournal::open(
+                directory,
+                &authority,
+                &store_identity,
+                &bootstrap,
+                &binding,
+            )?
+            .validate()
+        };
+        reopen().unwrap();
+        let cas = authority.cas_store().unwrap();
+        for path in [
+            lillux::cas::shard_path(cas.root(), "objects", &reference.metadata_hash, ".json"),
+            lillux::cas::shard_path(cas.root(), "blobs", &reference.blob_hash, ""),
+        ] {
+            let original = std::fs::read(&path).unwrap();
+            let absent = path.with_extension("saved-for-custody-test");
+            std::fs::rename(&path, &absent).unwrap();
+            assert!(
+                reopen().is_err(),
+                "cold reopen must require every retained CAS root"
+            );
+            std::fs::rename(&absent, &path).unwrap();
+            reopen().unwrap();
+            let mut changed = original.clone();
+            let byte = changed.iter_mut().find(|byte| **byte == b'a').unwrap();
+            *byte = b'b';
+            std::fs::write(&path, &changed).unwrap();
+            assert!(
+                reopen().is_err(),
+                "same-size CAS substitution must be refused"
+            );
+            std::fs::write(&path, &original).unwrap();
+            reopen().unwrap();
+        }
     }
 
     #[test]
