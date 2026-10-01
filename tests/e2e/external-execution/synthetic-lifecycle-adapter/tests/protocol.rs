@@ -3347,6 +3347,7 @@ async fn run_production_tls_candidate(
             let launch = runtime
                 .block_on(ryeos_api::handlers::product_qualification_launch::handle(
                     ryeos_api::handlers::product_qualification_launch::Request {
+                        consumer_invocation: None,
                         launch_id: format!("L-{}", "a".repeat(32)),
                         witness_hash: launch_witness,
                         witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
