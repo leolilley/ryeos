@@ -2034,6 +2034,7 @@ fn retained_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::TransactionBehavior;
     use crate::external_execution::{ExecutionFrame, ExternalStopReason};
     use anyhow::ensure;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
