@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-10-01T02:57:52Z:36d378bd96ef22ba75de0ebec1acc3fbdee29718f9106881b908f20aa86f237a:Ewf1Tsj9+Iip+91HBI5xDvIfddvBhp3b9zb9g01epKQTK5oamZ4RjHOjgKJeuUhejK0a2+4QMhuJTKP5D1xiCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-01T08:57:57Z:909f5b6d239e0a21a6e38425c7fd3bf1b1e3092237c8b3f600ce5c645e69786e:CBU3ScEDnXuKuEqlqZHkTiCs/0Ajz6qDC+DOGAIXHkt/Ys9tGkxG8oR33ee4DxySBTSWkNhjDC6wQiEazrJECQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
@@ -224,7 +224,8 @@ class CodexContractTests(unittest.TestCase):
             self.assertEqual(activation["consumer_ref"], consumer)
 
     def test_controller_side_extensions_are_closed_in_config_and_immutable_argv(self) -> None:
-        for name in ("structured-session.profile.json", "authoring.profile.json"):
+        for name in ("structured-session.profile.json", "authoring.profile.json",
+                     "external-authoring.profile.json"):
             profile = json.loads((SOURCE / name).read_text())
             baseline = tomllib.loads((SOURCE / profile["baseline_config"]).read_text())
             overrides = {}
@@ -241,6 +242,11 @@ class CodexContractTests(unittest.TestCase):
                     "skills": {"enabled": False}, "mcp": {"enabled": False}})
                 for feature in ("plugins", "remote_plugin", "hooks", "skill_mcp_dependency_install"):
                     self.assertIs(config["features"][feature], False, (name, feature))
+                if name == "external-authoring.profile.json":
+                    # These pinned handlers can create controller effects
+                    # independently of the remote command environment.
+                    for feature in ("image_generation", "goals"):
+                        self.assertIs(config["features"][feature], False, (name, feature))
             start = next(route for route in profile["routes"] if route["id"] == "session.start")
             self.assertIn("selectedCapabilityRoots", start["forbidden_fields"])
             # Selected executor roots can contribute MCP independently of the

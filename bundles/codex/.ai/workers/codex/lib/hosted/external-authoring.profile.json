@@ -67,7 +67,7 @@
     "-c",
     "agents={ enabled=false }",
     "-c",
-    "features={ apps=false, plugins=false, skill_mcp_dependency_install=false, remote_plugin=false, hooks=false, multi_agent=false, multi_agent_v2=false, memories=false, network_proxy=false, code_mode_host=true, code_mode={ enabled=false } }",
+    "features={ image_generation=false, goals=false, apps=false, plugins=false, skill_mcp_dependency_install=false, remote_plugin=false, hooks=false, multi_agent=false, multi_agent_v2=false, memories=false, network_proxy=false, code_mode_host=true, code_mode={ enabled=false } }",
     "app-server"
   ],
   "workload_home_env": "CODEX_HOME",
@@ -75,7 +75,7 @@
     "TMPDIR"
   ],
   "workload_client": null,
-  "baseline_config": "authoring.config.toml",
+  "baseline_config": "external-authoring.config.toml",
   "baseline_destination": "config.toml",
   "auxiliary_configs": [],
   "runtime_configs": [],

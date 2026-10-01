@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T08:45:01Z:cfa6953d54b3ec81feca232721fc61f03c16a71fe054ebbef3c0d2387e5c7d0a:iaTwrYDOdpUrvIaENCnBYrDN5rh4pjU+gVV1PjgbMObrKAgTSMexQV5Co6GHT4ICBaKFevTQLwJq1X+Vdui3Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T08:57:57Z:a3c2bb0f0be062f44ea6a6f01c291f1d9fe5b72ebb2bbe2f5d661a4963ce9c0f:ASn9fx0/YdI8/ZuQUyOm3F9OLeScwFwcZFo2d/tBLfOeohNCawtEwQ7xnnfOnFpMUZP14xgtZZj2cyumFWaVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -384,9 +384,18 @@ connector association. It does not prove independent configuration consumption o
 close the merged HOME/system/project/managed configuration, extension/model inputs,
 or complete effective tool inventory. Image generation and goals can create local
 controller effects in the pinned defaults; an empty MCP table does not erase lower
-configuration layers. External-product controls and a bounded effect-family/source
-proof must close these separate inputs. The shared ordinary authoring product must
-retain its own explicitly chosen semantics. All five ordinary runtime claims stay
+configuration layers. The external author's own baseline
+`external-authoring.config.toml` and immutable profile argv explicitly set
+`features.image_generation=false` and `features.goals=false`. Its ordinary authoring
+counterpart retains its separately chosen shared baseline. These two prohibitions
+close named conditional families in the pinned source; they do not prove absence of
+inherited MCP or other ambient configuration. External-product controls and a bounded
+effect-family/source proof must close these separate inputs. All five hosted
+Worker definitions bind the complete shared source closure, so a changed external
+profile or added baseline also changes their source identities. Refresh and sign
+every affected binding; existing captured Worker/profile evidence cannot stand in
+for this new closure. The ordinary authoring product retains its own explicitly
+chosen semantics. All five ordinary runtime claims stay
 disabled until actual required evidence exists; three probes or a routing projection
 cannot replace it. One Q turn also does not promise a hard internal model request,
 token or USD cap. Unknown post-contact charges remain unknown.
