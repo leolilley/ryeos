@@ -36,17 +36,17 @@ pub struct GuestProtocolScenario<'a> {
     pub candidate_content: &'a [u8],
 }
 
-impl<'a> From<&GuestScenario<'a>> for GuestProtocolScenario<'a> {
-    fn from(scenario: &GuestScenario<'a>) -> Self {
+impl<'a> From<&'a GuestScenario<'_>> for GuestProtocolScenario<'a> {
+    fn from(scenario: &'a GuestScenario<'_>) -> Self {
         Self {
             shell: scenario.shell,
             guest_cwd_uri: scenario.guest_cwd_uri,
-            guest_command: scenario.guest_command,
+            guest_command: &scenario.guest_command,
             secret_read_command: scenario.secret_read_command,
             expected_command_output: scenario.expected_command_output,
             controller_canary_value: scenario.controller_canary_value,
             secret_read_denial: scenario.secret_read_denial,
-            candidate_uri: scenario.candidate_uri,
+            candidate_uri: &scenario.candidate_uri,
             candidate_relative_path: scenario.candidate_relative_path,
             candidate_content: scenario.candidate_content,
         }
