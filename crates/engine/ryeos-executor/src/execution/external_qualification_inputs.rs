@@ -199,7 +199,9 @@ pub fn prepare_external_qualification_inputs(
             SessionProcessEnvironmentValue::RuntimeViewDirectory { .. }
         )
     }) {
-        let scratch = private_parent.create_child(OsStr::new("runtime-view"), 0o700)?;
+        let scratch = private_parent
+            .create_child(OsStr::new("runtime-view"), 0o700)?
+            .into_inherited_descriptor_path()?;
         for (name, value) in &content.process_environment {
             let SessionProcessEnvironmentValue::RuntimeViewDirectory { relative_path } = value
             else {

@@ -4,7 +4,7 @@
 //! driver below retains that owner through normal settlement; readiness or
 //! transport completion alone never publishes qualification.
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use ryeos_app::external_placement::{
     ExternalCandidateCleanupLifeline, ExternalCandidateStartProgress,
     ExternalQualificationControllerTransport, ExternalQualificationStart,
