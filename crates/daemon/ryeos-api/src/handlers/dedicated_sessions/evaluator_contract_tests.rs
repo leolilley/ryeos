@@ -93,6 +93,23 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
         let runtimes = ryeos_engine::runtime_registry::RuntimeRegistry::build_from_bundles(
             &tagged, &trust, &kinds,
         )?;
+        // Bind the signed runtime handlers through the same validation and
+        // bounded runner as production engine initialization. Loading runtime
+        // descriptors alone does not install their launch preparers.
+        let runner = ryeos_engine::launch_preparers::LaunchPreparerRunner::from_isolation_runtime(
+            state.isolation.clone(),
+            &roots,
+        )?;
+        ryeos_engine::boot_validation::validate_runtime_launch_handlers(
+            &runtimes, &handlers, &runner,
+        )
+        .map_err(|issues| {
+            anyhow::anyhow!("runtime launch-preparer validation failed: {issues:?}")
+        })?;
+        let launch_preparers =
+            ryeos_engine::launch_preparers::LaunchPreparerRegistry::from_runtimes(
+                &runtimes, &handlers, runner,
+            )?;
         let validators =
             ryeos_engine::effective_validators::EffectiveValidatorRegistry::from_kinds(
                 &kinds,
@@ -121,6 +138,7 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
             .with_composers(composers)
             .with_protocols(protocols)
             .with_runtimes(runtimes)
+            .with_launch_preparers(launch_preparers)
             .with_effective_validators(validators)
             .with_registered_bundle_roots(registered),
         );
