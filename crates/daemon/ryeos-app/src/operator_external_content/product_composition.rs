@@ -664,7 +664,8 @@ fn admit_selected_qualification(
             &proof.evidence,
             &product.evidence.manifest_hash,
         )?;
-        bail!("qualification consumer execution context has no applied runtime parity proof");
+        // The shared evidence and execution_evidence::verify_current below
+        // must also rejoin the exact settled Q transcript and enclosing root.
     }
     let current_verifier = qualification::resolve_current_bundle_verifier_identity_for_evidence(
         state,

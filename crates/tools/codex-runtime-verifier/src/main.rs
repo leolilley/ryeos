@@ -804,8 +804,9 @@ async fn admitted_main() -> Result<()> {
 }
 
 /// The signed Tool selects this entrypoint and the exact finite policy input.
-/// No caller supplies root/capsule/purpose hashes. This cut observes the
-/// independent diagnostic, and cannot issue the still-unjoined Q claim.
+/// No caller supplies root/capsule/purpose hashes. The result proposes only
+/// checked finite claims; the issuer later corroborates this process's death
+/// and the exact retained Q and independent diagnostic evidence.
 async fn run_consumer_controller(input: &[u8]) -> Result<()> {
     use ryeos_codex_runtime_verifier::consumer_controller::{
         ConsumerControllerInvocation, ConsumerControllerOutcome, run_controller_beat,
@@ -841,26 +842,15 @@ async fn run_consumer_controller(input: &[u8]) -> Result<()> {
     .await?
     {
         ConsumerControllerOutcome::Settled(observed) => {
-            // Bounded exact references are diagnostic output. They are not a
-            // ProductQualificationResult and cannot satisfy its claim schema.
-            println!(
-                "{}",
-                json!({
-                    "schema": "ryeos.codex.consumer_controller_diagnostic.v3",
-                    "remote_consumer_attempt": {
-                        "operation_id": observed.challenge.intent.operation_id,
-                        "evidence_sha256": observed.evidence_sha256,
-                        "termination_operation_id": observed.provider_terminal.operation_id,
-                        "terminal_observation_sha256": observed.provider_terminal.observation_sha256,
-                    },
-                    "qualification_claims_enabled": false,
-                    "qualification_worker_transcript_manifest_hash": observed.qualification_worker.reference.manifest_hash,
-                    "checked_q": observed.checked_q,
-                })
-            );
-            bail!(
-                "consumer diagnostic and Q semantics joined; enclosing verifier settlement and qualification issuance remain unproved"
-            )
+            // The successful terminal is a proposal. It cannot certify its
+            // own enclosing process settlement or authorize publication.
+            use std::io::Write as _;
+            observed.result.validate()?;
+            let encoded = lillux::canonical_json(&serde_json::to_value(&observed.result)?)?;
+            std::io::stdout()
+                .lock()
+                .write_all(format!("{encoded}\n").as_bytes())?;
+            Ok(())
         }
         ConsumerControllerOutcome::Unresolved(_) => {
             bail!("consumer diagnostic unresolved; observation/recovery required, no relaunch")

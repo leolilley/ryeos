@@ -60,11 +60,10 @@ fn consumer_execution_context_requires_typed_canonical_refs() {
         claims: vec!["command_probe".into()],
         probe_evidence: json!({}),
     };
-    assert!(
-        result
-            .validate_claims_for(&policy, &["command_probe".into()])
-            .is_err()
-    );
+    // Claim vocabulary does not pretend to authenticate execution.
+    result
+        .validate_claims_for(&policy, &["command_probe".into()])
+        .unwrap();
     let mut wrong_consumer = relationship_consumer.clone();
     wrong_consumer.declaration_id = "other-runtime".into();
     assert!(
@@ -107,7 +106,7 @@ fn consumer_execution_context_requires_typed_canonical_refs() {
 }
 
 #[test]
-fn consumer_execution_requires_scoped_producer_proof() {
+fn consumer_execution_requires_remote_consumer_proof() {
     let mut evidence = evidence();
     evidence.policy_source.policy.consumer_execution_context =
         Some(ProductQualificationConsumerExecutionContext {
@@ -125,7 +124,11 @@ fn consumer_execution_requires_scoped_producer_proof() {
         &[],
     )
     .unwrap_err();
-    assert!(error.to_string().contains("no scoped producer attempt"));
+    assert!(
+        error
+            .to_string()
+            .contains("requires a remote consumer attempt")
+    );
 }
 
 #[cfg(test)]
@@ -1707,8 +1710,7 @@ fn product_evidence_refuses_predecessor_use_retention_schema() {
     }
 }
 
-#[test]
-fn remote_subordinate_proof_binds_root_occurrence_and_timely_observation() {
+fn remote_subordinate_proof_fixture() -> ProductQualificationRemoteConsumerProof {
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         ConsumerArchiveBudget, ConsumerRuntimeVerificationCoordinate,
         ConsumerRuntimeVerifierSelection, ConsumerVerifierAdapterObservation,
@@ -1793,6 +1795,13 @@ fn remote_subordinate_proof_binds_root_occurrence_and_timely_observation() {
         terminal_observation,
     };
     proof.validate_for(&root).unwrap();
+    proof
+}
+
+#[test]
+fn remote_subordinate_proof_binds_root_occurrence_and_timely_observation() {
+    let root = evidence().verifier;
+    let proof = remote_subordinate_proof_fixture();
     let mut invalid_input = proof.clone();
     invalid_input.consumer_input_blob_hash = "unretained".into();
     assert!(invalid_input.validate_for(&root).is_err());
@@ -2324,4 +2333,130 @@ fn qualification_expiry_remains_explicit_existing_attestation_authority() {
     ProductQualificationEvidence::from_attestation(&signed).unwrap();
     assert!(!signed.is_expired_at("2026-09-08T23:59:59Z").unwrap());
     assert!(signed.is_expired_at("2026-09-09T00:00:00Z").unwrap());
+}
+
+fn consumer_q_evidence_fixture() -> ProductQualificationEvidence {
+    let mut evidence = evidence();
+    let purpose = consumer_launch_purpose_fixture();
+    evidence.policy_source.policy.consumer_execution_context =
+        purpose.policy_source.policy.consumer_execution_context;
+    evidence.consumer_content = purpose.consumer_content;
+    evidence
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .runtime_realization
+        .manifest_hash = evidence.result.subject_manifest_hash.clone();
+    evidence.policy_source.policy.producer_scenarios.insert(
+        "native_codex".into(),
+        ProductQualificationProducerScenario {
+            recipe_ref: "config:fixtures/recipe".into(),
+            remote_verifier: Some(ProductQualificationRemoteVerifierSelection {
+                binary_ref: "bin:fixtures/guest-verifier".into(),
+                guest_target_triple: "x86_64-unknown-linux-musl".into(),
+            }),
+            consumer_worker_request: Some(ProductQualificationConsumerWorkerRequest {
+                schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+                credential_profile_id: Some("fixture-profile".into()),
+                session_setup: json!({"route":"session.start","body":{}}),
+                body: json!({"route":"turn.start","body":{"prompt":"bounded"}}),
+            }),
+        },
+    );
+    let remote = remote_subordinate_proof_fixture();
+    let hash = "8".repeat(64);
+    evidence.result.probe_evidence = json!({
+        "qualification_worker_transcript_manifest_hash": hash,
+        "remote_consumer_attempt": {
+            "operation_id": remote.intent.operation_id,
+            "evidence_sha256": remote.observation.evidence_sha256,
+            "termination_operation_id": remote.termination_intent.operation_id,
+            "terminal_observation_sha256": canonical_value_digest(&serde_json::to_value(&remote.terminal_observation).unwrap()).unwrap(),
+        },
+    });
+    evidence.qualification_worker_transcript_manifest_hash = Some(hash);
+    evidence.execution_proof.subordinate_attempt =
+        Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof: remote });
+    evidence.verifier.result_digest = evidence.result.digest().unwrap();
+    evidence
+}
+
+#[test]
+fn consumer_evidence_requires_exact_q_reference_and_signed_remote_request() {
+    let valid = consumer_q_evidence_fixture();
+    valid.validate().unwrap();
+    let mut missing = valid.clone();
+    missing.qualification_worker_transcript_manifest_hash = None;
+    assert!(
+        missing
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("no Q transcript")
+    );
+    for value in [
+        Value::Null,
+        json!(123),
+        json!("not-a-hash"),
+        json!("9".repeat(64)),
+    ] {
+        let mut changed = valid.clone();
+        changed.result.probe_evidence["qualification_worker_transcript_manifest_hash"] = value;
+        changed.verifier.result_digest = changed.result.digest().unwrap();
+        assert!(changed.validate().is_err());
+    }
+    let mut missing_result = valid.clone();
+    missing_result
+        .result
+        .probe_evidence
+        .as_object_mut()
+        .unwrap()
+        .remove("qualification_worker_transcript_manifest_hash");
+    missing_result.verifier.result_digest = missing_result.result.digest().unwrap();
+    assert!(missing_result.validate().is_err());
+    let mut no_request = valid.clone();
+    no_request
+        .policy_source
+        .policy
+        .producer_scenarios
+        .get_mut("native_codex")
+        .unwrap()
+        .consumer_worker_request = None;
+    assert!(
+        no_request
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("no signed Worker request")
+    );
+    let mut no_remote = valid.clone();
+    no_remote.execution_proof.subordinate_attempt = None;
+    assert!(
+        no_remote
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("requires a remote consumer attempt")
+    );
+    let mut swapped_remote = valid;
+    swapped_remote.result.probe_evidence["remote_consumer_attempt"]["evidence_sha256"] =
+        json!("9".repeat(64));
+    swapped_remote.verifier.result_digest = swapped_remote.result.digest().unwrap();
+    assert!(swapped_remote.validate().is_err());
+}
+
+#[test]
+fn nonconsumer_evidence_refuses_even_null_q_reference() {
+    for value in [Value::Null, json!("8".repeat(64))] {
+        let mut changed = evidence();
+        changed.result.probe_evidence["qualification_worker_transcript_manifest_hash"] = value;
+        changed.verifier.result_digest = changed.result.digest().unwrap();
+        assert!(
+            changed
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("no admitted consumer content")
+        );
+    }
 }

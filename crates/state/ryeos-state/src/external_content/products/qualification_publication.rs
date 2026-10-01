@@ -359,6 +359,9 @@ pub fn verify_retained_verifier_realization(
                 .map(|realized| realized.manifest_hash.clone()),
         );
     }
+    if let Some(hash) = &evidence.qualification_worker_transcript_manifest_hash {
+        consumer_roots.push(hash.clone());
+    }
     verify_retained_execution_verifiers(
         authority,
         &evidence.execution_verifiers().collect::<Vec<_>>(),

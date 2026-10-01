@@ -9,6 +9,7 @@ pub mod consumer_observer;
 pub mod consumer_outer_owner;
 pub mod consumer_protocol;
 pub mod consumer_record;
+mod consumer_result;
 pub mod consumer_termination;
 pub mod consumer_worker_semantics;
 pub mod consumer_worker_transcript;

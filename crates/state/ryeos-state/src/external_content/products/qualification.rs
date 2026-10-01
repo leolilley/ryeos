@@ -736,6 +736,17 @@ impl ProductQualificationResult {
         canonical_value_digest(&serde_json::to_value(self)?)
     }
 
+    /// A result reference is structural data, not proof of Q execution.
+    pub fn q_transcript_manifest_hash(&self) -> anyhow::Result<&str> {
+        let hash = self
+            .probe_evidence
+            .get("qualification_worker_transcript_manifest_hash")
+            .and_then(Value::as_str)
+            .context("qualification result has no Q transcript manifest reference")?;
+        validate_hash("qualification result Q transcript manifest", hash)?;
+        Ok(hash)
+    }
+
     pub fn validate_claims_for(
         &self,
         policy: &ProductQualificationPolicy,
@@ -743,12 +754,8 @@ impl ProductQualificationResult {
     ) -> anyhow::Result<()> {
         self.validate()?;
         policy.validate()?;
-        // The typed declaration alone is not an admitted Worker closure.
-        // Until launch, proof, and fresh selection all authenticate the same
-        // retained consumer context, no claim may be issued under this field.
-        if policy.consumer_execution_context.is_some() {
-            bail!("qualification consumer execution context has no authenticated closure proof");
-        }
+        // This checks signed claim vocabulary only. Execution authentication
+        // belongs to the complete evidence and its admitting application.
         validate_claims_allow_empty(required)?;
         if self
             .claims
@@ -1254,8 +1261,23 @@ impl ProductQualificationEvidence {
         ) {
             (Some(_), Some(hash)) => {
                 validate_hash("qualification Worker transcript manifest", hash)?;
+                if self.result.q_transcript_manifest_hash()? != hash {
+                    bail!("qualification result changed its Q transcript manifest");
+                }
             }
-            (None, None) | (Some(_), None) => {}
+            (None, None) => {
+                if self
+                    .result
+                    .probe_evidence
+                    .get("qualification_worker_transcript_manifest_hash")
+                    .is_some()
+                {
+                    bail!("qualification result Q reference has no admitted consumer content");
+                }
+            }
+            (Some(_), None) => {
+                bail!("qualification consumer evidence has no Q transcript manifest")
+            }
             (None, Some(_)) => {
                 bail!("qualification Worker transcript has no admitted consumer content")
             }
@@ -1511,8 +1533,14 @@ pub(crate) fn validate_qualification_execution(
     policy.validate()?;
     verifier.validate()?;
     proof.validate_for(verifier)?;
-    if policy.policy.consumer_execution_context.is_some() && proof.subordinate_attempt.is_none() {
-        bail!("qualification consumer execution has no subordinate attempt");
+    if policy.policy.consumer_execution_context.is_some() {
+        if !matches!(
+            proof.subordinate_attempt,
+            Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { .. })
+        ) {
+            bail!("qualification consumer execution requires a remote consumer attempt");
+        }
+        result.q_transcript_manifest_hash()?;
     }
     if let Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof: remote }) =
         &proof.subordinate_attempt
@@ -1527,6 +1555,13 @@ pub(crate) fn validate_qualification_execution(
             .context("remote qualification proof has no signed producer scenario")?;
         if scenario.remote_verifier.is_none() {
             bail!("remote qualification proof scenario has no signed remote verifier");
+        }
+        if policy.policy.consumer_execution_context.is_some() {
+            scenario
+                .consumer_worker_request
+                .as_ref()
+                .context("consumer qualification scenario has no signed Worker request")?
+                .validate()?;
         }
         let expected_references = serde_json::json!({
             "operation_id": remote.intent.operation_id,

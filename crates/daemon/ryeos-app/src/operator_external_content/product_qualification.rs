@@ -590,9 +590,8 @@ fn prove_with_guard(
     }
     if let Some(content) = &purpose.consumer_content {
         require_retained_consumer_content_closure(authority, guard, limits, content)?;
-        // The exact historical inputs are retained, but the applied target,
-        // environment, protocol and hosted lifecycle are not yet joined.
-        bail!("qualification consumer execution context has no applied runtime parity proof");
+        // Applied Q/native/provider facts are corroborated below from the
+        // exact projected remote proof and its retained authenticated input.
     }
     let admitted_resolution = sealed.admitted_effective_resolution()?;
     require_reproducible_current_verifier_lane(&admitted_resolution.composed.derived, true)?;
@@ -724,6 +723,11 @@ fn prove_with_guard(
         &relationship.qualification.required_claims,
     )?;
     let result_digest = result.digest()?;
+    let qualification_worker_transcript_manifest_hash = purpose
+        .consumer_content
+        .as_ref()
+        .map(|_| result.q_transcript_manifest_hash().map(str::to_owned))
+        .transpose()?;
     let subject_declaration_id = policy_source.policy.subject_declaration_id.clone();
     let product_coordinate = ProductCaptureCoordinate::from_evidence(&product.evidence)?;
     let product_witness_hash = product.attestation_hash;
@@ -735,7 +739,7 @@ fn prove_with_guard(
         product_coordinate,
         policy_source,
         consumer_content: purpose.consumer_content.clone(),
-        qualification_worker_transcript_manifest_hash: None,
+        qualification_worker_transcript_manifest_hash,
         verifier_root_selections,
         execution_proof,
         verifier: ProductQualificationVerifier {

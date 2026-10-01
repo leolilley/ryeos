@@ -733,7 +733,7 @@ pub(super) fn prove(
     };
     let remote_proof = match subordinate_attempt.as_ref() {
         Some(candidate @ ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire::RemoteConsumer { .. }) => {
-            Some(corroborate_remote_consumer_references(state, authority, terminal, capsule, purpose, candidate, root_settlement_digest.as_ref().map(|(digest, _)| digest.as_str()))?.0)
+            Some(corroborate_remote_consumer_references(state, authority, guard, terminal, capsule, purpose, candidate, root_settlement_digest.as_ref().map(|(digest, _)| digest.as_str()), &result)?.0)
         },
         _ => None,
     };
@@ -848,11 +848,13 @@ pub(super) fn prove(
 fn corroborate_remote_consumer_references(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
     terminal: &ThreadSnapshot,
     capsule: &AdmittedLaunchCapsule,
     purpose: &QualificationExecutionPurposeView<'_>,
     candidate: &ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire,
     authenticated_settlement_digest: Option<&str>,
+    projected_result: &Value,
 ) -> anyhow::Result<(
     ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof,
     Value,
@@ -959,12 +961,176 @@ fn corroborate_remote_consumer_references(
         .get_blob_bounded(evidence_sha256, MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES)?
         .context("remote proof evidence blob is absent")?;
     let evidence = observation.verify_evidence_bytes(&bytes)?;
+    corroborate_qualification_worker_transcript(
+        state,
+        authority,
+        guard,
+        &input,
+        &attempt.intent.qualification_operation_id,
+        projected_result,
+    )?;
     Ok((ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof {
         launch_owner_digest: canonical_value_digest(&serde_json::to_value(&settlement.launch_owner)?)?,
         consumer_input_blob_hash,
         intent: attempt.intent, selection, observation,
         termination_intent: termination.intent, terminal_observation,
     }, evidence))
+}
+
+/// Join the independent verifier's Q reference to the daemon-owned completed
+/// transport and exact accepted program. This grants neither fresh execution
+/// nor callback access. Product-language interpretation remains in the signed
+/// verifier; these checks authenticate its actual input, bytes and settlement.
+fn corroborate_qualification_worker_transcript(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    input: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
+    qualification_operation_id: &str,
+    projected_result: &Value,
+) -> anyhow::Result<()> {
+    use ryeos_state::external_content::products::qualification::ProductQualificationResult;
+    use ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram;
+
+    input.validate()?;
+    let result = ProductQualificationResult::from_value(projected_result)?;
+    if result.subject_manifest_hash != input.purpose.subject_manifest_hash {
+        bail!("Q result changed the authenticated input subject");
+    }
+    let content = input
+        .purpose
+        .consumer_content
+        .as_ref()
+        .context("Q proof has no accepted consumer content")?;
+    let (profile, source_owner) =
+        crate::source_closure_admission::compile_retained_structured_worker_profile(
+            authority,
+            guard,
+            &content.worker_source,
+        )?;
+    let limits = state
+        .node_policy
+        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let (witness_hash, witness_source, _) = input.purpose.subject.captured_product()?;
+    let product = super::super::product_receipt::load_product_source(
+        state,
+        authority,
+        guard,
+        limits,
+        &input.purpose.owner_fingerprint,
+        witness_hash,
+        witness_source,
+        super::super::product_receipt::ProductSourceVerification::Retained,
+    )?;
+    let expected_program = AdmittedExternalQualificationSessionProgram::from_authenticated_inputs(
+        &input.purpose,
+        &profile,
+        &product,
+    )?;
+    // All current Worker/environment/execution, producer and independent
+    // verifier source joins share one checked generation. This establishes
+    // current selection, without requiring callback/contact eligibility.
+    let purpose = input.purpose.execution_view()?;
+    let contract = state.engine.with_checked_bundle_generation(|generation| {
+        let (_, contract) = super::derive_qualification_worker_resolution(
+            &input.purpose,
+            &expected_program,
+            &profile,
+            &source_owner,
+            &input.coordinate,
+            generation,
+        )?;
+        super::resolve_current_bundle_producer_recipe_for_purpose_in_generation(
+            state,
+            generation,
+            &purpose,
+            &input.coordinate.scenario_id,
+        )?;
+        let verifier = super::prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
+            state,
+            generation,
+            purpose.policy_source(),
+            purpose.producer_recipe_sources(),
+            purpose.subject_manifest_hash(),
+            &input.coordinate.scenario_id,
+        )?;
+        if Some(
+            &verifier.retained_identity(purpose.policy_source(), &input.coordinate.scenario_id)?,
+        ) != purpose.remote_verifier_source(&input.coordinate.scenario_id)
+        {
+            bail!("Q proof changed the accepted independent verifier source");
+        }
+        verifier.require_protected_selection(&input.selection)?;
+        Ok(contract)
+    })?;
+    let operation = qualification_operation_id;
+    let retained = state
+        .state_store
+        .qualification_historical_transport_evidence(
+            &input.coordinate,
+            operation,
+            &input.purpose.owner_fingerprint,
+        )?;
+    if retained.owner.program != expected_program {
+        bail!("Q applied program differs from exact accepted consumer/runtime inputs");
+    }
+    let local = state
+        .state_store
+        .qualification_local_start(&retained.placement_thread_id)?
+        .context("Q proof lost its original local credential custody")?;
+    let credential = local
+        .credential_custody
+        .as_ref()
+        .context("Q proof lost its selected credential profile")?;
+    if credential.profile_id != contract.credential_profile_id
+        || credential.owner_principal != input.purpose.owner_fingerprint
+        || credential.contract_digest != contract.digest()?
+        || credential.released_at_ms.is_none()
+    {
+        bail!("Q proof changed its accepted credential use or lacks exact release");
+    }
+    let reference = crate::qualification_consumer_observation::read_retained_reference(
+        state,
+        authority,
+        guard,
+        &input.coordinate,
+        operation,
+        &input.purpose.owner_fingerprint,
+    )?;
+    let request = input
+        .purpose
+        .policy_source
+        .policy
+        .producer_scenarios
+        .get(&input.coordinate.scenario_id)
+        .and_then(|scenario| scenario.consumer_worker_request.as_ref())
+        .context("Q proof has no original signed Worker setup/turn")?;
+    request.validate()?;
+    if reference.manifest_hash != result.q_transcript_manifest_hash()?
+        || reference.manifest.setup_request_digest
+            != canonical_value_digest(&request.session_setup)?
+        || reference.manifest.request_digest != canonical_value_digest(&request.body)?
+        || local.worker_incarnation_digest.as_deref()
+            != Some(reference.manifest.process_incarnation_digest.as_str())
+    {
+        bail!("Q proof substituted its manifest, process incarnation or signed request bytes");
+    }
+    // Use the shared bounded structural decoder on every retained chunk.
+    // The finite verifier separately interprets these same canonical bytes.
+    let cas = authority.cas_store()?;
+    let chunks = reference
+        .manifest
+        .chunks
+        .iter()
+        .map(|chunk| {
+            cas.get_blob_bounded(&chunk.blob_hash, chunk.size_bytes)?
+                .context("Q proof lost a manifest-owned transcript chunk")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    reference.manifest.verify_chunks(&chunks)?;
+    authority.ensure_guard(guard)?;
+    Ok(())
 }
 
 fn subordinate_authority(
@@ -1047,14 +1213,23 @@ fn verify_retained_remote_consumer(
     let (reconstructed, _) = corroborate_remote_consumer_references(
         state,
         authority,
+        guard,
         &terminal,
         &capsule,
         &purpose,
         &candidate,
         settlement.as_ref().map(|(digest, _)| digest.as_str()),
+        &serde_json::to_value(&evidence.result)?,
     )?;
     if &reconstructed != remote {
         bail!("remote retained proof differs from full historical corroboration");
+    }
+    if evidence
+        .qualification_worker_transcript_manifest_hash
+        .as_deref()
+        != Some(evidence.result.q_transcript_manifest_hash()?)
+    {
+        bail!("remote retained proof changed its qualification Worker transcript");
     }
     Ok(())
 }

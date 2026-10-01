@@ -22,6 +22,7 @@ pub enum ConsumerControllerInvocation {
 }
 
 pub struct SettledConsumerObservation {
+    pub result: ryeos_state::external_content::products::qualification::ProductQualificationResult,
     pub challenge: ConsumerRuntimeChallenge,
     pub evidence_sha256: String,
     pub evidence: ConsumerRetainedEvidence,
@@ -76,6 +77,15 @@ pub async fn run_controller_beat(
             RetainedControllerConsumerRecord::reopen(private_directory, inputs, &coordinate)?
         }
     };
+    crate::consumer_result::selected_claims(
+        &retained
+            .record()
+            .purpose
+            .policy_source
+            .policy
+            .allowed_claims,
+        &retained.record().purpose.required_claims,
+    )?;
     ensure!(
         retained
             .record()
@@ -216,8 +226,20 @@ pub async fn run_controller_beat(
                 !deadline.has_elapsed(),
                 "Q semantic join exceeded caller deadline"
             );
+            let result = crate::consumer_result::checked_result(
+                retained.record(),
+                &challenge,
+                &evidence_sha256,
+                &provider_terminal,
+                &qualification_worker,
+            )?;
+            ensure!(
+                !deadline.has_elapsed(),
+                "consumer result preparation exceeded caller deadline"
+            );
             Ok(ConsumerControllerOutcome::Settled(
                 SettledConsumerObservation {
+                    result,
                     challenge,
                     evidence,
                     evidence_sha256,
