@@ -1,8 +1,9 @@
 //! Local private material for one accepted qualification-only Worker.
 //!
 //! The caller already owns the Q private runtime workspace and
-//! the protected provider state root. This module only redeems accepted CAS
-//! content and publishes the accepted configuration into that state root.
+//! its disposable state root and the separately admitted credential home.
+//! This module redeems accepted CAS content and publishes the accepted
+//! configuration into that credential home under the retained profile fence.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -71,6 +72,7 @@ pub(crate) fn prepare_external_qualification_local_materials(
     workspace: &Path,
     workspace_lifeline: Arc<TempDirGuard>,
     state_root: &lillux::PinnedDirectory,
+    credential_home: &lillux::PinnedDirectory,
     budget: &super::external_content::PrivateMaterializationBudget,
 ) -> Result<PreparedExternalQualificationLocalMaterials> {
     ensure!(
@@ -87,6 +89,11 @@ pub(crate) fn prepare_external_qualification_local_materials(
     workspace_lifeline.require_uncreated_private_workspace()?;
     state_root.require_owner_private_directory()?;
     state_root.ensure_path_binding()?;
+    credential_home.require_owner_private_directory()?;
+    credential_home.ensure_path_binding()?;
+    credential_home.require_disjoint_directory_tree(state_root)?;
+    credential_home.require_disjoint_directory_tree(workspace_lifeline.owned_scratch_root()?)?;
+    let credential_home_lifeline = credential_home.inherited_descriptor_authority()?;
     let state_root_lifeline = state_root.inherited_descriptor_authority()?;
     let state_root_path = state_root.path().to_path_buf();
     let workspace_path = workspace.to_path_buf();
@@ -149,11 +156,12 @@ pub(crate) fn prepare_external_qualification_local_materials(
                 super::persistent_session::prepare_structured_session_configurations(
                     root.worker_profile(),
                     source.source_directory(),
-                    &state_root_path,
+                    credential_home.path(),
                     false,
                 )?,
             );
             state_root.ensure_path_binding()?;
+            credential_home.ensure_path_binding()?;
             plan.bind_persistent_session_workspace(&workspace_path)?;
             let executable_search = (!content.executable_search.is_empty())
                 .then(|| {
@@ -176,6 +184,7 @@ pub(crate) fn prepare_external_qualification_local_materials(
             lifelines.push(Box::new(source));
             lifelines.push(Box::new(runtime_view));
             lifelines.push(Box::new(state_root_lifeline));
+            lifelines.push(Box::new(credential_home_lifeline));
             lifelines.push(Box::new(workspace_lifeline));
             Ok(PreparedExternalQualificationLocalMaterials {
                 plan,

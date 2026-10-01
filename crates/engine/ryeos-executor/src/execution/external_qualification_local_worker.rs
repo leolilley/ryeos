@@ -182,6 +182,9 @@ impl ExternalQualificationLocalWorker {
                 "Q Worker turn observation exceeded channel or callback expiry"
             );
             self.ready.ensure_relay_running()?;
+            ryeos_app::external_qualification_local::ensure_qualification_worker_credential_current(
+                state, self.ready.placement(), self.ready.root(),
+            )?;
             let outcome = ryeos_app::external_qualification_command::read_qualification_worker_command_outcome(
                 state,
                 self.ready.placement(),
@@ -241,6 +244,9 @@ impl ExternalQualificationLocalWorker {
                 state,
                 self.ready.placement(),
                 &self.process_identity,
+            )?;
+            ryeos_app::external_qualification_local::release_qualification_worker_credential_custody(
+                state, self.ready.placement(),
             )?;
             self.retired = true;
             Ok(())
@@ -468,6 +474,16 @@ pub(crate) fn start_external_qualification_local_worker(
 ) -> Result<ExternalQualificationLocalWorker> {
     let placement = ready.placement().to_owned();
     let binding_digest = ready.binding().digest()?;
+    let contract = ready.root().worker_launch_contract();
+    let _credential_operation =
+        ryeos_app::hosted_operation::acquire_credential_profile_operation_until(
+            &contract.credential_profile_id,
+            ready
+                .root()
+                .cap_execution_deadline(lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::from_secs(contract.max_lifetime_seconds),
+                )),
+        )?;
     let mut reserved_start = false;
     let prepared = with_qualification_local_owner(
         state,
@@ -477,9 +493,11 @@ pub(crate) fn start_external_qualification_local_worker(
         ready.root(),
         |owner| {
             let reserved = owner.reserve_start()?;
+            reserved_start = true;
             let (project, workspace, state_root) =
                 owner.create_original_runtime_roots(&reserved)?;
-            reserved_start = true;
+            let credential_home = owner.credential_home()?;
+            let credential_home_path = credential_home.path().to_path_buf();
             let launch = (|| -> Result<LaunchOutcome> {
                 let runtime_cache = state.config.runtime_root().cache();
                 let custody_coordinate =
@@ -532,6 +550,7 @@ pub(crate) fn start_external_qualification_local_worker(
                 &project,
                 Arc::clone(&workspace),
                 &state_root,
+                &credential_home,
                 &budget,
             )?;
                 let (mut plan, session, mut mounts, mut lifelines, workspace_path, state_root_path) =
@@ -566,10 +585,33 @@ pub(crate) fn start_external_qualification_local_worker(
                         )?;
 
                     let boot_identity = lillux::sha256_hex(workspace_ready.launch_owner.as_bytes());
-                    let mut runtime_environment = BTreeMap::from([(
-                        "RYEOS_STRUCTURED_SESSION_PROFILE_HASH".to_owned(),
-                        ready.root().worker_profile().profile_hash.clone(),
-                    )]);
+                    let contract = ready.root().worker_launch_contract();
+                    let mut runtime_environment = BTreeMap::from([
+                        (
+                            "RYEOS_STRUCTURED_SESSION_PROFILE_HASH".to_owned(),
+                            ready.root().worker_profile().profile_hash.clone(),
+                        ),
+                        (
+                            contract.credential_home_env.clone(),
+                            credential_home_path.to_string_lossy().into_owned(),
+                        ),
+                        (
+                            contract.workspace_env.clone(),
+                            workspace_path.to_string_lossy().into_owned(),
+                        ),
+                        (
+                            "RYEOS_STRUCTURED_SESSION_ROUTE_SET".to_owned(),
+                            contract.route_set.clone(),
+                        ),
+                        (
+                            "RYEOS_STRUCTURED_SESSION_EFFECT_CLASSES".to_owned(),
+                            contract.allowed_effect_classes.join(","),
+                        ),
+                    ]);
+                    ensure!(
+                        runtime_environment.len() == 5,
+                        "Q launch context environment slots collide with fixed protocol authority"
+                    );
                     let identity_env = session
                         .protocol
                         .readiness_identity_env
@@ -617,7 +659,7 @@ pub(crate) fn start_external_qualification_local_worker(
                         ryeos_app::external_connector::prepare_external_candidate_connector(
                             state,
                             &placement,
-                            &state_root_path,
+                            &credential_home_path,
                         )?;
                     let (
                         connector_mounts,
@@ -653,7 +695,7 @@ pub(crate) fn start_external_qualification_local_worker(
                         &session.lifecycle,
                         session.protocol.workspace_authority,
                         session.protocol.network_authority,
-                        Some(&state_root_path),
+                        Some(&credential_home_path),
                         &placement,
                         None,
                         &workspace_ready.launch_owner,
@@ -765,6 +807,10 @@ pub(crate) fn start_external_qualification_local_worker(
                     );
             }
             let relay = connector_settlement();
+            let credential =
+                ryeos_app::external_qualification_local::release_qualification_worker_credential_custody(
+                    state, &placement,
+                );
             let _ =
                 ryeos_app::external_qualification_local::mark_qualification_local_cleanup_unproved(
                     state,
@@ -772,7 +818,7 @@ pub(crate) fn start_external_qualification_local_worker(
                     "Q held Worker start failed after connector preparation",
                 );
             return Err(error.context(format!(
-                "Q held Worker start failed; death: {death:?}; connector: {relay:?}"
+                "Q held Worker start failed; death: {death:?}; connector: {relay:?}; credential: {credential:?}"
             )));
         }
         Err(error) => {
@@ -782,6 +828,10 @@ pub(crate) fn start_external_qualification_local_worker(
                     &placement,
                     "Q local Worker start failed before connector preparation",
                 );
+                let credential = ryeos_app::external_qualification_local::release_qualification_worker_credential_custody(
+                    state, &placement,
+                );
+                return Err(error.context(format!("Q startup credential cleanup: {credential:?}")));
             }
             return Err(error);
         }
@@ -829,7 +879,10 @@ pub(crate) fn start_external_qualification_local_worker(
             &placement,
             "Q exclusive Worker readiness or pool binding failed",
         );
-        return Err(error);
+        let credential = ryeos_app::external_qualification_local::release_qualification_worker_credential_custody(
+            state, &placement,
+        );
+        return Err(error.context(format!("Q readiness credential cleanup: {credential:?}")));
     }
     Ok(ExternalQualificationLocalWorker {
         ready,

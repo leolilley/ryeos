@@ -2691,7 +2691,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // response before any controller-to-guest relay file can be uploaded.
 // Epoch 119 retains the original private Q project directory and its one-use
 // descriptor borrow, without backend workspace or process-scope authority.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 120;
+// Epoch 120 retains distinct one-use Q setup and turn contact/settlement.
+// Epoch 121 retains Q credential profile custody through exact local retirement.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 121;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -8274,7 +8276,11 @@ impl RuntimeDb {
                         AND dedicated_session.state IN ('admitted','binding','outcome_unknown'))
                 AND NOT EXISTS(SELECT 1 FROM credential_profile_reservation
                       WHERE credential_profile_reservation.reservation_id=credential_profile.lock_owner
-                        AND credential_profile_reservation.state='reserved')",
+                        AND credential_profile_reservation.state='reserved')
+                AND NOT EXISTS(SELECT 1 FROM external_qualification_local_start q
+                      WHERE json_extract(q.record_json,'$.credential_custody.profile_id')=credential_profile.profile_id
+                        AND json_type(q.record_json,'$.credential_custody')='object'
+                        AND json_type(q.record_json,'$.credential_custody.released_at_ms')='null')",
             [now],
         )?;
         tx.commit()?;

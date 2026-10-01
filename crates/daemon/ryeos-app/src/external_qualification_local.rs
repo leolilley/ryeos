@@ -30,6 +30,73 @@ pub struct QualificationLocalOwner<'a> {
     root: &'a PreparedExternalQualificationRoot,
 }
 
+fn require_credential_contract(
+    record: &QualificationLocalStartRecord,
+    root: &PreparedExternalQualificationRoot,
+) -> Result<()> {
+    let custody = record
+        .credential_custody
+        .as_ref()
+        .context("Q has no credential profile custody")?;
+    let contract = root.worker_launch_contract();
+    ensure!(
+        custody.released_at_ms.is_none()
+            && custody.profile_id == contract.credential_profile_id
+            && custody.owner_principal == root.purpose().owner_fingerprint
+            && custody.contract_digest == contract.digest()?
+            && custody.workload_family == contract.credential_requirement.workload_family
+            && custody.subject_projection_contract
+                == contract.credential_requirement.subject_projection_contract,
+        "Q credential custody differs from its accepted launch contract"
+    );
+    Ok(())
+}
+
+/// Read the live credential fence while awaiting the admitted turn. A changed
+/// generation/revocation refuses further execution; cleanup uses historical
+/// custody and does not depend on this check.
+pub fn ensure_qualification_worker_credential_current(
+    state: &AppState,
+    placement: &str,
+    root: &PreparedExternalQualificationRoot,
+) -> Result<()> {
+    let record = state
+        .state_store
+        .require_live_qualification_local_credential_custody(placement)?;
+    require_credential_contract(&record, root)
+}
+
+/// Release this credential fence only after the existing exact process and
+/// connector settlement. It neither recreates lost Q directories nor requires
+/// a live callback/current credential generation. No profile-home IO occurs.
+pub fn release_qualification_worker_credential_custody(
+    state: &AppState,
+    placement: &str,
+) -> Result<QualificationLocalStartRecord> {
+    let record = state
+        .state_store
+        .qualification_local_start(placement)?
+        .context("Q credential cleanup has no original start")?;
+    if record
+        .credential_custody
+        .as_ref()
+        .is_none_or(|c| c.released_at_ms.is_some())
+    {
+        return Ok(record);
+    }
+    if let Some(process) = state.state_store.qualification_worker_process(placement)? {
+        crate::process::assert_reaped_process_group_absent(&process.process_identity)?;
+        if process.phase == QualificationWorkerProcessPhase::Attached {
+            state
+                .state_store
+                .settle_qualification_worker_process(placement)?;
+        }
+    }
+    state
+        .state_store
+        .release_qualification_local_credential_custody(placement)
+}
+
 fn fence_precreate_cleanup(
     owner: &QualificationLocalOwner<'_>,
     error: anyhow::Error,
@@ -209,7 +276,48 @@ impl QualificationLocalOwner<'_> {
     pub fn reserve_start(&self) -> Result<QualificationLocalStartRecord> {
         self.state
             .state_store
-            .reserve_qualification_local_start(self.placement)
+            .reserve_qualification_local_start(self.placement)?;
+        let contract = self.root.worker_launch_contract();
+        let admission = self.root.authenticate_invocation(self.state)?;
+        self.state
+            .state_store
+            .claim_qualification_local_credential_custody(
+                self.state,
+                self.placement,
+                &contract.credential_profile_id,
+                &self.root.purpose().owner_fingerprint,
+                &contract.digest()?,
+                &contract.credential_requirement.workload_family,
+                &contract.credential_requirement.subject_projection_contract,
+                admission,
+            )
+    }
+
+    /// Open the existing private profile home after exact credential admission.
+    /// It is separately owned; Q's disposable state cleanup never removes it.
+    pub fn credential_home(&self) -> Result<lillux::PinnedDirectory> {
+        let record = self
+            .state
+            .state_store
+            .require_live_qualification_local_credential_custody(self.placement)?;
+        require_credential_contract(&record, self.root)?;
+        let credential = record
+            .credential_custody
+            .as_ref()
+            .context("Q has no admitted credential custody")?;
+        crate::private_artifact_home::require_within_default_limit(
+            &self.state.config.runtime_state_dir(),
+            &credential.home_id,
+        )?;
+        let path = crate::private_artifact_home::home_path(
+            &self.state.config.runtime_state_dir(),
+            &credential.home_id,
+        )?;
+        let home = lillux::PinnedDirectory::open(&path)?
+            .context("Q credential profile home is missing")?;
+        home.require_owner_private_directory()?;
+        home.ensure_path_binding()?;
+        Ok(home)
     }
 
     pub fn start_record(&self) -> Result<QualificationLocalStartRecord> {
@@ -633,6 +741,9 @@ pub fn cleanup_qualification_local_worker(
                 current == initial,
                 "Q local cleanup changed its original start before contact gate"
             );
+            // Credential retirement can succeed even when this daemon has
+            // lost original disposable-directory descriptors after restart.
+            current = release_qualification_worker_credential_custody(state, placement)?;
             if current.phase == QualificationLocalStartPhase::Closed {
                 state
                     .qualification_workspace_custody

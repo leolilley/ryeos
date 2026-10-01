@@ -7,6 +7,17 @@
 use super::*;
 use ryeos_state::external_execution::journal::load_binding;
 
+// A present null is permitted; omitting the journal field is not.
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize<'de>>::deserialize(deserializer)
+}
+
 pub(in crate::runtime_db) const JOURNAL_SQL: &str = r#"
 CREATE TABLE external_qualification_local_start (
     placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
@@ -27,6 +38,7 @@ CREATE TABLE external_qualification_local_start (
 CREATE TRIGGER external_qualification_local_start_insert_guard
 BEFORE INSERT ON external_qualification_local_start
 WHEN NEW.phase!='reserved'
+ OR json_type(NEW.record_json,'$.credential_custody') IS NOT 'null'
  OR NOT EXISTS(SELECT 1 FROM external_execution_allocation a
     JOIN external_execution_channel c ON c.placement_thread_id=a.placement_thread_id
     WHERE a.placement_thread_id=NEW.placement_thread_id AND a.phase='bound'
@@ -51,9 +63,9 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
      AND json_extract(NEW.record_json,'$.directory_borrow_intent') IS NOT NULL
      AND json_extract(NEW.record_json,'$.worker_incarnation_digest') IS NULL)
  OR json_remove(NEW.record_json,'$.phase','$.workspace_identity','$.directory_borrow_intent',
-      '$.worker_incarnation_digest','$.cleanup_reason','$.cleanup','$.updated_at_ms')
+      '$.worker_incarnation_digest','$.cleanup_reason','$.cleanup','$.credential_custody','$.updated_at_ms')
     != json_remove(OLD.record_json,'$.phase','$.workspace_identity','$.directory_borrow_intent',
-      '$.worker_incarnation_digest','$.cleanup_reason','$.cleanup','$.updated_at_ms')
+      '$.worker_incarnation_digest','$.cleanup_reason','$.cleanup','$.credential_custody','$.updated_at_ms')
  OR (json_extract(NEW.record_json,'$.workspace_identity') IS NOT json_extract(OLD.record_json,'$.workspace_identity')
      AND NOT (OLD.phase='reserved' AND NEW.phase='workspace_ready'
           AND json_extract(OLD.record_json,'$.workspace_identity') IS NULL
@@ -67,12 +79,16 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
           AND json_extract(OLD.record_json,'$.worker_incarnation_digest') IS NULL
           AND json_extract(NEW.record_json,'$.worker_incarnation_digest') IS NOT NULL))
  OR (NEW.phase=OLD.phase AND NOT (
-      OLD.phase='workspace_ready'
+      (json_extract(NEW.record_json,'$.credential_custody') IS NOT json_extract(OLD.record_json,'$.credential_custody')
+       AND json_remove(NEW.record_json,'$.credential_custody','$.updated_at_ms')
+           = json_remove(OLD.record_json,'$.credential_custody','$.updated_at_ms'))
+      OR (OLD.phase='workspace_ready'
       AND json_extract(OLD.record_json,'$.directory_borrow_intent') IS NULL
       AND json_extract(NEW.record_json,'$.directory_borrow_intent') IS NOT NULL
       AND json_remove(NEW.record_json,'$.directory_borrow_intent','$.updated_at_ms')
-          = json_remove(OLD.record_json,'$.directory_borrow_intent','$.updated_at_ms')))
- OR NOT ((OLD.phase='reserved' AND NEW.phase='workspace_ready')
+          = json_remove(OLD.record_json,'$.directory_borrow_intent','$.updated_at_ms'))))
+ OR NOT ((NEW.phase=OLD.phase AND json_extract(NEW.record_json,'$.credential_custody') IS NOT json_extract(OLD.record_json,'$.credential_custody'))
+      OR (OLD.phase='reserved' AND NEW.phase='workspace_ready')
       OR (OLD.phase='workspace_ready' AND NEW.phase IN ('workspace_ready','worker_attached'))
       OR (OLD.phase IN ('reserved','workspace_ready','worker_attached') AND NEW.phase='cleanup_unproved')
       OR (OLD.phase IN ('reserved','workspace_ready','worker_attached','cleanup_unproved') AND NEW.phase='cleanup_intent')
@@ -80,6 +96,61 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
       OR (OLD.phase='workspace_removed' AND NEW.phase='state_removed')
       OR (OLD.phase='state_removed' AND NEW.phase='closed'))
 BEGIN SELECT RAISE(ABORT, 'qualification local start transition changed its one-use owner'); END;
+CREATE TRIGGER external_qualification_local_credential_transition_guard
+BEFORE UPDATE ON external_qualification_local_start
+WHEN json_type(NEW.record_json,'$.credential_custody') IS NULL
+ OR (json_extract(NEW.record_json,'$.credential_custody') IS NOT json_extract(OLD.record_json,'$.credential_custody')
+ AND NOT COALESCE((
+   (OLD.phase='reserved' AND NEW.phase='reserved'
+    AND json_type(OLD.record_json,'$.credential_custody')='null'
+    AND json_type(NEW.record_json,'$.credential_custody')='object'
+    AND json_type(NEW.record_json,'$.credential_custody.released_at_ms')='null'
+    AND json_extract(NEW.record_json,'$.credential_custody.lock_owner')=json_extract(NEW.record_json,'$.launch_owner')
+    AND EXISTS(SELECT 1 FROM credential_profile p
+      JOIN external_execution_allocation a ON a.placement_thread_id=NEW.placement_thread_id
+      WHERE json_extract(a.reservation_json,'$.owner.operator_principal')=json_extract(NEW.record_json,'$.credential_custody.owner_principal')
+        AND p.profile_id=json_extract(NEW.record_json,'$.credential_custody.profile_id')
+        AND p.owner_principal=json_extract(NEW.record_json,'$.credential_custody.owner_principal')
+        AND p.home_id=json_extract(NEW.record_json,'$.credential_custody.home_id')
+        AND p.credential_generation=json_extract(NEW.record_json,'$.credential_custody.credential_generation')
+        AND p.authority_revision=json_extract(NEW.record_json,'$.credential_custody.authority_revision')
+        AND p.lock_owner=json_extract(NEW.record_json,'$.credential_custody.lock_owner') AND p.state='active'))
+   OR (NEW.phase=OLD.phase
+    AND json_type(OLD.record_json,'$.credential_custody')='object'
+    AND json_type(OLD.record_json,'$.credential_custody.released_at_ms')='null'
+    AND json_type(NEW.record_json,'$.credential_custody.released_at_ms')='integer'
+    AND json_extract(NEW.record_json,'$.credential_custody.released_at_ms')>=json_extract(OLD.record_json,'$.credential_custody.acquired_at_ms')
+    AND json_remove(json_extract(NEW.record_json,'$.credential_custody'),'$.released_at_ms')
+        =json_remove(json_extract(OLD.record_json,'$.credential_custody'),'$.released_at_ms')
+    AND NOT EXISTS(SELECT 1 FROM external_execution_connector c
+      WHERE c.placement_thread_id=OLD.placement_thread_id AND c.state!='closed')
+    AND ((json_extract(OLD.record_json,'$.directory_borrow_intent') IS NULL
+          AND json_extract(OLD.record_json,'$.worker_incarnation_digest') IS NULL
+          AND NOT EXISTS(SELECT 1 FROM external_qualification_worker_process p WHERE p.placement_thread_id=OLD.placement_thread_id))
+      OR (json_extract(OLD.record_json,'$.worker_incarnation_digest') IS NOT NULL
+          AND EXISTS(SELECT 1 FROM external_qualification_worker_process p
+            WHERE p.placement_thread_id=OLD.placement_thread_id AND p.phase='terminal'))))
+ ),0))
+ OR (NEW.phase='closed' AND json_type(NEW.record_json,'$.credential_custody')='object'
+     AND json_type(NEW.record_json,'$.credential_custody.released_at_ms') IS NOT 'integer')
+BEGIN SELECT RAISE(ABORT, 'qualification credential custody changed its one-use owner'); END;
+CREATE TRIGGER credential_profile_qualification_custody_guard
+BEFORE UPDATE ON credential_profile
+WHEN EXISTS(SELECT 1 FROM external_qualification_local_start q
+ WHERE json_extract(q.record_json,'$.credential_custody.profile_id')=OLD.profile_id
+   AND json_type(q.record_json,'$.credential_custody')='object'
+   AND json_type(q.record_json,'$.credential_custody.released_at_ms')='null')
+ AND (NEW.profile_id IS NOT OLD.profile_id OR NEW.owner_principal IS NOT OLD.owner_principal
+      OR NEW.home_id IS NOT OLD.home_id OR NEW.lock_owner IS NOT OLD.lock_owner
+      OR NEW.state IN ('revoked','deleting','deleted'))
+BEGIN SELECT RAISE(ABORT, 'credential profile retains unresolved qualification custody'); END;
+CREATE TRIGGER credential_profile_qualification_custody_delete_guard
+BEFORE DELETE ON credential_profile
+WHEN EXISTS(SELECT 1 FROM external_qualification_local_start q
+ WHERE json_extract(q.record_json,'$.credential_custody.profile_id')=OLD.profile_id
+   AND json_type(q.record_json,'$.credential_custody')='object'
+   AND json_type(q.record_json,'$.credential_custody.released_at_ms')='null')
+BEGIN SELECT RAISE(ABORT, 'credential profile retains unresolved qualification custody'); END;
 CREATE TRIGGER external_qualification_local_start_no_delete
 BEFORE DELETE ON external_qualification_local_start
 BEGIN SELECT RAISE(ABORT, 'qualification local start cleanup requires exact proof'); END;
@@ -133,6 +204,25 @@ struct QualificationLocalCleanupEvidence {
     pub closed_at_ms: Option<i64>,
 }
 
+/// Exact node-private credential ownership for this original Q launch. Signed
+/// contract labels describe admitted use, not metadata inferred from auth bytes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationLocalCredentialCustody {
+    pub profile_id: String,
+    pub owner_principal: String,
+    pub credential_generation: u64,
+    pub authority_revision: u64,
+    pub home_id: String,
+    pub lock_owner: String,
+    pub workload_family: String,
+    pub subject_projection_contract: String,
+    pub contract_digest: String,
+    pub acquired_at_ms: i64,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub released_at_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QualificationLocalStartRecord {
@@ -151,6 +241,8 @@ pub struct QualificationLocalStartRecord {
     /// The original pinned descriptor is the Worker state-root authority.
     pub state_root: String,
     pub launch_owner: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub credential_custody: Option<QualificationLocalCredentialCustody>,
     pub phase: QualificationLocalStartPhase,
     pub workspace_identity: Option<lillux::PinnedDirectoryIdentity>,
     pub directory_borrow_intent: Option<QualificationWorkspaceBorrowIntent>,
@@ -242,6 +334,45 @@ impl QualificationLocalStartRecord {
             "qualification state root is not the separate exact cache child"
         );
         validate_bounded_runtime_text("local launch owner", &self.launch_owner, 256)?;
+        if let Some(custody) = &self.credential_custody {
+            for (label, value) in [
+                ("credential profile", &custody.profile_id),
+                ("credential principal", &custody.owner_principal),
+                ("credential home", &custody.home_id),
+                ("credential workload family", &custody.workload_family),
+                (
+                    "credential subject contract",
+                    &custody.subject_projection_contract,
+                ),
+            ] {
+                validate_bounded_runtime_text(label, value, 256)?;
+            }
+            crate::private_artifact_home::home_path(std::path::Path::new("/"), &custody.home_id)?;
+            validate_sha256("credential contract", &custody.contract_digest)?;
+            for label in [
+                &custody.workload_family,
+                &custody.subject_projection_contract,
+            ] {
+                ensure!(
+                    label.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'-' | b'_' | b'.' | b'/')),
+                    "qualification credential contract label is not a bounded identifier"
+                );
+            }
+            ensure!(
+                custody.credential_generation > 0
+                    && custody.authority_revision > 0
+                    && custody.lock_owner == self.launch_owner
+                    && custody.acquired_at_ms >= self.created_at_ms
+                    && custody.acquired_at_ms <= self.updated_at_ms
+                    && custody
+                        .released_at_ms
+                        .is_none_or(|at| at >= custody.acquired_at_ms && at <= self.updated_at_ms)
+                    && (self.phase != QualificationLocalStartPhase::Closed
+                        || custody.released_at_ms.is_some()),
+                "qualification credential custody has invalid owner or timing"
+            );
+        }
         if let Some(intent) = &self.directory_borrow_intent {
             ensure!(
                 intent.workspace_id == self.workspace_id
@@ -377,6 +508,7 @@ pub(super) fn read_local_start(
         "qualification local start row contradicts its canonical record"
     );
     require_retained_local_owner(conn, &record)?;
+    require_historical_credential_custody(conn, &record)?;
     Ok(Some(record))
 }
 
@@ -395,7 +527,11 @@ fn require_retained_local_owner(
             && owner.coordinate.accepted_capsule_hash == record.accepted_capsule_hash
             && owner.qualification_operation_id == record.qualification_operation_id
             && owner.qualification_occurrence.occurrence_id == record.qualification_occurrence_id
-            && allocation.reservation.base_snapshot_hash == record.base_snapshot_hash,
+            && allocation.reservation.base_snapshot_hash == record.base_snapshot_hash
+            && record
+                .credential_custody
+                .as_ref()
+                .is_none_or(|custody| custody.owner_principal == owner.operator_principal),
         "qualification local start changed accepted owner or base"
     );
     let channel = load_binding(conn, &record.placement_thread_id)?;
@@ -405,6 +541,64 @@ fn require_retained_local_owner(
             && matches!(channel.execution_mode, ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {})
             && channel.candidate_export_max_bytes == 0,
         "qualification local start changed its Q channel"
+    );
+    Ok(())
+}
+
+fn require_historical_credential_custody(
+    conn: &Connection,
+    record: &QualificationLocalStartRecord,
+) -> Result<()> {
+    let Some(custody) = &record.credential_custody else {
+        return Ok(());
+    };
+    let profile: Option<(String,String,i64,i64,Option<String>)> = conn.query_row(
+        "SELECT owner_principal,home_id,credential_generation,authority_revision,lock_owner FROM credential_profile WHERE profile_id=?1",
+        [&custody.profile_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional()?;
+    if custody.released_at_ms.is_some() {
+        ensure!(
+            profile
+                .as_ref()
+                .is_none_or(|profile| profile.4.as_deref() != Some(custody.lock_owner.as_str())),
+            "released qualification credential still owns its old profile lock"
+        );
+        return Ok(());
+    }
+    let (owner, home, generation, revision, lock_owner) =
+        profile.context("qualification credential profile disappeared")?;
+    ensure!(
+        owner == custody.owner_principal
+            && home == custody.home_id
+            && u64::try_from(generation)? >= custody.credential_generation
+            && u64::try_from(revision)? >= custody.authority_revision
+            && lock_owner.as_deref() == Some(custody.lock_owner.as_str()),
+        "qualification credential lost its historical profile fence"
+    );
+    Ok(())
+}
+
+pub(super) fn require_live_credential_custody(
+    conn: &Connection,
+    record: &QualificationLocalStartRecord,
+) -> Result<()> {
+    let custody = record
+        .credential_custody
+        .as_ref()
+        .context("qualification has no credential custody")?;
+    ensure!(
+        custody.released_at_ms.is_none(),
+        "qualification credential custody was released"
+    );
+    let exact: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM credential_profile WHERE profile_id=?1 AND owner_principal=?2
+         AND home_id=?3 AND credential_generation=?4 AND authority_revision=?5 AND lock_owner=?6 AND state='active')",
+        params![custody.profile_id,custody.owner_principal,custody.home_id,i64::try_from(custody.credential_generation)?,i64::try_from(custody.authority_revision)?,custody.lock_owner],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        exact,
+        "qualification credential profile is no longer exactly active and owned"
     );
     Ok(())
 }
@@ -627,6 +821,143 @@ impl RuntimeDb {
         read_local_start(&self.conn, placement)
     }
 
+    /// Claim the original launch's credential generation exactly once. The
+    /// family/projection labels are signed intent supplied by admission; the
+    /// generic profile ledger does not independently observe those labels.
+    pub(crate) fn claim_qualification_local_credential_custody(
+        &self,
+        placement: &str,
+        profile_id: &str,
+        owner_principal: &str,
+        contract_digest: &str,
+        workload_family: &str,
+        subject_projection_contract: &str,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
+    ) -> Result<QualificationLocalStartRecord> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current = read_local_start(&tx, placement)?
+            .context("Q credential claim has no original start")?;
+        ensure!(
+            current.phase == QualificationLocalStartPhase::Reserved
+                && current.credential_custody.is_none(),
+            "Q credential claim cannot replay or replace original custody"
+        );
+        require_current_start(&tx, &current)?;
+        let allocation = read(&tx, placement)?.context("Q credential claim lost allocation")?;
+        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+        ensure!(
+            matches!(&allocation.reservation.owner,
+            ExternalAllocationOwner::QualificationCandidate(owner) if owner.operator_principal == owner_principal),
+            "Q credential principal differs from its authenticated allocation owner"
+        );
+        let profile = self
+            .credential_profile(profile_id)?
+            .context("Q credential profile is absent")?;
+        ensure!(
+            profile.owner_principal == owner_principal
+                && profile.state == "active"
+                && profile.lock_owner.is_none(),
+            "Q credential profile is not active, owned and available"
+        );
+        let now = now_after(&current)?;
+        let mut next = current.clone();
+        next.credential_custody = Some(QualificationLocalCredentialCustody {
+            profile_id: profile_id.to_owned(),
+            owner_principal: owner_principal.to_owned(),
+            credential_generation: profile.credential_generation,
+            authority_revision: profile.authority_revision,
+            home_id: profile.home_id,
+            lock_owner: current.launch_owner.clone(),
+            workload_family: workload_family.to_owned(),
+            subject_projection_contract: subject_projection_contract.to_owned(),
+            contract_digest: contract_digest.to_owned(),
+            acquired_at_ms: now,
+            released_at_ms: None,
+        });
+        next.updated_at_ms = now;
+        next.validate()?;
+        ensure!(
+            tx.execute(
+                "UPDATE credential_profile SET lock_owner=?3,updated_at_ms=MAX(updated_at_ms,?4)
+             WHERE profile_id=?1 AND owner_principal=?2 AND lock_owner IS NULL AND state='active'
+               AND credential_generation=?5 AND authority_revision=?6",
+                params![
+                    profile_id,
+                    owner_principal,
+                    current.launch_owner,
+                    now,
+                    i64::try_from(profile.credential_generation)?,
+                    i64::try_from(profile.authority_revision)?
+                ],
+            )? == 1,
+            "Q credential claim lost its exact active profile CAS"
+        );
+        transition(&tx, &current, &next)?;
+        require_historical_credential_custody(&tx, &next)?;
+        tx.commit()?;
+        Ok(next)
+    }
+
+    /// Fresh contact must still own the original active profile generation.
+    pub(crate) fn require_live_qualification_local_credential_custody(
+        &self,
+        placement: &str,
+    ) -> Result<QualificationLocalStartRecord> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read_local_start(&tx, placement)?
+            .context("Q credential check has no original start")?;
+        require_current_start(&tx, &record)?;
+        require_live_credential_custody(&tx, &record)?;
+        tx.commit()?;
+        Ok(record)
+    }
+
+    /// Cleanup may release revoked/expired custody, but only after exact local
+    /// retirement or proof that no directory borrow could have spawned a child.
+    /// The old lock and its release marker change in the same transaction.
+    pub(crate) fn release_qualification_local_credential_custody(
+        &self,
+        placement: &str,
+    ) -> Result<QualificationLocalStartRecord> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current = read_local_start(&tx, placement)?
+            .context("Q credential release has no original start")?;
+        let Some(custody) = &current.credential_custody else {
+            tx.commit()?;
+            return Ok(current);
+        };
+        if custody.released_at_ms.is_some() {
+            tx.commit()?;
+            return Ok(current);
+        }
+        require_local_processes_settled(&tx, &current)?;
+        let now = now_after(&current)?;
+        let mut next = current.clone();
+        next.credential_custody
+            .as_mut()
+            .expect("custody checked")
+            .released_at_ms = Some(now);
+        next.updated_at_ms = now;
+        transition(&tx, &current, &next)?;
+        ensure!(
+            tx.execute(
+                "UPDATE credential_profile SET lock_owner=NULL,updated_at_ms=MAX(updated_at_ms,?3)
+             WHERE profile_id=?1 AND lock_owner=?2 AND owner_principal=?4 AND home_id=?5",
+                params![
+                    custody.profile_id,
+                    custody.lock_owner,
+                    now,
+                    custody.owner_principal,
+                    custody.home_id
+                ],
+            )? == 1,
+            "Q credential release lost its exact old profile lock"
+        );
+        require_historical_credential_custody(&tx, &next)?;
+        tx.commit()?;
+        Ok(next)
+    }
+
     /// Read-only final pre-spawn gate. The app caller holds the Q occurrence
     /// contact gate from this check through held attachment; this projection
     /// itself grants neither a descriptor nor process contact.
@@ -647,6 +978,7 @@ impl RuntimeDb {
             "qualification local spawn requires its one-use original directory borrow"
         );
         require_current_start(&tx, &record)?;
+        require_live_credential_custody(&tx, &record)?;
         tx.commit()?;
         Ok(record)
     }
@@ -669,6 +1001,7 @@ impl RuntimeDb {
             "qualification Worker release requires its original attached process"
         );
         require_current_start(&tx, &local)?;
+        require_live_credential_custody(&tx, &local)?;
         let process = qualification_process::require_current_attached_worker(&tx, placement)?;
         ensure!(
             local.worker_incarnation_digest.as_deref()
@@ -807,6 +1140,7 @@ impl RuntimeDb {
             workspace_root: workspace_root.to_string_lossy().into_owned(),
             state_root: state_root.to_string_lossy().into_owned(),
             launch_owner,
+            credential_custody: None,
             phase: QualificationLocalStartPhase::Reserved,
             workspace_identity: None,
             directory_borrow_intent: None,
@@ -1059,6 +1393,7 @@ mod tests {
             state_root: format!("/tmp/qualification-cache/qualification-local/{workspace_id}"),
             workspace_id,
             launch_owner: format!("Q-local-{digest}"),
+            credential_custody: None,
             phase: QualificationLocalStartPhase::Reserved,
             workspace_identity: None,
             directory_borrow_intent: None,
@@ -1104,17 +1439,20 @@ mod tests {
         assert!(record.validate().is_err());
     }
 
-    #[test]
-    fn private_directory_journal_pins_identity_and_allows_one_borrow() {
+    fn fixture_journal() -> (Connection, QualificationLocalStartRecord) {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE external_execution_allocation(placement_thread_id TEXT PRIMARY KEY, phase TEXT, reservation_json TEXT);
+            "CREATE TABLE credential_profile(profile_id TEXT PRIMARY KEY,owner_principal TEXT,home_id TEXT,credential_generation INTEGER,authority_revision INTEGER,lock_owner TEXT,state TEXT);
+             CREATE TABLE external_qualification_worker_process(placement_thread_id TEXT PRIMARY KEY,phase TEXT,process_identity_json TEXT);
+             CREATE TABLE external_execution_connector(placement_thread_id TEXT PRIMARY KEY,state TEXT);
+             CREATE TABLE external_execution_allocation(placement_thread_id TEXT PRIMARY KEY, phase TEXT, reservation_json TEXT);
              CREATE TABLE external_execution_channel(placement_thread_id TEXT PRIMARY KEY, binding_digest TEXT, state TEXT);",
         ).unwrap();
         conn.execute_batch(JOURNAL_SQL).unwrap();
-        let mut current = fixture_record();
+        let current = fixture_record();
         let reservation = serde_json::json!({"owner": {
             "kind": "qualification_candidate",
+            "operator_principal": "principal",
             "coordinate": {"accepted_root_id": current.accepted_root_id,
                 "accepted_capsule_hash": current.accepted_capsule_hash},
             "qualification_operation_id": current.qualification_operation_id,
@@ -1134,6 +1472,195 @@ mod tests {
             params![current.placement_thread_id, current.accepted_root_id, current.accepted_capsule_hash,
                 current.qualification_operation_id, current.qualification_occurrence_id,
                 current.channel_binding_digest, canonical(&current).unwrap()]).unwrap();
+        (conn, current)
+    }
+
+    fn claim_fixture_credential(
+        conn: &Connection,
+        current: &QualificationLocalStartRecord,
+    ) -> QualificationLocalStartRecord {
+        conn.execute("INSERT INTO credential_profile VALUES('profile','principal','private-home',1,1,?1,'active')",
+            [&current.launch_owner]).unwrap();
+        let mut claimed = current.clone();
+        claimed.credential_custody = Some(QualificationLocalCredentialCustody {
+            profile_id: "profile".into(),
+            owner_principal: "principal".into(),
+            home_id: "private-home".into(),
+            credential_generation: 1,
+            authority_revision: 1,
+            lock_owner: current.launch_owner.clone(),
+            workload_family: "codex".into(),
+            subject_projection_contract: "codex.account.v1".into(),
+            contract_digest: "a".repeat(64),
+            acquired_at_ms: 1,
+            released_at_ms: None,
+        });
+        transition(conn, current, &claimed).unwrap();
+        claimed
+    }
+
+    #[test]
+    fn credential_custody_required_null_and_immutable_claim_are_cold_checked() {
+        let (conn, current) = fixture_journal();
+        let claimed = claim_fixture_credential(&conn, &current);
+        require_historical_credential_custody(&conn, &claimed).unwrap();
+        require_live_credential_custody(&conn, &claimed).unwrap();
+        assert!(transition(&conn, &claimed, &claimed).is_err());
+        let mut swapped = claimed.clone();
+        swapped.credential_custody.as_mut().unwrap().contract_digest = "b".repeat(64);
+        assert!(transition(&conn, &claimed, &swapped).is_err());
+        let (other_conn, other_reserved) = fixture_journal();
+        other_conn.execute("INSERT INTO credential_profile VALUES('profile','principal','private-home',1,1,?1,'active')", [&other_reserved.launch_owner]).unwrap();
+        other_conn.execute("UPDATE external_execution_allocation SET reservation_json=json_set(reservation_json,'$.owner.operator_principal','another-principal')", []).unwrap();
+        assert!(transition(&other_conn, &other_reserved, &claimed).is_err());
+        let mut absent = serde_json::to_value(&current).unwrap();
+        absent.as_object_mut().unwrap().remove("credential_custody");
+        assert!(serde_json::from_value::<QualificationLocalStartRecord>(absent).is_err());
+        let mut absent = serde_json::to_value(&claimed).unwrap();
+        absent["credential_custody"]
+            .as_object_mut()
+            .unwrap()
+            .remove("released_at_ms");
+        assert!(serde_json::from_value::<QualificationLocalStartRecord>(absent).is_err());
+        // A cold read of lost custody cannot treat an unlocked profile as safe.
+        conn.execute_batch("DROP TRIGGER credential_profile_qualification_custody_guard; UPDATE credential_profile SET lock_owner=NULL;").unwrap();
+        assert!(require_historical_credential_custody(&conn, &claimed).is_err());
+    }
+
+    #[test]
+    fn revocation_fences_fresh_use_without_erasing_historical_q_custody() {
+        let (conn, current) = fixture_journal();
+        let claimed = claim_fixture_credential(&conn, &current);
+        conn.execute("UPDATE credential_profile SET state='revoking',credential_generation=2,authority_revision=2", []).unwrap();
+        require_historical_credential_custody(&conn, &claimed).unwrap();
+        assert!(require_live_credential_custody(&conn, &claimed).is_err());
+        for sql in [
+            "UPDATE credential_profile SET lock_owner=NULL",
+            "UPDATE credential_profile SET state='revoked',lock_owner=NULL",
+            "UPDATE credential_profile SET state='deleting'",
+            "DELETE FROM credential_profile",
+        ] {
+            assert!(conn.execute(sql, []).is_err(), "{sql}");
+        }
+        require_local_processes_settled(&conn, &claimed).unwrap();
+        let mut released = claimed.clone();
+        released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
+        let tx = conn.unchecked_transaction().unwrap();
+        transition(&tx, &claimed, &released).unwrap();
+        tx.execute("UPDATE credential_profile SET lock_owner=NULL", [])
+            .unwrap();
+        tx.commit().unwrap();
+        require_historical_credential_custody(&conn, &released).unwrap();
+        // Historical cleanup must not clear a successor's lock or demand the
+        // original generation still be active after a completed release.
+        conn.execute("UPDATE credential_profile SET state='active',credential_generation=3,authority_revision=3,lock_owner='successor'", []).unwrap();
+        require_historical_credential_custody(&conn, &released).unwrap();
+        assert!(transition(&conn, &released, &claimed).is_err());
+        assert_eq!(
+            conn.query_row("SELECT lock_owner FROM credential_profile", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "successor"
+        );
+    }
+
+    #[test]
+    fn unregistered_rollback_and_resume_release_credentials_before_closed() {
+        for release_phase in [
+            QualificationLocalStartPhase::Reserved,
+            QualificationLocalStartPhase::CleanupIntent,
+            QualificationLocalStartPhase::WorkspaceRemoved,
+            QualificationLocalStartPhase::StateRemoved,
+        ] {
+            let (conn, reserved) = fixture_journal();
+            let mut current = claim_fixture_credential(&conn, &reserved);
+            for next_phase in [
+                QualificationLocalStartPhase::CleanupIntent,
+                QualificationLocalStartPhase::WorkspaceRemoved,
+                QualificationLocalStartPhase::StateRemoved,
+                QualificationLocalStartPhase::Closed,
+            ] {
+                if current.phase == release_phase {
+                    require_local_processes_settled(&conn, &current).unwrap();
+                    let mut released = current.clone();
+                    released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
+                    let tx = conn.unchecked_transaction().unwrap();
+                    transition(&tx, &current, &released).unwrap();
+                    tx.execute("UPDATE credential_profile SET lock_owner=NULL", [])
+                        .unwrap();
+                    tx.commit().unwrap();
+                    // A pre-release snapshot is stale after this CAS. Resuming
+                    // cleanup must use the newly retained canonical row.
+                    assert!(transition(&conn, &current, &released).is_err());
+                    current = released;
+                }
+                let mut next = current.clone();
+                next.phase = next_phase;
+                match next_phase {
+                    QualificationLocalStartPhase::CleanupIntent => {
+                        next.cleanup = Some(QualificationLocalCleanupEvidence {
+                            prior_failure_reason: None,
+                            intent_at_ms: 1,
+                            workspace_removed_at_ms: None,
+                            state_removed_at_ms: None,
+                            closed_at_ms: None,
+                        })
+                    }
+                    QualificationLocalStartPhase::WorkspaceRemoved => {
+                        next.cleanup.as_mut().unwrap().workspace_removed_at_ms = Some(1)
+                    }
+                    QualificationLocalStartPhase::StateRemoved => {
+                        next.cleanup.as_mut().unwrap().state_removed_at_ms = Some(1)
+                    }
+                    QualificationLocalStartPhase::Closed => {
+                        next.cleanup.as_mut().unwrap().closed_at_ms = Some(1)
+                    }
+                    _ => unreachable!(),
+                }
+                transition(&conn, &current, &next).unwrap();
+                current = next;
+            }
+            assert_eq!(current.phase, QualificationLocalStartPhase::Closed);
+            require_historical_credential_custody(&conn, &current).unwrap();
+        }
+    }
+
+    #[test]
+    fn uncertain_directory_borrow_and_live_connector_prevent_credential_release() {
+        let (conn, current) = fixture_journal();
+        let claimed = claim_fixture_credential(&conn, &current);
+        let mut released = claimed.clone();
+        released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
+        conn.execute(
+            "INSERT INTO external_execution_connector VALUES(?1,'connected')",
+            [&claimed.placement_thread_id],
+        )
+        .unwrap();
+        assert!(require_local_processes_settled(&conn, &claimed).is_err());
+        assert!(transition(&conn, &claimed, &released).is_err());
+        conn.execute("UPDATE external_execution_connector SET state='closed'", [])
+            .unwrap();
+        let mut ready = claimed.clone();
+        ready.phase = QualificationLocalStartPhase::WorkspaceReady;
+        ready.workspace_identity = Some(directory_identity(2));
+        transition(&conn, &claimed, &ready).unwrap();
+        let mut borrowed = ready.clone();
+        borrowed.directory_borrow_intent = Some(QualificationWorkspaceBorrowIntent {
+            workspace_id: ready.workspace_id.clone(),
+            directory_identity: ready.workspace_identity.unwrap(),
+            reserved_at_ms: 1,
+        });
+        transition(&conn, &ready, &borrowed).unwrap();
+        let mut released = borrowed.clone();
+        released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
+        assert!(require_local_processes_settled(&conn, &borrowed).is_err());
+        assert!(transition(&conn, &borrowed, &released).is_err());
+    }
+
+    #[test]
+    fn private_directory_journal_pins_identity_and_allows_one_borrow() {
+        let (conn, mut current) = fixture_journal();
         let mut ready = current.clone();
         ready.phase = QualificationLocalStartPhase::WorkspaceReady;
         ready.workspace_identity = Some(directory_identity(2));

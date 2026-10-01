@@ -13,6 +13,10 @@ mod auxiliary_admission_tests;
 mod consumer_definition_tests;
 pub(super) mod content_proof;
 pub mod launch;
+mod worker_launch_contract;
+pub use worker_launch_contract::{
+    QualificationWorkerCredentialRequirement, QualificationWorkerLaunchContract,
+};
 mod retained_verifier;
 pub(crate) use execution_evidence::{
     AuthenticatedConsumerRoot, authenticate_consumer_callback_root, authenticate_consumer_root,
@@ -2246,6 +2250,8 @@ fn resolve_current_bundle_producer_recipe_for_purpose_in_generation(
 pub struct PreparedExternalQualificationRoot {
     invocation: crate::external_qualification_invocation::QualificationInvocation,
     callback_expiry: Option<lillux::time::MonotonicDeadline>,
+    worker_execution_expiry: lillux::time::MonotonicDeadline,
+    worker_launch_contract: QualificationWorkerLaunchContract,
     coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
     qualification_operation_id: String,
     capsule: ryeos_state::objects::AdmittedLaunchCapsule,
@@ -2256,6 +2262,10 @@ pub struct PreparedExternalQualificationRoot {
 }
 
 impl PreparedExternalQualificationRoot {
+    pub fn worker_launch_contract(&self) -> &QualificationWorkerLaunchContract {
+        &self.worker_launch_contract
+    }
+
     /// Bound execution and its waits by the original callback clock. Fresh
     /// authentication cannot renew this limit. Retained cleanup uses its own
     /// authority and deadlines, including after callback expiry.
@@ -2263,6 +2273,7 @@ impl PreparedExternalQualificationRoot {
         &self,
         deadline: lillux::time::MonotonicDeadline,
     ) -> lillux::time::MonotonicDeadline {
+        let deadline = deadline.min(self.worker_execution_expiry);
         self.callback_expiry
             .map_or(deadline, |expiry| deadline.min(expiry))
     }
@@ -2321,86 +2332,113 @@ impl PreparedExternalQualificationRoot {
         &self,
         generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     ) -> anyhow::Result<ResolutionOutput> {
-        self.program.validate_against_purpose(&self.purpose)?;
-        let content = self
-            .purpose
-            .consumer_content
-            .as_ref()
-            .context("qualification-only root has no accepted Worker content")?;
-        if self.worker_profile.profile_hash != content.worker_profile_hash
-            || self.program.qualification_use.profile_hash != self.worker_profile.profile_hash
-        {
-            bail!("qualification-only Worker profile differs from accepted use");
-        }
-        let context = self
-            .purpose
-            .policy_source
-            .policy
-            .consumer_execution_context
-            .as_ref()
-            .context("qualification-only root has no signed consumer context")?;
-        content.definitions.validate_for(context)?;
-        if generation.request_engine_generation_identity()
-            != content.definitions.bundle_generation_identity
-            || resolve_current_bundle_qualification_policy_in_generation(
-                generation,
-                &self.purpose.policy_source.canonical_ref,
-            )? != self.purpose.policy_source
-        {
-            bail!("qualification-only Worker changed its accepted Bundle generation or policy");
-        }
-        let worker =
-            resolve_consumer_definition_in_generation(generation, &context.worker_ref, "worker")?;
-        let environment = resolve_consumer_definition_in_generation(
+        let (worker, contract) = derive_qualification_worker_resolution(
+            &self.purpose,
+            &self.program,
+            &self.worker_profile,
+            &self.worker_source_owner,
+            &self.coordinate,
             generation,
-            &context.environment_ref,
-            "config",
         )?;
-        let worker_execution = resolve_consumer_definition_in_generation(
-            generation,
-            &context.worker_execution_ref,
-            "worker_execution",
-        )?;
-        if consumer_definition_identity(&worker)? != content.definitions.worker
-            || consumer_definition_identity(&environment)? != content.definitions.environment
-            || consumer_definition_identity(&worker_execution)?
-                != content.definitions.worker_execution
-        {
-            bail!("qualification-only Worker definitions changed after admission");
-        }
-        if crate::source_closure_admission::source_owner_identity(&worker)?
-            != self.worker_source_owner
-        {
-            bail!("qualification-only Worker source owner changed after admission");
-        }
-        if environment
-            .composed
-            .composed
-            .get("worker_ref")
-            .and_then(serde_json::Value::as_str)
-            != Some(context.worker_ref.as_str())
-        {
-            bail!("qualification-only environment names a different Worker");
-        }
-        let execution_config = worker_execution
-            .composed
-            .composed
-            .get("config")
-            .context("qualification-only WorkerExecution has no config")?;
-        let execution_worker = execution_config
-            .get("worker_ref")
-            .context("qualification-only WorkerExecution has no worker_ref")?;
-        if execution_config
-            .get("environment_binding")
-            .and_then(serde_json::Value::as_str)
-            != Some(context.environment_binding.as_str())
-            || (!execution_worker.is_null()
-                && execution_worker.as_str() != Some(context.worker_ref.as_str()))
-        {
-            bail!("qualification-only WorkerExecution differs from signed Worker binding");
+        if contract != self.worker_launch_contract {
+            bail!("qualification-only Worker launch bindings changed after root preparation");
         }
         Ok(worker)
     }
+}
+
+fn derive_qualification_worker_resolution(
+    purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    program: &AdmittedExternalQualificationSessionProgram,
+    worker_profile: &ryeos_state::objects::AdmittedStructuredSessionProfile,
+    worker_source_owner: &ryeos_state::objects::SourceOwnerIdentity,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+) -> anyhow::Result<(ResolutionOutput, QualificationWorkerLaunchContract)> {
+    program.validate_against_purpose(purpose)?;
+    let content = purpose
+        .consumer_content
+        .as_ref()
+        .context("qualification-only root has no accepted Worker content")?;
+    if worker_profile.profile_hash != content.worker_profile_hash
+        || program.qualification_use.profile_hash != worker_profile.profile_hash
+    {
+        bail!("qualification-only Worker profile differs from accepted use");
+    }
+    let context = purpose
+        .policy_source
+        .policy
+        .consumer_execution_context
+        .as_ref()
+        .context("qualification-only root has no signed consumer context")?;
+    content.definitions.validate_for(context)?;
+    if generation.request_engine_generation_identity()
+        != content.definitions.bundle_generation_identity
+        || resolve_current_bundle_qualification_policy_in_generation(
+            generation,
+            &purpose.policy_source.canonical_ref,
+        )? != purpose.policy_source
+    {
+        bail!("qualification-only Worker changed its accepted Bundle generation or policy");
+    }
+    let worker =
+        resolve_consumer_definition_in_generation(generation, &context.worker_ref, "worker")?;
+    let environment =
+        resolve_consumer_definition_in_generation(generation, &context.environment_ref, "config")?;
+    let worker_execution = resolve_consumer_definition_in_generation(
+        generation,
+        &context.worker_execution_ref,
+        "worker_execution",
+    )?;
+    if consumer_definition_identity(&worker)? != content.definitions.worker
+        || consumer_definition_identity(&environment)? != content.definitions.environment
+        || consumer_definition_identity(&worker_execution)? != content.definitions.worker_execution
+    {
+        bail!("qualification-only Worker definitions changed after admission");
+    }
+    if crate::source_closure_admission::source_owner_identity(&worker)? != *worker_source_owner {
+        bail!("qualification-only Worker source owner changed after admission");
+    }
+    if environment
+        .composed
+        .composed
+        .get("worker_ref")
+        .and_then(serde_json::Value::as_str)
+        != Some(context.worker_ref.as_str())
+    {
+        bail!("qualification-only environment names a different Worker");
+    }
+    let execution_config = worker_execution
+        .composed
+        .composed
+        .get("config")
+        .context("qualification-only WorkerExecution has no config")?;
+    let execution_worker = execution_config
+        .get("worker_ref")
+        .context("qualification-only WorkerExecution has no worker_ref")?;
+    if execution_config
+        .get("environment_binding")
+        .and_then(serde_json::Value::as_str)
+        != Some(context.environment_binding.as_str())
+        || (!execution_worker.is_null()
+            && execution_worker.as_str() != Some(context.worker_ref.as_str()))
+    {
+        bail!("qualification-only WorkerExecution differs from signed Worker binding");
+    }
+    let request = purpose
+        .policy_source
+        .policy
+        .producer_scenarios
+        .get(&coordinate.scenario_id)
+        .and_then(|scenario| scenario.consumer_worker_request.as_ref())
+        .context("qualification-only Worker has no signed launch selection")?;
+    let contract = QualificationWorkerLaunchContract::from_accepted(
+        execution_config,
+        &environment.composed.composed,
+        &worker_profile.contract,
+        request,
+    )?;
+    Ok((worker, contract))
 }
 
 /// Join a CAS-authenticated accepted root, its retained product witness, and
@@ -2470,12 +2508,6 @@ pub fn prepare_external_qualification_root_for_invocation(
     {
         bail!("qualification-only Worker source differs from accepted signed definition");
     }
-    let current_definitions =
-        resolve_current_signed_bundle_consumer_definitions(state, &purpose.policy_source)?
-            .context("qualification-only Worker has no current signed consumer definitions")?;
-    if current_definitions != content.definitions {
-        bail!("qualification-only Worker changed its accepted signed Bundle generation");
-    }
     let (witness_hash, witness_source, _) = purpose.subject.captured_product()?;
     let product = super::product_receipt::load_product_source(
         state,
@@ -2506,10 +2538,23 @@ pub fn prepare_external_qualification_root_for_invocation(
     if sealed.qualification_purpose() != Some(purpose) {
         bail!("qualification-only root changed its sealed purpose");
     }
+    let (_, worker_launch_contract) =
+        state.engine.with_checked_bundle_generation(|generation| {
+            derive_qualification_worker_resolution(
+                purpose, &program, &profile, &owner, coordinate, generation,
+            )
+        })?;
+    // One clock captured for this prepared root, never refreshed by admission
+    // rechecks or by successful setup/turn. Cleanup retains its own window.
+    let worker_execution_expiry = lillux::time::MonotonicDeadline::after(
+        lillux::time::Duration::from_secs(worker_launch_contract.max_lifetime_seconds),
+    );
     authority.ensure_guard(&guard)?;
     Ok(PreparedExternalQualificationRoot {
         invocation: invocation.clone(),
         callback_expiry: admission.callback_expiry(),
+        worker_execution_expiry,
+        worker_launch_contract,
         coordinate: coordinate.clone(),
         qualification_operation_id: qualification_operation_id.to_owned(),
         capsule,

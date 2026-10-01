@@ -28,7 +28,7 @@ pub mod remote_verifier_source;
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v4";
 pub const PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA: &str =
-    "ryeos.qualification_worker_request.v2";
+    "ryeos.qualification_worker_request.v3";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
 // Current-only cut: an immutable v12 qualification head at the same
 // coordinate cannot be replaced by v14. Reissuance requires a fresh
@@ -433,6 +433,10 @@ pub struct ProductQualificationProducerScenario {
 #[serde(deny_unknown_fields)]
 pub struct ProductQualificationConsumerWorkerRequest {
     pub schema: String,
+    /// Explicit instance selection, never a default or credential bytes.
+    /// Null is valid data; launch admission checks the accepted environment.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub credential_profile_id: Option<String>,
     #[serde(deserialize_with = "Value::deserialize")]
     pub session_setup: Value,
     #[serde(deserialize_with = "Value::deserialize")]
@@ -443,6 +447,15 @@ impl ProductQualificationConsumerWorkerRequest {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA {
             bail!("unsupported qualification Worker request schema");
+        }
+        if let Some(profile) = &self.credential_profile_id {
+            if profile.is_empty()
+                || profile.len() > 256
+                || profile.trim() != profile
+                || profile.chars().any(char::is_control)
+            {
+                bail!("qualification Worker credential profile ID is not canonical and bounded");
+            }
         }
         bounded_object(&self.session_setup, "qualification Worker session setup")?;
         bounded_object(&self.body, "qualification Worker request body")?;

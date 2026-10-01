@@ -16073,6 +16073,54 @@ impl StateStore {
             .reserve_qualification_local_start(placement, cache.path())
     }
 
+    pub(crate) fn claim_qualification_local_credential_custody(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        profile_id: &str,
+        owner_principal: &str,
+        contract_digest: &str,
+        workload_family: &str,
+        subject_projection_contract: &str,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state, &g, placement, &admission,
+            )?;
+            g.runtime_db.claim_qualification_local_credential_custody(
+                placement,
+                profile_id,
+                owner_principal,
+                contract_digest,
+                workload_family,
+                subject_projection_contract,
+                &proof,
+            )
+        })
+    }
+
+    pub(crate) fn require_live_qualification_local_credential_custody(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        self.lock()?
+            .runtime_db
+            .require_live_qualification_local_credential_custody(placement)
+    }
+
+    pub(crate) fn release_qualification_local_credential_custody(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .release_qualification_local_credential_custody(placement)
+    }
+
     /// Bind the original privately materialized project. The caller holds its
     /// pinned custody; this receipt does not permit reopening it after restart.
     pub(crate) fn complete_qualification_private_workspace(
@@ -16223,6 +16271,18 @@ impl StateStore {
             "Q unregistered state root was replaced before rollback"
         );
 
+        // Original descriptors and no-Create ownership were checked above.
+        // Release only the proven pre-contact credential fence, then use the
+        // refreshed journal row for cleanup CAS; no credential-home I/O occurs.
+        let released =
+            self.release_qualification_local_credential_custody(&current.placement_thread_id)?;
+        let current = self
+            .qualification_local_start(&current.placement_thread_id)?
+            .context("Q unregistered rollback lost its released credential row")?;
+        anyhow::ensure!(
+            current == released,
+            "Q unregistered rollback changed after credential release"
+        );
         {
             let _permit = self.acquire_write_permit()?;
             self.lock()?
@@ -16291,6 +16351,16 @@ impl StateStore {
             "Q rollback resume changed its original pinned root coordinates"
         );
         parent.ensure_path_binding()?;
+        // Resume also covers interruptions after cleanup intent. The durable
+        // no-borrow gate remains authoritative without a live callback.
+        let released = self.release_qualification_local_credential_custody(placement)?;
+        current = self
+            .qualification_local_start(placement)?
+            .context("Q rollback resume lost its released credential row")?;
+        anyhow::ensure!(
+            current == released,
+            "Q rollback resume changed after credential release"
+        );
 
         if current.phase
             == runtime_db::external_execution::QualificationLocalStartPhase::CleanupIntent

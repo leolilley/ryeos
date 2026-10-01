@@ -729,6 +729,9 @@ impl RuntimeDb {
             "Q command is not bound"
         );
         require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+        let local = qualification_local_start::read_local_start(&tx, placement)?
+            .context("Q Worker contact has no original local start")?;
+        qualification_local_start::require_live_credential_custody(&tx, &local)?;
         let process_state: String = tx.query_row(
             "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
             [placement],
@@ -793,6 +796,9 @@ impl RuntimeDb {
             "Q command is not bound"
         );
         require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+        let local = qualification_local_start::read_local_start(&tx, placement)?
+            .context("Q Worker contact has no original local start")?;
+        qualification_local_start::require_live_credential_custody(&tx, &local)?;
         let process_state: String = tx.query_row(
             "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
             [placement],

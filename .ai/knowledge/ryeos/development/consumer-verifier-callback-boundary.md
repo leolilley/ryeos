@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T03:03:28Z:cd8139152bd81a3129961ab95fa475c6bb228ab2e88e7aa0bcd56da88436a170:nOFoU0AObYWeVLAzvlEYMDMG0ZVko7G7aYSwAcjGUYdgqRRHLC/7p3TaSvNFS+YCVaHcbOJVjtzk0LQNI8+5CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-01T03:42:12Z:6a17ebc711e9b754a88ec7b04414fef892bc0227b4f45be73582f812dcaa8923:k3hJu/YRDNmTfj1gBwuOEMNepdH/Vk79PormP7wDU0nasJndj/azqg75CzUFoiNccO9ScKcJWGuAS7MWjFd5Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -52,7 +52,8 @@ Q's signed setup and turn, native settlement, local cleanup and provider termina
 re-authenticates the original callback and prepares the diagnostic contact
 deadline. The enclosing signed verifier lifetime has continued throughout;
 starting the diagnostic deadline does not renew it. Q startup, both Request
-sends and turn-observation waits are capped by the immutable callback expiry.
+sends and turn-observation waits are capped by the immutable callback expiry
+and the once-captured accepted WorkerExecution lifetime.
 Checks after returned relay/read operations refuse late success. Cleanup and
 attachment retain their own bounded lifelines after expiry so an already-owned
 process is settled rather than abandoned. These are source contracts,
@@ -89,8 +90,9 @@ Requiring a completed root before Q contact would create an ordering cycle.
 
 ## Finite session setup and turn
 
-The signed consumer request contract is current-only v2. It commits an opaque
-session setup request and an opaque turn request, with a combined 8 KiB ceiling
+The signed consumer request contract is current-only v3. It requires an explicit
+nullable credential-profile selector and commits an opaque session setup request
+and an opaque turn request, with a combined 8 KiB ceiling
 and distinct canonical digests. The daemon sends those exact two values through
 one attached exclusive Worker. It does not interpret Codex response pointers:
 the structured bridge binds the upstream session during setup and supplies that
@@ -144,21 +146,56 @@ guest process IDs. Both raw and item output must match the signed expectation;
 assistant prose cannot replace command evidence. Interpretation grants neither
 provider permission nor a qualification result.
 
-Production launch remains unresolved. Q's fresh disposable state directory does
-not acquire the ordinary owner-bound credential profile, operation lock or
-credential home, and its Worker launch omits required structured-session context
-bindings. Reuse the existing dedicated-session credential custody interfaces,
-with exact principal/profile/generation, exclusivity and settlement; do not
-silently inject node credentials. The credential home must remain separately
-owned because Q cleanup recursively deletes its disposable state directory.
-No live model execution is authorized by this source preparation.
+## Production credential and launch context custody
 
+The accepted environment and WorkerExecution determine credential requirements,
+route set, effect ceiling, environment slots, session/turn routes and lifetime.
+Q derives them under the same checked Bundle generation as the exact accepted
+Worker and profile, retains the resulting contract and rechecks it on current
+resolution. The scenario supplies the explicit credential-profile instance;
+it cannot override launch policy. Current credential-bearing environments refuse
+null selection. The profile ledger checks active state, principal, generation,
+authority revision, home identity and lock owner. Workload-family and subject
+projection labels remain signed-use declarations, not independent observations
+of secret authentication bytes.
+
+The original Q local-start journal acquires its credential lock and immutable
+custody record atomically, after current callback/root authentication. It reuses
+the existing credential profile/home and operation gates; it does not copy auth
+or create a competing dedicated session. Operation waits consume the original
+execution deadline and precede the occurrence gate. Historical transcript and
+cleanup paths do not acquire that execution operation or renew its clock.
+Spawn, held executable release and both setup/turn contact require the exact
+active credential fence. Turn observation detects revocation/generation changes.
+
+The actual credential home receives the accepted baseline and occurrence-private
+connector configuration, and supplies the bridge's workload-home binding.
+Its pinned descriptor is retained and checked disjoint from Q's workspace and
+disposable state. Q cleanup removes only its disposable roots; it never deletes
+that credential home. Workspace/route/effect bindings come from accepted data,
+with environment-slot collisions refused.
+
+Unreleased Q custody fences profile clearing/deletion and survives cold lock
+reconciliation, including an uncertain borrow/spawn without attached process.
+Revocation can invalidate fresh contact while leaving cleanup custody intact.
+Release requires exact local process death/terminal evidence and closed connector,
+or proof that no borrow could have spawned a child. Release and exact old-owner
+lock clearing are atomic; a released row cannot clear a successor's lock.
+Historical release uses the retained process identity without requiring a current
+callback, active generation or original disposable-directory descriptors.
+Launch/send/readiness failures attempt the same release and preserve uncertainty.
+No-Create rollback releases safe credential custody before its terminal cleanup.
+Runtime epoch 121 and required-null journal fields are current-only; there is no
+predecessor decoder.
+
+These are reviewed source contracts, not installed launch/recovery evidence.
 There is not yet an admitted authored Q scenario with final captured product
-identities and raw-event setup. Complete production credential/context custody,
-then the full Q/diagnostic/native/provider/enclosing-root issuance and retained
-current-selection joins. Until those joins and operational evidence exist, the
-controller emits bounded diagnostic references and explicitly refuses;
-consumer-context publication and qualification claims remain disabled.
+identities, credential selection and raw-event setup. Complete the full
+Q/diagnostic/native/provider/enclosing-root issuance and retained current-selection
+joins, then exercise the actual candidate. Until those joins and operational
+evidence exist, the controller emits diagnostic references and explicitly refuses;
+consumer-context publication and qualification claims remain disabled. This
+source preparation authorizes no live model execution.
 
 Carry the existing authenticated callback invocation through Q admission;
 never manufacture an operator HandlerContext or use historical evidence as

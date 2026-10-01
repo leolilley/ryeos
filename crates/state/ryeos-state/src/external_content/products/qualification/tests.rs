@@ -1951,6 +1951,7 @@ fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source(
 
     let request = ProductQualificationConsumerWorkerRequest {
         schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        credential_profile_id: None,
         session_setup: json!({"task":"bounded session setup"}),
         body: json!({"task":"bounded qualification turn"}),
     };
@@ -2029,6 +2030,7 @@ fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source(
 fn worker_request_requires_distinct_bounded_setup_and_turn_in_current_schema() {
     let request = ProductQualificationConsumerWorkerRequest {
         schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        credential_profile_id: None,
         session_setup: json!({"route_id":"session.start", "payload":{}}),
         body: json!({"route_id":"turn.start", "payload":{"input":"probe"}}),
     };
@@ -2045,6 +2047,34 @@ fn worker_request_requires_distinct_bounded_setup_and_turn_in_current_schema() {
             assert!(decoded.validate().is_err());
         }
     }
+    let mut missing_profile = serde_json::to_value(&request).unwrap();
+    missing_profile
+        .as_object_mut()
+        .unwrap()
+        .remove("credential_profile_id");
+    assert!(
+        serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(missing_profile)
+            .is_err()
+    );
+    let mut selected = request.clone();
+    selected.credential_profile_id = Some("profile-one".into());
+    selected.validate().unwrap();
+    assert_ne!(
+        canonical_value_digest(&serde_json::to_value(&request).unwrap()).unwrap(),
+        canonical_value_digest(&serde_json::to_value(&selected).unwrap()).unwrap()
+    );
+    for profile in [
+        "".to_owned(),
+        " spaced ".into(),
+        "line\nbreak".into(),
+        "x".repeat(257),
+    ] {
+        selected.credential_profile_id = Some(profile);
+        assert!(selected.validate().is_err());
+    }
+    let mut immediate_predecessor = request.clone();
+    immediate_predecessor.schema = "ryeos.qualification_worker_request.v2".into();
+    assert!(immediate_predecessor.validate().is_err());
     let mut same = request.clone();
     same.session_setup = same.body.clone();
     assert!(same.validate().is_err());

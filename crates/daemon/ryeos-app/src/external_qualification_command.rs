@@ -349,6 +349,16 @@ pub fn execute_signed_qualification_worker_request(
         &mut dyn FnMut(Value) -> Result<Option<Value>>,
     ) -> Result<Value>,
 ) -> Result<QualificationWorkerCommandOutcome> {
+    // The profile operation precedes the Q occurrence gate and is acquired
+    // once for this conversation. Historical transcript reads take neither.
+    let contract = root.worker_launch_contract();
+    let _credential_operation =
+        crate::hosted_operation::acquire_credential_profile_operation_until(
+            &contract.credential_profile_id,
+            root.cap_execution_deadline(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(contract.max_lifetime_seconds),
+            )),
+        )?;
     with_signed_qualification_worker_request(
         state,
         placement,
