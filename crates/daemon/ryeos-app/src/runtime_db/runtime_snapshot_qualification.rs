@@ -701,11 +701,17 @@ mod tests {
             guest_runtime_manifest_hash: source.guest_runtime_manifest_hash.clone(),
         };
         consumer.operation_id = consumer.derived_operation_id().unwrap();
+        // The owner-measurement entry point supplies neither retained consumer
+        // input nor root admission. The input-lane check refuses first.
+        let refused = db.reserve_restored_verifier_attempt(&consumer).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "verifier reservation requires its matching consumer input lane"
+        );
         assert!(
-            db.reserve_restored_verifier_attempt(&consumer)
-                .unwrap_err()
-                .to_string()
-                .contains("matching admission lane")
+            db.restored_verifier_attempt(&consumer.operation_id)
+                .unwrap()
+                .is_none()
         );
         // A null owner selection is immutable, not an empty slot that may
         // later be converted into consumer placement authority.
