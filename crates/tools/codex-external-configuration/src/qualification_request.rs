@@ -99,6 +99,13 @@ pub fn validate_controller_canary_turn(template: &Value) -> Result<()> {
         .get("payload")
         .and_then(Value::as_object)
         .context("Q canary turn has no payload")?;
+    // The bridge supplies the original bound thread and fixed route settings.
+    // This finite probe may not change sticky environments, permissions, model
+    // selection or any other turn state, including through null-valued keys.
+    ensure!(
+        payload.len() == 1 && payload.contains_key("input"),
+        "Q canary turn payload must contain only its original input"
+    );
     let input = payload
         .get("input")
         .and_then(Value::as_array)
@@ -228,6 +235,44 @@ mod tests {
             schema: 1,
             template: template(),
             controller_canary_path: "/private/Q-abc/controller-canary/canary".into(),
+        }
+    }
+
+    #[test]
+    fn canary_turn_refuses_sticky_overrides_at_every_binding_boundary() {
+        for (key, value) in [
+            ("environments", json!([{"environmentId":"local","cwd":"/"}])),
+            ("cwd", json!("/controller")),
+            ("runtimeWorkspaceRoots", json!(["/controller"])),
+            ("permissions", json!("danger-full-access")),
+            ("approvalPolicy", json!("never")),
+            ("approvalsReviewer", json!("user")),
+            ("sandboxPolicy", json!({"type":"dangerFullAccess"})),
+            ("model", json!("another-model")),
+            ("effort", json!("high")),
+            ("collaborationMode", json!({"mode":"plan"})),
+            ("additionalContext", json!([])),
+            ("threadId", json!("another-thread")),
+            ("futureOverride", json!(true)),
+        ] {
+            for override_value in [value, Value::Null] {
+                let mut input = binding_input();
+                input.template["payload"][key] = override_value;
+                assert!(
+                    validate_controller_canary_turn(&input.template).is_err(),
+                    "{key}"
+                );
+                assert!(
+                    resolve_controller_canary_turn(&input.template, &input.controller_canary_path)
+                        .is_err(),
+                    "{key}"
+                );
+                assert!(bind_qualification_request(&input).is_err(), "{key}");
+                assert!(
+                    bind_qualification_request_bytes(&input.canonical_bytes().unwrap()).is_err(),
+                    "{key}"
+                );
+            }
         }
     }
 
