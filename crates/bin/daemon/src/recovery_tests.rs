@@ -161,6 +161,7 @@ fn precontact_resource_scope_recovery_discards_without_relaunch() {
             character_devices: Vec::new(),
         }],
         allocation_limit: 1,
+        runtime_custody: None,
         launch_authority:
             ryeos_app::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
                 allocation: serde_json::from_value(planned).unwrap(),
@@ -620,6 +621,7 @@ fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
             daemon_generation_id: ryeos_app::runtime_db::daemon_generation_id().to_owned(),
             selections: attached_identity.resource_selections.clone(),
             allocation_limit: attached_identity.resource_allocation_limit.unwrap(),
+            runtime_custody: None,
             launch_authority:
                 ryeos_app::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
                     allocation: allocation,

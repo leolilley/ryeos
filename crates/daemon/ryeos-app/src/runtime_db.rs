@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod external_execution;
+pub mod process_resource_custody;
 pub mod process_resource_launch;
 pub mod process_resource_settlement;
 pub mod restored_verifier_attempt;
@@ -142,6 +143,7 @@ pub struct ProcessResourceOwnerRecord {
     pub process_identity: ExecutionProcessIdentity,
     pub cleanup_proved: bool,
     pub cleanup_evidence: Option<ProcessResourceCleanupEvidence>,
+    pub runtime_custody: Option<process_resource_custody::ProcessResourceRuntimeCustody>,
 }
 
 /// Durable pre-contact reservation for one resource-bearing process launch.
@@ -160,6 +162,8 @@ pub struct ProcessResourceReservationRecord {
     pub selections: Vec<ryeos_engine::contracts::ExecutionResourceSelection>,
     pub allocation_limit: u32,
     pub launch_authority: ProcessResourceLaunchAuthority,
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub runtime_custody: Option<process_resource_custody::ProcessResourceRuntimeCustody>,
 }
 
 /// A device-free direct thread launch that nevertheless requires an exact
@@ -218,6 +222,20 @@ impl ProcessResourceReservationRecord {
             bail!("resource reservation exceeds its allocation ceiling");
         }
         self.launch_authority.validate()?;
+        if let Some(custody) = &self.runtime_custody {
+            if !matches!(
+                self.owner_kind.as_str(),
+                "pooled_session" | "dedicated_worker"
+            ) {
+                bail!("session runtime custody cannot identify a thread launch capsule");
+            }
+            custody.validate()?;
+        } else if matches!(
+            self.launch_authority,
+            ProcessResourceLaunchAuthority::TrustedProcessGroup { .. }
+        ) {
+            bail!("trusted resource reservation requires explicit runtime custody");
+        }
         let mut ids = BTreeSet::new();
         for selection in &self.selections {
             selection.validate()?;
@@ -408,9 +426,9 @@ fn consume_process_resource_reservation(
     owner_kind: &str,
     owner_coordinate: &str,
     process_identity: &ExecutionProcessIdentity,
-) -> Result<()> {
+) -> Result<Option<process_resource_custody::ProcessResourceRuntimeCustody>> {
     if process_identity.resource_selections.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let encoded: String = conn
         .query_row(
@@ -444,7 +462,7 @@ fn consume_process_resource_reservation(
     if changed != 1 {
         bail!("resource reservation was not consumed exactly once");
     }
-    Ok(())
+    Ok(reservation.runtime_custody)
 }
 
 fn consume_thread_process_scope_reservation(
@@ -511,10 +529,10 @@ fn attach_process_resource_owner(
         .ok_or_else(|| anyhow!("resource-bearing process identity has no allocation ceiling"))?;
     let encoded =
         serde_json::to_string(process_identity).context("encode exact process resource owner")?;
-    let existing: Option<(String, String, String, i64, String, String)> = conn
+    let existing: Option<(String, String, String, i64, String, String, Option<String>)> = conn
         .query_row(
             "SELECT owner_kind, owner_coordinate, process_identity, allocation_limit,
-                    cleanup_state, release_fence
+                    cleanup_state, release_fence, runtime_custody
                FROM process_resource_owner WHERE owner_incarnation=?1",
             params![owner_incarnation],
             |row| {
@@ -525,11 +543,12 @@ fn attach_process_resource_owner(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()?;
-    if let Some((kind, coordinate, identity, limit, cleanup, release_fence)) = existing {
+    if let Some((kind, coordinate, identity, limit, cleanup, release_fence, custody)) = existing {
         if kind != owner_kind
             || coordinate != owner_coordinate
             || identity != encoded
@@ -539,10 +558,22 @@ fn attach_process_resource_owner(
         {
             bail!("exact resource owner occurrence was reused with different authority");
         }
+        process_resource_custody::decode_owner_custody(
+            custody.as_deref(),
+            &kind,
+            process_identity,
+        )?;
         return Ok(());
     }
 
-    consume_process_resource_reservation(conn, owner_kind, owner_coordinate, process_identity)?;
+    let runtime_custody =
+        consume_process_resource_reservation(conn, owner_kind, owner_coordinate, process_identity)?;
+    let encoded_custody = runtime_custody
+        .as_ref()
+        .map(|custody| {
+            lillux::canonical_json(&serde_json::to_value(custody)?).map_err(anyhow::Error::from)
+        })
+        .transpose()?;
     let requested_ids = process_identity
         .resource_selections
         .iter()
@@ -594,8 +625,8 @@ fn attach_process_resource_owner(
     conn.execute(
         "INSERT INTO process_resource_owner (
             owner_incarnation, owner_kind, owner_coordinate, process_identity,
-            allocation_limit, cleanup_state, release_fence, created_at_ms, updated_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, 'owned', 'pending', ?6, ?6)",
+            allocation_limit, cleanup_state, release_fence, runtime_custody, created_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'owned', 'pending', ?7, ?6, ?6)",
         params![
             owner_incarnation,
             owner_kind,
@@ -603,6 +634,7 @@ fn attach_process_resource_owner(
             encoded,
             i64::from(allocation_limit),
             now_ms,
+            encoded_custody,
         ],
     )?;
     Ok(())
@@ -622,7 +654,8 @@ fn clear_process_resource_owner(
     let changed = conn.execute(
         "DELETE FROM process_resource_owner
           WHERE owner_incarnation=?1 AND owner_kind=?2 AND owner_coordinate=?3
-            AND process_identity=?4 AND cleanup_state='cleanup_proved'",
+            AND process_identity=?4 AND cleanup_state='cleanup_proved'
+            AND runtime_custody IS NULL",
         params![owner_incarnation, owner_kind, owner_coordinate, encoded],
     )?;
     if changed != 1 {
@@ -640,7 +673,7 @@ fn clear_scope_lifetime_fence_if_settled(conn: &Connection) -> Result<()> {
           + (SELECT COUNT(*) FROM thread_runtime
                WHERE json_type(process_identity, '$.process_scope')='object')
           + (SELECT COUNT(*) FROM process_resource_owner
-               WHERE cleanup_state='owned')
+               WHERE cleanup_state='owned' OR runtime_custody IS NOT NULL)
           + (SELECT COUNT(*) FROM dedicated_session s
                WHERE (s.worker_scope IS NOT NULL OR EXISTS (
                  SELECT 1 FROM worker_process w
@@ -1947,6 +1980,7 @@ CREATE TABLE IF NOT EXISTS process_resource_owner (
     cleanup_state TEXT NOT NULL CHECK (cleanup_state IN ('owned', 'cleanup_proved', 'unproved')),
     release_fence TEXT NOT NULL CHECK (release_fence IN ('pending', 'consumed')),
     cleanup_evidence TEXT,
+    runtime_custody TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     UNIQUE(owner_kind, owner_coordinate),
@@ -2668,7 +2702,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 104 requires explicit resource settlement authority in process
 // identity v6 and tagged local/trusted resource launch reservations. Predecessor
 // rows cannot infer trusted authority or reconstruct a held-spawn permit.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 104;
+// Epoch 105 retains required-nullable resource runtime custody, transferred
+// atomically into the existing owner. Populated custody cannot be generically
+// cleared before its original workspace/content cleanup owner is joined.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 105;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -3960,6 +3997,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "cleanup_evidence",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "runtime_custody",
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,
@@ -16603,7 +16646,7 @@ impl RuntimeDb {
         let owners: i64 = if chain_root_id.is_some() {
             self.conn.query_row(
                 "SELECT COUNT(*) FROM process_resource_owner
-                  WHERE cleanup_state='owned'
+                  WHERE (cleanup_state='owned' OR runtime_custody IS NOT NULL)
                     AND (owner_kind!='thread' OR owner_coordinate IN (
                       SELECT thread_id FROM thread_runtime WHERE chain_root_id=?1))",
                 [chain_root_id],
@@ -16612,7 +16655,7 @@ impl RuntimeDb {
         } else {
             self.conn.query_row(
                 "SELECT COUNT(*) FROM process_resource_owner
-                  WHERE cleanup_state='owned'",
+                  WHERE cleanup_state='owned' OR runtime_custody IS NOT NULL",
                 [],
                 |row| row.get(0),
             )?
@@ -17632,6 +17675,11 @@ impl RuntimeDb {
         reservation: &ProcessResourceReservationRecord,
     ) -> Result<()> {
         reservation.validate()?;
+        if reservation.runtime_custody.is_some() {
+            bail!(
+                "resource runtime custody remains retained until original workspace cleanup is proved"
+            );
+        }
         if matches!(
             reservation.launch_authority,
             ProcessResourceLaunchAuthority::TrustedProcessGroup {
@@ -17754,7 +17802,7 @@ impl RuntimeDb {
     pub fn process_resource_owners(&self) -> Result<Vec<ProcessResourceOwnerRecord>> {
         let mut statement = self.conn.prepare(
             "SELECT owner_incarnation, owner_kind, owner_coordinate, process_identity,
-                    cleanup_state, cleanup_evidence
+                    cleanup_state, cleanup_evidence, runtime_custody
              FROM process_resource_owner
              ORDER BY owner_kind, owner_coordinate",
         )?;
@@ -17767,6 +17815,7 @@ impl RuntimeDb {
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -17779,6 +17828,7 @@ impl RuntimeDb {
                     encoded,
                     cleanup_state,
                     cleanup_evidence,
+                    runtime_custody,
                 )| {
                     let process_identity: ExecutionProcessIdentity = serde_json::from_str(&encoded)
                         .context("decode durable process resource owner")?;
@@ -17798,6 +17848,11 @@ impl RuntimeDb {
                     if (cleanup_state == "cleanup_proved") != cleanup_evidence.is_some() {
                         bail!("durable resource cleanup state and evidence disagree");
                     }
+                    let runtime_custody = process_resource_custody::decode_owner_custody(
+                        runtime_custody.as_deref(),
+                        &owner_kind,
+                        &process_identity,
+                    )?;
                     Ok(ProcessResourceOwnerRecord {
                         owner_incarnation,
                         owner_kind,
@@ -17805,6 +17860,7 @@ impl RuntimeDb {
                         process_identity,
                         cleanup_proved: cleanup_state == "cleanup_proved",
                         cleanup_evidence,
+                        runtime_custody,
                     })
                 },
             )
@@ -26872,6 +26928,37 @@ mod tests {
         identity
     }
 
+    fn resource_runtime_custody_fixture(
+        root: &Path,
+    ) -> process_resource_custody::ProcessResourceRuntimeCustody {
+        use process_resource_custody::{
+            ProcessMaterializationCache, ProcessMaterializationCustody,
+            ProcessResourceRuntimeCustody,
+        };
+        ProcessResourceRuntimeCustody {
+            version: ProcessResourceRuntimeCustody::VERSION,
+            session_capsule_hash: "1".repeat(64),
+            execution_realization_hash: "2".repeat(64),
+            source_binding_hash: Some("3".repeat(64)),
+            materializations: vec![
+                ProcessMaterializationCustody {
+                    cache: ProcessMaterializationCache::ExternalContent,
+                    manifest_hash: "4".repeat(64),
+                },
+                ProcessMaterializationCustody {
+                    cache: ProcessMaterializationCache::SourceClosure,
+                    manifest_hash: "5".repeat(64),
+                },
+            ],
+            workspace_id: "resource-test-workspace".to_owned(),
+            workspace_identity: lillux::PinnedDirectory::open(root)
+                .unwrap()
+                .unwrap()
+                .identity()
+                .unwrap(),
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn trusted_resource_spawn_intent_is_once_and_restart_never_clears_it() {
@@ -26898,13 +26985,33 @@ mod tests {
             daemon_generation_id: daemon_generation_id().to_owned(),
             selections: identity.resource_selections.clone(),
             allocation_limit: 1,
+            runtime_custody: Some(resource_runtime_custody_fixture(_tmp.path())),
             launch_authority: ProcessResourceLaunchAuthority::TrustedProcessGroup {
                 cleanup_contract_digest: "7".repeat(64),
                 host_lifetime,
                 phase: TrustedResourceLaunchPhase::Reserved,
             },
         };
+        let mut missing = reserved.clone();
+        missing.runtime_custody = None;
+        assert!(db.reserve_process_resource_launch(&missing).is_err());
+        let mut wrong_owner = reserved.clone();
+        wrong_owner.owner_kind = "thread".to_owned();
+        assert!(db.reserve_process_resource_launch(&wrong_owner).is_err());
+        let mut omitted = serde_json::to_value(&reserved).unwrap();
+        omitted.as_object_mut().unwrap().remove("runtime_custody");
+        assert!(serde_json::from_value::<ProcessResourceReservationRecord>(omitted).is_err());
         db.reserve_process_resource_launch(&reserved).unwrap();
+        let roots = db.process_resource_cas_roots().unwrap();
+        let pins = db.process_resource_materialization_pins().unwrap();
+        let mut drifted = reserved.clone();
+        drifted
+            .runtime_custody
+            .as_mut()
+            .unwrap()
+            .session_capsule_hash = "6".repeat(64);
+        assert!(db.begin_trusted_process_resource_spawn(&drifted).is_err());
+        assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
         assert!(
             db.attach_pooled_resource_owner("trusted-once", &identity)
                 .is_err()
@@ -26945,8 +27052,21 @@ mod tests {
             db.attach_pooled_resource_owner("trusted-once", &wrong_boot)
                 .is_err()
         );
+        assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
         db.attach_pooled_resource_owner("trusted-once", &identity)
             .unwrap();
+        db.attach_pooled_resource_owner("trusted-once", &identity)
+            .unwrap();
+        assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
+        assert_eq!(db.process_resource_materialization_pins().unwrap(), pins);
+        assert_eq!(
+            db.process_resource_owners().unwrap()[0].runtime_custody,
+            reserved.runtime_custody
+        );
+        drop(db);
+        let db = RuntimeDb::open(&_tmp.path().join("runtime.db")).unwrap();
+        assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
+        assert_eq!(db.process_resource_materialization_pins().unwrap(), pins);
         assert!(
             db.process_resource_reservation("pooled_session", "trusted-once")
                 .unwrap()
@@ -26977,6 +27097,7 @@ mod tests {
             daemon_generation_id: daemon_generation_id().to_owned(),
             selections: identity.resource_selections.clone(),
             allocation_limit: 1,
+            runtime_custody: Some(resource_runtime_custody_fixture(_tmp.path())),
             launch_authority: ProcessResourceLaunchAuthority::TrustedProcessGroup {
                 cleanup_contract_digest: "7".repeat(64),
                 host_lifetime: lillux::ProcessHostLifetime::capture_current().unwrap(),
@@ -26997,9 +27118,24 @@ mod tests {
         }
         assert!(db.begin_trusted_process_resource_spawn(&drift).is_err());
         assert!(db.clear_process_resource_reservation(&drift).is_err());
-        db.clear_process_resource_reservation(&reserved).unwrap();
+        // Even uncontacted capacity keeps its runtime/workspace custody until
+        // the original physical-cleanup owner is joined; deletion is not proof.
+        assert!(db.clear_process_resource_reservation(&reserved).is_err());
+        assert_eq!(
+            db.process_resource_cas_roots().unwrap(),
+            (1..=5)
+                .map(|n| n.to_string().repeat(64))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            db.process_resource_reservation("pooled_session", "trusted-before-contact")
+                .unwrap(),
+            Some(reserved.clone())
+        );
+        let permit = db.begin_trusted_process_resource_spawn(&reserved).unwrap();
+        drop(permit);
         assert!(db.begin_trusted_process_resource_spawn(&reserved).is_err());
-        assert_eq!(db.unsettled_process_scope_count(None).unwrap(), 0);
+        assert!(db.unsettled_process_scope_count(None).unwrap() > 0);
     }
 
     fn reserve_test_resource_process(
@@ -27007,6 +27143,16 @@ mod tests {
         owner_kind: &str,
         owner_coordinate: &str,
         identity: &mut ExecutionProcessIdentity,
+    ) -> Result<()> {
+        reserve_test_resource_process_with_custody(db, owner_kind, owner_coordinate, identity, None)
+    }
+
+    fn reserve_test_resource_process_with_custody(
+        db: &RuntimeDb,
+        owner_kind: &str,
+        owner_coordinate: &str,
+        identity: &mut ExecutionProcessIdentity,
+        runtime_custody: Option<process_resource_custody::ProcessResourceRuntimeCustody>,
     ) -> Result<()> {
         let host =
             serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
@@ -27042,6 +27188,7 @@ mod tests {
             daemon_generation_id: daemon_generation_id().to_owned(),
             selections: identity.resource_selections.clone(),
             allocation_limit: identity.resource_allocation_limit.unwrap(),
+            runtime_custody,
             launch_authority:
                 crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
                     allocation: allocation,
@@ -27049,6 +27196,93 @@ mod tests {
                 },
         };
         db.reserve_process_resource_launch(&reservation)
+    }
+
+    #[test]
+    fn resource_runtime_custody_survives_process_cleanup_and_workspace_pending_restart() {
+        let (tmp, db) = fresh_db();
+        let mut identity = resource_process_identity(703, 703, "custody-after-process", 1);
+        let custody = resource_runtime_custody_fixture(tmp.path());
+        reserve_test_resource_process_with_custody(
+            &db,
+            "pooled_session",
+            "custody-owner",
+            &mut identity,
+            Some(custody.clone()),
+        )
+        .unwrap();
+        let roots = db.process_resource_cas_roots().unwrap();
+        let pins = db.process_resource_materialization_pins().unwrap();
+        db.attach_pooled_resource_owner("custody-owner", &identity)
+            .unwrap();
+        db.consume_pooled_resource_owner_release_fence("custody-owner", &identity)
+            .unwrap();
+        let evidence =
+            ProcessResourceCleanupEvidence::capture_unobserved_terminal(&identity).unwrap();
+        db.prove_pooled_resource_owner_cleanup("custody-owner", &identity, &evidence)
+            .unwrap();
+        assert!(
+            db.clear_pooled_resource_owner("custody-owner", &identity)
+                .is_err()
+        );
+        assert!(db.unsettled_process_scope_count(None).unwrap() > 0);
+        assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
+        drop(db);
+        let db = RuntimeDb::open(&tmp.path().join("runtime.db")).unwrap();
+        assert!(db.process_resource_owners().unwrap()[0].cleanup_proved);
+        assert_eq!(
+            db.process_resource_owners().unwrap()[0].runtime_custody,
+            Some(custody)
+        );
+        assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
+        assert_eq!(db.process_resource_materialization_pins().unwrap(), pins);
+        assert!(
+            db.clear_pooled_resource_owner("custody-owner", &identity)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn resource_runtime_custody_attachment_rollback_keeps_original_reservation_roots() {
+        let (tmp, db) = fresh_db();
+        let mut identity = resource_process_identity(704, 704, "custody-rollback", 1);
+        reserve_test_resource_process_with_custody(
+            &db,
+            "pooled_session",
+            "custody-rollback",
+            &mut identity,
+            Some(resource_runtime_custody_fixture(tmp.path())),
+        )
+        .unwrap();
+        let reserved = db
+            .process_resource_reservation("pooled_session", "custody-rollback")
+            .unwrap()
+            .unwrap();
+        let roots = db.process_resource_cas_roots().unwrap();
+        // Simulate failure after consuming the reservation, before durable
+        // publication. The existing attachment transaction must roll it back.
+        db.conn.execute_batch("CREATE TRIGGER refuse_custody_attachment BEFORE INSERT ON process_resource_owner BEGIN SELECT RAISE(ABORT, 'injected attachment failure'); END;").unwrap();
+        assert!(
+            db.attach_pooled_resource_owner("custody-rollback", &identity)
+                .is_err()
+        );
+        assert_eq!(
+            db.process_resource_reservation("pooled_session", "custody-rollback")
+                .unwrap(),
+            Some(reserved.clone())
+        );
+        assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
+        assert!(db.process_resource_owners().unwrap().is_empty());
+        db.conn
+            .execute_batch("DROP TRIGGER refuse_custody_attachment;")
+            .unwrap();
+        db.attach_pooled_resource_owner("custody-rollback", &identity)
+            .unwrap();
+        assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
+        assert_eq!(
+            db.process_resource_owners().unwrap()[0].runtime_custody,
+            reserved.runtime_custody
+        );
     }
 
     #[test]
@@ -27135,6 +27369,7 @@ mod tests {
             daemon_generation_id: daemon_generation_id().to_owned(),
             selections: identity.resource_selections.clone(),
             allocation_limit: 1,
+            runtime_custody: None,
             launch_authority:
                 crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
                     allocation: allocation,

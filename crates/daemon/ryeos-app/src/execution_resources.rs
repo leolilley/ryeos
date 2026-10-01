@@ -455,6 +455,7 @@ pub fn prepare_process_resource_scope(
         daemon_generation_id: crate::runtime_db::daemon_generation_id().to_owned(),
         selections: selected.selections.clone(),
         allocation_limit,
+        runtime_custody: None,
         launch_authority: crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
             allocation: allocation.clone(),
             recovery: None,
@@ -536,6 +537,7 @@ pub fn reserve_bound_process_resource_scope(
         allocation_limit: selected
             .max_concurrent_exclusive_allocations
             .context("resource-bearing launch lacks an allocation ceiling")?,
+        runtime_custody: None,
         launch_authority: crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
             allocation: allocation.clone(),
             recovery: Some(recovery.clone()),

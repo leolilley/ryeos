@@ -6744,6 +6744,24 @@ impl StateStore {
         self.lock()?.runtime_db.process_resource_owners()
     }
 
+    /// Deletion must hold this pin critical section THROUGH unlink, after
+    /// acquiring the exact construction token and exclusive generation lease.
+    /// Do not reenter StateStore or acquire a CAS lock in the callback. A pin
+    /// snapshot outside this guard is not deletion authority. This API alone
+    /// does not wire any cache deletion owner to the retained custody contract.
+    pub fn with_process_resource_materialization_pins<T>(
+        &self,
+        operation: impl FnOnce(
+            &std::collections::BTreeSet<
+                runtime_db::process_resource_custody::ProcessMaterializationCustody,
+            >,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        let guard = self.lock()?;
+        let pins = guard.runtime_db.process_resource_materialization_pins()?;
+        operation(&pins)
+    }
+
     pub fn reserve_process_resource_launch(
         &self,
         reservation: &runtime_db::ProcessResourceReservationRecord,
@@ -16147,6 +16165,7 @@ impl StateStore {
         }
         roots.extend(g.runtime_db.retained_candidate_snapshot_roots()?);
         roots.extend(g.runtime_db.runtime_child_cas_object_roots()?);
+        roots.extend(g.runtime_db.process_resource_cas_roots()?);
         roots.extend(g.runtime_db.external_execution_cas_roots()?);
         roots.extend(g.runtime_db.scoped_child_observation_cas_roots()?);
         roots.extend(g.runtime_db.snapshot_bootstrap_lifecycle_roots()?);
@@ -25723,6 +25742,7 @@ mod tests {
                     character_devices: Vec::new(),
                 }],
                 allocation_limit: 1,
+                runtime_custody: None,
                 launch_authority:
                     crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
                         allocation: allocation,
