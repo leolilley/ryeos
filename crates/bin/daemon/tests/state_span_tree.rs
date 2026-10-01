@@ -110,6 +110,7 @@ fn state_store_write_path_emits_state_spans() {
                     group_leader_pid: 222,
                     group_leader_start_time_ticks: 20,
                     resource_selections: Vec::new(),
+                    resource_settlement_authority: None,
                     resource_operations: Vec::new(),
                     resource_allocation_limit: None,
                     resource_occupancy_start: None,

@@ -43,6 +43,26 @@ the independent reference procedure and comparison policy only; it contains no
 observations and grants no activation, publication, qualification, or ARC
 acceptance authority. Focused authoring tests live in `tests/authoring/`.
 
+`authoring/gpu_bootstrap.py` prepares the separate GNU interpreter and exact
+musl compiler layout for a future `CUDA:PTX` worker. Its finite library resolver
+binds selected libc/libcuda paths and leaves imported but unused NVRTC and
+nvJitLink bindings unbound. The pinned CUDA PTX renderer uses driver PTX JIT;
+the NV renderer's nvJitLink path is a different closure. Synthetic authoring
+fixtures check layout and refusals without loading libraries or devices.
+This helper is outside admitted worker source: it creates no GPU Worker,
+product relationship, driver ABI proof, activation or execution authority.
+The GNU fixed namespace and resource/session contract must qualify on the
+selected target before a GPU consumer can use this preparation.
+
+`authoring/check_prompt_packing.py` checks fully frozen request messages against
+local, exact Qwen tokenizer metadata. It verifies the four metadata file hashes,
+counts the complete chat template and generation markers, reserves output tokens,
+and reports every overflow without truncation. It loads no weights or tinygrad
+backend. Supply a JSON array of `id`, `messages`, `tools` and `enable_thinking`
+objects, plus explicit input/output limits and a selected profile. Token counts
+require matching local metadata; synthetic encoder tests establish refusals only.
+The report retains Python and Unicode database versions for later runtime parity.
+
 The independent CPU oracle and the pinned tinygrad `CUDA:PTX` candidate have
 now been compared through the consequence-free authoring utility
 `authoring/compare_numeric_oracle.py`. The compact retained evidence is
@@ -129,3 +149,18 @@ identities through exact real-UID process ceilings of 4096 and 2048. They are
 bounded recorded-class contract fixtures, not sealed qualification, and do not
 define the future production model, device, context, trace, or training
 architecture.
+
+The descriptor-loader feasibility helper assembles a separate GNU probe using
+its selected loader, `--inhibit-cache`, `--library-path` and explicit
+`PYTHONHOME`. It does not execute the probe or inherit the existing GNU
+fixed-namespace qualification. Actual mapped dependencies, native imports,
+negative missing-provider cases and compiler children remain qualification
+obligations. Its five new controls use synthetic files only.
+
+Track D's shared source cut now retains explicit resource settlement authority
+in process identity v6 and distinguishes local scope allocation from trusted
+reserved/spawn-intent states in the existing reservation table. Trusted intents
+and driver-unknown owners retain capacity. Pooled trusted protocols are parsed
+explicitly, but executable admission refuses the missing node/product and
+actual driver-retirement joins. This cut is uncommitted and pending coordinated
+schema integration and full-crate checks; it supplies no enabled GPU worker.

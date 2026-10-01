@@ -2243,6 +2243,8 @@ mod tests {
             node_config: Arc::new(ryeos_app::node_config::NodeConfigSnapshot {
                 external_execution: Vec::new(),
                 runtime_snapshot_production: Vec::new(),
+                guest_runtime_materialization: Vec::new(),
+                runtime_snapshot_qualification: Vec::new(),
                 bundles: vec![],
                 routes: vec![],
                 commands: vec![],
@@ -3644,6 +3646,7 @@ mod tests {
                     group_leader_pid: 424242,
                     group_leader_start_time_ticks: 10,
                     resource_selections: Vec::new(),
+                    resource_settlement_authority: None,
                     resource_operations: Vec::new(),
                     resource_allocation_limit: None,
                     resource_occupancy_start: None,

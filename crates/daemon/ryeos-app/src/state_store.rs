@@ -6758,6 +6758,20 @@ impl StateStore {
         g.runtime_db.reserve_process_resource_launch(reservation)
     }
 
+    pub fn begin_trusted_process_resource_spawn(
+        &self,
+        expected: &runtime_db::ProcessResourceReservationRecord,
+    ) -> Result<runtime_db::process_resource_launch::TrustedResourceSpawnPermit> {
+        let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("trusted resource spawn intent is closed for daemon shutdown");
+        }
+        g.runtime_db.begin_trusted_process_resource_spawn(expected)
+    }
+
     pub fn reserve_thread_process_scope(
         &self,
         reservation: &runtime_db::ThreadProcessScopeReservationRecord,
@@ -21229,6 +21243,7 @@ mod tests {
             group_leader_pid: 12345,
             group_leader_start_time_ticks: 10,
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -21274,6 +21289,7 @@ mod tests {
             group_leader_pid: 12347,
             group_leader_start_time_ticks: 11,
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -21874,6 +21890,7 @@ mod tests {
             group_leader_pid: 12345,
             group_leader_start_time_ticks: 10,
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -23474,6 +23491,7 @@ mod tests {
                         group_leader_start_time_ticks: 201,
                         process_scope: None,
                         resource_selections: Vec::new(),
+                        resource_settlement_authority: None,
                         resource_operations: Vec::new(),
                         resource_allocation_limit: None,
                         resource_occupancy_start: None,
@@ -25705,8 +25723,11 @@ mod tests {
                     character_devices: Vec::new(),
                 }],
                 allocation_limit: 1,
-                scope_allocation: allocation,
-                scope_recovery: None,
+                launch_authority:
+                    crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
+                        allocation: allocation,
+                        recovery: None,
+                    },
             },
             recovery,
         )
@@ -25769,7 +25790,9 @@ mod tests {
                 .process_resource_reservation("thread", "bind-race")
                 .unwrap()
                 .unwrap()
-                .scope_recovery,
+                .launch_authority
+                .local_scope_recovery()
+                .cloned(),
             None
         );
     }
@@ -25795,6 +25818,7 @@ mod tests {
                 group_leader_pid: 12345,
                 group_leader_start_time_ticks: 10,
                 resource_selections: Vec::new(),
+                resource_settlement_authority: None,
                 resource_operations: Vec::new(),
                 resource_allocation_limit: None,
                 resource_occupancy_start: None,
@@ -26423,6 +26447,7 @@ mod tests {
                     group_leader_pid: 67890,
                     group_leader_start_time_ticks: 20,
                     resource_selections: Vec::new(),
+                    resource_settlement_authority: None,
                     resource_operations: Vec::new(),
                     resource_allocation_limit: None,
                     resource_occupancy_start: None,
@@ -26460,6 +26485,7 @@ mod tests {
             group_leader_pid: 12345,
             group_leader_start_time_ticks: 10,
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -26516,6 +26542,7 @@ mod tests {
             group_leader_pid: 12346,
             group_leader_start_time_ticks: 11,
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -26637,6 +26664,7 @@ mod tests {
             group_leader_pid: 12347,
             group_leader_start_time_ticks: 12,
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,

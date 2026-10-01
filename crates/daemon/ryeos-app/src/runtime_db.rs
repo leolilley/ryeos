@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod external_execution;
+pub mod process_resource_launch;
+pub mod process_resource_settlement;
 pub mod restored_verifier_attempt;
 pub mod runtime_snapshot;
 pub mod runtime_snapshot_bootstrap;
@@ -25,6 +27,7 @@ use crate::process::{
     ExecutionProcessIdentity, PROCESS_IDENTITY_SCHEMA_VERSION,
     validate_execution_process_identity_shape,
 };
+pub use process_resource_launch::{ProcessResourceLaunchAuthority, TrustedResourceLaunchPhase};
 
 const MAX_DEDICATED_SESSION_COMMANDS: i64 = 100_000;
 const MAX_DEDICATED_SESSION_COMMAND_SPOOL_BYTES: i64 = 512 * 1024 * 1024;
@@ -143,9 +146,9 @@ pub struct ProcessResourceOwnerRecord {
 
 /// Durable pre-contact reservation for one resource-bearing process launch.
 ///
-/// The allocation intent is committed before Lillux creates the process
-/// scope.  The concrete recovery identity is then bound before a held child
-/// can be spawned.  Attachment atomically consumes this row into
+/// Local allocation intent precedes Lillux scope creation and exact recovery
+/// binding. Trusted ownership instead journals its one-shot spawn intent.
+/// Attachment atomically consumes either row into
 /// `process_resource_owner`; recovery may only retire/discard it, never use it
 /// to launch again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,9 +159,7 @@ pub struct ProcessResourceReservationRecord {
     pub daemon_generation_id: String,
     pub selections: Vec<ryeos_engine::contracts::ExecutionResourceSelection>,
     pub allocation_limit: u32,
-    pub scope_allocation: lillux::ProcessScopeAllocation,
-    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
-    pub scope_recovery: Option<lillux::ProcessScopeRecovery>,
+    pub launch_authority: ProcessResourceLaunchAuthority,
 }
 
 /// A device-free direct thread launch that nevertheless requires an exact
@@ -216,16 +217,7 @@ impl ProcessResourceReservationRecord {
         {
             bail!("resource reservation exceeds its allocation ceiling");
         }
-        self.scope_allocation
-            .validate()
-            .map_err(anyhow::Error::msg)?;
-        if self
-            .scope_recovery
-            .as_ref()
-            .is_some_and(|recovery| !recovery.matches_allocation(&self.scope_allocation))
-        {
-            bail!("resource reservation scope binding contradicts its allocation");
-        }
+        self.launch_authority.validate()?;
         let mut ids = BTreeSet::new();
         for selection in &self.selections {
             selection.validate()?;
@@ -277,6 +269,19 @@ impl ProcessResourceCleanupEvidence {
     }
 
     fn validate(&self, process_identity: &ExecutionProcessIdentity) -> Result<()> {
+        if matches!(
+            process_identity.resource_settlement_authority,
+            Some(crate::process::ProcessResourceSettlementAuthority::TrustedProcessGroup { .. })
+        ) {
+            bail!(
+                "trusted resource cleanup requires admitted process and driver retirement; generic terminal evidence is insufficient"
+            );
+        }
+        process_resource_settlement::require_current_local_resource_scope(
+            !process_identity.resource_selections.is_empty(),
+            process_identity.process_scope.is_some(),
+        )
+        .map_err(|refusal| anyhow!("resource cleanup authority is unavailable: {refusal:?}"))?;
         if self.version != Self::VERSION {
             bail!("unsupported process resource cleanup evidence version");
         }
@@ -300,7 +305,7 @@ fn process_resource_reservation_id(
     // Binding the concrete scope is an allowed one-shot state transition, not
     // a new allocation identity. Keep the primary key stable across it.
     let mut allocation_identity = reservation.clone();
-    allocation_identity.scope_recovery = None;
+    allocation_identity.launch_authority = reservation.launch_authority.allocation_identity();
     let canonical = lillux::canonical_json(&serde_json::to_value(allocation_identity)?)?;
     Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
@@ -420,8 +425,9 @@ fn consume_process_resource_reservation(
     if reservation.daemon_generation_id != daemon_generation_id()
         || reservation.selections != process_identity.resource_selections
         || Some(reservation.allocation_limit) != process_identity.resource_allocation_limit
-        || reservation.scope_recovery.as_ref() != process_identity.process_scope.as_ref()
-        || reservation.scope_recovery.is_none()
+        || !reservation
+            .launch_authority
+            .matches_held_process(process_identity)?
     {
         bail!("held process identity differs from its pre-contact resource reservation");
     }
@@ -634,8 +640,7 @@ fn clear_scope_lifetime_fence_if_settled(conn: &Connection) -> Result<()> {
           + (SELECT COUNT(*) FROM thread_runtime
                WHERE json_type(process_identity, '$.process_scope')='object')
           + (SELECT COUNT(*) FROM process_resource_owner
-               WHERE cleanup_state='owned'
-                 AND json_type(process_identity, '$.process_scope') IS NOT 'null')
+               WHERE cleanup_state='owned')
           + (SELECT COUNT(*) FROM dedicated_session s
                WHERE (s.worker_scope IS NOT NULL OR EXISTS (
                  SELECT 1 FROM worker_process w
@@ -2660,7 +2665,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 103 binds consumer attempts to the retained installed guest runtime
 // manifest. Predecessor purposes cannot acquire an account/profile identity
 // from an uploaded archive or mutable settings during recovery.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 103;
+// Epoch 104 requires explicit resource settlement authority in process
+// identity v6 and tagged local/trusted resource launch reservations. Predecessor
+// rows cannot infer trusted authority or reconstruct a held-spawn permit.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 104;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -16596,7 +16604,6 @@ impl RuntimeDb {
             self.conn.query_row(
                 "SELECT COUNT(*) FROM process_resource_owner
                   WHERE cleanup_state='owned'
-                    AND json_type(process_identity, '$.process_scope') IS NOT 'null'
                     AND (owner_kind!='thread' OR owner_coordinate IN (
                       SELECT thread_id FROM thread_runtime WHERE chain_root_id=?1))",
                 [chain_root_id],
@@ -16605,8 +16612,7 @@ impl RuntimeDb {
         } else {
             self.conn.query_row(
                 "SELECT COUNT(*) FROM process_resource_owner
-                  WHERE cleanup_state='owned'
-                    AND json_type(process_identity, '$.process_scope') IS NOT 'null'",
+                  WHERE cleanup_state='owned'",
                 [],
                 |row| row.get(0),
             )?
@@ -17321,10 +17327,30 @@ impl RuntimeDb {
         &self,
         reservation: &ProcessResourceReservationRecord,
     ) -> Result<()> {
-        let lifetime = reservation
-            .scope_allocation
-            .host_lifetime()
-            .map_err(anyhow::Error::msg)?;
+        reservation.validate()?;
+        if reservation.daemon_generation_id != daemon_generation_id() {
+            bail!("resource reservation belongs to another daemon generation");
+        }
+        if matches!(
+            reservation.launch_authority,
+            ProcessResourceLaunchAuthority::TrustedProcessGroup {
+                phase: TrustedResourceLaunchPhase::SpawnIntent,
+                ..
+            }
+        ) {
+            bail!(
+                "trusted spawn intent cannot be inserted or reconstructed as a launch reservation"
+            );
+        }
+        let lifetime = reservation.launch_authority.host_lifetime()?;
+        if matches!(
+            reservation.launch_authority,
+            ProcessResourceLaunchAuthority::TrustedProcessGroup { .. }
+        ) && lifetime
+            != lillux::ProcessHostLifetime::capture_current().map_err(anyhow::Error::msg)?
+        {
+            bail!("trusted resource reservation is not in the current host occurrence");
+        }
         let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
         let tx = self.conn.unchecked_transaction()?;
         if let Some(incumbent) = read_scope_lifetime_fence(&tx)? {
@@ -17532,14 +17558,11 @@ impl RuntimeDb {
         let mut reservation = self
             .process_resource_reservation(owner_kind, owner_coordinate)?
             .ok_or_else(|| anyhow!("process resource scope binding has no allocation intent"))?;
-        if reservation.scope_recovery.is_some()
-            || reservation.daemon_generation_id != daemon_generation_id()
-            || !recovery.matches_allocation(&reservation.scope_allocation)
-        {
+        if reservation.daemon_generation_id != daemon_generation_id() {
             bail!("process resource scope binding lost its original allocation");
         }
         let expected = lillux::canonical_json(&serde_json::to_value(&reservation)?)?;
-        reservation.scope_recovery = Some(recovery.clone());
+        reservation.launch_authority.bind_local_scope(recovery)?;
         reservation.validate()?;
         let bound = lillux::canonical_json(&serde_json::to_value(&reservation)?)?;
         let changed = self.conn.execute(
@@ -17609,6 +17632,17 @@ impl RuntimeDb {
         reservation: &ProcessResourceReservationRecord,
     ) -> Result<()> {
         reservation.validate()?;
+        if matches!(
+            reservation.launch_authority,
+            ProcessResourceLaunchAuthority::TrustedProcessGroup {
+                phase: TrustedResourceLaunchPhase::SpawnIntent,
+                ..
+            }
+        ) {
+            bail!(
+                "trusted spawn intent remains quarantined until exact process and driver retirement is proved"
+            );
+        }
         let encoded = lillux::canonical_json(&serde_json::to_value(reservation)?)?;
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
@@ -26705,6 +26739,7 @@ mod tests {
             group_leader_pid: pgid,
             group_leader_start_time_ticks: 20,
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -26837,6 +26872,136 @@ mod tests {
         identity
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trusted_resource_spawn_intent_is_once_and_restart_never_clears_it() {
+        let (_tmp, db) = fresh_db();
+        let mut identity = resource_process_identity(701, 701, "trusted-accelerator", 1);
+        let host_lifetime = lillux::ProcessHostLifetime::capture_current().unwrap();
+        identity.boot_id = serde_json::to_value(&host_lifetime).unwrap()["backend"]["boot_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let owner_incarnation =
+            ryeos_accounting::HexDigest::new(identity.owner_incarnation_digest().unwrap()).unwrap();
+        for operation in &mut identity.resource_operations {
+            operation.owner_incarnation = owner_incarnation.clone();
+        }
+        identity.resource_settlement_authority = Some(
+            crate::process::ProcessResourceSettlementAuthority::TrustedProcessGroup {
+                cleanup_contract_digest: "7".repeat(64),
+            },
+        );
+        let reserved = ProcessResourceReservationRecord {
+            owner_kind: "pooled_session".to_owned(),
+            owner_coordinate: "trusted-once".to_owned(),
+            daemon_generation_id: daemon_generation_id().to_owned(),
+            selections: identity.resource_selections.clone(),
+            allocation_limit: 1,
+            launch_authority: ProcessResourceLaunchAuthority::TrustedProcessGroup {
+                cleanup_contract_digest: "7".repeat(64),
+                host_lifetime,
+                phase: TrustedResourceLaunchPhase::Reserved,
+            },
+        };
+        db.reserve_process_resource_launch(&reserved).unwrap();
+        assert!(
+            db.attach_pooled_resource_owner("trusted-once", &identity)
+                .is_err()
+        );
+        let permit = db.begin_trusted_process_resource_spawn(&reserved).unwrap();
+        assert!(db.begin_trusted_process_resource_spawn(&reserved).is_err());
+        let intent = permit.into_reservation();
+        assert!(db.reserve_process_resource_launch(&intent).is_err());
+        assert!(db.clear_process_resource_reservation(&reserved).is_err());
+        assert!(db.clear_process_resource_reservation(&intent).is_err());
+        let retained = db
+            .process_resource_reservation("pooled_session", "trusted-once")
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained, intent);
+        assert!(db.begin_trusted_process_resource_spawn(&retained).is_err());
+        assert!(db.unsettled_process_scope_count(None).unwrap() > 0);
+
+        let mut wrong_contract = identity.clone();
+        wrong_contract.resource_settlement_authority = Some(
+            crate::process::ProcessResourceSettlementAuthority::TrustedProcessGroup {
+                cleanup_contract_digest: "8".repeat(64),
+            },
+        );
+        assert!(
+            db.attach_pooled_resource_owner("trusted-once", &wrong_contract)
+                .is_err()
+        );
+        let mut wrong_boot = identity.clone();
+        wrong_boot.boot_id = "00000000-0000-4000-8000-000000000000".to_owned();
+        let stale_owner =
+            ryeos_accounting::HexDigest::new(wrong_boot.owner_incarnation_digest().unwrap())
+                .unwrap();
+        for operation in &mut wrong_boot.resource_operations {
+            operation.owner_incarnation = stale_owner.clone();
+        }
+        assert!(
+            db.attach_pooled_resource_owner("trusted-once", &wrong_boot)
+                .is_err()
+        );
+        db.attach_pooled_resource_owner("trusted-once", &identity)
+            .unwrap();
+        assert!(
+            db.process_resource_reservation("pooled_session", "trusted-once")
+                .unwrap()
+                .is_none()
+        );
+        assert!(db.unsettled_process_scope_count(None).unwrap() > 0);
+        assert!(ProcessResourceCleanupEvidence::capture(&identity).is_err());
+        assert!(ProcessResourceCleanupEvidence::capture_unobserved_terminal(&identity).is_err());
+        assert!(
+            db.clear_pooled_resource_owner("trusted-once", &identity)
+                .is_err()
+        );
+
+        // Both launch authorities contend in the existing durable index.
+        let mut overlapping = reserved.clone();
+        overlapping.owner_coordinate = "trusted-overlap".to_owned();
+        assert!(db.reserve_process_resource_launch(&overlapping).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trusted_resource_reserved_cleanup_is_exact_and_never_a_spawn_permit() {
+        let (_tmp, db) = fresh_db();
+        let identity = resource_process_identity(702, 702, "trusted-before-contact", 1);
+        let reserved = ProcessResourceReservationRecord {
+            owner_kind: "pooled_session".to_owned(),
+            owner_coordinate: "trusted-before-contact".to_owned(),
+            daemon_generation_id: daemon_generation_id().to_owned(),
+            selections: identity.resource_selections.clone(),
+            allocation_limit: 1,
+            launch_authority: ProcessResourceLaunchAuthority::TrustedProcessGroup {
+                cleanup_contract_digest: "7".repeat(64),
+                host_lifetime: lillux::ProcessHostLifetime::capture_current().unwrap(),
+                phase: TrustedResourceLaunchPhase::Reserved,
+            },
+        };
+        let mut stale = reserved.clone();
+        stale.daemon_generation_id = "previous-daemon".to_owned();
+        assert!(db.reserve_process_resource_launch(&stale).is_err());
+        db.reserve_process_resource_launch(&reserved).unwrap();
+        let mut drift = reserved.clone();
+        if let ProcessResourceLaunchAuthority::TrustedProcessGroup {
+            cleanup_contract_digest,
+            ..
+        } = &mut drift.launch_authority
+        {
+            *cleanup_contract_digest = "8".repeat(64);
+        }
+        assert!(db.begin_trusted_process_resource_spawn(&drift).is_err());
+        assert!(db.clear_process_resource_reservation(&drift).is_err());
+        db.clear_process_resource_reservation(&reserved).unwrap();
+        assert!(db.begin_trusted_process_resource_spawn(&reserved).is_err());
+        assert_eq!(db.unsettled_process_scope_count(None).unwrap(), 0);
+    }
+
     fn reserve_test_resource_process(
         db: &RuntimeDb,
         owner_kind: &str,
@@ -26877,8 +27042,11 @@ mod tests {
             daemon_generation_id: daemon_generation_id().to_owned(),
             selections: identity.resource_selections.clone(),
             allocation_limit: identity.resource_allocation_limit.unwrap(),
-            scope_allocation: allocation,
-            scope_recovery: Some(recovery),
+            launch_authority:
+                crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
+                    allocation: allocation,
+                    recovery: Some(recovery),
+                },
         };
         db.reserve_process_resource_launch(&reservation)
     }
@@ -26967,15 +27135,20 @@ mod tests {
             daemon_generation_id: daemon_generation_id().to_owned(),
             selections: identity.resource_selections.clone(),
             allocation_limit: 1,
-            scope_allocation: allocation,
-            scope_recovery: None,
+            launch_authority:
+                crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
+                    allocation: allocation,
+                    recovery: None,
+                },
         };
         db.reserve_process_resource_launch(&reservation).unwrap();
         assert_eq!(
             db.process_resource_reservation("thread", "t1")
                 .unwrap()
                 .unwrap()
-                .scope_recovery,
+                .launch_authority
+                .local_scope_recovery()
+                .cloned(),
             None
         );
 
@@ -26989,7 +27162,9 @@ mod tests {
             db.process_resource_reservation("thread", "t1")
                 .unwrap()
                 .unwrap()
-                .scope_recovery,
+                .launch_authority
+                .local_scope_recovery()
+                .cloned(),
             Some(recovery.clone())
         );
         assert!(
@@ -27235,6 +27410,24 @@ mod tests {
         reserve_test_resource_process(&db, "thread", "t1", &mut thread).unwrap();
         db.attach_new_process("t1", 202, 202, &thread, &RuntimeLaunchMetadata::default())
             .unwrap();
+    }
+
+    #[test]
+    fn current_resource_cleanup_cannot_infer_trusted_authority_from_missing_scope() {
+        let (_tmp, db) = fresh_db();
+        let mut resource = resource_process_identity(101, 101, "gpu-0", 1);
+        assert!(ProcessResourceCleanupEvidence::capture(&resource).is_err());
+        assert!(ProcessResourceCleanupEvidence::capture_unobserved_terminal(&resource).is_err());
+        reserve_test_resource_process(&db, "pooled_session", "scope-fixture", &mut resource)
+            .unwrap();
+        assert!(ProcessResourceCleanupEvidence::capture(&resource).is_ok());
+        assert!(ProcessResourceCleanupEvidence::capture_unobserved_terminal(&resource).is_ok());
+
+        // Q's separately admitted, device-free trusted group has no resource
+        // cleanup obligation and must not acquire this new scope requirement.
+        let q_group = fake_process_identity(202, 202);
+        assert!(ProcessResourceCleanupEvidence::capture(&q_group).is_ok());
+        assert!(ProcessResourceCleanupEvidence::capture_unobserved_terminal(&q_group).is_ok());
     }
 
     #[test]
@@ -29153,6 +29346,7 @@ mod tests {
             group_leader_pid: 12345,
             group_leader_start_time_ticks: 10,
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -29311,6 +29505,7 @@ mod tests {
                 group_leader_pid: 12345,
                 group_leader_start_time_ticks: 10,
                 resource_selections: Vec::new(),
+                resource_settlement_authority: None,
                 resource_operations: Vec::new(),
                 resource_allocation_limit: None,
                 resource_occupancy_start: None,

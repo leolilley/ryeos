@@ -5967,6 +5967,7 @@ pub mod test_support {
                     group_leader_pid: 41,
                     group_leader_start_time_ticks: 100,
                     resource_selections: Vec::new(),
+                    resource_settlement_authority: None,
                     resource_operations: Vec::new(),
                     resource_allocation_limit: None,
                     resource_occupancy_start: None,

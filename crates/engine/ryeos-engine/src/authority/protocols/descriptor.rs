@@ -98,7 +98,7 @@ pub enum PersistentSessionProcessMode {
     ExclusiveSession,
 }
 
-/// Termination and recovery authority for a dedicated session process.
+/// Termination and recovery authority independent of request reuse.
 ///
 /// This is independent of session ownership. In particular, an externally
 /// fenced placement incarnation must never be represented as a qualified local
@@ -253,6 +253,9 @@ pub fn validate_persistent_session_protocol(
             (
                 PersistentSessionProcessMode::PooledRequests,
                 PersistentSessionCleanupAuthority::NotRequired
+            ) | (
+                PersistentSessionProcessMode::PooledRequests,
+                PersistentSessionCleanupAuthority::TrustedProcessGroup
             ) | (
                 PersistentSessionProcessMode::ExclusiveSession,
                 PersistentSessionCleanupAuthority::LocalProcessScope
@@ -477,6 +480,20 @@ mod tests {
                 PersistentSessionCleanupAuthority::NotRequired,
             ))
             .is_ok()
+        );
+        assert!(
+            validate_persistent_session_protocol(&persistent_protocol(
+                PersistentSessionProcessMode::PooledRequests,
+                PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            ))
+            .is_ok()
+        );
+        assert!(
+            validate_persistent_session_protocol(&persistent_protocol(
+                PersistentSessionProcessMode::PooledRequests,
+                PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
+            ))
+            .is_err()
         );
     }
 

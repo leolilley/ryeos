@@ -474,6 +474,16 @@ impl ProcessHostLifetime {
             _ => Err("host lifetime observation is unavailable on this OS".to_owned()),
         }
     }
+
+    /// Join an exact process occurrence to this retained host lifetime.
+    /// This checks birth identity only; it proves neither liveness nor cleanup.
+    pub fn contains_process(&self, process: &super::ExactProcessIdentity) -> Result<bool, String> {
+        self.validate()?;
+        process.validate()?;
+        match &self.backend {
+            HostLifetimeBackend::LinuxBoot { boot_id } => Ok(process.boot_id == *boot_id),
+        }
+    }
 }
 
 /// Guarantees of the selected scope mechanism. Launch admission must also
@@ -2399,6 +2409,19 @@ mod tests {
 #[test]
 fn host_lifetime_witness_is_strict_and_does_not_claim_same_boot_cleanup() {
     let current = ProcessHostLifetime::capture_current().unwrap();
+    let process = super::ExactProcessIdentity {
+        boot_id: super::linux::read_boot_id().unwrap(),
+        target_pid: 101,
+        target_start_time_ticks: 1,
+        group_leader_pid: 101,
+        group_leader_start_time_ticks: 1,
+    };
+    assert!(current.contains_process(&process).unwrap());
+    let mut stale = process.clone();
+    stale.boot_id = "00000000-0000-4000-8000-000000000000".to_owned();
+    assert!(!current.contains_process(&stale).unwrap());
+    stale.target_start_time_ticks = 0;
+    assert!(current.contains_process(&stale).is_err());
     assert!(!current.has_ended().unwrap());
     let value = serde_json::to_value(&current).unwrap();
     let roundtrip: ProcessHostLifetime = serde_json::from_value(value.clone()).unwrap();

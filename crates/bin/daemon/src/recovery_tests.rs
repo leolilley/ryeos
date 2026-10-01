@@ -161,8 +161,11 @@ fn precontact_resource_scope_recovery_discards_without_relaunch() {
             character_devices: Vec::new(),
         }],
         allocation_limit: 1,
-        scope_allocation: serde_json::from_value(planned).unwrap(),
-        scope_recovery: None,
+        launch_authority:
+            ryeos_app::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
+                allocation: serde_json::from_value(planned).unwrap(),
+                recovery: None,
+            },
     };
     state
         .state_store
@@ -212,15 +215,29 @@ fn unattached_resource_owner_startup_releases_hold_and_fences_without_relaunch()
     // This exact stale process occurrence crossed financial reservation but
     // crashed before any RuntimeDb owner attachment. Startup may only prove it
     // dead, release the unissued hold, and fence its gate; it cannot relaunch.
+    let local_scope = serde_json::from_value(serde_json::json!({
+        "version": 4,
+        "control_timeout": {"secs": 1, "nanos": 0},
+        "configuration": {"version": 3, "backend": {
+            "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+        }},
+        "backend": {"implementation": "linux_cgroup_v2",
+            "boot_id": "00000000-0000-4000-8000-000000000000",
+            "parent": {"containing_device": 1, "inode": 2},
+            "name": "unattached-resource-fixture",
+            "directory": {"containing_device": 1, "inode": 3}}
+    }))
+    .unwrap();
     let process_identity = ryeos_app::process::ExecutionProcessIdentity {
         schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
-        process_scope: None,
+        process_scope: Some(local_scope),
         boot_id: "00000000-0000-4000-8000-000000000000".to_owned(),
         target_pid: 999_990,
         target_start_time_ticks: 11,
         group_leader_pid: 999_990,
         group_leader_start_time_ticks: 11,
         resource_selections: Vec::new(),
+        resource_settlement_authority: None,
         resource_operations: Vec::new(),
         resource_allocation_limit: None,
         resource_occupancy_start: None,
@@ -359,6 +376,63 @@ fn unattached_resource_owner_startup_releases_hold_and_fences_without_relaunch()
 
 #[cfg(target_os = "linux")]
 #[test]
+fn unattached_resource_owner_without_settlement_authority_remains_quarantined() {
+    let (tmpdir, mut state) = build_test_state();
+    let accounting = Arc::new(
+        ryeos_app::accounting_db::AccountingDb::open_default(
+            &tmpdir.path().join("unknown-resource-accounting"),
+        )
+        .unwrap(),
+    );
+    let budget = "exec-unknown-resource";
+    let root = "T-unknown-resource";
+    accounting
+        .create_execution_account_prepared(
+            budget,
+            root,
+            Some(ryeos_accounting::UsdNanos::parse_canonical("1").unwrap()),
+        )
+        .unwrap();
+    accounting
+        .activate_account(budget, "execution", budget)
+        .unwrap();
+    accounting.startup_verify().unwrap();
+    let identity = ryeos_app::process::ExecutionProcessIdentity {
+        schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+        boot_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+        target_pid: 999_990,
+        target_start_time_ticks: 11,
+        group_leader_pid: 999_990,
+        group_leader_start_time_ticks: 11,
+        process_scope: None,
+        resource_selections: Vec::new(),
+        resource_settlement_authority: None,
+        resource_operations: Vec::new(),
+        resource_allocation_limit: None,
+        resource_occupancy_start: None,
+        resource_occupancy_limit: None,
+        resource_cleanup_allowance_ms: None,
+    };
+    let incarnation = identity.owner_incarnation_digest().unwrap();
+    let now = lillux::time::timestamp_millis();
+    let gate = accounting
+        .open_resource_owner_accounting_gate(&identity, budget, None, root, root, now)
+        .unwrap();
+    state.accounting = Some(accounting.clone());
+    assert!(super::reconcile::reconcile_process_resource_owners(&state).is_err());
+    assert!(
+        accounting
+            .resource_owner_gate_eligible(gate.as_str(), &incarnation, now + 1)
+            .unwrap()
+    );
+    assert_eq!(
+        accounting.open_resource_owner_recoveries().unwrap().len(),
+        1
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
     let (tmpdir, mut state) = build_test_state();
     let accounting = Arc::new(
@@ -391,6 +465,7 @@ fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
         group_leader_pid: 999_991,
         group_leader_start_time_ticks: 11,
         resource_selections: Vec::new(),
+        resource_settlement_authority: None,
         resource_operations: Vec::new(),
         resource_allocation_limit: None,
         resource_occupancy_start: None,
@@ -545,8 +620,11 @@ fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
             daemon_generation_id: ryeos_app::runtime_db::daemon_generation_id().to_owned(),
             selections: attached_identity.resource_selections.clone(),
             allocation_limit: attached_identity.resource_allocation_limit.unwrap(),
-            scope_allocation: allocation,
-            scope_recovery: Some(recovery),
+            launch_authority:
+                ryeos_app::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
+                    allocation: allocation,
+                    recovery: Some(recovery),
+                },
         })
         .unwrap();
     state
@@ -667,6 +745,8 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
     let node_config = ryeos_app::node_config::NodeConfigSnapshot {
         external_execution: Vec::new(),
         runtime_snapshot_production: Vec::new(),
+        guest_runtime_materialization: Vec::new(),
+        runtime_snapshot_qualification: Vec::new(),
         bundles: vec![],
         routes: vec![],
         commands: vec![],
@@ -1938,6 +2018,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
                 group_leader_pid: 999_999,
                 group_leader_start_time_ticks: 1,
                 resource_selections: Vec::new(),
+                resource_settlement_authority: None,
                 resource_operations: Vec::new(),
                 resource_allocation_limit: None,
                 resource_occupancy_start: None,

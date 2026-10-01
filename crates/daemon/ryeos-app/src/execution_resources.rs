@@ -455,8 +455,10 @@ pub fn prepare_process_resource_scope(
         daemon_generation_id: crate::runtime_db::daemon_generation_id().to_owned(),
         selections: selected.selections.clone(),
         allocation_limit,
-        scope_allocation: allocation.clone(),
-        scope_recovery: None,
+        launch_authority: crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
+            allocation: allocation.clone(),
+            recovery: None,
+        },
     };
     state
         .state_store
@@ -502,7 +504,7 @@ pub fn prepare_process_resource_scope(
             )),
         });
     }
-    reservation.scope_recovery = Some(recovery);
+    reservation.launch_authority.bind_local_scope(&recovery)?;
     Ok(Some(PreparedProcessResourceScope {
         reservation,
         scope: Some(scope),
@@ -534,8 +536,10 @@ pub fn reserve_bound_process_resource_scope(
         allocation_limit: selected
             .max_concurrent_exclusive_allocations
             .context("resource-bearing launch lacks an allocation ceiling")?,
-        scope_allocation: allocation.clone(),
-        scope_recovery: Some(recovery.clone()),
+        launch_authority: crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
+            allocation: allocation.clone(),
+            recovery: Some(recovery.clone()),
+        },
     };
     state
         .state_store
@@ -550,14 +554,30 @@ pub fn cleanup_process_resource_reservation(
     state: &crate::state::AppState,
     reservation: &crate::runtime_db::ProcessResourceReservationRecord,
 ) -> anyhow::Result<()> {
-    match reservation.scope_recovery.as_ref() {
-        Some(recovery) => recovery
-            .terminate_and_wait(state.isolation.process_scope_control_timeout()?)
-            .map_err(anyhow::Error::msg)?,
-        None => reservation
-            .scope_allocation
-            .discard_unlaunched()
-            .map_err(anyhow::Error::msg)?,
+    match &reservation.launch_authority {
+        crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
+            allocation,
+            recovery,
+        } => match recovery {
+            Some(recovery) => recovery
+                .terminate_and_wait(state.isolation.process_scope_control_timeout()?)
+                .map_err(anyhow::Error::msg)?,
+            None => allocation
+                .discard_unlaunched()
+                .map_err(anyhow::Error::msg)?,
+        },
+        crate::runtime_db::ProcessResourceLaunchAuthority::TrustedProcessGroup {
+            phase: crate::runtime_db::TrustedResourceLaunchPhase::Reserved,
+            ..
+        } => {}
+        crate::runtime_db::ProcessResourceLaunchAuthority::TrustedProcessGroup {
+            phase: crate::runtime_db::TrustedResourceLaunchPhase::SpawnIntent,
+            ..
+        } => {
+            bail!(
+                "trusted spawn intent is quarantined: process and driver retirement are unproved"
+            );
+        }
     }
     state
         .state_store
@@ -1149,15 +1169,16 @@ mod tests {
             // the empty selection without relaxing its resource invariant.
             let mut identity: crate::process::ExecutionProcessIdentity =
                 serde_json::from_value(serde_json::json!({
-                    "schema_version": crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
-                    "boot_id": "fixture-boot", "target_pid": 40,
-                    "target_start_time_ticks": 200, "group_leader_pid": 39,
-                    "group_leader_start_time_ticks": 190, "process_scope": null,
-                    "resource_selections": [], "resource_operations": [],
-                    "resource_allocation_limit": null,
-                    "resource_occupancy_start": null, "resource_occupancy_limit": null,
-                    "resource_cleanup_allowance_ms": null,
-                }))
+                        "schema_version": crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                        "boot_id": "fixture-boot", "target_pid": 40,
+                        "target_start_time_ticks": 200, "group_leader_pid": 39,
+                        "group_leader_start_time_ticks": 190, "process_scope": null,
+                        "resource_selections": [], "resource_operations": [],
+                "resource_settlement_authority": null,
+                        "resource_allocation_limit": null,
+                        "resource_occupancy_start": null, "resource_occupancy_limit": null,
+                        "resource_cleanup_allowance_ms": null,
+                    }))
                 .unwrap();
             identity
                 .bind_execution_resources(

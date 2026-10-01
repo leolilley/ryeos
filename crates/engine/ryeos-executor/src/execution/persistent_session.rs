@@ -2598,9 +2598,9 @@ where
     let capsule = load_capsule(state, capsule_hash)?;
     require_candidate_connector_ready(capsule.external_candidate.as_ref())?;
     validate_capsule_current_trust(&state.engine, &capsule)?;
-    if retained_session_protocol(&state.engine, &capsule)?.process_mode
-        != PersistentSessionProcessMode::PooledRequests
-    {
+    let session_protocol = retained_session_protocol(&state.engine, &capsule)?;
+    validate_session_process_control(state, &session_protocol)?;
+    if session_protocol.process_mode != PersistentSessionProcessMode::PooledRequests {
         let protocol_ref = capsule_protocol_identity(&capsule)?.0;
         bail!(
             "exclusive persistent-session protocol `{protocol_ref}` cannot enter the request pool"
@@ -2663,6 +2663,18 @@ fn validate_session_process_control(
             PersistentSessionCleanupAuthority::NotRequired,
         ) => {}
         (
+            PersistentSessionProcessMode::PooledRequests,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
+        ) => {
+            // Parsing this explicit contract must not make an existing pooled
+            // worker acquire resource cleanup authority. Until the retained
+            // node/product owner and driver-retirement joins exist, refuse
+            // before spawning or contacting the inference process.
+            bail!(
+                "trusted pooled session requires admitted resource settlement and driver-retirement authority"
+            );
+        }
+        (
             PersistentSessionProcessMode::ExclusiveSession,
             PersistentSessionCleanupAuthority::LocalProcessScope,
         ) => {
@@ -2722,8 +2734,11 @@ fn validate_session_process_control(
 fn supports_private_descriptor_realizations(
     session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
 ) -> bool {
-    session.process_mode == PersistentSessionProcessMode::ExclusiveSession
-        && session.cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup
+    matches!(
+        session.process_mode,
+        PersistentSessionProcessMode::ExclusiveSession
+            | PersistentSessionProcessMode::PooledRequests
+    ) && session.cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup
 }
 
 fn protocol_supports_private_descriptor_realizations(
@@ -2837,6 +2852,7 @@ fn start_capsule_process(
     funding_owner: &str,
 ) -> Result<StartedPersistentSession> {
     let session_protocol = retained_session_protocol(&state.engine, capsule)?;
+    validate_session_process_control(state, &session_protocol)?;
     if session_protocol.process_mode != PersistentSessionProcessMode::PooledRequests {
         bail!("exclusive persistent-session protocol cannot use the pooled launcher");
     }
@@ -4709,6 +4725,12 @@ mod tests {
         assert!(supports_private_descriptor_realizations(
             &realization_delivery_session(
                 PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            )
+        ));
+        assert!(supports_private_descriptor_realizations(
+            &realization_delivery_session(
+                PersistentSessionProcessMode::PooledRequests,
                 PersistentSessionCleanupAuthority::TrustedProcessGroup,
             )
         ));

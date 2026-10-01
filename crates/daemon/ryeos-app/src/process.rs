@@ -20,7 +20,33 @@ const POST_SIGKILL_WAIT_MS: u64 = 200;
 /// escalating the exact process group.
 pub const MAX_GRACEFUL_SHUTDOWN_GRACE_SECS: u64 = 5;
 
-pub const PROCESS_IDENTITY_SCHEMA_VERSION: u32 = 5;
+pub const PROCESS_IDENTITY_SCHEMA_VERSION: u32 = 6;
+
+/// Explicit retained settlement contract, independent of resource access.
+/// The trusted variant is not selected by an absent local scope. Admission
+/// must join its exact contract to both the signed product and node ceiling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "authority", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProcessResourceSettlementAuthority {
+    LocalProcessScope {},
+    TrustedProcessGroup { cleanup_contract_digest: String },
+}
+
+impl ProcessResourceSettlementAuthority {
+    pub fn validate(&self) -> Result<()> {
+        if let Self::TrustedProcessGroup {
+            cleanup_contract_digest,
+        } = self
+            && (cleanup_contract_digest.len() != 64
+                || !cleanup_contract_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        {
+            bail!("trusted resource cleanup contract is not an exact canonical digest");
+        }
+        Ok(())
+    }
+}
 
 /// Durable identity for the exact target and its retained process-group leader.
 ///
@@ -47,6 +73,10 @@ pub struct ExecutionProcessIdentity {
     /// Exact node-selected resource evidence owned by this process
     /// incarnation. Empty means no constrained resource was selected.
     pub resource_selections: Vec<ryeos_engine::contracts::ExecutionResourceSelection>,
+    /// Required nullable: resource-free owners have null authority. Missing
+    /// predecessor fields cannot acquire current trusted cleanup permission.
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub resource_settlement_authority: Option<ProcessResourceSettlementAuthority>,
     /// Exact financial operations issued for the selected resources. Empty is
     /// valid only for a process with no selected resources.
     pub resource_operations: Vec<ryeos_accounting::ResourceOperationBinding>,
@@ -78,6 +108,22 @@ impl ExecutionProcessIdentity {
     pub fn owner_incarnation_digest(&self) -> Result<String> {
         lillux_process_identity(self)?
             .incarnation_digest()
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// Canonical selected-resource identity for an admitted retirement join.
+    /// Dynamic free capacity is not part of these retained selections.
+    pub fn resource_set_digest(&self) -> Result<String> {
+        validate_execution_process_identity_shape(self)?;
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(&self.resource_selections)?)?.as_bytes(),
+        ))
+    }
+
+    pub fn belongs_to_host_lifetime(&self, lifetime: &lillux::ProcessHostLifetime) -> Result<bool> {
+        validate_execution_process_identity_shape(self)?;
+        lifetime
+            .contains_process(&lillux_process_identity(self)?)
             .map_err(anyhow::Error::msg)
     }
 }
@@ -119,6 +165,7 @@ pub fn execution_process_identity_from_lillux(
             .context("Lillux group birth is outside RyeOS durable range")?,
         process_scope,
         resource_selections: Vec::new(),
+        resource_settlement_authority: None,
         resource_operations: Vec::new(),
         resource_allocation_limit: None,
         resource_occupancy_start: None,
@@ -134,6 +181,23 @@ pub fn validate_execution_process_identity_shape(
 ) -> Result<()> {
     if identity.schema_version != PROCESS_IDENTITY_SCHEMA_VERSION {
         anyhow::bail!("unsupported process identity schema version");
+    }
+    match (
+        &identity.resource_settlement_authority,
+        identity.resource_selections.is_empty(),
+    ) {
+        (None, true) => {}
+        (Some(authority), false) => {
+            authority.validate()?;
+            if matches!(
+                authority,
+                ProcessResourceSettlementAuthority::TrustedProcessGroup { .. }
+            ) && identity.process_scope.is_some()
+            {
+                bail!("trusted resource owner contradicts its local process scope");
+            }
+        }
+        _ => bail!("process resource settlement authority differs from its selected resources"),
     }
     if identity.boot_id.is_empty()
         || identity.target_start_time_ticks <= 0
@@ -247,6 +311,7 @@ impl ExecutionProcessIdentity {
         cleanup_allowance_ms: Option<u64>,
     ) -> Result<()> {
         if !self.resource_selections.is_empty()
+            || self.resource_settlement_authority.is_some()
             || self.resource_occupancy_start.is_some()
             || self.resource_occupancy_limit.is_some()
             || self.resource_cleanup_allowance_ms.is_some()
@@ -254,6 +319,8 @@ impl ExecutionProcessIdentity {
             bail!("process identity resource authority is already bound");
         }
         self.resource_selections = selections;
+        self.resource_settlement_authority = (!self.resource_selections.is_empty())
+            .then_some(ProcessResourceSettlementAuthority::LocalProcessScope {});
         self.resource_operations = operations;
         self.resource_allocation_limit = allocation_limit;
         self.resource_occupancy_start = occupancy_start;
@@ -593,6 +660,7 @@ fn capture_execution_process_identity_from_pin(
         group_leader_pid: pgid,
         group_leader_start_time_ticks: group_stat.start_time_ticks,
         resource_selections: Vec::new(),
+        resource_settlement_authority: None,
         resource_operations: Vec::new(),
         resource_allocation_limit: None,
         resource_occupancy_start: None,
@@ -1417,12 +1485,30 @@ mod tests {
             "target_start_time_ticks": 200, "group_leader_pid": 39,
             "group_leader_start_time_ticks": 190, "process_scope": null,
             "resource_selections": [], "resource_operations": [],
+            "resource_settlement_authority": null,
             "resource_allocation_limit": null,
             "resource_occupancy_start": null, "resource_occupancy_limit": null,
             "resource_cleanup_allowance_ms": null,
         });
         let identity: ExecutionProcessIdentity = serde_json::from_value(value.clone()).unwrap();
         validate_execution_process_identity_shape(&identity).unwrap();
+        let mut missing_settlement = value.clone();
+        missing_settlement
+            .as_object_mut()
+            .unwrap()
+            .remove("resource_settlement_authority");
+        assert!(
+            serde_json::from_value::<ExecutionProcessIdentity>(missing_settlement).is_err(),
+            "absence cannot infer local or trusted settlement authority"
+        );
+        let mut extra_settlement = value.clone();
+        extra_settlement["resource_settlement_authority"] =
+            serde_json::json!({"authority": "local_process_scope"});
+        let extra: ExecutionProcessIdentity = serde_json::from_value(extra_settlement).unwrap();
+        assert!(
+            validate_execution_process_identity_shape(&extra).is_err(),
+            "a resource-free identity has no resource settlement authority"
+        );
         let mut missing_resource_authority = value.clone();
         missing_resource_authority
             .as_object_mut()
