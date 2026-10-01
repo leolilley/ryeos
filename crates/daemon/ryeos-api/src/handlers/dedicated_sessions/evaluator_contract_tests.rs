@@ -160,14 +160,46 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
             creates_chain_root: true,
         })?
         .root_admission;
-        let resolution = admission.resolution_output().clone();
-        let validation = engine.effective_validators.validate(kind, &resolution)?;
-        let candidate = lock_validated_effective_program(resolution, validation)?;
+        let mut resolution = admission.resolution_output().clone();
         let roots = engine.resolution_roots(None);
+        // Capture hooks from the signed kind and actual base/operator/project
+        // source discovery, just as production does before final validation.
+        // An empty authored list alone is not an effective hook plan.
+        let hook_snapshots =
+            ryeos_app::effective_program_preparation::prepare_preselection_effective_program(
+                engine,
+                &admission.verified_subject().resolved,
+                &mut resolution,
+                &roots,
+                &engine.trust_store,
+                None,
+            )?;
+        if kind == "graph" {
+            let plan = ryeos_engine::hooks::EffectiveHookPlan::from_value(
+                resolution
+                    .composed
+                    .derived
+                    .get(ryeos_engine::hooks::EFFECTIVE_HOOK_PLAN_DERIVED_KEY)
+                    .context("fixture Graph lost its captured hook plan")?,
+            )?;
+            assert!(plan.iter_layers().all(|(_, layer)| layer.hooks.is_empty()));
+            assert!(
+                !plan.sources.is_empty(),
+                "empty hooks still retain signed base provenance"
+            );
+        }
+        let semantic_projection = take_recovered_effective_program_derived(&mut resolution);
+        let validation = engine.effective_validators.validate(kind, &resolution)?;
+        let candidate =
+            relock_recovered_effective_program(resolution, validation, semantic_projection)?;
+        let config_proofs = hook_snapshots
+            .as_ref()
+            .map(|snapshots| std::slice::from_ref(&snapshots.dependency_proof))
+            .unwrap_or_default();
         let proof = prove_finalization_authority(
             &candidate,
             engine.kinds.get(kind).unwrap().external_content_contract(),
-            &[],
+            config_proofs,
             &engine.launch_config_roots(&roots),
             None,
             None,
