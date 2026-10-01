@@ -286,10 +286,13 @@ mod tests {
 
         let (_temporary, fixture) = make_fixture(b"initial");
         remove_leaf(&fixture);
-        let _socket = std::os::unix::net::UnixListener::bind(
-            fixture.directory.path().join(&fixture.contract.leaf),
-        )
-        .unwrap();
+        // A FIFO exercises the non-regular inode refusal without requiring
+        // socket creation, which the test host's network policy may forbid.
+        use std::os::unix::ffi::OsStrExt as _;
+        let path = fixture.directory.path().join(&fixture.contract.leaf);
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: path is a live NUL-terminated name in the owned private fixture.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
         assert!(fixture.read_frozen_file(deadline()).is_err());
     }
 
