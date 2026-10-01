@@ -220,13 +220,16 @@ async fn handle_source(
             "prepared verifier differs from the reserved launch owner".to_string(),
         ));
     }
-    if expected_verifier_ref.is_some_and(|expected| expected != prepared.verifier_ref) {
+    if expected_verifier_ref
+        .is_some_and(|expected| expected != prepared.policy_source().policy.verifier_ref.as_str())
+    {
         return Err(HandlerError::BadRequest(
             "signed qualification policy selects a different verifier than the release stage"
                 .into(),
         ));
     }
-    if expected_product_selections.is_some_and(|expected| expected != &prepared.product_selections)
+    if expected_product_selections
+        .is_some_and(|expected| expected != &prepared.product_selections())
     {
         return Err(HandlerError::BadRequest(
             "signed qualification inputs differ from the release stage's composed selections"

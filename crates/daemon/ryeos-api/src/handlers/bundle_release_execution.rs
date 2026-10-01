@@ -811,6 +811,7 @@ pub(crate) async fn execute_protected_qualification(
             witness_hash,
             witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
             relationship_name,
+            consumer_invocation: None,
             project_context: Some(ryeos_app::operator_external_content::product_qualification::launch::ProductQualificationProjectContext { snapshot_hash }),
             auxiliary_product_selections,
         },
