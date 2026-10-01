@@ -342,6 +342,7 @@ mod tests {
         let request = ProductQualificationConsumerWorkerRequest {
             schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
             credential_profile_id: Some("profile-one".into()),
+            fixture: None,
             session_setup: json!({"route_id":"session.start","payload":{}}),
             body: json!({"route_id":"turn.start","payload":{}}),
         };

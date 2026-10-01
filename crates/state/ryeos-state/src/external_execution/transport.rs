@@ -1244,7 +1244,7 @@ mod tests {
         };
         value.candidate_program = AdmittedExternalExecutionProgram::QualificationStructuredSession(
             AdmittedExternalQualificationSessionProgram {
-                schema: 1,
+                schema: crate::external_execution::qualification_session::QUALIFICATION_SESSION_PROGRAM_SCHEMA,
                 qualification_purpose_digest: "7".repeat(64),
                 consumer_content_digest: "8".repeat(64),
                 requirement: ordinary.requirement.clone(),
@@ -1254,6 +1254,7 @@ mod tests {
                 runtime_manifest_hash: ordinary.runtime_manifest_hash,
                 runtime_member: member,
                 runtime_recipe_digest: ordinary.runtime_recipe_digest,
+                fixture: None,
             },
         );
         value.schema = EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA;
@@ -1273,6 +1274,48 @@ mod tests {
         value.candidate_export_max_bytes = 0;
         value.validate().unwrap();
         value
+    }
+
+    #[test]
+    fn q_program_fixture_is_required_nullable_and_changes_program_identity() {
+        use ryeos_external_execution_contract::qualification_fixture::{
+            Q_FIXTURE_MOUNT_DESTINATION, QFixtureContract,
+        };
+        let bootstrap = relay_bootstrap();
+        let AdmittedExternalExecutionProgram::QualificationStructuredSession(mut program) =
+            bootstrap.candidate_program
+        else {
+            unreachable!()
+        };
+        let before = program.digest().unwrap();
+        let wire = serde_json::to_value(&program).unwrap();
+        assert!(wire["fixture"].is_null());
+        let mut missing = wire.clone();
+        missing.as_object_mut().unwrap().remove("fixture");
+        assert!(
+            serde_json::from_value::<AdmittedExternalQualificationSessionProgram>(missing).is_err()
+        );
+        let mut old = wire;
+        old["schema"] = serde_json::json!(1);
+        assert!(
+            serde_json::from_value::<AdmittedExternalQualificationSessionProgram>(old)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        program.fixture = Some(QFixtureContract {
+            schema: 1,
+            mount_destination: Q_FIXTURE_MOUNT_DESTINATION.into(),
+            leaf: "candidate.txt".into(),
+            initial_content_b64: String::new(),
+            initial_blob_hash: lillux::sha256_hex(b""),
+            max_bytes: 65536,
+        });
+        program.validate().unwrap();
+        assert_ne!(before, program.digest().unwrap());
+        assert_eq!(program.fixture(), program.fixture.as_ref());
+        program.fixture.as_mut().unwrap().leaf = "../escape".into();
+        assert!(program.validate().is_err());
     }
 
     #[test]

@@ -28,7 +28,7 @@ pub mod remote_verifier_source;
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v4";
 pub const PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA: &str =
-    "ryeos.qualification_worker_request.v3";
+    "ryeos.qualification_worker_request.v4";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
 // Current-only cut: an immutable v12 qualification head at the same
 // coordinate cannot be replaced by v14. Reissuance requires a fresh
@@ -437,6 +437,10 @@ pub struct ProductQualificationConsumerWorkerRequest {
     /// Null is valid data; launch admission checks the accepted environment.
     #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
     pub credential_profile_id: Option<String>,
+    /// Signed finite fixture data only; null preserves the no-fixture lane.
+    /// Native mount/capture admission and claim interpretation remain separate.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub fixture: Option<ryeos_external_execution_contract::qualification_fixture::QFixtureContract>,
     #[serde(deserialize_with = "Value::deserialize")]
     pub session_setup: Value,
     #[serde(deserialize_with = "Value::deserialize")]
@@ -456,6 +460,9 @@ impl ProductQualificationConsumerWorkerRequest {
             {
                 bail!("qualification Worker credential profile ID is not canonical and bounded");
             }
+        }
+        if let Some(fixture) = &self.fixture {
+            fixture.validate()?;
         }
         bounded_object(&self.session_setup, "qualification Worker session setup")?;
         bounded_object(&self.body, "qualification Worker request body")?;

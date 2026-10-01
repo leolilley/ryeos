@@ -2049,6 +2049,7 @@ fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source(
     let request = ProductQualificationConsumerWorkerRequest {
         schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
         credential_profile_id: None,
+        fixture: None,
         session_setup: json!({"task":"bounded session setup"}),
         body: json!({"task":"bounded qualification turn"}),
     };
@@ -2128,6 +2129,7 @@ fn worker_request_requires_distinct_bounded_setup_and_turn_in_current_schema() {
     let request = ProductQualificationConsumerWorkerRequest {
         schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
         credential_profile_id: None,
+        fixture: None,
         session_setup: json!({"route_id":"session.start", "payload":{}}),
         body: json!({"route_id":"turn.start", "payload":{"input":"probe"}}),
     };
@@ -2170,7 +2172,7 @@ fn worker_request_requires_distinct_bounded_setup_and_turn_in_current_schema() {
         assert!(selected.validate().is_err());
     }
     let mut immediate_predecessor = request.clone();
-    immediate_predecessor.schema = "ryeos.qualification_worker_request.v2".into();
+    immediate_predecessor.schema = "ryeos.qualification_worker_request.v3".into();
     assert!(immediate_predecessor.validate().is_err());
     let mut same = request.clone();
     same.session_setup = same.body.clone();
@@ -2194,6 +2196,66 @@ fn worker_request_requires_distinct_bounded_setup_and_turn_in_current_schema() {
         canonical_value_digest(&serde_json::to_value(request).unwrap()).unwrap(),
         canonical_value_digest(&serde_json::to_value(changed_setup).unwrap()).unwrap()
     );
+}
+
+#[test]
+fn worker_fixture_requires_explicit_null_or_exact_current_signed_data() {
+    use ryeos_external_execution_contract::qualification_fixture::{
+        Q_FIXTURE_CONTRACT_SCHEMA, Q_FIXTURE_MOUNT_DESTINATION, QFixtureContract,
+    };
+    let mut request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        credential_profile_id: None,
+        fixture: None,
+        session_setup: json!({"route_id":"session.start", "payload":{}}),
+        body: json!({"route_id":"turn.start", "payload":{"input":"probe"}}),
+    };
+    let none_wire = serde_json::to_value(&request).unwrap();
+    assert!(none_wire["fixture"].is_null());
+    let mut missing = none_wire.clone();
+    missing.as_object_mut().unwrap().remove("fixture");
+    assert!(serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(missing).is_err());
+    request.fixture = Some(QFixtureContract {
+        schema: Q_FIXTURE_CONTRACT_SCHEMA,
+        mount_destination: Q_FIXTURE_MOUNT_DESTINATION.into(),
+        leaf: "candidate.txt".into(),
+        initial_content_b64: String::new(),
+        initial_blob_hash: lillux::sha256_hex(b""),
+        max_bytes: 65536,
+    });
+    request.validate().unwrap();
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_ne!(
+        canonical_value_digest(&none_wire).unwrap(),
+        canonical_value_digest(&wire).unwrap()
+    );
+    assert_eq!(
+        serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(wire.clone()).unwrap(),
+        request
+    );
+    let mut changed = request.clone();
+    changed.fixture.as_mut().unwrap().leaf = "other.txt".into();
+    changed.validate().unwrap();
+    assert_ne!(
+        canonical_value_digest(&wire).unwrap(),
+        canonical_value_digest(&serde_json::to_value(changed).unwrap()).unwrap()
+    );
+    request.fixture.as_mut().unwrap().mount_destination = "/workspace".into();
+    assert!(request.validate().is_err());
+    for schema in [
+        "ryeos.qualification_worker_request.v1",
+        "ryeos.qualification_worker_request.v2",
+        "ryeos.qualification_worker_request.v3",
+    ] {
+        let mut old = none_wire.clone();
+        old["schema"] = json!(schema);
+        assert!(
+            serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(old)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
 }
 
 #[test]
@@ -2447,6 +2509,7 @@ fn consumer_q_evidence_fixture() -> ProductQualificationEvidence {
             consumer_worker_request: Some(ProductQualificationConsumerWorkerRequest {
                 schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
                 credential_profile_id: Some("fixture-profile".into()),
+                fixture: None,
                 session_setup: json!({"route":"session.start","body":{}}),
                 body: json!({"route":"turn.start","body":{"prompt":"bounded"}}),
             }),

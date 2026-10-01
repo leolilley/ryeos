@@ -26,7 +26,7 @@ use super::admission::{
     ExternalCandidateRuntimeAuthority,
 };
 
-pub const QUALIFICATION_SESSION_PROGRAM_SCHEMA: u32 = 1;
+pub const QUALIFICATION_SESSION_PROGRAM_SCHEMA: u32 = 2;
 
 /// One logical Worker qualification contact per accepted verifier root,
 /// restored qualification operation and signed scenario. The key deliberately
@@ -64,6 +64,9 @@ pub struct AdmittedExternalQualificationSessionProgram {
     pub runtime_manifest_hash: String,
     pub runtime_member: ProductQualificationConsumerRuntimeMemberIdentity,
     pub runtime_recipe_digest: String,
+    /// Exact signed selected-scenario data, not native mount or export authority.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub fixture: Option<ryeos_external_execution_contract::qualification_fixture::QFixtureContract>,
 }
 
 impl AdmittedExternalQualificationSessionProgram {
@@ -138,6 +141,7 @@ impl AdmittedExternalQualificationSessionProgram {
             runtime_manifest_hash: product.evidence.manifest_hash.clone(),
             runtime_member: content.runtime_member.clone(),
             runtime_recipe_digest: requirement.runtime_recipe.digest()?,
+            fixture: selected_fixture(purpose)?,
         };
         program.validate()?;
         program.validate_against_purpose(purpose)?;
@@ -170,7 +174,8 @@ impl AdmittedExternalQualificationSessionProgram {
                 && self.qualification_use.profile_hash == content.worker_profile_hash
                 && self.runtime_manifest_hash == purpose.subject_manifest_hash
                 && self.runtime_manifest_hash == content.runtime_realization.manifest_hash
-                && self.runtime_member == content.runtime_member,
+                && self.runtime_member == content.runtime_member
+                && self.fixture == selected_fixture(purpose)?,
             "qualification-only program differs from its accepted purpose"
         );
         Ok(())
@@ -181,6 +186,9 @@ impl AdmittedExternalQualificationSessionProgram {
             self.schema == QUALIFICATION_SESSION_PROGRAM_SCHEMA,
             "unsupported qualification-only session program"
         );
+        if let Some(fixture) = self.fixture() {
+            fixture.validate()?;
+        }
         self.requirement.validate()?;
         self.qualification_use.validate()?;
         ensure!(
@@ -218,10 +226,17 @@ impl AdmittedExternalQualificationSessionProgram {
         Ok(())
     }
 
+    /// Data for the native preparer; this getter does not admit a mount.
+    pub fn fixture(
+        &self,
+    ) -> Option<&ryeos_external_execution_contract::qualification_fixture::QFixtureContract> {
+        self.fixture.as_ref()
+    }
+
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         canonical_value_digest(&serde_json::json!({
-            "domain": "ryeos.external-qualification-session-program.v1",
+            "domain": "ryeos.external-qualification-session-program.v2",
             "program": self,
         }))
     }
@@ -271,10 +286,101 @@ impl AdmittedExternalQualificationSessionProgram {
     }
 }
 
+/// Select only the originally sealed scenario. No first-scenario fallback or
+/// caller-supplied fixture can change this projection during recovery.
+fn selected_fixture(
+    purpose: &QualificationLaunchPurpose,
+) -> Result<Option<ryeos_external_execution_contract::qualification_fixture::QFixtureContract>> {
+    let invocation = purpose
+        .consumer_invocation
+        .as_ref()
+        .context("qualification-only session has no sealed consumer invocation")?;
+    let scenario = purpose
+        .policy_source
+        .policy
+        .producer_scenarios
+        .get(&invocation.scenario_id)
+        .context("qualification-only session has no signed selected scenario")?;
+    let request = scenario
+        .consumer_worker_request
+        .as_ref()
+        .context("qualification-only selected scenario has no Worker request")?;
+    request.validate()?;
+    Ok(request.fixture.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate;
+
+    #[test]
+    fn fixture_selection_uses_only_sealed_scenario_and_requires_its_request() {
+        use crate::external_content::products::qualification::{
+            PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA,
+            ProductQualificationConsumerWorkerRequest, ProductQualificationProducerScenario,
+        };
+        use ryeos_external_execution_contract::qualification_fixture::{
+            Q_FIXTURE_MOUNT_DESTINATION, QFixtureContract,
+        };
+        use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection;
+        // Exercise the selector in isolation. Public program constructors also
+        // validate the entire authenticated purpose, profile and product.
+        let mut purpose = crate::external_content::products::qualification::tests::launch_purpose();
+        assert!(selected_fixture(&purpose).is_err());
+        purpose.consumer_invocation = Some(ConsumerVerificationInputSelection {
+            scenario_id: "selected".into(),
+            qualification_operation_id: "a".repeat(64),
+            prerequisite_measurement_attempt_id: "b".repeat(64),
+        });
+        let fixture = QFixtureContract {
+            schema: 1,
+            mount_destination: Q_FIXTURE_MOUNT_DESTINATION.into(),
+            leaf: "candidate.txt".into(),
+            initial_content_b64: String::new(),
+            initial_blob_hash: lillux::sha256_hex(b""),
+            max_bytes: 65536,
+        };
+        let scenario = ProductQualificationProducerScenario {
+            recipe_ref: "config:fixtures/recipe".into(),
+            remote_verifier: None,
+            consumer_worker_request: Some(ProductQualificationConsumerWorkerRequest {
+                schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+                credential_profile_id: None,
+                fixture: Some(fixture.clone()),
+                session_setup: serde_json::json!({"route":"session.start"}),
+                body: serde_json::json!({"route":"turn.start"}),
+            }),
+        };
+        purpose
+            .policy_source
+            .policy
+            .producer_scenarios
+            .insert("unselected".into(), scenario.clone());
+        assert!(selected_fixture(&purpose).is_err());
+        purpose
+            .policy_source
+            .policy
+            .producer_scenarios
+            .insert("selected".into(), scenario);
+        assert_eq!(selected_fixture(&purpose).unwrap(), Some(fixture));
+        let selected = purpose
+            .policy_source
+            .policy
+            .producer_scenarios
+            .get_mut("selected")
+            .unwrap();
+        selected.consumer_worker_request.as_mut().unwrap().fixture = None;
+        assert_eq!(selected_fixture(&purpose).unwrap(), None);
+        purpose
+            .policy_source
+            .policy
+            .producer_scenarios
+            .get_mut("selected")
+            .unwrap()
+            .consumer_worker_request = None;
+        assert!(selected_fixture(&purpose).is_err());
+    }
 
     #[test]
     fn one_logical_qualification_contact_survives_evidence_and_binding_changes() {
