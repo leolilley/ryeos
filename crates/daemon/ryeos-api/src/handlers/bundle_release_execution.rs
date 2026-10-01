@@ -1185,6 +1185,7 @@ mod tests {
             witness_hash: "d".repeat(64),
             witness_source: ProductWitnessSource::LocalCapture {},
             relationship_name: "missing_qualification_relationship".to_owned(),
+            consumer_invocation: None,
             project_context: Some(ryeos_app::operator_external_content::product_qualification::launch::ProductQualificationProjectContext { snapshot_hash: snapshot_hash.clone() }),
             auxiliary_product_selections: Vec::new(),
         };
