@@ -227,7 +227,6 @@ pub enum GuestWorkspaceView {
     CapturedInputs,
 }
 
-
 /// Complete descriptor-bound environment delivered to one external guest.
 ///
 /// Descriptor coordinates are launch transport only. `identity_digest()`
