@@ -1570,6 +1570,28 @@ impl InheritedDescriptorAuthority {
         require_time()
     }
 
+    /// Borrow this actual nonblocking FIFO writer for one bounded record.
+    /// Returns the actual write count immediately; callers must retain that
+    /// count before any later expiry check and must never replay sent bytes.
+    /// This observes bytes only, not native or settlement evidence.
+    #[cfg(target_os = "linux")]
+    pub fn write_atomic_pipe_record_until(
+        &self,
+        record: &[u8],
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> std::io::Result<usize> {
+        if record.is_empty() || record.len() > libc::PIPE_BUF as usize {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic pipe record must contain 1..=PIPE_BUF bytes",
+            ));
+        }
+        self.require_distinct_nonblocking_pipe_writer(&[], original_deadline)
+            .map_err(std::io::Error::other)?;
+        let mut stream = DeadlinePipeStream::new(self.file().as_fd(), original_deadline)?;
+        stream.write_atomic_record(record)
+    }
+
     #[cfg(unix)]
     pub fn directory_identity(&self) -> anyhow::Result<crate::secure_fs::PinnedDirectoryIdentity> {
         let lease = retain_fork_sensitive_descriptors();
@@ -10718,6 +10740,99 @@ mod native_terminal_borrowed_role_guard_tests {
                     expired
                 )
                 .is_err()
+        );
+        assert!(writer.file_identity().is_ok());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_terminal_atomic_pipe_write_tests {
+    use super::*;
+
+    fn pipe() -> (
+        SupervisedLauncherAttachmentStatusPipe,
+        InheritedDescriptorAuthority,
+        crate::time::MonotonicDeadline,
+    ) {
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let writer = held.prepare_native_settlement_channel(deadline).unwrap();
+        (held, writer, deadline)
+    }
+
+    #[test]
+    fn atomic_pipe_write_returns_actual_count_and_invalid_sizes_write_nothing() {
+        let (held, writer, deadline) = pipe();
+        let record = vec![b'x'; libc::PIPE_BUF as usize];
+        assert_eq!(
+            writer
+                .write_atomic_pipe_record_until(&record, deadline)
+                .unwrap(),
+            record.len()
+        );
+        let mut reader = held
+            .reader
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .reader
+            .file();
+        let mut received = vec![0; record.len()];
+        reader.read_exact(&mut received).unwrap();
+        assert_eq!(received, record);
+        assert_eq!(
+            writer
+                .write_atomic_pipe_record_until(&[], deadline)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            writer
+                .write_atomic_pipe_record_until(&vec![b'x'; libc::PIPE_BUF as usize + 1], deadline,)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        let mut sentinel = [0];
+        assert_eq!(
+            reader.read(&mut sentinel).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn closed_reader_or_expired_window_fails_without_consuming_writer_owner() {
+        let (held, writer, deadline) = pipe();
+        drop(held);
+        assert!(
+            writer
+                .write_atomic_pipe_record_until(b"one\n", deadline)
+                .is_err()
+        );
+        assert!(writer.file_identity().is_ok());
+
+        let (held, writer, _) = pipe();
+        let expired = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(
+            writer
+                .write_atomic_pipe_record_until(b"one\n", expired)
+                .is_err()
+        );
+        let mut reader = held
+            .reader
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .reader
+            .file();
+        assert_eq!(
+            reader.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
         );
         assert!(writer.file_identity().is_ok());
     }
