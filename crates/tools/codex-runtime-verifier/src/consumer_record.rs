@@ -990,6 +990,7 @@ impl ImportedConsumerInputs {
             contain_process_group: false,
             nested_sandbox: true,
             aggregate_limits: None,
+            target_limits: None,
         };
         protected_owner.ensure_path_binding()?;
         self.root.ensure_path_binding()?;

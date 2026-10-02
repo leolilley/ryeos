@@ -261,6 +261,7 @@ fn held_source_target(
         contain_process_group: true,
         nested_sandbox: false,
         aggregate_limits: None,
+        target_limits: None,
     };
     let expected = request.clone();
     let mut held = lillux::sandbox::prepare_linux_sandbox_from_sealed_source(

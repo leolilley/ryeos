@@ -8499,6 +8499,48 @@ pub fn configure_subprocess_limits(
     Ok(())
 }
 
+/// Install restrictions in the already-created native target, after trusted
+/// namespace/descriptor setup and before any target code or applied receipt.
+/// The caller must be the single-threaded sandbox child, never the daemon.
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_target_subprocess_limits(
+    limits: Option<&SubprocessLimits>,
+) -> Result<(), String> {
+    validate_subprocess_limits(limits)?;
+    if limits.is_some_and(|limits| {
+        limits.max_stdout_bytes.is_some() || limits.max_stderr_bytes.is_some()
+    }) {
+        return Err("native target cannot own pipe-output retention limits".to_owned());
+    }
+    let installed = validated_rlimits(limits)?;
+    for (resource, value) in [
+        (libc::RLIMIT_NOFILE, installed[0]),
+        (libc::RLIMIT_AS, installed[1]),
+        (libc::RLIMIT_CPU, installed[2]),
+        (libc::RLIMIT_NPROC, installed[3]),
+    ] {
+        if let Some(value) = value {
+            let limit = libc::rlimit {
+                rlim_cur: value,
+                rlim_max: value,
+            };
+            if unsafe { libc::setrlimit(resource, &limit) } != 0 {
+                return Err(format!(
+                    "install native target resource limit: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+    }
+    if limits.is_some_and(|limits| limits.deny_process_creation) {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        install_no_process_creation_filter().map_err(|error| error.to_string())?;
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        return Err("no-process-creation limit is unsupported on this host".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_output_retention_limits(limits: Option<&SubprocessLimits>) -> Result<(), String> {
     let Some(limits) = limits else {
         return Ok(());

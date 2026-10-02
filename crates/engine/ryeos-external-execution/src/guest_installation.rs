@@ -924,6 +924,7 @@ impl CommittedGuestSupervisorLaunchIntent {
             contain_process_group: false,
             nested_sandbox: true,
             aggregate_limits: None,
+            target_limits: None,
         };
         Ok(PreparedGuestMountedSandbox {
             _committed: self,

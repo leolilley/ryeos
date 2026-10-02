@@ -109,6 +109,7 @@ pub(crate) fn prepare_candidate(
         contain_process_group: spec.contain_process_group,
         nested_sandbox: spec.nested_sandbox,
         aggregate_limits: None,
+        target_limits: None,
     };
     NativeExternalCandidate::prepare(
         spec.binding.clone(),

@@ -472,6 +472,7 @@ fn translate_launch(request: &AdapterLaunchRequest) -> Result<lillux::LinuxSandb
         // stays outside this adapter/target namespace. The current protocol
         // admits no aggregate-limit request; ordinary rlimits do not supply it.
         aggregate_limits: None,
+        target_limits: None,
     })
 }
 

@@ -168,6 +168,9 @@ pub struct LinuxSandboxRequest {
     /// PID-local proc becomes writable for child UID/GID maps, never host proc.
     pub nested_sandbox: bool,
     pub aggregate_limits: Option<LinuxSandboxAggregateLimits>,
+    /// Installed in the actual target after trusted setup, before receipt/exec.
+    /// Pipe retention belongs to the launch owner and must not appear here.
+    pub target_limits: Option<crate::SubprocessLimits>,
 }
 
 /// Whether a guest mount would overlap namespace structure owned by Lillux.
@@ -1779,6 +1782,12 @@ mod imp {
     }
 
     fn validate_request(request: &LinuxSandboxRequest) -> Result<(), String> {
+        crate::validate_subprocess_limits(request.target_limits.as_ref())?;
+        if request.target_limits.is_some_and(|limits| {
+            limits.max_stdout_bytes.is_some() || limits.max_stderr_bytes.is_some()
+        }) {
+            return Err("native target cannot own pipe-output retention limits".to_owned());
+        }
         if request.nested_sandbox && unsafe { libc::geteuid() } == 0 {
             return Err(
                 "nested sandbox requires an unprivileged launch identity, not node root".to_owned(),
@@ -4073,6 +4082,7 @@ mod imp {
             unsafe { libc::chdir(cwd.as_ptr()) },
             "enter sandbox target cwd",
         )?;
+        crate::exec::apply_target_subprocess_limits(request.target_limits.as_ref())?;
         if let Some((fd, mounts)) = applied_launch {
             write_applied_launch(fd, &executable, &arguments, &environment, &mounts)?;
         }
@@ -8210,7 +8220,32 @@ mod tests {
             contain_process_group: true,
             nested_sandbox: false,
             aggregate_limits: None,
+            target_limits: None,
         }
+    }
+
+    #[test]
+    fn native_target_limits_refuse_invalid_or_pipe_limits_before_setup() {
+        let mut request = minimal_request();
+        request.target_limits = Some(crate::SubprocessLimits {
+            max_cpu_seconds: Some(0),
+            ..Default::default()
+        });
+        assert!(
+            launch_linux_sandbox(request)
+                .unwrap_err()
+                .contains("max_cpu_seconds must be positive")
+        );
+        let mut request = minimal_request();
+        request.target_limits = Some(crate::SubprocessLimits {
+            max_stdout_bytes: Some(32768),
+            ..Default::default()
+        });
+        assert!(
+            launch_linux_sandbox(request)
+                .unwrap_err()
+                .contains("native target cannot own pipe-output retention limits")
+        );
     }
 
     #[test]
