@@ -140,7 +140,9 @@ class Lifecycle:
     def _validate_call(self, name, args):
         if name == "cuInit" and args[0] != 0: self._fail("unselected driver initialization")
         if name == "cuDeviceGet" and args[1] != self.selected_device: self._fail("extra device")
-        if name == "cuDeviceComputeCapability" and _value(args[2]) != self.selected_device: self._fail("extra device")
+        if name == "cuDeviceComputeCapability":
+            if self._device_handle is None or _value(args[2]) != self.selected_device:
+                self._fail("extra device")
         if name == "cuCtxCreate_v2":
             if self._context_created or args[1] != 0 or _value(args[2]) != self._device_handle:
                 self._fail("extra or shared context")
@@ -168,8 +170,12 @@ class Lifecycle:
 
     def _call(self, name, args):
         self._validate_call(name, args)
+        # Pinned CUDADevice supplies its ordinal integer here, whereas the
+        # generated binding consumes CUdevice. Forward the actual handle returned
+        # by the selected cuDeviceGet instead of assuming handle == ordinal.
+        native_args = (*args[:2], self._bindings.CUdevice(self._device_handle)) if name == "cuDeviceComputeCapability" else args
         try:
-            status = self._native[name](*args)
+            status = self._native[name](*native_args)
         except BaseException:
             self._poison = self._poison or f"uncertain native {name}"
             raise
