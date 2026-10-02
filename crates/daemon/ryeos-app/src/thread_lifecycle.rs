@@ -52,13 +52,13 @@ mod validation;
 #[cfg(test)]
 pub(crate) use direct_execution::external_direct_program_test_fixture;
 pub use direct_execution::{
-    ADMITTED_DIRECT_PROJECT_ROOT, PreparedItemPlan, RunningItem, SpawnItemFailure,
-    SpawnItemFailureDisposition, SpawnItemParams, SpawnedItemAwaitingAttachment,
+    ADMITTED_DIRECT_PROJECT_ROOT, PreparedExternalDirectProjectFile, PreparedItemPlan, RunningItem,
+    SpawnItemFailure, SpawnItemFailureDisposition, SpawnItemParams, SpawnedItemAwaitingAttachment,
     SpawnedPersistentSessionAwaitingAttachment, capsule_requires_external_direct,
     effective_child_external_content_declarations, external_direct_environment,
     prepare_bundle_item_plan_for_qualification, prepare_captured_item_plan,
-    prepare_external_qualification_local_worker_plan, prepare_item_plan, spawn_item,
-    with_prepared_external_qualification_local_worker_plan,
+    prepare_external_direct_project_file, prepare_external_qualification_local_worker_plan,
+    prepare_item_plan, spawn_item, with_prepared_external_qualification_local_worker_plan,
 };
 pub(crate) use direct_execution::{
     CompiledExternalDirectProgram, compile_external_direct_program,

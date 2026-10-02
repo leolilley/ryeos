@@ -8,6 +8,9 @@
 #[cfg(test)]
 mod tests;
 
+mod project_file;
+pub use project_file::{PreparedExternalDirectProjectFile, prepare_external_direct_project_file};
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -209,6 +212,7 @@ pub(crate) fn compile_external_direct_program(
     inputs: &ExternalGuestInputProjection,
     source: Option<&VerifiedAdmittedSourceRecords>,
     launch_owner: crate::runtime_db::LaunchOwner,
+    project_file: Option<&PreparedExternalDirectProjectFile>,
 ) -> Result<CompiledExternalDirectProgram> {
     // The placement owner authenticates the retained capsule and born thread;
     // this join also prevents the evaluator source being selected from C.
@@ -219,7 +223,10 @@ pub(crate) fn compile_external_direct_program(
     );
     validate_external_direct_project_inputs(&capsule.project_authority, inputs)?;
     validate_direct_capsule_source(capsule, source)?;
-    let program = compile_external_direct_program_parts(
+    if let Some(proof) = project_file {
+        proof.require_capsule(capsule)?;
+    }
+    let program = compile_external_direct_program_parts_with_project_file(
         &capsule.execution_closure,
         &capsule.artifact_identity,
         protocol,
@@ -227,6 +234,7 @@ pub(crate) fn compile_external_direct_program(
         chain_root_id,
         inputs,
         source,
+        project_file,
     )?;
     Ok(CompiledExternalDirectProgram {
         program,
@@ -537,6 +545,7 @@ fn retained_external_direct_plan(
     Ok((plan, retained))
 }
 
+#[cfg(test)]
 fn compile_external_direct_program_parts(
     closure: &AdmittedExecutionClosure,
     artifact: &AdmittedLaunchArtifactIdentity,
@@ -545,6 +554,28 @@ fn compile_external_direct_program_parts(
     chain_root_id: &str,
     inputs: &ExternalGuestInputProjection,
     source: Option<&VerifiedAdmittedSourceRecords>,
+) -> Result<AdmittedExternalDirectProgram> {
+    compile_external_direct_program_parts_with_project_file(
+        closure,
+        artifact,
+        protocol,
+        thread_id,
+        chain_root_id,
+        inputs,
+        source,
+        None,
+    )
+}
+
+fn compile_external_direct_program_parts_with_project_file(
+    closure: &AdmittedExecutionClosure,
+    artifact: &AdmittedLaunchArtifactIdentity,
+    protocol: &VerifiedProtocol,
+    thread_id: &str,
+    chain_root_id: &str,
+    inputs: &ExternalGuestInputProjection,
+    source: Option<&VerifiedAdmittedSourceRecords>,
+    project_file: Option<&PreparedExternalDirectProjectFile>,
 ) -> Result<AdmittedExternalDirectProgram> {
     let (plan, retained) = retained_external_direct_plan(closure, artifact, protocol)?;
     let target = plan
@@ -566,6 +597,7 @@ fn compile_external_direct_program_parts(
         .context("external direct endpoint has not been sealed")?;
     let spec = ordinary_direct_subprocess(&plan)?;
     inputs.validate()?;
+    let project_file_destination = project_file::require_inputs(&plan, inputs, project_file)?;
     ensure!(
         inputs.workspace_view == direct_workspace_view(&plan)?,
         "external direct workspace view differs from its retained plan ceiling"
@@ -632,9 +664,10 @@ fn compile_external_direct_program_parts(
                 .to_str()
                 .context("external direct source entry is not UTF-8")?
                 .to_owned()),
-            PlanArgument::AdmittedExecutionProjectFile { .. } => {
-                bail!("external execution project file requires admitted candidate input binding")
-            }
+            PlanArgument::AdmittedExecutionProjectFile { .. } => Ok(project_file_destination
+                .as_ref()
+                .context("external execution project file has no bound input")?
+                .clone()),
             PlanArgument::AdmittedSourceMember { .. } => {
                 bail!("external direct source members require an admitted guest binding")
             }

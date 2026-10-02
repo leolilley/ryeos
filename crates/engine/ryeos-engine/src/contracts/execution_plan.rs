@@ -446,6 +446,10 @@ impl PlanExecutionProjectFileInput {
         let destination = std::path::Path::new(&self.destination);
         let workspace = std::path::Path::new("/workspace");
         anyhow::ensure!(
+            !lillux::linux_sandbox_mount_overlaps_managed_namespace(destination),
+            "execution project file destination overlaps managed native namespace",
+        );
+        anyhow::ensure!(
             !destination.starts_with(workspace) && !workspace.starts_with(destination),
             "execution project file destination overlaps workspace",
         );

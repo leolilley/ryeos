@@ -482,3 +482,170 @@ fn evaluator_input_custody_rejects_missing_and_b_snapshot_substitution() {
     );
     require_evaluator_execution_materialization(None, snapshot_hash, None).unwrap();
 }
+
+#[cfg(target_os = "linux")]
+fn selected_member_capsule(mut capsule: AdmittedLaunchCapsule) -> AdmittedLaunchCapsule {
+    use ryeos_app::thread_lifecycle::{CandidateEvaluationAuthority, CandidateOperationPurpose};
+    let ExecutionProjectAuthority::PinnedGeneration { snapshot_hash, .. } =
+        &capsule.project_authority
+    else {
+        unreachable!();
+    };
+    let evaluation = CandidateEvaluationAuthority {
+        schema_version: CandidateEvaluationAuthority::SCHEMA_VERSION,
+        source_chain_root_id: "T-00000000-0000-4000-8000-000000000001".to_owned(),
+        source_placement_thread_id: "T-00000000-0000-4000-8000-000000000002".to_owned(),
+        owner_principal: "node:input-custody-test".to_owned(),
+        base_snapshot_hash: snapshot_hash.clone(),
+        candidate_snapshot_hash: snapshot_hash.clone(),
+        candidate_validation_hash: "b".repeat(64),
+        integration_operation_hash: None,
+        integration_launch_id: None,
+        purpose: CandidateOperationPurpose::Evaluate,
+    };
+    capsule.sealed_invocation["candidate_evaluation"] = serde_json::to_value(evaluation).unwrap();
+    capsule.exact_program =
+        admitted_launch_capsule::project_sealed_root_exact_program(&capsule.sealed_invocation)
+            .unwrap();
+    capsule.exact_program_hash = lillux::sha256_hex(
+        lillux::canonical_json(&capsule.exact_program)
+            .unwrap()
+            .as_bytes(),
+    );
+    let AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. } =
+        &mut capsule.execution_closure
+    else {
+        unreachable!();
+    };
+    execution_plan["nodes"][0]["spec"]["args"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "kind":"admitted_execution_project_file", "declaration": {
+                "relative_path":"data.txt", "destination":"/candidate-input", "max_bytes":4096,
+                "normalized_mode":420, "access":"read_only"
+            }
+        }));
+    let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+        execution_plan_hash,
+        ..
+    } = &mut capsule.artifact_identity
+    else {
+        unreachable!();
+    };
+    *execution_plan_hash =
+        lillux::sha256_hex(lillux::canonical_json(execution_plan).unwrap().as_bytes());
+    capsule.validate().unwrap();
+    capsule
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn selected_c_member_uses_sealed_cas_descriptor_and_refuses_missing_custody() {
+    use ryeos_app::thread_lifecycle::prepare_external_direct_project_file;
+    use ryeos_external_execution_contract::{GuestMountContentAuthority, GuestMountRole};
+    let (root, state, records, _) =
+        crate::execution::source_closure::tests::external_delivery::state_and_source();
+    let path = root.path().join("candidate-input-materialization");
+    let (ordinary, _, protocol) = retained_inputs_capsule(&state, &records, &path);
+    let capsule = selected_member_capsule(ordinary);
+    let ExecutionProjectAuthority::PinnedGeneration { snapshot_hash, .. } =
+        &capsule.project_authority
+    else {
+        unreachable!();
+    };
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("data.txt"), b"retained base data").unwrap();
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let guard = authority.acquire_shared_guard().unwrap();
+    let c =
+        ryeos_state::PinnedProjectMaterialization::verify(&authority, &guard, snapshot_hash, &path)
+            .unwrap();
+    drop(guard);
+    // Changing the checkout after verification cannot replace the selected
+    // member: preparation reads the verified snapshot's CAS bytes.
+    std::fs::write(path.join("data.txt"), b"wrong live candidate").unwrap();
+    let prepared =
+        prepare_external_direct_inputs(&state, &capsule, &protocol, THREAD, CHAIN, Some(&c))
+            .unwrap();
+    let proof = prepared.project_file.as_ref().unwrap();
+    let file = proof.input().unwrap();
+    assert_eq!(file.role, GuestMountRole::Configuration);
+    assert_eq!(file.destination, "/candidate-input");
+    assert_eq!(file.normalized_mode, Some(0o644));
+    assert!(
+        matches!(&file.content_authority, GuestMountContentAuthority::RawFile { sha256 } if sha256 == &lillux::sha256_hex(b"retained base data"))
+    );
+    assert_eq!(
+        proof.input_authority().inherited_descriptor().unwrap(),
+        file.descriptor
+    );
+    assert_eq!(
+        proof
+            .input_authority()
+            .digest_regular_file_stable_exact(
+                &proof.input_authority().regular_file_observation().unwrap()
+            )
+            .unwrap(),
+        lillux::sha256_hex(b"retained base data")
+    );
+    assert_eq!(
+        prepared
+            .authority
+            .projection()
+            .inputs
+            .iter()
+            .filter(|input| input.role == GuestMountRole::Configuration)
+            .count(),
+        1
+    );
+    assert_eq!(
+        prepared
+            .authority
+            .projection()
+            .inputs
+            .iter()
+            .filter(|input| input.role == GuestMountRole::Source)
+            .count(),
+        1
+    );
+    assert!(prepare_external_direct_project_file(&capsule, &protocol, None).is_err());
+    let mut no_evaluate = capsule.clone();
+    no_evaluate.sealed_invocation["candidate_evaluation"] = serde_json::Value::Null;
+    no_evaluate.exact_program =
+        admitted_launch_capsule::project_sealed_root_exact_program(&no_evaluate.sealed_invocation)
+            .unwrap();
+    no_evaluate.exact_program_hash = lillux::sha256_hex(
+        lillux::canonical_json(&no_evaluate.exact_program)
+            .unwrap()
+            .as_bytes(),
+    );
+    assert!(prepare_external_direct_project_file(&no_evaluate, &protocol, Some(&c)).is_err());
+    for (field, value) in [
+        ("relative_path", json!("missing.py")),
+        ("max_bytes", json!(1)),
+        ("destination", json!("/proc/file")),
+        ("destination", json!("/.lillux-sealed-staging/file")),
+    ] {
+        let mut changed = capsule.clone();
+        let AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. } =
+            &mut changed.execution_closure
+        else {
+            unreachable!();
+        };
+        execution_plan["nodes"][0]["spec"]["args"][1]["declaration"][field] = value;
+        let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            execution_plan_hash,
+            ..
+        } = &mut changed.artifact_identity
+        else {
+            unreachable!();
+        };
+        *execution_plan_hash =
+            lillux::sha256_hex(lillux::canonical_json(execution_plan).unwrap().as_bytes());
+        assert!(
+            prepare_external_direct_project_file(&changed, &protocol, Some(&c)).is_err(),
+            "{field}"
+        );
+    }
+}

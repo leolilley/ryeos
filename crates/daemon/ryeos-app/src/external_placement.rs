@@ -5251,6 +5251,7 @@ pub fn prepare_external_direct_start<'a>(
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
     source: Option<&ryeos_state::source_verification::VerifiedAdmittedSourceRecords>,
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+    project_file: Option<&crate::thread_lifecycle::PreparedExternalDirectProjectFile>,
 ) -> Result<ExternalDirectStart<'a>> {
     ensure!(
         state.state_store.external_allocation(placement)?.is_none(),
@@ -5272,6 +5273,7 @@ pub fn prepare_external_direct_start<'a>(
         guest_inputs.projection(),
         source,
         claim.owner,
+        project_file,
     )?;
     let prepared = ExternalPlacementOwner::new(state).prepare_direct(compiled)?;
     let deadline = prepared.record.reservation.startup_deadline()?;

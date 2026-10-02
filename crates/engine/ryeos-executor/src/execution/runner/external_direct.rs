@@ -222,6 +222,7 @@ fn run(
                     &protocol,
                     inputs.source.as_ref(),
                     inputs.authority,
+                    inputs.project_file.as_deref(),
                 )?
             }
             Entry::Recover => placement::recover_external_direct_start(state, thread_id)?,

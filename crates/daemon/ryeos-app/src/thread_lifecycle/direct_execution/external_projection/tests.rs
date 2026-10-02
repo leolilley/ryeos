@@ -1380,3 +1380,8 @@ fn external_direct_projection_preserves_ordinary_environment_source_authority() 
         "search without PATH was discarded"
     );
 }
+
+pub(super) fn project_file_plan_fixture() -> (ExecutionPlan, ExternalGuestInputProjection) {
+    let fixture = Fixture::new();
+    (fixture.plan, fixture.inputs)
+}

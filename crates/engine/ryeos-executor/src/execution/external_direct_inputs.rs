@@ -26,6 +26,8 @@ pub(crate) struct PreparedExternalDirectInputs {
     /// Original verified B-source records for the app's ordinary-plan compiler.
     /// Their directory and generation lease are retained inside `authority`.
     pub source: Option<VerifiedAdmittedSourceRecords>,
+    pub project_file:
+        Option<std::sync::Arc<ryeos_app::thread_lifecycle::PreparedExternalDirectProjectFile>>,
 }
 
 pub(crate) fn prepare_external_direct_inputs(
@@ -67,6 +69,12 @@ pub(crate) fn prepare_external_direct_inputs(
     else {
         anyhow::bail!("external direct inputs require an ordinary exact realization executable");
     };
+    let project_file = ryeos_app::thread_lifecycle::prepare_external_direct_project_file(
+        capsule,
+        protocol,
+        execution_materialization,
+    )?
+    .map(std::sync::Arc::new);
     let products = super::external_guest_inputs::prepare_product_inputs(
         state,
         resolution,
@@ -134,6 +142,11 @@ pub(crate) fn prepare_external_direct_inputs(
     } else {
         None
     };
+    if let Some(file) = &project_file {
+        projection.inputs.push(file.input()?);
+        authorities.push(file.input_authority());
+        lifelines.push(Box::new(std::sync::Arc::clone(file)));
+    }
     let authority = ExternalGuestInputAuthority::new(
         projection,
         base_descriptor,
@@ -145,6 +158,7 @@ pub(crate) fn prepare_external_direct_inputs(
     Ok(PreparedExternalDirectInputs {
         authority,
         source: source_records,
+        project_file,
     })
 }
 

@@ -1271,6 +1271,11 @@ mod tests {
             ("relative_path", serde_json::json!("../secret")),
             ("destination", serde_json::json!("/workspace/private")),
             ("destination", serde_json::json!("/")),
+            ("destination", serde_json::json!("/proc/custom")),
+            (
+                "destination",
+                serde_json::json!("/.lillux-sealed-staging/file"),
+            ),
             ("max_bytes", serde_json::json!(0)),
             ("max_bytes", serde_json::json!(65537)),
             ("normalized_mode", serde_json::json!(493)),

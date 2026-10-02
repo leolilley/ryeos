@@ -8,7 +8,10 @@ pub(crate) use external_projection::{
     CompiledExternalDirectProgram, compile_external_direct_program,
     validate_retained_external_direct_program,
 };
-pub use external_projection::{capsule_requires_external_direct, external_direct_environment};
+pub use external_projection::{
+    PreparedExternalDirectProjectFile, capsule_requires_external_direct,
+    external_direct_environment, prepare_external_direct_project_file,
+};
 
 fn persistent_session_spawn_error(error: ryeos_engine::error::EngineError) -> anyhow::Error {
     // Lillux's held-launch owner can prove group cleanup before reporting a
