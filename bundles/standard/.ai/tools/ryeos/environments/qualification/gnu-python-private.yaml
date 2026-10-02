@@ -110,7 +110,8 @@ config:
                     selector.close()
             return status, b"".join(chunks)
 
-        root = "/ryeos/realizations/python-gnu-private/python"
+        distribution = "/ryeos/realizations/python-gnu-private"
+        root = distribution + "/python"
         command = [root + "/lib/ld-linux-x86-64.so.2", "--inhibit-cache",
                    "--library-path", root + "/lib", root + "/bin/python3.14",
                    "-I", "-S", "-B", "-X", "utf8", "-c", sys.argv[1]]
@@ -143,6 +144,10 @@ config:
                     "libpthread.so.0": "/ryeos/realizations/python-gnu-private/python/lib/libpthread.so.0"} or
                 not isinstance(evidence.get("inventory_sha256"), str) or
                 re.fullmatch(r"[0-9a-f]{64}", evidence["inventory_sha256"]) is None or
+                evidence.get("fixed_rescue_provider_path") !=
+                    "/ryeos/realizations/python-gnu/python/lib/libgcc_s.so.1" or
+                evidence.get("fixed_control_entry_runpath") !=
+                    ["/ryeos/realizations/python-gnu/python/lib"] or
                 evidence.get("fixed_rescue_provider_sha256") !=
                     "30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af" or
                 not isinstance(evidence.get("negative_omission"), dict) or
@@ -150,8 +155,11 @@ config:
                 evidence["negative_omission"].get("fixed_rescue_control_mounted") is not True or
                 evidence["negative_omission"].get("failure_before_python") is not True or
                 evidence["negative_omission"].get("provider_absent_from_selected_copy") is not True or
+                evidence["negative_omission"].get("selected_copy_is_complete_runtime") is not True or
                 type(evidence["negative_omission"].get("probe_exit_code")) is not int or
                 evidence["negative_omission"]["probe_exit_code"] == 0 or
+                evidence["negative_omission"].get("same_loader_complete_control_exit_code") != 0 or
+                evidence["negative_omission"].get("same_loader_complete_control_started_python") is not True or
                 not isinstance(evidence["negative_omission"].get("failure_output_sha256"), str) or
                 re.fullmatch(r"[0-9a-f]{64}", evidence["negative_omission"]["failure_output_sha256"]) is None or
                 evidence.get("zlib_runtime_version") != "1.3.2"):
@@ -160,8 +168,8 @@ config:
     - literal: |
         import _ctypes, ctypes, hashlib, json, os, re, selectors, shutil, stat, subprocess, sys, sysconfig, tempfile, time, zlib
 
-        root = "/ryeos/realizations/python-gnu-private/python"
-        fixed = "/ryeos/realizations/python-gnu/python"
+        distribution = "/ryeos/realizations/python-gnu-private"
+        root = distribution + "/python"
         sealed = json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS", "null"))
         keys = {"id", "kind", "mode", "manifest_hash", "entry_count", "total_bytes", "mount_root", "mount"}
         if not isinstance(sealed, list) or len(sealed) != 4 or any(not isinstance(x, dict) or set(x) != keys for x in sealed):
@@ -236,10 +244,10 @@ config:
                 raise SystemExit("private GNU evidence digest differs")
             return data, digest
 
-        def readelf(member, *options):
+        def readelf_path(path, *options):
             command = [support + "/elf/lib/ld-linux-x86-64.so.2", "--inhibit-cache",
                        "--library-path", support + "/elf/lib",
-                       support + "/elf/bin/readelf", "-W", *options, root + "/" + member]
+                       support + "/elf/bin/readelf", "-W", *options, path]
             status, output = run_limited(
                 command, environment={"LANG": "C", "LC_ALL": "C", "PATH": ""},
                 limit=1048576, timeout=15)
@@ -249,6 +257,9 @@ config:
                 return output.decode("utf-8")
             except UnicodeDecodeError as error:
                 raise SystemExit("selected GNU readelf output is not UTF-8") from error
+
+        def readelf(member, *options):
+            return readelf_path(root + "/" + member, *options)
 
         def expected_runpath(member):
             if (not isinstance(member, str) or not 1 <= len(member) <= 1024 or
@@ -265,7 +276,7 @@ config:
                 return "$ORIGIN"
             raise SystemExit("private GNU ELF has an unsupported relative layout")
 
-        raw_inventory, inventory_sha256 = read_regular(root + "/elf-inventory.json", 4194304)
+        raw_inventory, inventory_sha256 = read_regular(distribution + "/elf-inventory.json", 4194304)
         try:
             inventory = json.loads(raw_inventory)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -409,41 +420,60 @@ config:
             "30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af")
         if fixed_provider_sha256 != provider_hashes["libgcc_s.so.1"]:
             raise SystemExit("fixed rescue control is not the exact provider fixture")
+        fixed_control_entry_dynamic = readelf_path(
+            "/ryeos/realizations/python-gnu/python/bin/python3.14", "-d")
+        fixed_control_entry_runpath = re.findall(
+            r"Library runpath: \[([^\]]*)\]", fixed_control_entry_dynamic)
+        if fixed_control_entry_runpath != ["/ryeos/realizations/python-gnu/python/lib"]:
+            raise SystemExit("fixed rescue control no longer has its exact absolute RUNPATH")
 
         negative = {}
         with tempfile.TemporaryDirectory(prefix="ryeos-gnu-private-omit-") as temporary:
-            probe_root = os.path.join(temporary, "probe")
-            probe_bin, probe_lib = os.path.join(probe_root, "bin"), os.path.join(probe_root, "lib")
-            os.makedirs(probe_bin, mode=0o700)
-            os.makedirs(probe_lib, mode=0o700)
-            probe_python = os.path.join(probe_bin, "python3.14")
-            shutil.copyfile(root + "/bin/python3.14", probe_python)
-            os.chmod(probe_python, 0o755)
-            for name in sorted(os.listdir(root + "/lib")):
-                if name == "libgcc_s.so.1":
-                    continue
-                os.symlink(root + "/lib/" + name, os.path.join(probe_lib, name))
-            if os.path.lexists(os.path.join(probe_lib, "libgcc_s.so.1")):
-                raise SystemExit("private GNU omission fixture retained the selected libgcc")
-            sentinel = os.path.join(temporary, "python-started")
-            failed_status, failed_output = run_limited([
-                root + "/lib/ld-linux-x86-64.so.2", "--inhibit-cache", "--library-path", probe_lib,
-                probe_python, "-I", "-S", "-B", "-c",
+            probe_root = os.path.join(temporary, "python")
+            shutil.copytree(root, probe_root, symlinks=True)
+            probe_lib = os.path.join(probe_root, "lib")
+            sentinel = os.path.join(temporary, "python-started-positive")
+            positive_status, positive_output = run_limited([
+                probe_lib + "/ld-linux-x86-64.so.2", "--inhibit-cache", "--library-path", probe_lib,
+                probe_root + "/bin/python3.14", "-I", "-S", "-B", "-c",
                 "open(" + repr(sentinel) + ", 'w').close()"],
                 environment={"LANG": "C", "LC_ALL": "C", "PATH": ""},
                 limit=65536, timeout=30)
-            if (failed_status == 0 or b"libgcc_s.so.1" not in failed_output or
-                    os.path.exists(sentinel)):
+            if positive_status != 0 or not os.path.exists(sentinel):
+                raise SystemExit("complete private GNU omission fixture did not start successfully")
+            omitted_provider = os.path.join(probe_lib, "libgcc_s.so.1")
+            provider_record = by_path.get("lib/libgcc_s.so.1")
+            if not isinstance(provider_record, dict):
+                raise SystemExit("private GNU inventory lacks the omitted provider identity")
+            read_regular(omitted_provider, 2097152, provider_record["bytes"],
+                         provider_record["sha256"])
+            os.unlink(omitted_provider)
+            if os.path.lexists(omitted_provider):
+                raise SystemExit("private GNU omission fixture retained the selected libgcc")
+            negative_sentinel = os.path.join(temporary, "python-started-negative")
+            failed_status, failed_output = run_limited([
+                probe_lib + "/ld-linux-x86-64.so.2", "--inhibit-cache", "--library-path", probe_lib,
+                probe_root + "/bin/python3.14", "-I", "-S", "-B", "-c",
+                "open(" + repr(negative_sentinel) + ", 'w').close()"],
+                environment={"LANG": "C", "LC_ALL": "C", "PATH": ""},
+                limit=65536, timeout=30)
+            if (failed_status == 0 or
+                    b"error while loading shared libraries: libgcc_s.so.1" not in failed_output or
+                    b"cannot open shared object file" not in failed_output or
+                    os.path.exists(negative_sentinel)):
                 raise SystemExit("private GNU omitted-provider fixture did not fail in the loader")
             negative = {"missing_provider": "libgcc_s.so.1", "fixed_rescue_control_mounted": True,
                         "failure_before_python": True, "probe_exit_code": failed_status,
                         "provider_absent_from_selected_copy": True,
+                        "selected_copy_is_complete_runtime": True,
+                        "same_loader_complete_control_exit_code": positive_status,
+                        "same_loader_complete_control_started_python": os.path.exists(sentinel),
                         "failure_output_sha256": hashlib.sha256(failed_output).hexdigest()}
 
         if (zlib.ZLIB_RUNTIME_VERSION != "1.3.2" or zlib.__spec__.origin != "built-in" or
                 _ctypes.__spec__.origin != "built-in"):
             raise SystemExit("private GNU zlib or ctypes topology differs")
-        metadata_path = root + "/notices/python-build-standalone/PYTHON.json"
+        metadata_path = distribution + "/notices/python-build-standalone/PYTHON.json"
         metadata_bytes, _ = read_regular(
             metadata_path, 128346, 128346,
             "e4596127ee78428301bfc9beac06547a14ab7ead983c4c390d5256ecde061fa9")
@@ -468,6 +498,7 @@ config:
             "provider_mappings": {name: next(iter(paths)) for name, paths in mapped.items()},
             "versioned_symbols": symbol_probes,
             "negative_omission": negative,
+            "fixed_control_entry_runpath": fixed_control_entry_runpath,
             "fixed_rescue_provider_path": fixed_provider,
             "fixed_rescue_provider_sha256": fixed_provider_sha256,
             "zlib_runtime_version": zlib.ZLIB_RUNTIME_VERSION,
