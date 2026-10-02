@@ -290,6 +290,7 @@ fn observe(relative: &str, request: Request) -> Result<Observation> {
         contain_process_group: true,
         nested_sandbox: false,
         aggregate_limits: None,
+        target_limits: None,
     };
     let (mut held, pipes) =
         lillux::prepare_linux_sandbox_piped(request_native).map_err(anyhow::Error::msg)?;
