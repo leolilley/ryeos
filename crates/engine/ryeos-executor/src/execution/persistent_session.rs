@@ -2822,6 +2822,17 @@ fn start_capsule_process(
             accounting_scope.context("trusted pooled start lacks actual allocation scope")?,
         )?;
     }
+    let original_deadline = if session_protocol.cleanup_authority
+        == PersistentSessionCleanupAuthority::TrustedProcessGroup
+    {
+        Some(
+            original_budget
+                .context("trusted pooled attachment lacks original callback budget")?
+                .contact_expiry(),
+        )
+    } else {
+        None
+    };
     validate_session_process_control(state, &session_protocol)?;
     if session_protocol.process_mode != PersistentSessionProcessMode::PooledRequests {
         bail!("exclusive persistent-session protocol cannot use the pooled launcher");
@@ -2867,10 +2878,17 @@ fn start_capsule_process(
     );
     original_start
         .retain_cleanup_obligations(cleanup_observer.clone(), held.retirement_observer.clone())?;
-    if let Err(error) = state
-        .state_store
-        .attach_pooled_resource_owner(&pooled_owner_coordinate, &held.process.process_identity)
-    {
+    let attachment = match original_deadline {
+        Some(deadline) => state.state_store.attach_pooled_resource_owner_until(
+            &pooled_owner_coordinate,
+            &held.process.process_identity,
+            deadline,
+        ),
+        None => state
+            .state_store
+            .attach_pooled_resource_owner(&pooled_owner_coordinate, &held.process.process_identity),
+    };
+    if let Err(error) = attachment {
         let process_identity = held.process.process_identity.clone();
         let cleanup = settle_launch_retirement(
             held.process.abort_and_reap(),
@@ -2951,11 +2969,18 @@ fn start_capsule_process(
             state,
             &released_process_identity.resource_operations,
         )
-        .and_then(|()| {
-            state.state_store.authorize_pooled_resource_owner_release(
+        .and_then(|()| match original_deadline {
+            Some(deadline) => state
+                .state_store
+                .authorize_pooled_resource_owner_release_until(
+                    &pooled_owner_coordinate,
+                    &released_process_identity,
+                    deadline,
+                ),
+            None => state.state_store.authorize_pooled_resource_owner_release(
                 &pooled_owner_coordinate,
                 &released_process_identity,
-            )
+            ),
         })
     };
     let running = match release_authorization.and_then(|()| held.process.release_after_attachment())

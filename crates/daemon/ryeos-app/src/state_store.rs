@@ -6740,6 +6740,18 @@ impl StateStore {
         g.runtime_db.attach_worker_process(record)
     }
 
+    /// Same pooled attachment under the actual original launch window.
+    pub fn attach_pooled_resource_owner_until(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        self.with_runtime_original_deadline(deadline, |db| {
+            db.attach_pooled_resource_owner(owner_coordinate, process_identity)
+        })
+    }
+
     pub fn attach_pooled_resource_owner(
         &self,
         owner_coordinate: &str,
@@ -6759,6 +6771,19 @@ impl StateStore {
     /// Linearization point between a durable pooled-owner attachment and held
     /// process release. Shutdown closes the same gate under this lock; only the
     /// exact current process incarnation may consume its one-shot fence.
+    /// Consume the SAME release fence under the original launch window.
+    /// Existing native/scope qualification checks are not bypassed.
+    pub fn authorize_pooled_resource_owner_release_until(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        self.with_runtime_original_deadline(deadline, |db| {
+            db.consume_pooled_resource_owner_release_fence(owner_coordinate, process_identity)
+        })
+    }
+
     pub fn authorize_pooled_resource_owner_release(
         &self,
         owner_coordinate: &str,
