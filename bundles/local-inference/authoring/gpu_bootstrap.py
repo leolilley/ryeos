@@ -195,3 +195,30 @@ def compiler_prefix(layout: Mapping[str, Path], *, linker: bool = False) -> tupl
         os.pathsep.join((str(layout["toolchain_lib"]), str(layout["compiler_lib"]))),
         str(layout["linker" if linker else "clang"]),
     )
+
+
+def worker_launch(
+    layout: Mapping[str, Path], source_root: Path, driver_root: Path,
+    scratch: Path, *, session_fd: int, cleanup_fd: int,
+) -> tuple[list[str], dict[str, str]]:
+    """Prepare the distinct graph-free product, including its lifecycle closure.
+
+    The caller must independently admit/qualify every input and retain the
+    original scratch/channel owners. This pure assembly is not a launch grant.
+    Cleanup descriptor mechanics and collision checks remain D/Lillux-owned.
+    """
+    if (type(cleanup_fd) is not int or not 3 <= cleanup_fd <= 2147483647
+            or cleanup_fd == session_fd):
+        raise ValueError("cleanup descriptor overlaps session or is invalid")
+    for member in ("runtime.py", "cleanup_channel.py", "bootstrap_support.py",
+                   "session.py", "compiler.py", "cpu_support.py", "model.py", "model_contract.py",
+                   "tokenizer.py", "model-profiles/qwen3-0.6b.json",
+                   "cuda_lifecycle/__init__.py"):
+        _member(source_root, member)
+    exact_library_resolver(layout["libc"], driver_root)
+    command, environment = descriptor_loader_probe(
+        layout, source_root, "bootstrap.py", scratch,
+        profile="qwen3-0.6b", session_fd=session_fd,
+    )
+    environment.update(JIT="0", PROFILE="0", RYEOS_RESOURCE_CLEANUP_FD=str(cleanup_fd))
+    return command, environment

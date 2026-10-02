@@ -1,0 +1,26 @@
+# UNSIGNED DRAFT: qualification policy/claims unresolved; not safe for admission.
+category: ryeos-runtime
+version: 1.0.0
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+  - name: gnu_runtime_to_private_worker
+    producer:
+      canonical_ref: graph:ryeos/development/gnu-python-production
+      recipe_binding: product_recipe
+      product_name: runtime
+      parameters: {}
+    consumer:
+      canonical_ref: worker:local-inference/qwen3-0.6b-gnu-cuda-graph-free-2048-draft
+      declaration_id: python-gnu
+    required_product:
+      shape: tree
+      storage: large_content
+      bounds:
+        maximum_entries: 10000
+        maximum_depth: 64
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+    qualification:
+      policy_ref: null
+      required_claims: []
