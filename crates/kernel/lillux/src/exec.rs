@@ -1574,6 +1574,10 @@ impl InheritedDescriptorAuthority {
     /// Returns the actual write count immediately; callers must retain that
     /// count before any later expiry check and must never replay sent bytes.
     /// This observes bytes only, not native or settlement evidence.
+    /// If EPIPE's SIGPIPE drain is interrupted through expiry, the method
+    /// returns an error and restores the prior signal mask; a pending SIGPIPE
+    /// may then be delivered and terminate the caller. Invocation-stack
+    /// custody after such termination is not guaranteed.
     #[cfg(target_os = "linux")]
     pub fn write_atomic_pipe_record_until(
         &self,
