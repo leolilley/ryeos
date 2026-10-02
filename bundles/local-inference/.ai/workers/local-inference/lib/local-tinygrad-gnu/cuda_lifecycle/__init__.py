@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes
 import functools
 import importlib
+import re
 import sys
 import threading
 from contextlib import contextmanager
@@ -74,8 +75,10 @@ class _Resource:
 
 
 class Lifecycle:
-    def __init__(self, bindings, selected_device: int, observe: Callable | None):
+    def __init__(self, bindings, selected_device: int, observe: Callable | None,
+                 expected_uuid_v2_hex: str | None = None):
         self.selected_device, self._observe = selected_device, observe
+        self._expected_uuid_v2_hex = expected_uuid_v2_hex  # comparison only, never authority
         self._bindings = bindings
         self._lock = threading.RLock()  # in-memory serialization, no thread owner
         self._local = threading.local()
@@ -89,6 +92,15 @@ class Lifecycle:
         self._device_handle: int | None = None
         self._hooks: list[tuple[object, str, object]] = []
         self._native = {name: getattr(bindings, name) for name in _ALLOW}
+        self._uuid_type = self._native_uuid = None
+        if expected_uuid_v2_hex is not None:
+            try:
+                self._uuid_type = bindings.CUuuid
+                self._native_uuid = bindings.cuDeviceGetUuid_v2
+            except AttributeError as error:
+                raise LifecycleError("selected driver lacks UUID-v2 binding") from error
+            if not callable(self._native_uuid) or ctypes.sizeof(self._uuid_type) != 16:
+                raise LifecycleError("selected driver UUID-v2 ABI differs")
         self._result: ShutdownResult | None = None
         self._policy = lambda: None
         self._terminalize = lambda: None
@@ -193,7 +205,21 @@ class Lifecycle:
             if kind == "context": self._context_created = True
         if status != 0: self._fail(f"native {name} failed ({status})")
         if name == "cuDeviceGet":
-            self._device_handle = ctypes.cast(args[0], ctypes.POINTER(self._bindings.CUdevice))[0]
+            device = ctypes.cast(args[0], ctypes.POINTER(self._bindings.CUdevice))[0]
+            if self._expected_uuid_v2_hex is not None:
+                # Query the SAME opaque handle before pinned CUDADevice can
+                # create its context. Never expose this internal native alias.
+                uuid = self._uuid_type()
+                try:
+                    uuid_status = self._native_uuid(ctypes.byref(uuid), self._bindings.CUdevice(device))
+                except BaseException:
+                    self._poison = self._poison or "uncertain native cuDeviceGetUuid_v2"
+                    raise
+                if type(uuid_status) is not int or uuid_status != 0:
+                    self._fail("selected CUDA UUID-v2 query failed")
+                if ctypes.string_at(ctypes.byref(uuid), 16).hex() != self._expected_uuid_v2_hex:
+                    self._fail("selected CUDA device differs from expected UUID-v2 comparison")
+            self._device_handle = device
         if name in _RELEASE:
             kind = _RELEASE[name]
             key = kind, _value(args[0])
@@ -266,15 +292,23 @@ class Lifecycle:
             return self._result
 
 
-def install(*, bindings=None, selected_device: int = 0, observe: Callable | None = None) -> Lifecycle:
+def install(*, bindings=None, selected_device: int = 0, observe: Callable | None = None,
+            expected_uuid_v2_hex: str | None = None) -> Lifecycle:
     """Install once after the exact DLL resolver, before any CUDA consumer.
 
     observe is optional for offline/source preparation ONLY. Production runtime
     must require D's admitted channel owner before importing/loading CUDA.
+    expected_uuid_v2_hex is comparison data only. None preserves the unqualified
+    source-preparation path; a trusted launch must obtain the expected value
+    from D's independently admitted original device owner before native use.
     """
     if isinstance(selected_device, bool) or selected_device != 0:
         raise LifecycleError("first product selects only device ordinal zero")
     if observe is not None and not callable(observe): raise LifecycleError("invalid observer")
+    if expected_uuid_v2_hex is not None and (type(expected_uuid_v2_hex) is not str
+            or re.fullmatch(r"[0-9a-f]{32}", expected_uuid_v2_hex) is None
+            or expected_uuid_v2_hex == "0" * 32):
+        raise LifecycleError("invalid canonical UUID-v2 comparison")
     if any(name in sys.modules for name in ("tinygrad.runtime.ops_cuda", "tinygrad.runtime.graph.cuda")):
         raise LifecycleError("CUDA consumers preceded lifecycle installation")
     from tinygrad import helpers
@@ -287,7 +321,7 @@ def install(*, bindings=None, selected_device: int = 0, observe: Callable | None
         if helpers.getenv(name, 0): raise LifecycleError(f"unselected switch {name}")
     bindings = bindings or importlib.import_module("tinygrad.runtime.autogen.cuda")
     if getattr(bindings, "_ryeos_lifecycle", False): raise LifecycleError("lifecycle already installed")
-    lifecycle = Lifecycle(bindings, selected_device, observe)
+    lifecycle = Lifecycle(bindings, selected_device, observe, expected_uuid_v2_hex)
     def policy():
         if (repr(helpers.DEV) != "CUDA:PTX" or helpers.JIT.value != 0 or helpers.PROFILE.value != 0
                 or helpers.DEBUG.value != 0 or helpers.BEAM.value != 0 or helpers.VALIDATE_WITH_CPU.value != 0):

@@ -104,8 +104,13 @@ financial settlement remain D/coordinator acceptance, never supplied by this map
 ## Agreed source interface and offline limits
 
 D's private interface record was fully read and re-ACKed after its identity
-clarification. Runtime and D ACK install(*, bindings=None, selected_device=0,
-observe=None) -> Lifecycle; submission() covers import/construction and whole
+clarification. Runtime and D ACK the original install(*, bindings=None,
+selected_device=0, observe=None) -> Lifecycle contract. The source-prepared
+optional expected_uuid_v2_hex comparison parameter leaves that call unchanged;
+None is unqualified. Runtime now requires a strict init-v2 UUID comparison and
+passes it to install so guarded cuDeviceGet checks the actual context-creating
+handle. D has no independently admitted same-node UUID issuer yet, so this
+source wiring opens no admission. submission() covers import/construction and whole
 Worker.execute; shutdown() returns frozen ShutdownResult(status busy/failed/closed,
 observation_delivered, error). Busy closes new admission; only the existing owner
 quiesces and retries. A native error or partial constructor poisons the owner;
@@ -117,10 +122,12 @@ observe receives frozen CloseObservation with selected ordinal and release count
 (context/device/portable-host/module/event); no handles. These are local semantics,
 not the frame or authentication. Offline absent observe may return locally closed
 but observation_delivered remains false. Production runtime requires D's channel
-owner before loading CUDA. It validates init, then D's matching shutdown, and
-sends the single strict <=4096-byte length-prefixed retired frame followed by EOF.
-Only version/kind/teardown/capsule_hash/cleanup_contract/process_owner/resource_set
-are allowed. capsule_hash is the exact admitted capsule CAS key; process_owner and
+owner before loading CUDA. Strict init-v2 carries the five original comparison
+digests plus uuid_v2_hex and exact GNU/driver TreeBounds; runtime requires all
+three new values before loading the selected provider or creating a context.
+The matching shutdown and single <=4096-byte retired+EOF remain strict v1 with
+only version/kind/teardown/capsule_hash/cleanup_contract/process_owner/resource_set.
+capsule_hash is the exact admitted capsule CAS key; process_owner and
 resource_set use existing ExecutionProcessIdentity digests; teardown is the
 ORIGINAL resource reservation ID/live one-use slot. Init is queued after held
 birth/durable attachment before release, without awaiting a child response.

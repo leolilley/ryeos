@@ -47,6 +47,78 @@ impl CleanupBindings {
     }
 }
 
+/// Product-private startup comparisons, not selected-device or launch authority.
+/// Deliberately no production constructor, Deserialize or default: the retained
+/// independently admitted device/product issuer is not implemented yet. A later
+/// issuer must consume those actual owners; raw bytes/hashes cannot mint it.
+#[derive(Serialize)]
+pub(crate) struct CleanupStartupComparisons {
+    uuid_v2_hex: String,
+    gnu_bounds: ryeos_state::external_content::products::ProductBounds,
+    driver_bounds: ryeos_state::external_content::products::ProductBounds,
+}
+
+impl CleanupStartupComparisons {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.uuid_v2_hex.len() == 32
+                && self
+                    .uuid_v2_hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && self.uuid_v2_hex.bytes().any(|b| b != b'0'),
+            "startup selected-device UUID comparison is invalid"
+        );
+        for bounds in [&self.gnu_bounds, &self.driver_bounds] {
+            bounds.validate()?;
+            ensure!(
+                bounds.maximum_entries > 0
+                    && bounds.maximum_depth > 0
+                    && bounds.maximum_file_bytes > 0
+                    && bounds.maximum_total_bytes > 0
+                    && bounds.maximum_file_bytes <= bounds.maximum_total_bytes,
+                "startup product bounds comparison is invalid"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct InitFrame<'a> {
+    #[serde(flatten)]
+    bindings: Frame,
+    #[serde(flatten)]
+    startup: &'a CleanupStartupComparisons,
+}
+
+fn write_init(
+    writer: &mut impl Write,
+    bindings: &CleanupBindings,
+    startup: &CleanupStartupComparisons,
+) -> Result<()> {
+    bindings.validate()?;
+    startup.validate()?;
+    let mut frame = Frame::new("init", bindings);
+    frame.version = 2;
+    let body = serde_json::to_vec(&InitFrame {
+        bindings: frame,
+        startup,
+    })?;
+    write_bounded_body(writer, &body)
+}
+
+fn write_bounded_body(writer: &mut impl Write, body: &[u8]) -> Result<()> {
+    ensure!(
+        !body.is_empty() && body.len() <= MAX_FRAME_BYTES,
+        "cleanup frame exceeds its bound"
+    );
+    writer.write_all(&(body.len() as u32).to_be_bytes())?;
+    writer.write_all(body)?;
+    writer.flush()?;
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Frame {
@@ -94,16 +166,13 @@ impl Frame {
 }
 
 fn write_frame(writer: &mut impl Write, kind: &str, bindings: &CleanupBindings) -> Result<()> {
+    ensure!(
+        matches!(kind, "shutdown" | "retired"),
+        "v1 init or unknown cleanup frame refuses"
+    );
     bindings.validate()?;
     let body = serde_json::to_vec(&Frame::new(kind, bindings))?;
-    ensure!(
-        !body.is_empty() && body.len() <= MAX_FRAME_BYTES,
-        "cleanup frame exceeds its bound"
-    );
-    writer.write_all(&(body.len() as u32).to_be_bytes())?;
-    writer.write_all(&body)?;
-    writer.flush()?;
-    Ok(())
+    write_bounded_body(writer, &body)
 }
 
 fn read_retired(reader: &mut impl Read, bindings: &CleanupBindings) -> Result<()> {
@@ -194,17 +263,21 @@ impl TrustedCleanupChannel {
 
     /// Queue only AFTER actual held birth/durable attachment and BEFORE release.
     /// No read/child acknowledgment occurs while the child is held.
-    pub(crate) fn queue_init(&mut self, bindings: CleanupBindings) -> Result<()> {
+    pub(crate) fn queue_init(
+        &mut self,
+        bindings: CleanupBindings,
+        startup: &CleanupStartupComparisons,
+    ) -> Result<()> {
         let previous = std::mem::replace(&mut self.phase, Phase::Failed);
         ensure!(
             previous == Phase::Created,
             "cleanup initialization was reused"
         );
         bindings.validate()?;
-        write_frame(
+        write_init(
             &mut self.channel.with_deadline(self.deadline),
-            "init",
             &bindings,
+            startup,
         )?;
         self.bindings = Some(bindings);
         self.phase = Phase::InitQueued;
@@ -310,8 +383,7 @@ mod tests {
             );
         }
         for name in ["init", "shutdown", "error", "final", "observation_batch"] {
-            let mut bytes = Vec::new();
-            write_frame(&mut bytes, name, &expected).unwrap();
+            let bytes = framed(&serde_json::to_vec(&Frame::new(name, &expected)).unwrap());
             assert!(read_retired(&mut Cursor::new(bytes), &expected).is_err());
         }
         let body = serde_json::to_string(&original).unwrap();
@@ -328,6 +400,116 @@ mod tests {
         }
         for length in [0u32, 4097, u32::MAX] {
             assert!(read_retired(&mut Cursor::new(length.to_be_bytes()), &expected).is_err());
+        }
+    }
+    fn startup() -> CleanupStartupComparisons {
+        let bounds = || ryeos_state::external_content::products::ProductBounds {
+            maximum_entries: 8,
+            maximum_depth: 4,
+            maximum_file_bytes: 16,
+            maximum_total_bytes: 32,
+        };
+        CleanupStartupComparisons {
+            uuid_v2_hex: "01000000000000000000000000000000".into(),
+            gnu_bounds: bounds(),
+            driver_bounds: bounds(),
+        }
+    }
+
+    #[test]
+    fn init_v2_serializes_exact_required_comparisons_and_keeps_retirement_v1() {
+        let expected = bindings();
+        let mut bytes = Vec::new();
+        write_init(&mut bytes, &expected, &startup()).unwrap();
+        let length = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert_eq!(length, bytes.len() - 4);
+        let value: serde_json::Value = serde_json::from_slice(&bytes[4..]).unwrap();
+        let keys: std::collections::BTreeSet<_> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "version",
+                "kind",
+                "teardown",
+                "capsule_hash",
+                "cleanup_contract",
+                "process_owner",
+                "resource_set",
+                "uuid_v2_hex",
+                "gnu_bounds",
+                "driver_bounds"
+            ])
+        );
+        assert_eq!(value["version"], 2);
+        assert_eq!(value["kind"], "init");
+        assert_eq!(value["uuid_v2_hex"], "01000000000000000000000000000000");
+        for name in ["gnu_bounds", "driver_bounds"] {
+            let keys: std::collections::BTreeSet<_> = value[name]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                std::collections::BTreeSet::from([
+                    "maximum_entries",
+                    "maximum_depth",
+                    "maximum_file_bytes",
+                    "maximum_total_bytes"
+                ])
+            );
+        }
+        assert!(read_retired(&mut Cursor::new(bytes), &expected).is_err());
+        assert!(write_frame(&mut Vec::new(), "init", &expected).is_err());
+        for kind in ["shutdown", "retired"] {
+            let mut bytes = Vec::new();
+            write_frame(&mut bytes, kind, &expected).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes[4..]).unwrap();
+            assert_eq!(value["version"], 1);
+            assert!(value.get("uuid_v2_hex").is_none());
+        }
+    }
+
+    #[test]
+    fn invalid_init_comparisons_write_nothing_and_cannot_default() {
+        let expected = bindings();
+        for uuid in [
+            "",
+            "00000000000000000000000000000000",
+            "ABCDEF00000000000000000000000000",
+            "1",
+        ] {
+            let mut startup = startup();
+            startup.uuid_v2_hex = uuid.into();
+            let mut bytes = Vec::new();
+            assert!(write_init(&mut bytes, &expected, &startup).is_err());
+            assert!(bytes.is_empty());
+        }
+        for invalid_gnu in [true, false] {
+            for field in 0..5 {
+                let mut startup = startup();
+                let bounds = if invalid_gnu {
+                    &mut startup.gnu_bounds
+                } else {
+                    &mut startup.driver_bounds
+                };
+                match field {
+                    0 => bounds.maximum_entries = 0,
+                    1 => bounds.maximum_depth = 0,
+                    2 => bounds.maximum_file_bytes = 0,
+                    3 => bounds.maximum_total_bytes = 0,
+                    _ => bounds.maximum_file_bytes = bounds.maximum_total_bytes + 1,
+                }
+                let mut bytes = Vec::new();
+                assert!(write_init(&mut bytes, &expected, &startup).is_err());
+                assert!(bytes.is_empty());
+            }
         }
     }
 }

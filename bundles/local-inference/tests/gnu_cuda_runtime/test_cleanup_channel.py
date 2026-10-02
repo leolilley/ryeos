@@ -15,8 +15,12 @@ import cleanup_channel as wire
 import runtime
 
 BINDINGS={key:format(i,'064x') for i,key in enumerate(sorted(wire.BINDINGS),1)}
+BOUNDS=dict(maximum_entries=100,maximum_depth=10,maximum_file_bytes=1024,maximum_total_bytes=4096)
 def frame(kind, **changes):
-    data=json.dumps(dict(BINDINGS,version=1,kind=kind,**changes),separators=(',',':')).encode()
+    message=dict(BINDINGS,version=2,kind='init',uuid_v2_hex='00112233445566778899aabbccddeeff',
+                 gnu_bounds=BOUNDS,driver_bounds=BOUNDS) if kind=='init' else dict(BINDINGS,version=1,kind=kind)
+    message.update(changes)
+    data=json.dumps(message,separators=(',',':')).encode()
     return struct.pack('>I',len(data))+data
 
 class ChannelTests(unittest.TestCase):
@@ -34,6 +38,9 @@ class ChannelTests(unittest.TestCase):
     def test_init_shutdown_retired_eof_same_bindings_once(self):
         parent,fd=self.pair();os.write(parent.fileno(),frame('init')+frame('shutdown'))
         channel=wire.CleanupChannel(fd,0)
+        self.assertEqual(dict(channel.bindings),BINDINGS)
+        self.assertEqual(channel.uuid_v2_hex,'00112233445566778899aabbccddeeff')
+        self.assertEqual(channel.gnu_bounds,wire.TreeBounds.from_contract(BOUNDS))
         channel.authorize_shutdown();channel.observe(SimpleNamespace(selected_device=0))
         bindings=wire.read_frame(parent.fileno(),'retired',BINDINGS)
         self.assertEqual(bindings,BINDINGS)
@@ -53,15 +60,15 @@ class ChannelTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): channel.observe(SimpleNamespace(selected_device=0))
 
     def test_strict_grammar_refuses_unknown_duplicate_nonfinite_and_wrong_version(self):
-        valid=json.dumps(dict(BINDINGS,version=1,kind='init')).encode()
-        for raw in (valid[:-1]+b',"unknown":0}', valid[:-1]+b',"version":1}',
-                    valid.replace(b'"version": 1',b'"version": true'),
-                    valid.replace(b'"version": 1',b'"version": NaN'),b'[]'):
-            with self.assertRaises(ValueError): wire.decode(raw,'init')
+        valid=frame('init')[4:]
+        for raw in (valid[:-1]+b',"unknown":0}', valid.replace(b'"version":2',b'"version":1'),
+                    valid.replace(b'"version":2',b'"version":true'),
+                    valid.replace(b'"version":2',b'"version":NaN'),b'[]'):
+            with self.assertRaises(ValueError): wire.decode_init(raw)
 
     def test_oversized_length_refuses_before_body_read(self):
         parent,fd=self.pair();os.write(parent.fileno(),struct.pack('>I',4097))
-        with self.assertRaises(ValueError): wire.read_frame(fd,'init')
+        with self.assertRaises(ValueError): wire.read_init_frame(fd)
 
     def test_fd_collisions_stdio_and_noncanonical_refuse(self):
         for value in (None,'0','1','2','04','-1','2147483648'):

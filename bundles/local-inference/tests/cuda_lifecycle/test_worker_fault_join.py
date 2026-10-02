@@ -25,12 +25,20 @@ sys.path.insert(0, str(SOURCE))
 import test_pinned_integration as pinned
 from cuda_lifecycle import LifecycleError
 
+BOUNDS = dict(maximum_entries=100, maximum_depth=10,
+              maximum_file_bytes=1024, maximum_total_bytes=4096)
+UUID_V2 = '00112233445566778899aabbccddeeff'
+
 
 def source_module(name: str, member: str):
     spec = importlib.util.spec_from_file_location(name, RUNTIME_SOURCE / member)
     if spec is None or spec.loader is None: raise AssertionError('complete runtime module unavailable')
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[name] = module  # dataclass resolution needs the selected module identity
+    try: spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
     return module
 
 
@@ -79,12 +87,20 @@ class WorkerFaultJoinTests(unittest.TestCase):
                           separators=(',', ':')).encode('utf-8')
         return struct.pack('>I', len(body)) + body
 
+    def init_frame(self):
+        body = json.dumps(dict(self.bindings, version=2, kind='init',
+                              uuid_v2_hex=UUID_V2, gnu_bounds=BOUNDS,
+                              driver_bounds=BOUNDS), separators=(',', ':')).encode('utf-8')
+        return struct.pack('>I', len(body)) + body
+
     def channel(self, shutdown_frame):
         # Fixture supplies bounded inherited bytes; D's durable held-process
         # attachment and financial settlement are not simulated by this test.
-        frames = self.frame('init') + shutdown_frame
+        frames = self.init_frame() + shutdown_frame
         self.assertEqual(os.write(self.cleanup_parent.fileno(), frames), len(frames))
         channel = self.wire.CleanupChannel(self.cleanup_fd, self.session_fd)
+        self.assertEqual(channel.init.uuid_v2_hex, UUID_V2)
+        self.assertEqual(channel.init.gnu_bounds.maximum_total_bytes, BOUNDS['maximum_total_bytes'])
         self.fixture.lifecycle._observe = channel.observe
         return channel
 

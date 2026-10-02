@@ -1,8 +1,9 @@
 # Ordinal-zero native qualification input
 
-Status: PREPARED, UNWIRED, NATIVE UNOBSERVED. No admission gate is opened.
-This supplements source_map.md and the existing D private cleanup v1 contract;
-it adds no transport fields, authority, resource pool or host-idleness claim.
+Status: SOURCE-WIRED COMPARISON, ORIGINAL ISSUER MISSING, NATIVE UNOBSERVED.
+No admission gate is opened. This supplements source_map.md and D's strict
+private cleanup init-v2 comparison contract; shutdown/retired remain v1.
+The comparison fields add no authority, resource pool or host-idleness claim.
 
 ## Actual source trace and correction
 
@@ -35,9 +36,9 @@ are not substitutes for that independently observed identity.
 
 Reuse the existing GNU qualifier/worker-launch and observation-contract machinery.
 Do not add a daemon, device-discovery system, host-wide idle probe or alternate
-cleanup channel. Runtime head6942e32dc58222b9c71e65dd1fb7b48b5aa575e7 already
-prepared its retained-input native-startup operation; this device check is a
-subsequent qualification input, not authorization to execute that operation.
+cleanup channel. Runtime source now requires a strict init-v2 UUID comparison
+before installing lifecycle; this check is a qualification input, not
+authorization to execute the native operation.
 
 The native operation must retain all of the following before driver initialization:
 
@@ -54,9 +55,17 @@ Native result acceptance also needs consumer verification against that independe
 observation and the same live handle used for context creation. A standalone
 diagnostic followed by a second cuDeviceGet is insufficient: product wiring must
 check UUID-v2 immediately after the selected get and before creating the context,
-then retain that verified handle. This product seam is deliberately UNWIRED until
-D can project a qualified independent observation through existing authority.
-The current runtime input and cleanup wire remain unchanged.
+then retain that verified handle. Lifecycle now prepares this exact same-handle
+comparison behind optional `install(expected_uuid_v2_hex=...)`: the guarded
+cuDeviceGet queries UUID-v2 internally before returning to the pinned device
+constructor, and mismatch/query error poisons before context creation. Direct
+UUID queries stay forbidden. This is comparison code, not an admitted observer.
+Runtime now passes the required init-v2 UUID comparison to lifecycle install,
+which checks the actual returned handle before context creation. It does not
+run the separate diagnostic helper first. D still has no independently admitted
+same-node UUID/provider observation or original-owner issuer for that frame.
+The source is wired, but the admitted input and native proof are MISSING;
+GPU admission stays closed.
 
 ## Callable diagnostic input/result and refusals
 
@@ -81,7 +90,7 @@ Successful native qualification of the complete product additionally needs real
 kernel/copy/output behavior and orderly synchronization, event/module/device and
 portable-host release, context destruction, existing retired+EOF observation,
 then D's independent group retirement and financial settlement under the original
-reservation. These results remain UNOBSERVED. The seven new controls use actual
+reservation. These results remain UNOBSERVED. The focused controls use actual
 pinned generated bindings and CUDADevice with an injected DLL, prohibit native
 CDLL loading, and establish source/refusal behavior only. Earlier passed suites
 were not repeated for this follow-up.

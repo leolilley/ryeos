@@ -5,11 +5,19 @@ must retain qualified inputs and the original scratch owner before release.
 """
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
 from pathlib import Path
+from typing import Mapping
 
 from bootstrap_support import _member, _environment, inspect_layout, install_exact_library_resolver
+from driver_closure import TreeBounds, inspect_cuda_driver_closure
+
+
+# Exact ceiling from gnu_runtime_to_private_worker in the unsigned product draft.
+# Actual retained GNU bounds must be supplied separately and remain within it.
+GNU_RUNTIME_BOUNDS_CEILING = TreeBounds(10000, 64, 134217728, 268435456)
 
 
 def validate_paths(workspace: Path, worker: Path) -> dict[str, Path]:
@@ -29,6 +37,60 @@ def validate_paths(workspace: Path, worker: Path) -> dict[str, Path]:
     for name in ("home", "cache", "tmp"):
         _member(roots["scratch"], name, directory=True)
     return layout
+
+
+def _retained_tree_bounds(
+    gnu_bounds: TreeBounds | Mapping[str, object] | None,
+    driver_bounds: TreeBounds | Mapping[str, object] | None,
+) -> tuple[TreeBounds, TreeBounds]:
+    if gnu_bounds is None or driver_bounds is None:
+        raise ValueError('missing D-retained GNU or CUDA driver product bounds')
+    selected_gnu = gnu_bounds if isinstance(gnu_bounds, TreeBounds) else TreeBounds.from_contract(gnu_bounds)
+    selected_driver = driver_bounds if isinstance(driver_bounds, TreeBounds) else TreeBounds.from_contract(driver_bounds)
+    if any(
+        selected > maximum for selected, maximum in zip(
+            (selected_gnu.maximum_entries, selected_gnu.maximum_depth,
+             selected_gnu.maximum_file_bytes, selected_gnu.maximum_total_bytes),
+            (GNU_RUNTIME_BOUNDS_CEILING.maximum_entries, GNU_RUNTIME_BOUNDS_CEILING.maximum_depth,
+             GNU_RUNTIME_BOUNDS_CEILING.maximum_file_bytes, GNU_RUNTIME_BOUNDS_CEILING.maximum_total_bytes),
+            strict=True,
+        )
+    ):
+        raise ValueError('retained GNU product bounds exceed its authored relationship ceiling')
+    return selected_gnu, selected_driver
+
+
+def _retained_device_uuid(value: object) -> str:
+    if (not isinstance(value, str) or len(value) != 32
+            or any(character not in '0123456789abcdef' for character in value)
+            or value == '0' * 32):
+        raise ValueError('missing D-retained canonical UUID-v2 comparison')
+    return value
+
+
+def _require_one_visible_device(bindings) -> None:
+    if getattr(bindings, '_ryeos_lifecycle', False):
+        raise RuntimeError('device count check must precede lifecycle installation')
+    try:
+        initialize = bindings.cuInit
+        get_count = bindings.cuDeviceGetCount
+    except AttributeError as error:
+        raise RuntimeError('selected CUDA binding lacks device-count qualification') from error
+    try:
+        status = initialize(0)
+    except Exception as error:
+        raise RuntimeError('selected CUDA driver initialization failed') from error
+    if type(status) is not int or status != 0:
+        raise RuntimeError('selected CUDA driver initialization failed')
+    count = ctypes.c_int(-1)
+    try:
+        status = get_count(ctypes.byref(count))
+    except Exception as error:
+        raise RuntimeError('selected CUDA device-count query failed') from error
+    if type(status) is not int or status != 0:
+        raise RuntimeError('selected CUDA device-count query failed')
+    if count.value != 1:
+        raise RuntimeError('selected product requires exactly one visible CUDA device')
 
 
 def closed_environment(layout: dict[str, Path], supplied: dict[str, str]) -> dict[str, str]:
@@ -54,10 +116,19 @@ def verify_origins(roots: tuple[Path, ...]) -> None:
             raise RuntimeError(f"GNU module {name!r} escaped selected closure")
 
 
-def prepare_environment() -> tuple[Path, Path, Path, Path]:
+def prepare_environment(
+    *,
+    gnu_bounds: TreeBounds | Mapping[str, object] | None = None,
+    driver_bounds: TreeBounds | Mapping[str, object] | None = None,
+) -> tuple[Path, Path, Path, Path]:
+    retained_gnu_bounds, retained_driver_bounds = _retained_tree_bounds(gnu_bounds, driver_bounds)
     workspace = Path.cwd().resolve(strict=True)
     worker = Path(__file__).resolve(strict=True).parent
     layout = validate_paths(workspace, worker)
+    closure = inspect_cuda_driver_closure(
+        layout['gnu_lib'], layout['driver'] / 'lib',
+        gnu_bounds=retained_gnu_bounds, driver_bounds=retained_driver_bounds,
+    )
     environment = closed_environment(layout, dict(os.environ))
     if Path(sys.prefix).resolve(strict=True) != layout["python_home"]:
         raise RuntimeError("GNU interpreter prefix differs from selected product")
@@ -70,7 +141,10 @@ def prepare_environment() -> tuple[Path, Path, Path, Path]:
     os.environ.clear()
     os.environ.update(environment)
     verify_origins((worker, layout["python_home"]))
-    install_exact_library_resolver(layout["tinygrad"], layout["libc"], layout["driver"])
+    install_exact_library_resolver(
+        layout["tinygrad"], layout["libc"], layout["driver"],
+        selected_libraries=closure.providers,
+    )
     return workspace, layout["python-gnu"], worker, layout["tinygrad"]
 
 
@@ -95,15 +169,31 @@ def run_with_lifecycle(lifecycle, load_session, before_shutdown=None):
             raise RuntimeError("CUDA normal shutdown evidence unavailable; same owner remains uncertain")
 
 
-def run_product(*, observe=None, bindings=None, before_shutdown=None):
+def run_product(
+    *, observe=None, bindings=None, before_shutdown=None,
+    gnu_bounds: TreeBounds | Mapping[str, object] | None = None,
+    driver_bounds: TreeBounds | Mapping[str, object] | None = None,
+    expected_uuid_v2_hex: str | None = None,
+):
     # A Python callable is only the consumer interface, not authentication.
     # D must supply it through the admitted same-process private channel contract.
     if not callable(observe):
         raise RuntimeError("missing D-owned admitted private cleanup observation binding")
-    workspace, gnu, worker, tinygrad = prepare_environment()
+    retained_gnu_bounds, retained_driver_bounds = _retained_tree_bounds(gnu_bounds, driver_bounds)
+    retained_uuid_v2_hex = _retained_device_uuid(expected_uuid_v2_hex)
+    workspace, gnu, worker, tinygrad = prepare_environment(
+        gnu_bounds=retained_gnu_bounds, driver_bounds=retained_driver_bounds
+    )
     import importlib
     from cuda_lifecycle import install
-    lifecycle = install(selected_device=0, observe=observe, bindings=bindings)
+    if bindings is None:
+        bindings = importlib.import_module("tinygrad.runtime.autogen.cuda")
+    verify_origins((gnu / "python", worker, tinygrad))
+    _require_one_visible_device(bindings)
+    lifecycle = install(
+        selected_device=0, observe=observe, bindings=bindings,
+        expected_uuid_v2_hex=retained_uuid_v2_hex,
+    )
 
     def load_session():
         from compiler import install_admitted_compiler
@@ -124,4 +214,11 @@ def run_channel_product():
     if not session_text.isascii() or not session_text.isdecimal() or str(int(session_text)) != session_text or not 0 <= int(session_text) <= 2147483647 or int(session_text) in (1, 2):
         raise RuntimeError("persistent descriptor is not canonical")
     channel = CleanupChannel(cleanup_fd, int(session_text))
-    return run_product(observe=channel.observe, before_shutdown=channel.authorize_shutdown)
+    # CleanupChannel's strict v2 init is the sole input source. These fields are
+    # comparison data from D's original owner, never self-authenticating claims.
+    return run_product(
+        observe=channel.observe, before_shutdown=channel.authorize_shutdown,
+        gnu_bounds=getattr(channel, 'gnu_bounds', None),
+        driver_bounds=getattr(channel, 'driver_bounds', None),
+        expected_uuid_v2_hex=getattr(channel, 'uuid_v2_hex', None),
+    )

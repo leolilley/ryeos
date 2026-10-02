@@ -175,6 +175,9 @@ pub(crate) struct OriginalFundingOwner {
     accounting: Arc<AccountingDb>,
     state_store: Arc<crate::state_store::StateStore>,
     original_budget: crate::handler_context::OriginalExecutionBudget,
+    // Pinned BEFORE sampling original occupancy_start in this same daemon.
+    // BOOT alone cannot authenticate time-namespace offsets.
+    original_clock_namespace: lillux::InheritedDescriptorAuthority,
     envelope: StoredEnvelope,
     gate_id: HexDigest,
     request_digest: HexDigest,
@@ -226,6 +229,11 @@ impl OriginalFundingOwner {
         if binding.current_site_id != state.threads.site_id() {
             bail!("original funding callback belongs to another current execution site");
         }
+        let original_clock_namespace =
+            lillux::time::OriginalNamespaceOccupancyHandoff::pin_original_clock_namespace(
+                budget.contact_expiry(),
+            )
+            .map_err(anyhow::Error::msg)?;
         let envelope = StoredEnvelope {
             version: 1,
             original_reservation: original.clone(),
@@ -268,6 +276,7 @@ impl OriginalFundingOwner {
             accounting,
             state_store: Arc::clone(&state.state_store),
             original_budget: budget.clone(),
+            original_clock_namespace,
             envelope,
             phase: FundingPhase::Prepared,
             runtime_permit: None,
@@ -276,6 +285,11 @@ impl OriginalFundingOwner {
     }
 
     fn require_contact_window(&self) -> Result<()> {
+        lillux::time::OriginalNamespaceOccupancyHandoff::require_original_clock_namespace(
+            &self.original_clock_namespace,
+            self.original_budget.contact_expiry(),
+        )
+        .map_err(anyhow::Error::msg)?;
         let cleanup = lillux::time::Duration::from_millis(self.envelope.cleanup_allowance_ms);
         if self.original_budget.remaining() <= cleanup {
             bail!("original funding window reached reserved cleanup interval");
@@ -432,7 +446,10 @@ impl OriginalFundingOwner {
 
     pub(crate) fn take_contact_permit(
         &mut self,
-    ) -> Result<crate::runtime_db::process_resource_launch::TrustedResourceSpawnPermit> {
+    ) -> Result<(
+        crate::runtime_db::process_resource_launch::TrustedResourceSpawnPermit,
+        lillux::time::OriginalNamespaceOccupancyHandoff,
+    )> {
         if self.phase != FundingPhase::ContactReady {
             bail!("original financial contact permit is unavailable");
         }
@@ -440,9 +457,28 @@ impl OriginalFundingOwner {
         // retry using a retained runtime permit.
         self.phase = FundingPhase::ContactTaken;
         self.require_contact_window()?;
-        self.runtime_permit
+        let ResourceSpendAuthority::Bounded {
+            maximum_occupancy_milliseconds,
+            ..
+        } = self.envelope.authority.spend
+        else {
+            bail!("original funded contact lost bounded occupancy");
+        };
+        let limit = lillux::time::OccupancyLimit::new(
+            self.envelope.occupancy_start.clone(),
+            maximum_occupancy_milliseconds
+                .checked_mul(1_000_000)
+                .context("original occupancy overflow")?,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let window = lillux::time::OriginalNamespaceOccupancyHandoff::from_original_in_retained_clock_namespace(
+            &limit, lillux::time::Duration::from_millis(self.envelope.cleanup_allowance_ms),
+            self.original_budget.contact_expiry(), &self.original_clock_namespace).map_err(anyhow::Error::msg)?;
+        let permit = self
+            .runtime_permit
             .take()
-            .context("original runtime contact permit was already consumed")
+            .context("original runtime contact permit was already consumed")?;
+        Ok((permit, window))
     }
 
     pub(crate) fn refund_never_born(
@@ -712,6 +748,11 @@ mod tests {
             access: lillux::CharacterDeviceAccess::ReadWrite,
         }])
         .unwrap();
+        let original_clock_namespace =
+            lillux::time::OriginalNamespaceOccupancyHandoff::pin_original_clock_namespace(
+                budget.contact_expiry(),
+            )
+            .unwrap();
         let occupancy_start = lillux::time::occupancy_now().unwrap();
         let meter = ryeos_accounting::ResourceMeterContract {
             version: ryeos_accounting::RESOURCE_METER_CONTRACT_VERSION,
@@ -831,6 +872,7 @@ mod tests {
             state_store: Arc::clone(&fixture.state.state_store),
             accounting,
             original_budget: budget,
+            original_clock_namespace,
             envelope,
             phase: FundingPhase::Prepared,
             runtime_permit: None,
@@ -995,11 +1037,46 @@ mod tests {
             .begin_trusted_process_resource_spawn(&owner.envelope.original_reservation)
             .unwrap();
         owner.bind_contact_intent(permit).unwrap();
-        let permit = owner.take_contact_permit().unwrap();
+        let (permit, original_window) = owner.take_contact_permit().unwrap();
+        let (sealed_window, clock_namespace) = original_window.into_authorities();
+        let bytes = lillux::sandbox::read_sealed_inherited_descriptor(
+            sealed_window.inherited_descriptor().unwrap(),
+            4096,
+        )
+        .unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            wire["limit"]["start"],
+            serde_json::to_value(&owner.envelope.occupancy_start).unwrap()
+        );
+        let ResourceSpendAuthority::Bounded {
+            maximum_occupancy_milliseconds,
+            ..
+        } = owner.envelope.authority.spend
+        else {
+            panic!("fixture lost original bounded funding")
+        };
+        assert_eq!(
+            wire["limit"]["maximum_occupancy_ns"],
+            maximum_occupancy_milliseconds * 1_000_000
+        );
+        assert_eq!(
+            wire["cleanup_ns"],
+            owner.envelope.cleanup_allowance_ms * 1_000_000
+        );
+        assert_eq!(
+            clock_namespace.inherited_descriptor().unwrap(),
+            owner
+                .original_clock_namespace
+                .inherited_descriptor()
+                .unwrap()
+        );
         assert!(owner.take_contact_permit().is_err());
         let original = owner.envelope.original_reservation_id.clone();
         let operation = owner.operation_id.clone();
         drop(permit);
+        drop(sealed_window);
+        drop(clock_namespace);
         drop(owner);
         drop(fixture);
         let reopened =

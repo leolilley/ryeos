@@ -93,12 +93,20 @@ or independently qualify the private consumer. No new producer or harness is use
 
 D/Lillux creates, inherits and retains the separate duplex cleanup channel on
 RYEOS_RESOURCE_CLEANUP_FD, distinct from session/stdout/stderr. The worker
-consumes init before startup/model/CUDA. Frames are four-byte big-endian lengths
-1..4096 and strict JSON with exactly version=1, kind, teardown, capsule_hash,
-cleanup_contract, process_owner and resource_set. Every binding is 64 lowercase
-hex; shutdown must repeat init exactly. D derives these from the original
-reservation, exact capsule CAS key, cleanup agreement and actual held process's
-owner_incarnation_digest/resource_set_digest. Matching JSON authenticates nothing.
+consumes init before provider startup/model/CUDA. Frames are four-byte
+big-endian lengths 1..4096 and strict JSON. Init is version 2 and has exactly
+`version`, `kind`, the five existing bindings (`teardown`, `capsule_hash`,
+`cleanup_contract`, `process_owner`, `resource_set`), `uuid_v2_hex`, `gnu_bounds`
+and `driver_bounds`. The UUID is 32 lowercase hex characters and nonzero. Each
+bounds object has exactly the positive integer fields `maximum_entries`,
+`maximum_depth`, `maximum_file_bytes`, and `maximum_total_bytes`, with the file
+bound no larger than the tree total. The Python consumer returns a frozen typed
+record; the runtime requires its UUID and both typed bounds before path scan or
+provider contact. Shutdown and retired remain strict version 1 and repeat only
+the five original bindings; shutdown must exactly match init's five bindings.
+D must derive every value from the retained original reservation, exact capsule CAS
+key, cleanup agreement, held process owner, selected product manifests and
+independent physical-device observation. Matching JSON authenticates nothing.
 
 D queues init after held birth/durable attachment before release without waiting
 for worker response. D closes session request input/quiesces then sends shutdown
@@ -177,3 +185,48 @@ and main loop even after independently authorized successful cleanup. Three real
 socket fixtures cover clean closure and truncated headers/payloads with the
 matching private shutdown command and retired frame; retirement never changes
 that failed execution into success.
+
+## 2026-10-02 source follow-up
+
+The private source branch adds a bounded structural check for the selected
+driver's recursive ELF `DT_NEEDED` closure and wires it into GNU worker startup.
+The check accepts only x86-64 ELF shared objects inside the separately selected
+GNU and driver `lib/` roots, enforces each retained tree's explicit entry/depth/
+file/total-byte bounds, rejects escaping or ambiguous providers, and checks that
+each dependency resolves through the loader's first exact search entry. It
+supports explicit `DT_RUNPATH`; inherited `DT_RPATH` is refused. It reads ELF
+metadata only: it does not load native code, qualify symbol versions/ABI,
+observe mapped providers, cover future `dlopen` calls, or establish a device.
+
+The strict cleanup consumer now exposes init-v2's UUID and two typed bounds on
+the existing channel. `run_channel_product` dispatches those exact values to
+`run_product`; `prepare_environment` checks both tree bounds before path
+discovery and provider contact. GNU bounds may not exceed the unsigned
+`gnu_runtime_to_private_worker` draft ceiling; that ceiling is not
+selected-product evidence and is never a default. The runtime validates the
+UUID before loading the selected generated tinygrad CUDA binding, calls
+`cuInit(0)` and requires `cuDeviceGetCount` to report exactly one visible device,
+then passes UUID-v2 to `install(expected_uuid_v2_hex=...)`. Lifecycle checks
+UUID-v2 on the exact `CUdevice` handle returned for ordinal zero before that
+handle reaches context creation. A missing, malformed, mismatched, zero-device,
+multiple-device or failed count comparison refuses before a CUDA context is
+created. These source checks do not prove independent D authority, a retained
+lease, physical close, or native qualification.
+
+The current driver draft still has no selected tree, bounds, or digest, and D's
+protected producer has not yet supplied original-owner-bound product/device
+selections. Therefore production startup remains fail-closed until D wires that
+selection contract; do not pass these values through ambient environment or
+user JSON.
+
+The source cuts are `1e7dd0e7b`, `976a4dfc8`, `1e083fbdf`, `0e98a1d3e`,
+`f8258ecc8`, cleanup init-v2 `4ff6c19c1` (rebased as `9fa36a92a` in the
+runtime worktree), runtime dispatch `3bbb621e3`, same-handle guard wiring
+`fbdaaaab4`, exactly-one-visible-device enforcement `51e99d5f6`, and lifecycle
+documentation `1ace6898b`. They are based on D checkpoint `3b89173e7` and the
+coordinator-reviewed combined source. The GNU runtime suite passes 40 tests;
+the cleanup-init-v2/device-lifecycle suite passes 64 tests. These fixtures
+establish parser and source-order/refusal behavior only. No native driver,
+compiler child, model weight, CUDA device or provider was loaded or run; all ABI,
+actual GNU production, destination admission, native qualification, signing and
+activation gates remain open.

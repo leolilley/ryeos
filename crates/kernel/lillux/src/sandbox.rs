@@ -327,6 +327,10 @@ pub struct LinuxSandboxProcess {
     /// never for helper/probe children. Kept private and non-serializable.
     #[cfg(target_os = "linux")]
     namespace_lifetime: Option<std::os::fd::OwnedFd>,
+    /// Present only for the existing externally-held adapter route which
+    /// bound this actual native fork before readiness. Drop is never cancel.
+    #[cfg(target_os = "linux")]
+    namespace_occupancy_watchdog: Option<crate::exec::OccupancyWatchdog>,
     /// Lillux-private, close-on-exec evidence channel. A record proves setup
     /// or exec failed before the workload existed. EOF alone does not prove
     /// execution: killing a pre-exec child also closes its descriptor. It is
@@ -591,6 +595,24 @@ impl LinuxSandboxLaunchFailure {
     }
 }
 
+/// Private one-use enforcement witness from the actual native PID-1 owner.
+/// Only this module can construct it, after its native readiness and pidfd pin.
+/// It is neither a serialized mount receipt nor a process-group assertion.
+#[cfg(target_os = "linux")]
+pub(crate) struct NativeNamespaceOccupancyAuthority {
+    lifetime: std::os::fd::OwnedFd,
+    owned_fork_pid: u32,
+}
+#[cfg(target_os = "linux")]
+impl NativeNamespaceOccupancyAuthority {
+    pub(crate) fn into_pidfd(self) -> std::os::fd::OwnedFd {
+        self.lifetime
+    }
+    pub(crate) fn into_parts(self) -> (std::os::fd::OwnedFd, u32) {
+        (self.lifetime, self.owned_fork_pid)
+    }
+}
+
 /// Native target prepared through readiness, but held before exec until the
 /// exact owner releases it. Like native launch, construction changes the
 /// calling process's namespaces and belongs in a dedicated launcher process.
@@ -601,6 +623,10 @@ pub struct HeldLinuxSandboxProcess {
     release: Option<std::fs::File>,
     #[cfg(target_os = "linux")]
     release_succeeded: bool,
+    #[cfg(target_os = "linux")]
+    namespace_occupancy_attempted: bool,
+    #[cfg(target_os = "linux")]
+    namespace_occupancy_watchdog: Option<crate::exec::OccupancyWatchdog>,
 }
 
 /// Held target whose dedicated launcher remains the non-dumpable custodian of
@@ -670,63 +696,166 @@ pub fn prepare_linux_sandbox_piped(
     }
     #[cfg(target_os = "linux")]
     {
-        use std::os::fd::{AsRawFd as _, FromRawFd as _};
-        fn pipe() -> Result<(std::fs::File, std::fs::File), String> {
-            let mut fds = [-1; 2];
-            if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-                return Err(format!(
-                    "create candidate protocol pipe: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            if let Err(error) = imp::relocate_internal_descriptors(
-                &mut fds,
-                &std::collections::BTreeSet::from([0, 1, 2]),
-                "candidate protocol pipe",
-            ) {
-                unsafe {
-                    libc::close(fds[0]);
-                    libc::close(fds[1]);
-                }
-                return Err(error);
-            }
-            Ok(unsafe {
-                (
-                    std::fs::File::from_raw_fd(fds[0]),
-                    std::fs::File::from_raw_fd(fds[1]),
-                )
-            })
-        }
-        let (input, stdin) = pipe()?;
-        let (stdout, output) = pipe()?;
-        let (stderr, error) = pipe()?;
-        for file in [&stdin, &stdout, &stderr] {
-            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-            if flags < 0
-                || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
-                    < 0
-            {
-                return Err(format!(
-                    "set candidate relay nonblocking: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-        }
-        let process = prepare_linux_sandbox_inner(request, Some(&[input, output, error]), None)?;
-        Ok((
-            process,
-            LinuxSandboxPipes {
-                stdin,
-                stdout,
-                stderr,
-            },
-        ))
+        prepare_linux_sandbox_piped_linux(request, None)
     }
     #[cfg(not(target_os = "linux"))]
     Err("piped native sandbox is unavailable on this platform".into())
 }
 
+#[cfg(target_os = "linux")]
+fn prepare_linux_sandbox_piped_linux(
+    request: LinuxSandboxRequest,
+    occupancy: Option<crate::exec::PendingNamespaceWatchdog>,
+) -> Result<(HeldLinuxSandboxProcess, LinuxSandboxPipes), String> {
+    if !request.target_channels.is_empty() {
+        return Err("piped candidate cannot inherit extra target channels".into());
+    }
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    fn pipe() -> Result<(std::fs::File, std::fs::File), String> {
+        let mut fds = [-1; 2];
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(format!(
+                "create candidate protocol pipe: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if let Err(error) = imp::relocate_internal_descriptors(
+            &mut fds,
+            &std::collections::BTreeSet::from([0, 1, 2]),
+            "candidate protocol pipe",
+        ) {
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            return Err(error);
+        }
+        Ok(unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        })
+    }
+    let (input, stdin) = pipe()?;
+    let (stdout, output) = pipe()?;
+    let (stderr, error) = pipe()?;
+    for file in [&stdin, &stdout, &stderr] {
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+        {
+            return Err(format!(
+                "set candidate relay nonblocking: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    let process =
+        prepare_linux_sandbox_inner_linux(request, Some(&[input, output, error]), None, occupancy)?;
+    Ok((
+        process,
+        LinuxSandboxPipes {
+            stdin,
+            stdout,
+            stderr,
+        },
+    ))
+}
+
+/// SAME held native owner with an outside watcher before user/PID transition.
+/// Actual qualified cessation and higher Runtime/funding release stay required.
+#[cfg(target_os = "linux")]
+pub fn prepare_linux_sandbox_piped_with_original_namespace_occupancy(
+    request: LinuxSandboxRequest,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: crate::time::Duration,
+    original_deadline: crate::time::MonotonicDeadline,
+) -> Result<(HeldLinuxSandboxProcess, LinuxSandboxPipes), String> {
+    let pending = crate::exec::PendingNamespaceWatchdog::prepare(
+        limit,
+        cleanup_allowance,
+        original_deadline,
+    )?;
+    prepare_linux_sandbox_piped_linux(request, Some(pending))
+}
+
+/// Same native held owner, retaining existing extra admitted target channels.
+#[cfg(target_os = "linux")]
+pub fn prepare_linux_sandbox_with_original_namespace_occupancy(
+    request: LinuxSandboxRequest,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: crate::time::Duration,
+    original_deadline: crate::time::MonotonicDeadline,
+) -> Result<HeldLinuxSandboxProcess, String> {
+    let pending = crate::exec::PendingNamespaceWatchdog::prepare(
+        limit,
+        cleanup_allowance,
+        original_deadline,
+    )?;
+    prepare_linux_sandbox_inner_linux(request, None, None, Some(pending))
+}
+
 impl HeldLinuxSandboxProcess {
+    /// Arm the SAME existing watchdog on this actual held native namespace.
+    /// This installs stronger termination while retaining the held owner. It
+    /// grants NO release: independently admitted cessation and the higher
+    /// original Runtime/funding authorization are still missing.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn prepare_namespace_occupancy(
+        &mut self,
+        limit: &crate::time::OccupancyLimit,
+        cleanup_allowance: crate::time::Duration,
+    ) -> Result<(), String> {
+        if self.namespace_occupancy_attempted || self.release_succeeded || self.release.is_none() {
+            return Err(
+                "original native namespace occupancy attempt cannot replay or follow release"
+                    .into(),
+            );
+        }
+        // Poison before a fallible step. Refusal retains the release handle
+        // and original native owner, but cannot fall through to bare release.
+        self.namespace_occupancy_attempted = true;
+        if !matches!(
+            limit.window(cleanup_allowance)?,
+            crate::time::OccupancyWindowState::Service { .. }
+        ) {
+            return Err("original namespace occupancy service window is not open".into());
+        }
+        if self.process.termination_requested || self.process.pid <= 0 {
+            return Err("namespace occupancy requires the original live held PID-1 owner".into());
+        }
+        let lifetime = self
+            .process
+            .namespace_lifetime
+            .as_ref()
+            .ok_or("ordinary sandbox process has no native namespace lifetime authority")?;
+        let preparation = self.process.mount_preparation_receipt()?;
+        if preparation.owned_child_pid != self.process.child_pid() {
+            return Err("native namespace occupancy changed its actual child readiness".into());
+        }
+        let authority = NativeNamespaceOccupancyAuthority {
+            owned_fork_pid: self.process.child_pid(),
+            lifetime: lifetime
+                .try_clone()
+                .map_err(|error| format!("retain native PID-1 lifetime: {error}"))?,
+        };
+        self.namespace_occupancy_watchdog = Some(crate::exec::arm_namespace_occupancy_watchdog(
+            authority,
+            limit,
+            cleanup_allowance,
+        )?);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cancel_namespace_occupancy_after_exact_death(&mut self) -> Result<(), String> {
+        if let Some(watchdog) = self.namespace_occupancy_watchdog.as_mut() {
+            watchdog.cancel_and_reap()?;
+        }
+        self.namespace_occupancy_watchdog = None;
+        Ok(())
+    }
     pub fn mount_preparation_receipt(&self) -> Result<LinuxSandboxMountPreparationReceipt, String> {
         self.process.mount_preparation_receipt()
     }
@@ -751,6 +880,9 @@ impl HeldLinuxSandboxProcess {
         #[cfg(target_os = "linux")]
         {
             use std::io::Write as _;
+            if self.namespace_occupancy_attempted {
+                return Err("namespace occupancy release requires independently admitted cessation and original Runtime authorization; bare release refused".into());
+            }
             // Consume authority before writing: even an ambiguous write error
             // cannot authorize a second release attempt.
             let mut release = self
@@ -826,7 +958,10 @@ impl HeldLinuxSandboxProcess {
         {
             self.release = None;
         }
-        self.process.terminate_namespace_for_export(timeout)
+        let termination = self.process.terminate_namespace_for_export(timeout)?;
+        #[cfg(target_os = "linux")]
+        self.cancel_namespace_occupancy_after_exact_death()?;
+        Ok(termination)
     }
 
     /// Terminate beneath one caller-owned absolute deadline while keeping the
@@ -885,44 +1020,69 @@ fn prepare_linux_sandbox_inner(
     }
     #[cfg(target_os = "linux")]
     {
-        use std::os::fd::{AsRawFd as _, FromRawFd as _};
-        let mut reserved = request
-            .target_channels
-            .iter()
-            .map(|(_, target)| i32::try_from(*target))
-            .collect::<Result<std::collections::BTreeSet<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        if stdio.is_some() {
-            reserved.extend([0, 1, 2]);
+        prepare_linux_sandbox_inner_linux(request, stdio, private_source, None)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = &mut request;
+        Err("held native sandbox is unavailable on this platform".into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_linux_sandbox_inner_linux(
+    mut request: LinuxSandboxRequest,
+    stdio: Option<&[std::fs::File; 3]>,
+    private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
+    mut occupancy: Option<crate::exec::PendingNamespaceWatchdog>,
+) -> Result<HeldLinuxSandboxProcess, String> {
+    if request.lifecycle != LinuxSandboxLifecycle::Run {
+        return Err("held native preparation owns its release channel".into());
+    }
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    let mut reserved = request
+        .target_channels
+        .iter()
+        .map(|(_, target)| i32::try_from(*target))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if stdio.is_some() {
+        reserved.extend([0, 1, 2]);
+    }
+    let mut descriptors = [-1; 2];
+    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(format!(
+            "create native release pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if let Err(error) =
+        imp::relocate_internal_descriptors(&mut descriptors, &reserved, "native release pipe")
+    {
+        unsafe {
+            libc::close(descriptors[0]);
+            libc::close(descriptors[1]);
         }
-        let mut descriptors = [-1; 2];
-        if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            return Err(format!(
-                "create native release pipe: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        if let Err(error) =
-            imp::relocate_internal_descriptors(&mut descriptors, &reserved, "native release pipe")
-        {
-            unsafe {
-                libc::close(descriptors[0]);
-                libc::close(descriptors[1]);
-            }
-            return Err(error);
-        }
-        // SAFETY: pipe2/relocation returned distinct newly owned descriptors.
-        let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
-        let writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
-        request.lifecycle = LinuxSandboxLifecycle::AwaitRelease {
-            release_fd: u32::try_from(reader.as_raw_fd()).map_err(|error| error.to_string())?,
-            release_keepalive_fd: u32::try_from(writer.as_raw_fd())
-                .map_err(|error| error.to_string())?,
-        };
-        let mut process = imp::launch_with_stdio(request, stdio, private_source)?;
-        // Only held execution requests the stronger terminal-export primitive.
-        // Ordinary native launch retains its existing capability floor. The
-        // child remains blocked on release while its exact lifetime is pinned.
+        return Err(error);
+    }
+    // SAFETY: pipe2/relocation returned distinct newly owned descriptors.
+    let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
+    let writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
+    request.lifecycle = LinuxSandboxLifecycle::AwaitRelease {
+        release_fd: u32::try_from(reader.as_raw_fd()).map_err(|error| error.to_string())?,
+        release_keepalive_fd: u32::try_from(writer.as_raw_fd())
+            .map_err(|error| error.to_string())?,
+    };
+    let mut process = imp::launch_with_stdio_with_namespace_watchdog(
+        request,
+        stdio,
+        private_source,
+        occupancy.as_mut(),
+    )?;
+    // Only held execution requests the stronger terminal-export primitive.
+    // Ordinary native launch retains its existing capability floor. The
+    // child remains blocked on release while its exact lifetime is pinned.
+    if process.namespace_lifetime.is_none() {
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, process.pid, 0u32) };
         if fd < 0 {
             return Err(format!(
@@ -931,18 +1091,17 @@ fn prepare_linux_sandbox_inner(
             ));
         }
         process.namespace_lifetime = Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) });
-        drop(reader);
-        Ok(HeldLinuxSandboxProcess {
-            process,
-            release: Some(writer),
-            release_succeeded: false,
-        })
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = &mut request;
-        Err("held native sandbox is unavailable on this platform".into())
-    }
+    let namespace_occupancy_watchdog = occupancy.map(|pending| pending.finish()).transpose()?;
+    let namespace_occupancy_attempted = namespace_occupancy_watchdog.is_some();
+    drop(reader);
+    Ok(HeldLinuxSandboxProcess {
+        process,
+        release: Some(writer),
+        release_succeeded: false,
+        namespace_occupancy_attempted,
+        namespace_occupancy_watchdog,
+    })
 }
 
 impl LinuxSandboxProcess {
@@ -1114,10 +1273,23 @@ impl LinuxSandboxProcess {
             return Err("sandbox namespace has an unsupported terminal status".into());
         };
         let launch_failure = imp::read_launch_failure(self.launch_failure.take())?;
+        self.cancel_namespace_occupancy_after_owned_reap()?;
         Ok(Some(LinuxSandboxTermination {
             exit,
             launch_failure,
         }))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cancel_namespace_occupancy_after_owned_reap(&mut self) -> Result<(), String> {
+        if self.pid != 0 {
+            return Err("watchdog cancellation requires exact owned native reap".into());
+        }
+        if let Some(watchdog) = self.namespace_occupancy_watchdog.as_mut() {
+            watchdog.cancel_and_reap()?;
+        }
+        self.namespace_occupancy_watchdog = None;
+        Ok(())
     }
 
     pub fn child_pid(&self) -> u32 {
@@ -1142,6 +1314,9 @@ impl LinuxSandboxProcess {
                 let waited = unsafe { libc::waitpid(self.pid, &mut status, 0) };
                 if waited == self.pid {
                     self.pid = 0;
+                    if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
+                        self.cancel_namespace_occupancy_after_owned_reap()?;
+                    }
                     if libc::WIFEXITED(status) {
                         let exit = LinuxSandboxExit::Code(libc::WEXITSTATUS(status));
                         if let Some(failure) = imp::read_launch_failure(self.launch_failure.take())?
@@ -1257,6 +1432,36 @@ pub fn inspect_linux_sandbox() -> Result<LinuxSandboxInspection, String> {
 /// process, not an application daemon.
 pub fn launch_linux_sandbox(request: LinuxSandboxRequest) -> Result<LinuxSandboxProcess, String> {
     imp::launch(request)
+}
+
+/// Same externally-held adapter lifecycle and actual native custodian, with
+/// the original outside watcher. This owns no release writer or financial
+/// authority; the existing outer attachment/Runtime owner remains responsible.
+/// No ordinary Run request can select this stronger held-only operation.
+#[cfg(target_os = "linux")]
+pub fn launch_linux_sandbox_with_original_namespace_occupancy(
+    request: LinuxSandboxRequest,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: crate::time::Duration,
+    original_deadline: crate::time::MonotonicDeadline,
+) -> Result<LinuxSandboxProcess, String> {
+    if !matches!(
+        request.lifecycle,
+        LinuxSandboxLifecycle::AwaitRelease { .. }
+    ) {
+        return Err(
+            "original namespace occupancy requires existing externally-held lifecycle".into(),
+        );
+    }
+    let mut pending = crate::exec::PendingNamespaceWatchdog::prepare(
+        limit,
+        cleanup_allowance,
+        original_deadline,
+    )?;
+    let mut process =
+        imp::launch_with_stdio_with_namespace_watchdog(request, None, None, Some(&mut pending))?;
+    process.namespace_occupancy_watchdog = Some(pending.finish()?);
+    Ok(process)
 }
 
 /// Launch a held isolated target with one exact namespace-local listener.
@@ -1631,7 +1836,8 @@ mod imp {
         // uniquely. The signed launch request supplies its exact coordinate.
         let sender = unsafe { crate::take_inherited_descriptor_transfer_sender(transfer_fd) }
             .map_err(|error| format!("adopt loopback transfer endpoint: {error}"))?;
-        let (process, source) = launch_with_stdio_and_loopback(request, None, Some(address), None)?;
+        let (process, source) =
+            launch_with_stdio_and_loopback(request, None, Some(address), None, None)?;
         let source = source.ok_or("isolated loopback listener was not created")?;
         source
             .transfer(sender, payload, deadline)
@@ -1644,7 +1850,17 @@ mod imp {
         stdio: Option<&[std::fs::File; 3]>,
         private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
     ) -> Result<LinuxSandboxProcess, String> {
-        launch_with_stdio_and_loopback(request, stdio, None, private_source)
+        launch_with_stdio_and_loopback(request, stdio, None, private_source, None)
+            .map(|(process, _)| process)
+    }
+
+    pub(super) fn launch_with_stdio_with_namespace_watchdog(
+        request: LinuxSandboxRequest,
+        stdio: Option<&[std::fs::File; 3]>,
+        private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
+        occupancy: Option<&mut crate::exec::PendingNamespaceWatchdog>,
+    ) -> Result<LinuxSandboxProcess, String> {
+        launch_with_stdio_and_loopback(request, stdio, None, private_source, occupancy)
             .map(|(process, _)| process)
     }
 
@@ -1653,6 +1869,7 @@ mod imp {
         stdio: Option<&[std::fs::File; 3]>,
         ingress: Option<std::net::SocketAddr>,
         private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
+        occupancy: Option<&mut crate::exec::PendingNamespaceWatchdog>,
     ) -> Result<
         (
             LinuxSandboxProcess,
@@ -1669,6 +1886,9 @@ mod imp {
         let pre_transition_paths = private_source
             .map(|_| pre_transition_source_paths(&request))
             .transpose()?;
+        if let Some(watchdog) = occupancy.as_ref() {
+            watchdog.require_original_window()?;
+        }
         enter_namespaces(request.network, private_source)?;
         let loopback_source = if let Some(address) = ingress {
             if request.network != LinuxSandboxNetwork::Isolated {
@@ -1778,7 +1998,7 @@ mod imp {
         ensure_regular_path(&executable, "sandbox executable")?;
         let cwd = rooted(&request.cwd)?;
         ensure_directory_path(&cwd, "sandbox cwd")?;
-        spawn_target(request, stdio).map(|process| (process, loopback_source))
+        spawn_target(request, stdio, occupancy).map(|process| (process, loopback_source))
     }
 
     fn validate_request(request: &LinuxSandboxRequest) -> Result<(), String> {
@@ -3777,6 +3997,7 @@ mod imp {
     fn spawn_target(
         request: LinuxSandboxRequest,
         stdio: Option<&[std::fs::File; 3]>,
+        mut occupancy: Option<&mut crate::exec::PendingNamespaceWatchdog>,
     ) -> Result<LinuxSandboxProcess, String> {
         let mut ready = [0; 2];
         syscall_zero(
@@ -3831,8 +4052,36 @@ mod imp {
         ready.copy_from_slice(&private_descriptors[..2]);
         launch_failure.copy_from_slice(&private_descriptors[2..4]);
         applied_launch.copy_from_slice(&private_descriptors[4..]);
+        let scrub = occupancy
+            .as_ref()
+            .map(|watchdog| watchdog.target_scrub_descriptors());
+        if let Some(descriptors) = scrub {
+            if request.target_channels.iter().any(|(source, _)| {
+                descriptors
+                    .iter()
+                    .any(|private| *private >= 0 && *source == *private as u32)
+            }) {
+                for descriptor in private_descriptors {
+                    close_fd(descriptor);
+                }
+                return Err("native target channel cannot adopt private watchdog custody".into());
+            }
+        }
+        if let Some(watchdog) = occupancy.as_mut() {
+            if let Err(error) = watchdog.require_original_window() {
+                for descriptor in private_descriptors {
+                    close_fd(descriptor);
+                }
+                return Err(error);
+            }
+            // A failed ACK is never evidence that this fork did not happen.
+            watchdog.mark_fork_intent();
+        }
         let pid = unsafe { libc::fork() };
         if pid < 0 {
+            if let Some(watchdog) = occupancy.as_mut() {
+                watchdog.prove_fork_failed();
+            }
             close_fd(ready[0]);
             close_fd(ready[1]);
             close_fd(launch_failure[0]);
@@ -3845,6 +4094,18 @@ mod imp {
             ));
         }
         if pid == 0 {
+            // First syscall after birth. The race before this syscall remains
+            // explicitly unqualified; no missing ACK is a prebirth receipt.
+            if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
+                unsafe { libc::_exit(125) };
+            }
+            if let Some(descriptors) = scrub {
+                for descriptor in descriptors {
+                    if descriptor >= 0 {
+                        unsafe { libc::close(descriptor) };
+                    }
+                }
+            }
             close_fd(ready[0]);
             close_fd(launch_failure[0]);
             close_fd(applied_launch[0]);
@@ -3864,32 +4125,49 @@ mod imp {
         close_fd(ready[1]);
         close_fd(launch_failure[1]);
         close_fd(applied_launch[1]);
-        let result = read_child_target_ready(ready[0]);
-        close_fd(ready[0]);
-        let mut mount_preparation = match result {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                    libc::waitpid(pid, std::ptr::null_mut(), 0);
-                }
-                close_fd(launch_failure[0]);
-                close_fd(applied_launch[0]);
-                return Err(error);
-            }
-        };
-        mount_preparation.owned_child_pid = pid as u32;
-        Ok(LinuxSandboxProcess {
+        // Install the SAME actual fork custodian before any fallible handoff.
+        // Error paths retain birth uncertainty; Drop kills/reaps this child but
+        // cannot settle funding or cancel the original watchdog.
+        let ready_reader = unsafe { File::from_raw_fd(ready[0]) };
+        let mut process = LinuxSandboxProcess {
             pid,
             namespace_lifetime: None,
-            // SAFETY: the parent exclusively owns this surviving pipe end.
+            namespace_occupancy_watchdog: None,
             launch_failure: Some(unsafe { File::from_raw_fd(launch_failure[0]) }),
-            // SAFETY: the parent exclusively owns this surviving pipe end.
             applied_launch: Some(unsafe { File::from_raw_fd(applied_launch[0]) }),
             observed_applied_launch: None,
-            mount_preparation: Some(mount_preparation),
+            mount_preparation: None,
             termination_requested: false,
-        })
+        };
+        let mut mount_preparation = if let Some(watchdog) = occupancy.as_mut() {
+            // Transfer actual fork-owned pidfd BEFORE readiness: setup stalls
+            // stay inside original enforcement rather than a renewed timer.
+            let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0_u32) };
+            if raw < 0 {
+                return Err(format!(
+                    "pin actual namespace birth: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let lifetime = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw as RawFd) };
+            let witness = NativeNamespaceOccupancyAuthority {
+                lifetime: lifetime.try_clone().map_err(|error| error.to_string())?,
+                owned_fork_pid: pid as u32,
+            };
+            process.namespace_lifetime = Some(lifetime);
+            watchdog.bind_actual_fork(witness)?;
+            let receipt = read_child_target_ready_until(
+                ready_reader.as_raw_fd(),
+                watchdog.original_deadline(),
+            )?;
+            watchdog.require_original_window()?;
+            receipt
+        } else {
+            read_child_target_ready(ready_reader.as_raw_fd())?
+        };
+        mount_preparation.owned_child_pid = pid as u32;
+        process.mount_preparation = Some(mount_preparation);
+        Ok(process)
     }
 
     fn child_target_main(
@@ -5912,6 +6190,7 @@ mod imp {
                 LinuxSandboxProcess {
                     pid,
                     namespace_lifetime: None,
+                    namespace_occupancy_watchdog: None,
                     launch_failure: Some(unsafe { File::from_raw_fd(pipe[0]) }),
                     applied_launch: None,
                     observed_applied_launch: None,
@@ -7039,6 +7318,9 @@ mod imp {
             ExecFailure,
             PendingThenCleanup,
             Descendant,
+            OccupancyForkRefusal,
+            PreforkWatchdogExpiry,
+            PreforkWatchdogOwnerLoss,
         }
 
         #[test]
@@ -7052,6 +7334,28 @@ mod imp {
                 TargetObservationCase::ExecFailure,
                 TargetObservationCase::PendingThenCleanup,
                 TargetObservationCase::Descendant,
+            ] {
+                exercise_native_proc_with_observation(true, true, Some(case), false);
+            }
+        }
+
+        #[test]
+        #[ignore = "requires actual native namespaces and pidfd; capability refusal is not a pass"]
+        fn native_namespace_occupancy_refuses_workload_side_watchdog_fork() {
+            exercise_native_proc_with_observation(
+                true,
+                true,
+                Some(TargetObservationCase::OccupancyForkRefusal),
+                false,
+            );
+        }
+
+        #[test]
+        #[ignore = "requires actual native namespaces and pidfd; capability refusal is not a pass"]
+        fn native_prefork_watchdog_expiry_and_owner_loss_keep_actual_namespace_custody() {
+            for case in [
+                TargetObservationCase::PreforkWatchdogExpiry,
+                TargetObservationCase::PreforkWatchdogOwnerLoss,
             ] {
                 exercise_native_proc_with_observation(true, true, Some(case), false);
             }
@@ -7345,6 +7649,11 @@ mod imp {
                             }
                             TargetObservationCase::PendingThenCleanup => "observe-pending".into(),
                             TargetObservationCase::Descendant => "observe-descendant".into(),
+                            TargetObservationCase::OccupancyForkRefusal
+                            | TargetObservationCase::PreforkWatchdogExpiry
+                            | TargetObservationCase::PreforkWatchdogOwnerLoss => {
+                                "observe-pending".into()
+                            }
                         };
                         request
                             .environment
@@ -7445,7 +7754,29 @@ mod imp {
                         }
                         request.target_channels.clear();
                         let expected_launch = request.clone();
-                        let (mut process, mut pipes) = prepare_linux_sandbox_piped(request)?;
+                        let prefork_case = matches!(
+                            observation,
+                            Some(
+                                TargetObservationCase::PreforkWatchdogExpiry
+                                    | TargetObservationCase::PreforkWatchdogOwnerLoss
+                            )
+                        );
+                        let (mut process, mut pipes) = if prefork_case {
+                            let limit = crate::time::OccupancyLimit::new(
+                                crate::time::occupancy_now()?,
+                                5_000_000_000,
+                            )?;
+                            prepare_linux_sandbox_piped_with_original_namespace_occupancy(
+                                request,
+                                &limit,
+                                std::time::Duration::from_secs(1),
+                                crate::time::MonotonicDeadline::after(
+                                    std::time::Duration::from_secs(5),
+                                ),
+                            )?
+                        } else {
+                            prepare_linux_sandbox_piped(request)?
+                        };
                         let preparation = process.process.mount_preparation_receipt()?;
                         if preparation.schema != 1
                             || preparation.mount_count == 0
@@ -7483,6 +7814,101 @@ mod imp {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         if writer_ready()? {
                             return Err("held native target executed before release".into());
+                        }
+                        if prefork_case {
+                            if !process.namespace_occupancy_attempted
+                                || process.namespace_occupancy_watchdog.is_none()
+                                || process.release_once().is_ok()
+                                || writer_ready()?
+                            {
+                                return Err("prefork arming bypassed held qualification or lost original owner".into());
+                            }
+                            if matches!(
+                                observation,
+                                Some(TargetObservationCase::PreforkWatchdogOwnerLoss)
+                            ) {
+                                // Drop is owner loss, never cancellation; native custodian remains.
+                                drop(process.namespace_occupancy_watchdog.take());
+                            }
+                            let lifetime = process
+                                .process
+                                .namespace_lifetime
+                                .as_ref()
+                                .ok_or("actual native lifetime missing")?;
+                            let mut poll = libc::pollfd {
+                                fd: lifetime.as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            };
+                            let deadline = crate::time::MonotonicDeadline::after(
+                                std::time::Duration::from_secs(6),
+                            );
+                            loop {
+                                let ready = unsafe { libc::poll(&mut poll, 1, 10) };
+                                if ready > 0 && poll.revents & libc::POLLIN != 0 {
+                                    break;
+                                }
+                                if ready < 0
+                                    && std::io::Error::last_os_error().raw_os_error()
+                                        != Some(libc::EINTR)
+                                {
+                                    return Err(
+                                        "observe actual watchdog target death failed".into()
+                                    );
+                                }
+                                if deadline.has_elapsed() {
+                                    return Err(
+                                        "original watcher did not kill actual held namespace"
+                                            .into(),
+                                    );
+                                }
+                            }
+                            // Observed exact lifetime precedes this settlement operation:
+                            // a SIGKILL acknowledgment cannot make the control pass.
+                            let death = process.terminate_namespace_for_export(
+                                std::time::Duration::from_secs(1),
+                            )?;
+                            if death.exit() != LinuxSandboxExit::Signal(libc::SIGKILL)
+                                || writer_ready()?
+                            {
+                                return Err(
+                                    "watchdog expiry lacked exact held namespace retirement".into(),
+                                );
+                            }
+                            return Ok(LinuxSandboxExit::Code(0));
+                        }
+                        if matches!(
+                            observation,
+                            Some(TargetObservationCase::OccupancyForkRefusal)
+                        ) {
+                            let limit = crate::time::OccupancyLimit::new(
+                                crate::time::occupancy_now()?,
+                                10_000_000_000,
+                            )?;
+                            let error = process
+                                .prepare_namespace_occupancy(
+                                    &limit,
+                                    std::time::Duration::from_secs(1),
+                                )
+                                .err()
+                                .ok_or("watchdog fork inside workload namespace was accepted")?;
+                            if !error.contains("original outside namespace fork boundary")
+                                || process.namespace_occupancy_watchdog.is_some()
+                                || process.process.namespace_lifetime.is_none()
+                                || process.release_once().is_ok()
+                                || writer_ready()?
+                            {
+                                return Err("namespace fork refusal lost original held custody or permitted release".into());
+                            }
+                            let death = process.terminate_namespace_for_export(
+                                std::time::Duration::from_secs(5),
+                            )?;
+                            if death.exit() != LinuxSandboxExit::Signal(libc::SIGKILL) {
+                                return Err(
+                                    "refused native namespace lacked exact retirement".into()
+                                );
+                            }
+                            return Ok(LinuxSandboxExit::Code(0));
                         }
                         if !release_target {
                             // Exercise a valid but exhausted observation budget,
@@ -7636,7 +8062,10 @@ mod imp {
                                 }
                                 TargetObservationCase::ExecFailure => LinuxSandboxExit::Code(125),
                                 TargetObservationCase::Descendant => LinuxSandboxExit::Code(0),
-                                TargetObservationCase::PendingThenCleanup => unreachable!(),
+                                TargetObservationCase::PendingThenCleanup
+                                | TargetObservationCase::OccupancyForkRefusal
+                                | TargetObservationCase::PreforkWatchdogExpiry
+                                | TargetObservationCase::PreforkWatchdogOwnerLoss => unreachable!(),
                             };
                             if observed.exit() != expected
                                 || observed.launch_failure().is_some()
@@ -7960,6 +8389,7 @@ mod tests {
             process: LinuxSandboxProcess {
                 pid: 0,
                 namespace_lifetime: None,
+                namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
@@ -7968,6 +8398,8 @@ mod tests {
             },
             release: None,
             release_succeeded: false,
+            namespace_occupancy_attempted: false,
+            namespace_occupancy_watchdog: None,
         };
         assert!(
             held.try_observe_target_exit()
@@ -8026,11 +8458,55 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn namespace_occupancy_refusal_poison_keeps_release_and_never_mints_lifetime() {
+        let mut held = HeldLinuxSandboxProcess {
+            process: LinuxSandboxProcess {
+                pid: 0,
+                namespace_lifetime: None,
+                namespace_occupancy_watchdog: None,
+                launch_failure: None,
+                applied_launch: None,
+                observed_applied_launch: None,
+                mount_preparation: None,
+                termination_requested: false,
+            },
+            release: Some(std::fs::File::open("/dev/null").unwrap()),
+            release_succeeded: false,
+            namespace_occupancy_attempted: false,
+            namespace_occupancy_watchdog: None,
+        };
+        let limit =
+            crate::time::OccupancyLimit::new(crate::time::occupancy_now().unwrap(), 30_000_000_000)
+                .unwrap();
+        assert!(
+            held.prepare_namespace_occupancy(&limit, std::time::Duration::from_secs(1))
+                .unwrap_err()
+                .contains("original live held PID-1 owner")
+        );
+        assert!(held.namespace_occupancy_attempted);
+        assert!(held.namespace_occupancy_watchdog.is_none());
+        assert!(held.release.is_some());
+        assert!(
+            held.release_once()
+                .unwrap_err()
+                .contains("bare release refused")
+        );
+        assert!(held.release.is_some());
+        assert!(
+            held.prepare_namespace_occupancy(&limit, std::time::Duration::from_secs(1))
+                .unwrap_err()
+                .contains("cannot replay")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn failed_release_never_authorizes_target_observation_or_retry() {
         let mut held = HeldLinuxSandboxProcess {
             process: LinuxSandboxProcess {
                 pid: 0,
                 namespace_lifetime: None,
+                namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
@@ -8040,6 +8516,8 @@ mod tests {
             // Deliberately wrong access mode: a failed private release write.
             release: Some(std::fs::File::open("/dev/null").unwrap()),
             release_succeeded: false,
+            namespace_occupancy_attempted: false,
+            namespace_occupancy_watchdog: None,
         };
         assert!(
             held.release_once()
@@ -8064,6 +8542,7 @@ mod tests {
         let mut process = LinuxSandboxProcess {
             pid: 0,
             namespace_lifetime: None,
+            namespace_occupancy_watchdog: None,
             launch_failure: None,
             applied_launch: None,
             observed_applied_launch: None,
@@ -8246,6 +8725,22 @@ mod tests {
                 .unwrap_err()
                 .contains("native target cannot own pipe-output retention limits")
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_adapter_occupancy_refuses_ordinary_run_before_any_fork() {
+        let limit =
+            crate::time::OccupancyLimit::new(crate::time::occupancy_now().unwrap(), 10_000_000_000)
+                .unwrap();
+        let error = launch_linux_sandbox_with_original_namespace_occupancy(
+            minimal_request(),
+            &limit,
+            crate::time::Duration::from_secs(1),
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1)),
+        )
+        .unwrap_err();
+        assert!(error.contains("existing externally-held lifecycle"));
     }
 
     #[test]

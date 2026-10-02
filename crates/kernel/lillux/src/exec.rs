@@ -2898,14 +2898,21 @@ const ATTACHMENT_READY_PHASE: u32 = 2;
 const ATTACHMENT_RELEASE_TOKEN: u8 = 1;
 
 #[cfg(target_os = "linux")]
-struct OccupancyWatchdog {
+#[path = "namespace_occupancy.rs"]
+mod namespace_occupancy;
+#[cfg(target_os = "linux")]
+pub(crate) use namespace_occupancy::PendingNamespaceWatchdog;
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub(crate) struct OccupancyWatchdog {
     pid: libc::pid_t,
     cancel: Option<std::fs::File>,
 }
 
 #[cfg(target_os = "linux")]
 impl OccupancyWatchdog {
-    fn cancel_and_reap(&mut self) -> Result<(), String> {
+    pub(crate) fn cancel_and_reap(&mut self) -> Result<(), String> {
         if let Some(mut cancel) = self.cancel.take() {
             let _ = cancel.write_all(&[1]);
             drop(cancel);
@@ -2962,6 +2969,64 @@ impl Drop for OccupancyWatchdog {
 fn arm_occupancy_watchdog(
     target_pidfd: BorrowedFd<'_>,
     scope_kill: std::fs::File,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: Duration,
+) -> Result<OccupancyWatchdog, String> {
+    arm_occupancy_watchdog_inner(target_pidfd, scope_kill, false, limit, cleanup_allowance)
+}
+
+/// Only the SAME native sandbox owner can supply this private PID-1 lifetime.
+/// No ordinary target, group, public mount DTO or missing scope is a fallback.
+#[cfg(target_os = "linux")]
+pub(crate) fn arm_namespace_occupancy_watchdog(
+    authority: crate::sandbox::NativeNamespaceOccupancyAuthority,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: Duration,
+) -> Result<OccupancyWatchdog, String> {
+    // Native preparation changed pid_for_children. Forking the controller in
+    // that namespace would let the workload share its enforcement boundary.
+    // The actual outside-owner handoff must exist; no same-namespace fallback.
+    require_original_watchdog_fork_boundary()?;
+    let lifetime = authority.into_pidfd();
+    let kill = std::fs::File::from(
+        lifetime
+            .try_clone()
+            .map_err(|error| format!("retain exact namespace occupancy lifetime: {error}"))?,
+    );
+    arm_occupancy_watchdog_inner(lifetime.as_fd(), kill, true, limit, cleanup_allowance)
+}
+
+#[cfg(target_os = "linux")]
+fn require_original_watchdog_fork_boundary() -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    // Inspect the actual CALLING thread, not the thread-group leader. Keep
+    // both namespace descriptors pinned through their identity comparison.
+    let current = std::fs::File::open("/proc/thread-self/ns/pid").map_err(|error| {
+        format!("watchdog requires original outside namespace fork boundary: {error}")
+    })?;
+    let children =
+        std::fs::File::open("/proc/thread-self/ns/pid_for_children").map_err(|error| {
+            format!("watchdog requires original outside namespace fork boundary: {error}")
+        })?;
+    let current_identity = current
+        .metadata()
+        .map_err(|error| format!("inspect original watchdog PID namespace: {error}"))?;
+    let child_identity = children
+        .metadata()
+        .map_err(|error| format!("inspect original watchdog child PID namespace: {error}"))?;
+    if current_identity.dev() != child_identity.dev()
+        || current_identity.ino() != child_identity.ino()
+    {
+        return Err("watchdog requires original outside namespace fork boundary; target namespace fork refused".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn arm_occupancy_watchdog_inner(
+    target_pidfd: BorrowedFd<'_>,
+    scope_kill: std::fs::File,
+    namespace_init: bool,
     limit: &crate::time::OccupancyLimit,
     cleanup_allowance: Duration,
 ) -> Result<OccupancyWatchdog, String> {
@@ -3044,6 +3109,7 @@ fn arm_occupancy_watchdog(
                 child_target_pidfd.as_raw_fd(),
                 child_ready_writer.as_raw_fd(),
                 expiry_tick,
+                namespace_init,
             )
         }
     }
@@ -3079,10 +3145,21 @@ fn arm_occupancy_watchdog(
             "occupancy watchdog did not acknowledge its isolated enforcement boundary".to_owned(),
         );
     }
-    Ok(OccupancyWatchdog {
+    let watchdog = OccupancyWatchdog {
         pid: child,
         cancel: Some(std::fs::File::from(cancel_writer)),
-    })
+    };
+    // Readiness may have consumed the ORIGINAL service window. Do not renew
+    // it or hand back a release-capable owner after this five-second wait.
+    // Error drops only our cancel authority; the armed child continues until
+    // exact cleanup proves that enforcement may be cancelled.
+    if !matches!(
+        limit.window(cleanup_allowance)?,
+        crate::time::OccupancyWindowState::Service { .. }
+    ) {
+        return Err("original occupancy service window elapsed while watchdog armed".into());
+    }
+    Ok(watchdog)
 }
 
 #[cfg(target_os = "linux")]
@@ -3130,6 +3207,7 @@ unsafe fn occupancy_watchdog_child(
     target_pidfd: i32,
     ready_writer: i32,
     expiry_tick: u64,
+    namespace_init: bool,
 ) -> ! {
     for (source, target) in [
         cancel_reader,
@@ -3177,7 +3255,7 @@ unsafe fn occupancy_watchdog_child(
             if unsafe { *libc::__errno_location() } == libc::EINTR {
                 continue;
             }
-            unsafe { kill_scope_and_exit(5) }
+            unsafe { kill_occupancy_target_and_exit(5, namespace_init) }
         }
         if poll_fds[0].revents != 0 {
             unsafe { libc::_exit(0) }
@@ -3185,6 +3263,12 @@ unsafe fn occupancy_watchdog_child(
         if poll_fds[1].revents & libc::POLLIN != 0 {
             break;
         }
+    }
+    // Kill a proved namespace-init at the ORIGINAL service boundary, leaving
+    // the existing cleanup reserve for death observation. This requests exact
+    // descendant termination; it does NOT prove bounded death or GPU release.
+    if namespace_init {
+        unsafe { kill_occupancy_target_and_exit(5, true) }
     }
     // The service-boundary request is fenced by the retained pidfd. A numeric
     // PID or PGID may be recycled after daemon loss and is never safe here.
@@ -3200,7 +3284,7 @@ unsafe fn occupancy_watchdog_child(
     if signal_result != 0 {
         let error = unsafe { *libc::__errno_location() };
         if error != libc::ESRCH {
-            unsafe { kill_scope_and_exit(5) }
+            unsafe { kill_occupancy_target_and_exit(5, namespace_init) }
         }
     }
     let seconds = expiry_tick / 1_000_000_000;
@@ -3218,7 +3302,7 @@ unsafe fn occupancy_watchdog_child(
     if unsafe { libc::timerfd_settime(4, libc::TFD_TIMER_ABSTIME, &expiry, std::ptr::null_mut()) }
         != 0
     {
-        unsafe { kill_scope_and_exit(5) }
+        unsafe { kill_occupancy_target_and_exit(5, namespace_init) }
     }
     for poll_fd in &mut poll_fds {
         poll_fd.revents = 0;
@@ -3229,7 +3313,7 @@ unsafe fn occupancy_watchdog_child(
             if unsafe { *libc::__errno_location() } == libc::EINTR {
                 continue;
             }
-            unsafe { kill_scope_and_exit(5) }
+            unsafe { kill_occupancy_target_and_exit(5, namespace_init) }
         }
         if poll_fds[0].revents != 0 {
             unsafe { libc::_exit(0) }
@@ -3238,14 +3322,39 @@ unsafe fn occupancy_watchdog_child(
             break;
         }
     }
-    unsafe { kill_scope_and_exit(5) }
+    unsafe { kill_occupancy_target_and_exit(5, namespace_init) }
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn kill_scope_and_exit(scope_kill_fd: i32) -> ! {
+unsafe fn kill_occupancy_target_and_exit(kill_fd: i32, namespace_init: bool) -> ! {
+    if namespace_init {
+        loop {
+            let signalled = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    kill_fd,
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0_u32,
+                )
+            };
+            if signalled == 0 {
+                // Diagnostic only; namespace death still requires observation.
+                unsafe { libc::_exit(0) }
+            }
+            let error = unsafe { *libc::__errno_location() };
+            if error == libc::EINTR {
+                continue;
+            }
+            if error == libc::ESRCH {
+                unsafe { libc::_exit(0) }
+            }
+            unsafe { libc::_exit(126) }
+        }
+    }
     let byte = b'1';
     loop {
-        let written = unsafe { libc::write(scope_kill_fd, (&byte as *const u8).cast(), 1) };
+        let written = unsafe { libc::write(kill_fd, (&byte as *const u8).cast(), 1) };
         if written == 1 {
             unsafe { libc::_exit(0) }
         }

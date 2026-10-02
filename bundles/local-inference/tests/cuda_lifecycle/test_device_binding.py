@@ -128,6 +128,60 @@ class DeviceBindingTests(unittest.TestCase):
         self.assertEqual(len(observations), 1)
         with self.assertRaises(LifecycleError): device.synchronize()
 
+    def test_guarded_same_handle_uuid_v2_precedes_context_with_embedded_zero(self):
+        observations = []
+        lifecycle = install(bindings=self.bindings, observe=observations.append,
+                            expected_uuid_v2_hex=UUID.hex())
+        self.addCleanup(lifecycle.shutdown)
+        from tinygrad.device import Device
+        device = Device['CUDA']
+        self.assertEqual(device.cu_device.value, 37)
+        self.assertEqual(self.driver.uuid_handle, 37)
+        self.assertEqual(self.driver.context_handle, 37)
+        self.assertLess(self.driver.calls.index('cuDeviceGetUuid_v2'),
+                        self.driver.calls.index('cuCtxCreate_v2'))
+        self.assertEqual(lifecycle.shutdown().status, 'closed')
+        self.assertEqual(len(observations), 1)
+
+    def test_guarded_uuid_mismatch_refuses_before_context_or_retired(self):
+        self.driver.uuid = bytes.fromhex('f' * 32)
+        observations = []
+        lifecycle = install(bindings=self.bindings, observe=observations.append,
+                            expected_uuid_v2_hex=UUID.hex())
+        self.addCleanup(lifecycle.shutdown)
+        from tinygrad.device import Device
+        with self.assertRaises(LifecycleError): Device['CUDA']
+        self.assertEqual(self.driver.uuid_handle, 37)
+        self.assertNotIn('cuCtxCreate_v2', self.driver.calls)
+        self.assertEqual(lifecycle.inventory()['context'], 0)
+        self.assertEqual(lifecycle.shutdown().status, 'failed')
+        self.assertFalse(observations)
+
+    def test_guarded_uuid_query_error_refuses_before_context_or_retired(self):
+        self.driver.fail = 'cuDeviceGetUuid_v2'
+        observations = []
+        lifecycle = install(bindings=self.bindings, observe=observations.append,
+                            expected_uuid_v2_hex=UUID.hex())
+        self.addCleanup(lifecycle.shutdown)
+        from tinygrad.device import Device
+        with self.assertRaises(LifecycleError): Device['CUDA']
+        self.assertIn('cuDeviceGetUuid_v2', self.driver.calls)
+        self.assertNotIn('cuCtxCreate_v2', self.driver.calls)
+        self.assertEqual(lifecycle.shutdown().status, 'failed')
+        self.assertFalse(observations)
+
+    def test_guarded_uuid_parameter_and_public_query_do_not_grant_native_access(self):
+        for value in ('', '0' * 32, UUID.hex().upper(), 'GPU-' + UUID.hex()):
+            with self.subTest(value=value), self.assertRaises(LifecycleError):
+                install(bindings=self.bindings, expected_uuid_v2_hex=value)
+        self.assertFalse(self.driver.calls)
+        lifecycle = install(bindings=self.bindings, expected_uuid_v2_hex=UUID.hex())
+        self.addCleanup(lifecycle.shutdown)
+        with self.assertRaises(LifecycleError):
+            self.bindings.cuDeviceGetUuid_v2(None, self.bindings.CUdevice(37))
+        self.assertFalse(self.driver.calls)
+        self.assertEqual(lifecycle.shutdown().status, 'failed')
+
     def test_qualifier_never_escapes_installed_lifecycle_or_enables_extra_queries(self):
         lifecycle = install(bindings=self.bindings)
         self.addCleanup(lifecycle.shutdown)

@@ -8,7 +8,7 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v12";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v13";
 /// Second PID-first status document. The adapter may publish this only after
 /// Lillux's child-owned pre-exec observation; the parent requires EOF after
 /// exactly one document before accepting it.
@@ -160,7 +160,7 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IsolationAdapterProtocolVersion {
-    #[serde(rename = "ryeos.isolation-adapter/v12")]
+    #[serde(rename = "ryeos.isolation-adapter/v13")]
     Current,
 }
 
@@ -1158,6 +1158,15 @@ impl InspectedArtifact {
     }
 }
 
+/// Distinct one-use roles for the original sealed local window and retained
+/// actual clock namespace. Coordinates do not authenticate funding or release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OriginalNamespaceOccupancyDescriptorRoles {
+    pub window_fd: u32,
+    pub clock_namespace_fd: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdapterLaunchRequest {
@@ -1174,6 +1183,10 @@ pub struct AdapterLaunchRequest {
     /// listener. Present iff the plan requests isolated loopback ingress.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub loopback_transfer_fd: Option<u32>,
+    /// Explicit null is required for ordinary launches. A selected original
+    /// funded path must provide BOTH roles; absence is never a fallback.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub original_namespace_occupancy: Option<OriginalNamespaceOccupancyDescriptorRoles>,
     pub lifecycle: AdapterLaunchLifecycle,
 }
 
@@ -1607,6 +1620,16 @@ impl AdapterLaunchRequest {
                 "loopback ingress requires a held attachment launch",
             ));
         }
+        if self.original_namespace_occupancy.is_some()
+            && (!matches!(
+                self.lifecycle,
+                AdapterLaunchLifecycle::AwaitAttachment { .. }
+            ) || self.loopback_transfer_fd.is_some())
+        {
+            return Err(ProtocolValidationError::new(
+                "original occupancy requires the existing held-only lifecycle without an unrelated loopback transfer",
+            ));
+        }
         if self.status_fd <= 2 {
             return Err(ProtocolValidationError::new(
                 "status descriptor overlaps stdio",
@@ -1639,6 +1662,18 @@ impl AdapterLaunchRequest {
                 return Err(ProtocolValidationError::new(
                     "attachment release keepalive descriptor overlaps stdio or another isolation protocol role",
                 ));
+            }
+        }
+        if let Some(roles) = self.original_namespace_occupancy {
+            for descriptor in [roles.window_fd, roles.clock_namespace_fd] {
+                if descriptor <= 2
+                    || descriptor > i32::MAX as u32
+                    || !descriptors.insert(descriptor)
+                {
+                    return Err(ProtocolValidationError::new(
+                        "original occupancy descriptor overlaps stdio or another protocol role",
+                    ));
+                }
             }
         }
         for authority in &self.authorities {
@@ -2295,8 +2330,8 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
-        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v12","protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
-        let nested = r#"{"protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
+        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v13","protocol":"ryeos.isolation-adapter/v13","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let nested = r#"{"protocol":"ryeos.isolation-adapter/v13","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
         for document in [top_level, nested] {
             let error = from_json_str_strict::<AdapterInspectionRequest>(document).unwrap_err();
             assert!(error.to_string().contains("duplicate JSON object key"));
@@ -2305,7 +2340,7 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
-        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
+        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v13","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(unknown)
                 .unwrap_err()
@@ -2313,7 +2348,7 @@ mod tests {
                 .contains("unknown field")
         );
 
-        let valid = r#"{"protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let valid = r#"{"protocol":"ryeos.isolation-adapter/v13","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(&format!("{valid} true"))
                 .unwrap_err()
@@ -2701,6 +2736,7 @@ mod tests {
             adapter_fd: 10,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 7,
                 release_keepalive_fd: 8,
@@ -2719,6 +2755,7 @@ mod tests {
             adapter_fd: 7,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         assert!(
@@ -2741,6 +2778,7 @@ mod tests {
             adapter_fd: 10,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         request.validate().unwrap();
@@ -2765,6 +2803,7 @@ mod tests {
             adapter_fd: 10,
             status_fd: 6,
             loopback_transfer_fd: Some(11),
+            original_namespace_occupancy: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 8,
                 release_keepalive_fd: 9,
@@ -2821,6 +2860,7 @@ mod tests {
             adapter_fd: 10,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         }
         .validate()
@@ -2838,6 +2878,7 @@ mod tests {
             adapter_fd: 8,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         let value = serde_json::to_value(&run).unwrap();
@@ -2852,6 +2893,7 @@ mod tests {
             adapter_fd: 10,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 8,
                 release_keepalive_fd: 9,
@@ -3028,7 +3070,7 @@ mod tests {
         let request = workspace_request(WorkspaceLifecycleOperation::Create);
         request.validate().unwrap();
         let encoded = serde_json::to_value(&request).unwrap();
-        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v12");
+        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v13");
         let purposes = encoded["authorities"]
             .as_array()
             .unwrap()
@@ -3315,5 +3357,95 @@ mod tests {
         let mut encoded = serde_json::to_value(receipt).unwrap();
         encoded["extra"] = serde_json::json!(true);
         assert!(serde_json::from_value::<LoopbackListenerTransferReceipt>(encoded).is_err());
+    }
+    fn original_occupancy_request() -> AdapterLaunchRequest {
+        let (plan, authorities) = complete_plan();
+        AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            plan,
+            authorities,
+            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
+            adapter_fd: 10,
+            status_fd: 6,
+            loopback_transfer_fd: None,
+            original_namespace_occupancy: Some(OriginalNamespaceOccupancyDescriptorRoles {
+                window_fd: 101,
+                clock_namespace_fd: 102,
+            }),
+            lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
+                release_fd: 8,
+                release_keepalive_fd: 9,
+            },
+        }
+    }
+
+    #[test]
+    fn v13_original_occupancy_requires_explicit_complete_distinct_held_roles() {
+        let request = original_occupancy_request();
+        request.validate().unwrap();
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["protocol"], "ryeos.isolation-adapter/v13");
+        let mut missing = value.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("original_namespace_occupancy");
+        assert!(serde_json::from_value::<AdapterLaunchRequest>(missing).is_err());
+        for role in ["window_fd", "clock_namespace_fd"] {
+            let mut missing = value.clone();
+            missing["original_namespace_occupancy"]
+                .as_object_mut()
+                .unwrap()
+                .remove(role);
+            assert!(serde_json::from_value::<AdapterLaunchRequest>(missing).is_err());
+        }
+        let mut old = value.clone();
+        old["protocol"] = serde_json::json!("ryeos.isolation-adapter/v12");
+        assert!(serde_json::from_value::<AdapterLaunchRequest>(old).is_err());
+        let mut ordinary = request.clone();
+        ordinary.original_namespace_occupancy = None;
+        ordinary.validate().unwrap();
+        let ordinary_value = serde_json::to_value(&ordinary).unwrap();
+        assert!(
+            ordinary_value
+                .get("original_namespace_occupancy")
+                .unwrap()
+                .is_null()
+        );
+        for role in ["window_fd", "clock_namespace_fd"] {
+            for bad in [0, 1, 2, 6, 7, 8, 9, 10, 101, 102, u32::MAX] {
+                let mut altered = value.clone();
+                altered["original_namespace_occupancy"][role] = serde_json::json!(bad);
+                let parsed: AdapterLaunchRequest = serde_json::from_value(altered).unwrap();
+                // The original unaltered coordinate is valid; every actual
+                // collision/stdio alias refuses before any adapter fork.
+                if (role == "window_fd" && bad == 101)
+                    || (role == "clock_namespace_fd" && bad == 102)
+                {
+                    parsed.validate().unwrap();
+                } else {
+                    assert!(parsed.validate().is_err());
+                }
+            }
+        }
+        for role in ["window_fd", "clock_namespace_fd"] {
+            let mut altered = value.clone();
+            altered["original_namespace_occupancy"][role] =
+                serde_json::json!(request.authorities[0].inherited_fd);
+            let parsed: AdapterLaunchRequest = serde_json::from_value(altered).unwrap();
+            assert!(parsed.validate().is_err());
+        }
+        let mut run = request.clone();
+        run.lifecycle = AdapterLaunchLifecycle::Run;
+        assert!(run.validate().is_err());
+        let mut unrelated = request.clone();
+        unrelated.loopback_transfer_fd = Some(103);
+        assert!(unrelated.validate().is_err());
+        let text = serde_json::to_string(&request).unwrap().replacen(
+            '{',
+            r#"{"original_namespace_occupancy":null,"#,
+            1,
+        );
+        assert!(from_json_str_strict::<AdapterLaunchRequest>(&text).is_err());
     }
 }
