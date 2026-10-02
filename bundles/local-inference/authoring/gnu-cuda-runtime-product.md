@@ -221,9 +221,9 @@ user JSON.
 
 The source cuts are `1e7dd0e7b`, `976a4dfc8`, `1e083fbdf`, `0e98a1d3e`,
 `f8258ecc8`, cleanup init-v2 `4ff6c19c1` (rebased as `9fa36a92a` in the
-runtime worktree), runtime dispatch `3bbb621e3`, and same-handle guard wiring
-`fbdaaaab4`, plus exactly-one-visible-device enforcement `51e99d5f6`. They are
-based on D checkpoint `3b89173e7` and the
+runtime worktree), runtime dispatch `3bbb621e3`, same-handle guard wiring
+`fbdaaaab4`, exactly-one-visible-device enforcement `51e99d5f6`, and lifecycle
+documentation `1ace6898b`. They are based on D checkpoint `3b89173e7` and the
 coordinator-reviewed combined source. The GNU runtime suite passes 40 tests;
 the cleanup-init-v2/device-lifecycle suite passes 64 tests. These fixtures
 establish parser and source-order/refusal behavior only. No native driver,
