@@ -95,13 +95,14 @@ class GnuPythonProductionTests(unittest.TestCase):
                 produce(Path("/unused-after-refusal"), value)
         exact_archive.assert_called_once()
 
-    def test_fixed_evidence_hash_projection_preserves_the_v2_contract_identity(self):
+    def test_evidence_config_hash_covers_the_actual_v3_contract(self):
         value = contract()
-        old_contract = copy.deepcopy(value)
-        old_contract.pop("private_profile")
-        old_contract["schema"] = "ryeos.gnu_python_production_inputs.v2"
-        self.assertEqual(production._legacy_config_digest(value),
-                         hashlib.sha256(production.canonical_json(old_contract)).hexdigest())
+        expected = hashlib.sha256(production.canonical_json(value)).hexdigest()
+        self.assertEqual(production._config_digest(value), expected)
+        changed = copy.deepcopy(value)
+        changed["private_profile"]["runtime_root"] += "-changed"
+        self.assertNotEqual(production._config_digest(value),
+                            production._config_digest(changed))
         for field, replacement in (
             ("id", "other_profile"),
             ("runtime_root", "/tmp/python"),

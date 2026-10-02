@@ -241,12 +241,9 @@ def _copy_support(support: Path, destination: Path, selections: dict) -> None:
             raise ValueError("copied support file changed")
 
 
-def _legacy_config_digest(config: dict) -> str:
-    """Keep the fixed product evidence identity byte-compatible with v2."""
-    legacy = dict(config)
-    legacy.pop("private_profile")
-    legacy["schema"] = "ryeos.gnu_python_production_inputs.v2"
-    return hashlib.sha256(canonical_json(legacy)).hexdigest()
+def _config_digest(config: dict) -> str:
+    """Identify the exact admitted canonical contract used by production."""
+    return hashlib.sha256(canonical_json(config)).hexdigest()
 
 
 def produce(project: Path, config: dict, profile: str = FIXED_PROFILE) -> dict:
@@ -349,7 +346,7 @@ def produce(project: Path, config: dict, profile: str = FIXED_PROFILE) -> dict:
     relocations_path.chmod(0o644)
     evidence = {
         "schema": "ryeos.gnu-python-production-evidence.v1",
-        "config_sha256": _legacy_config_digest(config),
+        "config_sha256": _config_digest(config),
         "archive_manifest_digest": config["archives"]["manifest"]["digest"],
         "install_receipt": install_receipt,
         "metadata_receipt": metadata_receipt,
