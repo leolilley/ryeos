@@ -203,12 +203,13 @@ the existing channel. `run_channel_product` dispatches those exact values to
 `run_product`; `prepare_environment` checks both tree bounds before path
 discovery and provider contact. GNU bounds may not exceed the unsigned
 `gnu_runtime_to_private_worker` draft ceiling; that ceiling is not
-selected-product evidence and is never a default. Before lifecycle installation,
-the runtime loads only the selected generated tinygrad CUDA binding and queries
-UUID-v2/count/ordinal zero against the same bound UUID. A missing, malformed or
-mismatched comparison refuses before a CUDA context is created. This query is a
-source-qualified device comparison, not proof of independent D authority, a
-retained lease, physical close, or native qualification.
+selected-product evidence and is never a default. The runtime validates the
+UUID before loading the selected generated tinygrad CUDA binding and passes it
+to `install(expected_uuid_v2_hex=...)`. Lifecycle checks UUID-v2 on the exact
+`CUdevice` handle returned for ordinal zero before that handle reaches context
+creation. A missing, malformed or mismatched comparison refuses before a CUDA
+context is created. This source comparison is not proof of independent D
+authority, a retained lease, physical close, or native qualification.
 
 The current driver draft still has no selected tree, bounds, or digest, and D's
 protected producer has not yet supplied original-owner-bound product/device
@@ -218,10 +219,11 @@ user JSON.
 
 The source cuts are `1e7dd0e7b`, `976a4dfc8`, `1e083fbdf`, `0e98a1d3e`,
 `f8258ecc8`, cleanup init-v2 `4ff6c19c1` (rebased as `9fa36a92a` in the
-runtime worktree), and runtime dispatch `3bbb621e3`. They are based on D
-checkpoint `3b89173e7` and the coordinator-reviewed combined source. The GNU
-runtime suite passes 39 tests; the cleanup-init-v2/device-lifecycle suite passes
-64 tests. These fixtures establish parser and source-order/refusal behavior
-only. No native driver, compiler child, model weight, CUDA device or provider
-was loaded or run; all ABI, actual GNU production, destination admission,
-native qualification, signing and activation gates remain open.
+runtime worktree), runtime dispatch `3bbb621e3`, and same-handle guard wiring
+`fbdaaaab4`. They are based on D checkpoint `3b89173e7` and the
+coordinator-reviewed combined source. The GNU runtime suite passes 39 tests;
+the cleanup-init-v2/device-lifecycle suite passes 64 tests. These fixtures
+establish parser and source-order/refusal behavior only. No native driver,
+compiler child, model weight, CUDA device or provider was loaded or run; all ABI,
+actual GNU production, destination admission, native qualification, signing and
+activation gates remain open.
