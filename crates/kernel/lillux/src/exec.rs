@@ -170,14 +170,64 @@ struct NativeSettlementChannel {
     exact_eof: bool,
     testimony: Option<crate::sandbox::native_terminal_wire::NativeTerminalTestimony>,
     failure: Option<String>,
+    pin_observation: NativeTerminalPinObservation,
+    pin_timely: bool,
+    selected_wait_phase: SelectedNativeTerminalWaitPhase,
     // Drainer joins are irreversible too. Preserve exact bounded bytes/flags
     // when natural wait returns this owner after a late terminal failure.
     retained_drains: Option<(BoundedCapture, BoundedCapture)>,
     retained_terminal_result: Option<SubprocessResult>,
 }
 
+/// Raw result of the one nonblocking observation of the exact retained target pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeTerminalPinObservation {
+    NotAttempted,
+    Interrupted,
+    Error(String),
+    NotExited,
+    Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeTerminalWaitPhase {
+    Pending,
+    Collected,
+    Failed,
+}
+
+type SelectedNativeTerminalWaitPhase = NativeTerminalWaitPhase;
+
+/// Same-owner result of a selected native terminal wait. `Incomplete` is a
+/// per-call observation and may be resumed with the same owner and deadline.
+pub enum SelectedNativeTerminalWaitOutcome {
+    Collected(RunningProcess),
+    Incomplete(RunningProcess),
+    Failed(RunningProcess),
+}
+
+enum NaturalWaitCoreOutcome {
+    Completed(RunningProcess, Option<SubprocessResult>),
+    Incomplete(RunningProcess),
+    Failed(RunningProcess),
+}
+
+/// Borrowed raw collection state. These bytes and observations are diagnostics,
+/// not native-generation, driver-retirement, or financial proof.
+pub struct NativeTerminalRawView<'a> {
+    pub frame: &'a [u8],
+    pub exact_eof: bool,
+    pub applied_receipt: Option<&'a Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
+    pub pin_observation: &'a NativeTerminalPinObservation,
+    pub pin_timely: bool,
+    pub failure: Option<&'a str>,
+    pub wait_phase: NativeTerminalWaitPhase,
+    pub retained_drains: Option<(&'a [u8], bool, &'a [u8], bool)>,
+    pub terminal_result: Option<&'a SubprocessResult>,
+}
+
 #[cfg(target_os = "linux")]
-fn native_terminal_pin_has_exited(pin: &OwnedFd) -> Result<bool, String> {
+fn native_terminal_pin_has_exited(pin: &OwnedFd) -> NativeTerminalPinObservation {
     let mut readiness = libc::pollfd {
         fd: pin.as_raw_fd(),
         events: libc::POLLIN,
@@ -187,16 +237,24 @@ fn native_terminal_pin_has_exited(pin: &OwnedFd) -> Result<bool, String> {
     if ready < 0 {
         let error = std::io::Error::last_os_error();
         if error.kind() == std::io::ErrorKind::Interrupted {
-            return Ok(false);
+            return NativeTerminalPinObservation::Interrupted;
         }
-        return Err(format!("observe native terminal target pin: {error}"));
+        return NativeTerminalPinObservation::Error(format!(
+            "observe native terminal target pin: {error}"
+        ));
     }
     if readiness.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
-        return Err("native terminal target pin observation failed".into());
+        return NativeTerminalPinObservation::Error(
+            "native terminal target pin observation failed".into(),
+        );
     }
     // Linux reports HUP after the exact child has been reaped. Neither case
     // reopens procfs or transfers ownership from another process wrapper.
-    Ok(ready > 0 && readiness.revents & (libc::POLLIN | libc::POLLHUP) != 0)
+    if ready > 0 && readiness.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+        NativeTerminalPinObservation::Exited
+    } else {
+        NativeTerminalPinObservation::NotExited
+    }
 }
 
 impl SupervisedProcessStatus {
@@ -389,6 +447,9 @@ impl SupervisedLauncherAttachmentStatusPipe {
             exact_eof: false,
             testimony: None,
             failure: None,
+            pin_observation: NativeTerminalPinObservation::NotAttempted,
+            pin_timely: false,
+            selected_wait_phase: SelectedNativeTerminalWaitPhase::Pending,
             retained_drains: None,
             retained_terminal_result: None,
         });
@@ -5231,6 +5292,30 @@ impl Drop for ProcessAwaitingAttachment {
 }
 
 impl RunningProcess {
+    /// Borrow the selected channel's retained raw observations and terminal result.
+    pub fn native_terminal_raw_view(&self) -> Option<NativeTerminalRawView<'_>> {
+        let channel = self.native_settlement.as_ref()?;
+        let drains = channel.retained_drains.as_ref().map(|(stdout, stderr)| {
+            (
+                stdout.bytes.as_slice(),
+                stdout.truncated,
+                stderr.bytes.as_slice(),
+                stderr.truncated,
+            )
+        });
+        Some(NativeTerminalRawView {
+            frame: &channel.frame,
+            exact_eof: channel.exact_eof,
+            applied_receipt: self.applied_receipt_observation.as_ref(),
+            pin_observation: &channel.pin_observation,
+            pin_timely: channel.pin_timely,
+            failure: channel.failure.as_deref(),
+            wait_phase: channel.selected_wait_phase,
+            retained_drains: drains,
+            terminal_result: channel.retained_terminal_result.as_ref(),
+        })
+    }
+
     /// Await the second, exact trusted-launcher status after attachment and
     /// release. The reader reports success only after the status writer closes
     /// cleanly, so extra or partial documents cannot be laundered by a first
@@ -5420,6 +5505,18 @@ impl RunningProcess {
         if let Some(failure) = &channel.failure {
             return Err(failure.clone());
         }
+        if channel.original_deadline.remaining().is_zero() {
+            let failure = "native terminal original deadline expired".to_string();
+            channel.failure = Some(failure.clone());
+            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
+            return Err(failure);
+        }
+        if matches!(
+            &channel.pin_observation,
+            NativeTerminalPinObservation::Exited
+        ) {
+            return Ok(channel.pin_timely);
+        }
         let observation = (|| {
             if channel.original_deadline.remaining().is_zero() {
                 return Err("native terminal original deadline expired".to_string());
@@ -5481,8 +5578,25 @@ impl RunningProcess {
                     .attachment_target_lifetime
                     .as_ref()
                     .ok_or("native terminal target lifetime pin is missing")?;
-                let exited = native_terminal_pin_has_exited(pin)?;
                 if channel.original_deadline.remaining().is_zero() {
+                    return Err(
+                        "native terminal original deadline expired before pin observation".into(),
+                    );
+                }
+                let pin_observation = native_terminal_pin_has_exited(pin);
+                channel.pin_observation = pin_observation.clone();
+                let expired_after_pin = channel.original_deadline.remaining().is_zero();
+                channel.pin_timely =
+                    matches!(pin_observation, NativeTerminalPinObservation::Exited)
+                        && !expired_after_pin;
+                let exited = match pin_observation {
+                    NativeTerminalPinObservation::Exited => true,
+                    NativeTerminalPinObservation::NotExited
+                    | NativeTerminalPinObservation::Interrupted => false,
+                    NativeTerminalPinObservation::Error(error) => return Err(error),
+                    NativeTerminalPinObservation::NotAttempted => false,
+                };
+                if expired_after_pin {
                     return Err(
                         "native terminal original deadline expired after pin observation".into(),
                     );
@@ -5494,6 +5608,7 @@ impl RunningProcess {
             // Parse/context/EOF/expiry failures cannot be rehabilitated by
             // cleanup-induced EOF or a later read of an emptied pipe.
             channel.failure = Some(failure.clone());
+            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
         }
         observation
     }
@@ -5526,20 +5641,96 @@ impl RunningProcess {
     /// while a child that merely dropped the channel remains available for
     /// the caller's ordinary abort policy.
     pub fn wait_for_natural_exit(mut self, timeout: Duration) -> Result<SubprocessResult, Self> {
-        let Some(deadline) = Instant::now().checked_add(timeout) else {
+        let selected_phase = self
+            .native_settlement
+            .as_ref()
+            .map(|channel| channel.selected_wait_phase);
+        let cached_result = self
+            .native_settlement
+            .as_ref()
+            .is_some_and(|channel| channel.retained_terminal_result.is_some());
+        let sticky_failure = self
+            .native_settlement
+            .as_ref()
+            .is_some_and(|channel| channel.failure.is_some());
+        if cached_result
+            && (sticky_failure || selected_phase == Some(SelectedNativeTerminalWaitPhase::Failed))
+        {
             return Err(self);
+        }
+        if cached_result && selected_phase == Some(SelectedNativeTerminalWaitPhase::Collected) {
+            return Ok(self
+                .native_settlement
+                .as_mut()
+                .and_then(|channel| channel.retained_terminal_result.take())
+                .expect("collected native result checked above"));
+        }
+        match self.natural_wait_core(timeout, false) {
+            NaturalWaitCoreOutcome::Completed(_, Some(result)) => Ok(result),
+            NaturalWaitCoreOutcome::Completed(owner, None)
+            | NaturalWaitCoreOutcome::Incomplete(owner)
+            | NaturalWaitCoreOutcome::Failed(owner) => Err(owner),
+        }
+    }
+
+    /// Selected-channel wait that retains terminal bytes and the exact result
+    /// in this owner. `Incomplete` may be resumed before the original expiry.
+    pub fn wait_for_natural_exit_retaining_native(
+        self,
+        timeout: Duration,
+    ) -> Result<SelectedNativeTerminalWaitOutcome, Self> {
+        if self.native_settlement.is_none() {
+            return Err(self);
+        }
+        match self.natural_wait_core(timeout, true) {
+            NaturalWaitCoreOutcome::Completed(owner, _) => {
+                Ok(SelectedNativeTerminalWaitOutcome::Collected(owner))
+            }
+            NaturalWaitCoreOutcome::Incomplete(owner) => {
+                Ok(SelectedNativeTerminalWaitOutcome::Incomplete(owner))
+            }
+            NaturalWaitCoreOutcome::Failed(owner) => {
+                Ok(SelectedNativeTerminalWaitOutcome::Failed(owner))
+            }
+        }
+    }
+
+    fn natural_wait_core(
+        mut self,
+        timeout: Duration,
+        retain_selected_result: bool,
+    ) -> NaturalWaitCoreOutcome {
+        if retain_selected_result {
+            if let Some(channel) = self.native_settlement.as_ref() {
+                match channel.selected_wait_phase {
+                    SelectedNativeTerminalWaitPhase::Collected => {
+                        return NaturalWaitCoreOutcome::Completed(self, None);
+                    }
+                    SelectedNativeTerminalWaitPhase::Failed => {
+                        return NaturalWaitCoreOutcome::Failed(self);
+                    }
+                    SelectedNativeTerminalWaitPhase::Pending => {}
+                }
+            }
+        }
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return NaturalWaitCoreOutcome::Incomplete(self);
         };
         loop {
             let complete = match self.poll_native_terminal_testimony() {
                 Ok(complete) => complete,
-                Err(_) => return Err(self),
+                Err(_) => return NaturalWaitCoreOutcome::Failed(self),
             };
             if !complete && Instant::now() >= deadline {
-                return Err(self);
+                return NaturalWaitCoreOutcome::Incomplete(self);
             }
             match poll_wrapper(&mut self.child) {
                 Ok(WrapperPoll::ExitedUnreaped) if !complete => {
-                    thread::sleep(self.natural_wait_poll_bound(deadline));
+                    let bound = self.natural_wait_poll_bound(deadline);
+                    if bound.is_zero() {
+                        return NaturalWaitCoreOutcome::Incomplete(self);
+                    }
+                    thread::sleep(bound);
                 }
                 Ok(WrapperPoll::ExitedUnreaped) => {
                     // WNOWAIT retains the exact wrapper identity while the
@@ -5547,59 +5738,144 @@ impl RunningProcess {
                     // has naturally left. Without this check the ordinary
                     // settlement below could kill a live descendant and
                     // misreport forced cleanup as natural completion.
-                    if let Some(scope) = self.process_scope.as_ref()
-                        && scope
-                            .wait_empty(self.native_terminal_wait_bound(
-                                deadline.saturating_duration_since(Instant::now()),
-                            ))
-                            .is_err()
-                    {
-                        return Err(self);
+                    if let Some(scope) = self.process_scope.as_ref() {
+                        let wait_bound = self.native_terminal_wait_bound(
+                            deadline.saturating_duration_since(Instant::now()),
+                        );
+                        if let Err(error) = scope.wait_empty(wait_bound) {
+                            let original_expired =
+                                self.native_settlement.as_ref().is_some_and(|channel| {
+                                    channel.original_deadline.remaining().is_zero()
+                                });
+                            let slice_timeout = error.contains("did not settle before deadline")
+                                || error.contains("control needs a positive bounded timeout");
+                            if retain_selected_result && slice_timeout && !original_expired {
+                                return NaturalWaitCoreOutcome::Incomplete(self);
+                            }
+                            if retain_selected_result {
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    channel.failure = Some(error);
+                                    channel.selected_wait_phase =
+                                        SelectedNativeTerminalWaitPhase::Failed;
+                                }
+                            }
+                            return NaturalWaitCoreOutcome::Failed(self);
+                        }
                     }
                     // Readiness callers treat Ok as completed cleanup. Do
                     // not turn a failed scope/group barrier into that proof
                     // merely by attaching a diagnostic to an exit result.
                     // Keep the typed owner available for checked abort/retry.
                     if !matches!(self.poll_native_terminal_testimony(), Ok(true)) {
-                        return Err(self);
+                        return NaturalWaitCoreOutcome::Failed(self);
                     }
-                    if self.settle_processes_before_drains().is_err() {
-                        return Err(self);
+                    if let Err(error) = self.settle_processes_before_drains() {
+                        if retain_selected_result {
+                            if let Some(channel) = self.native_settlement.as_mut() {
+                                channel.failure = Some(error);
+                                channel.selected_wait_phase =
+                                    SelectedNativeTerminalWaitPhase::Failed;
+                            }
+                        }
+                        return NaturalWaitCoreOutcome::Failed(self);
                     }
                     // Child retains its reaped status; this does not reap a
                     // second process or reopen a numeric PID.
                     return match self.child.wait() {
                         Ok(status) => {
                             let result = self.completed_result(status);
+                            if retain_selected_result {
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    // Preserve this exact non-Clone result before
+                                    // any post-drain pin/deadline observation.
+                                    channel.retained_terminal_result = Some(result);
+                                }
+                                if !matches!(self.poll_native_terminal_testimony(), Ok(true)) {
+                                    if let Some(channel) = self.native_settlement.as_mut() {
+                                        channel.selected_wait_phase =
+                                            SelectedNativeTerminalWaitPhase::Failed;
+                                    }
+                                    return NaturalWaitCoreOutcome::Failed(self);
+                                }
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    channel.selected_wait_phase =
+                                        SelectedNativeTerminalWaitPhase::Collected;
+                                }
+                                return NaturalWaitCoreOutcome::Completed(self, None);
+                            }
                             // A late drain cannot make Ok mean settled. The
                             // exact Child cached status remains in Err(owner).
                             if !matches!(self.poll_native_terminal_testimony(), Ok(true)) {
                                 if let Some(channel) = self.native_settlement.as_mut() {
                                     channel.retained_terminal_result = Some(result);
+                                    channel.selected_wait_phase =
+                                        SelectedNativeTerminalWaitPhase::Failed;
                                 }
-                                Err(self)
+                                NaturalWaitCoreOutcome::Failed(self)
                             } else {
-                                Ok(result)
+                                NaturalWaitCoreOutcome::Completed(self, Some(result))
                             }
                         }
-                        Err(_) => Err(self),
+                        Err(error) => {
+                            if retain_selected_result {
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    channel.failure =
+                                        Some(format!("reap settled wrapper: {error}"));
+                                    channel.selected_wait_phase =
+                                        SelectedNativeTerminalWaitPhase::Failed;
+                                }
+                            }
+                            NaturalWaitCoreOutcome::Failed(self)
+                        }
                     };
                 }
                 #[cfg(not(target_os = "linux"))]
                 Ok(WrapperPoll::ExitedReaped(status)) => {
                     self.wrapper_reaped = true;
                     if self.settle_processes_before_drains().is_err() {
-                        return Err(self);
+                        return NaturalWaitCoreOutcome::Failed(self);
                     }
-                    return Ok(self.completed_result(status));
+                    let result = self.completed_result(status);
+                    if retain_selected_result {
+                        if let Some(channel) = self.native_settlement.as_mut() {
+                            channel.retained_terminal_result = Some(result);
+                            channel.selected_wait_phase = if channel.failure.is_some() {
+                                SelectedNativeTerminalWaitPhase::Failed
+                            } else {
+                                SelectedNativeTerminalWaitPhase::Collected
+                            };
+                        }
+                        return if self
+                            .native_settlement
+                            .as_ref()
+                            .is_some_and(|channel| channel.failure.is_some())
+                        {
+                            NaturalWaitCoreOutcome::Failed(self)
+                        } else {
+                            NaturalWaitCoreOutcome::Completed(self, None)
+                        };
+                    }
+                    return NaturalWaitCoreOutcome::Completed(self, Some(result));
                 }
                 Ok(WrapperPoll::Running) => {
                     if Instant::now() >= deadline {
-                        return Err(self);
+                        return NaturalWaitCoreOutcome::Incomplete(self);
                     }
-                    thread::sleep(self.natural_wait_poll_bound(deadline));
+                    let bound = self.natural_wait_poll_bound(deadline);
+                    if bound.is_zero() {
+                        return NaturalWaitCoreOutcome::Incomplete(self);
+                    }
+                    thread::sleep(bound);
                 }
-                Err(_) => return Err(self),
+                Err(error) => {
+                    if retain_selected_result {
+                        if let Some(channel) = self.native_settlement.as_mut() {
+                            channel.failure = Some(format!("observe supervised wrapper: {error}"));
+                            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
+                        }
+                    }
+                    return NaturalWaitCoreOutcome::Failed(self);
+                }
             }
         }
     }
@@ -5773,6 +6049,31 @@ impl RunningProcess {
     /// The predicate grants no signal handle: this owner alone terminates
     /// and reaps the supervised process before returning its failed result.
     pub fn wait_interruptible(mut self, mut interrupted: impl FnMut() -> bool) -> SubprocessResult {
+        let retained_failure = self
+            .native_settlement
+            .as_ref()
+            .and_then(|channel| channel.failure.clone());
+        if self.native_settlement.as_ref().is_some_and(|channel| {
+            channel.selected_wait_phase == SelectedNativeTerminalWaitPhase::Collected
+        }) {
+            if let Some(result) = self
+                .native_settlement
+                .as_mut()
+                .and_then(|channel| channel.retained_terminal_result.take())
+            {
+                return result;
+            }
+        }
+        if let Some(failure) = retained_failure
+            && let Some(mut result) = self
+                .native_settlement
+                .as_mut()
+                .and_then(|channel| channel.retained_terminal_result.take())
+        {
+            result.success = false;
+            result.stderr = append_diagnostic(&result.stderr, &failure);
+            return result;
+        }
         if self.attachment_release.is_some() {
             self.kill_supervised_processes();
             self.reap_wrapper();
@@ -10821,6 +11122,79 @@ mod pinned_attachment_cwd_tests {
 mod native_terminal_existing_wait_tests {
     use super::*;
 
+    fn selected_wait(
+        running: RunningProcess,
+        timeout: Duration,
+    ) -> SelectedNativeTerminalWaitOutcome {
+        match running.wait_for_natural_exit_retaining_native(timeout) {
+            Ok(outcome) => outcome,
+            Err(owner) => {
+                owner.abort();
+                panic!("selected wait unexpectedly had no selected channel")
+            }
+        }
+    }
+
+    fn selected_live_child_with_testimony(
+        delay: &str,
+    ) -> (RunningProcess, InheritedDescriptorAuthority, Vec<u8>) {
+        let mut running = lib_spawn(SubprocessRequest {
+            cmd: "/bin/sleep".into(),
+            argv0: None,
+            args: vec![delay.into()],
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        })
+        .unwrap();
+        let identity = crate::capture_exact_process_identity(
+            running.pid,
+            Some(u32::try_from(running.pgid).unwrap()),
+        )
+        .unwrap();
+        let mount = crate::LinuxSandboxMountPreparationReceipt {
+            schema: 1,
+            owned_child_pid: running.pid,
+            mount_count: 0,
+            destination_access_sha256: [0; 32],
+        };
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let writer = held
+            .prepare_native_settlement_channel(crate::time::MonotonicDeadline::after(
+                Duration::from_secs(4),
+            ))
+            .unwrap();
+        running.native_settlement = held.reader.native_settlement.take();
+        running.mount_preparation = Some(mount.clone());
+        running.attachment_target_lifetime = Some(Arc::new(open_pidfd(running.pid).unwrap()));
+        running
+            .native_settlement
+            .as_mut()
+            .unwrap()
+            .held_target_identity = Some(identity.clone());
+        let record = crate::sandbox::native_terminal_wire::NativeTerminalTestimony {
+            schema: crate::sandbox::native_terminal_wire::NATIVE_TERMINAL_SCHEMA.to_owned(),
+            process_identity: identity,
+            held_mount: mount,
+            applied_launch: None,
+            exit: crate::sandbox::native_terminal_wire::NativeTerminalExit::Code(0),
+            owner_requested_termination: false,
+            launch_failure: None,
+        };
+        let mut frame = serde_json::to_vec(&record).unwrap();
+        frame.push(b'\n');
+        (running, writer, frame)
+    }
+
     // Negative collection controls only: this ordinary child supplies no
     // native identity/admitted context and can never qualify testimony.
     fn negative_owner() -> (RunningProcess, InheritedDescriptorAuthority) {
@@ -10857,7 +11231,10 @@ mod native_terminal_existing_wait_tests {
         let mut child = process::Command::new("/bin/true").spawn().unwrap();
         let pin = open_pidfd(child.id()).unwrap();
         child.wait().unwrap();
-        assert!(native_terminal_pin_has_exited(&pin).unwrap());
+        assert_eq!(
+            native_terminal_pin_has_exited(&pin),
+            NativeTerminalPinObservation::Exited
+        );
     }
 
     #[test]
@@ -10917,6 +11294,22 @@ mod native_terminal_existing_wait_tests {
                 .as_raw_fd(),
             reader_fd
         );
+        assert!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .failure
+                .is_none()
+        );
+        assert_eq!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .selected_wait_phase,
+            SelectedNativeTerminalWaitPhase::Pending
+        );
         // A deterministic already-expired negative fixture, never renewal.
         running
             .native_settlement
@@ -10931,6 +11324,240 @@ mod native_terminal_existing_wait_tests {
         );
         assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
         running.abort();
+    }
+
+    #[test]
+    fn selected_incomplete_resumes_same_owner_and_caches_collected_result() {
+        let (running, writer, frame) = selected_live_child_with_testimony("0.15");
+        let split = frame.len() / 2;
+        let mut writer_file = writer.file();
+        writer_file.write_all(&frame[..split]).unwrap();
+        let mut running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Incomplete(owner) => owner,
+            SelectedNativeTerminalWaitOutcome::Collected(_) => {
+                panic!("partial testimony was reported collected")
+            }
+            SelectedNativeTerminalWaitOutcome::Failed(_) => {
+                panic!("partial testimony became sticky failure")
+            }
+        };
+        let reader_fd = running
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .reader
+            .file()
+            .as_raw_fd();
+        assert_eq!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .selected_wait_phase,
+            SelectedNativeTerminalWaitPhase::Pending
+        );
+        assert!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .failure
+                .is_none()
+        );
+
+        writer_file.write_all(&frame[split..]).unwrap();
+        drop(writer_file);
+        drop(writer);
+        running = match selected_wait(running, Duration::from_secs(3)) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            SelectedNativeTerminalWaitOutcome::Incomplete(owner) => {
+                owner.abort();
+                panic!("completed selected child remained incomplete")
+            }
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => {
+                let failure = owner
+                    .native_settlement
+                    .as_ref()
+                    .and_then(|channel| channel.failure.as_deref())
+                    .unwrap_or("unknown selected collection failure")
+                    .to_owned();
+                owner.abort();
+                panic!("selected collection failed: {failure}")
+            }
+        };
+        let first = running.native_terminal_raw_view().unwrap();
+        assert!(first.exact_eof);
+        assert_eq!(first.frame, frame);
+        assert!(matches!(
+            first.pin_observation,
+            &NativeTerminalPinObservation::Exited
+        ));
+        assert!(first.pin_timely);
+        assert!(first.terminal_result.unwrap().success);
+        assert_eq!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .reader
+                .file()
+                .as_raw_fd(),
+            reader_fd
+        );
+        drop(first);
+        let running = match selected_wait(running, Duration::from_secs(3)) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            _ => panic!("cached selected result changed phase on reentry"),
+        };
+        let second = running.native_terminal_raw_view().unwrap();
+        assert!(second.terminal_result.unwrap().success);
+        assert_eq!(second.wait_phase, NativeTerminalWaitPhase::Collected);
+    }
+
+    #[test]
+    fn legacy_natural_wait_takes_cached_selected_result_without_recollection() {
+        let (running, writer, frame) = selected_live_child_with_testimony("0.05");
+        writer.file().write_all(&frame).unwrap();
+        drop(writer);
+        let running = match selected_wait(running, Duration::from_secs(3)) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            SelectedNativeTerminalWaitOutcome::Incomplete(owner) => {
+                owner.abort();
+                panic!("selected child did not finish within its wait slice")
+            }
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => {
+                let failure = owner
+                    .native_settlement
+                    .as_ref()
+                    .and_then(|channel| channel.failure.as_deref())
+                    .unwrap_or("unknown selected collection failure")
+                    .to_owned();
+                owner.abort();
+                panic!("selected collection failed: {failure}")
+            }
+        };
+        let result = match running.wait_for_natural_exit(Duration::ZERO) {
+            Ok(result) => result,
+            Err(owner) => {
+                owner.abort();
+                panic!("legacy entrypoint did not return cached collected result")
+            }
+        };
+        assert!(result.success);
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn selected_sticky_failure_reentry_preserves_raw_frame_and_owner() {
+        let (running, writer) = negative_owner();
+        writer.file().write_all(b"{\"schema\":").unwrap();
+        drop(writer);
+        let running = match selected_wait(running, Duration::from_secs(1)) {
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => owner,
+            SelectedNativeTerminalWaitOutcome::Collected(owner)
+            | SelectedNativeTerminalWaitOutcome::Incomplete(owner) => {
+                owner.abort();
+                panic!("malformed EOF did not become sticky failure")
+            }
+        };
+        let channel = running.native_settlement.as_ref().unwrap();
+        let frame = channel.frame.clone();
+        let reader_fd = channel.reader.file().as_raw_fd();
+        let failure = channel.failure.clone().unwrap();
+        let running = match selected_wait(running, Duration::from_secs(1)) {
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => owner,
+            _ => panic!("sticky failure was rehabilitated on reentry"),
+        };
+        let channel = running.native_settlement.as_ref().unwrap();
+        assert_eq!(channel.frame, frame);
+        assert_eq!(channel.failure.as_deref(), Some(failure.as_str()));
+        assert_eq!(channel.reader.file().as_raw_fd(), reader_fd);
+        running.abort();
+    }
+
+    #[test]
+    fn timely_cached_pin_stays_raw_but_original_expiry_fails_pending_collection() {
+        let (mut running, writer, frame) = selected_live_child_with_testimony("0.01");
+        thread::sleep(Duration::from_millis(50));
+        writer.file().write_all(&frame).unwrap();
+        drop(writer);
+        let original_deadline = running
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .original_deadline;
+        loop {
+            match running.poll_native_terminal_testimony() {
+                Ok(true) => break,
+                Ok(false) => {
+                    let remaining = original_deadline.remaining();
+                    assert!(
+                        !remaining.is_zero(),
+                        "same collector did not observe pin before original expiry"
+                    );
+                    thread::sleep(Duration::from_millis(1).min(remaining));
+                }
+                Err(error) => panic!("same collector failed before pin observation: {error}"),
+            }
+        }
+        {
+            let channel = running.native_settlement.as_ref().unwrap();
+            assert_eq!(
+                channel.pin_observation,
+                NativeTerminalPinObservation::Exited
+            );
+            assert!(channel.pin_timely);
+            assert_eq!(
+                channel.selected_wait_phase,
+                NativeTerminalWaitPhase::Pending
+            );
+        }
+        running
+            .native_settlement
+            .as_mut()
+            .unwrap()
+            .original_deadline = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(running.poll_native_terminal_testimony().is_err());
+        let channel = running.native_settlement.as_ref().unwrap();
+        assert_eq!(
+            channel.pin_observation,
+            NativeTerminalPinObservation::Exited
+        );
+        assert!(channel.pin_timely);
+        assert_eq!(channel.selected_wait_phase, NativeTerminalWaitPhase::Failed);
+        assert!(channel.failure.is_some());
+        running.abort();
+    }
+
+    #[test]
+    fn ordinary_short_wait_returns_resumable_owner_without_sticky_failure() {
+        let (running, writer, frame) = selected_live_child_with_testimony("0.15");
+        let split = frame.len() / 2;
+        writer.file().write_all(&frame[..split]).unwrap();
+        let mut running = match running.wait_for_natural_exit(Duration::ZERO) {
+            Err(owner) => owner,
+            Ok(_) => panic!("ordinary wait accepted an incomplete selected channel"),
+        };
+        {
+            let channel = running.native_settlement.as_ref().unwrap();
+            assert_eq!(channel.frame, frame[..split]);
+            assert!(channel.failure.is_none());
+            assert_eq!(
+                channel.selected_wait_phase,
+                NativeTerminalWaitPhase::Pending
+            );
+        }
+        writer.file().write_all(&frame[split..]).unwrap();
+        drop(writer);
+        let result = match running.wait_for_natural_exit(Duration::from_secs(3)) {
+            Ok(result) => result,
+            Err(owner) => {
+                owner.abort();
+                panic!("ordinary wait did not resume the same selected collector")
+            }
+        };
+        assert!(result.success);
+        assert_eq!(result.exit_code, 0);
     }
 }
 
