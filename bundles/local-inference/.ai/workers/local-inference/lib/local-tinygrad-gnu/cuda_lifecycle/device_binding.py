@@ -3,8 +3,11 @@
 NOT an admitted observer or launch capability. The caller must already retain an
 independent same-node GPU UUID-v2 observation joined to Lillux's exact selected
 character-device authorities. There is no such qualified node observer in the
-current resource pool. This helper is deliberately not invoked by runtime.py.
-It loads no bindings/libraries and creates no CUDA context or allocation.
+current resource pool. This separate diagnostic is not invoked by runtime.py:
+the source-wired worker instead passes strict init-v2 comparison data to
+Lifecycle.install, which checks the actual context-creating CUdevice handle.
+Neither path admits the supplied comparison. This helper loads neither
+bindings nor libraries and creates no CUDA context or allocation.
 """
 from __future__ import annotations
 
