@@ -1029,6 +1029,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn authored_q_scenario_matches_current_finite_request_and_fixture_contracts() {
+        // Source authoring only: this does not manufacture an observed Q turn,
+        // controller custody, native settlement or issued qualification.
+        let source: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/codex/qualification/consumer-q-scenario.json"
+        )))
+        .unwrap();
+        let request: ryeos_state::external_content::products::qualification::ProductQualificationConsumerWorkerRequest =
+            serde_json::from_value(source["consumer_worker_request"].clone()).unwrap();
+        let mut expectation = source["qualification_worker"].clone();
+        assert_eq!(expectation["command_shell"], "${EXACT_Q_COMMAND_SHELL}");
+        assert_eq!(
+            expectation["command_presentation"],
+            "${EXACT_Q_COMMAND_PRESENTATION}"
+        );
+        // A synthetic shell selection checks the authored commands' grammar;
+        // it is not an applied-shell witness for this unselected source asset.
+        expectation["command_shell"] = json!("zsh");
+        expectation["command_presentation"] =
+            json!("zsh -c 'printf after > /ryeos/qualification-fixture/result; printf probe'");
+        let expected: QCommandExpectation = serde_json::from_value(expectation).unwrap();
+        request.validate().unwrap();
+        validate_controller_canary_conversation(&request.session_setup, &request.body).unwrap();
+        let final_bytes = expected
+            .expected_fixture_content(request.fixture.as_ref())
+            .unwrap()
+            .unwrap();
+        assert_eq!(final_bytes, b"after");
+        assert_eq!(
+            request
+                .fixture
+                .as_ref()
+                .unwrap()
+                .decoded_initial_content()
+                .unwrap(),
+            b"before"
+        );
+        // Explicit unresolved original-owner selection, not an inherited or
+        // synthetic credential. This source asset must be completed before
+        // the selected environment's independent launch admission.
+        assert_eq!(
+            request.credential_profile_id.as_deref(),
+            Some("${SELECTED_CREDENTIAL_PROFILE_ID}")
+        );
+        let path = "/private/Q-authored/controller-canary/canary";
+        resolve_controller_canary_turn(&request.body, path).unwrap();
+        let commands = controller_canary_commands(path).unwrap();
+        let instructions = request
+            .body
+            .pointer("/payload/input/0/text")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(instructions.contains(&expected.command));
+        assert!(instructions.contains(&commands.read_command.replace(path, "<P>")));
+        assert!(instructions.contains(&commands.local_refusal_command.replace(path, "<P>")));
+    }
+
     fn notification(method: &str, extra: Value) -> Value {
         let mut params = json!({"threadId":"thread-one","turnId":"turn-one"});
         params
