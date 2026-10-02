@@ -9,6 +9,72 @@ use std::fs;
 #[cfg(unix)]
 use std::io::Write;
 
+/// Lock an already-open regular file in shared mode until the caller's existing
+/// deadline. This consumes and returns the SAME descriptor: it never opens a
+/// path, creates a sibling anchor, or writes lock contents. The caller must
+/// supply a fresh independently owned file, not an alias of an existing lock.
+/// Keep the caller's fork-sensitive descriptor lease through this acquisition
+/// and the returned file's lifetime. Contention is bounded; filesystem metadata
+/// inspection is not an interruptible operation.
+pub fn acquire_existing_shared_file_until(
+    file: fs::File,
+    deadline: crate::time::MonotonicDeadline,
+) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+
+        let expired = || {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "existing shared file lock deadline elapsed",
+            )
+        };
+        if deadline.has_elapsed() {
+            return Err(expired());
+        }
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "existing shared file lock requires a regular file",
+            ));
+        }
+        loop {
+            if deadline.has_elapsed() {
+                return Err(expired());
+            }
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+                // A successful native call after expiry supplies no authority.
+                // Dropping this uniquely owned file releases its acquired lock.
+                if deadline.has_elapsed() {
+                    return Err(expired());
+                }
+                return Ok(file);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => {
+                    let remaining = deadline.remaining();
+                    if remaining.is_zero() {
+                        return Err(expired());
+                    }
+                    crate::time::sleep(remaining.min(crate::time::Duration::from_millis(10)));
+                }
+                _ => return Err(error),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, deadline);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "interprocess file locking is unavailable on this platform",
+        ))
+    }
+}
+
 #[cfg(unix)]
 fn open_directory_no_follow(path: &Path, create_missing: bool) -> Result<fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -832,6 +898,114 @@ pub(crate) fn linux_flock_holder_pid(_file: &fs::File) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_shared_file_until_preserves_descriptor_inode_and_bytes() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("cas-mutation.lock");
+        fs::write(&target, b"original lock bytes").unwrap();
+        let file = fs::File::open(&target).unwrap();
+        let original_fd = file.as_raw_fd();
+        let original_inode = file.metadata().unwrap().ino();
+        // The native primitive follows the supplied descriptor, not this path.
+        let retained = dir.path().join("original");
+        fs::rename(&target, &retained).unwrap();
+        fs::write(&target, b"replacement").unwrap();
+        let held = acquire_existing_shared_file_until(
+            file,
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1)),
+        )
+        .unwrap();
+        assert_eq!(held.as_raw_fd(), original_fd);
+        assert_eq!(held.metadata().unwrap().ino(), original_inode);
+        assert_eq!(fs::read(&retained).unwrap(), b"original lock bytes");
+        assert_eq!(fs::read(&target).unwrap(), b"replacement");
+        assert!(!dir.path().join(".cas-mutation.lock.lock").exists());
+        let contender = fs::File::open(&retained).unwrap();
+        assert_ne!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        drop(held);
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_shared_file_until_refuses_contention_and_releases_after_owner_drop() {
+        use std::os::fd::AsRawFd;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("cas-mutation.lock");
+        fs::write(&target, b"unchanged").unwrap();
+        let owner = fs::File::open(&target).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let deadline =
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_millis(20));
+        let error = acquire_existing_shared_file_until(fs::File::open(&target).unwrap(), deadline)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(deadline.has_elapsed());
+        assert_eq!(fs::read(&target).unwrap(), b"unchanged");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        drop(owner);
+        let held = acquire_existing_shared_file_until(
+            fs::File::open(&target).unwrap(),
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1)),
+        )
+        .unwrap();
+        drop(held);
+        let contender = fs::File::open(&target).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_shared_file_until_refuses_expired_without_locking() {
+        use std::os::fd::AsRawFd;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("lock");
+        fs::write(&target, b"unchanged").unwrap();
+        let error = acquire_existing_shared_file_until(
+            fs::File::open(&target).unwrap(),
+            crate::time::MonotonicDeadline::after(crate::time::Duration::ZERO),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let contender = fs::File::open(&target).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"unchanged");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_shared_file_until_refuses_nonregular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = acquire_existing_shared_file_until(
+            fs::File::open(dir.path()).unwrap(),
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1)),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     #[cfg(unix)]
     #[test]

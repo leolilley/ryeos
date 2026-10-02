@@ -1,0 +1,95 @@
+# UNSIGNED DRAFT; null fields deliberately block publication.
+category: local-inference
+version: 1.0.0
+executor_id: '@subprocess'
+description: 'UNSIGNED INCOMPLETE DRAFT: exact GNU CUDA:PTX graph-free compatibility
+  worker; no activation authority.'
+execution_protocol: protocol:local-inference/gnu_cuda_persistent_session
+external_product_slots:
+- id: python-gnu
+  relationship_ref: config:ryeos-runtime/gnu-cuda-products-draft
+  relationship: gnu_runtime_to_private_worker
+  kind: tree
+  mount_root: project
+  mount: python-gnu
+supported_target:
+  os: linux
+  arch: x86_64
+  resources:
+  - class: null  # D-owned observed class/facts not selected
+    count: 1
+    allocation: exclusive
+    access: null  # D-owned deployment-visible/restricted choice
+session_resources:
+  real_uid_process_limit: 2048
+source:
+  root: lib/local-tinygrad-gnu
+  entry: bootstrap.py
+  digest: d6df4cc28e5c6fee61b7a8126f41591ffd732922daa64cdab1b796c6354463df
+external_content:
+- id: runtime
+  kind: tree
+  mode: pinned
+  digest: 800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf
+  metadata_hint: python-build-standalone-3.14.7-musl
+  mount_root: project
+  mount: runtime
+- id: tinygrad
+  kind: tree
+  mode: pinned
+  digest: e468f263924eb44fc21405dafba8ea27a7cd9e70dd6847822905a652549be21c
+  metadata_hint: tinygrad-4c206a52b1a72a98db8c97576959b54fa2a38232
+  mount_root: project
+  mount: tinygrad
+- id: toolchain
+  kind: tree
+  mode: pinned
+  digest: 0f278c1f855f123cbab94e6c1aa11dc0ae0b64b27a73241a4f67941d12c70e53
+  metadata_hint: alpine-v3.22-clang-lld-20.1.8
+  mount_root: project
+  mount: toolchain
+- id: model
+  kind: tree
+  mode: pinned
+  digest: 1a75084b7404ba3409e598a8ee2d09a8d236edf1fa5f33917c3b3a8f0494e35b
+  metadata_hint: qwen3-0.6b-c1899de289a04d12100db370d81485cdf75e47ca
+  mount_root: project
+  mount: model
+- id: driver
+  kind: tree
+  mode: pinned
+  digest: null
+  metadata_hint: MISSING selected destination driver closure
+  mount_root: project
+  mount: driver
+config:
+  command: bin:core/ryeos-session-exec
+  args:
+  - python-gnu/python/lib/ld-linux-x86-64.so.2
+  - --inhibit-cache
+  - --library-path
+  - python-gnu/python/lib
+  - python-gnu/python/bin/python3.14
+  - -P
+  - -S
+  - -B
+  - -X
+  - utf8
+  - ${source.entry}
+  env:
+    PYTHONHOME: python-gnu/python
+    PYTHONHASHSEED: '0'
+    PYTHONDONTWRITEBYTECODE: '1'
+    PYTHONNOUSERSITE: '1'
+    PYTHONSAFEPATH: '1'
+    PYTHONUNBUFFERED: '1'
+    PATH: ''
+    DEV: CUDA:PTX
+    RYEOS_LOCAL_MODEL_PROFILE: qwen3-0.6b
+    CACHELEVEL: '0'
+    CCACHE: '0'
+    LANG: C
+    LC_ALL: C
+    JIT: '0'
+    PROFILE: '0'
+  timeout_secs: null

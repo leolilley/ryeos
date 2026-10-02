@@ -29,6 +29,8 @@ WORKER_PATHS = {
     profile: BUNDLE / f".ai/workers/local-inference/{profile}.yaml"
     for profile in PROFILE_SPECS
 }
+GNU_WORKER_PATH = BUNDLE / ".ai/workers/local-inference/qwen3-0.6b-gnu-cuda-graph-free-2048-draft.yaml"
+GNU_WORKER_SOURCE = BUNDLE / ".ai/workers/local-inference/lib/local-tinygrad-gnu"
 PROVIDER_PATHS = {
     profile: BUNDLE / f".ai/config/ryeos-runtime/model-providers/{profile}.yaml"
     for profile in PROFILE_SPECS
@@ -72,12 +74,12 @@ QWEN3_4B_SOURCE_CONTRACT_PATH = (
 )
 
 
-def worker_source_manifest_digest() -> str:
+def worker_source_manifest_digest(source_root: Path = WORKER_SOURCE) -> str:
     entries = []
     total = 0
     for path in sorted(
-        (candidate for candidate in WORKER_SOURCE.rglob("*") if candidate.is_file()),
-        key=lambda candidate: candidate.relative_to(WORKER_SOURCE).as_posix().encode(),
+        (candidate for candidate in source_root.rglob("*") if candidate.is_file()),
+        key=lambda candidate: candidate.relative_to(source_root).as_posix().encode(),
     ):
         content = path.read_bytes()
         total += len(content)
@@ -85,7 +87,7 @@ def worker_source_manifest_digest() -> str:
         entries.append(
             {
                 "root": "source",
-                "path": path.relative_to(WORKER_SOURCE).as_posix(),
+                "path": path.relative_to(source_root).as_posix(),
                 "blob_hash": hashlib.sha256(content).hexdigest(),
                 "size": len(content),
                 "mode": "executable"
@@ -381,6 +383,15 @@ class LocalInferenceContractTests(unittest.TestCase):
                 worker["config"]["env"]["RYEOS_LOCAL_MODEL_PROFILE"],
                 "qwen3-0.6b",
             )
+
+    def test_gnu_worker_source_digest_covers_complete_consumer_closure(self) -> None:
+        worker = yaml.safe_load(GNU_WORKER_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(worker["source"]["root"], "lib/local-tinygrad-gnu")
+        self.assertEqual(worker["source"]["entry"], "bootstrap.py")
+        self.assertEqual(
+            worker["source"]["digest"],
+            worker_source_manifest_digest(GNU_WORKER_SOURCE),
+        )
 
     def test_profile_selection_is_signed_and_has_no_predecessor_alias(self) -> None:
         for profile, provider in self.providers.items():

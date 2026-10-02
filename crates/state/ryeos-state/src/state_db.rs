@@ -2133,6 +2133,18 @@ impl PinnedStateAuthority {
         )
     }
 
+    /// Acquire the SAME established pinned shared guard without renewing the
+    /// caller's operation deadline. This bounds contention, not arbitrary I/O.
+    pub fn acquire_shared_guard_until(
+        &self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> anyhow::Result<crate::recovery::CasMutationGuard> {
+        crate::recovery::CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(
+            &self.runtime_directory,
+            deadline,
+        )
+    }
+
     /// Acquire the exclusive CAS mutation guard relative to this exact runtime
     /// authority. Mutable maintenance may establish the lock anchor; strict
     /// read-only maintenance requires the anchor to already exist.

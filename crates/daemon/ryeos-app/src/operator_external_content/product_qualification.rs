@@ -1961,6 +1961,7 @@ fn prepare_exact_bundle_consumer_realizations(
     })
 }
 
+#[cfg(test)]
 pub(super) fn resolve_current_bundle_consumer_environment_definition(
     state: &AppState,
     policy_source: &ProductQualificationPolicySource,

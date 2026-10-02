@@ -455,6 +455,12 @@ impl SessionProcess {
     }
 
     fn retire(&self) -> Result<()> {
+        if let Some(start) = &self.pooled_start {
+            if start.has_original_trusted_obligation() {
+                start.retain_unsettled();
+                bail!("ordinary session retirement cannot settle original trusted driver funding");
+            }
+        }
         // Serialize retirement and retain all execution lifelines until the
         // process owner has established cleanup. Arc destruction is not the
         // retirement boundary.
@@ -504,16 +510,22 @@ impl SessionProcess {
                 bail!("{reason}");
             }
         }
-        lifelines.clear();
         if let Some(start) = &self.pooled_start {
-            start.prove_cleanup();
+            start.prove_cleanup()?;
         }
+        lifelines.clear();
         Ok(())
     }
 }
 
 impl Drop for SessionProcess {
     fn drop(&mut self) {
+        if let Some(start) = &self.pooled_start {
+            if start.has_original_trusted_obligation() {
+                start.retain_unsettled();
+                return; // descriptor Drop is not driver/financial settlement
+            }
+        }
         if self
             .cleanup_unproved
             .get_mut()
@@ -559,7 +571,10 @@ impl Drop for SessionProcess {
             return;
         }
         if let Some(start) = &self.pooled_start {
-            start.prove_cleanup();
+            if let Err(error) = start.prove_cleanup() {
+                tracing::error!(%error, "original session cleanup remains unsettled");
+                start.retain_unsettled();
+            }
         }
     }
 }
@@ -741,6 +756,10 @@ struct PooledStartRetention {
     // Only the separate admitted originals below may execute as obligations.
     obligation_owners: Vec<PersistentSessionCleanupObserver>,
     admission_refused: bool,
+    // Opaque SAME input owner and original financial attempt live in the
+    // EXISTING start slot, before first possible RuntimeDb/ledger write.
+    trusted_inputs: Option<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
+    original_funding: Option<crate::accounting_db::precontact::OriginalFundingOwner>,
 }
 
 impl PersistentSessionPooledStart {
@@ -753,9 +772,80 @@ impl PersistentSessionPooledStart {
                 retirement_observer: None,
                 obligation_owners: Vec::new(),
                 admission_refused: false,
+                trusted_inputs: None,
+                original_funding: None,
             }),
             callback_in_flight: AtomicBool::new(true),
         }
+    }
+
+    /// Stage the verified input and SAME scratch owner before any write.
+    /// No decoder, replacement budget, reconstructed selection or launcher.
+    /// Production native admission remains behind its existing closed guards.
+    pub fn prepare_trusted_original_funding(
+        &self,
+        state: &crate::state::AppState,
+        inputs: crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs,
+        budget: &crate::handler_context::OriginalExecutionBudget,
+        allocation_scope: &ryeos_state::objects::AdmittedAccountingScope,
+        original: &crate::runtime_db::ProcessResourceReservationRecord,
+        scratch: Arc<crate::temp_dir_guard::TempDirGuard>,
+        thread_id: &str,
+        launch_generation: &str,
+    ) -> Result<bool> {
+        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        // Every actually supplied physical owner stays rooted on refusal.
+        retained.lifelines.push(Box::new(Arc::clone(&scratch)));
+        if retained.trusted_inputs.is_some() {
+            retained.lifelines.push(Box::new(inputs));
+            retained.admission_refused = true;
+            bail!("original trusted funding attempt cannot replace verified input owner");
+        }
+        retained.trusted_inputs = Some(inputs);
+        if retained.phase != PooledStartPhase::Preparing || retained.admission_refused {
+            retained.admission_refused = true;
+            bail!("original pooled owner no longer admits funding preparation");
+        }
+        let result = (|| {
+            let funding = crate::accounting_db::precontact::OriginalFundingOwner::prepare(
+                state,
+                retained
+                    .trusted_inputs
+                    .as_ref()
+                    .expect("input retained before validation"),
+                budget,
+                allocation_scope,
+                original,
+                thread_id,
+                launch_generation,
+            )?;
+            // Keep this SAME original attempt before the first cross-store
+            // commit can lose its acknowledgement. Never recreate on error.
+            retained.original_funding = Some(funding);
+            state
+                .state_store
+                .reserve_process_resource_launch_with_scratch_until(
+                    original,
+                    &scratch,
+                    budget.contact_expiry(),
+                )?;
+            retained
+                .original_funding
+                .as_mut()
+                .expect("funding retained before RuntimeDb attempt")
+                .reserve()
+        })();
+        if !matches!(&result, Ok(true)) {
+            retained.admission_refused = true;
+        }
+        result
+    }
+
+    /// An ordinary process-group reap is not trusted driver/physical release.
+    /// No public completion callback or decoded row can clear this obligation.
+    fn has_original_trusted_obligation(&self) -> bool {
+        let retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        retained.trusted_inputs.is_some() || retained.original_funding.is_some()
     }
 
     /// Move actual ORIGINAL guards/bindings into the already owned start slot.
@@ -802,6 +892,12 @@ impl PersistentSessionPooledStart {
         if retained.admission_refused {
             bail!("pooled start previously substituted an original cleanup obligation");
         }
+        if retained.trusted_inputs.is_some() || retained.original_funding.is_some() {
+            retained.admission_refused = true;
+            bail!(
+                "trusted pooled ready publication requires original held/runtime/driver ownership join"
+            );
+        }
         let result = admit_original_pooled_obligations(
             &mut retained,
             started.cleanup_observer.clone(),
@@ -833,6 +929,8 @@ impl PersistentSessionPooledStart {
             || retained.resource_observer.is_some()
             || retained.retirement_observer.is_some()
             || !retained.obligation_owners.is_empty()
+            || retained.trusted_inputs.is_some()
+            || retained.original_funding.is_some()
     }
 
     fn publish(&self) {
@@ -851,7 +949,13 @@ impl PersistentSessionPooledStart {
 
     /// Private pool call only AFTER checked reap and every existing observer.
     /// It cannot remove a preserved scratch or clear its durable resource row.
-    fn prove_cleanup(&self) {
+    fn prove_cleanup(&self) -> Result<()> {
+        // Trusted component funding has no accepted driver/scratch settlement
+        // join yet. Never mark it settled from ordinary group cleanup.
+        if self.has_original_trusted_obligation() {
+            self.retain_unsettled();
+            bail!("original trusted funding/physical retirement remains unproved");
+        }
         let (lifelines, resource, retirement, supplied_owners) = {
             let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
             retained.phase = PooledStartPhase::Settled;
@@ -867,6 +971,7 @@ impl PersistentSessionPooledStart {
         drop(retirement);
         drop(supplied_owners);
         drop(lifelines);
+        Ok(())
     }
 }
 
@@ -2334,6 +2439,7 @@ impl PersistentSessionPool {
         }
     }
 
+    #[cfg(test)]
     fn acquire<F, C>(
         &self,
         key: &str,
@@ -2443,7 +2549,7 @@ impl PersistentSessionPool {
                     original_start: Arc::clone(&original_start),
                     active: true,
                 };
-                let started = match spawn(&original_start) {
+                let mut started = match spawn(&original_start) {
                     Ok(started) => ready_pooled_process(
                         started,
                         Arc::clone(&original_start),
@@ -2458,11 +2564,20 @@ impl PersistentSessionPool {
                         original_start: Arc::clone(&original_start),
                     }),
                 };
+                if let Err(failure) = &mut started {
+                    // A ready/callback failure cannot erase an actual original
+                    // trusted attempt just because ordinary cleanup completed.
+                    failure.cleanup_unproved |=
+                        failure.original_start.has_original_trusted_obligation();
+                }
                 let failure_reason = if let Err(failure) = &started {
                     if failure.cleanup_unproved {
                         failure.original_start.retain_unsettled();
                     } else {
-                        failure.original_start.prove_cleanup();
+                        if let Err(error) = failure.original_start.prove_cleanup() {
+                            tracing::error!(%error, "original pooled failure cannot settle trusted funding");
+                            failure.original_start.retain_unsettled();
+                        }
                     }
                     Some(failure.error.to_string()) // Outside PoolState/owner destruction.
                 } else {

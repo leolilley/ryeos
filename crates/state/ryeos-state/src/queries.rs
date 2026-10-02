@@ -1839,9 +1839,9 @@ pub fn latest_thread_event_by_type_prefix(
         .context("query latest thread event by type prefix")
 }
 
-/// Look up at most two operation-addressed control events. Returning two lets
-/// the authority owner refuse a contradictory historical duplicate instead
-/// of arbitrarily selecting one projection row.
+/// Look up at most three operation-addressed control events. Single-receipt
+/// owners still refuse more than one; two-transition owners can detect an
+/// excess third record instead of silently hiding a contradictory history.
 pub fn thread_events_by_type_operation_id(
     db: &ProjectionDb,
     thread_id: &str,
@@ -1858,7 +1858,7 @@ pub fn thread_events_by_type_operation_id(
              JOIN events AS e ON e.event_hash = operation.event_hash \
              WHERE operation.thread_id = ?1 AND operation.event_type = ?2 \
                AND operation.operation_id = ?3 \
-             ORDER BY operation.chain_seq LIMIT 2",
+             ORDER BY operation.chain_seq LIMIT 3",
         )
         .context("prepare thread operation event lookup")?;
     let rows = stmt

@@ -4063,6 +4063,23 @@ impl Engine {
         })
     }
 
+    /// Preserve the original expiry through this existing held launch owner.
+    /// This accepts no new process scope or financial/native admission authority.
+    pub fn spawn_plan_with_resources_until(
+        &self,
+        ctx: &EngineContext,
+        plan: &ExecutionPlan,
+        selections: &[crate::contracts::ExecutionResourceSelection],
+        devices: Option<&lillux::CharacterDeviceSet>,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
+        self.checked_bundle_generation(|| {
+            crate::dispatch::spawn_plan_with_resources_until(
+                plan, ctx, selections, devices, deadline,
+            )
+        })
+    }
+
     /// Spawn through a scope already retained by the caller's durable launch
     /// owner. It is not selected by
     /// executable name, kind, or a fallback after ordinary spawn fails.

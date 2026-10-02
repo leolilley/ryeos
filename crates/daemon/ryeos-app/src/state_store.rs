@@ -45,6 +45,61 @@ impl ResourceScratchPhysicalReceipt {
     }
 }
 
+/// Authoritative original no-birth + physical removal join. No Clone/serde,
+/// decoded-record constructor, process proof or driver retirement authority.
+pub(crate) struct NeverBornResourceFundingReceipt {
+    state_store: Arc<StateStore>,
+    removed: runtime_db::ProcessResourceReservationRecord,
+}
+
+impl NeverBornResourceFundingReceipt {
+    pub(crate) fn matches_original(
+        self,
+        state: &Arc<StateStore>,
+        original: &runtime_db::ProcessResourceReservationRecord,
+    ) -> Result<()> {
+        if !Arc::ptr_eq(&self.state_store, state) {
+            bail!("no-birth funding receipt belongs to another StateStore owner");
+        }
+        let custody =
+            runtime_db::process_resource_custody::never_issued_scratch_custody(&self.removed)?;
+        if custody.physical_state
+            != runtime_db::process_resource_custody::ProcessCustodyPhysicalState::PhysicallyRemoved
+        {
+            bail!("no-birth funding receipt lacks actual original physical removal");
+        }
+        let mut expected = original.clone();
+        expected
+            .runtime_custody
+            .as_mut()
+            .context("original funding lacks physical custody")?
+            .physical_state =
+            runtime_db::process_resource_custody::ProcessCustodyPhysicalState::PhysicallyRemoved;
+        if self.removed != expected {
+            bail!("no-birth funding receipt differs from exact original reservation");
+        }
+        Ok(())
+    }
+}
+
+impl StateStore {
+    /// Wrap the existing winning never-issued Reserved/CleanupIntent physical
+    /// owner, rather than accepting a raw receipt JSON or PID absence. The
+    /// existing physical removal path's finite acquisition/SQL/traversal join
+    /// is still required before enabling the trusted executable route.
+    pub(crate) fn remove_never_born_scratch_for_funding(
+        self: &Arc<Self>,
+        original: &runtime_db::ProcessResourceReservationRecord,
+        scratch: &crate::temp_dir_guard::TempDirGuard,
+    ) -> Result<NeverBornResourceFundingReceipt> {
+        let removed = self.remove_never_issued_resource_scratch(original, scratch)?;
+        Ok(NeverBornResourceFundingReceipt {
+            state_store: Arc::clone(self),
+            removed,
+        })
+    }
+}
+
 mod projection_access;
 mod scoped_child;
 
@@ -1547,7 +1602,7 @@ fn persist_credential_profile_authority_locked(inner: &Inner, profile_id: &str) 
 struct StateStoreGuard<'a> {
     inner: std::sync::MutexGuard<'a, Inner>,
     _fork_sensitive_descriptors: lillux::ForkSensitiveDescriptorLease,
-    acquired_at: std::time::Instant,
+    acquired_at: lillux::time::MonotonicTimer,
     caller: &'static std::panic::Location<'static>,
 }
 
@@ -6866,6 +6921,28 @@ impl StateStore {
         g.runtime_db.reserve_process_resource_launch(reservation)
     }
 
+    /// SAME original scratch reservation under the original connection window.
+    /// Physical guard validation is still the existing separate unbounded seam.
+    pub(crate) fn reserve_process_resource_launch_with_scratch_until(
+        &self,
+        reservation: &runtime_db::ProcessResourceReservationRecord,
+        original: &crate::temp_dir_guard::TempDirGuard,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        if self.read_only || deadline.has_elapsed() {
+            bail!("original scratch reservation unavailable or expired");
+        }
+        let custody =
+            runtime_db::process_resource_custody::never_issued_scratch_custody(reservation)?;
+        custody.require_retained()?;
+        let parent = self.resource_scratch_parent(custody)?;
+        self.require_original_resource_scratch(custody, &parent, original)?;
+        original.preserve_for_explicit_cleanup();
+        self.with_runtime_original_deadline(deadline, |db| {
+            db.reserve_process_resource_launch(reservation)
+        })
+    }
+
     /// Only a stored NEVER-ISSUED reservation can use this finite first cut.
     /// The receipt records physical disposal; pins/capacity remain retained.
     pub fn remove_never_issued_resource_scratch(
@@ -7045,6 +7122,16 @@ impl StateStore {
             bail!("trusted resource spawn intent is closed for daemon shutdown");
         }
         g.runtime_db.begin_trusted_process_resource_spawn(expected)
+    }
+
+    pub(crate) fn begin_trusted_process_resource_spawn_until(
+        &self,
+        expected: &runtime_db::ProcessResourceReservationRecord,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<runtime_db::process_resource_launch::TrustedResourceSpawnPermit> {
+        self.with_runtime_original_deadline(deadline, |db| {
+            db.begin_trusted_process_resource_spawn(expected)
+        })
     }
 
     pub fn reserve_thread_process_scope(
@@ -8773,7 +8860,7 @@ impl StateStore {
 
     #[track_caller]
     fn lock(&self) -> Result<StateStoreGuard<'_>> {
-        let started = std::time::Instant::now();
+        let started = lillux::time::MonotonicTimer::start();
         let caller = std::panic::Location::caller();
         let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         let inner = cooperate_while_blocking(|| {
@@ -8788,9 +8875,72 @@ impl StateStore {
         Ok(StateStoreGuard {
             _fork_sensitive_descriptors: fork_sensitive_descriptors,
             inner,
-            acquired_at: std::time::Instant::now(),
+            acquired_at: lillux::time::MonotonicTimer::start(),
             caller,
         })
+    }
+
+    /// Bound BOTH original descriptor lease and StateStore mutex acquisition.
+    /// The returned guard preserves the original descriptor-before-store order.
+    #[track_caller]
+    fn lock_until(&self, deadline: lillux::time::MonotonicDeadline) -> Result<StateStoreGuard<'_>> {
+        let started = lillux::time::MonotonicTimer::start();
+        let caller = std::panic::Location::caller();
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)
+            .context("original StateStore deadline waiting for descriptor lease")?;
+        let inner = cooperate_while_blocking(|| {
+            loop {
+                if deadline.has_elapsed() {
+                    bail!("original StateStore deadline expired waiting for mutex");
+                }
+                match self.inner.try_lock() {
+                    Ok(inner) => {
+                        if deadline.has_elapsed() {
+                            bail!("original StateStore deadline expired at mutex acquisition");
+                        }
+                        break Ok(inner);
+                    }
+                    Err(std::sync::TryLockError::Poisoned(_)) => bail!("StateStore lock poisoned"),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        lillux::time::sleep(
+                            deadline
+                                .remaining()
+                                .min(lillux::time::Duration::from_millis(1)),
+                        );
+                    }
+                }
+            }
+        })?;
+        let waited = started.elapsed();
+        if waited >= std::time::Duration::from_millis(100) {
+            record_store_contention(StoreContentionKind::Wait, waited, caller);
+        }
+        Ok(StateStoreGuard {
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
+            inner,
+            acquired_at: lillux::time::MonotonicTimer::start(),
+            caller,
+        })
+    }
+
+    fn with_runtime_original_deadline<T>(
+        &self,
+        deadline: lillux::time::MonotonicDeadline,
+        operation: impl FnOnce(&runtime_db::RuntimeDb) -> Result<T>,
+    ) -> Result<T> {
+        let g = self.lock_until(deadline)?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("original RuntimeDb operation is fenced for process attachment");
+        }
+        g.runtime_db.with_original_deadline(
+            deadline,
+            &self.process_attachment_admission_open,
+            &self.process_attachment_admission_closed,
+            operation,
+        )
     }
 
     fn attached_process_registry(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
@@ -22705,6 +22855,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn original_state_store_mutex_deadline_refuses_while_actual_guard_remains_held() {
+        let store = Arc::new(test_store());
+        let original_guard = store.inner.lock().unwrap();
+        let original =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(40));
+        let waiting = Arc::clone(&store);
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sent.send(waiting.lock_until(original).map(|_| ())).unwrap();
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(2));
+        drop(original_guard); // always release actual original mutex before joining/assertion
+        worker.join().unwrap();
+        assert!(
+            result
+                .expect("actual StateStore waiter must stop before guard release")
+                .is_err()
+        );
+        assert!(original.has_elapsed());
+        assert!(store.lock().is_ok());
+    }
+
+    #[test]
+    fn original_state_store_expiry_cannot_enter_runtime_sql_operation() {
+        let store = test_store();
+        let entered = AtomicBool::new(false);
+        let result = store.with_runtime_original_deadline(
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO),
+            |db| {
+                entered.store(true, Ordering::Release);
+                db.process_resource_reservations()
+            },
+        );
+        assert!(result.is_err());
+        assert!(!entered.load(Ordering::Acquire));
+        assert!(store.lock().is_ok());
+    }
+
     fn test_store() -> StateStore {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
@@ -29774,6 +29963,83 @@ mod tests {
         assert_eq!(
             events.events[1].event_type,
             ryeos_state::event_types::EDGE_RECORDED
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn j4_no_birth_funding_receipt_requires_same_actual_original_scratch_owner() {
+        let store = Arc::new(test_store());
+        let (scratch, original) = scratch_reservation_fixture(&store, "j4-no-birth-funding");
+        store
+            .reserve_process_resource_launch_with_scratch(&original, &scratch)
+            .unwrap();
+        let receipt = store
+            .remove_never_born_scratch_for_funding(&original, &scratch)
+            .unwrap();
+        assert!(
+            store
+                .begin_trusted_process_resource_spawn(&original)
+                .is_err()
+        );
+        receipt
+            .matches_original(&Arc::clone(&store), &original)
+            .unwrap();
+        assert!(
+            store
+                .process_resource_reservation(&original.owner_kind, &original.owner_coordinate)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn j4_no_birth_funding_receipt_refuses_other_state_and_changed_original() {
+        for foreign_state in [false, true] {
+            let store = Arc::new(test_store());
+            let other = Arc::new(test_store());
+            let (scratch, original) = scratch_reservation_fixture(&store, "j4-no-birth-foreign");
+            store
+                .reserve_process_resource_launch_with_scratch(&original, &scratch)
+                .unwrap();
+            let receipt = store
+                .remove_never_born_scratch_for_funding(&original, &scratch)
+                .unwrap();
+            let mut changed = original.clone();
+            if !foreign_state {
+                changed.owner_coordinate.push_str("-changed");
+            }
+            assert!(
+                receipt
+                    .matches_original(if foreign_state { &other } else { &store }, &changed)
+                    .is_err()
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn j4_spawn_intent_cannot_mint_no_birth_funding_receipt() {
+        let store = Arc::new(test_store());
+        let (scratch, original) = scratch_reservation_fixture(&store, "j4-contacted-no-refund");
+        store
+            .reserve_process_resource_launch_with_scratch(&original, &scratch)
+            .unwrap();
+        let permit = store
+            .begin_trusted_process_resource_spawn(&original)
+            .unwrap();
+        assert!(
+            store
+                .remove_never_born_scratch_for_funding(permit.reservation(), &scratch)
+                .is_err()
+        );
+        assert!(scratch.path().unwrap().exists());
+        assert_eq!(
+            store
+                .process_resource_reservation(&original.owner_kind, &original.owner_coordinate)
+                .unwrap()
+                .as_ref(),
+            Some(permit.reservation())
         );
     }
 }

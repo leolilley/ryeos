@@ -1,4 +1,3 @@
-# ryeos:signed:2026-09-17T05:42:27Z:a4a30dc19828559db82163d8d1373d2123f39858053c2ac19b2d4b9cf75c8a36:LCCDmgsF9y2cGbvK0QWGQCp1F+QhDGLmRjyGbd+2gNdKqYsCpqs8jSs506lqZWzYzZNc1FSdjAu0tcUKIP2CBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 # ryeos-tool:
 #   category: ryeos/development/authoring-environment-production
 #   version: "1.0.0"
@@ -10,7 +9,8 @@
 #   network_authority: isolated
 #   config_schema:
 #     type: object
-#     properties: {}
+#     properties:
+#       profile: {type: string, enum: [fixed_absolute_v1, private_origin_v1]}
 #     additionalProperties: false
 #   config_resolve:
 #     type: single

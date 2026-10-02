@@ -4097,7 +4097,7 @@ impl ProcessAwaitingAttachment {
                 }
                 drop(release_registration);
                 match worker.join() {
-                    Ok(Ok(running)) => Ok(running),
+                    Ok(Ok(running)) => self.finish_release_before_original_expiry(running),
                     Ok(Err(result)) => {
                         let cleanup = wait_pidfd_exit(
                             self.pidfd.as_raw_fd(),
@@ -4189,7 +4189,7 @@ impl ProcessAwaitingAttachment {
                     }
                 }
                 match running.release_attachment_boundary() {
-                    Ok(()) => Ok(*running),
+                    Ok(()) => self.finish_release_before_original_expiry(*running),
                     Err(error) => {
                         let cleanup = prove_attachment_cleanup(
                             self.pidfd.as_raw_fd(),
@@ -4210,6 +4210,34 @@ impl ProcessAwaitingAttachment {
                 }
             }
         }
+    }
+
+    /// Observe completion at the ownership handoff, not just release entry.
+    /// Late completion is an attempted birth with exact cleanup obligations.
+    fn finish_release_before_original_expiry(
+        &self,
+        running: RunningProcess,
+    ) -> Result<RunningProcess, AttachmentReleaseError> {
+        if self
+            .request_deadline
+            .is_some_and(|expiry| Instant::now() >= expiry)
+        {
+            let cleanup = running.abort_and_reap_checked();
+            #[cfg(target_os = "linux")]
+            let cleanup = prove_attachment_cleanup(self.pidfd.as_raw_fd(), cleanup);
+            let (detail, cleanup_is_settled) = self.cleanup_failure_detail(cleanup);
+            return Err(AttachmentReleaseError {
+                phase: "release after attachment",
+                cleanup_is_settled,
+                result: spawn_failure(
+                    Instant::now(),
+                    format!(
+                        "release after attachment refused: original deadline expired before completion handoff{detail}"
+                    ),
+                ),
+            });
+        }
+        Ok(running)
     }
 
     /// Fail closed, terminate the exact held child through its pidfd, and join
@@ -5277,10 +5305,47 @@ pub fn lib_spawn_awaiting_attachment(
 
 #[cfg(target_os = "linux")]
 pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
-    mut request: SubprocessRequest,
+    request: SubprocessRequest,
     process_scope: Option<crate::ProcessScope>,
 ) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    lib_spawn_awaiting_attachment_in_scope_with_deadline(request, process_scope, None)
+}
+
+#[cfg(target_os = "linux")]
+pub fn lib_spawn_awaiting_attachment_until(
+    request: SubprocessRequest,
+    deadline: crate::time::MonotonicDeadline,
+) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    lib_spawn_awaiting_attachment_in_scope_with_deadline(request, None, Some(deadline))
+}
+
+#[cfg(target_os = "linux")]
+fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
+    mut request: SubprocessRequest,
+    process_scope: Option<crate::ProcessScope>,
+    absolute_deadline: Option<crate::time::MonotonicDeadline>,
+) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
     let start = Instant::now();
+    if absolute_deadline.is_some_and(|deadline| deadline.has_elapsed()) {
+        return Err(spawn_deadline_failure(start));
+    }
+    // Sampling remaining after `start` can only narrow the original expiry.
+    // No host instant crosses the public Lillux boundary.
+    let original_expiry = match absolute_deadline {
+        Some(deadline) => Some(
+            start
+                .checked_add(deadline.remaining())
+                .ok_or_else(|| spawn_deadline_failure(start))?,
+        ),
+        None => None,
+    };
+    let narrow_expiry = |relative: Option<Instant>| match (relative, original_expiry) {
+        (Some(relative), Some(original)) => Some(relative.min(original)),
+        (relative, original) => relative.or(original),
+    };
+    let relative_setup = supervised_setup_deadline(start, request.timeout);
+    let setup_deadline =
+        original_expiry.map_or(relative_setup, |expiry| relative_setup.min(expiry));
     let attachment_scope = process_scope
         .as_ref()
         .map(crate::ProcessScope::control_authority);
@@ -5295,7 +5360,15 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
             ));
         }
         let timeout = request.timeout;
-        let running = lib_spawn_with_stdio(request, false, None, process_scope, None, None, false)?;
+        let running = lib_spawn_with_stdio(
+            request,
+            false,
+            None,
+            process_scope,
+            None,
+            absolute_deadline,
+            false,
+        )?;
         if running.attachment_release.is_none() {
             return Err(running.into_spawn_failure(spawn_failure(
                 start,
@@ -5345,15 +5418,16 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
                     running: Box::new(running),
                 }),
                 pidfd,
-                request_deadline: request_timeout_duration(timeout)
-                    .and_then(|duration| start.checked_add(duration)),
+                request_deadline: narrow_expiry(
+                    request_timeout_duration(timeout)
+                        .and_then(|duration| start.checked_add(duration)),
+                ),
             },
             start,
-            supervised_setup_deadline(start, timeout),
+            setup_deadline,
         );
     }
     let timeout = request.timeout;
-    let setup_deadline = supervised_setup_deadline(start, timeout);
     let cwd_directory = match request.cwd.take() {
         Some(path) => Some(open_attachment_cwd(&path, start)?),
         None => None,
@@ -5421,7 +5495,15 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
     let worker = thread::Builder::new()
         .name("lillux-attachment-spawn".to_string())
         .spawn(move || {
-            lib_spawn_with_stdio(request, false, Some(gate), process_scope, None, None, false)
+            lib_spawn_with_stdio(
+                request,
+                false,
+                Some(gate),
+                process_scope,
+                None,
+                absolute_deadline,
+                false,
+            )
         })
         .map_err(|error| {
             spawn_failure(
@@ -5556,8 +5638,9 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
                 release_registration,
             }),
             pidfd,
-            request_deadline: request_timeout_duration(timeout)
-                .and_then(|duration| start.checked_add(duration)),
+            request_deadline: narrow_expiry(
+                request_timeout_duration(timeout).and_then(|duration| start.checked_add(duration)),
+            ),
         },
         start,
         setup_deadline,
@@ -5803,6 +5886,14 @@ pub fn lib_spawn_awaiting_attachment(
         Instant::now(),
         "Failed to spawn awaiting attachment: supported only on Linux",
     ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn lib_spawn_awaiting_attachment_until(
+    request: SubprocessRequest,
+    _deadline: crate::time::MonotonicDeadline,
+) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    lib_spawn_awaiting_attachment(request)
 }
 
 fn lib_spawn_with_stdio(
@@ -6345,7 +6436,13 @@ fn lib_spawn_with_stdio(
         };
         running.status_thread = Some(status_thread);
         running.applied_receipt_rx = applied_rx;
-        let setup_deadline = supervised_setup_deadline(start, timeout);
+        let relative_setup = supervised_setup_deadline(start, timeout);
+        let setup_deadline = absolute_deadline.map_or(relative_setup, |original| {
+            // Sample on the original worker clock; never restart its expiry.
+            start
+                .checked_add(original.remaining())
+                .map_or(Instant::now(), |expiry| relative_setup.min(expiry))
+        });
         let setup_wait = setup_deadline.saturating_duration_since(Instant::now());
         let reported_pid = match status_rx.recv_timeout(setup_wait) {
             Ok(Ok(InitialLauncherStatus::Target(pid, preparation))) => {
@@ -8000,6 +8097,127 @@ mod absolute_spawn_deadline_tests {
         let error = observed.expect("deadline must expire while barrier remains held");
         assert!(error.timed_out);
         assert_eq!(error.pid, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_original_deadline_expired_before_acquisition_has_no_child() {
+        let error = match lib_spawn_awaiting_attachment_until(
+            request("exit 0"),
+            crate::time::MonotonicDeadline::after(Duration::ZERO),
+        ) {
+            Ok(held) => {
+                held.abort_and_reap().unwrap();
+                panic!("expired held spawn admitted child")
+            }
+            Err(error) => error,
+        };
+        assert!(error.timed_out);
+        assert_eq!(error.pid, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_original_deadline_queued_barrier_expires_without_native_birth() {
+        let barrier =
+            quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5)).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let original = crate::time::MonotonicDeadline::after(Duration::from_millis(40));
+        let worker = thread::spawn(move || {
+            let result = lib_spawn_awaiting_attachment_until(request("exit 0"), original);
+            let error = match result {
+                Ok(held) => {
+                    held.abort_and_reap().unwrap();
+                    panic!("expired barrier admitted held child")
+                }
+                Err(error) => error,
+            };
+            sent.send(error).unwrap();
+        });
+        let observed = received.recv_timeout(Duration::from_secs(2));
+        drop(barrier);
+        worker.join().unwrap();
+        let error = observed.expect("held spawn must expire while original barrier retained");
+        assert_eq!(error.pid, 0);
+        assert!(!error.success);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_original_deadline_remains_original_during_attachment_hold() {
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let held =
+            lib_spawn_awaiting_attachment_until(request("exec /bin/sleep 30"), original).unwrap();
+        // The held child is real; releasing after the original expiry must
+        // fail and retain the existing lifecycle's exact settlement evidence.
+        thread::sleep(original.remaining() + Duration::from_millis(5));
+        let error = match held.release_after_attachment() {
+            Ok(process) => {
+                process.abort();
+                panic!("held release renewed original expiry")
+            }
+            Err(error) => error,
+        };
+        assert!(error.result.stderr.contains("deadline expired"));
+        assert!(error.cleanup_is_settled()); // process settlement, not driver/funding proof
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_original_deadline_delayed_worker_ack_refuses_success_handoff() {
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let mut held =
+            lib_spawn_awaiting_attachment_until(request("exec /bin/sleep 30"), original).unwrap();
+        let exact_pid = held.pid;
+        assert_ne!(exact_pid, 0); // actual attempted native birth, not no-birth evidence
+        let owner = held.owner.take().unwrap();
+        let AttachmentPendingOwner::Direct {
+            worker,
+            release_registration,
+        } = owner
+        else {
+            panic!("actual direct held worker required");
+        };
+        let (completed, observed) = std::sync::mpsc::channel();
+        let (allow_ack, wait_ack) = std::sync::mpsc::channel();
+        // Test-only proxy delays the real existing worker acknowledgement.
+        // It does not create a replacement process or production launcher.
+        let delayed_worker = thread::spawn(move || {
+            let actual = worker.join().expect("original attachment worker must join");
+            completed.send(actual.is_ok()).unwrap();
+            wait_ack.recv().unwrap();
+            actual
+        });
+        held.owner = Some(AttachmentPendingOwner::Direct {
+            worker: delayed_worker,
+            release_registration,
+        });
+        let releasing = thread::spawn(move || held.release_after_attachment());
+        let completion = observed.recv_timeout(Duration::from_secs(1));
+        let completed_in_original_window = !original.has_elapsed();
+        if matches!(&completion, Ok(true)) {
+            thread::sleep(original.remaining() + Duration::from_millis(5));
+        }
+        allow_ack.send(()).unwrap(); // always release test proxy before any assertion
+        let result = releasing.join().expect("actual release owner must join");
+        assert!(
+            matches!(&completion, Ok(true)),
+            "real attachment worker did not successfully complete before controlled ACK delay"
+        );
+        assert!(
+            completed_in_original_window,
+            "test failed to enter before original expiry"
+        );
+        let error = match result {
+            Ok(process) => {
+                process.abort();
+                panic!("late worker ACK published successful running owner")
+            }
+            Err(error) => error,
+        };
+        assert_eq!(error.phase, "release after attachment");
+        assert!(error.result.stderr.contains("completion handoff"));
+        assert!(error.cleanup_is_settled()); // exact process cleanup; no driver/funding refund authority
     }
 
     #[test]

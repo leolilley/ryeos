@@ -183,6 +183,10 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
         project_provider_attempt_budget_latest(db, event)?;
     }
 
+    if event.event_type == crate::event_types::RESOURCE_PRECONTACT_BUDGET_TRANSITION_V1 {
+        validate_resource_precontact_budget_event(event)?;
+    }
+
     if event.event_type == crate::event_types::RESOURCE_BUDGET_TRANSITION_V1 {
         project_resource_budget_latest(db, event)?;
     }
@@ -1108,5 +1112,20 @@ pub fn project_thread_edge(
         )
         .context("failed to project edge")?;
 
+    Ok(())
+}
+
+/// Precontact audit stays in the existing indexed event stream. It cannot
+/// populate resource_budget_latest, whose V1 rows describe ACTUAL processes.
+fn validate_resource_precontact_budget_event(event: &crate::ThreadEvent) -> anyhow::Result<()> {
+    let transition: ryeos_accounting::ResourcePrecontactBudgetTransitionV1 =
+        serde_json::from_value(event.payload.clone())
+            .context("invalid precontact resource budget audit")?;
+    transition.validate().map_err(anyhow::Error::msg)?;
+    if transition.audit_chain_root_id != event.chain_root_id
+        || transition.thread_id != event.thread_id
+    {
+        anyhow::bail!("precontact audit contradicts its original thread/chain");
+    }
     Ok(())
 }

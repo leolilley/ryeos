@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod external_execution;
+mod original_deadline;
 pub mod process_resource_custody;
 pub mod process_resource_launch;
 pub mod process_resource_settlement;
@@ -201,6 +202,18 @@ impl ThreadProcessScopeReservationRecord {
 }
 
 impl ProcessResourceReservationRecord {
+    /// Compare a captured attachment-pending identity with exact launch intent.
+    /// This comparison alone is not a process/contact/release proof.
+    pub(crate) fn matches_held_process(&self, identity: &ExecutionProcessIdentity) -> Result<bool> {
+        self.validate()?;
+        self.launch_authority.matches_held_process(identity)
+    }
+
+    /// Read-only canonical original reservation identity; no launch authority.
+    pub(crate) fn reservation_id(&self) -> Result<String> {
+        process_resource_reservation_id(self)
+    }
+
     fn validate(&self) -> Result<()> {
         validate_bounded_runtime_text(
             "resource reservation owner coordinate",
@@ -7280,6 +7293,8 @@ fn reset_owned_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
 
 pub struct RuntimeDb {
     conn: Connection,
+    // One scoped progress/busy owner on this SAME private connection.
+    original_deadline_active: std::cell::Cell<bool>,
     reset_required: bool,
     open_mode: RuntimeDbOpenMode,
     _directory: Option<lillux::PinnedDirectory>,
@@ -8542,6 +8557,7 @@ impl RuntimeDb {
         initialize_current_runtime_schema(&conn, Path::new(":memory:"))?;
         Ok(Self {
             conn,
+            original_deadline_active: std::cell::Cell::new(false),
             reset_required: false,
             open_mode: RuntimeDbOpenMode::Current,
             _directory: None,
@@ -16345,6 +16361,7 @@ impl RuntimeDb {
             }
             return Ok(Self {
                 conn,
+                original_deadline_active: std::cell::Cell::new(false),
                 reset_required: true,
                 open_mode: mode,
                 _directory: Some(directory),
@@ -16422,6 +16439,7 @@ impl RuntimeDb {
 
         Ok(Self {
             conn,
+            original_deadline_active: std::cell::Cell::new(false),
             reset_required: false,
             open_mode: mode,
             _directory: Some(directory),

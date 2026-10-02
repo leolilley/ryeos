@@ -60,7 +60,7 @@ use crate::accounting_anchor::{AccountingAnchor, AnchorAgreement, genesis_chain_
 
 /// RYAC = 0x5259_4143 ("RY" + "AC" for accounting).
 const ACCOUNTING_APP_ID: i32 = 0x5259_4143;
-const ACCOUNTING_SCHEMA_VERSION: i32 = 7;
+const ACCOUNTING_SCHEMA_VERSION: i32 = 8;
 pub const ACCOUNTING_DB_FILENAME: &str = "accounting.sqlite3";
 pub(crate) const ACCOUNTING_INITIALIZED_FILENAME: &str = "accounting.initialized";
 const ACCOUNTING_INITIALIZED_CONTENT: &[u8] = b"ryeos-accounting-v1\n";
@@ -460,9 +460,134 @@ CREATE TABLE resource_usage_partition_page (
 PRAGMA user_version=7;
 "#;
 
+mod deadline;
+pub(crate) mod precontact;
+
+const SCHEMA_V8_SQL: &str = r#"
+-- SOURCE PROPOSAL ONLY, UNAPPLIED. Exact predecessor validation precedes any transaction.
+-- Host/Accounting owner disables foreign keys OUTSIDE BEGIN, restores them on every result.
+-- No writable_schema, predecessor reinterpretation or new financial ledger.
+
+
+CREATE TABLE resource_owner_accounting_gate_v8 (
+    owner_gate_id TEXT PRIMARY KEY,
+    owner_incarnation TEXT UNIQUE,
+    budget_authority_site_id TEXT NOT NULL,
+    ledger_epoch INTEGER NOT NULL,
+    execution_budget_id TEXT NOT NULL,
+    directive_budget_id TEXT,
+    root_chain_id TEXT NOT NULL,
+    audit_chain_root_id TEXT NOT NULL,
+    owner_recovery_json TEXT,
+    state TEXT NOT NULL CHECK (state IN ('open', 'cleanup_proved', 'liability_pending', 'fenced', 'precontact_reserved', 'precontact_spawn_intent', 'precontact_denied', 'precontact_released')),
+    active_request_count INTEGER NOT NULL CHECK (active_request_count >= 0),
+    fenced_reason TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    original_reservation_id TEXT,
+    precontact_json TEXT,
+    CHECK ((original_reservation_id IS NULL) = (precontact_json IS NULL)),
+    CHECK (state NOT IN ('precontact_reserved', 'precontact_spawn_intent', 'precontact_denied', 'precontact_released') OR (owner_incarnation IS NULL AND owner_recovery_json IS NULL AND active_request_count=0 AND precontact_json IS NOT NULL)),
+    CHECK (owner_incarnation IS NOT NULL OR (precontact_json IS NOT NULL AND state IN ('precontact_reserved', 'precontact_spawn_intent', 'precontact_denied', 'precontact_released', 'fenced')))
+);
+
+INSERT INTO resource_owner_accounting_gate_v8 (owner_gate_id, owner_incarnation, budget_authority_site_id, ledger_epoch, execution_budget_id, directive_budget_id, root_chain_id, audit_chain_root_id, owner_recovery_json, state, active_request_count, fenced_reason, created_at_ms, updated_at_ms) SELECT owner_gate_id, owner_incarnation, budget_authority_site_id, ledger_epoch, execution_budget_id, directive_budget_id, root_chain_id, audit_chain_root_id, owner_recovery_json, state, active_request_count, fenced_reason, created_at_ms, updated_at_ms FROM resource_owner_accounting_gate;
+
+DROP TABLE resource_owner_accounting_gate;
+
+ALTER TABLE resource_owner_accounting_gate_v8 RENAME TO resource_owner_accounting_gate;
+
+CREATE TABLE resource_financial_operation_v8 (
+    operation_id TEXT PRIMARY KEY,
+    request_digest TEXT NOT NULL,
+    authority_digest TEXT NOT NULL,
+    budget_authority_site_id TEXT NOT NULL,
+    ledger_epoch INTEGER NOT NULL,
+    execution_budget_id TEXT NOT NULL,
+    directive_budget_id TEXT,
+    root_chain_id TEXT NOT NULL,
+    audit_chain_root_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    launch_generation TEXT NOT NULL,
+    owner_incarnation TEXT,
+    stable_resource_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN (
+        'reservation_denied', 'reserved', 'released_unissued', 'issued', 'reconciled',
+        'charged_reserved_maximum', 'reservation_bound_violated',
+        'advisory_pending', 'advisory_released_unissued',
+        'advisory_issued', 'advisory_reconciled'
+    )),
+    reserved_usd_nanos INTEGER NOT NULL CHECK (reserved_usd_nanos >= 0),
+    budget_charge_usd_nanos INTEGER CHECK (
+        budget_charge_usd_nanos IS NULL OR budget_charge_usd_nanos >= 0
+    ),
+    usage_json TEXT,
+    rated_charge_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    issued_at_ms INTEGER,
+    settled_at_ms INTEGER,
+    authority_json TEXT NOT NULL,
+    owner_gate_id TEXT REFERENCES resource_owner_accounting_gate(owner_gate_id),
+    CHECK (owner_incarnation IS NOT NULL OR state IN ('reservation_denied', 'reserved', 'released_unissued'))
+);
+
+INSERT INTO resource_financial_operation_v8 (operation_id, request_digest, authority_digest, budget_authority_site_id, ledger_epoch, execution_budget_id, directive_budget_id, root_chain_id, audit_chain_root_id, thread_id, launch_generation, owner_incarnation, stable_resource_id, state, reserved_usd_nanos, budget_charge_usd_nanos, usage_json, rated_charge_json, created_at_ms, issued_at_ms, settled_at_ms, authority_json, owner_gate_id) SELECT operation_id, request_digest, authority_digest, budget_authority_site_id, ledger_epoch, execution_budget_id, directive_budget_id, root_chain_id, audit_chain_root_id, thread_id, launch_generation, owner_incarnation, stable_resource_id, state, reserved_usd_nanos, budget_charge_usd_nanos, usage_json, rated_charge_json, created_at_ms, issued_at_ms, settled_at_ms, authority_json, owner_gate_id FROM resource_financial_operation;
+
+DROP TABLE resource_financial_operation;
+
+ALTER TABLE resource_financial_operation_v8 RENAME TO resource_financial_operation;
+
+CREATE INDEX idx_resource_financial_operation_owner
+    ON resource_financial_operation(thread_id, launch_generation, owner_incarnation);
+
+CREATE INDEX idx_resource_financial_operation_state
+    ON resource_financial_operation(state);
+
+CREATE INDEX idx_resource_owner_gate_accounts
+    ON resource_owner_accounting_gate(execution_budget_id, directive_budget_id, state);
+
+CREATE INDEX idx_resource_financial_operation_gate
+    ON resource_financial_operation(owner_gate_id, state);
+
+CREATE UNIQUE INDEX idx_resource_owner_original_reservation ON resource_owner_accounting_gate(original_reservation_id) WHERE original_reservation_id IS NOT NULL;
+
+PRAGMA user_version=8;
+
+-- Widen ONLY the same original audit outbox's closed event vocabulary.
+-- Preserve its retained AUTOINCREMENT highwater even if its largest row was deleted.
+CREATE TEMP TABLE resource_precontact_outbox_sequence (seq INTEGER NOT NULL);
+INSERT INTO resource_precontact_outbox_sequence SELECT seq FROM sqlite_sequence WHERE name='accounting_audit_outbox';
+CREATE TABLE accounting_audit_outbox_v8 (
+    outbox_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id TEXT NOT NULL,
+    audit_chain_root_id TEXT NOT NULL,
+    transition_sequence INTEGER NOT NULL,
+    transition_id TEXT NOT NULL UNIQUE,
+    transition TEXT NOT NULL,
+    payload_fingerprint TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    published_chain_seq INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    lease_expires_at_ms INTEGER,
+    event_type TEXT NOT NULL DEFAULT 'unclassified' CHECK (event_type IN (
+        'unclassified', 'provider_attempt_budget_transition_v1',
+        'resource_budget_transition_v1', 'resource_precontact_budget_transition_v1'
+    ))
+);
+INSERT INTO accounting_audit_outbox_v8 (outbox_seq, operation_id, audit_chain_root_id, transition_sequence, transition_id, transition, payload_fingerprint, payload, published_chain_seq, created_at_ms, lease_expires_at_ms, event_type)
+SELECT outbox_seq, operation_id, audit_chain_root_id, transition_sequence, transition_id, transition, payload_fingerprint, payload, published_chain_seq, created_at_ms, lease_expires_at_ms, event_type FROM accounting_audit_outbox;
+DROP TABLE accounting_audit_outbox;
+ALTER TABLE accounting_audit_outbox_v8 RENAME TO accounting_audit_outbox;
+UPDATE sqlite_sequence SET seq=MAX(seq, COALESCE((SELECT MAX(seq) FROM resource_precontact_outbox_sequence), 0)) WHERE name='accounting_audit_outbox';
+DROP TABLE resource_precontact_outbox_sequence;
+CREATE INDEX idx_outbox_unpublished ON accounting_audit_outbox(published_chain_seq);
+CREATE INDEX idx_outbox_operation ON accounting_audit_outbox(operation_id, transition_sequence);
+
+"#;
+
 fn current_schema_sql() -> String {
     format!(
-        "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}\n{SCHEMA_V7_SQL}"
+        "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}\n{SCHEMA_V7_SQL}\n{SCHEMA_V8_SQL}"
     )
 }
 
@@ -732,7 +857,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "resource_owner_accounting_gate",
                 columns: &[
                     col("owner_gate_id", "TEXT", true, true),
-                    col("owner_incarnation", "TEXT", false, true),
+                    col("owner_incarnation", "TEXT", false, false),
                     col("budget_authority_site_id", "TEXT", false, true),
                     col("ledger_epoch", "INTEGER", false, true),
                     col("execution_budget_id", "TEXT", false, true),
@@ -745,6 +870,8 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                     col("fenced_reason", "TEXT", false, false),
                     col("created_at_ms", "INTEGER", false, true),
                     col("updated_at_ms", "INTEGER", false, true),
+                    col("original_reservation_id", "TEXT", false, false),
+                    col("precontact_json", "TEXT", false, false),
                 ],
             },
             sqlite_schema::TableSpec {
@@ -761,7 +888,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                     col("audit_chain_root_id", "TEXT", false, true),
                     col("thread_id", "TEXT", false, true),
                     col("launch_generation", "TEXT", false, true),
-                    col("owner_incarnation", "TEXT", false, true),
+                    col("owner_incarnation", "TEXT", false, false),
                     col("stable_resource_id", "TEXT", false, true),
                     col("state", "TEXT", false, true),
                     col("reserved_usd_nanos", "INTEGER", false, true),
@@ -879,6 +1006,12 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                 table: "execution_resource_claim",
                 columns: &["execution_budget_id", "dimension", "outcome"],
                 unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_owner_original_reservation",
+                table: "resource_owner_accounting_gate",
+                columns: &["original_reservation_id"],
+                unique: true,
             },
             sqlite_schema::IndexSpec {
                 name: "idx_resource_owner_gate_accounts",
@@ -1153,6 +1286,24 @@ pub struct ReserveResourceOperationArgs<'a> {
     pub owner_incarnation: &'a str,
     pub authority: &'a ResourceAccountingAuthority,
     pub now_ms: i64,
+}
+
+/// Internal borrowing view; new precontact mode can only arise from the
+/// private original funding owner, never a public DTO or caller flag.
+struct ResourceReservationArgs<'a> {
+    owner_gate_id: &'a str,
+    operation_id: &'a str,
+    request_digest: &'a str,
+    execution_budget_id: &'a str,
+    directive_budget_id: Option<&'a str>,
+    root_chain_id: &'a str,
+    audit_chain_root_id: &'a str,
+    thread_id: &'a str,
+    launch_generation: &'a str,
+    owner_incarnation: Option<&'a str>,
+    authority: &'a ResourceAccountingAuthority,
+    now_ms: i64,
+    precontact: Option<&'a precontact::StoredEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1534,6 +1685,8 @@ fn validate_resource_claim_coordinate(coordinate: &str) -> Result<()> {
 fn load_execution_resource_budget(
     conn: &Connection,
     execution_budget_id: &str,
+    site_id: &str,
+    epoch: u64,
 ) -> Result<Option<ExecutionResourceBudgetSnapshot>> {
     let row: Option<(
         String,
@@ -1544,11 +1697,13 @@ fn load_execution_resource_budget(
         Option<i64>,
         i64,
         i64,
+        String,
+        i64,
     )> = conn
         .query_row(
             "SELECT execution_budget_id, root_chain_id, limits_digest, deadline_at_ms,
                     max_worker_executions, max_provider_contacts,
-                    used_worker_executions, used_provider_contacts
+                    used_worker_executions, used_provider_contacts, limits_json, created_at_ms
              FROM execution_resource_budget WHERE execution_budget_id = ?1",
             rusqlite::params![execution_budget_id],
             |row| {
@@ -1561,6 +1716,8 @@ fn load_execution_resource_budget(
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
                 ))
             },
         )
@@ -1576,7 +1733,22 @@ fn load_execution_resource_budget(
             max_provider_contacts,
             used_worker_executions,
             used_provider_contacts,
+            limits_json,
+            created_at_ms,
         )| {
+            validate_retained_execution_resource_budget(
+                conn,
+                site_id,
+                epoch,
+                &execution_budget_id,
+                &root_chain_id,
+                &limits_json,
+                &limits_digest,
+                deadline_at_ms,
+                max_worker_executions,
+                max_provider_contacts,
+                created_at_ms,
+            )?;
             Ok(ExecutionResourceBudgetSnapshot {
                 execution_budget_id,
                 root_chain_id,
@@ -1615,7 +1787,59 @@ fn decode_resource_claim_outcome(
     }
 }
 
-fn validate_execution_resource_budgets(conn: &Connection) -> Result<()> {
+/// Check one retained immutable budget and its original execution-account birth.
+/// The caller lends its already-held connection; this never locks or creates authority.
+#[allow(clippy::too_many_arguments)]
+fn validate_retained_execution_resource_budget(
+    conn: &Connection,
+    site_id: &str,
+    epoch: u64,
+    execution_budget_id: &str,
+    root_chain_id: &str,
+    limits_json: &str,
+    limits_digest: &str,
+    deadline_at_ms: Option<i64>,
+    max_worker_executions: Option<i64>,
+    max_provider_contacts: Option<i64>,
+    created_at_ms: i64,
+) -> Result<()> {
+    let limits: AggregateExecutionLimits =
+        serde_json::from_str(limits_json).context("decode retained aggregate execution limits")?;
+    let canonical = canonical_json_string(&serde_json::to_value(&limits)?)?;
+    if canonical != limits_json
+        || lillux::cas::sha256_hex(canonical.as_bytes()) != limits_digest
+        || aggregate_deadline(created_at_ms, limits.duration_seconds)? != deadline_at_ms
+        || nonzero_u32_i64(limits.worker_executions) != max_worker_executions
+        || nonzero_u32_i64(limits.provider_contacts) != max_provider_contacts
+    {
+        bail!("execution resource budget {execution_budget_id} contradicts its retained limits");
+    }
+    let account_birth: Option<(String, i64, String, i64)> = conn
+        .query_row(
+            "SELECT root_chain_id, created_at_ms, budget_authority_site_id, ledger_epoch
+             FROM budget_account
+             WHERE account_kind='execution' AND scope_id=?1 AND execution_budget_id=?1",
+            rusqlite::params![execution_budget_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    if !account_birth
+        .as_ref()
+        .is_some_and(|(root, birth, site, retained_epoch)| {
+            root == root_chain_id
+                && *birth == created_at_ms
+                && site == site_id
+                && u64::try_from(*retained_epoch).ok() == Some(epoch)
+        })
+    {
+        bail!(
+            "execution resource budget {execution_budget_id} lost its root account birth binding"
+        );
+    }
+    Ok(())
+}
+
+fn validate_execution_resource_budgets(conn: &Connection, site_id: &str, epoch: u64) -> Result<()> {
     let mut statement = conn.prepare(
         "SELECT execution_budget_id, root_chain_id, limits_json, limits_digest,
                 deadline_at_ms, max_worker_executions, max_provider_contacts,
@@ -1651,35 +1875,19 @@ fn validate_execution_resource_budgets(conn: &Connection) -> Result<()> {
         created_at_ms,
     ) in rows
     {
-        let limits: AggregateExecutionLimits = serde_json::from_str(&limits_json)
-            .context("decode retained aggregate execution limits")?;
-        let canonical = canonical_json_string(&serde_json::to_value(&limits)?)?;
-        if canonical != limits_json
-            || lillux::cas::sha256_hex(canonical.as_bytes()) != limits_digest
-            || aggregate_deadline(created_at_ms, limits.duration_seconds)? != deadline_at_ms
-            || nonzero_u32_i64(limits.worker_executions) != max_worker_executions
-            || nonzero_u32_i64(limits.provider_contacts) != max_provider_contacts
-        {
-            bail!(
-                "execution resource budget {execution_budget_id} contradicts its retained limits"
-            );
-        }
-        let account_birth: Option<(String, i64)> = conn
-            .query_row(
-                "SELECT root_chain_id, created_at_ms FROM budget_account
-                 WHERE account_kind='execution' AND scope_id=?1
-                   AND execution_budget_id=?1",
-                rusqlite::params![execution_budget_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if account_birth.as_ref().map(|(root, _)| root.as_str()) != Some(root_chain_id.as_str())
-            || account_birth.as_ref().map(|(_, created)| *created) != Some(created_at_ms)
-        {
-            bail!(
-                "execution resource budget {execution_budget_id} lost its root account birth binding"
-            );
-        }
+        validate_retained_execution_resource_budget(
+            conn,
+            site_id,
+            epoch,
+            &execution_budget_id,
+            &root_chain_id,
+            &limits_json,
+            &limits_digest,
+            deadline_at_ms,
+            max_worker_executions,
+            max_provider_contacts,
+            created_at_ms,
+        )?;
         let (claimed_workers, claimed_contacts): (i64, i64) = conn.query_row(
             "SELECT
                 COALESCE(SUM(CASE WHEN dimension='worker_execution' AND outcome='admitted'
@@ -1735,7 +1943,7 @@ fn validate_execution_resource_budgets(conn: &Connection) -> Result<()> {
             .with_context(|| {
                 format!("aggregate resource claim {execution_budget_id}/{dimension} request digest")
             })?;
-        let budget = load_execution_resource_budget(conn, &execution_budget_id)?
+        let budget = load_execution_resource_budget(conn, &execution_budget_id, site_id, epoch)?
             .ok_or_else(|| anyhow::anyhow!("aggregate resource claim lost its budget"))?;
         let budget_created_at_ms: i64 = conn.query_row(
             "SELECT created_at_ms FROM execution_resource_budget
@@ -2104,18 +2312,32 @@ fn validate_monotonic_resource_usage_completion(
 }
 
 fn validate_resource_financial_operations(conn: &Connection) -> Result<()> {
-    let mut gate_statement = conn.prepare(
+    validate_resource_financial_operations_layout(conn, true)
+}
+
+fn validate_resource_financial_operations_layout(
+    conn: &Connection,
+    precontact_columns: bool,
+) -> Result<()> {
+    let gate_sql = if precontact_columns {
         "SELECT owner_gate_id, owner_incarnation, budget_authority_site_id,
                 ledger_epoch, execution_budget_id, directive_budget_id,
                 root_chain_id, audit_chain_root_id, owner_recovery_json, state,
-                active_request_count, fenced_reason
-         FROM resource_owner_accounting_gate ORDER BY owner_gate_id",
-    )?;
+                active_request_count, fenced_reason, original_reservation_id, precontact_json
+         FROM resource_owner_accounting_gate ORDER BY owner_gate_id"
+    } else {
+        "SELECT owner_gate_id, owner_incarnation, budget_authority_site_id,
+                ledger_epoch, execution_budget_id, directive_budget_id,
+                root_chain_id, audit_chain_root_id, owner_recovery_json, state,
+                active_request_count, fenced_reason, NULL, NULL
+         FROM resource_owner_accounting_gate ORDER BY owner_gate_id"
+    };
+    let mut gate_statement = conn.prepare(gate_sql)?;
     let gates = gate_statement
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, i64>(3)?,
                 row.get::<_, String>(4)?,
@@ -2126,6 +2348,8 @@ fn validate_resource_financial_operations(conn: &Connection) -> Result<()> {
                 row.get::<_, String>(9)?,
                 row.get::<_, i64>(10)?,
                 row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2143,23 +2367,109 @@ fn validate_resource_financial_operations(conn: &Connection) -> Result<()> {
         state,
         active_requests,
         reason,
+        original_reservation_id,
+        precontact_json,
     ) in gates
     {
-        HexDigest::new(owner.clone()).map_err(anyhow::Error::msg)?;
-        let expected = HexDigest::of_canonical_json(&serde_json::json!({
-            "kind": "resource_owner_accounting_gate",
-            "version": 1,
-            "budget_authority_site_id": site,
-            "ledger_epoch": u64::try_from(epoch).context("resource owner gate epoch is negative")?,
-            "execution_budget_id": execution,
-            "directive_budget_id": directive,
-            "root_chain_id": root,
-            "audit_chain_root_id": audit_root,
-            "owner_incarnation": owner,
-        }))
-        .map_err(anyhow::Error::msg)?;
+        if let Some(owner) = &owner {
+            HexDigest::new(owner.clone()).map_err(anyhow::Error::msg)?;
+        }
+        let expected = match (
+            original_reservation_id.as_deref(),
+            precontact_json.as_deref(),
+        ) {
+            (None, None) => {
+                if owner.is_none() {
+                    bail!("ordinary resource gate lacks actual owner");
+                }
+                HexDigest::of_canonical_json(&serde_json::json!({
+                    "kind": "resource_owner_accounting_gate", "version": 1,
+                    "budget_authority_site_id": site,
+                    "ledger_epoch": u64::try_from(epoch).context("resource owner gate epoch is negative")?,
+                    "execution_budget_id": execution, "directive_budget_id": directive,
+                    "root_chain_id": root, "audit_chain_root_id": audit_root,
+                    "owner_incarnation": owner,
+                })).map_err(anyhow::Error::msg)?
+            }
+            (Some(original), Some(encoded)) => {
+                let envelope: precontact::StoredEnvelope = serde_json::from_str(encoded)?;
+                envelope.validate_ledger(conn)?;
+                if canonical_json_string(&serde_json::to_value(&envelope)?)? != encoded
+                    || envelope.original_reservation_id != original
+                    || envelope.scope.budget_authority_site_id != site
+                    || envelope.scope.ledger_epoch != u64::try_from(epoch)?
+                    || envelope.scope.execution_budget_id != execution
+                    || envelope.scope.directive_budget_id != directive
+                    || envelope.root_chain_id != root
+                    || envelope.audit_chain_root_id != audit_root
+                {
+                    bail!("precontact gate contradicts immutable original envelope");
+                }
+                if let Some(encoded_recovery) = recovery.as_deref() {
+                    let identity: crate::process::ExecutionProcessIdentity =
+                        serde_json::from_str(encoded_recovery)?;
+                    crate::process::validate_execution_process_identity_shape(&identity)?;
+                    if owner.as_deref() != Some(identity.owner_incarnation_digest()?.as_str())
+                        || identity.process_scope.is_some()
+                        || !identity.resource_selections.is_empty()
+                        || identity.resource_settlement_authority.is_some()
+                        || !identity.belongs_to_host_lifetime(
+                            &envelope
+                                .original_reservation
+                                .launch_authority
+                                .host_lifetime()?,
+                        )?
+                    {
+                        bail!(
+                            "precontact actual recovery contradicts original held-birth authority"
+                        );
+                    }
+                } else if owner.is_some() {
+                    bail!("attached precontact gate lacks actual recovery");
+                }
+                let operations: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM resource_financial_operation WHERE owner_gate_id=?1",
+                    [&gate_id],
+                    |row| row.get(0),
+                )?;
+                if operations != 1 {
+                    bail!("first-product precontact gate lacks exactly one immutable operation");
+                }
+                let operation_state: String = conn.query_row(
+                    "SELECT state FROM resource_financial_operation WHERE owner_gate_id=?1",
+                    [&gate_id],
+                    |row| row.get(0),
+                )?;
+                if !matches!(
+                    (state.as_str(), operation_state.as_str()),
+                    ("precontact_denied", "reservation_denied")
+                        | ("precontact_released", "released_unissued")
+                        | (
+                            "precontact_reserved" | "precontact_spawn_intent",
+                            "reserved"
+                        )
+                ) && state.starts_with("precontact_")
+                {
+                    bail!("precontact phase contradicts its financial operation");
+                }
+                envelope.gate_id()?
+            }
+            _ => bail!("precontact gate original identity is incomplete"),
+        };
         let valid_state = match (state.as_str(), reason.as_deref()) {
-            ("open", None) => recovery.is_some(),
+            (
+                "precontact_reserved"
+                | "precontact_spawn_intent"
+                | "precontact_denied"
+                | "precontact_released",
+                None,
+            ) => {
+                precontact_json.is_some()
+                    && owner.is_none()
+                    && recovery.is_none()
+                    && active_requests == 0
+            }
+            ("open", None) => recovery.is_some() && owner.is_some(),
             ("cleanup_proved", None) | ("liability_pending", None) => {
                 recovery.is_some() && active_requests == 0
             }
@@ -2184,7 +2494,7 @@ fn validate_resource_financial_operations(conn: &Connection) -> Result<()> {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
@@ -2224,11 +2534,21 @@ fn validate_resource_financial_operations(conn: &Connection) -> Result<()> {
     ) in rows
     {
         HexDigest::new(operation_id.clone()).map_err(anyhow::Error::msg)?;
-        HexDigest::new(owner_incarnation.clone()).map_err(anyhow::Error::msg)?;
+        if let Some(owner) = &owner_incarnation {
+            HexDigest::new(owner.clone()).map_err(anyhow::Error::msg)?;
+        }
         let owner_gate_id = owner_gate_id
             .ok_or_else(|| anyhow::anyhow!("resource operation lacks owner accounting gate"))?;
         HexDigest::new(owner_gate_id.clone()).map_err(anyhow::Error::msg)?;
-        let gate: (String, String, i64, String, Option<String>, String, String) = conn
+        let gate: (
+            Option<String>,
+            String,
+            i64,
+            String,
+            Option<String>,
+            String,
+            String,
+        ) = conn
             .query_row(
                 "SELECT owner_incarnation, budget_authority_site_id, ledger_epoch,
                         execution_budget_id, directive_budget_id, root_chain_id,
@@ -2270,6 +2590,37 @@ fn validate_resource_financial_operations(conn: &Connection) -> Result<()> {
         {
             bail!("resource operation authority identity diverges from its retained row");
         }
+        if owner_incarnation.is_none()
+            && !matches!(
+                state,
+                ResourceBudgetState::ReservationDenied
+                    | ResourceBudgetState::Reserved
+                    | ResourceBudgetState::ReleasedUnissued
+            )
+        {
+            bail!("resource financial operation crossed issue without an actual owner");
+        }
+        if precontact_columns {
+            let encoded: Option<String> = conn.query_row(
+                "SELECT precontact_json FROM resource_owner_accounting_gate WHERE owner_gate_id=?1",
+                [&owner_gate_id],
+                |row| row.get(0),
+            )?;
+            if let Some(encoded) = encoded {
+                let envelope: precontact::StoredEnvelope = serde_json::from_str(&encoded)?;
+                let request: String = conn.query_row(
+                    "SELECT request_digest FROM resource_financial_operation WHERE operation_id=?1",
+                    [&operation_id],
+                    |row| row.get(0),
+                )?;
+                if envelope.operation_id()?.as_str() != operation_id
+                    || envelope.request_digest()?.as_str() != request
+                    || envelope.authority != authority
+                {
+                    bail!("precontact financial operation differs from immutable envelope");
+                }
+            }
+        }
         let advisory = matches!(authority.spend, ResourceSpendAuthority::Advisory);
         if advisory
             != matches!(
@@ -2300,7 +2651,9 @@ fn validate_resource_financial_operations(conn: &Connection) -> Result<()> {
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("settled resource operation lacks usage"))?,
             )?;
-            if usage.operation_id != operation_id || usage.owner_incarnation != owner_incarnation {
+            if usage.operation_id != operation_id
+                || Some(usage.owner_incarnation.as_str()) != owner_incarnation.as_deref()
+            {
                 bail!("settled resource usage contradicts its operation owner");
             }
             let charge: ResourceRatedCharge = serde_json::from_str(
@@ -2326,7 +2679,7 @@ fn validate_resource_financial_operations(conn: &Connection) -> Result<()> {
                 serde_json::from_str(usage_json.as_deref().expect("checked above"))?;
             if usage.coverage != ResourceUsageCoverage::Partial
                 || usage.operation_id != operation_id
-                || usage.owner_incarnation != owner_incarnation
+                || Some(usage.owner_incarnation.as_str()) != owner_incarnation.as_deref()
             {
                 bail!("unresolved advisory resource usage is not exact partial evidence");
             }
@@ -3614,7 +3967,12 @@ impl AccountingDb {
         let limits_digest = lillux::cas::sha256_hex(limits_json.as_bytes());
         let conn = self.lock_conn()?;
         immediate_transaction(&conn, "aggregate execution budget birth", || {
-            if let Some(existing) = load_execution_resource_budget(&conn, execution_budget_id)? {
+            if let Some(existing) = load_execution_resource_budget(
+                &conn,
+                execution_budget_id,
+                &self.site_id,
+                self.epoch,
+            )? {
                 let stored_limits_json: String = conn
                     .query_row(
                         "SELECT limits_json FROM execution_resource_budget
@@ -3676,7 +4034,7 @@ impl AccountingDb {
                 ],
             )
             .context("insert aggregate execution budget")?;
-            load_execution_resource_budget(&conn, execution_budget_id)?.ok_or_else(|| {
+            load_execution_resource_budget(&conn, execution_budget_id, &self.site_id, self.epoch)?.ok_or_else(|| {
                 anyhow::anyhow!(
                     "aggregate execution budget {execution_budget_id} disappeared after insertion"
                 )
@@ -3692,7 +4050,7 @@ impl AccountingDb {
         execution_budget_id: &str,
     ) -> Result<Option<ExecutionResourceBudgetSnapshot>> {
         let conn = self.lock_conn()?;
-        load_execution_resource_budget(&conn, execution_budget_id)
+        load_execution_resource_budget(&conn, execution_budget_id, &self.site_id, self.epoch)
     }
 
     /// Read one exact retained claim decision without creating or advancing a
@@ -3774,13 +4132,18 @@ impl AccountingDb {
                 return decode_resource_claim_outcome(&outcome, reason, true);
             }
 
-            let budget =
-                load_execution_resource_budget(&conn, execution_budget_id)?.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "aggregate execution budget {execution_budget_id} is absent; resource \
+            let budget = load_execution_resource_budget(
+                &conn,
+                execution_budget_id,
+                &self.site_id,
+                self.epoch,
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "aggregate execution budget {execution_budget_id} is absent; resource \
                          admission fails closed"
-                    )
-                })?;
+                )
+            })?;
             let budget_created_at_ms: i64 = conn.query_row(
                 "SELECT created_at_ms FROM execution_resource_budget
                  WHERE execution_budget_id=?1",
@@ -4304,80 +4667,129 @@ impl AccountingDb {
 
         let conn = self.lock_conn()?;
         immediate_transaction(&conn, "resource financial reservation", || {
-            let existing: Option<(
-                String,
-                String,
-                String,
-                Option<String>,
-                String,
-                String,
-                String,
-                String,
-            )> = conn
-                .query_row(
-                    "SELECT request_digest, authority_digest, execution_budget_id,
+            self.reserve_resource_operation_in_transaction(
+                &conn,
+                ResourceReservationArgs {
+                    owner_gate_id: args.owner_gate_id,
+                    operation_id: args.operation_id,
+                    request_digest: args.request_digest,
+                    execution_budget_id: args.execution_budget_id,
+                    directive_budget_id: args.directive_budget_id,
+                    root_chain_id: args.root_chain_id,
+                    audit_chain_root_id: args.audit_chain_root_id,
+                    thread_id: args.thread_id,
+                    launch_generation: args.launch_generation,
+                    owner_incarnation: Some(args.owner_incarnation),
+                    authority: args.authority,
+                    now_ms: args.now_ms,
+                    precontact: None,
+                },
+            )
+        })
+    }
+
+    fn reserve_resource_operation_in_transaction(
+        &self,
+        conn: &Connection,
+        args: ResourceReservationArgs<'_>,
+    ) -> Result<ResourceOperationReserveOutcome> {
+        let existing: Option<(
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            String,
+        )> = conn
+            .query_row(
+                "SELECT request_digest, authority_digest, execution_budget_id,
                             directive_budget_id, owner_incarnation, stable_resource_id, state,
                             owner_gate_id
                        FROM resource_financial_operation WHERE operation_id=?1",
-                    rusqlite::params![args.operation_id],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                            row.get(5)?,
-                            row.get(6)?,
-                            row.get(7)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            if let Some((
-                request,
-                authority,
-                execution,
-                directive,
-                owner,
-                resource,
-                state,
-                owner_gate,
-            )) = existing
+                rusqlite::params![args.operation_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((
+            request,
+            authority,
+            execution,
+            directive,
+            owner,
+            resource,
+            state,
+            owner_gate,
+        )) = existing
+        {
+            if request != args.request_digest
+                || authority != args.authority.authority_digest.as_str()
+                || execution != args.execution_budget_id
+                || directive.as_deref() != args.directive_budget_id
+                || owner.as_deref() != args.owner_incarnation
+                || resource != args.authority.stable_resource_id
+                || owner_gate != args.owner_gate_id
             {
-                if request != args.request_digest
-                    || authority != args.authority.authority_digest.as_str()
-                    || execution != args.execution_budget_id
-                    || directive.as_deref() != args.directive_budget_id
-                    || owner != args.owner_incarnation
-                    || resource != args.authority.stable_resource_id
-                    || owner_gate != args.owner_gate_id
-                {
-                    bail!("resource operation coordinate was reused with different authority");
-                }
-                return match ResourceBudgetState::parse(&state) {
-                    Some(ResourceBudgetState::ReservationDenied) => {
-                        Ok(ResourceOperationReserveOutcome::Denied { replayed: true })
-                    }
-                    Some(ResourceBudgetState::AdvisoryPending)
-                    | Some(ResourceBudgetState::AdvisoryIssued)
-                    | Some(ResourceBudgetState::AdvisoryReconciled) => {
-                        Ok(ResourceOperationReserveOutcome::Advisory { replayed: true })
-                    }
-                    Some(ResourceBudgetState::ReleasedUnissued)
-                    | Some(ResourceBudgetState::AdvisoryReleasedUnissued) => {
-                        Ok(ResourceOperationReserveOutcome::ReleasedUnissued { replayed: true })
-                    }
-                    Some(_) => Ok(ResourceOperationReserveOutcome::Reserved { replayed: true }),
-                    None => bail!("resource operation has an invalid retained state"),
-                };
+                bail!("resource operation coordinate was reused with different authority");
             }
+            return match ResourceBudgetState::parse(&state) {
+                Some(ResourceBudgetState::ReservationDenied) => {
+                    Ok(ResourceOperationReserveOutcome::Denied { replayed: true })
+                }
+                Some(ResourceBudgetState::AdvisoryPending)
+                | Some(ResourceBudgetState::AdvisoryIssued)
+                | Some(ResourceBudgetState::AdvisoryReconciled) => {
+                    Ok(ResourceOperationReserveOutcome::Advisory { replayed: true })
+                }
+                Some(ResourceBudgetState::ReleasedUnissued)
+                | Some(ResourceBudgetState::AdvisoryReleasedUnissued) => {
+                    Ok(ResourceOperationReserveOutcome::ReleasedUnissued { replayed: true })
+                }
+                Some(_) => Ok(ResourceOperationReserveOutcome::Reserved { replayed: true }),
+                None => bail!("resource operation has an invalid retained state"),
+            };
+        }
 
+        if let Some(envelope) = args.precontact {
+            if args.owner_incarnation.is_some() {
+                bail!("precontact reservation cannot invent an actual owner");
+            }
+            envelope.validate_ledger(conn)?;
+            if envelope.gate_id()?.as_str() != args.owner_gate_id
+                || envelope.request_digest()?.as_str() != args.request_digest
+                || envelope.operation_id()?.as_str() != args.operation_id
+                || envelope.authority != *args.authority
+                || envelope.deadline_at_ms <= args.now_ms
+            {
+                bail!("precontact reservation differs from its original finite envelope");
+            }
+            let (owner, state, encoded): (Option<String>, String, String) = conn.query_row(
+                    "SELECT owner_incarnation, state, precontact_json FROM resource_owner_accounting_gate WHERE owner_gate_id=?1",
+                    [args.owner_gate_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            if owner.is_some()
+                || state != "precontact_reserved"
+                || encoded != canonical_json_string(&serde_json::to_value(envelope)?)?
+            {
+                bail!("precontact reservation lost the exact original pending gate");
+            }
+        } else {
             let gate = self
-                .load_resource_owner_gate(&conn, args.owner_gate_id)?
+                .load_resource_owner_gate(conn, args.owner_gate_id)?
                 .ok_or_else(|| anyhow::anyhow!("resource owner accounting gate is absent"))?;
             if gate.state != "open"
-                || gate.owner_incarnation != args.owner_incarnation
+                || Some(gate.owner_incarnation.as_str()) != args.owner_incarnation
                 || gate.execution_budget_id != args.execution_budget_id
                 || gate.directive_budget_id.as_deref() != args.directive_budget_id
                 || gate.root_chain_id != args.root_chain_id
@@ -4385,80 +4797,87 @@ impl AccountingDb {
             {
                 bail!("resource reservation authority differs from its exact open owner gate");
             }
-            let conflicting: Option<String> = conn
+        }
+        let conflicting: Option<String> = conn
                 .query_row(
                     "SELECT operation_id FROM resource_financial_operation
                       JOIN resource_owner_accounting_gate USING(owner_gate_id)
                      WHERE stable_resource_id=?1
-                       AND resource_financial_operation.owner_incarnation<>?2
-                       AND resource_owner_accounting_gate.state IN ('open', 'liability_pending')
+                       AND resource_financial_operation.owner_gate_id<>?2
+                       AND (resource_owner_accounting_gate.state IN ('open', 'liability_pending', 'precontact_reserved', 'precontact_spawn_intent')
+                            OR (resource_owner_accounting_gate.state='fenced'
+                                AND resource_owner_accounting_gate.precontact_json IS NOT NULL))
                      LIMIT 1",
-                    rusqlite::params![args.authority.stable_resource_id, args.owner_incarnation],
+                    rusqlite::params![args.authority.stable_resource_id, args.owner_gate_id],
                     |row| row.get(0),
                 )
                 .optional()?;
-            if conflicting.is_some() {
-                bail!("execution resource is reserved by another live owner intent");
-            }
+        if conflicting.is_some() {
+            bail!("execution resource is reserved by another live owner intent");
+        }
 
-            let execution =
-                self.require_active_account(&conn, "execution", args.execution_budget_id)?;
-            if execution.root_chain_id != args.root_chain_id {
-                bail!("resource operation root chain contradicts its execution account");
-            }
-            let mut accounts = vec![execution];
-            if let Some(directive_budget_id) = args.directive_budget_id {
-                accounts.push(self.require_active_account(
-                    &conn,
-                    "directive_item",
-                    directive_budget_id,
-                )?);
-            }
-            if args
-                .authority
-                .tariff
-                .expires_at_ms
-                .is_some_and(|expiry| expiry <= args.now_ms)
-            {
-                bail!("resource tariff expired before reservation");
-            }
-            let authority_json = canonical_json_string(&serde_json::to_value(args.authority)?)?;
-            let (state, reserved_nanos, denied) = match &args.authority.spend {
-                ResourceSpendAuthority::Advisory => {
-                    if accounts.iter().any(|account| account.limit_nanos.is_some()) {
-                        bail!(
-                            "advisory resource accounting cannot satisfy an applicable finite budget"
-                        );
-                    }
-                    (ResourceBudgetState::AdvisoryPending, 0_i64, false)
+        let execution = self.require_active_account(conn, "execution", args.execution_budget_id)?;
+        if execution.root_chain_id != args.root_chain_id {
+            bail!("resource operation root chain contradicts its execution account");
+        }
+        let mut accounts = vec![execution];
+        if let Some(directive_budget_id) = args.directive_budget_id {
+            accounts.push(self.require_active_account(
+                conn,
+                "directive_item",
+                directive_budget_id,
+            )?);
+        }
+        if args.precontact.is_some()
+            && !accounts.iter().any(|account| account.limit_nanos.is_some())
+        {
+            bail!("precontact trusted resource has no finite applicable USD account");
+        }
+        if args
+            .authority
+            .tariff
+            .expires_at_ms
+            .is_some_and(|expiry| expiry <= args.now_ms)
+        {
+            bail!("resource tariff expired before reservation");
+        }
+        let authority_json = canonical_json_string(&serde_json::to_value(args.authority)?)?;
+        let (state, reserved_nanos, denied) = match &args.authority.spend {
+            ResourceSpendAuthority::Advisory => {
+                if accounts.iter().any(|account| account.limit_nanos.is_some()) {
+                    bail!(
+                        "advisory resource accounting cannot satisfy an applicable finite budget"
+                    );
                 }
-                ResourceSpendAuthority::Bounded { maximum, .. } => {
-                    if !self.hard_admission_enabled() {
-                        bail!("hard-budget admission is disabled for resource reservation");
-                    }
-                    let maximum_nanos = maximum.as_nanos();
-                    let denied = accounts.iter().any(|account| {
-                        account.limit_nanos.is_some_and(|limit| {
-                            i128::from(limit)
-                                - i128::from(account.committed_nanos)
-                                - i128::from(account.held_nanos)
-                                - i128::from(account.transferred_out_nanos)
-                                < i128::from(maximum_nanos)
-                        })
-                    });
-                    (
-                        if denied {
-                            ResourceBudgetState::ReservationDenied
-                        } else {
-                            ResourceBudgetState::Reserved
-                        },
-                        maximum_nanos,
-                        denied,
-                    )
+                (ResourceBudgetState::AdvisoryPending, 0_i64, false)
+            }
+            ResourceSpendAuthority::Bounded { maximum, .. } => {
+                if !self.hard_admission_enabled() {
+                    bail!("hard-budget admission is disabled for resource reservation");
                 }
-            };
-            conn.execute(
-                "INSERT INTO resource_financial_operation (
+                let maximum_nanos = maximum.as_nanos();
+                let denied = accounts.iter().any(|account| {
+                    account.limit_nanos.is_some_and(|limit| {
+                        i128::from(limit)
+                            - i128::from(account.committed_nanos)
+                            - i128::from(account.held_nanos)
+                            - i128::from(account.transferred_out_nanos)
+                            < i128::from(maximum_nanos)
+                    })
+                });
+                (
+                    if denied {
+                        ResourceBudgetState::ReservationDenied
+                    } else {
+                        ResourceBudgetState::Reserved
+                    },
+                    maximum_nanos,
+                    denied,
+                )
+            }
+        };
+        conn.execute(
+            "INSERT INTO resource_financial_operation (
                     operation_id, request_digest, authority_digest,
                     budget_authority_site_id, ledger_epoch, execution_budget_id,
                     directive_budget_id, root_chain_id, audit_chain_root_id,
@@ -4468,67 +4887,66 @@ impl AccountingDb {
                     created_at_ms, issued_at_ms, settled_at_ms, authority_json
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                            ?12, ?13, ?14, ?15, ?16, NULL, NULL, NULL, ?17, NULL, NULL, ?18)",
-                rusqlite::params![
-                    args.operation_id,
-                    args.request_digest,
-                    args.authority.authority_digest.as_str(),
-                    self.site_id,
-                    self.epoch_i64(),
-                    args.execution_budget_id,
-                    args.directive_budget_id,
-                    args.root_chain_id,
-                    args.audit_chain_root_id,
-                    args.thread_id,
-                    args.launch_generation,
-                    args.owner_incarnation,
-                    args.owner_gate_id,
-                    args.authority.stable_resource_id,
-                    state.as_str(),
-                    reserved_nanos,
-                    args.now_ms,
-                    authority_json,
-                ],
-            )?;
-            if !denied && reserved_nanos > 0 {
-                for account in &accounts {
-                    let held = account
-                        .held_nanos
-                        .checked_add(reserved_nanos)
-                        .context("resource reservation hold overflow")?;
-                    conn.execute(
-                        "UPDATE budget_account SET held_usd_nanos=?1, updated_at_ms=?2
+            rusqlite::params![
+                args.operation_id,
+                args.request_digest,
+                args.authority.authority_digest.as_str(),
+                self.site_id,
+                self.epoch_i64(),
+                args.execution_budget_id,
+                args.directive_budget_id,
+                args.root_chain_id,
+                args.audit_chain_root_id,
+                args.thread_id,
+                args.launch_generation,
+                args.owner_incarnation,
+                args.owner_gate_id,
+                args.authority.stable_resource_id,
+                state.as_str(),
+                reserved_nanos,
+                args.now_ms,
+                authority_json,
+            ],
+        )?;
+        if !denied && reserved_nanos > 0 {
+            for account in &accounts {
+                let held = account
+                    .held_nanos
+                    .checked_add(reserved_nanos)
+                    .context("resource reservation hold overflow")?;
+                conn.execute(
+                    "UPDATE budget_account SET held_usd_nanos=?1, updated_at_ms=?2
                          WHERE account_id=?3",
-                        rusqlite::params![held, args.now_ms, account.account_id],
-                    )?;
-                    conn.execute(
-                        "INSERT INTO resource_financial_debit (
+                    rusqlite::params![held, args.now_ms, account.account_id],
+                )?;
+                conn.execute(
+                    "INSERT INTO resource_financial_debit (
                             operation_id, account_id, held_usd_nanos, committed_usd_nanos
                          ) VALUES (?1, ?2, ?3, 0)",
-                        rusqlite::params![args.operation_id, account.account_id, reserved_nanos],
-                    )?;
-                }
+                    rusqlite::params![args.operation_id, account.account_id, reserved_nanos],
+                )?;
             }
-            self.enqueue_resource_transition(
-                &conn,
-                args.operation_id,
-                1,
-                state,
-                None,
-                None,
-                args.now_ms,
-            )?;
-            Ok(match state {
-                ResourceBudgetState::ReservationDenied => {
-                    ResourceOperationReserveOutcome::Denied { replayed: false }
-                }
-                ResourceBudgetState::AdvisoryPending => {
-                    ResourceOperationReserveOutcome::Advisory { replayed: false }
-                }
-                ResourceBudgetState::Reserved => {
-                    ResourceOperationReserveOutcome::Reserved { replayed: false }
-                }
-                _ => unreachable!("fresh resource reservation state is closed"),
-            })
+        }
+        self.enqueue_resource_transition(
+            conn,
+            args.operation_id,
+            1,
+            state,
+            None,
+            None,
+            args.now_ms,
+        )?;
+        Ok(match state {
+            ResourceBudgetState::ReservationDenied => {
+                ResourceOperationReserveOutcome::Denied { replayed: false }
+            }
+            ResourceBudgetState::AdvisoryPending => {
+                ResourceOperationReserveOutcome::Advisory { replayed: false }
+            }
+            ResourceBudgetState::Reserved => {
+                ResourceOperationReserveOutcome::Reserved { replayed: false }
+            }
+            _ => unreachable!("fresh resource reservation state is closed"),
         })
     }
 
@@ -4555,6 +4973,33 @@ impl AccountingDb {
     }
 
     fn release_unissued_resource_operation_in_transaction(
+        &self,
+        conn: &Connection,
+        operation_id: &str,
+        request_digest: &str,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let precontact: Option<String> = conn.query_row(
+            "SELECT gate.precontact_json FROM resource_financial_operation op
+             JOIN resource_owner_accounting_gate gate USING(owner_gate_id)
+             WHERE op.operation_id=?1",
+            [operation_id],
+            |row| row.get(0),
+        )?;
+        if precontact.is_some() {
+            bail!("precontact hold requires original typed no-birth or complete retirement owner");
+        }
+        self.release_unissued_resource_operation_money_in_transaction(
+            conn,
+            operation_id,
+            request_digest,
+            now_ms,
+        )
+    }
+
+    // Monetary primitive only. All original-precontact callers must FIRST
+    // consume typed StateStore no-birth or complete same-owner retirement.
+    fn release_unissued_resource_operation_money_in_transaction(
         &self,
         conn: &Connection,
         operation_id: &str,
@@ -8080,12 +8525,17 @@ impl AccountingDb {
             )?;
             return Ok(frontier_from_transfer(&transfer));
         }
-        let resources = load_execution_resource_budget(&conn, &scope.execution_budget_id)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "handoff execution accounting scope has no aggregate resource authority"
-                )
-            })?;
+        let resources = load_execution_resource_budget(
+            &conn,
+            &scope.execution_budget_id,
+            &self.site_id,
+            self.epoch,
+        )?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "handoff execution accounting scope has no aggregate resource authority"
+            )
+        })?;
         if resources.deadline_at_ms.is_some()
             || resources.max_worker_executions.is_some()
             || resources.max_provider_contacts.is_some()
@@ -9147,7 +9597,7 @@ impl AccountingDb {
                 "{unbound_open_gates} predecessor launch gate(s) lack current directive-scope authority"
             ));
         }
-        if let Err(error) = validate_execution_resource_budgets(&conn) {
+        if let Err(error) = validate_execution_resource_budgets(&conn, &self.site_id, self.epoch) {
             reasons.push(format!(
                 "aggregate execution budget integrity failed: {error:#}"
             ));
@@ -10288,6 +10738,22 @@ impl AccountingDb {
         usage_digest: Option<HexDigest>,
         occurred_at_ms: i64,
     ) -> Result<(i64, String)> {
+        let owner: Option<String> = conn.query_row(
+            "SELECT owner_incarnation FROM resource_financial_operation WHERE operation_id=?1",
+            [operation_id],
+            |row| row.get(0),
+        )?;
+        if owner.is_none() {
+            return self.enqueue_precontact_resource_transition(
+                conn,
+                operation_id,
+                sequence,
+                state,
+                budget_charge_nanos,
+                usage_digest,
+                occurred_at_ms,
+            );
+        }
         let (
             execution_budget_id,
             root_chain_id,
@@ -11121,7 +11587,7 @@ fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("read accounting schema version before migration")?;
-    if application_id != ACCOUNTING_APP_ID || !matches!(version, 1 | 2 | 3 | 4 | 5 | 6) {
+    if application_id != ACCOUNTING_APP_ID || !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7) {
         return Ok(());
     }
     let predecessor_sql = match version {
@@ -11135,14 +11601,37 @@ fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
         6 => format!(
             "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}"
         ),
+        7 => format!(
+            "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}\n{SCHEMA_V7_SQL}"
+        ),
         _ => unreachable!("version domain checked above"),
     };
     sqlite_schema::assert_complete_schema_sql(conn, &predecessor_sql, path).with_context(|| {
         format!("accounting v{version} predecessor is not exact; refusing migration")
     })?;
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .context("begin accounting schema migration")?;
+    if !conn.is_autocommit() {
+        bail!("accounting migration requires exclusive connection outside a transaction");
+    }
+    assert_integrity(conn, path)?;
+    assert_accounting_foreign_keys(conn)?;
+    if version >= 6 {
+        validate_resource_financial_operations_layout(conn, false)
+            .context("validate exact predecessor financial rows before migration")?;
+    }
+    if version == 7 {
+        validate_resource_usage_partitions(conn)?;
+    }
+    // Foreign-key mode cannot change inside BEGIN. Preserve the actual prior
+    // connection setting, including every failure/COMMIT uncertainty exit.
+    let prior_fk: bool = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    conn.pragma_update(None, "foreign_keys", false)?;
     let result = (|| -> Result<()> {
+        let disabled: bool = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+        if disabled {
+            bail!("could not disable FK mode outside migration transaction");
+        }
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .context("begin accounting schema migration")?;
         if version == 1 {
             conn.execute_batch(SCHEMA_V2_SQL)
                 .context("apply accounting v2 handoff-ledger schema")?;
@@ -11179,38 +11668,76 @@ fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
             backfill_resource_owner_accounting_gates(conn)?;
             backfill_accounting_outbox_event_types(conn)?;
         }
-        conn.execute_batch(SCHEMA_V7_SQL)
-            .context("apply accounting v7 paged partitions")?;
-        let mut statement = conn.prepare("SELECT attribution_id, attribution_json FROM resource_request_attribution ORDER BY attribution_id")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            let attribution: ResourceRequestAttribution =
-                serde_json::from_str(&row.get::<_, String>(1)?)?;
-            attribution.validate().map_err(anyhow::Error::msg)?;
-            if attribution.attribution_id.as_str() != id {
-                bail!("migration attribution identity mismatch");
-            }
-            conn.execute(
+        if version < 7 {
+            conn.execute_batch(SCHEMA_V7_SQL)
+                .context("apply accounting v7 paged partitions")?;
+            let mut statement = conn.prepare("SELECT attribution_id, attribution_json FROM resource_request_attribution ORDER BY attribution_id")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let id: String = row.get(0)?;
+                let attribution: ResourceRequestAttribution =
+                    serde_json::from_str(&row.get::<_, String>(1)?)?;
+                attribution.validate().map_err(anyhow::Error::msg)?;
+                if attribution.attribution_id.as_str() != id {
+                    bail!("migration attribution identity mismatch");
+                }
+                conn.execute(
                 "UPDATE resource_request_attribution SET start_tick_key=?2, end_tick_key=?3 WHERE attribution_id=?1",
                 rusqlite::params![id, format!("{:020}", attribution.interval.start_tick_ns), format!("{:020}", attribution.interval.end_tick_ns)],
             )?;
+            }
+            drop(rows);
+            drop(statement);
+            backfill_resource_usage_partitions(conn)?;
         }
-        drop(rows);
-        drop(statement);
-        backfill_resource_usage_partitions(conn)?;
+        validate_resource_financial_operations_layout(conn, false)?;
+        validate_resource_usage_partitions(conn)?;
+        conn.execute_batch(SCHEMA_V8_SQL)
+            .context("preserve existing resource owners in accounting v8")?;
         assert_current(conn, path).context("validate migrated accounting schema before commit")?;
+        validate_resource_financial_operations(conn)?;
+        assert_accounting_foreign_keys(conn)?;
+        conn.execute_batch("COMMIT")
+            .context("commit accounting schema migration; retain uncertain original database")?;
         Ok(())
     })();
-    match result {
-        Ok(()) => conn
-            .execute_batch("COMMIT")
-            .context("commit accounting schema migration"),
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(error)
+    // COMMIT failures may leave the transaction open. Do not drop the FK guard
+    // before attempting rollback, and never reset/replace the financial DB.
+    let result = if !conn.is_autocommit() {
+        match conn.execute_batch("ROLLBACK") {
+            Ok(()) => result,
+            Err(rollback) => Err(result
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("migration unexpectedly retained a transaction"))
+                .context(format!("migration rollback also failed: {rollback}"))),
+        }
+    } else {
+        result
+    };
+    let restored = (|| -> Result<()> {
+        conn.pragma_update(None, "foreign_keys", prior_fk)?;
+        let current: bool = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+        if current != prior_fk {
+            bail!("accounting migration FK mode restoration failed");
+        }
+        Ok(())
+    })();
+    match (result, restored) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error).context("restore FK mode after migration"),
+        (Err(error), Err(restore)) => {
+            Err(error.context(format!("FK restoration also failed: {restore:#}")))
         }
     }
+}
+
+fn assert_accounting_foreign_keys(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare("PRAGMA foreign_key_check")?;
+    if statement.query([])?.next()?.is_some() {
+        bail!("accounting foreign-key integrity check failed");
+    }
+    Ok(())
 }
 
 fn backfill_resource_owner_accounting_gates(conn: &Connection) -> Result<()> {
@@ -12432,6 +12959,7 @@ mod tests {
         // the original independent financial anchor, not just SQL projection.
         {
             let source = db.lock_conn().unwrap();
+            j4_project_financial_tables_to_v7(&source);
             source
                 .execute_batch(
                     "DROP INDEX idx_resource_attribution_chronology;
@@ -13455,6 +13983,44 @@ mod tests {
             "expected healthy ledger, got {:?}",
             report.reasons
         );
+    }
+
+    #[test]
+    fn aggregate_budget_reader_rejects_corrupt_original_authority() {
+        // Each mutation gets its own original ledger. No ensure/recovery call
+        // follows corruption: the read itself must refuse retained bad authority.
+        for mutation in [
+            "UPDATE execution_resource_budget SET root_chain_id='different-root'",
+            "UPDATE execution_resource_budget SET created_at_ms=created_at_ms+1",
+            "UPDATE execution_resource_budget SET limits_digest='wrong-digest'",
+            "UPDATE execution_resource_budget SET limits_json='{}'",
+            "UPDATE execution_resource_budget SET deadline_at_ms=deadline_at_ms+1",
+            "UPDATE execution_resource_budget SET max_worker_executions=99",
+            "UPDATE budget_account SET root_chain_id='different-root'",
+            "UPDATE budget_account SET created_at_ms=created_at_ms+1",
+            "UPDATE budget_account SET budget_authority_site_id='different-site'",
+            "UPDATE budget_account SET ledger_epoch=ledger_epoch+1",
+            "DELETE FROM budget_account",
+        ] {
+            let (_dir, db) = setup();
+            db.create_execution_account_prepared(EXEC, THREAD, None)
+                .unwrap();
+            let limits = AggregateExecutionLimits {
+                duration_seconds: 60,
+                worker_executions: 2,
+                provider_contacts: 3,
+            };
+            let original = db.ensure_execution_resource_budget(EXEC, &limits).unwrap();
+            assert_eq!(
+                db.execution_resource_budget_snapshot(EXEC).unwrap(),
+                Some(original)
+            );
+            db.lock_conn().unwrap().execute(mutation, []).unwrap();
+            assert!(
+                db.execution_resource_budget_snapshot(EXEC).is_err(),
+                "{mutation}"
+            );
+        }
     }
 
     #[test]
@@ -16159,4 +16725,414 @@ mod tests {
         assert_eq!(db.anchor().read_valid().unwrap().financial_high_water, 2);
         assert_healthy_verify(&db);
     }
+    // Test-only projection of genuine ledger testimony into exact predecessor
+    // financial tables and audit vocabulary. Anchors, debits and outbox highwater stay untouched.
+    fn j4_project_financial_tables_to_v7(conn: &Connection) {
+        let reference = Connection::open_in_memory().unwrap();
+        reference.execute_batch(&format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}\n{SCHEMA_V7_SQL}")).unwrap();
+        let pending: i64 = conn.query_row("SELECT COUNT(*) FROM resource_owner_accounting_gate WHERE precontact_json IS NOT NULL", [], |row| row.get(0)).unwrap();
+        assert_eq!(
+            pending, 0,
+            "test predecessor projection cannot discard new authority"
+        );
+        let prior: bool = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        let old_outbox_sequence: Option<i64> = conn
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name='accounting_audit_outbox'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        for table in [
+            "resource_owner_accounting_gate",
+            "resource_financial_operation",
+            "accounting_audit_outbox",
+        ] {
+            let sql: String = reference
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let temporary = format!("{table}_predecessor");
+            conn.execute_batch(&sql.replacen(table, &temporary, 1))
+                .unwrap();
+            let mut info = reference
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let columns = info
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join(",");
+            conn.execute_batch(&format!("INSERT INTO {temporary}({columns}) SELECT {columns} FROM {table}; DROP TABLE {table}; ALTER TABLE {temporary} RENAME TO {table};")).unwrap();
+        }
+        let mut indices = reference.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND tbl_name IN ('resource_owner_accounting_gate', 'resource_financial_operation', 'accounting_audit_outbox') ORDER BY name").unwrap();
+        for sql in indices
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+        {
+            conn.execute_batch(&sql.unwrap()).unwrap();
+        }
+        if let Some(sequence) = old_outbox_sequence {
+            conn.execute(
+                "UPDATE sqlite_sequence SET seq=MAX(seq,?1) WHERE name='accounting_audit_outbox'",
+                [sequence],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version=7; COMMIT").unwrap();
+        conn.pragma_update(None, "foreign_keys", prior).unwrap();
+        assert_accounting_foreign_keys(conn).unwrap();
+        sqlite_schema::assert_complete_schema_sql(conn, &format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}\n{SCHEMA_V7_SQL}"), Path::new("exact-test-v7")).unwrap();
+    }
+
+    fn j4_snapshot_existing_rows(
+        conn: &Connection,
+        reference: &Connection,
+    ) -> std::collections::BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+        let mut tables = reference.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").unwrap();
+        let names = tables
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let mut result = std::collections::BTreeMap::new();
+        for name in names {
+            let mut info = reference
+                .prepare(&format!("PRAGMA table_info({name})"))
+                .unwrap();
+            let columns = info
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let ordering = (1..=columns.len())
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut select = conn
+                .prepare(&format!(
+                    "SELECT {} FROM {name} ORDER BY {ordering}",
+                    columns.join(",")
+                ))
+                .unwrap();
+            let rows = select
+                .query_map([], |row| {
+                    (0..columns.len())
+                        .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            result.insert(name, rows);
+        }
+        result
+    }
+
+    #[test]
+    fn j4_exact_v7_nonempty_migration_preserves_money_and_original_anchor() {
+        let (dir, db) = setup();
+        birth(&db, EXEC, None, Some("1"));
+        assert_healthy_verify(&db);
+        for index in 0..3 {
+            let mut authority = bounded_resource_authority();
+            authority.stable_resource_id = format!("history-device-{index}");
+            let authority = authority.sealed().unwrap();
+            let (owner, gate) = open_resource_owner_gate_for_pid(&db, 101 + index);
+            let operation = digest_of(&format!("j4-historical-operation-{index}"));
+            let request = digest_of(&format!("j4-historical-request-{index}"));
+            db.reserve_resource_operation(ReserveResourceOperationArgs {
+                owner_gate_id: &gate,
+                operation_id: operation.as_str(),
+                request_digest: request.as_str(),
+                execution_budget_id: EXEC,
+                directive_budget_id: None,
+                root_chain_id: "root-chain",
+                audit_chain_root_id: "audit-chain",
+                thread_id: THREAD,
+                launch_generation: GENERATION,
+                owner_incarnation: &owner,
+                authority: &authority,
+                now_ms: NOW,
+            })
+            .unwrap();
+            if index == 0 {
+                db.issue_resource_operation(operation.as_str(), request.as_str(), NOW + 1)
+                    .unwrap();
+            }
+            if index == 1 {
+                db.release_unissued_resource_operation(
+                    operation.as_str(),
+                    request.as_str(),
+                    NOW + 1,
+                )
+                .unwrap();
+            }
+            if index == 2 {
+                db.fence_resource_owner_accounting_gate(
+                    &gate,
+                    "original unresolved owner",
+                    NOW + 1,
+                )
+                .unwrap();
+            }
+        }
+        assert_healthy_verify(&db);
+        let anchor = db.anchor.read_valid().unwrap();
+        let conn = db.lock_conn().unwrap();
+        j4_project_financial_tables_to_v7(&conn);
+        let reference = Connection::open_in_memory().unwrap();
+        reference.execute_batch(&format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}\n{SCHEMA_V7_SQL}")).unwrap();
+        let before = j4_snapshot_existing_rows(&conn, &reference);
+        migrate_accounting_schema(&conn, Path::new("exact-v7-nonempty")).unwrap();
+        assert_eq!(j4_snapshot_existing_rows(&conn, &reference), before);
+        assert_current(&conn, Path::new("exact-v8-nonempty")).unwrap();
+        assert_accounting_foreign_keys(&conn).unwrap();
+        assert!(
+            conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, bool>(0))
+                .unwrap()
+        );
+        drop(conn);
+        assert_eq!(db.anchor.read_valid().unwrap(), anchor);
+        drop(db);
+        let reopened = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        assert_healthy_verify(&reopened);
+        assert_eq!(reopened.anchor.read_valid().unwrap(), anchor);
+        assert_eq!(
+            j4_snapshot_existing_rows(&reopened.lock_conn().unwrap(), &reference),
+            before
+        );
+    }
+
+    #[test]
+    fn j4_original_sql_deadline_interrupts_vm_and_restores_handlers() {
+        use lillux::time::{Duration, MonotonicDeadline};
+        let (_dir, db) = setup();
+        db.lock_conn()
+            .unwrap()
+            .busy_timeout(Duration::from_millis(37))
+            .unwrap();
+        let expired = MonotonicDeadline::after(Duration::ZERO);
+        assert!(db.with_conn_until(expired, |_| Ok(())).is_err());
+        // The original mutex remains held by this thread: deadline acquisition
+        // must refuse instead of blocking or minting a relative replacement.
+        let held = db.lock_conn().unwrap();
+        assert!(
+            db.with_conn_until(MonotonicDeadline::after(Duration::from_millis(2)), |_| Ok(
+                ()
+            ))
+            .is_err()
+        );
+        drop(held);
+        let error = db.with_conn_until(MonotonicDeadline::after(Duration::from_millis(20)), |conn| {
+            conn.query_row("WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<10000000) SELECT sum(n) FROM seq", [], |row| row.get::<_, i64>(0)).map_err(anyhow::Error::from)
+        }).unwrap_err();
+        assert!(error.to_string().contains("interrupt") || error.to_string().contains("expired"));
+        let conn = db.lock_conn().unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            37
+        );
+        // A subsequent VM run passes even though the old hook's deadline is
+        // expired: scope removed its exclusively owned progress callback.
+        assert_eq!(conn.query_row("WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<1000) SELECT sum(n) FROM seq", [], |row| row.get::<_, i64>(0)).unwrap(), 500500);
+    }
+
+    #[test]
+    fn j4_lost_postcommit_ack_keeps_same_hold_on_reopen() {
+        use lillux::time::{Duration, MonotonicDeadline};
+        let (dir, db) = setup();
+        birth(&db, EXEC, None, Some("1"));
+        assert_healthy_verify(&db);
+        let (owner, gate) = open_resource_owner_gate(&db);
+        let authority = bounded_resource_authority();
+        let operation = digest_of("j4-lost-ack-original-operation");
+        let request = digest_of("j4-lost-ack-original-request");
+        let deadline = MonotonicDeadline::after(Duration::from_millis(100));
+        let result = db.with_conn_until(deadline, |conn| {
+            immediate_transaction(conn, "test original committed hold", || {
+                db.reserve_resource_operation_in_transaction(
+                    conn,
+                    ResourceReservationArgs {
+                        owner_gate_id: &gate,
+                        operation_id: operation.as_str(),
+                        request_digest: request.as_str(),
+                        execution_budget_id: EXEC,
+                        directive_budget_id: None,
+                        root_chain_id: "root-chain",
+                        audit_chain_root_id: "audit-chain",
+                        thread_id: THREAD,
+                        launch_generation: GENERATION,
+                        owner_incarnation: Some(&owner),
+                        authority: &authority,
+                        now_ms: NOW,
+                        precontact: None,
+                    },
+                )
+            })?;
+            lillux::time::sleep(deadline.remaining() + Duration::from_millis(1));
+            Ok(())
+        });
+        assert!(result.is_err());
+        let expected_hold = match authority.spend {
+            ResourceSpendAuthority::Bounded { maximum, .. } => maximum.as_nanos(),
+            _ => unreachable!(),
+        };
+        let exact = |conn: &Connection| {
+            let row: (String, String, i64) = conn.query_row("SELECT request_digest, state, reserved_usd_nanos FROM resource_financial_operation WHERE operation_id=?1", [operation.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+            assert_eq!(
+                row,
+                (
+                    request.as_str().to_owned(),
+                    "reserved".to_owned(),
+                    expected_hold
+                )
+            );
+            assert_eq!(conn.query_row("SELECT SUM(held_usd_nanos) FROM resource_financial_debit WHERE operation_id=?1", [operation.as_str()], |row| row.get::<_, i64>(0)).unwrap(), expected_hold);
+        };
+        exact(&db.lock_conn().unwrap());
+        drop(db);
+        let reopened = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        assert_healthy_verify(&reopened);
+        exact(&reopened.lock_conn().unwrap());
+    }
+    #[test]
+    fn j4_divergent_v7_refuses_before_write_and_preserves_fk_mode() {
+        let (_dir, db) = setup();
+        let conn = db.lock_conn().unwrap();
+        j4_project_financial_tables_to_v7(&conn);
+        conn.execute_batch(
+            "CREATE INDEX unowned_extra_index ON resource_financial_operation(state)",
+        )
+        .unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let error = migrate_accounting_schema(&conn, Path::new("divergent-v7")).unwrap_err();
+        assert!(error.to_string().contains("not exact"));
+        assert_eq!(version, 7);
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        assert!(
+            conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, bool>(0))
+                .unwrap()
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='unowned_extra_index'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn j4_original_scope_refuses_sqlite_busy_without_renewed_wait() {
+        use lillux::time::{Duration, MonotonicDeadline};
+        let (_dir, db) = setup();
+        let other = Connection::open(&db.path).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        db.lock_conn()
+            .unwrap()
+            .busy_timeout(Duration::from_millis(37))
+            .unwrap();
+        let result = db.with_conn_until(MonotonicDeadline::after(Duration::from_secs(1)), |conn| {
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .map_err(anyhow::Error::from)
+        });
+        assert!(result.is_err());
+        other.execute_batch("ROLLBACK").unwrap();
+        let conn = db.lock_conn().unwrap();
+        assert!(conn.is_autocommit());
+        assert_eq!(
+            conn.query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            37
+        );
+    }
+    #[test]
+    fn j4_null_precontact_owner_cannot_issue_or_use_generic_refund() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("1"));
+        assert_healthy_verify(&db);
+        let (owner, gate) = open_resource_owner_gate(&db);
+        let authority = bounded_resource_authority();
+        let operation = digest_of("j4-null-refusal-operation");
+        let request = digest_of("j4-null-refusal-request");
+        db.reserve_resource_operation(ReserveResourceOperationArgs {
+            owner_gate_id: &gate,
+            operation_id: operation.as_str(),
+            request_digest: request.as_str(),
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            thread_id: THREAD,
+            launch_generation: GENERATION,
+            owner_incarnation: &owner,
+            authority: &authority,
+            now_ms: NOW,
+        })
+        .unwrap();
+        {
+            let conn = db.lock_conn().unwrap();
+            // Deliberately invalid retained envelope metadata tests refusal;
+            // it is never used to construct a positive funding/admission proof.
+            conn.execute("UPDATE resource_owner_accounting_gate SET owner_incarnation=NULL, owner_recovery_json=NULL,
+                state='precontact_reserved', original_reservation_id=?2, precontact_json='{}' WHERE owner_gate_id=?1",
+                rusqlite::params![gate, digest_of("j4-null-original").as_str()]).unwrap();
+            conn.execute("UPDATE resource_financial_operation SET owner_incarnation=NULL WHERE operation_id=?1", [operation.as_str()]).unwrap();
+        }
+        assert!(
+            db.issue_resource_operation(operation.as_str(), request.as_str(), NOW + 1)
+                .is_err()
+        );
+        assert!(
+            db.release_unissued_resource_operation(operation.as_str(), request.as_str(), NOW + 1)
+                .is_err()
+        );
+        let conn = db.lock_conn().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
+                [operation.as_str()],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "reserved"
+        );
+        let held: i64 = conn
+            .query_row(
+                "SELECT held_usd_nanos FROM resource_financial_debit WHERE operation_id=?1",
+                [operation.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(held > 0);
+        assert!(validate_resource_financial_operations(&conn).is_err());
+    }
+}
+
+/// Test-only actual precontact producer/physical no-birth/refund fixture.
+/// This returns stores/audits, never a live funding/spawn/cleanup capability.
+#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
+pub fn precontact_publication_fixture_for_test(
+    root: &Path,
+) -> crate::handler_context::budget_test_support::Fixture {
+    precontact::financial_publication_fixture(root)
 }

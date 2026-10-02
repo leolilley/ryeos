@@ -293,6 +293,7 @@ fn callback_execution_context(
     current_site_id: &str,
     origin_site_id: &str,
     child_provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    original_budget: Option<&ryeos_app::handler_context::OriginalExecutionBudget>,
 ) -> Result<(
     crate::executor::ExecutionContext,
     Option<ryeos_app::handler_context::HandlerContext>,
@@ -339,11 +340,13 @@ fn callback_execution_context(
         scheduled_fire,
         validate_only: false,
     };
-    let handler_context = thread_auth.narrowed_handler_context(
-        dispatch_caps.to_vec(),
-        current_site_id,
-        origin_site_id,
-    )?;
+    let handler_context = thread_auth
+        .narrowed_handler_context(dispatch_caps.to_vec(), current_site_id, origin_site_id)?
+        .map(|context| context.with_original_execution_budget(original_budget.cloned()))
+        .transpose()?;
+    if original_budget.is_some() && handler_context.is_none() {
+        anyhow::bail!("callback preparation lost its original budget handler context");
+    }
     Ok((
         crate::executor::ExecutionContext {
             principal_fingerprint: thread_auth.acting_principal.clone(),
@@ -365,6 +368,7 @@ async fn prepare_callback_dispatch(
     current_site_id: &str,
     origin_site_id: &str,
     child_provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    original_budget: Option<&ryeos_app::handler_context::OriginalExecutionBudget>,
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     authorization: Option<ryeos_effect_contract::AdmittedEffectAuthorization>,
 ) -> Result<PreparedCallbackDispatch> {
@@ -381,6 +385,7 @@ async fn prepare_callback_dispatch(
         current_site_id,
         origin_site_id,
         child_provenance,
+        original_budget,
     )?;
     let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
         &context.engine,
@@ -644,6 +649,22 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         )?;
     }
 
+    // Actual capability, ThreadAuth, launch-owner and item/binding capability
+    // checks precede the opaque clock mint. Deny-all method/augmentation
+    // callbacks keep their existing refusal before any new budget lookup.
+    // Initial and reparsed inline preparation retain this
+    // same owner and expiry; no service audit root can restart the budget.
+    let original_budget = if params.action.thread == "inline" {
+        ryeos_app::handler_context::HandlerContext::budget_from_verified_callback(
+            state,
+            &params.callback_token,
+            &params.thread_auth_token,
+            &params.thread_id,
+        )?
+    } else {
+        None
+    };
+
     // Note: DispatchActionParams has `deny_unknown_fields` and no
     // `principal` field — the request body cannot supply (and so
     // cannot spoof) a principal. The principal logged here is read
@@ -682,6 +703,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 &caller_thread.current_site_id,
                 &caller_thread.origin_site_id,
                 &child_provenance,
+                original_budget.as_ref(),
                 lifecycle_authority,
                 selected_effect_authorization,
             )
@@ -1608,6 +1630,11 @@ async fn handle_execute(
             }
         }
         if let Some(partition) = awaited_partition.as_ref() {
+            let original_budget = prepared
+                .handler_context
+                .as_ref()
+                .and_then(ryeos_app::handler_context::HandlerContext::original_execution_budget)
+                .cloned();
             let initial_subject = &prepared.preflight.requested_subject;
             let expected_subject_identity = (
                 initial_subject.resolved.canonical_ref.to_string(),
@@ -1636,6 +1663,7 @@ async fn handle_execute(
                 authoritative_current_site_id,
                 authoritative_origin_site_id,
                 &child_provenance,
+                original_budget.as_ref(),
                 lifecycle_authority,
                 Some(expected_effect_authority.authorization.clone()),
             )

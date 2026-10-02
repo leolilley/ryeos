@@ -3889,38 +3889,13 @@ pub(crate) fn verify_admitted_signed_descriptor_document(
     expected_signer: &str,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<String, BuildAndLaunchError> {
-    let header =
-        lillux::signature::parse_signature_line(document.lines().next().unwrap_or(""), "#", None)
-            .ok_or_else(|| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "admitted descriptor has no valid signature header"
-            ))
-        })?;
-    let body = lillux::signature::strip_signature_lines(document);
-    let observed_hash = lillux::signature::content_hash(&body);
-    if observed_hash != expected_content_hash
-        || header.content_hash != expected_content_hash
-        || header.signer_fingerprint != expected_signer
-    {
-        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "admitted descriptor document contradicts its sealed identity"
-        )));
-    }
-    let signer = trust_store.get(expected_signer).ok_or_else(|| {
-        BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "admitted descriptor signer is no longer trusted: {expected_signer}"
-        ))
-    })?;
-    if !lillux::signature::verify_signature(
+    ryeos_app::admitted_program_trust::verify_admitted_signed_descriptor_document(
+        document,
         expected_content_hash,
-        &header.signature_b64,
-        &signer.verifying_key,
-    ) {
-        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "admitted descriptor signature no longer verifies"
-        )));
-    }
-    Ok(body)
+        expected_signer,
+        trust_store,
+    )
+    .map_err(BuildAndLaunchError::Internal)
 }
 
 async fn prepare_managed_launch_authority(

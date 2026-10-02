@@ -312,21 +312,31 @@ impl ExecutionProcessIdentity {
     ) -> Result<()> {
         if !self.resource_selections.is_empty()
             || self.resource_settlement_authority.is_some()
+            || !self.resource_operations.is_empty()
+            || self.resource_allocation_limit.is_some()
             || self.resource_occupancy_start.is_some()
             || self.resource_occupancy_limit.is_some()
             || self.resource_cleanup_allowance_ms.is_some()
         {
             bail!("process identity resource authority is already bound");
         }
-        self.resource_selections = selections;
-        self.resource_settlement_authority = (!self.resource_selections.is_empty())
+        validate_execution_process_identity_shape(self)?;
+        // Validation can fail after examining financial and clock bindings.
+        // Publish the complete candidate only on success, leaving the original
+        // held incarnation and every retained obligation intact on refusal.
+        // This existing entry point continues to select ONLY local authority.
+        let mut candidate = self.clone();
+        candidate.resource_selections = selections;
+        candidate.resource_settlement_authority = (!candidate.resource_selections.is_empty())
             .then_some(ProcessResourceSettlementAuthority::LocalProcessScope {});
-        self.resource_operations = operations;
-        self.resource_allocation_limit = allocation_limit;
-        self.resource_occupancy_start = occupancy_start;
-        self.resource_occupancy_limit = occupancy_limit;
-        self.resource_cleanup_allowance_ms = cleanup_allowance_ms;
-        validate_execution_process_identity_shape(self)
+        candidate.resource_operations = operations;
+        candidate.resource_allocation_limit = allocation_limit;
+        candidate.resource_occupancy_start = occupancy_start;
+        candidate.resource_occupancy_limit = occupancy_limit;
+        candidate.resource_cleanup_allowance_ms = cleanup_allowance_ms;
+        validate_execution_process_identity_shape(&candidate)?;
+        *self = candidate;
+        Ok(())
     }
 }
 
@@ -1476,6 +1486,162 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use tempfile::TempDir;
+
+    fn resource_binding_bare_identity() -> ExecutionProcessIdentity {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": PROCESS_IDENTITY_SCHEMA_VERSION,
+            "boot_id": "fixture-boot", "target_pid": 40,
+            "target_start_time_ticks": 200, "group_leader_pid": 39,
+            "group_leader_start_time_ticks": 190, "process_scope": null,
+            "resource_selections": [], "resource_operations": [],
+            "resource_settlement_authority": null,
+            "resource_allocation_limit": null,
+            "resource_occupancy_start": null, "resource_occupancy_limit": null,
+            "resource_cleanup_allowance_ms": null,
+        }))
+        .unwrap()
+    }
+
+    // Shape-only bindings; these fixtures open no ledger, device or process.
+    fn resource_binding_fixture(
+        identity: &ExecutionProcessIdentity,
+    ) -> (
+        ryeos_engine::contracts::ExecutionResourceSelection,
+        ryeos_accounting::ResourceOperationBinding,
+        lillux::time::OccupancyCoordinate,
+        lillux::time::OccupancyLimit,
+    ) {
+        let start = lillux::time::occupancy_now().unwrap();
+        let limit = lillux::time::OccupancyLimit::new(start.clone(), 60_000_000_000).unwrap();
+        let selection = ryeos_engine::contracts::ExecutionResourceSelection {
+            stable_id: "accelerator-fixture".to_owned(),
+            class: "accelerator".to_owned(),
+            matched_facts: std::collections::BTreeMap::new(),
+            observation_contract_digest: "a".repeat(64),
+            device_binding_digest: "b".repeat(64),
+            access: ryeos_engine::contracts::ExecutionResourceAccess::DeploymentVisible,
+            enforcement: ryeos_engine::contracts::ExecutionResourceEnforcement::DeploymentVisible,
+            character_devices: Vec::new(),
+        };
+        let operation = ryeos_accounting::ResourceOperationBinding {
+            version: ryeos_accounting::RESOURCE_OPERATION_BINDING_VERSION,
+            owner_gate_id: ryeos_accounting::HexDigest::new("9".repeat(64)).unwrap(),
+            operation_id: ryeos_accounting::HexDigest::new("c".repeat(64)).unwrap(),
+            request_digest: ryeos_accounting::HexDigest::new("d".repeat(64)).unwrap(),
+            owner_incarnation: ryeos_accounting::HexDigest::new(
+                identity.owner_incarnation_digest().unwrap(),
+            )
+            .unwrap(),
+            stable_resource_id: selection.stable_id.clone(),
+            authority_digest: ryeos_accounting::HexDigest::new("e".repeat(64)).unwrap(),
+            meter_contract_digest: ryeos_accounting::HexDigest::new("f".repeat(64)).unwrap(),
+            clock_contract_digest: ryeos_accounting::HexDigest::new(start.contract_digest.clone())
+                .unwrap(),
+            maximum_occupancy_milliseconds: Some(60_000),
+        };
+        (selection, operation, start, limit)
+    }
+
+    #[test]
+    fn resource_binding_refusal_preserves_complete_original_identity() {
+        for mismatch in ["allocation", "cleanup", "owner", "clock", "limit"] {
+            let mut identity = resource_binding_bare_identity();
+            let original = identity.clone();
+            let (selection, mut operation, start, mut limit) = resource_binding_fixture(&identity);
+            let mut allocation = Some(1);
+            let mut cleanup = Some(1_000);
+            match mismatch {
+                "allocation" => allocation = Some(0),
+                "cleanup" => cleanup = Some(60_000),
+                "owner" => {
+                    operation.owner_incarnation =
+                        ryeos_accounting::HexDigest::new("1".repeat(64)).unwrap();
+                }
+                "clock" => {
+                    operation.clock_contract_digest =
+                        ryeos_accounting::HexDigest::new("2".repeat(64)).unwrap();
+                }
+                "limit" => {
+                    limit =
+                        lillux::time::OccupancyLimit::new(start.clone(), 59_000_000_000).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                identity
+                    .bind_execution_resources(
+                        vec![selection],
+                        vec![operation],
+                        allocation,
+                        Some(start),
+                        Some(limit),
+                        cleanup,
+                    )
+                    .is_err(),
+                "{mismatch}"
+            );
+            assert_eq!(identity, original, "{mismatch}");
+        }
+    }
+
+    #[test]
+    fn resource_binding_never_overwrites_retained_operations_or_ceiling() {
+        for retained in ["operation", "allocation"] {
+            let mut identity = resource_binding_bare_identity();
+            match retained {
+                "operation" => identity
+                    .resource_operations
+                    .push(resource_binding_fixture(&identity).1),
+                "allocation" => identity.resource_allocation_limit = Some(1),
+                _ => unreachable!(),
+            }
+            let original = identity.clone();
+            assert!(
+                identity
+                    .bind_execution_resources(Vec::new(), Vec::new(), None, None, None, None,)
+                    .is_err()
+            );
+            assert_eq!(identity, original, "{retained}");
+        }
+    }
+
+    #[test]
+    fn resource_binding_preserves_incarnation_and_existing_local_contract() {
+        let mut identity = resource_binding_bare_identity();
+        let bare = identity.clone();
+        let incarnation = identity.owner_incarnation_digest().unwrap();
+        identity
+            .bind_execution_resources(Vec::new(), Vec::new(), None, None, None, None)
+            .unwrap();
+        assert_eq!(
+            identity, bare,
+            "resource-free owners acquire no resource authority"
+        );
+        let (selection, operation, start, limit) = resource_binding_fixture(&identity);
+        identity
+            .bind_execution_resources(
+                vec![selection],
+                vec![operation],
+                Some(1),
+                Some(start),
+                Some(limit),
+                Some(1_000),
+            )
+            .unwrap();
+        assert_eq!(identity.owner_incarnation_digest().unwrap(), incarnation);
+        assert_eq!(
+            identity.resource_settlement_authority,
+            Some(ProcessResourceSettlementAuthority::LocalProcessScope {})
+        );
+        validate_execution_process_identity_shape(&identity).unwrap();
+        let bound = identity.clone();
+        assert!(
+            identity
+                .bind_execution_resources(Vec::new(), Vec::new(), None, None, None, None)
+                .is_err()
+        );
+        assert_eq!(identity, bound);
+    }
 
     #[test]
     fn process_identity_requires_explicit_scope_contract() {
