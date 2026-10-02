@@ -2019,8 +2019,9 @@ mod inherited_pipe_writer_tests {
         assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
     }
 
-    fn authority(file: std::fs::File) -> InheritedDescriptorAuthority {
+    fn authority(open: impl FnOnce() -> std::fs::File) -> InheritedDescriptorAuthority {
         let lease = retain_fork_sensitive_descriptors();
+        let file = open();
         InheritedDescriptorAuthority::from_owned_file(file, &lease).unwrap()
     }
 
@@ -2033,19 +2034,21 @@ mod inherited_pipe_writer_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("writer");
         fifo(&path);
-        let reader = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(&path)
-            .unwrap();
-        let writer = std::fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(&path)
-            .unwrap();
-        let reader = authority(reader);
-        let writer = authority(writer);
-        let regular = authority(std::fs::File::open(directory.path()).unwrap());
+        let reader = authority(|| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap()
+        });
+        let writer = authority(|| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap()
+        });
+        let regular = authority(|| std::fs::File::open(directory.path()).unwrap());
 
         writer
             .require_distinct_nonblocking_pipe_writer(&[&regular], deadline())
@@ -2068,29 +2071,37 @@ mod inherited_pipe_writer_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("writer");
         fifo(&path);
-        let reader = authority(
+        let reader = authority(|| {
             std::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
                 .open(&path)
-                .unwrap(),
-        );
-        let blocking_writer = authority(
+                .unwrap()
+        });
+        let blocking_writer = authority(|| {
             std::fs::OpenOptions::new()
                 .write(true)
                 .custom_flags(libc::O_CLOEXEC)
                 .open(&path)
-                .unwrap(),
-        );
-        let regular = authority(std::fs::File::open(directory.path()).unwrap());
+                .unwrap()
+        });
+        let regular = authority(|| std::fs::File::open(directory.path()).unwrap());
 
-        assert!(reader.require_distinct_nonblocking_pipe_writer(&[], deadline()).is_err());
+        assert!(
+            reader
+                .require_distinct_nonblocking_pipe_writer(&[], deadline())
+                .is_err()
+        );
         assert!(
             blocking_writer
                 .require_distinct_nonblocking_pipe_writer(&[], deadline())
                 .is_err()
         );
-        assert!(regular.require_distinct_nonblocking_pipe_writer(&[], deadline()).is_err());
+        assert!(
+            regular
+                .require_distinct_nonblocking_pipe_writer(&[], deadline())
+                .is_err()
+        );
         assert!(
             blocking_writer
                 .require_distinct_nonblocking_pipe_writer(
