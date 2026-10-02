@@ -94,6 +94,7 @@ pub(crate) fn prepare_external_direct_inputs(
     drop(guard);
     let base_descriptor = base.descriptor();
     let mut projection = ExternalGuestInputProjection {
+        workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
         schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
         base_snapshot: GuestBaseSnapshotInput {
             descriptor: base_descriptor

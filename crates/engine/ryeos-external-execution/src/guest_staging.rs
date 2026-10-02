@@ -774,6 +774,7 @@ mod tests {
         let launcher = b"start".as_slice();
         let supervisor = b"runrun".as_slice();
         let inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,
@@ -1129,6 +1130,7 @@ mod tests {
         }
         entries.sort_by(|left, right| left.path().cmp(right.path()));
         let inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,

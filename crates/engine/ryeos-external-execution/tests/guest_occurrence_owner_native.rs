@@ -282,6 +282,7 @@ fn run(
     let launcher = b"native-launcher";
     let supervisor = b"native-supervisor";
     let inputs = ExternalGuestInputProjection {
+        workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
         schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
         base_snapshot: GuestBaseSnapshotInput {
             descriptor: 56,

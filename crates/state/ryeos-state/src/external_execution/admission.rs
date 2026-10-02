@@ -1917,6 +1917,7 @@ mod tests {
             admitted_project_root: Some(ADMITTED_DIRECT_PROJECT_ROOT.into()),
         };
         let inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,

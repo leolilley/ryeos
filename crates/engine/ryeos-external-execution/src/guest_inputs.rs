@@ -245,6 +245,7 @@ mod tests {
                 })
                 .collect();
             let projection = ExternalGuestInputProjection {
+                workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
                 schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
                 base_snapshot: GuestBaseSnapshotInput {
                     descriptor: base.inherited_descriptor().unwrap(),

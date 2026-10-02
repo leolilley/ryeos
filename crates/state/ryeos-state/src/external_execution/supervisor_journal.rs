@@ -1224,6 +1224,7 @@ mod tests {
         let recipe_digest = recipe.digest().unwrap();
         let roots = vec![STANDARD.encode(b"fixture root")];
         let guest_inputs = ryeos_external_execution_contract::ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: ryeos_external_execution_contract::GuestBaseSnapshotInput {
                 descriptor: 55,

@@ -793,6 +793,7 @@ mod tests {
 
     fn fixture() -> (ExternalGuestInputProjection, GuestStagingPackageManifest) {
         let inputs = ExternalGuestInputProjection {
+            workspace_view: crate::GuestWorkspaceView::FullSnapshot,
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,

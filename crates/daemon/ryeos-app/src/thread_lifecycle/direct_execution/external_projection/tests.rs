@@ -310,7 +310,7 @@ impl Fixture {
             descriptor_path: PathBuf::from("/fixture/protocol.yaml"),
         };
         let inputs = serde_json::from_value(json!({
-            "schema":4, "base_snapshot":{"descriptor":3,"snapshot_hash":"1".repeat(64),
+            "schema":ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA, "workspace_view":"full_snapshot", "base_snapshot":{"descriptor":3,"snapshot_hash":"1".repeat(64),
                 "closure_digest":"2".repeat(64),"object_count":3,"blob_count":1,"total_bytes":1024},
             "workspace_outputs":null,
             "inputs":[{"role":"product","authority_id":"runtime","descriptor":4,

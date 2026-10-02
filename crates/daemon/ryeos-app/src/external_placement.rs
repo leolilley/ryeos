@@ -8360,6 +8360,7 @@ mod tests {
         let manifest_authority =
             lillux::sealed_memfd(c"test-runtime-manifest", manifest_bytes.as_bytes()).unwrap();
         let projection = ryeos_external_execution_contract::ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: ryeos_external_execution_contract::GuestBaseSnapshotInput {
                 descriptor: base.inherited_descriptor().unwrap(),

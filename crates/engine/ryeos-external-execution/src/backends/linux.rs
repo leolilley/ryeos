@@ -737,6 +737,11 @@ impl NativeExternalCandidate {
     ) -> Result<(Self, NativeCandidateOutput)> {
         binding.validate()?;
         guest_inputs.validate()?;
+        ensure!(
+            guest_inputs.workspace_view
+                == ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
+            "captured inputs guest workspace is not supported by this launcher"
+        );
         validate_qualification_fixture_mounts(
             binding.execution_mode,
             fixture,

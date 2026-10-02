@@ -286,6 +286,7 @@ pub fn prepare_external_qualification_inputs(
         &destinations,
     )?;
     let projection = ExternalGuestInputProjection {
+        workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
         schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
         base_snapshot: GuestBaseSnapshotInput {
             descriptor: base_descriptor

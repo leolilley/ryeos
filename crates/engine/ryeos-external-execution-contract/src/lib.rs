@@ -39,7 +39,7 @@ pub const PROVIDER_CONFIGURATION_PROTOCOL: &str =
 pub const MAX_LIFECYCLE_REQUEST_BYTES: usize = 256 * 1024;
 pub const MAX_LIFECYCLE_PROVIDER_SPEC_BYTES: u64 = 256 * 1024;
 pub const MAX_GUEST_INPUT_PROJECTION_BYTES: usize = 192 * 1024;
-pub const EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA: u32 = 4;
+pub const EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA: u32 = 5;
 pub const MAX_GUEST_SOURCE_RECORD_BYTES: u64 = 1024 * 1024;
 pub const MAX_GUEST_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_LIFECYCLE_RESPONSE_BYTES: usize = 64 * 1024;
@@ -219,6 +219,15 @@ impl ExternalCommandTermination {
     }
 }
 
+/// Target-visible workspace; snapshot identity remains custody authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum GuestWorkspaceView {
+    FullSnapshot,
+    CapturedInputs,
+}
+
+
 /// Complete descriptor-bound environment delivered to one external guest.
 ///
 /// Descriptor coordinates are launch transport only. `identity_digest()`
@@ -229,6 +238,7 @@ impl ExternalCommandTermination {
 #[serde(deny_unknown_fields)]
 pub struct ExternalGuestInputProjection {
     pub schema: u32,
+    pub workspace_view: GuestWorkspaceView,
     pub base_snapshot: GuestBaseSnapshotInput,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub workspace_outputs: Option<GuestWorkspaceOutputAuthorityInput>,
@@ -434,6 +444,7 @@ pub struct GuestMountInput {
 #[derive(Serialize)]
 struct GuestInputSemanticIdentity<'a> {
     domain: &'static str,
+    workspace_view: GuestWorkspaceView,
     base_snapshot_hash: &'a str,
     base_snapshot_closure_digest: &'a str,
     base_snapshot_object_count: u64,
@@ -489,6 +500,21 @@ impl ExternalGuestInputProjection {
             self.schema == EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             "unsupported external guest input schema"
         );
+        if self.workspace_view == GuestWorkspaceView::CapturedInputs {
+            ensure!(
+                self.workspace_outputs.is_none()
+                    && self.inputs.iter().all(|input| {
+                        input.access == GuestMountAccess::ReadOnly
+                            && matches!(
+                                input.role,
+                                GuestMountRole::Product
+                                    | GuestMountRole::Source
+                                    | GuestMountRole::Configuration
+                            )
+                    }),
+                "captured inputs workspace cannot expose writable inputs or output authority"
+            );
+        }
         digest(
             &self.base_snapshot.snapshot_hash,
             "external guest base snapshot",
@@ -700,7 +726,8 @@ impl ExternalGuestInputProjection {
             })
             .collect();
         let bytes = canonical_json(&GuestInputSemanticIdentity {
-            domain: "ryeos.external-guest-inputs.v4",
+            domain: "ryeos.external-guest-inputs.v5",
+            workspace_view: self.workspace_view,
             base_snapshot_hash: &self.base_snapshot.snapshot_hash,
             base_snapshot_closure_digest: &self.base_snapshot.closure_digest,
             base_snapshot_object_count: self.base_snapshot.object_count,
@@ -2150,6 +2177,7 @@ mod tests {
 
     fn guest_projection() -> ExternalGuestInputProjection {
         ExternalGuestInputProjection {
+            workspace_view: GuestWorkspaceView::FullSnapshot,
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 10,
@@ -2513,6 +2541,29 @@ mod tests {
             }
             assert!(invalid.validate().is_err());
         }
+    }
+
+    #[test]
+    fn workspace_view_is_required_identity_bound_and_read_only() {
+        let projection = source_projection();
+        let full_identity = projection.identity_digest().unwrap();
+        let mut captured = projection.clone();
+        captured.workspace_view = GuestWorkspaceView::CapturedInputs;
+        captured.validate().unwrap();
+        assert_ne!(full_identity, captured.identity_digest().unwrap());
+        assert_eq!(captured.base_snapshot, projection.base_snapshot);
+        let mut wire = serde_json::to_value(&captured).unwrap();
+        wire.as_object_mut().unwrap().remove("workspace_view");
+        assert!(serde_json::from_value::<ExternalGuestInputProjection>(wire).is_err());
+        let mut wire = serde_json::to_value(&captured).unwrap();
+        wire["workspace_view"] = serde_json::json!("host");
+        assert!(serde_json::from_value::<ExternalGuestInputProjection>(wire).is_err());
+        let mut writable = captured.clone();
+        writable.inputs[0].access = GuestMountAccess::PrivateWritable;
+        assert!(writable.validate().is_err());
+        let mut predecessor = captured;
+        predecessor.schema = 4;
+        assert!(predecessor.validate().is_err());
     }
 
     #[test]

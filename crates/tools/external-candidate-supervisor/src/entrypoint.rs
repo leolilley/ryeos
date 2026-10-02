@@ -342,6 +342,7 @@ mod tests {
             .create_child(OsStr::new("guest-scratch-01"), 0o700)
             .unwrap();
         let inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 10,
@@ -477,6 +478,7 @@ mod tests {
     #[test]
     fn two_product_inputs_rebind_without_manifest_descriptor_collision() {
         let mut inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: SUPERVISOR_CONTENT_RECORD_FD_BASE,
@@ -548,6 +550,7 @@ mod tests {
     #[test]
     fn source_records_and_products_rebind_in_flattened_order() {
         let mut inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 200,

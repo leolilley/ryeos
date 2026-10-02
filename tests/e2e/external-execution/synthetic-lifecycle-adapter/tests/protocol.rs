@@ -2651,6 +2651,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
     )
     .unwrap();
     let guest_inputs = ExternalGuestInputProjection {
+        workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
         schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
         base_snapshot: GuestBaseSnapshotInput {
             descriptor: base_authority.inherited_descriptor().unwrap(),
@@ -5508,6 +5509,7 @@ fn exercise_activation_fault(fault: &str) {
     let manifest_authority =
         lillux::sealed_memfd(c"synthetic-runtime-manifest", manifest_bytes.as_bytes()).unwrap();
     let guest_inputs = ExternalGuestInputProjection {
+        workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
         schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
         base_snapshot: GuestBaseSnapshotInput {
             descriptor: base_authority.inherited_descriptor().unwrap(),

@@ -405,6 +405,7 @@ mod tests {
     fn fixture() -> (GuestImportAuthorization, GuestOccurrenceAssignment<'static>) {
         let digest = |byte: char| byte.to_string().repeat(64);
         let inputs = ryeos_external_execution_contract::ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,
