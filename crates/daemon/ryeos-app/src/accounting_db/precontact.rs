@@ -226,6 +226,16 @@ impl OriginalFundingOwner {
         if binding.scope != allocation_scope {
             bail!("new trusted pool funding differs from exact verified allocation scope");
         }
+        if binding.callback_thread_id != thread_id
+            || binding.callback_launch_owner != launch_generation
+        {
+            bail!("original trusted funding differs from actual verified callback launch owner");
+        }
+        state.state_store.assert_launch_owner_until(
+            thread_id,
+            launch_generation,
+            budget.contact_expiry(),
+        )?;
         if binding.current_site_id != state.threads.site_id() {
             bail!("original funding callback belongs to another current execution site");
         }
@@ -399,12 +409,23 @@ impl OriginalFundingOwner {
     /// Borrow only this original funded attempt before consuming contact.
     pub(crate) fn original_contact_reservation(
         &self,
+        owned_capsule_hash: &str,
+        owner_kind: &str,
+        owner_coordinate: &str,
     ) -> Result<(
         &crate::runtime_db::ProcessResourceReservationRecord,
         lillux::time::MonotonicDeadline,
     )> {
         if self.phase != FundingPhase::Funded {
             bail!("original funded contact is unavailable or already attempted");
+        }
+        if owned_capsule_hash != self.envelope.capsule_hash
+            || owner_kind != self.envelope.original_reservation.owner_kind
+            || owner_coordinate != self.envelope.original_reservation.owner_coordinate
+        {
+            bail!(
+                "original funded contact differs from owned capsule plan or original pooled coordinate"
+            );
         }
         self.require_contact_window()?;
         Ok((
@@ -1043,6 +1064,43 @@ mod tests {
     }
 
     #[cfg(test)]
+    #[test]
+    fn actual_funded_contact_refuses_other_capsule_and_owner_before_runtime_intent() {
+        let (_root, _fixture, _scratch, mut owner) = fixture("1");
+        assert!(owner.reserve().unwrap());
+        let hold = exact_hold(&owner);
+        let capsule = owner.envelope.capsule_hash.clone();
+        let kind = owner.envelope.original_reservation.owner_kind.clone();
+        let coordinate = owner.envelope.original_reservation.owner_coordinate.clone();
+        // Same original device selections and actual funded ledger hold; only
+        // the caller's capsule/pooled coordinate is changed.
+        assert!(
+            owner
+                .original_contact_reservation(&"9".repeat(64), &kind, &coordinate)
+                .is_err()
+        );
+        assert!(
+            owner
+                .original_contact_reservation(&capsule, "dedicated_worker", &coordinate)
+                .is_err()
+        );
+        assert!(
+            owner
+                .original_contact_reservation(&capsule, &kind, "another-owned-pool")
+                .is_err()
+        );
+        assert!(
+            owner
+                .original_contact_reservation(&capsule, &kind, &coordinate)
+                .is_ok()
+        );
+        assert!(matches!(owner.phase, FundingPhase::Funded));
+        assert!(owner.intent.is_none());
+        assert!(owner.runtime_permit.is_none());
+        assert_eq!(exact_hold(&owner), hold);
+        assert_eq!(audits(&owner).len(), 1);
+    }
+
     #[test]
     fn actual_precontact_intent_is_one_use_and_reopen_retains_same_unattached_hold() {
         let (root, fixture, _scratch, mut owner) = fixture("1");

@@ -819,12 +819,9 @@ impl PersistentSessionPooledStart {
         &self,
         state: &crate::state::AppState,
         inputs: crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs,
-        budget: &crate::handler_context::OriginalExecutionBudget,
         allocation_scope: &ryeos_state::objects::AdmittedAccountingScope,
         original: &crate::runtime_db::ProcessResourceReservationRecord,
         scratch: Arc<crate::temp_dir_guard::TempDirGuard>,
-        thread_id: &str,
-        launch_generation: &str,
     ) -> Result<bool> {
         let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
         // Every actually supplied physical owner stays rooted on refusal.
@@ -844,10 +841,8 @@ impl PersistentSessionPooledStart {
                 .original_callback_budget
                 .as_ref()
                 .context("original trusted funding lacks retained callback budget")?;
-            if retained_budget != budget {
-                bail!("original trusted funding cannot replace retained callback clock");
-            }
             let original_expiry = retained_budget.contact_expiry();
+            let callback = retained_budget.precontact_binding();
             let funding = crate::accounting_db::precontact::OriginalFundingOwner::prepare(
                 state,
                 retained
@@ -857,8 +852,8 @@ impl PersistentSessionPooledStart {
                 retained_budget,
                 allocation_scope,
                 original,
-                thread_id,
-                launch_generation,
+                callback.callback_thread_id,
+                callback.callback_launch_owner,
             )?;
             // Keep this SAME original attempt before the first cross-store
             // commit can lose its acknowledgement. Never recreate on error.
@@ -888,6 +883,9 @@ impl PersistentSessionPooledStart {
         &self,
         state: &crate::state::AppState,
         selected: &crate::execution_resources::SelectedExecutionResources,
+        owned_capsule_hash: &str,
+        owner_kind: &str,
+        owner_coordinate: &str,
     ) -> Result<(
         lillux::time::OriginalNamespaceOccupancyHandoff,
         crate::runtime_db::ProcessResourceReservationRecord,
@@ -911,7 +909,11 @@ impl PersistentSessionPooledStart {
                 .original_funding
                 .as_mut()
                 .context("original contact lacks same funded owner")?;
-            let (original, deadline) = funding.original_contact_reservation()?;
+            let (original, deadline) = funding.original_contact_reservation(
+                owned_capsule_hash,
+                owner_kind,
+                owner_coordinate,
+            )?;
             if original.selections != selected.selections() {
                 bail!("original funded contact differs from current exact plan selection");
             }

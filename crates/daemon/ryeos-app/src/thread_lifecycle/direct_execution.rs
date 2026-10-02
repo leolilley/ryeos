@@ -451,6 +451,7 @@ pub struct PreparedItemPlan {
     admitted_command: Option<ryeos_engine::isolation::IsolationAdmittedCommand>,
     realization_command: Option<PreparedRealizationCommand>,
     resource_policy: PersistentSessionResourcePolicy,
+    persistent_session_capsule_hash: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1647,13 +1648,15 @@ impl PreparedItemPlan {
         isolation: &ryeos_engine::isolation::IsolationRuntime,
         effective_workspace: &Path,
     ) -> Result<Self> {
-        Self::recover_from_direct_parts(
+        let mut prepared = Self::recover_from_direct_parts(
             &capsule.execution_closure,
             &capsule.artifact_identity,
             cas,
             isolation,
             Some(effective_workspace),
-        )
+        )?;
+        prepared.persistent_session_capsule_hash = Some(capsule.content_hash()?);
+        Ok(prepared)
     }
 
     fn recover_from_direct_parts(
@@ -1766,6 +1769,7 @@ impl PreparedItemPlan {
             admitted_command,
             realization_command,
             resource_policy: PersistentSessionResourcePolicy::Ordinary,
+            persistent_session_capsule_hash: None,
         })
     }
 
@@ -1875,8 +1879,15 @@ impl PreparedItemPlan {
             selected_resources
                 .devices()
                 .context("original trusted contact lacks selected device descriptors")?;
-            let (window, intent) =
-                original.take_original_funded_contact(state, &selected_resources)?;
+            let (window, intent) = original.take_original_funded_contact(
+                state,
+                &selected_resources,
+                self.persistent_session_capsule_hash
+                    .as_deref()
+                    .context("original funded contact lacks owned persistent capsule plan")?,
+                resource_owner_kind,
+                resource_owner_coordinate,
+            )?;
             original_window = Some(window);
             Some(intent)
         } else {
@@ -2877,6 +2888,7 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
                 admitted_command: None,
                 realization_command: None,
                 resource_policy: PersistentSessionResourcePolicy::QualificationNoResources,
+                persistent_session_capsule_hash: None,
             },
             declaration,
             signed_protocol,
@@ -2981,6 +2993,7 @@ fn prepare_item_plan_with_logical_context(
             admitted_command: None,
             realization_command: None,
             resource_policy: PersistentSessionResourcePolicy::Ordinary,
+            persistent_session_capsule_hash: None,
         })
     })
 }
@@ -3073,6 +3086,7 @@ pub fn prepare_captured_item_plan(
             admitted_command: None,
             realization_command: None,
             resource_policy: PersistentSessionResourcePolicy::Ordinary,
+            persistent_session_capsule_hash: None,
         })
     })
 }
@@ -4083,6 +4097,7 @@ mod tests {
             admitted_command: None,
             realization_command: None,
             resource_policy: PersistentSessionResourcePolicy::Ordinary,
+            persistent_session_capsule_hash: None,
         }
     }
 

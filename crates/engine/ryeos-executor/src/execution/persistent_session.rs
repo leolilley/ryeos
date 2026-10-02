@@ -3862,6 +3862,10 @@ fn spawn_capsule_process_held(
                 original_bindings.push(Box::new(Arc::clone(source)));
             }
             original_start.retain_before_contact(original_bindings)?;
+            let allocation_scope = accounting_scope
+                .context("original trusted custody lacks actual allocation scope")?;
+            original_start.retain_before_contact(lifelines)?;
+            lifelines = Vec::new();
             let custody = custody::PreparedTrustedSessionCustody::capture(
                 state,
                 capsule_hash,
@@ -3870,9 +3874,12 @@ fn spawn_capsule_process_held(
                 bound,
                 source,
             )?;
-            lifelines.push(Box::new(custody));
-            original_start.retain_before_contact(lifelines)?;
-            lifelines = Vec::new();
+            custody.stage_original_funding(
+                state,
+                original_start,
+                allocation_scope,
+                resource_owner_coordinate,
+            )?;
         }
         Some((original_start, _)) => {
             if let Some(bound) = bound {

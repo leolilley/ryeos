@@ -25,7 +25,7 @@ pub(super) struct PreparedTrustedSessionCustody {
     runtime_custody: ProcessResourceRuntimeCustody,
     verified_inputs: ryeos_app::persistent_session_admission::VerifiedTrustedPooledSessionInputs,
     state_store: Arc<ryeos_app::state_store::StateStore>,
-    state_authority: ryeos_state::PinnedStateAuthority,
+    state_authority: Arc<ryeos_state::PinnedStateAuthority>,
     workspace: Arc<TempDirGuard>,
     external: Option<Arc<BoundExternalRealizations>>,
     source: Option<Arc<BoundSourceClosure>>,
@@ -73,7 +73,7 @@ impl PreparedTrustedSessionCustody {
         let original_workspace = workspace.owned_scratch_root()?;
         original_workspace.ensure_path_binding()?;
         let workspace_identity = original_workspace.identity()?;
-        let state_authority = state.state_store.pinned_state_authority()?;
+        let state_authority = Arc::new(state.state_store.pinned_state_authority()?);
         let runtime = state_authority.runtime_directory();
         let workspace_custody = capture_owned_scratch_custody(runtime, &workspace)?;
         let cache = required_child(runtime, "cache")?;
@@ -181,6 +181,96 @@ impl PreparedTrustedSessionCustody {
         // scratch incarnation may be published as the original capture.
         captured.retained_runtime_custody(state)?;
         Ok(captured)
+    }
+
+    /// Consume this actual capture into the SAME original pooled funding slot.
+    /// The constructed record is retention/intent data, never native admission.
+    pub(super) fn stage_original_funding(
+        self,
+        state: &AppState,
+        original_start: &ryeos_app::persistent_session::PersistentSessionPooledStart,
+        allocation_scope: &ryeos_state::objects::AdmittedAccountingScope,
+        owner_coordinate: &str,
+    ) -> Result<()> {
+        // Preserve all original physical and pinned owners before validation or
+        // the first RuntimeDb/ledger write. No replacement materialization.
+        let mut owners: Vec<Box<dyn Send + Sync>> = vec![
+            Box::new(Arc::clone(&self.workspace)),
+            Box::new(Arc::clone(&self.state_store)),
+            Box::new(Arc::clone(&self.state_authority)),
+        ];
+        if let Some(external) = &self.external {
+            owners.push(Box::new(Arc::clone(external)));
+        }
+        if let Some(source) = &self.source {
+            owners.push(Box::new(Arc::clone(source)));
+        }
+        if let Err(error) = original_start.retain_before_contact(owners) {
+            let retention = original_start
+                .retain_before_contact(vec![Box::new(self)])
+                .err();
+            return Err(error.context(format!(
+                "same original custody retained on refusal: {retention:?}"
+            )));
+        }
+        let prepared: Result<ryeos_app::runtime_db::ProcessResourceReservationRecord> = (|| {
+            self.retained_runtime_custody(state)?;
+            let allocation_limit = self
+                .verified_inputs
+                .selected()
+                .max_concurrent_exclusive_allocations()
+                .context("original trusted funding lacks admitted allocation ceiling")?;
+            let ProcessWorkspaceCustody::ResourceOwnedScratch { scratch_name, .. } =
+                &self.runtime_custody.workspace
+            else {
+                bail!("original pooled funding lacks its actual owned scratch coordinate");
+            };
+            ensure!(
+                scratch_name == owner_coordinate,
+                "original pooled coordinate differs from actual captured scratch owner"
+            );
+            let original = ryeos_app::runtime_db::ProcessResourceReservationRecord {
+                owner_kind: "pooled_session".to_owned(),
+                owner_coordinate: owner_coordinate.to_owned(),
+                daemon_generation_id: ryeos_app::runtime_db::daemon_generation_id().to_owned(),
+                selections: self.verified_inputs.selected().selections().to_vec(),
+                allocation_limit,
+                runtime_custody: Some(self.runtime_custody.clone()),
+                launch_authority:
+                    ryeos_app::runtime_db::ProcessResourceLaunchAuthority::TrustedProcessGroup {
+                        cleanup_contract_digest: self
+                            .cleanup_agreement
+                            .cleanup_contract_digest
+                            .clone(),
+                        host_lifetime: lillux::ProcessHostLifetime::capture_current()
+                            .map_err(anyhow::Error::msg)?,
+                        phase: ryeos_app::runtime_db::TrustedResourceLaunchPhase::Reserved,
+                    },
+            };
+            Ok(original)
+        })(
+        );
+        let original = match prepared {
+            Ok(original) => original,
+            Err(error) => {
+                let retention = original_start
+                    .retain_before_contact(vec![Box::new(self)])
+                    .err();
+                return Err(error.context(format!(
+                    "same original custody retained on validation refusal: {retention:?}"
+                )));
+            }
+        };
+        if !original_start.prepare_trusted_original_funding(
+            state,
+            self.verified_inputs,
+            allocation_scope,
+            &original,
+            self.workspace,
+        )? {
+            bail!("original trusted pooled funding was denied; same custody remains retained");
+        }
+        Ok(())
     }
 
     /// Borrow retention data from the SAME live capture. This private method

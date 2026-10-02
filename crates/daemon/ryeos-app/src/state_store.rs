@@ -19728,6 +19728,25 @@ impl StateStore {
         g.runtime_db.get_launch_claim(thread_id)
     }
 
+    /// Revalidate the actual original callback owner under its existing window.
+    /// Reuses the finite RuntimeDb connection and StateStore acquisition seam.
+    pub(crate) fn assert_launch_owner_until(
+        &self,
+        thread_id: &str,
+        launch_owner: &str,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        self.with_runtime_original_deadline(deadline, |db| {
+            let claim = db
+                .get_launch_claim(thread_id)?
+                .ok_or_else(|| anyhow!("thread {thread_id} has no current launch owner"))?;
+            if claim.claimed_by != launch_owner {
+                bail!("stale launch owner for thread {thread_id}");
+            }
+            Ok(())
+        })
+    }
+
     pub fn assert_launch_owner(&self, thread_id: &str, launch_owner: &str) -> Result<()> {
         let g = self.lock()?;
         let claim = g

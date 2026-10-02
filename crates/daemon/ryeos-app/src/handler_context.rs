@@ -34,6 +34,8 @@ pub struct OriginalExecutionBudget {
     // original execution clock never drops its narrower directive account.
     allocation_scope: ryeos_state::objects::AdmittedAccountingScope,
     callback_invocation_id: String,
+    callback_thread_id: String,
+    callback_launch_owner: String,
     callback_expires_at: lillux::time::MonotonicDeadline,
 }
 
@@ -59,6 +61,8 @@ impl PartialEq for OriginalExecutionBudget {
         Arc::ptr_eq(&self.owner, &other.owner)
             && self.callback_invocation_id == other.callback_invocation_id
             && self.allocation_scope == other.allocation_scope
+            && self.callback_thread_id == other.callback_thread_id
+            && self.callback_launch_owner == other.callback_launch_owner
     }
 }
 
@@ -87,6 +91,8 @@ pub(crate) struct PrecontactBudgetBinding<'a> {
     pub current_site_id: &'a str,
     pub origin_site_id: &'a str,
     pub callback_invocation_id: &'a str,
+    pub callback_thread_id: &'a str,
+    pub callback_launch_owner: &'a str,
 }
 
 impl OriginalExecutionBudget {
@@ -100,6 +106,8 @@ impl OriginalExecutionBudget {
             current_site_id: &self.owner.current_site_id,
             origin_site_id: &self.owner.origin_site_id,
             callback_invocation_id: &self.callback_invocation_id,
+            callback_thread_id: &self.callback_thread_id,
+            callback_launch_owner: &self.callback_launch_owner,
         }
     }
 }
@@ -467,6 +475,8 @@ impl HandlerContext {
         let budget = OriginalExecutionBudget {
             owner,
             allocation_scope: scope.clone(),
+            callback_thread_id: cap.thread_id.clone(),
+            callback_launch_owner: launch_owner.to_owned(),
             callback_invocation_id: cap.invocation_id,
             callback_expires_at,
         };
