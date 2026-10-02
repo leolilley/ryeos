@@ -100,15 +100,20 @@ def _c_string(data: bytes, offset: int) -> str:
 def _file_translation(
     virtual: int,
     length: int,
-    loads: tuple[tuple[int, int, int], ...],
+    loads: tuple[tuple[int, int, int, int], ...],
     file_size: int,
     name: str,
 ) -> int:
-    offsets = [
-        file_offset + virtual - load_virtual
-        for load_virtual, file_offset, load_size in loads
-        if load_virtual <= virtual and virtual + length <= load_virtual + load_size
-    ]
+    end = virtual + length
+    offsets = []
+    for load_virtual, file_offset, file_size, memory_size in loads:
+        memory_end = load_virtual + memory_size
+        if virtual >= memory_end or load_virtual >= end:
+            continue
+        file_end = load_virtual + file_size
+        if virtual < load_virtual or end > file_end:
+            raise DriverClosureError(f'{name} overlaps a partial or zero-filled PT_LOAD range')
+        offsets.append(file_offset + virtual - load_virtual)
     if len(offsets) != 1:
         raise DriverClosureError(f'{name} has missing or ambiguous PT_LOAD file mapping')
     offset = offsets[0]
@@ -143,7 +148,7 @@ def _dynamic_info(path: Path, maximum_file_bytes: int) -> _DynamicInfo:
             encoded_headers = source.read(phbytes)
             if len(encoded_headers) != phbytes:
                 raise DriverClosureError(f'{path.name} has a truncated program-header table')
-            loads: list[tuple[int, int, int]] = []
+            loads: list[tuple[int, int, int, int]] = []
             dynamic: tuple[int, int, int] | None = None
             for offset in range(0, phbytes, phentsize):
                 item = _PROGRAM_HEADER.unpack_from(encoded_headers, offset)
@@ -155,7 +160,7 @@ def _dynamic_info(path: Path, maximum_file_bytes: int) -> _DynamicInfo:
                 if file_size > memory_size:
                     raise DriverClosureError(f'{path.name} file-backed segment exceeds memory size')
                 if kind == _PT_LOAD:
-                    loads.append((virtual, file_offset, file_size))
+                    loads.append((virtual, file_offset, file_size, memory_size))
                 elif kind == _PT_DYNAMIC:
                     if dynamic is not None:
                         raise DriverClosureError(f'{path.name} has multiple PT_DYNAMIC segments')

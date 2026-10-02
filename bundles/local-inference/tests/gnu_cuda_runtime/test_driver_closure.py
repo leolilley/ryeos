@@ -19,6 +19,8 @@ def _shared_object(
     runpath: str | None = None,
     *,
     conflicting_string_map: bool = False,
+    partial_string_map: bool = False,
+    zero_fill_string_map: bool = False,
     load_memory_size: int | None = None,
 ) -> None:
     strings = bytearray(b'\0')
@@ -35,7 +37,8 @@ def _shared_object(
     dynamic.append((driver_closure._DT_STRTAB, 0))
     dynamic.append((driver_closure._DT_STRSZ, len(strings)))
     dynamic.append((driver_closure._DT_NULL, 0))
-    header_count = 3 if conflicting_string_map else 2
+    extra_mapping = conflicting_string_map or partial_string_map or zero_fill_string_map
+    header_count = 3 if extra_mapping else 2
     dynamic_offset = 64 + header_count * driver_closure._PROGRAM_HEADER.size
     dynamic_bytes = b''.join(driver_closure._DYNAMIC.pack(tag, value) for tag, value in dynamic)
     string_offset = dynamic_offset + len(dynamic_bytes)
@@ -45,7 +48,7 @@ def _shared_object(
     string_offset = dynamic_offset + len(dynamic_bytes)
     dynamic[-3] = (driver_closure._DT_STRTAB, string_offset)
     dynamic_bytes = b''.join(driver_closure._DYNAMIC.pack(tag, value) for tag, value in dynamic)
-    end = string_offset + len(strings) + (1 if conflicting_string_map else 0)
+    end = string_offset + len(strings) + (1 if conflicting_string_map or partial_string_map else 0)
     ident = b'\x7fELF\x02\x01\x01\0' + b'\0' * 8
     header = driver_closure._ELF_HEADER.pack(
         ident, driver_closure._ET_DYN, driver_closure._EM_X86_64, 1,
@@ -54,20 +57,32 @@ def _shared_object(
     load = driver_closure._PROGRAM_HEADER.pack(
         1, 5, 0, 0, 0, end, end if load_memory_size is None else load_memory_size, 4096
     )
-    conflicting_load = (
-        driver_closure._PROGRAM_HEADER.pack(
+    extra_load = b''
+    if conflicting_string_map:
+        extra_load = driver_closure._PROGRAM_HEADER.pack(
             1, 4, string_offset + 1, string_offset, string_offset,
             len(strings), len(strings), 1,
         )
-        if conflicting_string_map else b''
-    )
+    elif partial_string_map:
+        half = max(1, len(strings) // 2)
+        start = string_offset + half
+        extra_load = driver_closure._PROGRAM_HEADER.pack(
+            1, 4, start + 1, start, start, len(strings) - half,
+            len(strings) - half, 1,
+        )
+    elif zero_fill_string_map:
+        half = max(1, len(strings) // 2)
+        start = string_offset + half
+        extra_load = driver_closure._PROGRAM_HEADER.pack(
+            1, 4, start, start, start, 0, len(strings) - half, 1,
+        )
     dynamic_header = driver_closure._PROGRAM_HEADER.pack(
         driver_closure._PT_DYNAMIC, 4, dynamic_offset, dynamic_offset,
         dynamic_offset, len(dynamic_bytes), len(dynamic_bytes), 8,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(header + load + conflicting_load + dynamic_header + dynamic_bytes + strings +
-                     (b'\0' if conflicting_string_map else b''))
+    path.write_bytes(header + load + extra_load + dynamic_header + dynamic_bytes + strings +
+                     (b'\0' if conflicting_string_map or partial_string_map else b''))
 
 
 class DriverClosureTests(unittest.TestCase):
@@ -176,13 +191,14 @@ class DriverClosureTests(unittest.TestCase):
             )
 
     def test_ambiguous_metadata_mapping_and_oversized_load_segment_refuse(self):
-        _shared_object(
-            self.driver / 'libcuda.so.1', 'libcuda.so.1',
-            ('libhelper.so.1', 'libc.so.6'), '$ORIGIN',
-            conflicting_string_map=True,
-        )
-        with self.assertRaisesRegex(driver_closure.DriverClosureError, 'ambiguous PT_LOAD'):
-            self.inspect()
+        for option in ('conflicting_string_map', 'partial_string_map', 'zero_fill_string_map'):
+            with self.subTest(mapping=option):
+                _shared_object(
+                    self.driver / 'libcuda.so.1', 'libcuda.so.1',
+                    ('libhelper.so.1', 'libc.so.6'), '$ORIGIN', **{option: True},
+                )
+                with self.assertRaisesRegex(driver_closure.DriverClosureError, 'PT_LOAD'):
+                    self.inspect()
         _shared_object(
             self.driver / 'libcuda.so.1', 'libcuda.so.1',
             ('libhelper.so.1', 'libc.so.6'), '$ORIGIN',
