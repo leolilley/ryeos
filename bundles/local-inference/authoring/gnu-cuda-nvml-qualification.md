@@ -45,8 +45,8 @@ here as historical source metadata. No signature or activation was produced.
 ## Product-qualification edge
 
 `nvml_product_qualification.qualify_raw_assignment` consumes the existing
-`ProductQualificationPolicy.v3` static `verifier_parameters`, D's raw retained
-selection, and the exact observer/provider API injected by the accepted
+signed product-qualification policy's static `verifier_parameters`, D's raw
+retained selection, and the exact observer/provider API injected by the accepted
 qualification owner. It delegates native query interpretation to the cleanup
 owner's helper and returns the existing
 `ryeos.product_qualification_result.v1` envelope, binding its candidate to the
@@ -78,7 +78,8 @@ This source cut does not declare a new Tool item or verifier relationship: no
 driver/NVML product producer or source-closure binding for reusing the worker
 helper from a ProductQualification Tool has been selected. The API is ready for
 the existing qualification owner to call once that exact signed verifier source
-closure is chosen. Keep use on `launch-product-qualification` and its v3 policy;
+closure is chosen. Keep use on the existing `launch-product-qualification`
+policy path;
 do not add a second endpoint or let the verifier discover a helper from the
 installed host tree.
 

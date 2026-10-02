@@ -1,4 +1,4 @@
-"""ProductQualificationPolicy.v3 consumer for one raw NVIDIA assignment.
+"""Signed product-qualification parameter consumer for one NVIDIA assignment.
 
 This module translates a retained signed verifier policy and D-injected raw
 selection/provider into the existing NVML observer and product-result shape.
