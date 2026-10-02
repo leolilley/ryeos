@@ -737,11 +737,17 @@ impl NativeExternalCandidate {
     ) -> Result<(Self, NativeCandidateOutput)> {
         binding.validate()?;
         guest_inputs.validate()?;
-        ensure!(
-            guest_inputs.workspace_view
-                == ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
-            "captured inputs guest workspace is not supported by this launcher"
-        );
+        let captured_inputs = guest_inputs.workspace_view
+            == ryeos_external_execution_contract::GuestWorkspaceView::CapturedInputs;
+        if captured_inputs {
+            ensure!(
+                matches!(
+                    binding.execution_mode,
+                    ExternalExecutionMode::DirectCommand { .. }
+                ) && fixture.is_none(),
+                "captured inputs workspace requires callback-free direct execution without a qualification fixture"
+            );
+        }
         validate_qualification_fixture_mounts(
             binding.execution_mode,
             fixture,
@@ -769,6 +775,10 @@ impl NativeExternalCandidate {
             binding.execution_mode,
             guest_inputs.workspace_outputs.is_some(),
         )?;
+        ensure!(
+            !captured_inputs || workspace_access == lillux::LinuxSandboxMountAccess::ReadOnly,
+            "captured inputs workspace cannot be writable"
+        );
         ensure!(
             guest_inputs.base_snapshot.snapshot_hash == binding.base_snapshot_hash
                 && request.mounts.len() == guest_inputs.inputs.len(),
@@ -821,7 +831,7 @@ impl NativeExternalCandidate {
         ));
         // Hold the CAS guard only during immutable input validation/copy. It
         // must be gone before native launch forks the isolated target.
-        let base = {
+        let root = {
             let guard = authority.acquire_shared_guard()?;
             let cas = authority.cas_store()?;
             let closure = VerifiedProjectSnapshotClosure::load(&cas, &binding.base_snapshot_hash)?;
@@ -835,43 +845,58 @@ impl NativeExternalCandidate {
                     "external base exceeds first-generation private-copy bound"
                 );
             }
-            let (_, root) = private_parent.create_unique_child("external-candidate-", 0o700)?;
-            for (path, file) in closure.tree().files() {
-                ensure!(
-                    !deadline.has_elapsed(),
-                    "external base copy deadline expired"
-                );
-                let relative = std::path::Path::new(path);
-                let mut parent = root.try_clone()?;
-                if let Some(ancestors) = relative.parent() {
-                    for component in ancestors.components() {
-                        parent = parent.open_or_create_child(component.as_os_str(), 0o755)?;
+            let (_, root) = private_parent.create_unique_child(
+                if captured_inputs {
+                    "external-input-view-"
+                } else {
+                    "external-candidate-"
+                },
+                0o700,
+            )?;
+            if captured_inputs {
+                // The verified closure remains the same custody identity. This
+                // separate empty directory is a target view, not a claimed
+                // materialization of that snapshot. Only admitted mount
+                // targets are assembled below; no base file is copied here.
+                root
+            } else {
+                for (path, file) in closure.tree().files() {
+                    ensure!(
+                        !deadline.has_elapsed(),
+                        "external base copy deadline expired"
+                    );
+                    let relative = std::path::Path::new(path);
+                    let mut parent = root.try_clone()?;
+                    if let Some(ancestors) = relative.parent() {
+                        for component in ancestors.components() {
+                            parent = parent.open_or_create_child(component.as_os_str(), 0o755)?;
+                        }
                     }
+                    let size = cas.materialize_blob_to_new_regular(
+                        &file.blob_hash,
+                        &parent,
+                        relative
+                            .file_name()
+                            .context("external base file has no name")?,
+                        file.normalized_mode,
+                    )?;
+                    ensure!(size == file.size, "external base size changed during copy");
                 }
-                let size = cas.materialize_blob_to_new_regular(
-                    &file.blob_hash,
-                    &parent,
-                    relative
-                        .file_name()
-                        .context("external base file has no name")?,
-                    file.normalized_mode,
+                let base = PinnedProjectMaterialization::verify_pinned_from_closure(
+                    authority, &guard, &closure, root,
                 )?;
-                ensure!(size == file.size, "external base size changed during copy");
+                base.try_clone_root()?
             }
-            PinnedProjectMaterialization::verify_pinned_from_closure(
-                authority, &guard, &closure, root,
-            )?
         };
         ensure!(
             !deadline.has_elapsed(),
             "external candidate preparation exhausted its execution window"
         );
-        // The exact private base has been verified. From here this inode is an
-        // execution assembly: admitted input mounts may need empty targets.
-        // Do not export a verified-base descriptor after augmenting it, or
-        // mutate CAS/shared materializations to satisfy namespace setup.
-        let root = base.try_clone_root()?;
-        drop(base);
+        // This inode is now a target-view assembly. The full-snapshot branch
+        // has verified its private materialization; the captured-inputs branch
+        // deliberately has only the same verified custody closure. Neither
+        // exports this augmented inode as a verified base materialization.
+        // Never mutate CAS/shared materializations for namespace setup.
         let workspace_input_anchors =
             prepare_workspace_input_targets(&root, &workspace_targets, deadline)?;
         let candidate_mount = root.inherited_descriptor_authority()?;
