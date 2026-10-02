@@ -145,23 +145,22 @@ class RuntimeTests(unittest.TestCase):
         lifecycle_module = SimpleNamespace(install=lambda **kwargs: calls.append(('install', kwargs)) or object())
         with patch.object(runtime, 'prepare_environment', return_value=(self.root, self.root, self.root, self.root)) as prepare:
             with patch.object(runtime, 'verify_origins'):
-                with patch.object(runtime, 'qualify_ordinal_zero', side_effect=lambda **kwargs: calls.append(('qualify', kwargs))):
-                    with patch.dict(sys.modules, {
-                        'cuda_lifecycle': lifecycle_module,
-                        'tinygrad.runtime.autogen.cuda': generated,
-                    }):
-                        # Stop after binding qualification and lifecycle install.
-                        with patch.object(runtime, 'run_with_lifecycle', side_effect=RuntimeError('stop after wiring')):
-                            with self.assertRaisesRegex(RuntimeError, 'stop after wiring'):
-                                runtime.run_product(
-                                    observe=lambda _: None, gnu_bounds=selected, driver_bounds=selected,
-                                    expected_uuid_v2_hex='1' * 32,
-                                )
+                with patch.dict(sys.modules, {
+                    'cuda_lifecycle': lifecycle_module,
+                    'tinygrad.runtime.autogen.cuda': generated,
+                }):
+                    # Stop after lifecycle install without a native device call.
+                    with patch.object(runtime, 'run_with_lifecycle', side_effect=RuntimeError('stop after wiring')):
+                        with self.assertRaisesRegex(RuntimeError, 'stop after wiring'):
+                            runtime.run_product(
+                                observe=lambda _: None, gnu_bounds=selected, driver_bounds=selected,
+                                expected_uuid_v2_hex='1' * 32,
+                            )
         self.assertIs(prepare.call_args.kwargs['gnu_bounds'], selected)
         self.assertIs(prepare.call_args.kwargs['driver_bounds'], selected)
-        self.assertEqual([name for name, _ in calls], ['qualify', 'install'])
+        self.assertEqual([name for name, _ in calls], ['install'])
         self.assertEqual(calls[0][1]['expected_uuid_v2_hex'], '1' * 32)
-        self.assertEqual(calls[1][1]['bindings'], generated)
+        self.assertEqual(calls[0][1]['bindings'], generated)
 
     def test_lifecycle_wraps_import_session_and_constructor_failure(self):
         for fail in ('import', 'constructor', None):

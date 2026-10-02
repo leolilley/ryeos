@@ -12,7 +12,6 @@ from typing import Mapping
 
 from bootstrap_support import _member, _environment, inspect_layout, install_exact_library_resolver
 from driver_closure import TreeBounds, inspect_cuda_driver_closure
-from cuda_lifecycle.device_binding import qualify_ordinal_zero
 
 
 # Exact ceiling from gnu_runtime_to_private_worker in the unsigned product draft.
@@ -164,8 +163,10 @@ def run_product(
     if bindings is None:
         bindings = importlib.import_module("tinygrad.runtime.autogen.cuda")
     verify_origins((gnu / "python", worker, tinygrad))
-    qualify_ordinal_zero(bindings=bindings, expected_uuid_v2_hex=retained_uuid_v2_hex)
-    lifecycle = install(selected_device=0, observe=observe, bindings=bindings)
+    lifecycle = install(
+        selected_device=0, observe=observe, bindings=bindings,
+        expected_uuid_v2_hex=retained_uuid_v2_hex,
+    )
 
     def load_session():
         from compiler import install_admitted_compiler
