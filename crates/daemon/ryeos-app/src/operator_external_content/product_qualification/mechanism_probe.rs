@@ -8,7 +8,9 @@ use ryeos_engine::contracts::{
     SubjectResolutionAuthority, VerifiedItem,
 };
 use ryeos_engine::engine::{CapturedSignedBundleItemSource, CheckedEngineGeneration};
+use ryeos_engine::launch_config::LaunchConfigSnapshotSet;
 use ryeos_engine::resolution::ResolutionOutput;
+use ryeos_state::PendingCasPublication;
 use ryeos_state::external_content::products::producer_recipe::{
     ProducerExecutableSource, ProducerStdinSource, ProductProducerRecipe,
 };
@@ -36,6 +38,25 @@ pub struct CapturedMechanismProbeSource {
     parameters: BTreeMap<String, Value>,
     signed_sources: Vec<CapturedSignedBundleItemSource>,
     signed_bundle_manifests: Vec<ryeos_engine::plan_builder::CapturedSignedBundleManifest>,
+}
+
+/// Owner-retained preparation only. Every field remains coupled to the
+/// original sealed root and staged CAS roots until native input preparation.
+/// Holding this value does not authorize a helper launch or a qualification.
+#[allow(dead_code)]
+pub(crate) struct PreparedMechanismProbeProgram {
+    root_key: ScopedProducerAuthorityKey,
+    root_capsule_hash: String,
+    scenario_id: String,
+    recipe_source: ProductProducerRecipeSourceIdentity,
+    coordinate: ScopedProducerAttemptCoordinate,
+    deadline: lillux::time::MonotonicDeadline,
+    finalized: ryeos_engine::effective_program::FinalizedEffectiveProgram,
+    plan: crate::thread_lifecycle::PreparedItemPlan,
+    source: Option<crate::source_closure_admission::AdmittedSourceClosure>,
+    external: crate::external_content_admission::AdmittedExternalRealizations,
+    publication: PendingCasPublication,
+    config_snapshots: Option<LaunchConfigSnapshotSet>,
 }
 
 impl CapturedMechanismProbeSource {
@@ -161,9 +182,9 @@ impl CapturedMechanismProbeSource {
         Ok(())
     }
 
-    /// Compile only this original root's retained signed Tool dependency.
-    /// The returned plan still lacks materialized command authority, native
-    /// guest inputs, and any permission to launch a helper or issue a claim.
+    /// Finalize and compile only this original root's retained signed Tool
+    /// dependency. Its source and external CAS roots remain staged with the
+    /// plan; no native guest input or helper-launch authority is produced.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_original_probe_member_plan(
         &self,
@@ -174,14 +195,164 @@ impl CapturedMechanismProbeSource {
         selected: &CurrentBundleProducerRecipe,
         coordinate: &ScopedProducerAttemptCoordinate,
         deadline: lillux::time::MonotonicDeadline,
-        finalized: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
-    ) -> Result<crate::thread_lifecycle::PreparedItemPlan> {
+    ) -> Result<PreparedMechanismProbeProgram> {
         state.engine.with_checked_bundle_generation(|generation| {
             self.require_original_root_in_generation(
                 state, generation, key, purpose, scenario, selected, coordinate, deadline,
             )?;
             self.require_current_signed_tool_source(state, generation, purpose)?;
-            self.require_finalized_captured_tool(finalized)?;
+            let engine = state.engine.as_ref();
+            let kind = self.verified.resolved.kind.clone();
+            let roots = engine.resolution_roots(None);
+            let mut resolution = self.resolution.clone();
+            super::require_reproducible_current_verifier_lane(&resolution.composed.derived, false)?;
+            let schema = engine
+                .kinds
+                .get(&kind)
+                .context("mechanism Tool has no signed kind schema")?;
+            let execution = schema
+                .execution()
+                .context("mechanism Tool has no signed execution contract")?;
+            let contract = schema.external_content_contract();
+            let declarer = ryeos_engine::external_content::declaring_authority(&resolution)?;
+            let shape = ryeos_engine::external_content::authored_external_content_shape(
+                &resolution.composed.composed,
+                contract,
+                declarer,
+            )?
+            .context("mechanism Tool has no signed external content")?;
+            ensure!(
+                shape.product_slots.is_empty(),
+                "mechanism Tool has an unselected product slot"
+            );
+            let declarations =
+                ryeos_engine::external_content::effective_external_content_declarations(
+                    &resolution,
+                    contract,
+                    declarer,
+                )?
+                .context("mechanism Tool has no fixed-pin declaration")?;
+            ensure!(
+                !declarations.is_empty()
+                    && declarations.iter().all(|declaration| {
+                        declaration.mode
+                            == ryeos_engine::external_content::ExternalContentMode::Pinned
+                            && declaration.locator.is_none()
+                            && declaration.bundle_binary.is_none()
+                            && declaration.digest.is_some()
+                    }),
+                "mechanism Tool requires only locator-free fixed pins"
+            );
+
+            // Use the same source, hook, external-realization and semantic
+            // finalization owners as an ordinary current Tool admission.
+            let source_contract = execution.source_closure.as_ref();
+            let source_policy = if source_contract.is_some() {
+                let executor_id = resolution
+                    .composed
+                    .composed
+                    .get("executor_id")
+                    .and_then(Value::as_str)
+                    .context("mechanism Tool has no executor chain")?;
+                ryeos_engine::launch::plan_builder::resolve_executor_source_policy(
+                    executor_id,
+                    &resolution.root.source_path,
+                    &kind,
+                    &engine.kinds,
+                    &engine.parser_dispatcher,
+                    &roots,
+                    &engine.trust_store,
+                    &engine.node_trust_store,
+                    None,
+                )?
+            } else {
+                None
+            };
+            self.require_original_root_in_generation(
+                state, generation, key, purpose, scenario, selected, coordinate, deadline,
+            )?;
+            let mut publication = None;
+            let source = crate::source_closure_admission::admit_source_closure_in_publication(
+                state,
+                engine,
+                &kind,
+                &mut resolution,
+                &roots,
+                None,
+                source_policy.as_ref(),
+                &mut publication,
+                None,
+            )?;
+            self.require_original_root_in_generation(
+                state, generation, key, purpose, scenario, selected, coordinate, deadline,
+            )?;
+            let config_snapshots =
+                crate::effective_program_preparation::prepare_preselection_effective_program(
+                    engine,
+                    &self.verified.resolved,
+                    &mut resolution,
+                    &roots,
+                    &engine.trust_store,
+                    None,
+                )?;
+            super::require_reproducible_current_verifier_lane(&resolution.composed.derived, false)?;
+            self.require_original_root_in_generation(
+                state, generation, key, purpose, scenario, selected, coordinate, deadline,
+            )?;
+            let external =
+                crate::external_content_admission::admit_external_realizations_in_publication(
+                    state,
+                    engine,
+                    &kind,
+                    &mut resolution,
+                    &roots,
+                    &SubjectResolutionAuthority::Projectless,
+                    None,
+                    &mut publication,
+                )?
+                .context("mechanism Tool produced no current external realization")?;
+            self.require_original_root_in_generation(
+                state, generation, key, purpose, scenario, selected, coordinate, deadline,
+            )?;
+            let semantic_projection =
+                ryeos_engine::effective_program::take_recovered_effective_program_derived(
+                    &mut resolution,
+                );
+            let validation = engine.effective_validators.validate(&kind, &resolution)?;
+            let candidate = ryeos_engine::effective_program::relock_recovered_effective_program(
+                resolution,
+                validation,
+                semantic_projection,
+            )?;
+            let config_roots = engine.launch_config_roots(&roots);
+            let config_proofs = config_snapshots
+                .as_ref()
+                .map(|snapshots| std::slice::from_ref(&snapshots.dependency_proof))
+                .unwrap_or_default();
+            let finalization = ryeos_engine::effective_program::prove_finalization_authority(
+                &candidate,
+                contract,
+                config_proofs,
+                &config_roots,
+                None,
+                Some(external.finalization_evidence()),
+                source.as_ref().map(|held| held.finalization_evidence()),
+            )?;
+            let finalized = ryeos_engine::effective_program::finalize_effective_program(
+                candidate,
+                finalization,
+            )?;
+            self.require_original_root_in_generation(
+                state, generation, key, purpose, scenario, selected, coordinate, deadline,
+            )?;
+            self.require_finalized_captured_tool(
+                &finalized,
+                execution
+                    .hooks
+                    .as_ref()
+                    .filter(|_| config_snapshots.is_some())
+                    .map(|hooks| hooks.plan_derived.as_str()),
+            )?;
 
             let canonical = CanonicalRef::parse(&self.resolution.root.resolved_ref)?;
             let site = state.threads.site_id().to_owned();
@@ -224,14 +395,18 @@ impl CapturedMechanismProbeSource {
                 root_admission: None,
             };
             let prepared = {
-                let authority = state.state_store.pinned_state_authority()?;
+                let authority = publication
+                    .as_ref()
+                    .context("mechanism realization has no retained CAS publication")?
+                    .authority()
+                    .try_clone()?;
                 let guard = authority.acquire_shared_guard()?;
                 let plan = crate::thread_lifecycle::prepare_captured_external_member_plan(
                     state,
                     state.engine.as_ref(),
                     &request,
                     &self.verified,
-                    finalized,
+                    &finalized,
                     None,
                     ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
                     &authority,
@@ -249,7 +424,22 @@ impl CapturedMechanismProbeSource {
                 !deadline.has_elapsed(),
                 "mechanism preparation deadline elapsed after source recapture"
             );
-            Ok(prepared)
+            let publication =
+                publication.context("mechanism realization lost its staged CAS publication")?;
+            Ok(PreparedMechanismProbeProgram {
+                root_key: key.clone(),
+                root_capsule_hash: self.root_capsule_hash.clone(),
+                scenario_id: self.scenario_id.clone(),
+                recipe_source: self.recipe_source.clone(),
+                coordinate: coordinate.clone(),
+                deadline,
+                finalized,
+                plan: prepared,
+                source,
+                external,
+                publication,
+                config_snapshots,
+            })
         })
     }
 
@@ -323,6 +513,7 @@ impl CapturedMechanismProbeSource {
     fn require_finalized_captured_tool(
         &self,
         finalized: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
+        owned_hook_projection: Option<&str>,
     ) -> Result<()> {
         let held = &self.resolution;
         let current = finalized.resolution();
@@ -347,6 +538,7 @@ impl CapturedMechanismProbeSource {
                     .all(|(name, value)| { current.composed.derived.get(name) == Some(value) })
                 && current.composed.derived.keys().all(|name| {
                     held.composed.derived.contains_key(name)
+                        || owned_hook_projection == Some(name.as_str())
                         || matches!(
                             name.as_str(),
                             ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
