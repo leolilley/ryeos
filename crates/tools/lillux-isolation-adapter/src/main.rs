@@ -130,6 +130,9 @@ fn launch(request_fd: u32) -> ! {
     } else {
         None
     };
+    // Keep the SAME adopted original expiry before consuming native parts.
+    // Selected later observation cannot acquire an ordinary fresh safety clock.
+    let original_contact_expiry = original_parts.as_ref().map(|(_, _, deadline)| *deadline);
     let native = match translate_launch(&request) {
         Ok(native) => native,
         Err(error) => emit_refusal(status_fd, error),
@@ -232,7 +235,10 @@ fn launch(request_fd: u32) -> ! {
     // pre-exec receipt until the controller durably attaches and releases it.
     // This second document is trusted-adapter testimony from Lillux's private
     // child pipe, never target stdout or stderr.
-    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(3600));
+    let deadline = match original_contact_expiry {
+        Some(original) => original,
+        None => lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(3600)),
+    };
     let receipt = loop {
         if deadline.has_elapsed() {
             emit_refusal(
@@ -242,7 +248,10 @@ fn launch(request_fd: u32) -> ! {
         }
         match process.try_observe_applied_launch() {
             Ok(Some(receipt)) => break receipt,
-            Ok(None) => lillux::time::sleep(lillux::time::Duration::from_millis(1)),
+            Ok(None) => lillux::time::sleep(match original_contact_expiry {
+                Some(_) => lillux::time::Duration::from_millis(1).min(deadline.remaining()),
+                None => lillux::time::Duration::from_millis(1),
+            }),
             Err(error) => emit_refusal(
                 status_fd,
                 format!("applied-launch receipt refused: {error}"),
