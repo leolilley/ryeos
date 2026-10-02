@@ -20,7 +20,7 @@ session_resources:
 source:
   root: "lib/hosted"
   entry: "authoring.profile.json"
-  digest: "9b753e3675394db93a0c163c5faa1ae41bf672070dfcf39b77422fc3d75dfd1a"
+  digest: "2ac0197e81cd98a277c95a34d9906bc02ceae94ac9e9529b2676609c5e415495"
 
 external_content:
   # Runtime dependencies must never create mountpoints in the project CoW.
