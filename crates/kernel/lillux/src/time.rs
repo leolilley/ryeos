@@ -437,3 +437,382 @@ mod tests {
         assert_eq!(earlier.min(earlier).deadline, earlier.deadline);
     }
 }
+
+/// A sealed transfer of an existing local window, not financial, node,
+/// release or physical-retirement authority. No raw/serde/default constructor.
+/// The selected adapter must inherit BOTH exact descriptor roles once.
+#[cfg(target_os = "linux")]
+pub struct OriginalNamespaceOccupancyHandoff {
+    window: crate::InheritedDescriptorAuthority,
+    clock_namespace: crate::InheritedDescriptorAuthority,
+}
+
+#[cfg(target_os = "linux")]
+impl OriginalNamespaceOccupancyHandoff {
+    pub fn from_original(
+        limit: &OccupancyLimit,
+        cleanup: Duration,
+        original_deadline: MonotonicDeadline,
+    ) -> Result<Self, String> {
+        let lease = crate::exec::retain_fork_sensitive_descriptors_until(original_deadline)
+            .map_err(|error| format!("retain original-window descriptors: {error}"))?;
+        let clock_namespace = original_window::pin_current_clock_namespace(&lease)?;
+        // Sample BOOTTIME BEFORE remaining Instant duration. Any delay between
+        // samples only narrows the original deadline; suspend also narrows it.
+        let before = occupancy_now()?;
+        original_window::require_window(limit, cleanup, original_deadline)?;
+        let remaining = original_deadline.remaining();
+        let contact_expiry_tick_ns = before
+            .tick_ns
+            .checked_add(
+                u64::try_from(remaining.as_nanos())
+                    .map_err(|_| "original contact expiry overflow")?,
+            )
+            .ok_or("original contact expiry overflow")?;
+        let service_expiry = limit
+            .start
+            .tick_ns
+            .checked_add(limit.maximum_occupancy_ns)
+            .and_then(|expiry| expiry.checked_sub(u64::try_from(cleanup.as_nanos()).ok()?))
+            .ok_or("original service expiry overflow")?;
+        let contact_expiry_tick_ns = contact_expiry_tick_ns.min(service_expiry);
+        use std::os::unix::fs::MetadataExt as _;
+        let namespace_identity = clock_namespace
+            .file()
+            .metadata()
+            .map_err(|error| error.to_string())?;
+        let wire = original_window::Wire {
+            version: 1,
+            clock_namespace_dev: namespace_identity.dev(),
+            clock_namespace_ino: namespace_identity.ino(),
+            limit: limit.clone(),
+            cleanup_ns: u64::try_from(cleanup.as_nanos())
+                .map_err(|_| "original cleanup overflow")?,
+            contact_expiry_tick_ns,
+        };
+        wire.validate(&before)?;
+        let bytes = serde_json::to_vec(&wire).map_err(|error| error.to_string())?;
+        if bytes.is_empty() || bytes.len() > original_window::MAX_BYTES {
+            return Err("original occupancy handoff exceeds its fixed bound".into());
+        }
+        let window = crate::sealed_memfd(c"original-native-occupancy-window", &bytes)?;
+        original_window::require_same_clock_namespace(clock_namespace.file())?;
+        original_window::require_window(limit, cleanup, original_deadline)?;
+        Ok(Self {
+            window,
+            clock_namespace,
+        })
+    }
+
+    /// Consume into the existing inherited-FD compiler. Descriptor coordinates
+    /// are transport only; no reconstructed numeric PID or fresh timer.
+    pub fn into_authorities(
+        self,
+    ) -> (
+        crate::InheritedDescriptorAuthority,
+        crate::InheritedDescriptorAuthority,
+    ) {
+        (self.window, self.clock_namespace)
+    }
+}
+
+/// Adopted once in the dedicated adapter BEFORE USER/PID transition. Keeps the
+/// exact clock namespace pinned until the existing native owner consumes it.
+/// A restart must not recreate this from elapsed duration or a recovered row.
+#[cfg(target_os = "linux")]
+pub struct AdoptedOriginalNamespaceOccupancy {
+    wire: original_window::Wire,
+    deadline: MonotonicDeadline,
+    clock_namespace: crate::InheritedDescriptorAuthority,
+}
+
+#[cfg(target_os = "linux")]
+impl AdoptedOriginalNamespaceOccupancy {
+    /// # Safety
+    /// Both distinct descriptors must be uniquely owned, deliberately inherited
+    /// for this exact request, and have no other Rust owner in this process.
+    pub unsafe fn take_inherited(window_fd: u32, clock_namespace_fd: u32) -> Result<Self, String> {
+        if window_fd <= 2 || clock_namespace_fd <= 2 || window_fd == clock_namespace_fd {
+            return Err("original-window roles must be distinct and above stdio".into());
+        }
+        let window = unsafe { crate::take_inherited_descriptor_authority(window_fd) }?;
+        let clock_namespace =
+            unsafe { crate::take_inherited_descriptor_authority(clock_namespace_fd) }?;
+        original_window::require_same_clock_namespace(clock_namespace.file())?;
+        let bytes = crate::sandbox::read_sealed_inherited_descriptor(
+            window.inherited_descriptor()?,
+            original_window::MAX_BYTES,
+        )?;
+        let wire: original_window::Wire = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode strict original occupancy handoff: {error}"))?;
+        // Anchor BEFORE observing BOOTTIME. Never add stale remaining duration
+        // to a later Instant: that would extend the exported original expiry.
+        let anchor = Instant::now();
+        let now = occupancy_now()?;
+        wire.validate(&now)?;
+        wire.require_clock_namespace(clock_namespace.file())?;
+        let remaining = Duration::from_nanos(wire.contact_expiry_tick_ns - now.tick_ns);
+        let deadline = MonotonicDeadline {
+            deadline: anchor
+                .checked_add(remaining)
+                .ok_or("original contact deadline overflow")?,
+        };
+        original_window::require_window(
+            &wire.limit,
+            Duration::from_nanos(wire.cleanup_ns),
+            deadline,
+        )?;
+        // The sealed input has served its one-use role; no FD reaches target.
+        drop(window);
+        Ok(Self {
+            wire,
+            deadline,
+            clock_namespace,
+        })
+    }
+
+    /// Consume the exact adopted coordinates. Recheck original expiry and both
+    /// actual clock-namespace views immediately before watcher preparation.
+    pub fn into_original_parts(
+        self,
+    ) -> Result<(OccupancyLimit, Duration, MonotonicDeadline), String> {
+        original_window::require_same_clock_namespace(self.clock_namespace.file())?;
+        self.wire.validate(&occupancy_now()?)?;
+        self.wire
+            .require_clock_namespace(self.clock_namespace.file())?;
+        let cleanup = Duration::from_nanos(self.wire.cleanup_ns);
+        original_window::require_window(&self.wire.limit, cleanup, self.deadline)?;
+        // self is consumed; its pinned namespace FD closes before target fork.
+        Ok((self.wire.limit, cleanup, self.deadline))
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod original_window {
+    use super::*;
+    use std::os::unix::fs::MetadataExt as _;
+    pub(super) const MAX_BYTES: usize = 4096;
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Wire {
+        pub(super) version: u32,
+        pub(super) clock_namespace_dev: u64,
+        pub(super) clock_namespace_ino: u64,
+        pub(super) limit: OccupancyLimit,
+        pub(super) cleanup_ns: u64,
+        pub(super) contact_expiry_tick_ns: u64,
+    }
+    impl Wire {
+        pub(super) fn require_clock_namespace(
+            &self,
+            original: &std::fs::File,
+        ) -> Result<(), String> {
+            require_same_clock_namespace(original)?;
+            let identity = original.metadata().map_err(|error| error.to_string())?;
+            if identity.dev() != self.clock_namespace_dev
+                || identity.ino() != self.clock_namespace_ino
+            {
+                return Err(
+                    "sealed original window disagrees with retained clock namespace".into(),
+                );
+            }
+            Ok(())
+        }
+        pub(super) fn validate(&self, now: &OccupancyCoordinate) -> Result<(), String> {
+            if self.version != 1
+                || self.cleanup_ns == 0
+                || self.contact_expiry_tick_ns <= now.tick_ns
+            {
+                return Err("original contact handoff is expired or unsupported".into());
+            }
+            self.limit.validate()?;
+            now.elapsed_nanoseconds_since(&self.limit.start)?; // same actual boot/clock contract
+            if !matches!(
+                self.limit
+                    .window_at(now, Duration::from_nanos(self.cleanup_ns))?,
+                OccupancyWindowState::Service { .. }
+            ) {
+                return Err("original occupancy handoff has no service/cleanup window".into());
+            }
+            Ok(())
+        }
+    }
+
+    pub(super) fn require_window(
+        limit: &OccupancyLimit,
+        cleanup: Duration,
+        deadline: MonotonicDeadline,
+    ) -> Result<(), String> {
+        if deadline.has_elapsed()
+            || !matches!(limit.window(cleanup)?, OccupancyWindowState::Service { .. })
+        {
+            return Err("original contact or service window expired".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn pin_current_clock_namespace(
+        lease: &crate::exec::ForkSensitiveDescriptorLease,
+    ) -> Result<crate::InheritedDescriptorAuthority, String> {
+        let current = std::fs::File::open("/proc/thread-self/ns/time")
+            .map_err(|error| format!("pin original time namespace: {error}"))?;
+        require_same_clock_namespace(&current)?;
+        crate::exec::InheritedDescriptorAuthority::from_owned_file(current, lease)
+    }
+
+    pub(super) fn require_same_clock_namespace(original: &std::fs::File) -> Result<(), String> {
+        let expected = original.metadata().map_err(|error| error.to_string())?;
+        for path in [
+            "/proc/thread-self/ns/time",
+            "/proc/thread-self/ns/time_for_children",
+        ] {
+            let current = std::fs::File::open(path)
+                .map_err(|error| format!("pin actual clock namespace view: {error}"))?;
+            let observed = current.metadata().map_err(|error| error.to_string())?;
+            if expected.dev() != observed.dev() || expected.ino() != observed.ino() {
+                return Err(
+                    "original occupancy handoff cannot cross actual clock namespace".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod original_window_tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+
+    fn duplicate(fd: i32) -> u32 {
+        let raw = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+        assert!(raw > 2);
+        raw as u32 // transferred uniquely to the adopter
+    }
+    fn window() -> (OccupancyLimit, Duration, MonotonicDeadline) {
+        (
+            OccupancyLimit::new(occupancy_now().unwrap(), 10_000_000_000).unwrap(),
+            Duration::from_secs(1),
+            MonotonicDeadline::after(Duration::from_secs(5)),
+        )
+    }
+    fn adopt_bytes(bytes: &[u8]) -> Result<AdoptedOriginalNamespaceOccupancy, String> {
+        let sealed = crate::sealed_memfd(c"test-original-window", bytes).unwrap();
+        let namespace = std::fs::File::open("/proc/thread-self/ns/time").unwrap();
+        unsafe {
+            AdoptedOriginalNamespaceOccupancy::take_inherited(
+                duplicate(sealed.file().as_raw_fd()),
+                duplicate(namespace.as_raw_fd()),
+            )
+        }
+    }
+
+    #[test]
+    fn sealed_original_window_roundtrip_cannot_extend_original_deadline() {
+        let (limit, cleanup, deadline) = window();
+        let handoff =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
+        let (sealed, namespace) = handoff.into_authorities();
+        let adopted = unsafe {
+            AdoptedOriginalNamespaceOccupancy::take_inherited(
+                duplicate(sealed.file().as_raw_fd()),
+                duplicate(namespace.file().as_raw_fd()),
+            )
+        }
+        .unwrap();
+        assert!(adopted.deadline.deadline <= deadline.deadline);
+        let (actual_limit, actual_cleanup, actual_deadline) =
+            adopted.into_original_parts().unwrap();
+        assert_eq!(actual_limit, limit);
+        assert_eq!(actual_cleanup, cleanup);
+        assert!(actual_deadline.deadline <= deadline.deadline);
+    }
+
+    #[test]
+    fn original_window_rejects_unsealed_foreign_clock_and_descriptor_alias() {
+        let (limit, cleanup, deadline) = window();
+        let (sealed, namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        let bytes = crate::sandbox::read_sealed_inherited_descriptor(
+            sealed.inherited_descriptor().unwrap(),
+            4096,
+        )
+        .unwrap();
+        let mut unsealed = tempfile::tempfile().unwrap();
+        unsealed.write_all(&bytes).unwrap();
+        assert!(
+            unsafe {
+                AdoptedOriginalNamespaceOccupancy::take_inherited(
+                    duplicate(unsealed.as_raw_fd()),
+                    duplicate(namespace.file().as_raw_fd()),
+                )
+            }
+            .is_err()
+        );
+        let foreign = std::fs::File::open("/dev/null").unwrap();
+        assert!(
+            unsafe {
+                AdoptedOriginalNamespaceOccupancy::take_inherited(
+                    duplicate(sealed.file().as_raw_fd()),
+                    duplicate(foreign.as_raw_fd()),
+                )
+            }
+            .is_err()
+        );
+        // Rejected aliases are not consumed: they cannot be uniquely owned twice.
+        let coordinate = sealed.inherited_descriptor().unwrap();
+        assert!(
+            unsafe { AdoptedOriginalNamespaceOccupancy::take_inherited(coordinate, coordinate) }
+                .is_err()
+        );
+        assert_ne!(
+            unsafe { libc::fcntl(sealed.file().as_raw_fd(), libc::F_GETFD) },
+            -1
+        );
+    }
+
+    #[test]
+    fn original_window_strict_wire_refuses_expired_foreign_and_partial() {
+        let (limit, cleanup, deadline) = window();
+        let (sealed, _namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        let bytes = crate::sandbox::read_sealed_inherited_descriptor(
+            sealed.inherited_descriptor().unwrap(),
+            4096,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for name in ["version", "limit", "cleanup_ns", "contact_expiry_tick_ns"] {
+            let mut altered = value.clone();
+            altered.as_object_mut().unwrap().remove(name);
+            assert!(adopt_bytes(&serde_json::to_vec(&altered).unwrap()).is_err());
+        }
+        for field in ["contract_digest", "incarnation_digest"] {
+            let mut altered = value.clone();
+            altered["limit"]["start"][field] = serde_json::json!("f".repeat(64));
+            assert!(adopt_bytes(&serde_json::to_vec(&altered).unwrap()).is_err());
+        }
+        for field in ["clock_namespace_dev", "clock_namespace_ino", "cleanup_ns"] {
+            let mut altered = value.clone();
+            altered[field] = serde_json::json!(0);
+            assert!(adopt_bytes(&serde_json::to_vec(&altered).unwrap()).is_err());
+        }
+        let mut altered = value.clone();
+        altered["contact_expiry_tick_ns"] = serde_json::json!(0);
+        assert!(adopt_bytes(&serde_json::to_vec(&altered).unwrap()).is_err());
+        let mut altered = value.clone();
+        altered["extra"] = serde_json::json!(true);
+        assert!(adopt_bytes(&serde_json::to_vec(&altered).unwrap()).is_err());
+        let text = std::str::from_utf8(&bytes)
+            .unwrap()
+            .replacen('{', "{\"version\":1,", 1);
+        assert!(adopt_bytes(text.as_bytes()).is_err());
+        assert!(adopt_bytes(&[b' '; 4097]).is_err());
+    }
+}
