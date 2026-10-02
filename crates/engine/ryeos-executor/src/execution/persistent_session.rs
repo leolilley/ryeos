@@ -3964,6 +3964,11 @@ fn spawn_capsule_process_held(
             resource_owner_coordinate,
             process_scope_allocation,
             process_scope,
+            pooled_start.as_ref().and_then(|(original, _)| {
+                (session_protocol.cleanup_authority
+                    == PersistentSessionCleanupAuthority::TrustedProcessGroup)
+                    .then_some(*original)
+            }),
         )
     })()
     .map_err(|error: anyhow::Error| {

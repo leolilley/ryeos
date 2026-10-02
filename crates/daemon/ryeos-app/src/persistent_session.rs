@@ -761,6 +761,9 @@ struct PooledStartRetention {
     trusted_inputs: Option<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
     original_funding: Option<crate::accounting_db::precontact::OriginalFundingOwner>,
     original_callback_budget: Option<crate::handler_context::OriginalExecutionBudget>,
+    original_contact_attempted: bool,
+    original_spawn_permit:
+        Option<crate::runtime_db::process_resource_launch::TrustedResourceSpawnPermit>,
 }
 
 impl PersistentSessionPooledStart {
@@ -776,6 +779,8 @@ impl PersistentSessionPooledStart {
                 trusted_inputs: None,
                 original_funding: None,
                 original_callback_budget: None,
+                original_contact_attempted: false,
+                original_spawn_permit: None,
             }),
             callback_in_flight: AtomicBool::new(true),
         }
@@ -872,6 +877,81 @@ impl PersistentSessionPooledStart {
                 .reserve()
         })();
         if !matches!(&result, Ok(true)) {
+            retained.admission_refused = true;
+        }
+        result
+    }
+
+    /// Consume the same funded owner and journaled Runtime intent once.
+    /// The actual permit remains rooted here on every later refusal.
+    pub(crate) fn take_original_funded_contact(
+        &self,
+        state: &crate::state::AppState,
+        selected: &crate::execution_resources::SelectedExecutionResources,
+    ) -> Result<(
+        lillux::time::OriginalNamespaceOccupancyHandoff,
+        crate::runtime_db::ProcessResourceReservationRecord,
+    )> {
+        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        if retained.phase != PooledStartPhase::Preparing
+            || retained.admission_refused
+            || retained.original_contact_attempted
+        {
+            retained.admission_refused = true;
+            bail!("original pooled contact cannot be replaced or replayed");
+        }
+        retained.original_contact_attempted = true;
+        let result = (|| {
+            retained
+                .trusted_inputs
+                .as_ref()
+                .context("original contact lacks retained verified inputs")?
+                .require_same_state(state)?;
+            let funding = retained
+                .original_funding
+                .as_mut()
+                .context("original contact lacks same funded owner")?;
+            let (original, deadline) = funding.original_contact_reservation()?;
+            if original.selections != selected.selections() {
+                bail!("original funded contact differs from current exact plan selection");
+            }
+            let permit = state
+                .state_store
+                .begin_trusted_process_resource_spawn_until(original, deadline)?;
+            funding.bind_contact_intent(permit)?;
+            let (permit, window) = funding.take_contact_permit()?;
+            let intent = permit.reservation().clone();
+            retained.original_spawn_permit = Some(permit);
+            Ok((window, intent))
+        })();
+        if result.is_err() {
+            retained.admission_refused = true;
+        }
+        result
+    }
+
+    /// Attach the actual held Engine owner to the original financial operation.
+    /// No second debit, reconstructed process identity or release authorization.
+    pub(crate) fn attach_original_funded_held(
+        &self,
+        held: &ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
+    ) -> Result<crate::process::ExecutionProcessIdentity> {
+        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        if retained.phase != PooledStartPhase::Preparing
+            || retained.admission_refused
+            || !retained.original_contact_attempted
+            || retained.original_spawn_permit.is_none()
+        {
+            retained.admission_refused = true;
+            bail!("original held attachment lacks its retained one-use contact permit");
+        }
+        let result = retained
+            .original_funding
+            .as_mut()
+            .context("original held attachment lost its funded owner")?
+            .attach_held(held)
+            .map(|(identity, _binding)| identity);
+        if result.is_err() {
             retained.admission_refused = true;
         }
         result

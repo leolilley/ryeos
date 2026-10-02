@@ -1811,6 +1811,7 @@ impl PreparedItemPlan {
         resource_owner_coordinate: &str,
         process_scope_allocation: Option<&lillux::ProcessScopeAllocation>,
         process_scope: Option<lillux::ProcessScope>,
+        original_funded_owner: Option<&crate::persistent_session::PersistentSessionPooledStart>,
     ) -> Result<SpawnedPersistentSessionAwaitingAttachment> {
         if session_identity.is_empty() || session_identity.len() > 128 {
             bail!("persistent-session process identity is not canonical");
@@ -1860,30 +1861,49 @@ impl PreparedItemPlan {
                 &selected_resources,
             )?;
         }
+        let mut original_window = None;
         let mut prepared_scope = None;
-        let resource_reservation = match (process_scope.as_ref(), process_scope_allocation) {
-            (Some(scope), Some(allocation)) => {
-                crate::execution_resources::reserve_bound_process_resource_scope(
-                    state,
-                    &selected_resources,
-                    resource_owner_kind,
-                    resource_owner_coordinate,
-                    allocation,
-                    scope.recovery(),
-                )?
+        let resource_reservation = if let Some(original) = original_funded_owner {
+            if process_scope.is_some()
+                || process_scope_allocation.is_some()
+                || self.resource_policy == PersistentSessionResourcePolicy::QualificationNoResources
+            {
+                bail!(
+                    "original trusted contact cannot acquire local scope or qualification resource policy"
+                );
             }
-            (None, None) => {
-                prepared_scope = crate::execution_resources::prepare_process_resource_scope(
-                    state,
-                    &selected_resources,
-                    resource_owner_kind,
-                    resource_owner_coordinate,
-                )?;
-                prepared_scope
-                    .as_ref()
-                    .map(|prepared| prepared.reservation().clone())
+            selected_resources
+                .devices()
+                .context("original trusted contact lacks selected device descriptors")?;
+            let (window, intent) =
+                original.take_original_funded_contact(state, &selected_resources)?;
+            original_window = Some(window);
+            Some(intent)
+        } else {
+            match (process_scope.as_ref(), process_scope_allocation) {
+                (Some(scope), Some(allocation)) => {
+                    crate::execution_resources::reserve_bound_process_resource_scope(
+                        state,
+                        &selected_resources,
+                        resource_owner_kind,
+                        resource_owner_coordinate,
+                        allocation,
+                        scope.recovery(),
+                    )?
+                }
+                (None, None) => {
+                    prepared_scope = crate::execution_resources::prepare_process_resource_scope(
+                        state,
+                        &selected_resources,
+                        resource_owner_kind,
+                        resource_owner_coordinate,
+                    )?;
+                    prepared_scope
+                        .as_ref()
+                        .map(|prepared| prepared.reservation().clone())
+                }
+                _ => bail!("persistent-session process scope authority is incomplete"),
             }
-            _ => bail!("persistent-session process scope authority is incomplete"),
         };
         let context = EngineContext {
             app_root: state.config.app_root.clone(),
@@ -1942,25 +1962,43 @@ impl PreparedItemPlan {
                 .map(crate::execution_resources::PreparedProcessResourceScope::take_scope)
                 .transpose()?,
         };
-        let spawned_result = match effective_scope {
-            Some(scope) => state.engine.spawn_plan_in_scope_with_resources(
-                &context,
-                &self.plan,
-                scope,
-                selected_resources.selections(),
-                selected_resources.devices().map(Arc::as_ref),
-            ),
-            None => state.engine.spawn_plan_with_resources(
+        let spawned_result = if let Some(window) = original_window {
+            state.engine.spawn_plan_with_original_namespace_occupancy(
                 &context,
                 &self.plan,
                 selected_resources.selections(),
-                selected_resources.devices().map(Arc::as_ref),
-            ),
+                selected_resources
+                    .devices()
+                    .map(Arc::as_ref)
+                    .context("original trusted contact lacks selected device descriptors")?,
+                window,
+            )
+        } else {
+            match effective_scope {
+                Some(scope) => state.engine.spawn_plan_in_scope_with_resources(
+                    &context,
+                    &self.plan,
+                    scope,
+                    selected_resources.selections(),
+                    selected_resources.devices().map(Arc::as_ref),
+                ),
+                None => state.engine.spawn_plan_with_resources(
+                    &context,
+                    &self.plan,
+                    selected_resources.selections(),
+                    selected_resources.devices().map(Arc::as_ref),
+                ),
+            }
         };
         let spawned = match spawned_result {
             Ok(spawned) => spawned,
             Err(error) => {
                 let error = persistent_session_spawn_error(error);
+                if original_funded_owner.is_some() {
+                    return Err(
+                        error.context(crate::persistent_session::PersistentSessionCleanupUnproved)
+                    );
+                }
                 if let Some(reservation) = resource_reservation.as_ref() {
                     return Err(
                         match crate::execution_resources::cleanup_process_resource_reservation(
@@ -1977,71 +2015,89 @@ impl PreparedItemPlan {
                 return Err(error);
             }
         };
-        let identity_result = spawned
-            .exact_process_identity()
-            .map_err(anyhow::Error::from)
-            .and_then(|identity| {
-                crate::process::execution_process_identity_from_lillux(
-                    identity,
-                    spawned.scope_recovery().cloned(),
-                )
-            })
-            .context("capture held persistent-session identity through Lillux");
-        let process_identity = match identity_result {
-            Ok(mut identity) => {
-                identity.process_scope = spawned.scope_recovery().cloned();
-                let financial =
-                    match crate::execution_resources::reserve_process_resource_operations(
-                        state,
-                        &selected_resources,
-                        accounting_scope,
-                        session_identity,
-                        session_identity,
-                        funding_owner,
-                        &identity,
-                    ) {
-                        Ok(financial) => financial,
-                        Err(error) => {
-                            let cleanup = abort_spawned_with_resource_reservation(
-                                state,
-                                resource_reservation.as_ref(),
-                                spawned,
-                            )
-                            .err();
-                            return Err(match cleanup {
-                            Some(cleanup) => error.context(format!(
-                                "persistent-session resource reservation cleanup failed: {cleanup}"
-                            )).context(crate::persistent_session::PersistentSessionCleanupUnproved),
-                            None => error,
-                        });
-                        }
-                    };
-                if let Err(error) = identity.bind_execution_resources(
-                    selected_resources.selections().to_vec(),
-                    financial.bindings().to_vec(),
-                    selected_resources.max_concurrent_exclusive_allocations(),
-                    financial.occupancy_start(),
-                    financial.occupancy_limit(),
-                    financial.cleanup_allowance_ms(),
-                ) {
-                    let financial_cleanup =
-                        crate::execution_resources::abandon_prepared_process_resource_operations(
-                            state,
-                            financial.bindings(),
-                        );
+        let process_identity = if let Some(original) = original_funded_owner {
+            match original.attach_original_funded_held(&spawned) {
+                Ok(identity) => identity,
+                Err(error) => {
                     let cleanup = abort_spawned_with_resource_reservation(
                         state,
                         resource_reservation.as_ref(),
                         spawned,
                     )
                     .err();
-                    let error = match financial_cleanup {
+                    return Err(error
+                        .context(format!(
+                            "original funded held attachment remains quarantined: {cleanup:?}"
+                        ))
+                        .context(crate::persistent_session::PersistentSessionCleanupUnproved));
+                }
+            }
+        } else {
+            let identity_result = spawned
+                .exact_process_identity()
+                .map_err(anyhow::Error::from)
+                .and_then(|identity| {
+                    crate::process::execution_process_identity_from_lillux(
+                        identity,
+                        spawned.scope_recovery().cloned(),
+                    )
+                })
+                .context("capture held persistent-session identity through Lillux");
+            match identity_result {
+                Ok(mut identity) => {
+                    identity.process_scope = spawned.scope_recovery().cloned();
+                    let financial =
+                        match crate::execution_resources::reserve_process_resource_operations(
+                            state,
+                            &selected_resources,
+                            accounting_scope,
+                            session_identity,
+                            session_identity,
+                            funding_owner,
+                            &identity,
+                        ) {
+                            Ok(financial) => financial,
+                            Err(error) => {
+                                let cleanup = abort_spawned_with_resource_reservation(
+                                    state,
+                                    resource_reservation.as_ref(),
+                                    spawned,
+                                )
+                                .err();
+                                return Err(match cleanup {
+                            Some(cleanup) => error.context(format!(
+                                "persistent-session resource reservation cleanup failed: {cleanup}"
+                            )).context(crate::persistent_session::PersistentSessionCleanupUnproved),
+                            None => error,
+                        });
+                            }
+                        };
+                    if let Err(error) = identity.bind_execution_resources(
+                        selected_resources.selections().to_vec(),
+                        financial.bindings().to_vec(),
+                        selected_resources.max_concurrent_exclusive_allocations(),
+                        financial.occupancy_start(),
+                        financial.occupancy_limit(),
+                        financial.cleanup_allowance_ms(),
+                    ) {
+                        let financial_cleanup =
+                        crate::execution_resources::abandon_prepared_process_resource_operations(
+                            state,
+                            financial.bindings(),
+                        );
+                        let cleanup = abort_spawned_with_resource_reservation(
+                            state,
+                            resource_reservation.as_ref(),
+                            spawned,
+                        )
+                        .err();
+                        let error = match financial_cleanup {
                         Ok(()) => error,
                         Err(financial_cleanup) => error.context(format!(
                             "persistent-session resource binding reservation cleanup failed: {financial_cleanup:#}"
                         )),
                     };
-                    return Err(match cleanup {
+                        return Err(match cleanup {
                         Some(cleanup) => error
                             .context(format!(
                                 "held persistent-session resource binding cleanup failed: {cleanup}"
@@ -2049,28 +2105,33 @@ impl PreparedItemPlan {
                             .context(crate::persistent_session::PersistentSessionCleanupUnproved),
                         None => error,
                     });
-                }
-                identity
-            }
-            Err(error) => {
-                let cleanup = abort_spawned_with_resource_reservation(
-                    state,
-                    resource_reservation.as_ref(),
-                    spawned,
-                )
-                .err();
-                return Err(match cleanup {
-                    Some(cleanup) => {
-                        // Failure before identity capture is still process
-                        // contact. Preserve the existing pool cleanup marker
-                        // so an exclusive owner cannot clear its durable
-                        // credential/workspace fence as an uncontacted start.
-                        error
-                            .context(format!("held persistent-session cleanup failed: {cleanup}"))
-                            .context(crate::persistent_session::PersistentSessionCleanupUnproved)
                     }
-                    None => error,
-                });
+                    identity
+                }
+                Err(error) => {
+                    let cleanup = abort_spawned_with_resource_reservation(
+                        state,
+                        resource_reservation.as_ref(),
+                        spawned,
+                    )
+                    .err();
+                    return Err(match cleanup {
+                        Some(cleanup) => {
+                            // Failure before identity capture is still process
+                            // contact. Preserve the existing pool cleanup marker
+                            // so an exclusive owner cannot clear its durable
+                            // credential/workspace fence as an uncontacted start.
+                            error
+                                .context(format!(
+                                    "held persistent-session cleanup failed: {cleanup}"
+                                ))
+                                .context(
+                                    crate::persistent_session::PersistentSessionCleanupUnproved,
+                                )
+                        }
+                        None => error,
+                    });
+                }
             }
         };
         Ok(SpawnedPersistentSessionAwaitingAttachment {

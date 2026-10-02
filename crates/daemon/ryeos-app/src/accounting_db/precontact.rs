@@ -396,6 +396,23 @@ impl OriginalFundingOwner {
         }
     }
 
+    /// Borrow only this original funded attempt before consuming contact.
+    pub(crate) fn original_contact_reservation(
+        &self,
+    ) -> Result<(
+        &crate::runtime_db::ProcessResourceReservationRecord,
+        lillux::time::MonotonicDeadline,
+    )> {
+        if self.phase != FundingPhase::Funded {
+            bail!("original funded contact is unavailable or already attempted");
+        }
+        self.require_contact_window()?;
+        Ok((
+            &self.envelope.original_reservation,
+            self.original_budget.contact_expiry(),
+        ))
+    }
+
     /// RuntimeDb one-use permit wins first, then this SAME ledger consumes
     /// its pending phase. Neither permit can be reconstructed after an ACK
     /// loss. No process contact occurs inside this method.

@@ -702,6 +702,7 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                         &placement,
                         None,
                         None,
+                        None,
                     );
                     let held = match spawned {
                         Ok(held) => held,
