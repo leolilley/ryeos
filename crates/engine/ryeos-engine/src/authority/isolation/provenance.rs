@@ -190,6 +190,21 @@ impl IsolationRequestAwaitingAttachment {
             None => lillux::spawn_awaiting_attachment(self.request),
         }
     }
+
+    /// Narrow the existing unscoped attachment path by its original expiry.
+    /// Trusted pooled ownership does not acquire a local process scope.
+    pub fn spawn_until(
+        self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<lillux::ProcessAwaitingAttachment, EngineError> {
+        if self.scope.is_some() {
+            return Err(EngineError::Internal(
+                "deadline-bound unscoped attachment cannot acquire local scope".into(),
+            ));
+        }
+        lillux::spawn_awaiting_attachment_until(self.request, deadline)
+            .map_err(crate::dispatch::subprocess_spawn_error)
+    }
 }
 
 /// Provenance paired with an attachment-required subprocess request.

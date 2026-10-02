@@ -747,7 +747,7 @@ pub(crate) fn spawn_plan_with_scope(
     scope: Option<lillux::ProcessScope>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
     validate_plan_target_without_selection(plan)?;
-    spawn_first_plan_node(plan, ctx, scope, None)
+    spawn_first_plan_node(plan, ctx, scope, None, None)
 }
 
 pub(crate) fn spawn_plan_with_scope_and_resources(
@@ -757,6 +757,34 @@ pub(crate) fn spawn_plan_with_scope_and_resources(
     selections: &[crate::contracts::ExecutionResourceSelection],
     devices: Option<&lillux::CharacterDeviceSet>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    spawn_plan_with_scope_and_resources_until(plan, ctx, scope, selections, devices, None)
+}
+
+/// Original expiry is carried through plan/isolation preparation and native birth.
+/// The higher launch owner retains admission, funding and uncertainty.
+pub fn spawn_plan_with_resources_until(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+    selections: &[crate::contracts::ExecutionResourceSelection],
+    devices: Option<&lillux::CharacterDeviceSet>,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    spawn_plan_with_scope_and_resources_until(plan, ctx, None, selections, devices, Some(deadline))
+}
+
+fn spawn_plan_with_scope_and_resources_until(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+    scope: Option<lillux::ProcessScope>,
+    selections: &[crate::contracts::ExecutionResourceSelection],
+    devices: Option<&lillux::CharacterDeviceSet>,
+    deadline: Option<lillux::time::MonotonicDeadline>,
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    if deadline.is_some_and(|expiry| expiry.has_elapsed()) {
+        return Err(EngineError::Internal(
+            "original held-spawn deadline expired".into(),
+        ));
+    }
     if selections.iter().any(|selection| {
         selection.enforcement
             == crate::contracts::ExecutionResourceEnforcement::CharacterDeviceGrant
@@ -767,7 +795,7 @@ pub(crate) fn spawn_plan_with_scope_and_resources(
         ));
     }
     validate_plan_target_with_selection(plan, selections, devices)?;
-    spawn_first_plan_node(plan, ctx, scope, devices)
+    spawn_first_plan_node(plan, ctx, scope, devices, deadline)
 }
 
 fn spawn_first_plan_node(
@@ -775,6 +803,7 @@ fn spawn_first_plan_node(
     ctx: &EngineContext,
     scope: Option<lillux::ProcessScope>,
     devices: Option<&lillux::CharacterDeviceSet>,
+    deadline: Option<lillux::time::MonotonicDeadline>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
     if let Some(node) = plan.nodes.first() {
         match node {
@@ -788,6 +817,7 @@ fn spawn_first_plan_node(
                     ctx,
                     scope,
                     devices,
+                    deadline,
                 );
             }
             PlanNode::Complete { .. } => {
@@ -809,6 +839,7 @@ fn spawn_subprocess(
     ctx: &EngineContext,
     scope: Option<lillux::ProcessScope>,
     devices: Option<&lillux::CharacterDeviceSet>,
+    deadline: Option<lillux::time::MonotonicDeadline>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
     let request = isolation_plan_request_awaiting_attachment(
         spec,
@@ -821,7 +852,10 @@ fn spawn_subprocess(
     )?;
     let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
-    let pending = request.spawn().map_err(subprocess_spawn_error)?;
+    let pending = match deadline {
+        Some(expiry) => request.spawn_until(expiry)?,
+        None => request.spawn().map_err(subprocess_spawn_error)?,
+    };
     Ok(SpawnedExecutionAwaitingAttachment { pending, debug })
 }
 

@@ -183,6 +183,15 @@ pub fn spawn_awaiting_attachment(
     exec::lib_spawn_awaiting_attachment(request)
 }
 
+/// Carry the original process-local expiry through the existing held spawn.
+/// This is no admission, cleanup or funding authority.
+pub fn spawn_awaiting_attachment_until(
+    request: SubprocessRequest,
+    deadline: time::MonotonicDeadline,
+) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    exec::lib_spawn_awaiting_attachment_until(request, deadline)
+}
+
 pub fn run_inherited_stdio(request: SubprocessRequest) -> SubprocessResult {
     exec::lib_run_inherited_stdio(request)
 }
