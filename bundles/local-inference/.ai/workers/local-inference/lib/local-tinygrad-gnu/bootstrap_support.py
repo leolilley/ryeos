@@ -62,7 +62,7 @@ def inspect_layout(
 
 
 def exact_library_resolver(
-    libc: Path, driver_root: Path
+    libc: Path, driver_root: Path, *, selected_libraries: Mapping[str, Path] | None = None
 ) -> Callable[..., str | None]:
     """Bind only the selected GNU libc and driver entry; never scan host paths.
 
@@ -75,19 +75,37 @@ def exact_library_resolver(
         raise ValueError("selected GNU libc is not a regular file")
     driver = _member(driver_root, "lib/libcuda.so.1")
     selected = MappingProxyType({"libc": str(libc), "cuda": str(driver)})
+    if selected_libraries is not None:
+        provider_roots = (
+            libc.parent.resolve(strict=True),
+            (driver_root.resolve(strict=True) / "lib").resolve(strict=True),
+        )
+        for soname, provider in selected_libraries.items():
+            if (not isinstance(soname, str) or not soname or "/" in soname
+                    or not isinstance(provider, Path)):
+                raise ValueError("selected ELF provider map is malformed")
+            resolved = provider.resolve(strict=True)
+            if not resolved.is_file():
+                raise ValueError("selected ELF provider is not a regular file")
+            if not any(resolved == root or root in resolved.parents for root in provider_roots):
+                raise ValueError("selected ELF provider escaped the admitted library roots")
+            if soname in selected and selected[soname] != str(resolved):
+                raise ValueError("selected ELF provider shadows a reserved library alias")
+            selected = MappingProxyType({**selected, soname: str(resolved)})
 
     def resolve(name: str, _paths: object, _extra_paths: object = ()) -> str | None:
-        if name in selected:
-            return selected[name]
         if name in UNUSED_CUDA_PTX_LIBRARIES:
             return None
+        if name in selected:
+            return selected[name]
         raise RuntimeError(f"CUDA:PTX requested an unselected library: {name}")
 
     return resolve
 
 
 def install_exact_library_resolver(
-    tinygrad_root: Path, libc: Path, driver_root: Path
+    tinygrad_root: Path, libc: Path, driver_root: Path, *,
+    selected_libraries: Mapping[str, Path] | None = None,
 ) -> None:
     """Fence tinygrad DLL discovery before any generated bindings are imported."""
     import sys
@@ -99,7 +117,7 @@ def install_exact_library_resolver(
     if any(name in sys.modules for name in forbidden):
         raise RuntimeError("tinygrad library binding occurred before the bootstrap fence")
     expected = _member(tinygrad_root, "tinygrad/runtime/support/c.py")
-    resolver = exact_library_resolver(libc, driver_root)
+    resolver = exact_library_resolver(libc, driver_root, selected_libraries=selected_libraries)
     support = importlib.import_module("tinygrad.runtime.support.c")
     if Path(support.__file__).resolve(strict=True) != expected:
         raise RuntimeError("tinygrad library support escaped selected source")
