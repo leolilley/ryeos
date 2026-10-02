@@ -251,14 +251,19 @@ fn validate_direct_capsule_source(
 
 /// Derive input environment values using the same retained-plan/protocol owner
 /// as the final compiler. No host environment, live project or caller-authored
-/// search path enters this projection. This is not born-thread/contact proof.
+/// search path enters this projection. The workspace view is selected from
+/// the same exact plan; this is not born-thread/contact proof.
 pub fn external_direct_environment(
     capsule: &AdmittedLaunchCapsule,
     protocol: &VerifiedProtocol,
     thread_id: &str,
     chain_root_id: &str,
     source: Option<&VerifiedAdmittedSourceRecords>,
-) -> Result<(BTreeMap<String, String>, Vec<String>)> {
+) -> Result<(
+    BTreeMap<String, String>,
+    Vec<String>,
+    ryeos_external_execution_contract::GuestWorkspaceView,
+)> {
     capsule.validate()?;
     validate_external_direct_project_authority(&capsule.project_authority)?;
     validate_direct_capsule_source(capsule, source)?;
@@ -274,7 +279,24 @@ pub fn external_direct_environment(
         .get("PATH")
         .map(|path| path.split(':').map(str::to_owned).collect())
         .unwrap_or_default();
-    Ok((environment, search))
+    Ok((environment, search, direct_workspace_view(&plan)?))
+}
+
+fn direct_workspace_view(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+) -> Result<ryeos_external_execution_contract::GuestWorkspaceView> {
+    use ryeos_external_execution_contract::GuestWorkspaceView;
+    match plan.filesystem_authority_ceiling {
+        IsolationFilesystemAuthorityCeiling::CapturedExecution => {
+            Ok(GuestWorkspaceView::FullSnapshot)
+        }
+        IsolationFilesystemAuthorityCeiling::CapturedInputs => {
+            Ok(GuestWorkspaceView::CapturedInputs)
+        }
+        IsolationFilesystemAuthorityCeiling::NodePolicy => {
+            bail!("external direct workspace cannot inherit node filesystem authority")
+        }
+    }
 }
 
 /// Join the guest's C filesystem to the retained launch, independently of the
@@ -501,6 +523,10 @@ fn compile_external_direct_program_parts(
         .context("external direct endpoint has not been sealed")?;
     let spec = ordinary_direct_subprocess(&plan)?;
     inputs.validate()?;
+    ensure!(
+        inputs.workspace_view == direct_workspace_view(&plan)?,
+        "external direct workspace view differs from its retained plan ceiling"
+    );
     let source_mounts = inputs
         .inputs
         .iter()

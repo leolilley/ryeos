@@ -75,7 +75,7 @@ pub(crate) fn prepare_external_direct_inputs(
         "external direct executable lost its exact realized input"
     );
     let source = super::source_closure::bind_external_source(state, resolution, capsule)?;
-    let (environment, executable_search) =
+    let (environment, executable_search, workspace_view) =
         ryeos_app::thread_lifecycle::external_direct_environment(
             capsule,
             protocol,
@@ -94,7 +94,7 @@ pub(crate) fn prepare_external_direct_inputs(
     drop(guard);
     let base_descriptor = base.descriptor();
     let mut projection = ExternalGuestInputProjection {
-        workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
+        workspace_view,
         schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
         base_snapshot: GuestBaseSnapshotInput {
             descriptor: base_descriptor
