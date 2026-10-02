@@ -175,6 +175,10 @@ pub(crate) struct OriginalFundingOwner {
     // Real held OS-owner association retained before any postbirth refusal.
     // Raw presence is never acknowledged attachment or retirement evidence.
     held_occurrence: Option<Arc<lillux::exec::ProcessLocalHeldOccurrence>>,
+    // Assembled from the ACTUAL held owner, before intent/write/ack checks.
+    // Retention after lost acknowledgment is not acknowledged attachment,
+    // native/driver/physical proof or no-birth/refund authority. No getter.
+    held_identity: Option<crate::process::ExecutionProcessIdentity>,
     accounting: Arc<AccountingDb>,
     state_store: Arc<crate::state_store::StateStore>,
     original_budget: crate::handler_context::OriginalExecutionBudget,
@@ -294,6 +298,7 @@ impl OriginalFundingOwner {
         }
         Ok(Self {
             held_occurrence: None,
+            held_identity: None,
             gate_id: envelope.gate_id()?,
             request_digest: envelope.request_digest()?,
             operation_id: envelope.operation_id()?,
@@ -582,7 +587,7 @@ impl OriginalFundingOwner {
         self.phase = FundingPhase::AttachAttempted;
         // Capture raw real-held association BEFORE clock/live identity/shape
         // or write checks. Lost/late acknowledgement keeps the original link.
-        if self.held_occurrence.is_some() {
+        if self.held_occurrence.is_some() || self.held_identity.is_some() {
             bail!("original held association cannot be replaced");
         }
         self.held_occurrence = Some(Arc::new(held.capture_existing_held_occurrence()));
@@ -644,6 +649,10 @@ impl OriginalFundingOwner {
         );
         identity.resource_cleanup_allowance_ms = Some(self.envelope.cleanup_allowance_ms);
         crate::process::validate_execution_process_identity_shape(&identity)?;
+        // Preserve THIS constructor-produced, fully assembled actual birth
+        // even if intent matching or the attach transaction loses its ack.
+        // The raw pin was already retained before every earlier fallible check.
+        self.held_identity = Some(identity.clone());
         let intent = self
             .intent
             .as_ref()
@@ -931,6 +940,7 @@ mod tests {
         envelope.validate().unwrap();
         let owner = OriginalFundingOwner {
             held_occurrence: None,
+            held_identity: None,
             gate_id: envelope.gate_id().unwrap(),
             request_digest: envelope.request_digest().unwrap(),
             operation_id: envelope.operation_id().unwrap(),

@@ -827,6 +827,10 @@ struct PooledStartRetention {
     original_contact_attempted: bool,
     original_spawn_permit:
         Option<crate::runtime_db::process_resource_launch::TrustedResourceSpawnPermit>,
+    // SAME supplied guard, never reconstructed/downcast from lifelines. Keep
+    // this typed reference last so every process/capture owner drops first.
+    // Presence is raw custody only, not physical-close or funding authority.
+    original_scratch: Option<Arc<crate::temp_dir_guard::TempDirGuard>>,
 }
 
 // Historical acceptance from the sole protected Collected branch, beside the
@@ -977,6 +981,20 @@ enum OriginalNativeCheckOutcome {
 }
 
 impl PersistentSessionPooledStart {
+    // Root EVERY supplied guard before checking multiplicity. A duplicate
+    // remains in existing lifelines; the first typed original is never replaced.
+    fn retain_original_scratch(
+        retained: &mut PooledStartRetention,
+        scratch: &Arc<crate::temp_dir_guard::TempDirGuard>,
+    ) -> bool {
+        retained.lifelines.push(Box::new(Arc::clone(scratch)));
+        if retained.original_scratch.is_some() {
+            return false;
+        }
+        retained.original_scratch = Some(Arc::clone(scratch));
+        true
+    }
+
     fn native_check_blocks_mutation(retained: &PooledStartRetention) -> bool {
         retained.native_check_attempted
             || retained.native_check_in_flight
@@ -1004,6 +1022,7 @@ impl PersistentSessionPooledStart {
                 original_funding: None,
                 original_contact_attempted: false,
                 original_spawn_permit: None,
+                original_scratch: None,
             }),
             original_callback_budget: OnceLock::new(),
             callback_in_flight: AtomicBool::new(true),
@@ -1053,8 +1072,11 @@ impl PersistentSessionPooledStart {
     ) -> Result<bool> {
         let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
         // Every actually supplied physical owner stays rooted on refusal.
-        retained.lifelines.push(Box::new(Arc::clone(&scratch)));
-        if Self::native_check_blocks_mutation(&retained) || retained.trusted_inputs.is_some() {
+        let first_scratch = Self::retain_original_scratch(&mut retained, &scratch);
+        if !first_scratch
+            || Self::native_check_blocks_mutation(&retained)
+            || retained.trusted_inputs.is_some()
+        {
             retained.quarantined_inputs.push(inputs);
             retained.native_check_refused |=
                 retained.native_check_attempted || retained.native_check_in_flight;
@@ -5153,6 +5175,106 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_typed_scratch_keeps_exact_guard_and_duplicate_actual_lifelines() {
+        let start = PersistentSessionPooledStart::new();
+        let (_first_root, first_path, first) = owned_start_scratch();
+        let (_second_root, second_path, second) = owned_start_scratch();
+        let first_identity = first.owned_scratch_root().unwrap().identity().unwrap();
+        let first_weak = Arc::downgrade(&first);
+        let second_weak = Arc::downgrade(&second);
+        {
+            let mut retained = start.retained.lock().unwrap();
+            assert!(PersistentSessionPooledStart::retain_original_scratch(
+                &mut retained,
+                &first
+            ));
+            assert!(Arc::ptr_eq(
+                retained.original_scratch.as_ref().unwrap(),
+                &first
+            ));
+            assert!(!PersistentSessionPooledStart::retain_original_scratch(
+                &mut retained,
+                &first
+            ));
+            assert!(!PersistentSessionPooledStart::retain_original_scratch(
+                &mut retained,
+                &second
+            ));
+            assert!(Arc::ptr_eq(
+                retained.original_scratch.as_ref().unwrap(),
+                &first
+            ));
+            assert_eq!(retained.lifelines.len(), 3);
+            assert!(retained.trusted_inputs.is_none() && retained.original_funding.is_none());
+            assert!(retained.original_native_acceptance.is_none());
+        }
+        drop(first);
+        drop(second);
+        assert!(first_path.join("sentinel").is_file());
+        assert!(second_path.join("sentinel").is_file());
+        assert_eq!(
+            first_weak
+                .upgrade()
+                .unwrap()
+                .owned_scratch_root()
+                .unwrap()
+                .identity()
+                .unwrap(),
+            first_identity
+        );
+        assert!(second_weak.upgrade().is_some());
+        assert!(start.has_retained_custody());
+        // Actual descriptor/guard custody only; no opaque trusted inputs or
+        // financial/native/physical-close proof is manufactured by this test.
+    }
+
+    #[test]
+    fn refused_original_scratch_deposits_preserve_first_guard_and_all_incoming_owners() {
+        let start = PersistentSessionPooledStart::new();
+        let (_first_root, first_path, first) = owned_start_scratch();
+        let (_second_root, second_path, second) = owned_start_scratch();
+        let first_weak = Arc::downgrade(&first);
+        let second_weak = Arc::downgrade(&second);
+        {
+            let mut retained = start.retained.lock().unwrap();
+            // Existing actual refusal state; custody deposition must still
+            // precede the production preparation caller's refusal checks.
+            retained.native_check_attempted = true;
+            retained.native_check_refused = true;
+            retained.admission_refused = true;
+            retained.phase = PooledStartPhase::Unsettled;
+            assert!(PersistentSessionPooledStart::retain_original_scratch(
+                &mut retained,
+                &first
+            ));
+            assert!(PersistentSessionPooledStart::native_check_blocks_mutation(
+                &retained
+            ));
+            assert!(!PersistentSessionPooledStart::retain_original_scratch(
+                &mut retained,
+                &second
+            ));
+            assert!(Arc::ptr_eq(
+                retained.original_scratch.as_ref().unwrap(),
+                &first
+            ));
+            assert!(retained.native_check_attempted && retained.native_check_refused);
+            assert!(retained.admission_refused && retained.phase == PooledStartPhase::Unsettled);
+            assert!(retained.original_native_acceptance.is_none());
+            assert_eq!(retained.lifelines.len(), 2);
+        }
+        drop(first);
+        drop(second);
+        assert!(first_weak.upgrade().is_some() && second_weak.upgrade().is_some());
+        assert!(first_path.join("sentinel").is_file() && second_path.join("sentinel").is_file());
+        assert!(!start.publish());
+        assert!(start.prove_cleanup().is_err());
+        assert!(first_weak.upgrade().is_some() && second_weak.upgrade().is_some());
+        // This is the production scratch-deposition seam plus existing refusal
+        // behavior, not a genuine full funding-preparation or native positive.
+    }
 
     #[cfg(target_os = "linux")]
     fn actual_ordinary_held_link() -> Arc<lillux::exec::ProcessLocalHeldOccurrence> {
