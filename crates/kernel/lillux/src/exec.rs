@@ -11459,6 +11459,20 @@ mod native_terminal_existing_wait_tests {
     fn selected_live_child_with_testimony(
         delay: &str,
     ) -> (RunningProcess, InheritedDescriptorAuthority, Vec<u8>) {
+        let (running, writer, frame, sender, applied) = selected_child_with_receipt_sender(delay);
+        sender.send(Ok(applied)).unwrap();
+        (running, writer, frame)
+    }
+
+    fn selected_child_with_receipt_sender(
+        delay: &str,
+    ) -> (
+        RunningProcess,
+        InheritedDescriptorAuthority,
+        Vec<u8>,
+        std::sync::mpsc::Sender<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
+        crate::LinuxSandboxAppliedLaunchReceipt,
+    ) {
         let mut running = lib_spawn(SubprocessRequest {
             cmd: "/bin/sleep".into(),
             argv0: None,
@@ -11515,7 +11529,6 @@ mod native_terminal_existing_wait_tests {
                 destination_access_sha256: [0; 32],
             },
         };
-        receipt_sender.send(Ok(applied.clone())).unwrap();
         running.applied_receipt_rx = Some(receipt_receiver);
         running
             .native_settlement
@@ -11526,14 +11539,14 @@ mod native_terminal_existing_wait_tests {
             schema: crate::sandbox::native_terminal_wire::NATIVE_TERMINAL_SCHEMA.to_owned(),
             process_identity: identity,
             held_mount: mount,
-            applied_launch: Some(applied),
+            applied_launch: Some(applied.clone()),
             exit: crate::sandbox::native_terminal_wire::NativeTerminalExit::Code(0),
             owner_requested_termination: false,
             launch_failure: None,
         };
         let mut frame = serde_json::to_vec(&record).unwrap();
         frame.push(b'\n');
-        (running, writer, frame)
+        (running, writer, frame, receipt_sender, applied)
     }
 
     // Negative collection controls only: this ordinary child supplies no
@@ -11686,6 +11699,113 @@ mod native_terminal_existing_wait_tests {
         );
         assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
         running.abort();
+    }
+
+    #[test]
+    fn empty_receipt_then_real_delivery_reaches_full_terminal_same_owner() {
+        let (running, writer, frame, sender, applied) = selected_child_with_receipt_sender("0.05");
+        let pid = running.pid;
+        let running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Incomplete(owner) => owner,
+            _ => panic!("empty receipt must retain owner as Incomplete"),
+        };
+        assert!(running.applied_receipt_rx.is_some());
+        sender.send(Ok(applied.clone())).unwrap();
+        writer.file().write_all(&frame).unwrap();
+        drop(writer);
+        let running = match selected_wait(running, Duration::from_secs(2)) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            _ => panic!("actual receipt and EOF must reach full terminal collection"),
+        };
+        assert_eq!(running.pid, pid);
+        let raw = running.native_terminal_raw_view().unwrap();
+        assert_eq!(raw.frame, frame.as_slice());
+        assert!(raw.exact_eof && raw.pin_timely);
+        assert!(raw.terminal_result.is_some() && raw.retained_drains.is_some());
+        assert_eq!(raw.applied_receipt, Some(&Ok(applied)));
+    }
+
+    #[test]
+    fn timely_collected_reentry_after_original_expiry_preserves_historical_result() {
+        let (running, writer, frame) = selected_live_child_with_testimony("0.01");
+        writer.file().write_all(&frame).unwrap();
+        drop(writer);
+        let running = match selected_wait(running, Duration::from_secs(2)) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            _ => panic!("fixture must collect before original expiry"),
+        };
+        let deadline = running
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .original_deadline;
+        // Expire the actual original clock, never replace it with test metadata.
+        thread::sleep(deadline.remaining() + Duration::from_millis(1));
+        assert!(deadline.has_elapsed());
+        let running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            _ => panic!("historical timely collection must remain Collected"),
+        };
+        let raw = running.native_terminal_raw_view().unwrap();
+        assert_eq!(raw.frame, frame.as_slice());
+        assert!(raw.exact_eof && raw.pin_timely && raw.failure.is_none());
+        assert!(raw.terminal_result.is_some());
+        assert!(running.applied_receipt_rx.is_none());
+    }
+
+    #[test]
+    fn selected_core_pid_refusal_retains_actual_consumed_receipt_and_writer_owner() {
+        let (running, writer, _frame, sender, mut applied) =
+            selected_child_with_receipt_sender("0.1");
+        applied.owned_child_pid += 1;
+        sender.send(Ok(applied.clone())).unwrap();
+        let running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => owner,
+            _ => panic!("actual wrong PID receipt must fail selected core"),
+        };
+        assert_eq!(running.applied_receipt_observation, Some(Ok(applied)));
+        assert!(running.applied_receipt_failure.is_some());
+        assert!(!running.applied_receipt_returned);
+        assert!(running.applied_receipt_rx.is_none());
+        assert!(
+            running
+                .native_terminal_raw_view()
+                .unwrap()
+                .failure
+                .is_some()
+        );
+        assert!(!writer.file().as_raw_fd().is_negative());
+    }
+
+    #[test]
+    fn pending_receipt_original_expiry_fails_same_owner_without_consuming_late_item() {
+        let (running, writer, _frame, sender, applied) = selected_child_with_receipt_sender("0.01");
+        let running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Incomplete(owner) => owner,
+            _ => panic!("empty receipt must remain Pending"),
+        };
+        let original = running
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .original_deadline;
+        thread::sleep(original.remaining() + Duration::from_millis(1));
+        sender.send(Ok(applied)).unwrap();
+        let running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => owner,
+            _ => panic!("expired original must fail before late receive"),
+        };
+        assert!(running.applied_receipt_observation.is_none());
+        assert!(running.applied_receipt_failure.is_some());
+        assert!(running.applied_receipt_rx.is_none());
+        assert!(
+            running
+                .native_terminal_raw_view()
+                .unwrap()
+                .failure
+                .is_some()
+        );
+        drop(writer);
     }
 
     #[test]
