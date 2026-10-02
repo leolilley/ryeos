@@ -49,18 +49,15 @@ impl PendingNamespaceWatchdog {
         limit.validate()?;
         require_window(limit, cleanup, original_deadline)?;
         let cleanup_ns = u64::try_from(cleanup.as_nanos()).map_err(|_| "cleanup overflow")?;
-        let service_tick = limit
-            .start
-            .tick_ns
-            .checked_add(limit.maximum_occupancy_ns - cleanup_ns)
-            .ok_or("original service tick overflow")?;
+        let service_tick = occupancy_service_cutoff_tick(limit, cleanup, Some(original_deadline))?;
         let mut hash = sha2::Sha256::new();
-        hash.update(b"lillux.native-namespace-watchdog/v1");
+        hash.update(b"lillux.native-namespace-watchdog/v2");
         hash.update(limit.start.contract_digest.as_bytes());
         hash.update(limit.start.incarnation_digest.as_bytes());
         hash.update(limit.start.tick_ns.to_le_bytes());
         hash.update(limit.maximum_occupancy_ns.to_le_bytes());
         hash.update(cleanup_ns.to_le_bytes());
+        hash.update(service_tick.to_le_bytes());
         let tag: [u8; 32] = hash.finalize().into();
         let timer_raw = unsafe { libc::timerfd_create(libc::CLOCK_BOOTTIME, libc::TFD_CLOEXEC) };
         if timer_raw < 0 {
@@ -569,6 +566,48 @@ unsafe fn child_main(inputs: [i32; 5], tag: [u8; 32]) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actual_timer_caps_earlier_original_directive_and_preserves_legacy_resource_boundary() {
+        let start = crate::time::occupancy_now().unwrap();
+        let limit = crate::time::OccupancyLimit::new(start.clone(), 120_000_000_000).unwrap();
+        let cleanup = Duration::from_secs(20);
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(60));
+        let cutoff = occupancy_service_cutoff_tick(&limit, cleanup, Some(original)).unwrap();
+        assert_eq!(
+            occupancy_service_cutoff_tick(&limit, cleanup, None).unwrap(),
+            start.tick_ns + 100_000_000_000
+        );
+        let raw = unsafe { libc::timerfd_create(libc::CLOCK_BOOTTIME, libc::TFD_CLOEXEC) };
+        assert!(raw >= 0);
+        let timer = unsafe { OwnedFd::from_raw_fd(raw) };
+        arm_absolute_boottime_timer(timer.as_raw_fd(), cutoff).unwrap();
+        let original_service_remaining = original.remaining().checked_sub(cleanup).unwrap();
+        let mut actual: libc::itimerspec = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::timerfd_gettime(timer.as_raw_fd(), &mut actual) },
+            0
+        );
+        let actual_remaining = Duration::from_secs(u64::try_from(actual.it_value.tv_sec).unwrap())
+            + Duration::from_nanos(u64::try_from(actual.it_value.tv_nsec).unwrap());
+        assert!(!actual_remaining.is_zero());
+        assert!(actual_remaining <= original_service_remaining);
+        // This timer control is not a target birth/death/driver receipt.
+    }
+
+    #[test]
+    fn original_cutoff_refuses_insufficient_cleanup_before_watchdog_birth() {
+        let limit = crate::time::OccupancyLimit::new(
+            crate::time::occupancy_now().unwrap(),
+            120_000_000_000,
+        )
+        .unwrap();
+        let cleanup = Duration::from_secs(1);
+        let original = crate::time::MonotonicDeadline::after(cleanup);
+        assert!(occupancy_service_cutoff_tick(&limit, cleanup, Some(original)).is_err());
+        let expired = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(occupancy_service_cutoff_tick(&limit, cleanup, Some(expired)).is_err());
+    }
 
     fn pair() -> (OwnedFd, OwnedFd) {
         let mut raw = [-1; 2];

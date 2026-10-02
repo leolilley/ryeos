@@ -3022,6 +3022,63 @@ fn require_original_watchdog_fork_boundary() -> Result<(), String> {
     Ok(())
 }
 
+/// Return one fixed cutoff in the original BOOTTIME domain. The optional
+/// original directive is actual owned authority, never a renewed duration.
+#[cfg(target_os = "linux")]
+fn occupancy_service_cutoff_tick(
+    limit: &crate::time::OccupancyLimit,
+    cleanup: Duration,
+    original_deadline: Option<crate::time::MonotonicDeadline>,
+) -> Result<u64, String> {
+    limit.validate()?;
+    // BOOTTIME BEFORE remaining Instant duration: delay/suspend can only
+    // narrow the mapping. A later BOOTTIME plus earlier duration could extend.
+    let before = crate::time::occupancy_now()?;
+    if !matches!(
+        limit.window_at(&before, cleanup)?,
+        crate::time::OccupancyWindowState::Service { .. }
+    ) {
+        return Err("occupancy service window elapsed before watchdog preparation".into());
+    }
+    let cleanup_ns = u64::try_from(cleanup.as_nanos()).map_err(|_| "occupancy cleanup overflow")?;
+    let resource_tick = limit
+        .start
+        .tick_ns
+        .checked_add(
+            limit
+                .maximum_occupancy_ns
+                .checked_sub(cleanup_ns)
+                .ok_or("occupancy cleanup consumes limit")?,
+        )
+        .ok_or("occupancy service deadline overflow")?;
+    let cutoff = match original_deadline {
+        Some(original) => {
+            let service_remaining = original
+                .remaining()
+                .checked_sub(cleanup)
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or("original directive has no remaining service plus cleanup reserve")?;
+            let original_tick = before
+                .tick_ns
+                .checked_add(
+                    u64::try_from(service_remaining.as_nanos())
+                        .map_err(|_| "original directive cutoff overflow")?,
+                )
+                .ok_or("original directive cutoff tick overflow")?;
+            resource_tick.min(original_tick)
+        }
+        // Ordinary/legacy scope enforcement owns only its resource limit.
+        // Do not manufacture an original aggregate clock or claim one here.
+        None => resource_tick,
+    };
+    let after = crate::time::occupancy_now()?;
+    after.elapsed_nanoseconds_since(&before)?;
+    if cutoff <= after.tick_ns {
+        return Err("original occupancy service cutoff elapsed before watchdog fork".into());
+    }
+    Ok(cutoff)
+}
+
 #[cfg(target_os = "linux")]
 fn arm_occupancy_watchdog_inner(
     target_pidfd: BorrowedFd<'_>,
@@ -3037,13 +3094,7 @@ fn arm_occupancy_watchdog_inner(
     ) {
         return Err("occupancy service window elapsed before target release".to_owned());
     }
-    let cleanup_ns = u64::try_from(cleanup_allowance.as_nanos())
-        .map_err(|_| "occupancy cleanup allowance overflows nanoseconds".to_owned())?;
-    let service_tick = limit
-        .start
-        .tick_ns
-        .checked_add(limit.maximum_occupancy_ns - cleanup_ns)
-        .ok_or_else(|| "occupancy service deadline overflow".to_owned())?;
+    let service_tick = occupancy_service_cutoff_tick(limit, cleanup_allowance, None)?;
     let expiry_tick = limit
         .start
         .tick_ns
