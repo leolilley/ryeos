@@ -3021,63 +3021,16 @@ pub fn prepare_captured_item_plan(
     sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
     enclosing_filesystem_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
 ) -> Result<PreparedItemPlan> {
-    engine.with_checked_bundle_generation(|_generation| {
-        if verified.resolved.canonical_ref.to_string() != resolved.item_ref
-            || verified.resolved.raw_content_digest != resolved.root_raw_content_digest
-        {
-            bail!("captured direct-plan subject contradicts its request carrier");
-        }
-        let execution = engine
-            .kinds
-            .get(&verified.resolved.kind)
-            .and_then(|schema| schema.execution.as_ref())
-            .ok_or_else(|| anyhow!("captured dependency has no execution schema"))?;
-        let (filesystem_ceiling, network_ceiling) = captured_plan_isolation_ceilings(
-            execution,
+    engine.with_checked_bundle_generation(|_| {
+        let mut prepared = assemble_captured_item_plan(
+            engine,
+            resolved,
+            verified,
             program,
-            &resolved.item_ref,
-            &resolved.root_raw_content_digest,
+            sealed_content,
             enclosing_filesystem_ceiling,
         )?;
-        let mut plan = engine.build_plan_from_captured_root(
-            &resolved.plan_context,
-            verified,
-            &program.resolution().root.raw_content,
-            &resolved.parameters,
-            &resolved.plan_context.execution_hints,
-            sealed_content,
-            filesystem_ceiling,
-        )?;
-        plan.network_authority_ceiling = network_ceiling;
-        plan.endpoint_requirement =
-            execution.project_endpoint_requirement(&program.resolution().composed.composed)?;
-        plan.validate_endpoint_for_planning()?;
-        plan.filesystem_authority_ceiling = plan
-            .filesystem_authority_ceiling
-            .intersect(filesystem_ceiling);
-        let expected_name = match &verified.resolved.source_root {
-            ryeos_engine::contracts::ItemSourceRoot::Bundle { name } => name.as_str(),
-            other => bail!(
-                "captured bundle item has no registered typed source-root authority: {other:?}"
-            ),
-        };
-        let root = engine
-            .registered_bundle_root(expected_name)
-            .ok_or_else(|| {
-                anyhow!(
-                    "captured bundle `{expected_name}` is absent from the registered generation"
-                )
-            })?;
-        let identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
-            root,
-            expected_name,
-            &engine.node_trust_store,
-        )?;
-        let root_subject_source_identity = ryeos_state::objects::DirectRootSourceIdentity::Bundle {
-            manifest_hash: identity.body_digest,
-            manifest_signer_fingerprint: identity.signer_fingerprint,
-        };
-        let spec = first_subprocess_spec_mut(&mut plan)?;
+        let spec = first_subprocess_spec_mut(&mut prepared.plan)?;
         if spec.verified_command.is_none() {
             let captured = isolation
                 .capture_verified_command(Path::new(&spec.cmd), None, None)
@@ -3086,16 +3039,118 @@ pub fn prepare_captured_item_plan(
                 ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent { code: captured },
             );
         }
-        let timeout_secs = spec.timeout_secs;
-        Ok(PreparedItemPlan {
-            plan,
-            timeout_secs,
-            root_subject_source_identity,
-            admitted_command: None,
-            realization_command: None,
-            resource_policy: PersistentSessionResourcePolicy::Ordinary,
-            persistent_session_capsule_hash: None,
-        })
+        Ok(prepared)
+    })
+}
+
+/// Mechanical preparation of an exact external member from a finalized
+/// dependency. This never captures a symbolic selector as an ambient host
+/// path. The qualification owner must authenticate its retained source,
+/// original purpose/attempt and generation before calling this compiler;
+/// returning a plan is neither native-input nor execution admission.
+pub(crate) fn prepare_captured_external_member_plan(
+    state: &crate::state::AppState,
+    engine: &Engine,
+    resolved: &ResolvedExecutionRequest,
+    verified: &VerifiedItem,
+    program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
+    sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
+    enclosing_filesystem_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    maximum_command_file_bytes: u64,
+) -> Result<PreparedItemPlan> {
+    engine.with_checked_bundle_generation(|_| {
+        let mut prepared = assemble_captured_item_plan(
+            engine,
+            resolved,
+            verified,
+            program,
+            sealed_content,
+            enclosing_filesystem_ceiling,
+        )?;
+        prepared.bind_finalized_execution_endpoint(state, engine, program.resolution())?;
+        prepared.capture_external_realization_command_guarded(
+            authority,
+            guard,
+            engine,
+            program.resolution(),
+            maximum_command_file_bytes,
+        )?;
+        Ok(prepared)
+    })
+}
+
+fn assemble_captured_item_plan(
+    engine: &Engine,
+    resolved: &ResolvedExecutionRequest,
+    verified: &VerifiedItem,
+    program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
+    sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
+    enclosing_filesystem_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+) -> Result<PreparedItemPlan> {
+    if verified.resolved.canonical_ref.to_string() != resolved.item_ref
+        || verified.resolved.raw_content_digest != resolved.root_raw_content_digest
+    {
+        bail!("captured direct-plan subject contradicts its request carrier");
+    }
+    let execution = engine
+        .kinds
+        .get(&verified.resolved.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .ok_or_else(|| anyhow!("captured dependency has no execution schema"))?;
+    let (filesystem_ceiling, network_ceiling) = captured_plan_isolation_ceilings(
+        execution,
+        program,
+        &resolved.item_ref,
+        &resolved.root_raw_content_digest,
+        enclosing_filesystem_ceiling,
+    )?;
+    let mut plan = engine.build_plan_from_captured_root(
+        &resolved.plan_context,
+        verified,
+        &program.resolution().root.raw_content,
+        &resolved.parameters,
+        &resolved.plan_context.execution_hints,
+        sealed_content,
+        filesystem_ceiling,
+    )?;
+    plan.network_authority_ceiling = network_ceiling;
+    plan.endpoint_requirement =
+        execution.project_endpoint_requirement(&program.resolution().composed.composed)?;
+    plan.validate_endpoint_for_planning()?;
+    plan.filesystem_authority_ceiling = plan
+        .filesystem_authority_ceiling
+        .intersect(filesystem_ceiling);
+    let expected_name = match &verified.resolved.source_root {
+        ryeos_engine::contracts::ItemSourceRoot::Bundle { name } => name.as_str(),
+        other => {
+            bail!("captured bundle item has no registered typed source-root authority: {other:?}")
+        }
+    };
+    let root = engine
+        .registered_bundle_root(expected_name)
+        .ok_or_else(|| {
+            anyhow!("captured bundle `{expected_name}` is absent from the registered generation")
+        })?;
+    let identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
+        root,
+        expected_name,
+        &engine.node_trust_store,
+    )?;
+    let root_subject_source_identity = ryeos_state::objects::DirectRootSourceIdentity::Bundle {
+        manifest_hash: identity.body_digest,
+        manifest_signer_fingerprint: identity.signer_fingerprint,
+    };
+    let timeout_secs = first_subprocess_spec_mut(&mut plan)?.timeout_secs;
+    Ok(PreparedItemPlan {
+        plan,
+        timeout_secs,
+        root_subject_source_identity,
+        admitted_command: None,
+        realization_command: None,
+        resource_policy: PersistentSessionResourcePolicy::Ordinary,
+        persistent_session_capsule_hash: None,
     })
 }
 

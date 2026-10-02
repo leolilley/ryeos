@@ -7,7 +7,7 @@ use ryeos_engine::contracts::{
     EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext,
     SubjectResolutionAuthority, VerifiedItem,
 };
-use ryeos_engine::engine::CapturedSignedBundleItemSource;
+use ryeos_engine::engine::{CapturedSignedBundleItemSource, CheckedEngineGeneration};
 use ryeos_engine::resolution::ResolutionOutput;
 use ryeos_state::external_content::products::producer_recipe::{
     ProducerExecutableSource, ProducerStdinSource, ProductProducerRecipe,
@@ -95,6 +95,25 @@ impl CapturedMechanismProbeSource {
         coordinate: &ScopedProducerAttemptCoordinate,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<()> {
+        state.engine.with_checked_bundle_generation(|generation| {
+            self.require_original_root_in_generation(
+                state, generation, key, purpose, scenario, selected, coordinate, deadline,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn require_original_root_in_generation(
+        &self,
+        state: &AppState,
+        generation: &CheckedEngineGeneration<'_>,
+        key: &ScopedProducerAuthorityKey,
+        purpose: &QualificationExecutionPurposeView<'_>,
+        scenario: &str,
+        selected: &CurrentBundleProducerRecipe,
+        coordinate: &ScopedProducerAttemptCoordinate,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
         ensure!(
             !deadline.has_elapsed(),
             "mechanism preparation deadline elapsed"
@@ -114,10 +133,15 @@ impl CapturedMechanismProbeSource {
             capsule.content_hash()? == self.root_capsule_hash,
             "mechanism preparation changed its original root capsule"
         );
-        let current =
-            super::resolve_current_bundle_producer_recipe_for_purpose(state, purpose, scenario)?;
+        let current = super::resolve_current_bundle_producer_recipe_for_purpose_in_generation(
+            state, generation, purpose, scenario,
+        )?;
         ensure!(
-            current == *selected,
+            current == *selected
+                && current.bundle_generation_identity
+                    == generation.request_engine_generation_identity()
+                && self.recipe_source.bundle_generation_identity
+                    == generation.request_engine_generation_identity(),
             "mechanism recipe changed before preparation"
         );
         self.require_recipe(scenario, &current.source_identity()?, &current.recipe)?;
@@ -133,6 +157,204 @@ impl CapturedMechanismProbeSource {
         ensure!(
             !deadline.has_elapsed(),
             "mechanism preparation deadline elapsed"
+        );
+        Ok(())
+    }
+
+    /// Compile only this original root's retained signed Tool dependency.
+    /// The returned plan still lacks materialized command authority, native
+    /// guest inputs, and any permission to launch a helper or issue a claim.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_original_probe_member_plan(
+        &self,
+        state: &AppState,
+        key: &ScopedProducerAuthorityKey,
+        purpose: &QualificationExecutionPurposeView<'_>,
+        scenario: &str,
+        selected: &CurrentBundleProducerRecipe,
+        coordinate: &ScopedProducerAttemptCoordinate,
+        deadline: lillux::time::MonotonicDeadline,
+        finalized: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
+    ) -> Result<crate::thread_lifecycle::PreparedItemPlan> {
+        state.engine.with_checked_bundle_generation(|generation| {
+            self.require_original_root_in_generation(
+                state, generation, key, purpose, scenario, selected, coordinate, deadline,
+            )?;
+            self.require_current_signed_tool_source(state, generation, purpose)?;
+            self.require_finalized_captured_tool(finalized)?;
+
+            let canonical = CanonicalRef::parse(&self.resolution.root.resolved_ref)?;
+            let site = state.threads.site_id().to_owned();
+            let context = PlanContext {
+                // Static capture above has no execution capability. Only this
+                // exact signed Tool receives the scope needed by plan build.
+                requested_by: EffectivePrincipal::Local(Principal {
+                    fingerprint: purpose.owner_fingerprint().to_owned(),
+                    scopes: vec![ryeos_runtime::authorizer::canonical_cap(
+                        &canonical.kind,
+                        &canonical.bare_id,
+                        "execute",
+                    )],
+                }),
+                project_context: ProjectContext::None,
+                subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+                current_site_id: site.clone(),
+                origin_site_id: site,
+                execution_hints: ExecutionHints::default(),
+                scheduled_fire: None,
+                validate_only: false,
+            };
+            let request = crate::thread_lifecycle::ResolvedExecutionRequest {
+                kind: self.verified.resolved.kind.clone(),
+                item_ref: canonical.to_string(),
+                executor_ref: String::new(),
+                launch_mode: "wait".to_owned(),
+                current_site_id: context.current_site_id.clone(),
+                origin_site_id: context.origin_site_id.clone(),
+                target_site_id: None,
+                requested_by: Some(purpose.owner_fingerprint().to_owned()),
+                usage_subject: None,
+                usage_subject_asserted_by: None,
+                parameters: serde_json::to_value(&self.parameters)?,
+                ref_bindings: BTreeMap::new(),
+                product_selections: Vec::new(),
+                resolved_item: self.verified.resolved.clone(),
+                root_raw_content_digest: self.verified.resolved.raw_content_digest.clone(),
+                plan_context: context,
+                root_admission: None,
+            };
+            let prepared = {
+                let authority = state.state_store.pinned_state_authority()?;
+                let guard = authority.acquire_shared_guard()?;
+                let plan = crate::thread_lifecycle::prepare_captured_external_member_plan(
+                    state,
+                    state.engine.as_ref(),
+                    &request,
+                    &self.verified,
+                    finalized,
+                    None,
+                    ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                    &authority,
+                    &guard,
+                    state.isolation.verified_command_file_bytes(),
+                )?;
+                authority.ensure_guard(&guard)?;
+                plan
+            };
+            self.require_original_root_in_generation(
+                state, generation, key, purpose, scenario, selected, coordinate, deadline,
+            )?;
+            self.require_current_signed_tool_source(state, generation, purpose)?;
+            ensure!(
+                !deadline.has_elapsed(),
+                "mechanism preparation deadline elapsed after source recapture"
+            );
+            Ok(prepared)
+        })
+    }
+
+    fn require_current_signed_tool_source(
+        &self,
+        state: &AppState,
+        generation: &CheckedEngineGeneration<'_>,
+        purpose: &QualificationExecutionPurposeView<'_>,
+    ) -> Result<()> {
+        let canonical = CanonicalRef::parse(&self.resolution.root.resolved_ref)?;
+        let site = state.threads.site_id().to_owned();
+        let context = PlanContext {
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: purpose.owner_fingerprint().to_owned(),
+                scopes: vec![],
+            }),
+            project_context: ProjectContext::None,
+            subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+            current_site_id: site.clone(),
+            origin_site_id: site,
+            execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
+            validate_only: true,
+        };
+        let verified = generation.verify(&context, generation.resolve(&context, &canonical)?)?;
+        let resolution = super::resolve_consumer_definition_in_generation(
+            generation,
+            &self.resolution.root.resolved_ref,
+            "tool",
+        )?;
+        ensure!(
+            verified.resolved.canonical_ref == self.verified.resolved.canonical_ref
+                && verified.resolved.raw_content_digest
+                    == self.verified.resolved.raw_content_digest
+                && verified.resolved.content_hash == self.verified.resolved.content_hash
+                && verified.resolved.source_space == self.verified.resolved.source_space
+                && verified.resolved.source_root == self.verified.resolved.source_root
+                && verified.signer == self.verified.signer
+                && verified.trust_class == self.verified.trust_class
+                && serde_json::to_value(&resolution)? == serde_json::to_value(&self.resolution)?,
+            "mechanism probe Tool changed after original source capture"
+        );
+        let sources = generation.capture_verified_signed_bundle_sources(&resolution)?;
+        ensure!(
+            sources.len() == self.signed_sources.len()
+                && sources.iter().zip(&self.signed_sources).all(|(now, held)| {
+                    now.resolved_ref == held.resolved_ref
+                        && now.source_root == held.source_root
+                        && now.signer_fingerprint == held.signer_fingerprint
+                        && now.source_content_digest == held.source_content_digest
+                        && now.raw_content_digest == held.raw_content_digest
+                        && now.signature_envelope == held.signature_envelope
+                        && now.signed_bytes == held.signed_bytes
+                }),
+            "mechanism probe signed Tool envelope changed after original capture"
+        );
+        let manifests = generation.capture_verified_source_bundle_manifests(&sources)?;
+        ensure!(
+            manifests.len() == self.signed_bundle_manifests.len()
+                && manifests
+                    .iter()
+                    .zip(&self.signed_bundle_manifests)
+                    .all(|(now, held)| {
+                        now.identity == held.identity && now.signed_bytes == held.signed_bytes
+                    }),
+            "mechanism probe signed Bundle manifest changed after original capture"
+        );
+        Ok(())
+    }
+
+    fn require_finalized_captured_tool(
+        &self,
+        finalized: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
+    ) -> Result<()> {
+        let held = &self.resolution;
+        let current = finalized.resolution();
+        let authored = |resolution: &ResolutionOutput| {
+            serde_json::json!({
+                "root": &resolution.root,
+                "ancestors": &resolution.ancestors,
+                "references_edges": &resolution.references_edges,
+                "referenced_items": &resolution.referenced_items,
+                "step_outputs": &resolution.step_outputs,
+                "effective_trust_class": resolution.effective_trust_class,
+                "composed": &resolution.composed.composed,
+                "policy_facts": &resolution.composed.policy_facts,
+            })
+        };
+        ensure!(
+            authored(held) == authored(current)
+                && held
+                    .composed
+                    .derived
+                    .iter()
+                    .all(|(name, value)| { current.composed.derived.get(name) == Some(value) })
+                && current.composed.derived.keys().all(|name| {
+                    held.composed.derived.contains_key(name)
+                        || matches!(
+                            name.as_str(),
+                            ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
+                                | ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY
+                                | ryeos_effect_contract::EFFECT_AUTHORIZATIONS_DERIVED_KEY
+                        )
+                }),
+            "finalized mechanism Tool differs from captured signed source"
         );
         Ok(())
     }
