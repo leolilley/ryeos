@@ -6,6 +6,15 @@ executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/qualification_consumer_callback
 effects: live
 required_caps: []
+external_product_slots:
+  # The verifier inspects the unqualified witness through its own existing
+  # composition edge. This does not admit the ordinary authoring Worker.
+  - id: subject
+    relationship_ref: config:codex/guest-runtime-products
+    relationship: runtime_to_qualification_verifier
+    kind: tree
+    mount_root: execution_runtime
+    mount: codex-guest-runtime
 config:
   command: bin:codex-runtime-verifier
   args: [--consumer-controller]

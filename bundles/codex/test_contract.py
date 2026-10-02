@@ -168,7 +168,10 @@ class CodexContractTests(unittest.TestCase):
             (BUNDLE / ".ai/config/codex/guest-runtime-products.yaml").read_text()
         )
         profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
-        relationship = product["product_relationships"]["relationships"][0]
+        relationship = next(
+            item for item in product["product_relationships"]["relationships"]
+            if item["name"] == "runtime_to_external_authoring_worker"
+        )
         self.assertEqual(worker["execution_protocol"], "protocol:ryeos/core/trusted_structured_session")
         self.assertEqual(worker["external_product_slots"][0]["id"], "guest-runtime")
         self.assertEqual(relationship["consumer"], {
@@ -179,6 +182,25 @@ class CodexContractTests(unittest.TestCase):
             "policy_ref": None,
             "required_claims": [],
         })
+        verifier = yaml.safe_load(
+            (BUNDLE / ".ai/tools/codex/qualification/consumer-runtime-verifier.yaml").read_text()
+        )
+        slot = verifier["external_product_slots"][0]
+        verifier_relationship = next(
+            item for item in product["product_relationships"]["relationships"]
+            if item["name"] == slot["relationship"]
+        )
+        self.assertEqual(slot["id"], "subject")
+        self.assertEqual(slot["relationship_ref"], "config:codex/guest-runtime-products")
+        self.assertEqual(verifier_relationship["consumer"], {
+            "canonical_ref": "tool:codex/qualification/consumer-runtime-verifier",
+            "declaration_id": slot["id"],
+        })
+        self.assertEqual(verifier_relationship["qualification"], {
+            "policy_ref": None, "required_claims": [],
+        })
+        self.assertEqual(verifier_relationship["producer"], relationship["producer"])
+        self.assertEqual(verifier_relationship["required_product"], relationship["required_product"])
         self.assertEqual(environment["worker_ref"], "worker:codex/external-hosted-authoring")
         self.assertIsNone(environment["workload_client"])
         bounded_turn = yaml.safe_load(
