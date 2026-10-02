@@ -3065,6 +3065,80 @@ impl OccupancyWatchdog {
             }
         }
     }
+
+    /// Cancel only after the native caller has observed exact owned namespace
+    /// reap, then reap this SAME helper within that caller's original window.
+    /// An expired window or observation failure retains the helper owner and
+    /// cannot testify to namespace/driver retirement or refund authority.
+    pub(crate) fn cancel_and_reap_until(
+        &mut self,
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        if self.pid <= 0 {
+            return Err("original watchdog has no retained exclusive reap authority".into());
+        }
+        if original_deadline.has_elapsed() {
+            return Err("original watchdog reap deadline already expired".into());
+        }
+        if let Some(cancel) = self.cancel.as_mut() {
+            let descriptor = cancel.as_raw_fd();
+            let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+            if flags < 0
+                || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return Err(format!(
+                    "bound original watchdog cancellation write: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            loop {
+                if original_deadline.has_elapsed() {
+                    return Err("original watchdog cancellation deadline elapsed".into());
+                }
+                match cancel.write(&[1]) {
+                    Ok(1) => break,
+                    Ok(_) => {
+                        return Err("original watchdog cancellation write was incomplete".into());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    // A closed helper may still be exclusively reaped below;
+                    // pipe loss by itself supplies no terminal evidence.
+                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => break,
+                    Err(error) => {
+                        return Err(format!("request original watchdog cancellation: {error}"));
+                    }
+                }
+            }
+            // A successful request is not repeated after a late helper reap.
+            // Retain the same PID owner until its exclusive waitpid succeeds.
+            self.cancel.take();
+        }
+        loop {
+            if original_deadline.has_elapsed() {
+                return Err("original watchdog reap remains unproved at deadline".into());
+            }
+            let mut status = 0;
+            let result = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+            if result == self.pid {
+                if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
+                    // Only supported terminal wait status proves owned reap.
+                    // Retrying later cannot wait on this numeric PID again.
+                    self.pid = -1;
+                    return Ok(());
+                }
+                return Err("original watchdog lacks a supported terminal status".into());
+            }
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                // ECHILD is uncertainty here, not exclusive reap testimony.
+                return Err(format!("observe original watchdog owned reap: {error}"));
+            }
+            crate::time::sleep(Duration::from_millis(1).min(original_deadline.remaining()));
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
