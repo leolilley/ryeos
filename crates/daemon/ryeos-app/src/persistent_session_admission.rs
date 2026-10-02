@@ -455,6 +455,11 @@ fn verify_original_isolation_expectation(
         .context("original isolation expectation lacks registered bundle roots")?;
     let backend = capture.backend();
     capture.require_same_backend(backend)?;
+    require_original_terminal_reporter_contract(
+        backend.declaration.protocol,
+        &backend.declaration.capabilities,
+        &backend.effective_capabilities,
+    )?;
     let mut selected_roots = roots
         .iter()
         .filter(|root| root.name == backend.selection.bundle);
@@ -596,8 +601,34 @@ fn require_current_original_isolation_expectation(
         "original isolation current executor reference changed"
     );
     expected.require_same_backend(expected.backend())?;
+    let backend = expected.backend();
+    require_original_terminal_reporter_contract(
+        backend.declaration.protocol,
+        &backend.declaration.capabilities,
+        &backend.effective_capabilities,
+    )?;
     original.runtime.ensure_registered_generation_current()?;
     require_original_isolation_unexpired(original)?;
+    Ok(())
+}
+
+// A metadata predicate inside the actual captured/current node-trust checks,
+// never an issuer for arbitrary backend DTOs or native terminal evidence.
+fn require_original_terminal_reporter_contract(
+    protocol: ryeos_isolation_protocol::IsolationAdapterProtocolVersion,
+    declared: &std::collections::BTreeSet<ryeos_isolation_protocol::IsolationCapability>,
+    effective: &std::collections::BTreeSet<ryeos_isolation_protocol::IsolationCapability>,
+) -> Result<()> {
+    use ryeos_isolation_protocol::{IsolationAdapterProtocolVersion, IsolationCapability};
+    anyhow::ensure!(
+        protocol == IsolationAdapterProtocolVersion::Current,
+        "original namespace reporter requires the current strict protocol"
+    );
+    let reporter = IsolationCapability::ProcessOriginalNamespaceTerminalReporting;
+    anyhow::ensure!(
+        declared.contains(&reporter) && effective.contains(&reporter),
+        "original namespace reporter is not both node-declared and inspected"
+    );
     Ok(())
 }
 
@@ -605,6 +636,33 @@ fn require_current_original_isolation_expectation(
 mod tests {
     use super::*;
     use ryeos_engine::protocols::descriptor::PersistentSessionCleanupAuthority;
+
+    #[test]
+    fn original_reporter_contract_requires_declaration_and_inspection() {
+        use ryeos_isolation_protocol::{IsolationAdapterProtocolVersion, IsolationCapability};
+        let reporter = std::collections::BTreeSet::from([
+            IsolationCapability::ProcessOriginalNamespaceTerminalReporting,
+        ]);
+        let absent = std::collections::BTreeSet::new();
+        let current = IsolationAdapterProtocolVersion::Current;
+        for (declared, effective) in [
+            (&absent, &absent),
+            (&reporter, &absent),
+            (&absent, &reporter),
+        ] {
+            assert!(
+                require_original_terminal_reporter_contract(current, declared, effective).is_err()
+            );
+        }
+        require_original_terminal_reporter_contract(current, &reporter, &reporter).unwrap();
+        // Metadata only: this does not manufacture captures, funding or native facts.
+        assert!(
+            serde_json::from_str::<IsolationAdapterProtocolVersion>(
+                "\"ryeos.isolation-adapter/v12\""
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn retained_predecessor_protocol_gets_only_its_historical_cleanup_meaning() {

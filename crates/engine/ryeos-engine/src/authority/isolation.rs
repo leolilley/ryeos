@@ -4812,16 +4812,11 @@ impl IsolationRuntime {
         let required_capabilities = plan
             .validate(&authorities)
             .map_err(|error| refused(format!("invalid compiled isolation plan: {error}")))?;
-        if !required_capabilities.is_subset(&backend.effective_capabilities) {
-            let missing = required_capabilities
-                .difference(&backend.effective_capabilities)
-                .map(|capability| format!("{capability:?}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(refused(format!(
-                "selected isolation adapter is missing required capabilities: {missing}"
-            )));
-        }
+        require_compiled_launch_capabilities(
+            required_capabilities,
+            backend,
+            original_occupancy.is_some(),
+        )?;
         let plan_digest = redacted_plan_digest(&plan)?;
         let expected_applied_launch = expected_applied_launch_commitments(&plan)?;
         let expected_mount_preparation =
@@ -5707,6 +5702,29 @@ fn descriptor_file_identity(
         mode: identity.mode(),
         file_type: identity.file_type(),
     })
+}
+
+// The compiler admits the plan before forming AdapterLaunchRequest. Original
+// reporter admission must therefore happen here as well as request.validate.
+fn require_compiled_launch_capabilities(
+    mut required: BTreeSet<IsolationCapability>,
+    backend: &ResolvedIsolationBackend,
+    original_occupancy: bool,
+) -> Result<(), EngineError> {
+    if original_occupancy {
+        required.insert(IsolationCapability::ProcessOriginalNamespaceTerminalReporting);
+    }
+    if !required.is_subset(&backend.effective_capabilities) {
+        let missing = required
+            .difference(&backend.effective_capabilities)
+            .map(|capability| format!("{capability:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(refused(format!(
+            "selected isolation adapter is missing required capabilities: {missing}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_descriptor_bound_command(
@@ -7170,6 +7188,23 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn compiled_original_launch_requires_reporter_before_request_validation() {
+        let mut backend = resolved_backend();
+        let required = BTreeSet::from([IsolationCapability::FilesystemPrivateRoot]);
+        require_compiled_launch_capabilities(required.clone(), &backend, false).unwrap();
+        assert!(require_compiled_launch_capabilities(required.clone(), &backend, true).is_err());
+        let reporter = IsolationCapability::ProcessOriginalNamespaceTerminalReporting;
+        backend.declaration.capabilities.insert(reporter);
+        // A signed declaration without inspected effective support is insufficient.
+        assert!(require_compiled_launch_capabilities(required.clone(), &backend, true).is_err());
+        backend.effective_capabilities.insert(reporter);
+        require_compiled_launch_capabilities(required, &backend, true).unwrap();
+        // Metadata admission only; these sealed empty fixture handles are not
+        // a qualified native publisher or a protected App acceptance fixture.
     }
 
     fn write_policy(app_root: &Path, policy: &IsolationPolicy) {

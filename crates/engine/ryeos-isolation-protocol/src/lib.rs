@@ -234,6 +234,10 @@ pub enum IsolationCapability {
     ProcessIsolatedPidNamespace,
     #[serde(rename = "process.target_pid_reporting")]
     ProcessTargetPidReporting,
+    /// Reports only the original namespace terminal occurrence. This does
+    /// not authorize driver, physical-resource or financial retirement.
+    #[serde(rename = "process.original_namespace_terminal_reporting")]
+    ProcessOriginalNamespaceTerminalReporting,
     #[serde(rename = "lifecycle.shared_process_group")]
     LifecycleSharedProcessGroup,
     #[serde(rename = "process.nested_sandbox")]
@@ -1648,7 +1652,7 @@ impl AdapterWorkspaceResponse {
 
 impl AdapterLaunchRequest {
     pub fn validate(&self) -> Result<BTreeSet<IsolationCapability>, ProtocolValidationError> {
-        let required = self.plan.validate(&self.authorities)?;
+        let mut required = self.plan.validate(&self.authorities)?;
         if self.loopback_transfer_fd.is_some() != self.plan.loopback_ingress.is_some() {
             return Err(ProtocolValidationError::new(
                 "loopback ingress requires exactly one transfer endpoint",
@@ -1678,6 +1682,9 @@ impl AdapterLaunchRequest {
             return Err(ProtocolValidationError::new(
                 "native terminal writer and original occupancy must be selected together",
             ));
+        }
+        if self.original_namespace_occupancy.is_some() {
+            required.insert(IsolationCapability::ProcessOriginalNamespaceTerminalReporting);
         }
         if self.status_fd <= 2 {
             return Err(ProtocolValidationError::new(
@@ -3540,6 +3547,21 @@ mod tests {
         let mut run = selected;
         run.lifecycle = AdapterLaunchLifecycle::Run;
         assert!(run.validate().is_err());
+    }
+
+    #[test]
+    fn original_terminal_reporter_is_required_only_for_paired_original_launch() {
+        let mut request = original_occupancy_request();
+        let capability = IsolationCapability::ProcessOriginalNamespaceTerminalReporting;
+        assert!(request.validate().unwrap().contains(&capability));
+        assert_eq!(
+            serde_json::to_string(&capability).unwrap(),
+            "\"process.original_namespace_terminal_reporting\""
+        );
+        request.original_namespace_occupancy = None;
+        assert!(request.validate().is_err());
+        request.native_terminal_fd = None;
+        assert!(!request.validate().unwrap().contains(&capability));
     }
 
     #[test]

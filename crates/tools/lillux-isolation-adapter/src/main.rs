@@ -969,6 +969,11 @@ fn supported_capabilities(
     }
     if inspection.isolated_pid_namespace {
         capabilities.insert(IsolationCapability::ProcessIsolatedPidNamespace);
+        // Permission is separately admitted from the signed declaration and
+        // this inspection of the actual captured adapter. Grammar is not a grant.
+        if cfg!(target_os = "linux") {
+            capabilities.insert(IsolationCapability::ProcessOriginalNamespaceTerminalReporting);
+        }
     }
     capabilities.extend([
         IsolationCapability::ProcessTargetPidReporting,
@@ -1171,6 +1176,18 @@ mod tests {
         };
         request.validate().unwrap();
         assert!(request.artifacts.is_empty());
+    }
+
+    #[test]
+    fn original_terminal_reporter_requires_native_isolated_pid_namespace() {
+        let mut inspection = lillux::LinuxSandboxInspection::declared_native_contract();
+        let capability = IsolationCapability::ProcessOriginalNamespaceTerminalReporting;
+        assert_eq!(
+            supported_capabilities(&inspection).contains(&capability),
+            cfg!(target_os = "linux") && inspection.isolated_pid_namespace
+        );
+        inspection.isolated_pid_namespace = false;
+        assert!(!supported_capabilities(&inspection).contains(&capability));
     }
 
     #[test]

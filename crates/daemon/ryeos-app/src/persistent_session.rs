@@ -804,6 +804,7 @@ struct PooledStartRetention {
     // Destroy ALL best-effort process owners before scratch/capture lifelines.
     // Group/pool destruction is never native or financial settlement proof.
     retained_running: Vec<ryeos_engine::dispatch::RunningExecution>,
+    original_native_acceptance: Option<OriginalNamespaceReporterAcceptance>,
     // Checked-out originals are never replaced by another supplied input.
     quarantined_inputs:
         Vec<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
@@ -828,6 +829,16 @@ struct PooledStartRetention {
         Option<crate::runtime_db::process_resource_launch::TrustedResourceSpawnPermit>,
 }
 
+// Historical acceptance from the sole protected Collected branch, beside the
+// exact restored execution whose private channel still owns all actual facts.
+// No copied frame/receipt/result and no current-generation lease. A later
+// retirement consumer must revalidate authority and all independent proofs.
+struct OriginalNamespaceReporterAcceptance {
+    held_occurrence: Arc<lillux::exec::ProcessLocalHeldOccurrence>,
+    _capture: Arc<ryeos_engine::isolation::VerifiedIsolationBackendCapture>,
+    original_deadline: lillux::time::MonotonicDeadline,
+}
+
 // The guard can restore only objects it actually owns. A panic inside a
 // consuming wait may destroy the moved RunningExecution; higher originals
 // stay refused and funded/scratch uncertainty is never converted to proof.
@@ -836,29 +847,38 @@ struct OriginalNativeCheckGuard<'a> {
     held_occurrence: Arc<lillux::exec::ProcessLocalHeldOccurrence>,
     inputs: Option<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
     original: &'a PersistentSessionPooledStart,
+    fallback_armed: bool,
 }
 
 impl OriginalNativeCheckGuard<'_> {
+    fn has_exclusive_retention(&self, retained: &PooledStartRetention) -> bool {
+        retained.native_check_attempted
+            && retained.native_check_in_flight
+            && !retained.native_check_refused
+            && !retained.admission_refused
+            && retained.phase == PooledStartPhase::Unsettled
+            && retained.original_native_acceptance.is_none()
+            && retained.trusted_inputs.is_none()
+            && retained.retained_running.is_empty()
+            && retained.quarantined_inputs.is_empty()
+            && retained.original_spawn_permit.is_some()
+            && retained.original_contact_attempted
+            && retained.original_held_attached
+            && self.original.is_in_flight()
+            && retained
+                .original_funding
+                .as_ref()
+                .and_then(|funding| funding.acknowledged_held_occurrence())
+                .is_some_and(|actual| Arc::ptr_eq(actual, &self.held_occurrence))
+    }
+
     fn require_exclusive(&self) -> Result<()> {
         let retained = self
             .original
             .retained
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let exclusive = retained.native_check_attempted
-            && retained.native_check_in_flight
-            && !retained.native_check_refused
-            && !retained.admission_refused
-            && retained.trusted_inputs.is_none()
-            && retained.retained_running.is_empty()
-            && retained.quarantined_inputs.is_empty()
-            && retained.original_funding.is_some()
-            && retained.original_spawn_permit.is_some()
-            && retained
-                .original_funding
-                .as_ref()
-                .and_then(|funding| funding.acknowledged_held_occurrence())
-                .is_some_and(|actual| Arc::ptr_eq(actual, &self.held_occurrence));
+        let exclusive = self.has_exclusive_retention(&retained);
         drop(retained);
         anyhow::ensure!(
             exclusive,
@@ -866,15 +886,8 @@ impl OriginalNativeCheckGuard<'_> {
         );
         Ok(())
     }
-}
 
-impl Drop for OriginalNativeCheckGuard<'_> {
-    fn drop(&mut self) {
-        let mut retained = self
-            .original
-            .retained
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+    fn restore_owned(&mut self, retained: &mut PooledStartRetention) {
         if let Some(running) = self.running.take() {
             retained.retained_running.push(running);
         }
@@ -884,6 +897,69 @@ impl Drop for OriginalNativeCheckGuard<'_> {
             }
             retained.trusted_inputs = Some(inputs);
         }
+    }
+
+    // One locked transaction; rejection returns the staged owner to the caller
+    // so its destruction and error formatting happen after releasing the lock.
+    fn commit_acceptance(
+        &mut self,
+        acceptance: OriginalNamespaceReporterAcceptance,
+    ) -> std::result::Result<(), OriginalNamespaceReporterAcceptance> {
+        let original = self.original;
+        let mut retained = original.retained.lock().unwrap_or_else(|p| p.into_inner());
+        let eligible = self.fallback_armed
+            && self.running.is_some()
+            && self.inputs.is_some()
+            && self.has_exclusive_retention(&retained)
+            && Arc::ptr_eq(&acceptance.held_occurrence, &self.held_occurrence);
+        // Restore exact checked-out originals FIRST, preserving all collisions.
+        self.restore_owned(&mut retained);
+        let commit = eligible
+            && retained.native_check_attempted
+            && retained.native_check_in_flight
+            && !retained.native_check_refused
+            && !retained.admission_refused
+            && retained.phase == PooledStartPhase::Unsettled
+            && retained.original_native_acceptance.is_none()
+            && retained.trusted_inputs.is_some()
+            && retained.retained_running.len() == 1
+            && retained.quarantined_inputs.is_empty()
+            && retained.original_spawn_permit.is_some()
+            && retained.original_contact_attempted
+            && retained.original_held_attached
+            && original.is_in_flight()
+            && retained
+                .original_funding
+                .as_ref()
+                .and_then(|funding| funding.acknowledged_held_occurrence())
+                .is_some_and(|actual| Arc::ptr_eq(actual, &self.held_occurrence))
+            && !acceptance.original_deadline.has_elapsed();
+        if commit {
+            retained.original_native_acceptance = Some(acceptance);
+            retained.native_check_in_flight = false;
+            retained.admission_refused = true;
+            // attempted/Unsettled remain; native_check_refused stays false.
+            // No fallible work between committing and disarming fallback.
+            self.fallback_armed = false;
+            Ok(())
+        } else {
+            retained.native_check_in_flight = false;
+            retained.native_check_refused = true;
+            retained.admission_refused = true;
+            retained.phase = PooledStartPhase::Unsettled;
+            Err(acceptance)
+        }
+    }
+}
+
+impl Drop for OriginalNativeCheckGuard<'_> {
+    fn drop(&mut self) {
+        if !self.fallback_armed {
+            return;
+        }
+        let original = self.original;
+        let mut retained = original.retained.lock().unwrap_or_else(|p| p.into_inner());
+        self.restore_owned(&mut retained);
         retained.native_check_in_flight = false;
         retained.native_check_refused = true;
         retained.admission_refused = true;
@@ -894,7 +970,7 @@ impl Drop for OriginalNativeCheckGuard<'_> {
 }
 
 enum OriginalNativeCheckOutcome {
-    CollectedFacts,
+    CollectedFacts(OriginalNamespaceReporterAcceptance),
     Incomplete,
     Failed,
     Unsupported,
@@ -912,6 +988,7 @@ impl PersistentSessionPooledStart {
         Self {
             retained: Mutex::new(PooledStartRetention {
                 retained_running: Vec::new(),
+                original_native_acceptance: None,
                 quarantined_inputs: Vec::new(),
                 native_check_attempted: false,
                 native_check_in_flight: false,
@@ -1156,9 +1233,9 @@ impl PersistentSessionPooledStart {
     /// Actual selected pooled callback only, after held release and before Ready.
     /// Root every supplied object first; all outcomes remain refused for Ready,
     /// startup/driver/physical retirement and financial settlement.
-    /// Flags and backend correspondence do not attest a funded occurrence:
-    /// the actual Executor held/attach/release caller supplies source lineage.
-    /// A later issuer still needs an actual held/funding occurrence join.
+    /// The actual Executor held/attach/release caller supplies source lineage;
+    /// only its protected Collected branch can commit reporter acceptance.
+    /// Acceptance is historical and never independent retirement authority.
     pub fn retain_and_check_original_native(
         &self,
         state: &crate::state::AppState,
@@ -1211,6 +1288,7 @@ impl PersistentSessionPooledStart {
                 ),
                 inputs: retained.trusted_inputs.take(),
                 original: self,
+                fallback_armed: true,
             }
         };
         let observed = (|| -> Result<OriginalNativeCheckOutcome> {
@@ -1252,24 +1330,27 @@ impl PersistentSessionPooledStart {
                     running,
                 )) => {
                     guard.running = Some(running);
-                    OriginalNativeCheckOutcome::CollectedFacts
+                    None
                 }
                 Ok(ryeos_engine::dispatch::SelectedNativeExecutionWaitOutcome::Incomplete(
                     running,
                 )) => {
                     guard.running = Some(running);
-                    OriginalNativeCheckOutcome::Incomplete
+                    Some(OriginalNativeCheckOutcome::Incomplete)
                 }
                 Ok(ryeos_engine::dispatch::SelectedNativeExecutionWaitOutcome::Failed(running)) => {
                     guard.running = Some(running);
-                    OriginalNativeCheckOutcome::Failed
+                    Some(OriginalNativeCheckOutcome::Failed)
                 }
                 Err(running) => {
                     guard.running = Some(running);
-                    OriginalNativeCheckOutcome::Unsupported
+                    Some(OriginalNativeCheckOutcome::Unsupported)
                 }
             };
-            if matches!(phase, OriginalNativeCheckOutcome::CollectedFacts) {
+            if let Some(phase) = phase {
+                return Ok(phase);
+            }
+            {
                 guard.require_exclusive()?;
                 guard
                     .running
@@ -1291,23 +1372,47 @@ impl PersistentSessionPooledStart {
                     .require_original_held_occurrence(&guard.held_occurrence)
                     .map_err(anyhow::Error::new)?;
                 guard.require_exclusive()?;
+                Ok(OriginalNativeCheckOutcome::CollectedFacts(
+                    OriginalNamespaceReporterAcceptance {
+                        held_occurrence: Arc::clone(&guard.held_occurrence),
+                        _capture: capture,
+                        original_deadline: original_budget.contact_expiry(),
+                    },
+                ))
             }
-            Ok(phase)
         })();
+        let observed = match observed {
+            Ok(OriginalNativeCheckOutcome::CollectedFacts(acceptance)) => {
+                match guard.commit_acceptance(acceptance) {
+                    Ok(()) => Ok(None),
+                    Err(rejected) => {
+                        drop(rejected); // outside the retained lock
+                        Err(anyhow!(
+                            "original native acceptance lost atomic commit eligibility"
+                        ))
+                    }
+                }
+            }
+            Ok(phase) => Ok(Some(phase)),
+            Err(error) => Err(error),
+        };
         // Restore exact objects/collisions BEFORE diagnostics or callback return.
         drop(guard);
         let error = match observed {
-            Ok(OriginalNativeCheckOutcome::CollectedFacts) => anyhow!(
-                "original native facts correspond; readiness/driver/physical retirement remains unproved"
+            Ok(None) => anyhow!(
+                "original namespace reporter accepted; readiness/driver/physical retirement remains unproved"
             ),
-            Ok(OriginalNativeCheckOutcome::Incomplete) => {
+            Ok(Some(OriginalNativeCheckOutcome::Incomplete)) => {
                 anyhow!("original native collection remains incomplete")
             }
-            Ok(OriginalNativeCheckOutcome::Failed) => {
+            Ok(Some(OriginalNativeCheckOutcome::Failed)) => {
                 anyhow!("original native collection retained a refusal")
             }
-            Ok(OriginalNativeCheckOutcome::Unsupported) => {
+            Ok(Some(OriginalNativeCheckOutcome::Unsupported)) => {
                 anyhow!("original native collection lacks selected context")
+            }
+            Ok(Some(OriginalNativeCheckOutcome::CollectedFacts(_))) => {
+                unreachable!("collected acceptance was consumed by atomic commit")
             }
             Err(error) => error.context("original protected native diagnostic refused"),
         };
@@ -5049,6 +5154,101 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    fn actual_ordinary_held_link() -> Arc<lillux::exec::ProcessLocalHeldOccurrence> {
+        let held = lillux::spawn_awaiting_attachment(lillux::SubprocessRequest {
+            cmd: "/bin/sh".into(),
+            argv0: None,
+            args: vec!["-c".into(), "exec /bin/sleep 30".into()],
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 30.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        })
+        .unwrap();
+        let link = Arc::new(held.capture_existing_held_occurrence());
+        drop(held); // ordinary best-effort child destruction, no native proof
+        link
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn armed_native_guard_restores_actual_execution_amid_collision_and_refuses() {
+        let start = PersistentSessionPooledStart::new();
+        let (_scratch_root, path, scratch) = owned_start_scratch();
+        let first = fake_framed_session().unwrap();
+        let second = fake_framed_session().unwrap();
+        {
+            let mut retained = start.retained.lock().unwrap();
+            retained.native_check_attempted = true;
+            retained.native_check_in_flight = true;
+            retained.phase = PooledStartPhase::Unsettled;
+            retained.retained_running.push(second.running);
+            retained.lifelines.push(Box::new(Arc::clone(&scratch)));
+        }
+        let guard = OriginalNativeCheckGuard {
+            running: Some(first.running),
+            held_occurrence: actual_ordinary_held_link(),
+            inputs: None,
+            original: &start,
+            fallback_armed: true,
+        };
+        assert!(guard.require_exclusive().is_err());
+        drop(guard);
+        drop(scratch);
+        {
+            let retained = start.retained.lock().unwrap();
+            assert_eq!(retained.retained_running.len(), 2);
+            assert!(retained.original_native_acceptance.is_none());
+            assert!(retained.native_check_attempted && retained.native_check_refused);
+            assert!(!retained.native_check_in_flight);
+            assert!(retained.admission_refused && retained.phase == PooledStartPhase::Unsettled);
+        }
+        assert!(path.join("sentinel").is_file());
+        assert!(!start.publish());
+        assert!(start.prove_cleanup().is_err());
+        // Actual ordinary owners only: missing protected inputs/funding means
+        // this is a restoration/refusal control, never an acceptance positive.
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disarmed_native_guard_drop_does_not_add_rejection_or_restore_twice() {
+        let start = PersistentSessionPooledStart::new();
+        let running = fake_framed_session().unwrap().running;
+        {
+            let mut retained = start.retained.lock().unwrap();
+            retained.native_check_attempted = true;
+            retained.phase = PooledStartPhase::Unsettled;
+            retained.admission_refused = true;
+            retained.retained_running.push(running);
+        }
+        let guard = OriginalNativeCheckGuard {
+            running: None,
+            held_occurrence: actual_ordinary_held_link(),
+            inputs: None,
+            original: &start,
+            fallback_armed: false,
+        };
+        drop(guard);
+        {
+            let retained = start.retained.lock().unwrap();
+            assert_eq!(retained.retained_running.len(), 1);
+            assert!(retained.native_check_attempted);
+            assert!(!retained.native_check_in_flight && !retained.native_check_refused);
+            assert!(retained.admission_refused && retained.phase == PooledStartPhase::Unsettled);
+            assert!(retained.original_native_acceptance.is_none());
+        }
+        assert!(!start.publish());
+        assert!(start.prove_cleanup().is_err());
+        // Isolated Drop transition only. No staged acceptance, genuine funded
+        // fixture or successful atomic commit is manufactured by this test.
+    }
+
     #[test]
     fn refused_native_callback_roots_actual_owners_and_blocks_publication_and_cleanup() {
         let root = tempfile::tempdir().unwrap();
@@ -5099,6 +5299,7 @@ mod tests {
             let retained = start.retained.lock().unwrap();
             assert_eq!(retained.retained_running.len(), 2);
             assert!(retained.native_check_attempted && retained.native_check_refused);
+            assert!(retained.original_native_acceptance.is_none());
             assert!(!retained.native_check_in_flight);
             assert!(retained.phase == PooledStartPhase::Unsettled);
             assert!(!retained.obligation_owners.is_empty());
