@@ -2919,10 +2919,18 @@ fn start_capsule_process(
                 .context(ryeos_app::persistent_session::PersistentSessionCleanupUnproved),
         });
     }
-    if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
-        state,
-        &held.process.process_identity.resource_operations,
-    ) {
+    let issue = match original_deadline {
+        Some(deadline) => ryeos_app::execution_resources::issue_process_resource_operations_until(
+            state,
+            &held.process.process_identity.resource_operations,
+            deadline,
+        ),
+        None => ryeos_app::execution_resources::issue_process_resource_operations(
+            state,
+            &held.process.process_identity.resource_operations,
+        ),
+    };
+    if let Err(error) = issue {
         let process_identity = held.process.process_identity.clone();
         let cleanup = settle_launch_retirement(
             held.process.abort_and_reap(),
@@ -2965,11 +2973,20 @@ fn start_capsule_process(
     let release_authorization = if released_process_identity.resource_selections.is_empty() {
         Ok(())
     } else {
-        ryeos_app::execution_resources::authorize_process_resource_release(
-            state,
-            &released_process_identity.resource_operations,
-        )
-        .and_then(|()| match original_deadline {
+        let financial = match original_deadline {
+            Some(deadline) => {
+                ryeos_app::execution_resources::authorize_process_resource_release_until(
+                    state,
+                    &released_process_identity.resource_operations,
+                    deadline,
+                )
+            }
+            None => ryeos_app::execution_resources::authorize_process_resource_release(
+                state,
+                &released_process_identity.resource_operations,
+            ),
+        };
+        financial.and_then(|()| match original_deadline {
             Some(deadline) => state
                 .state_store
                 .authorize_pooled_resource_owner_release_until(

@@ -4444,19 +4444,45 @@ impl AccountingDb {
         bindings: &[ryeos_accounting::ResourceOperationBinding],
         now_ms: i64,
     ) -> Result<()> {
-        let first = bindings
+        bindings
             .first()
             .context("resource-owner release requires at least one operation")?;
         let conn = self.lock_conn()?;
+        self.authorize_resource_owner_release_in_connection(&conn, bindings, now_ms)
+    }
+
+    pub fn authorize_resource_owner_release_until(
+        &self,
+        bindings: &[ryeos_accounting::ResourceOperationBinding],
+        now_ms: i64,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        bindings
+            .first()
+            .context("resource-owner release requires at least one operation")?;
+        self.with_conn_until(deadline, |conn| {
+            self.authorize_resource_owner_release_in_connection(conn, bindings, now_ms)
+        })
+    }
+
+    fn authorize_resource_owner_release_in_connection(
+        &self,
+        conn: &Connection,
+        bindings: &[ryeos_accounting::ResourceOperationBinding],
+        now_ms: i64,
+    ) -> Result<()> {
+        let first = bindings
+            .first()
+            .context("resource-owner release requires at least one operation")?;
         let gate = self
-            .load_resource_owner_gate(&conn, first.owner_gate_id.as_str())?
+            .load_resource_owner_gate(conn, first.owner_gate_id.as_str())?
             .context("resource-owner release has no accounting gate")?;
         if gate.owner_incarnation != first.owner_incarnation.as_str() || gate.state != "open" {
             bail!("resource-owner release differs from its exact open accounting gate");
         }
-        self.require_active_account(&conn, "execution", &gate.execution_budget_id)?;
+        self.require_active_account(conn, "execution", &gate.execution_budget_id)?;
         if let Some(directive) = gate.directive_budget_id.as_deref() {
-            self.require_active_account(&conn, "directive_item", directive)?;
+            self.require_active_account(conn, "directive_item", directive)?;
         }
         let deadline: Option<Option<i64>> = conn
             .query_row(
@@ -5126,7 +5152,33 @@ impl AccountingDb {
         HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
         HexDigest::new(request_digest.to_owned()).map_err(anyhow::Error::msg)?;
         let conn = self.lock_conn()?;
-        let (outcome, action) = immediate_transaction(&conn, "resource financial issue", || {
+        self.issue_resource_operation_in_connection(&conn, operation_id, request_digest, now_ms)
+    }
+
+    /// Issue the original operation using its existing deadline/connection.
+    /// A lost or expired postcommit acknowledgement never refunds/reissues.
+    pub fn issue_resource_operation_until(
+        &self,
+        operation_id: &str,
+        request_digest: &str,
+        now_ms: i64,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ResourceOperationIssueOutcome> {
+        HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
+        HexDigest::new(request_digest.to_owned()).map_err(anyhow::Error::msg)?;
+        self.with_conn_until(deadline, |conn| {
+            self.issue_resource_operation_in_connection(conn, operation_id, request_digest, now_ms)
+        })
+    }
+
+    fn issue_resource_operation_in_connection(
+        &self,
+        conn: &Connection,
+        operation_id: &str,
+        request_digest: &str,
+        now_ms: i64,
+    ) -> Result<ResourceOperationIssueOutcome> {
+        let (outcome, action) = immediate_transaction(conn, "resource financial issue", || {
             let (
                 stored_request,
                 state,
@@ -5219,7 +5271,7 @@ impl AccountingDb {
                 bail!("denied resource reservation cannot be issued");
             }
             let gate = self
-                .load_resource_owner_gate(&conn, &owner_gate_id)?
+                .load_resource_owner_gate(conn, &owner_gate_id)?
                 .ok_or_else(|| anyhow::anyhow!("resource owner accounting gate is absent"))?;
             if gate.state != "open"
                 || gate.owner_incarnation != owner_incarnation
@@ -5229,9 +5281,9 @@ impl AccountingDb {
             {
                 bail!("resource issue authority differs from its exact open owner gate");
             }
-            self.require_active_account(&conn, "execution", &execution_budget_id)?;
+            self.require_active_account(conn, "execution", &execution_budget_id)?;
             if let Some(directive_budget_id) = directive_budget_id.as_deref() {
-                self.require_active_account(&conn, "directive_item", directive_budget_id)?;
+                self.require_active_account(conn, "directive_item", directive_budget_id)?;
             }
             let authority: ResourceAccountingAuthority = serde_json::from_str(&authority_json)?;
             authority.validate().map_err(anyhow::Error::msg)?;
@@ -5259,7 +5311,7 @@ impl AccountingDb {
                 rusqlite::params![operation_id, next_state.as_str(), now_ms, state.as_str()],
             )?;
             let (_, fingerprint) = self.enqueue_resource_transition(
-                &conn,
+                conn,
                 operation_id,
                 2,
                 next_state,
@@ -5269,7 +5321,7 @@ impl AccountingDb {
             )?;
             if next_state == ResourceBudgetState::Issued {
                 let (sequence, digest) = self.commit_financial_transition(
-                    &conn,
+                    conn,
                     "resource_issued",
                     Some(operation_id),
                     Some(&authority_digest),
@@ -5293,7 +5345,7 @@ impl AccountingDb {
                 ))
             }
         })?;
-        self.resolve_anchor_action(&conn, action)?;
+        self.resolve_anchor_action(conn, action)?;
         Ok(outcome)
     }
 
@@ -13244,10 +13296,30 @@ mod tests {
                 .is_err(),
             "a merely reserved operation is not live release authority"
         );
-        db.issue_resource_operation(&operation_id, &request_digest, NOW + 1)
+        let held = db.account_snapshot(EXEC).unwrap().remove(0).held;
+        let expired = lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO);
+        assert!(
+            db.issue_resource_operation_until(&operation_id, &request_digest, NOW + 1, expired)
+                .is_err()
+        );
+        assert!(
+            db.authorize_resource_owner_release_until(
+                std::slice::from_ref(&binding),
+                NOW + 2,
+                expired
+            )
+            .is_err()
+        );
+        assert_eq!(db.account_snapshot(EXEC).unwrap().remove(0).held, held);
+        let original = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5));
+        db.issue_resource_operation_until(&operation_id, &request_digest, NOW + 1, original)
             .unwrap();
-        db.authorize_resource_owner_release(std::slice::from_ref(&binding), NOW + 2)
-            .unwrap();
+        db.authorize_resource_owner_release_until(
+            std::slice::from_ref(&binding),
+            NOW + 2,
+            original,
+        )
+        .unwrap();
 
         let mut changed = binding.clone();
         changed.clock_contract_digest = digest_of("another-clock-contract");
