@@ -8,7 +8,7 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v13";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v14";
 /// Second PID-first status document. The adapter may publish this only after
 /// Lillux's child-owned pre-exec observation; the parent requires EOF after
 /// exactly one document before accepting it.
@@ -160,7 +160,7 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IsolationAdapterProtocolVersion {
-    #[serde(rename = "ryeos.isolation-adapter/v13")]
+    #[serde(rename = "ryeos.isolation-adapter/v14")]
     Current,
 }
 
@@ -1227,6 +1227,10 @@ pub struct AdapterLaunchRequest {
     /// funded path must provide BOTH roles; absence is never a fallback.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub original_namespace_occupancy: Option<OriginalNamespaceOccupancyDescriptorRoles>,
+    /// Protected adapter-only terminal publication end. Mandatory explicit null
+    /// for ordinary launches; selected original occupancy requires this role.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub native_terminal_fd: Option<u32>,
     pub lifecycle: AdapterLaunchLifecycle,
 }
 
@@ -1670,6 +1674,11 @@ impl AdapterLaunchRequest {
                 "original occupancy requires the existing held-only lifecycle without an unrelated loopback transfer",
             ));
         }
+        if self.native_terminal_fd.is_some() != self.original_namespace_occupancy.is_some() {
+            return Err(ProtocolValidationError::new(
+                "native terminal writer and original occupancy must be selected together",
+            ));
+        }
         if self.status_fd <= 2 {
             return Err(ProtocolValidationError::new(
                 "status descriptor overlaps stdio",
@@ -1715,6 +1724,13 @@ impl AdapterLaunchRequest {
                     ));
                 }
             }
+        }
+        if let Some(descriptor) = self.native_terminal_fd
+            && (descriptor <= 2 || descriptor > i32::MAX as u32 || !descriptors.insert(descriptor))
+        {
+            return Err(ProtocolValidationError::new(
+                "native terminal descriptor overlaps stdio or another protocol role",
+            ));
         }
         for authority in &self.authorities {
             if !descriptors.insert(authority.inherited_fd) {
@@ -2371,8 +2387,8 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
-        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v13","protocol":"ryeos.isolation-adapter/v13","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
-        let nested = r#"{"protocol":"ryeos.isolation-adapter/v13","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
+        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v14","protocol":"ryeos.isolation-adapter/v14","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let nested = r#"{"protocol":"ryeos.isolation-adapter/v14","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
         for document in [top_level, nested] {
             let error = from_json_str_strict::<AdapterInspectionRequest>(document).unwrap_err();
             assert!(error.to_string().contains("duplicate JSON object key"));
@@ -2381,7 +2397,7 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
-        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v13","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
+        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v14","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(unknown)
                 .unwrap_err()
@@ -2389,7 +2405,7 @@ mod tests {
                 .contains("unknown field")
         );
 
-        let valid = r#"{"protocol":"ryeos.isolation-adapter/v13","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let valid = r#"{"protocol":"ryeos.isolation-adapter/v14","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(&format!("{valid} true"))
                 .unwrap_err()
@@ -2803,6 +2819,7 @@ mod tests {
             status_fd: 6,
             loopback_transfer_fd: None,
             original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 7,
                 release_keepalive_fd: 8,
@@ -2822,6 +2839,7 @@ mod tests {
             status_fd: 6,
             loopback_transfer_fd: None,
             original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         assert!(
@@ -2845,6 +2863,7 @@ mod tests {
             status_fd: 6,
             loopback_transfer_fd: None,
             original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         request.validate().unwrap();
@@ -2870,6 +2889,7 @@ mod tests {
             status_fd: 6,
             loopback_transfer_fd: Some(11),
             original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 8,
                 release_keepalive_fd: 9,
@@ -2927,6 +2947,7 @@ mod tests {
             status_fd: 6,
             loopback_transfer_fd: None,
             original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         }
         .validate()
@@ -2945,6 +2966,7 @@ mod tests {
             status_fd: 6,
             loopback_transfer_fd: None,
             original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         let value = serde_json::to_value(&run).unwrap();
@@ -2960,6 +2982,7 @@ mod tests {
             status_fd: 6,
             loopback_transfer_fd: None,
             original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 8,
                 release_keepalive_fd: 9,
@@ -3136,7 +3159,7 @@ mod tests {
         let request = workspace_request(WorkspaceLifecycleOperation::Create);
         request.validate().unwrap();
         let encoded = serde_json::to_value(&request).unwrap();
-        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v13");
+        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v14");
         let purposes = encoded["authorities"]
             .as_array()
             .unwrap()
@@ -3438,6 +3461,7 @@ mod tests {
                 window_fd: 101,
                 clock_namespace_fd: 102,
             }),
+            native_terminal_fd: Some(103),
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 8,
                 release_keepalive_fd: 9,
@@ -3446,11 +3470,84 @@ mod tests {
     }
 
     #[test]
-    fn v13_original_occupancy_requires_explicit_complete_distinct_held_roles() {
+    fn v14_native_terminal_role_is_mandatory_nullable_and_rejects_old_or_duplicate_wire() {
+        let selected = original_occupancy_request();
+        let value = serde_json::to_value(&selected).unwrap();
+        let mut missing = value.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("native_terminal_fd");
+        assert!(
+            from_json_slice_strict::<AdapterLaunchRequest>(&serde_json::to_vec(&missing).unwrap())
+                .is_err()
+        );
+        for old in ["ryeos.isolation-adapter/v12", "ryeos.isolation-adapter/v13"] {
+            let mut altered = value.clone();
+            altered["protocol"] = serde_json::json!(old);
+            assert!(
+                from_json_slice_strict::<AdapterLaunchRequest>(
+                    &serde_json::to_vec(&altered).unwrap()
+                )
+                .is_err()
+            );
+        }
+        let text = serde_json::to_string(&selected).unwrap().replacen(
+            '{',
+            r#"{"native_terminal_fd":null,"#,
+            1,
+        );
+        assert!(from_json_str_strict::<AdapterLaunchRequest>(&text).is_err());
+        let mut unknown = value;
+        unknown["native_terminal_writer"] = serde_json::json!(103);
+        assert!(
+            from_json_slice_strict::<AdapterLaunchRequest>(&serde_json::to_vec(&unknown).unwrap())
+                .is_err()
+        );
+        let mut ordinary = selected;
+        ordinary.original_namespace_occupancy = None;
+        ordinary.native_terminal_fd = None;
+        let ordinary: AdapterLaunchRequest =
+            from_json_slice_strict(&serde_json::to_vec(&ordinary).unwrap()).unwrap();
+        ordinary.validate().unwrap();
+        assert!(serde_json::to_value(ordinary).unwrap()["native_terminal_fd"].is_null());
+    }
+
+    #[test]
+    fn v14_native_terminal_pairs_original_roles_and_rejects_all_descriptor_collisions() {
+        let selected = original_occupancy_request();
+        let mut absent = selected.clone();
+        absent.native_terminal_fd = None;
+        assert!(absent.validate().is_err());
+        let mut no_original = selected.clone();
+        no_original.original_namespace_occupancy = None;
+        assert!(no_original.validate().is_err());
+        let mut collisions = vec![0, 1, 2, 6, 7, 8, 9, 10, 101, 102, u32::MAX];
+        collisions.extend(
+            selected
+                .authorities
+                .iter()
+                .map(|authority| authority.inherited_fd),
+        );
+        for descriptor in collisions {
+            let mut altered = selected.clone();
+            altered.native_terminal_fd = Some(descriptor);
+            assert!(
+                altered.validate().is_err(),
+                "terminal descriptor {descriptor} admitted"
+            );
+        }
+        let mut run = selected;
+        run.lifecycle = AdapterLaunchLifecycle::Run;
+        assert!(run.validate().is_err());
+    }
+
+    #[test]
+    fn v14_original_occupancy_requires_explicit_complete_distinct_held_roles() {
         let request = original_occupancy_request();
         request.validate().unwrap();
         let value = serde_json::to_value(&request).unwrap();
-        assert_eq!(value["protocol"], "ryeos.isolation-adapter/v13");
+        assert_eq!(value["protocol"], "ryeos.isolation-adapter/v14");
         let mut missing = value.clone();
         missing
             .as_object_mut()
@@ -3470,6 +3567,7 @@ mod tests {
         assert!(serde_json::from_value::<AdapterLaunchRequest>(old).is_err());
         let mut ordinary = request.clone();
         ordinary.original_namespace_occupancy = None;
+        ordinary.native_terminal_fd = None;
         ordinary.validate().unwrap();
         let ordinary_value = serde_json::to_value(&ordinary).unwrap();
         assert!(
@@ -3479,7 +3577,7 @@ mod tests {
                 .is_null()
         );
         for role in ["window_fd", "clock_namespace_fd"] {
-            for bad in [0, 1, 2, 6, 7, 8, 9, 10, 101, 102, u32::MAX] {
+            for bad in [0, 1, 2, 6, 7, 8, 9, 10, 101, 102, 103, u32::MAX] {
                 let mut altered = value.clone();
                 altered["original_namespace_occupancy"][role] = serde_json::json!(bad);
                 let parsed: AdapterLaunchRequest = serde_json::from_value(altered).unwrap();

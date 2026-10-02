@@ -165,6 +165,14 @@ impl IsolationRequestAwaitingAttachment {
                 reason: "held launch has no supervised adapter status channel".into(),
             }
         })?;
+        if status
+            .validate_existing_native_settlement_requirements(
+                ryeos_isolation_protocol::ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
+            )
+            .map_err(|reason| EngineError::IsolationPolicyRefused { reason })?
+        {
+            return Ok(self);
+        }
         status
             .require_applied_launch_receipt(
                 ryeos_isolation_protocol::ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,

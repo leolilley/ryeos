@@ -91,6 +91,117 @@ fn inspect(request_fd: u32) -> Result<AdapterInspectionResponse, String> {
     Ok(response)
 }
 
+/// Complete actual inherited companions, including the sealed caller request
+/// and actual adapter stdio. Coordinates are transport data, never authority.
+fn terminal_companion_coordinates(
+    request: &AdapterLaunchRequest,
+    request_fd: u32,
+) -> Result<Vec<u32>, String> {
+    if request_fd <= 2 || request_fd > i32::MAX as u32 {
+        return Err("sealed launch request overlaps stdio or exceeds descriptor range".into());
+    }
+    let mut peers = vec![0, 1, 2, request.status_fd, request.adapter_fd];
+    peers.extend(request.artifacts.values().copied());
+    peers.extend(
+        request
+            .authorities
+            .iter()
+            .map(|authority| authority.inherited_fd),
+    );
+    if let Some(fd) = request.loopback_transfer_fd {
+        peers.push(fd);
+    }
+    if let AdapterLaunchLifecycle::AwaitAttachment {
+        release_fd,
+        release_keepalive_fd,
+    } = request.lifecycle
+    {
+        peers.extend([release_fd, release_keepalive_fd]);
+    }
+    if let Some(roles) = request.original_namespace_occupancy {
+        peers.extend([roles.window_fd, roles.clock_namespace_fd]);
+    }
+    if peers.contains(&request_fd) || request.native_terminal_fd == Some(request_fd) {
+        return Err("sealed launch request aliases another protocol role".into());
+    }
+    peers.push(request_fd);
+    Ok(peers)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct NativeTerminalPublication {
+    // Actual opaque native output and bounded encoded bytes remain in this
+    // SAME adapter stack on every failed observation/encode/write/final check.
+    observation: Option<lillux::LinuxSandboxNativeTerminalObservation>,
+    frame: Option<Vec<u8>>,
+    sent_bytes: Option<usize>,
+    failure: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn publish_native_terminal(
+    process: &mut lillux::LinuxSandboxProcess,
+    writer: &lillux::InheritedDescriptorAuthority,
+    original: lillux::time::MonotonicDeadline,
+    publication: &mut NativeTerminalPublication,
+) -> Result<lillux::LinuxSandboxExit, String> {
+    if let Some(failure) = &publication.failure {
+        return Err(failure.clone());
+    }
+    let result = (|| {
+        if publication.sent_bytes.is_some() {
+            return Err("native terminal write was already observed; replay refused".to_string());
+        }
+        loop {
+            if original.has_elapsed() {
+                return Err(
+                    "native terminal original deadline expired before observation".to_string(),
+                );
+            }
+            match process.try_observe_native_terminal()? {
+                Some(observation) => {
+                    publication.observation = Some(observation);
+                    break;
+                }
+                None => lillux::time::sleep(
+                    lillux::time::Duration::from_millis(1).min(original.remaining()),
+                ),
+            }
+        }
+        let observation = publication
+            .observation
+            .as_ref()
+            .ok_or("native terminal actual observation missing")?;
+        publication.frame = Some(observation.encode_native_terminal_record()?);
+        let frame = publication
+            .frame
+            .as_ref()
+            .expect("actual encoded frame retained");
+        let sent = writer
+            .write_atomic_pipe_record_until(frame, original)
+            .map_err(|error| format!("publish native terminal record: {error}"))?;
+        // Cache the irreversible syscall observation BEFORE every later check.
+        // Whole/partial/zero outcomes never trigger a suffix or record replay.
+        publication.sent_bytes = Some(sent);
+        if sent != frame.len() {
+            return Err(
+                "native terminal write was incomplete; publication remains uncertain".into(),
+            );
+        }
+        if original.has_elapsed() {
+            return Err(
+                "native terminal record sent after original window; late result retained".into(),
+            );
+        }
+        Ok(observation.exit())
+    })();
+    if let Err(failure) = &result {
+        publication.failure = Some(failure.clone());
+    }
+    result
+}
+
 fn launch(request_fd: u32) -> ! {
     let request = match read_request::<AdapterLaunchRequest>(request_fd) {
         Ok(request) => request,
@@ -100,6 +211,24 @@ fn launch(request_fd: u32) -> ! {
     if let Err(error) = request.validate() {
         emit_refusal(status_fd, error.to_string());
     }
+    let terminal_companions = if request.native_terminal_fd.is_some() {
+        Some(
+            terminal_companion_coordinates(&request, request_fd)
+                .unwrap_or_else(|error| emit_refusal(status_fd, error)),
+        )
+    } else {
+        None
+    };
+    let native_terminal_writer = if let Some(fd) = request.native_terminal_fd {
+        // SAFETY: strict request roles and caller-request coordinate were
+        // validated distinct before this one unique inherited adoption.
+        Some(
+            unsafe { lillux::take_inherited_descriptor_authority(fd) }
+                .unwrap_or_else(|error| emit_refusal(status_fd, error)),
+        )
+    } else {
+        None
+    };
     // Consume both original roles BEFORE translation and USER/PID transition.
     // A selected handoff failure cannot enter the ordinary null branch.
     let original_parts: Option<(
@@ -110,9 +239,13 @@ fn launch(request_fd: u32) -> ! {
         #[cfg(target_os = "linux")]
         {
             let adopted = unsafe {
-                lillux::time::AdoptedOriginalNamespaceOccupancy::take_inherited(
+                lillux::time::AdoptedOriginalNamespaceOccupancy::take_inherited_with_terminal_writer(
                     roles.window_fd,
                     roles.clock_namespace_fd,
+                    native_terminal_writer.as_ref().unwrap_or_else(|| emit_refusal(
+                        status_fd, "original occupancy lost mandatory terminal writer".into())),
+                    terminal_companions.as_deref().unwrap_or_else(|| emit_refusal(
+                        status_fd, "original occupancy lost complete terminal peer inventory".into())),
                 )
             }
             .unwrap_or_else(|error| emit_refusal(status_fd, error));
@@ -143,11 +276,13 @@ fn launch(request_fd: u32) -> ! {
             // Existing OUTER AwaitAttachment writer is sole release authority.
             // This returns only after original watchdog ACK AND actual native
             // PID1/confinement readiness; no target status substitutes for it.
-            lillux::sandbox::launch_linux_sandbox_with_original_namespace_occupancy(
+            lillux::sandbox::launch_linux_sandbox_with_original_namespace_occupancy_and_terminal_writer(
                 native.clone(),
                 &limit,
                 cleanup,
                 deadline,
+                native_terminal_writer.as_ref().unwrap_or_else(|| emit_refusal(
+                    status_fd, "original native launch lost terminal writer".into())),
             )
         }
         #[cfg(not(target_os = "linux"))]
@@ -303,9 +438,37 @@ fn launch(request_fd: u32) -> ! {
         Err(error) => fail(&format!("retire applied-launch status descriptor: {error}")),
     };
     drop(status_owner);
-    match process.wait() {
-        Ok(status) => lillux::exit_with_linux_sandbox_status(status),
-        Err(error) => fail(&error),
+    if let Some(writer) = native_terminal_writer {
+        #[cfg(target_os = "linux")]
+        {
+            let original = original_contact_expiry.unwrap_or_else(|| {
+                fail("selected native terminal writer lost its original expiry")
+            });
+            let mut publication = NativeTerminalPublication::default();
+            match publish_native_terminal(&mut process, &writer, original, &mut publication) {
+                Ok(status) => {
+                    // Whole publication follows actual exclusive native/helper
+                    // reap. Close writer BEFORE outer adapter exits; receiver
+                    // collects while this publisher is alive, never an EOF cycle.
+                    drop(writer);
+                    lillux::exit_with_linux_sandbox_status(status)
+                }
+                Err(error) => {
+                    // Actual observation/bytes/count/failure remain on this
+                    // stack until invocation death. Existing refusal/cancellation
+                    // may race negative delivery; no applied-success fabrication
+                    // or guarantee of transient custody after consumption.
+                    fail(&error)
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        fail("native terminal publication requires Linux")
+    } else {
+        match process.wait() {
+            Ok(status) => lillux::exit_with_linux_sandbox_status(status),
+            Err(error) => fail(&error),
+        }
     }
 }
 

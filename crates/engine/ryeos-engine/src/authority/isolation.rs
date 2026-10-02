@@ -4197,7 +4197,17 @@ impl IsolationRuntime {
             )));
         }
         validate_namespace_destination("command", &command_path)?;
-        let (supervised_status, status_writer, status_fd, adapter_lifecycle) = match lifecycle {
+        // Borrow the existing original handoff before moving its exact roles.
+        let original_occupancy_deadline = original_occupancy
+            .as_ref()
+            .map(lillux::time::OriginalNamespaceOccupancyHandoff::original_deadline);
+        let (
+            supervised_status,
+            status_writer,
+            status_fd,
+            adapter_lifecycle,
+            native_terminal_writer,
+        ) = match lifecycle {
             RequestedLaunchLifecycle::Run => {
                 let status = lillux::supervised_launcher_status_pipe().map_err(|reason| {
                     refused(format!(
@@ -4212,10 +4222,11 @@ impl IsolationRuntime {
                     status.writer,
                     status_fd,
                     AdapterLaunchLifecycle::Run,
+                    None,
                 )
             }
             RequestedLaunchLifecycle::AwaitAttachment => {
-                let status = lillux::supervised_launcher_attachment_status_pipe().map_err(
+                let mut status = lillux::supervised_launcher_attachment_status_pipe().map_err(
                     |reason| {
                         refused(format!(
                             "supervised launcher attachment boundary cannot be initialized: {reason}"
@@ -4225,6 +4236,32 @@ impl IsolationRuntime {
                 let status_fd = status.writer_descriptor().map_err(|reason| {
                     refused(format!("invalid supervised status descriptor: {reason}"))
                 })?;
+                let native_terminal_writer =
+                    if let Some(original) = original_occupancy_deadline {
+                        status
+                            .reader
+                            .require_applied_launch_receipt(
+                                ryeos_isolation_protocol::ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
+                            )
+                            .map_err(|reason| {
+                                refused(format!("require original applied launch: {reason}"))
+                            })?;
+                        status
+                            .reader
+                            .require_mount_preparation_receipt()
+                            .map_err(|reason| {
+                                refused(format!("require original held mount: {reason}"))
+                            })?;
+                        Some(status.prepare_native_settlement_channel(original).map_err(
+                            |reason| {
+                                refused(format!(
+                                    "prepare original native terminal channel: {reason}"
+                                ))
+                            },
+                        )?)
+                    } else {
+                        None
+                    };
                 let release_reader = status.attachment_release_reader;
                 let release_fd = inherited_fd(&release_reader)?;
                 inherited_fds.push(release_reader);
@@ -4239,6 +4276,7 @@ impl IsolationRuntime {
                         release_fd,
                         release_keepalive_fd,
                     },
+                    native_terminal_writer,
                 )
             }
         };
@@ -4772,6 +4810,10 @@ impl IsolationRuntime {
                 .transpose()
                 .map_err(|error| refused(format!("inspect loopback transfer endpoint: {error}")))?,
             original_namespace_occupancy,
+            native_terminal_fd: native_terminal_writer
+                .as_ref()
+                .map(inherited_fd)
+                .transpose()?,
             lifecycle: adapter_lifecycle,
         };
         launch_request
@@ -4803,6 +4845,19 @@ impl IsolationRuntime {
         // range, and closes this original at the launcher exec boundary.
         inherited_fds.push(backend.adapter_handle.clone());
         inherited_fds.push(request_handle);
+        if let Some(writer) = native_terminal_writer {
+            let original = original_occupancy_deadline
+                .ok_or_else(|| refused("native terminal writer lost original handoff".into()))?;
+            // ALL actual inherited handles, including the newly sealed request.
+            // Adapter checks its actual stdio independently before role closure.
+            let companions = inherited_fds.iter().collect::<Vec<_>>();
+            writer
+                .require_distinct_nonblocking_pipe_writer(&companions, original)
+                .map_err(|reason| {
+                    refused(format!("validate original terminal writer: {reason}"))
+                })?;
+            inherited_fds.push(writer);
+        }
 
         let requested_open_files = limits.as_ref().and_then(|limits| limits.max_open_files);
         let effective_open_files = match (self.inspection.limits.open_files, requested_open_files) {
@@ -9926,6 +9981,7 @@ mod tests {
             status_fd: 11,
             loopback_transfer_fd: Some(12),
             original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 13,
                 release_keepalive_fd: 14,
