@@ -97,11 +97,62 @@ fn launch(request_fd: u32) -> ! {
         Err(error) => fail(&error),
     };
     let status_fd = request.status_fd;
+    if let Err(error) = request.validate() {
+        emit_refusal(status_fd, error.to_string());
+    }
+    // Consume both original roles BEFORE translation and USER/PID transition.
+    // A selected handoff failure cannot enter the ordinary null branch.
+    let original_parts: Option<(
+        lillux::time::OccupancyLimit,
+        lillux::time::Duration,
+        lillux::time::MonotonicDeadline,
+    )> = if let Some(roles) = request.original_namespace_occupancy {
+        #[cfg(target_os = "linux")]
+        {
+            let adopted = unsafe {
+                lillux::time::AdoptedOriginalNamespaceOccupancy::take_inherited(
+                    roles.window_fd,
+                    roles.clock_namespace_fd,
+                )
+            }
+            .unwrap_or_else(|error| emit_refusal(status_fd, error));
+            Some(
+                adopted
+                    .into_original_parts()
+                    .unwrap_or_else(|error| emit_refusal(status_fd, error)),
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        emit_refusal(
+            status_fd,
+            "original native occupancy handoff is unsupported on this platform".into(),
+        )
+    } else {
+        None
+    };
     let native = match translate_launch(&request) {
         Ok(native) => native,
         Err(error) => emit_refusal(status_fd, error),
     };
-    let result = if let Some(ingress) = &request.plan.loopback_ingress {
+    let result = if let Some((limit, cleanup, deadline)) = original_parts {
+        #[cfg(target_os = "linux")]
+        {
+            // Existing OUTER AwaitAttachment writer is sole release authority.
+            // This returns only after original watchdog ACK AND actual native
+            // PID1/confinement readiness; no target status substitutes for it.
+            lillux::sandbox::launch_linux_sandbox_with_original_namespace_occupancy(
+                native.clone(),
+                &limit,
+                cleanup,
+                deadline,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        emit_refusal(
+            status_fd,
+            "original native occupancy is unsupported on this platform".into(),
+        )
+    } else if let Some(ingress) = &request.plan.loopback_ingress {
         let address = match ingress.address.parse() {
             Ok(address) => address,
             Err(error) => emit_refusal(

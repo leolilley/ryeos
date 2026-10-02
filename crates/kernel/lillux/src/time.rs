@@ -441,22 +441,59 @@ mod tests {
 /// A sealed transfer of an existing local window, not financial, node,
 /// release or physical-retirement authority. No raw/serde/default constructor.
 /// The selected adapter must inherit BOTH exact descriptor roles once.
-#[cfg(target_os = "linux")]
 pub struct OriginalNamespaceOccupancyHandoff {
     window: crate::InheritedDescriptorAuthority,
     clock_namespace: crate::InheritedDescriptorAuthority,
 }
 
-#[cfg(target_os = "linux")]
 impl OriginalNamespaceOccupancyHandoff {
+    #[cfg(target_os = "linux")]
+    pub fn pin_original_clock_namespace(
+        original_deadline: MonotonicDeadline,
+    ) -> Result<crate::InheritedDescriptorAuthority, String> {
+        let lease = crate::exec::retain_fork_sensitive_descriptors_until(original_deadline)
+            .map_err(|error| format!("retain original clock namespace: {error}"))?;
+        original_window::pin_current_clock_namespace(&lease)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn require_original_clock_namespace(
+        original: &crate::InheritedDescriptorAuthority,
+        original_deadline: MonotonicDeadline,
+    ) -> Result<(), String> {
+        let _lease = crate::exec::retain_fork_sensitive_descriptors_until(original_deadline)
+            .map_err(|error| format!("retain original clock comparison: {error}"))?;
+        original_window::require_same_clock_namespace(original.file())
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn from_original(
         limit: &OccupancyLimit,
         cleanup: Duration,
         original_deadline: MonotonicDeadline,
     ) -> Result<Self, String> {
-        let lease = crate::exec::retain_fork_sensitive_descriptors_until(original_deadline)
-            .map_err(|error| format!("retain original-window descriptors: {error}"))?;
-        let clock_namespace = original_window::pin_current_clock_namespace(&lease)?;
+        let clock_namespace = Self::pin_original_clock_namespace(original_deadline)?;
+        Self::from_original_in_retained_clock_namespace(
+            limit,
+            cleanup,
+            original_deadline,
+            &clock_namespace,
+        )
+    }
+
+    /// Caller must derive the original limit/deadline from its existing funded
+    /// owner. This retains THAT clock namespace, not a newly observed substitute.
+    #[cfg(target_os = "linux")]
+    pub fn from_original_in_retained_clock_namespace(
+        limit: &OccupancyLimit,
+        cleanup: Duration,
+        original_deadline: MonotonicDeadline,
+        original_clock_namespace: &crate::InheritedDescriptorAuthority,
+    ) -> Result<Self, String> {
+        let _lease = crate::exec::retain_fork_sensitive_descriptors_until(original_deadline)
+            .map_err(|error| format!("retain original window transfer: {error}"))?;
+        Self::require_original_clock_namespace(original_clock_namespace, original_deadline)?;
+        let clock_namespace = original_clock_namespace.clone();
         // Sample BOOTTIME BEFORE remaining Instant duration. Any delay between
         // samples only narrows the original deadline; suspend also narrows it.
         let before = occupancy_now()?;
@@ -502,6 +539,31 @@ impl OriginalNamespaceOccupancyHandoff {
             window,
             clock_namespace,
         })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn pin_original_clock_namespace(
+        _original_deadline: MonotonicDeadline,
+    ) -> Result<crate::InheritedDescriptorAuthority, String> {
+        Err("original native clock namespace is unavailable on this platform".into())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn require_original_clock_namespace(
+        _original: &crate::InheritedDescriptorAuthority,
+        _original_deadline: MonotonicDeadline,
+    ) -> Result<(), String> {
+        Err("original native clock namespace is unavailable on this platform".into())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn from_original_in_retained_clock_namespace(
+        _limit: &OccupancyLimit,
+        _cleanup: Duration,
+        _original_deadline: MonotonicDeadline,
+        _original_clock_namespace: &crate::InheritedDescriptorAuthority,
+    ) -> Result<Self, String> {
+        Err("original native occupancy handoff is unavailable on this platform".into())
     }
 
     /// Consume into the existing inherited-FD compiler. Descriptor coordinates

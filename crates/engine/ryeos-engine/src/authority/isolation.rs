@@ -2318,6 +2318,7 @@ impl IsolationRuntime {
             None,
             None,
             None,
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunch {
@@ -2376,6 +2377,7 @@ impl IsolationRuntime {
             scope.as_ref().map(|scope| scope.recovery()),
             None,
             None,
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchAwaitingAttachment {
@@ -2416,10 +2418,42 @@ impl IsolationRuntime {
             scope.as_ref().map(|scope| scope.recovery()),
             Some(devices),
             None,
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchAwaitingAttachment {
             request: IsolationRequestAwaitingAttachment::new(applied.request, scope),
+            provenance: applied.provenance,
+            expected_applied_launch: applied.expected_applied_launch,
+            expected_mount_preparation: applied.expected_mount_preparation,
+        })
+    }
+
+    /// Compile the same held unscoped request with the original owner-supplied
+    /// sealed local window and existing node-selected device descriptors.
+    /// This generic compiler grants no financial/node/device/Runtime release
+    /// authority. The caller must consume its SAME retained original funded
+    /// owner; missing qualified admission remains refusal, never null fallback.
+    pub fn apply_awaiting_attachment_with_original_namespace_occupancy(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+        devices: &lillux::CharacterDeviceSet,
+        original_window: lillux::time::OriginalNamespaceOccupancyHandoff,
+    ) -> Result<AppliedIsolationLaunchAwaitingAttachment, EngineError> {
+        self.ensure_registered_generation_current()?;
+        let applied = self.apply_with_provenance_current(
+            request,
+            context,
+            RequestedLaunchLifecycle::AwaitAttachment,
+            None,
+            Some(devices),
+            None,
+            Some(original_window),
+        )?;
+        self.ensure_registered_generation_current()?;
+        Ok(AppliedIsolationLaunchAwaitingAttachment {
+            request: IsolationRequestAwaitingAttachment::new(applied.request, None),
             provenance: applied.provenance,
             expected_applied_launch: applied.expected_applied_launch,
             expected_mount_preparation: applied.expected_mount_preparation,
@@ -2458,6 +2492,7 @@ impl IsolationRuntime {
             Some(scope.recovery()),
             None,
             Some(ingress),
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchWithLoopbackIngress {
@@ -2483,12 +2518,21 @@ impl IsolationRuntime {
         process_scope: Option<&lillux::ProcessScopeRecovery>,
         selected_devices: Option<&lillux::CharacterDeviceSet>,
         loopback_ingress: Option<&IsolationLoopbackIngress>,
+        original_occupancy: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
     ) -> Result<CompiledIsolationLaunch, EngineError> {
         // Keep this seam backend-neutral. The engine may compile only the
         // signed generic isolation policy/protocol and retain exact descriptor
         // carriers. Namespace, mount, descriptor, process, and host-path
         // mechanics belong to Lillux; never add a backend-specific branch or
         // an ambient-path fallback here.
+        if original_occupancy.is_some()
+            && (self.state == IsolationRuntimeState::Disabled
+                || lifecycle != RequestedLaunchLifecycle::AwaitAttachment
+                || process_scope.is_some()
+                || loopback_ingress.is_some())
+        {
+            return Err(refused("original occupancy cannot downgrade held enforced launch, acquire local scope or use an unrelated loopback transfer".into()));
+        }
         validate_workspace_view_context(
             self.state,
             context.project_authority,
@@ -4676,6 +4720,18 @@ impl IsolationRuntime {
         } else {
             (None, None)
         };
+        let original_occupancy_handles = original_occupancy.map(|window| window.into_authorities());
+        let original_namespace_occupancy = original_occupancy_handles
+            .as_ref()
+            .map(|(window, clock)| {
+                Ok::<_, EngineError>(
+                    ryeos_isolation_protocol::OriginalNamespaceOccupancyDescriptorRoles {
+                        window_fd: inherited_fd(window)?,
+                        clock_namespace_fd: inherited_fd(clock)?,
+                    },
+                )
+            })
+            .transpose()?;
         let launch_request = AdapterLaunchRequest {
             protocol: IsolationAdapterProtocolVersion::Current,
             plan,
@@ -4688,6 +4744,7 @@ impl IsolationRuntime {
                 .map(|child| child.inherited_descriptor())
                 .transpose()
                 .map_err(|error| refused(format!("inspect loopback transfer endpoint: {error}")))?,
+            original_namespace_occupancy,
             lifecycle: adapter_lifecycle,
         };
         launch_request
@@ -4706,6 +4763,10 @@ impl IsolationRuntime {
         let request_fd = inherited_fd(&request_handle)?.to_string();
         if let Some(child) = transfer_child.as_ref() {
             child.retain_for_child(&mut inherited_fds);
+        }
+        if let Some((window, clock)) = original_occupancy_handles {
+            inherited_fds.push(window);
+            inherited_fds.push(clock);
         }
         inherited_fds.extend(authority_handles);
         inherited_fds.extend(backend.artifact_handles.values().cloned());
@@ -9825,6 +9886,7 @@ mod tests {
             adapter_fd: 10,
             status_fd: 11,
             loopback_transfer_fd: Some(12),
+            original_namespace_occupancy: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 13,
                 release_keepalive_fd: 14,
