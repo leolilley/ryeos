@@ -1729,6 +1729,30 @@ pub fn launch_linux_sandbox_with_original_namespace_occupancy(
     Ok(process)
 }
 
+/// Same original native owner, borrowing one protected adapter-only writer.
+/// The caller owns publication and must have inspected its complete inherited
+/// role inventory; this operation grants no authenticated terminal evidence.
+/// The writer is never part of a worker request or target descriptor mapping.
+#[cfg(target_os = "linux")]
+pub fn launch_linux_sandbox_with_original_namespace_occupancy_and_terminal_writer(
+    request: LinuxSandboxRequest,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: crate::time::Duration,
+    original_deadline: crate::time::MonotonicDeadline,
+    writer: &crate::InheritedDescriptorAuthority,
+) -> Result<LinuxSandboxProcess, String> {
+    imp::validate_terminal_writer_request(&request, writer, original_deadline)?;
+    let mut pending = crate::exec::PendingNamespaceWatchdog::prepare(
+        limit,
+        cleanup_allowance,
+        original_deadline,
+    )?;
+    let mut process =
+        imp::launch_with_namespace_watchdog_and_terminal_writer(request, &mut pending, writer)?;
+    process.namespace_occupancy_watchdog = Some(pending.finish()?);
+    Ok(process)
+}
+
 /// Launch a held isolated target with one exact namespace-local listener.
 /// Transfer the registered socket to the trusted controller before the target
 /// can be released. A failed transfer drops and kills the owned target.
@@ -2101,7 +2125,7 @@ mod imp {
         let sender = unsafe { crate::take_inherited_descriptor_transfer_sender(transfer_fd) }
             .map_err(|error| format!("adopt loopback transfer endpoint: {error}"))?;
         let (process, source) =
-            launch_with_stdio_and_loopback(request, None, Some(address), None, None)?;
+            launch_with_stdio_and_loopback(request, None, Some(address), None, None, None)?;
         let source = source.ok_or("isolated loopback listener was not created")?;
         source
             .transfer(sender, payload, deadline)
@@ -2114,7 +2138,7 @@ mod imp {
         stdio: Option<&[std::fs::File; 3]>,
         private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
     ) -> Result<LinuxSandboxProcess, String> {
-        launch_with_stdio_and_loopback(request, stdio, None, private_source, None)
+        launch_with_stdio_and_loopback(request, stdio, None, private_source, None, None)
             .map(|(process, _)| process)
     }
 
@@ -2124,7 +2148,81 @@ mod imp {
         private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
         occupancy: Option<&mut crate::exec::PendingNamespaceWatchdog>,
     ) -> Result<LinuxSandboxProcess, String> {
-        launch_with_stdio_and_loopback(request, stdio, None, private_source, occupancy)
+        launch_with_stdio_and_loopback(request, stdio, None, private_source, occupancy, None)
+            .map(|(process, _)| process)
+    }
+
+    pub(super) fn validate_terminal_writer_request(
+        request: &LinuxSandboxRequest,
+        writer: &crate::InheritedDescriptorAuthority,
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        if original_deadline.remaining().is_zero() {
+            return Err(
+                "native terminal writer original window expired before request validation".into(),
+            );
+        }
+        validate_request(request)?;
+        if !matches!(
+            request.lifecycle,
+            LinuxSandboxLifecycle::AwaitRelease { .. }
+        ) {
+            return Err(
+                "native terminal writer requires the original externally-held lifecycle".into(),
+            );
+        }
+        let descriptor = writer.inherited_descriptor()?;
+        if request
+            .target_channels
+            .iter()
+            .any(|(source, destination)| *source == descriptor || *destination == descriptor)
+        {
+            return Err(
+                "native terminal writer cannot be a target channel source or destination".into(),
+            );
+        }
+        let mut peers = vec![0, 1, 2];
+        peers.extend(request.mounts.iter().map(|mount| mount.source_fd));
+        peers.extend(
+            request
+                .character_devices
+                .iter()
+                .map(|device| device.source_fd),
+        );
+        peers.extend(request.target_channels.iter().map(|(source, _)| *source));
+        if let Some(overlay) = &request.overlay {
+            peers.push(
+                overlay
+                    .template
+                    .inherited_authority()
+                    .inherited_descriptor()?,
+            );
+            peers.extend(
+                overlay
+                    .writable_descendant_mounts
+                    .iter()
+                    .map(|mount| mount.source_fd),
+            );
+        }
+        if let LinuxSandboxLifecycle::AwaitRelease {
+            release_fd,
+            release_keepalive_fd,
+        } = request.lifecycle
+        {
+            peers.extend([release_fd, release_keepalive_fd]);
+        }
+        writer.require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+            &peers,
+            original_deadline,
+        )
+    }
+
+    pub(super) fn launch_with_namespace_watchdog_and_terminal_writer(
+        request: LinuxSandboxRequest,
+        occupancy: &mut crate::exec::PendingNamespaceWatchdog,
+        writer: &crate::InheritedDescriptorAuthority,
+    ) -> Result<LinuxSandboxProcess, String> {
+        launch_with_stdio_and_loopback(request, None, None, None, Some(occupancy), Some(writer))
             .map(|(process, _)| process)
     }
 
@@ -2134,6 +2232,7 @@ mod imp {
         ingress: Option<std::net::SocketAddr>,
         private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
         occupancy: Option<&mut crate::exec::PendingNamespaceWatchdog>,
+        terminal_writer: Option<&crate::InheritedDescriptorAuthority>,
     ) -> Result<
         (
             LinuxSandboxProcess,
@@ -2152,6 +2251,13 @@ mod imp {
             .transpose()?;
         if let Some(watchdog) = occupancy.as_ref() {
             watchdog.require_original_window()?;
+        }
+        if let Some(writer) = terminal_writer {
+            let original = occupancy
+                .as_ref()
+                .ok_or("native terminal writer lost its original watchdog owner")?
+                .original_deadline();
+            validate_terminal_writer_request(&request, writer, original)?;
         }
         enter_namespaces(request.network, private_source)?;
         let loopback_source = if let Some(address) = ingress {
@@ -2262,7 +2368,8 @@ mod imp {
         ensure_regular_path(&executable, "sandbox executable")?;
         let cwd = rooted(&request.cwd)?;
         ensure_directory_path(&cwd, "sandbox cwd")?;
-        spawn_target(request, stdio, occupancy).map(|process| (process, loopback_source))
+        spawn_target(request, stdio, occupancy, terminal_writer)
+            .map(|process| (process, loopback_source))
     }
 
     fn validate_request(request: &LinuxSandboxRequest) -> Result<(), String> {
@@ -4262,7 +4369,18 @@ mod imp {
         request: LinuxSandboxRequest,
         stdio: Option<&[std::fs::File; 3]>,
         mut occupancy: Option<&mut crate::exec::PendingNamespaceWatchdog>,
+        terminal_writer: Option<&crate::InheritedDescriptorAuthority>,
     ) -> Result<LinuxSandboxProcess, String> {
+        let terminal_scrub_descriptor = if let Some(writer) = terminal_writer {
+            let original = occupancy
+                .as_ref()
+                .ok_or("native terminal writer lost its original prefork owner")?
+                .original_deadline();
+            validate_terminal_writer_request(&request, writer, original)?;
+            Some(raw_fd(writer.inherited_descriptor()?)?)
+        } else {
+            None
+        };
         let mut ready = [0; 2];
         syscall_zero(
             unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) },
@@ -4362,6 +4480,13 @@ mod imp {
             // explicitly unqualified; no missing ACK is a prebirth receipt.
             if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
                 unsafe { libc::_exit(125) };
+            }
+            if let Some(descriptor) = terminal_scrub_descriptor {
+                // Immediately after the existing first PDEATHSIG syscall:
+                // the target must not retain the adapter's publication end.
+                if unsafe { libc::close(descriptor) } != 0 {
+                    unsafe { libc::_exit(125) };
+                }
             }
             if let Some(descriptors) = scrub {
                 for descriptor in descriptors {
@@ -8977,6 +9102,46 @@ mod tests {
             assert_eq!(failure.diagnostic().len(), imp::MAX_LAUNCH_FAILURE_BYTES);
             assert!(failure.diagnostic().bytes().all(|byte| byte == b'x'));
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_terminal_request_rejects_actual_write_alias_and_target_destination() {
+        let mut held = crate::supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let deadline = crate::time::MonotonicDeadline::after(std::time::Duration::from_secs(5));
+        let writer = held.prepare_native_settlement_channel(deadline).unwrap();
+        let mut request = minimal_request();
+        request.lifecycle = LinuxSandboxLifecycle::AwaitRelease {
+            release_fd: held
+                .attachment_release_reader
+                .inherited_descriptor()
+                .unwrap(),
+            release_keepalive_fd: held
+                .attachment_release_keepalive_writer
+                .inherited_descriptor()
+                .unwrap(),
+        };
+        // Descriptor/request metadata only; no native process or proof fixture.
+        imp::validate_terminal_writer_request(&request, &writer, deadline).unwrap();
+        let alias = writer.duplicate_at_or_above(64).unwrap();
+        request.target_channels = vec![(alias.inherited_descriptor().unwrap(), 0)];
+        let error = imp::validate_terminal_writer_request(&request, &writer, deadline).unwrap_err();
+        assert!(error.contains("aliases"), "{error}");
+        request.target_channels = vec![(
+            held.writer.inherited_descriptor().unwrap(),
+            writer.inherited_descriptor().unwrap(),
+        )];
+        let error = imp::validate_terminal_writer_request(&request, &writer, deadline).unwrap_err();
+        assert!(
+            error.contains("target channel source or destination"),
+            "{error}"
+        );
+        assert!(writer.file_identity().is_ok());
+        assert!(alias.file_identity().is_ok());
     }
 
     pub(super) fn minimal_request() -> LinuxSandboxRequest {
