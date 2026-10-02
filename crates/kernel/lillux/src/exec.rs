@@ -5522,7 +5522,7 @@ impl RunningProcess {
         if let Some(failure) = &channel.failure {
             return Err(failure.clone());
         }
-        let result = (|| {
+        let result: Result<(), String> = (|| {
             let (target, mounts, original) = expected?;
             if original.has_elapsed() || channel.original_deadline.has_elapsed() {
                 return Err("original native correspondence expired before comparison".into());

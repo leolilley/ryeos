@@ -3,6 +3,7 @@
 //! No serialized release authority, timer renewal or signal-as-death receipt.
 use super::*;
 use sha2::Digest as _;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt as _;
 
 const PACKET_BYTES: usize = 57;

@@ -258,6 +258,8 @@ pub(super) fn probe() -> Result<(), String> {
             (LinuxSandboxProcess {
                 pid: creator,
                 namespace_lifetime: None,
+                native_terminal_observation: None,
+                namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
@@ -337,6 +339,8 @@ fn bounded_probe_child(operation: impl FnOnce() -> Result<(), String>) -> Result
         (LinuxSandboxProcess {
             pid,
             namespace_lifetime: None,
+            native_terminal_observation: None,
+            namespace_occupancy_watchdog: None,
             launch_failure: None,
             applied_launch: None,
             observed_applied_launch: None,
