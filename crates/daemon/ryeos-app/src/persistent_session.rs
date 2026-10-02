@@ -4761,6 +4761,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unsupported_native_wait_returns_actual_execution_for_ordinary_readiness() {
+        let mut started = fake_framed_session().unwrap();
+        assert!(!started.running.has_selected_original_launch_context());
+        let owner = match started
+            .running
+            .wait_for_natural_exit_retaining_native(Duration::ZERO)
+        {
+            Err(owner) => owner,
+            Ok(_) => panic!("ordinary owner must not become a selected outcome"),
+        };
+        assert!(!owner.has_selected_original_launch_context());
+        assert!(owner.native_terminal_raw_view().is_none());
+        started.running = owner;
+        let pool = PersistentSessionPool::new();
+        let backlog = Arc::clone(&pool.streams.backlog);
+        let process = match ready_process(started, &test_wire(), &owned_start_lifecycle(), backlog)
+        {
+            Ok(process) => process,
+            Err(failure) => panic!("returned actual owner lost readiness: {}", failure.error),
+        };
+        process.retire().unwrap();
+    }
+
+    #[test]
+    fn duplicate_actual_running_owners_quarantine_scratch_and_refuse_cleanup() {
+        let (_root, path, guard) = owned_start_scratch();
+        let start = PersistentSessionPooledStart::new();
+        start
+            .retain_before_contact(vec![Box::new(Arc::clone(&guard))])
+            .unwrap();
+        let first = fake_framed_session().unwrap();
+        let second = fake_framed_session().unwrap();
+        start.retain_running_unsettled(first.running);
+        start.retain_running_unsettled(second.running);
+        drop(guard);
+        assert!(start.has_retained_custody());
+        assert!(start.prove_cleanup().is_err());
+        {
+            let retained = start.retained.lock().unwrap();
+            assert_eq!(retained.retained_running.len(), 2);
+            assert!(retained.admission_refused);
+            assert!(retained.phase == PooledStartPhase::Unsettled);
+            assert!(!retained.lifelines.is_empty());
+        }
+        assert_eq!(
+            std::fs::read(path.join("sentinel")).unwrap(),
+            b"original-slot-bytes"
+        );
+        // Existing pool/start destruction is best-effort only, not settlement.
+        drop(start);
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn actual_callback_budget_expires_under_held_contact_retention_lock_without_renewal() {
         let root = tempfile::tempdir().unwrap();
         let fixture =
