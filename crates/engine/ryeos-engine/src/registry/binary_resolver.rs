@@ -59,6 +59,28 @@ pub struct CapturedExecutable {
     pub handle: lillux::InheritedDescriptorAuthority,
 }
 
+/// Actual signed executable capture under the TrustStore supplied to the
+/// capture operation. Private fields preserve the successful verification and
+/// same sealed descriptor; caller-authored capture metadata cannot create it.
+///
+/// These are content-verification facts only. This does not establish node
+/// admission, a registered generation, native execution or settlement. A
+/// protected consumer must independently bind its actual node trust, selected
+/// backend and the same descriptor to its original held/running launch.
+#[derive(Debug)]
+pub struct VerifiedCapturedExecutable {
+    captured: CapturedExecutable,
+}
+
+impl VerifiedCapturedExecutable {
+    /// Borrow the actual retained capture without transferring or replacing
+    /// its descriptor or source facts. The ordinary metadata remains metadata;
+    /// this borrow grants no node, process, driver or financial authority.
+    pub fn captured(&self) -> &CapturedExecutable {
+        &self.captured
+    }
+}
+
 /// Signed bundle bytes selected for a guest target. The captured descriptor is
 /// sealed as non-executable data; selecting a guest payload never makes it a
 /// locally dispatchable command.
@@ -221,6 +243,22 @@ pub struct BundleExecutorManifestIdentity {
 struct VerifiedBundleExecutorSet {
     identity: Option<BundleExecutorManifestIdentity>,
     item_refs: HashSet<String>,
+}
+
+/// Capture exact signed executable bytes and retain a private witness of this
+/// actual successful capture operation under the supplied trust store.
+///
+/// An arbitrary supplied store cannot confer node admission. Only a separately
+/// guarded consumer can associate these facts with its independently admitted
+/// node generation/backend and the same actual selected launch. This function
+/// accepts no caller-built CapturedExecutable or provenance DTO.
+pub fn capture_verified_bundle_binary_ref(
+    binary_ref: &str,
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<VerifiedCapturedExecutable, EngineError> {
+    let captured = capture_bundle_binary_ref(binary_ref, bundle_root, node_trust_store)?;
+    Ok(VerifiedCapturedExecutable { captured })
 }
 
 /// Resolve, verify, open without following symlinks, and re-hash an installed
