@@ -760,6 +760,7 @@ struct PooledStartRetention {
     // EXISTING start slot, before first possible RuntimeDb/ledger write.
     trusted_inputs: Option<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
     original_funding: Option<crate::accounting_db::precontact::OriginalFundingOwner>,
+    original_callback_budget: Option<crate::handler_context::OriginalExecutionBudget>,
 }
 
 impl PersistentSessionPooledStart {
@@ -774,9 +775,36 @@ impl PersistentSessionPooledStart {
                 admission_refused: false,
                 trusted_inputs: None,
                 original_funding: None,
+                original_callback_budget: None,
             }),
             callback_in_flight: AtomicBool::new(true),
         }
+    }
+
+    /// Retain the actual verified callback clock in this same pooled-start slot.
+    /// Ordinary scope JSON, replay and a second callback cannot replace it.
+    pub fn retain_original_callback_budget(
+        &self,
+        budget: &crate::handler_context::OriginalExecutionBudget,
+        allocation_scope: &ryeos_state::objects::AdmittedAccountingScope,
+    ) -> Result<()> {
+        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        if retained.phase != PooledStartPhase::Preparing
+            || retained.admission_refused
+            || retained.original_callback_budget.is_some()
+        {
+            retained.admission_refused = true;
+            bail!("original pooled callback budget cannot be replaced or replayed");
+        }
+        // Keep the supplied original even if subsequent validation refuses.
+        retained.original_callback_budget = Some(budget.clone());
+        if budget.precontact_binding().scope != allocation_scope
+            || budget.contact_expiry().has_elapsed()
+        {
+            retained.admission_refused = true;
+            bail!("original pooled callback budget differs from allocation scope or expired");
+        }
+        Ok(())
     }
 
     /// Stage the verified input and SAME scratch owner before any write.
@@ -807,13 +835,21 @@ impl PersistentSessionPooledStart {
             bail!("original pooled owner no longer admits funding preparation");
         }
         let result = (|| {
+            let retained_budget = retained
+                .original_callback_budget
+                .as_ref()
+                .context("original trusted funding lacks retained callback budget")?;
+            if retained_budget != budget {
+                bail!("original trusted funding cannot replace retained callback clock");
+            }
+            let original_expiry = retained_budget.contact_expiry();
             let funding = crate::accounting_db::precontact::OriginalFundingOwner::prepare(
                 state,
                 retained
                     .trusted_inputs
                     .as_ref()
                     .expect("input retained before validation"),
-                budget,
+                retained_budget,
                 allocation_scope,
                 original,
                 thread_id,
@@ -827,7 +863,7 @@ impl PersistentSessionPooledStart {
                 .reserve_process_resource_launch_with_scratch_until(
                     original,
                     &scratch,
-                    budget.contact_expiry(),
+                    original_expiry,
                 )?;
             retained
                 .original_funding

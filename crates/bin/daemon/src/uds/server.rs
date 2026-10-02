@@ -630,7 +630,32 @@ pub(crate) async fn dispatch_runtime_method(
             validated_thread_auth.as_ref().ok_or_else(|| {
                 anyhow!("provider_attempt_local_stream_start requires validated thread authority")
             })?;
-            accounting::handle_provider_attempt_local_stream_start(&clean_params, state, cap)
+            // Derive only from the actual two-proof callback stores. Preserve
+            // this opaque owner across the asynchronous pooled-start closure;
+            // accounting scope JSON alone cannot supply its original clock.
+            let original_budget =
+                ryeos_app::handler_context::HandlerContext::budget_from_verified_callback(
+                    state,
+                    params
+                        .get("callback_token")
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| {
+                            anyhow!("local stream original budget lacks callback token")
+                        })?,
+                    params
+                        .get("thread_auth_token")
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| {
+                            anyhow!("local stream original budget lacks thread auth token")
+                        })?,
+                    &cap.thread_id,
+                )?;
+            accounting::handle_provider_attempt_local_stream_start(
+                &clean_params,
+                state,
+                cap,
+                original_budget,
+            )
         }
         "runtime.provider_attempt_local_stream_next" => {
             let cap = callback_cap.as_ref().ok_or_else(|| {

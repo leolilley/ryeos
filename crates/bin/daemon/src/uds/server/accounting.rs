@@ -1216,6 +1216,7 @@ pub(super) fn handle_provider_attempt_local_stream_start(
     params: &Value,
     state: &AppState,
     cap: &CallbackCapability,
+    original_budget: Option<ryeos_app::handler_context::OriginalExecutionBudget>,
 ) -> Result<Value> {
     let request: ProviderAttemptLocalStreamStartParams = serde_json::from_value(params.clone())
         .context("decode provider_attempt_local_stream_start params")?;
@@ -1347,6 +1348,7 @@ pub(super) fn handle_provider_attempt_local_stream_start(
             &owned_state,
             &owned_capsule,
             owned_accounting_scope.as_ref(),
+            original_budget.as_ref(),
             &ryeos_app::persistent_session::PersistentSessionRequestIdentity {
                 thread_id: owned_thread_id.clone(),
                 request_digest: ryeos_accounting::HexDigest::new(owned_request_hash.clone())

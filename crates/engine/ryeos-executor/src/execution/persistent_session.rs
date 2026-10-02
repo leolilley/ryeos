@@ -2574,6 +2574,7 @@ pub fn execute_capsule<C, D>(
     state: &AppState,
     capsule_hash: &str,
     accounting_scope: Option<&ryeos_state::objects::AdmittedAccountingScope>,
+    original_budget: Option<&ryeos_app::handler_context::OriginalExecutionBudget>,
     request_identity: &ryeos_app::persistent_session::PersistentSessionRequestIdentity,
     request_body: Value,
     cancelled: C,
@@ -2631,6 +2632,7 @@ where
                 &capsule,
                 &exact,
                 accounting_scope,
+                original_budget,
                 &pool_key,
             )
         },
@@ -2808,9 +2810,18 @@ fn start_capsule_process(
     capsule: &AdmittedPersistentSessionCapsule,
     exact: &PersistentSessionExactProgram,
     accounting_scope: Option<&ryeos_state::objects::AdmittedAccountingScope>,
+    original_budget: Option<&ryeos_app::handler_context::OriginalExecutionBudget>,
     funding_owner: &str,
 ) -> Result<StartedPersistentSession> {
     let session_protocol = retained_session_protocol(&state.engine, capsule)?;
+    if session_protocol.cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup
+    {
+        original_start.retain_original_callback_budget(
+            original_budget
+                .context("trusted pooled start lacks actual original callback budget")?,
+            accounting_scope.context("trusted pooled start lacks actual allocation scope")?,
+        )?;
+    }
     validate_session_process_control(state, &session_protocol)?;
     if session_protocol.process_mode != PersistentSessionProcessMode::PooledRequests {
         bail!("exclusive persistent-session protocol cannot use the pooled launcher");
