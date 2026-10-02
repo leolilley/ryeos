@@ -96,30 +96,72 @@ class RuntimeTests(unittest.TestCase):
         authored = runtime.TreeBounds.from_contract(relationship['required_product']['bounds'])
         self.assertEqual(runtime.GNU_RUNTIME_BOUNDS_CEILING, authored)
 
-    def test_channel_entry_requires_bounds_before_channel_import(self):
-        fake_channel = SimpleNamespace(
-            CleanupChannel=lambda *args: (_ for _ in ()).throw(AssertionError('channel constructed')),
-            descriptor=lambda *args: (_ for _ in ()).throw(AssertionError('descriptor read')),
+    def test_channel_entry_requires_typed_v2_selection_before_prepare(self):
+        channel = SimpleNamespace(
+            gnu_bounds=None, driver_bounds=None, uuid_v2_hex=None,
+            observe=lambda _: None, authorize_shutdown=lambda: None,
         )
-        with patch.dict(sys.modules, {'cleanup_channel': fake_channel}):
-            with self.assertRaisesRegex(ValueError, 'bounds'):
-                runtime.run_channel_product()
+        fake_channel = SimpleNamespace(
+            CleanupChannel=lambda *args: channel,
+            descriptor=lambda value: 7,
+        )
+        env = {'RYEOS_RESOURCE_CLEANUP_FD': '7', 'RYEOS_SESSION_FD': '3'}
+        with patch.dict(sys.modules, {'cleanup_channel': fake_channel}), patch.dict(os.environ, env):
+            with patch.object(runtime, 'prepare_environment', side_effect=AssertionError('provider preparation ran')):
+                with self.assertRaisesRegex(ValueError, 'bounds'):
+                    runtime.run_channel_product()
+
+    def test_channel_entry_dispatches_only_typed_init_v2_comparisons(self):
+        selected = runtime.TreeBounds(100, 10, 1024, 4096)
+        channel = SimpleNamespace(
+            gnu_bounds=selected, driver_bounds=selected, uuid_v2_hex='1' * 32,
+            observe=lambda _: None, authorize_shutdown=lambda: None,
+        )
+        fake_channel = SimpleNamespace(CleanupChannel=lambda *args: channel, descriptor=lambda value: 7)
+        env = {'RYEOS_RESOURCE_CLEANUP_FD': '7', 'RYEOS_SESSION_FD': '3'}
+        with patch.dict(sys.modules, {'cleanup_channel': fake_channel}), patch.dict(os.environ, env):
+            with patch.object(runtime, 'run_product', return_value='accepted') as run:
+                self.assertEqual(runtime.run_channel_product(), 'accepted')
+        self.assertEqual(run.call_args.kwargs['gnu_bounds'], selected)
+        self.assertEqual(run.call_args.kwargs['driver_bounds'], selected)
+        self.assertEqual(run.call_args.kwargs['expected_uuid_v2_hex'], '1' * 32)
 
     def test_product_requires_bounds_before_prepare_and_passes_typed_values(self):
         selected = runtime.TreeBounds(100, 10, 1024, 4096)
         with patch.object(runtime, 'prepare_environment', side_effect=AssertionError('prepare ran')):
             with self.assertRaisesRegex(ValueError, 'bounds'):
                 runtime.run_product(observe=lambda _: None)
+            with self.assertRaisesRegex(ValueError, 'UUID-v2'):
+                runtime.run_product(
+                    observe=lambda _: None, gnu_bounds=selected, driver_bounds=selected,
+                )
+            with self.assertRaisesRegex(ValueError, 'UUID-v2'):
+                runtime.run_product(
+                    observe=lambda _: None, gnu_bounds=selected, driver_bounds=selected,
+                    expected_uuid_v2_hex='0' * 32,
+                )
+        calls = []
+        generated = SimpleNamespace(__file__=str(self.root / 'tinygrad/tinygrad/runtime/autogen/cuda.py'))
+        lifecycle_module = SimpleNamespace(install=lambda **kwargs: calls.append(('install', kwargs)) or object())
         with patch.object(runtime, 'prepare_environment', return_value=(self.root, self.root, self.root, self.root)) as prepare:
-            # Stop after preparation without importing native/lifecycle components.
-            with patch.dict(sys.modules, {'cuda_lifecycle': SimpleNamespace(install=lambda **_: None)}):
-                with patch.object(runtime, 'run_with_lifecycle', side_effect=RuntimeError('stop after wiring')):
-                    with self.assertRaisesRegex(RuntimeError, 'stop after wiring'):
-                        runtime.run_product(
-                            observe=lambda _: None, gnu_bounds=selected, driver_bounds=selected,
-                        )
+            with patch.object(runtime, 'verify_origins'):
+                with patch.object(runtime, 'qualify_ordinal_zero', side_effect=lambda **kwargs: calls.append(('qualify', kwargs))):
+                    with patch.dict(sys.modules, {
+                        'cuda_lifecycle': lifecycle_module,
+                        'tinygrad.runtime.autogen.cuda': generated,
+                    }):
+                        # Stop after binding qualification and lifecycle install.
+                        with patch.object(runtime, 'run_with_lifecycle', side_effect=RuntimeError('stop after wiring')):
+                            with self.assertRaisesRegex(RuntimeError, 'stop after wiring'):
+                                runtime.run_product(
+                                    observe=lambda _: None, gnu_bounds=selected, driver_bounds=selected,
+                                    expected_uuid_v2_hex='1' * 32,
+                                )
         self.assertIs(prepare.call_args.kwargs['gnu_bounds'], selected)
         self.assertIs(prepare.call_args.kwargs['driver_bounds'], selected)
+        self.assertEqual([name for name, _ in calls], ['qualify', 'install'])
+        self.assertEqual(calls[0][1]['expected_uuid_v2_hex'], '1' * 32)
+        self.assertEqual(calls[1][1]['bindings'], generated)
 
     def test_lifecycle_wraps_import_session_and_constructor_failure(self):
         for fail in ('import', 'constructor', None):

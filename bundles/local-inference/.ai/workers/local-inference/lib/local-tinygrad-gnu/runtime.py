@@ -12,6 +12,7 @@ from typing import Mapping
 
 from bootstrap_support import _member, _environment, inspect_layout, install_exact_library_resolver
 from driver_closure import TreeBounds, inspect_cuda_driver_closure
+from cuda_lifecycle.device_binding import qualify_ordinal_zero
 
 
 # Exact ceiling from gnu_runtime_to_private_worker in the unsigned product draft.
@@ -57,6 +58,14 @@ def _retained_tree_bounds(
     ):
         raise ValueError('retained GNU product bounds exceed its authored relationship ceiling')
     return selected_gnu, selected_driver
+
+
+def _retained_device_uuid(value: object) -> str:
+    if (not isinstance(value, str) or len(value) != 32
+            or any(character not in '0123456789abcdef' for character in value)
+            or value == '0' * 32):
+        raise ValueError('missing D-retained canonical UUID-v2 comparison')
+    return value
 
 
 def closed_environment(layout: dict[str, Path], supplied: dict[str, str]) -> dict[str, str]:
@@ -139,17 +148,23 @@ def run_product(
     *, observe=None, bindings=None, before_shutdown=None,
     gnu_bounds: TreeBounds | Mapping[str, object] | None = None,
     driver_bounds: TreeBounds | Mapping[str, object] | None = None,
+    expected_uuid_v2_hex: str | None = None,
 ):
     # A Python callable is only the consumer interface, not authentication.
     # D must supply it through the admitted same-process private channel contract.
     if not callable(observe):
         raise RuntimeError("missing D-owned admitted private cleanup observation binding")
     retained_gnu_bounds, retained_driver_bounds = _retained_tree_bounds(gnu_bounds, driver_bounds)
+    retained_uuid_v2_hex = _retained_device_uuid(expected_uuid_v2_hex)
     workspace, gnu, worker, tinygrad = prepare_environment(
         gnu_bounds=retained_gnu_bounds, driver_bounds=retained_driver_bounds
     )
     import importlib
     from cuda_lifecycle import install
+    if bindings is None:
+        bindings = importlib.import_module("tinygrad.runtime.autogen.cuda")
+    verify_origins((gnu / "python", worker, tinygrad))
+    qualify_ordinal_zero(bindings=bindings, expected_uuid_v2_hex=retained_uuid_v2_hex)
     lifecycle = install(selected_device=0, observe=observe, bindings=bindings)
 
     def load_session():
@@ -164,18 +179,18 @@ def run_product(
     return run_with_lifecycle(lifecycle, load_session, before_shutdown)
 
 
-def run_channel_product(
-    *, gnu_bounds: TreeBounds | Mapping[str, object] | None = None,
-    driver_bounds: TreeBounds | Mapping[str, object] | None = None,
-):
-    retained_gnu_bounds, retained_driver_bounds = _retained_tree_bounds(gnu_bounds, driver_bounds)
+def run_channel_product():
     from cleanup_channel import CleanupChannel, descriptor
     cleanup_fd = descriptor(os.environ.get("RYEOS_RESOURCE_CLEANUP_FD"))
     session_text = os.environ.get("RYEOS_SESSION_FD", "")
     if not session_text.isascii() or not session_text.isdecimal() or str(int(session_text)) != session_text or not 0 <= int(session_text) <= 2147483647 or int(session_text) in (1, 2):
         raise RuntimeError("persistent descriptor is not canonical")
     channel = CleanupChannel(cleanup_fd, int(session_text))
+    # CleanupChannel's strict v2 init is the sole input source. These fields are
+    # comparison data from D's original owner, never self-authenticating claims.
     return run_product(
         observe=channel.observe, before_shutdown=channel.authorize_shutdown,
-        gnu_bounds=retained_gnu_bounds, driver_bounds=retained_driver_bounds,
+        gnu_bounds=getattr(channel, 'gnu_bounds', None),
+        driver_bounds=getattr(channel, 'driver_bounds', None),
+        expected_uuid_v2_hex=getattr(channel, 'uuid_v2_hex', None),
     )
