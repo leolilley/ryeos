@@ -74,7 +74,8 @@ impl PreparedExternalDirectProjectFile {
             "execution project file mount changed its exact descriptor or facts"
         );
         ensure!(
-            self.observation.size() == self.metadata.size
+            self.observation.permission_mode()? == declaration.normalized_mode
+                && self.observation.size() == self.metadata.size
                 && self
                     .authority
                     .digest_regular_file_stable_exact(&self.observation)?
@@ -166,8 +167,12 @@ pub fn prepare_external_direct_project_file(
             && lillux::sha256_hex(&bytes) == metadata.blob_hash,
         "selected C execution project file mode/size/hash differs from signed input"
     );
-    let authority = lillux::sealed_memfd(c"ryeos-execution-project-file", &bytes)
-        .map_err(anyhow::Error::msg)?;
+    let authority = lillux::sealed_normalized_data_memfd(
+        c"ryeos-execution-project-file",
+        &bytes,
+        declaration.normalized_mode,
+    )
+    .map_err(anyhow::Error::msg)?;
     let observation = authority.regular_file_observation()?;
     let prepared = PreparedExternalDirectProjectFile {
         capsule_hash: capsule.content_hash()?,
@@ -227,7 +232,9 @@ mod tests {
                 BTreeMap::from([("member.txt".to_owned(), metadata.clone())]),
             )
             .unwrap();
-        let authority = lillux::sealed_memfd(c"ryeos-project-file-control", bytes).unwrap();
+        let authority =
+            lillux::sealed_normalized_data_memfd(c"ryeos-project-file-control", bytes, 0o644)
+                .unwrap();
         let observation = authority.regular_file_observation().unwrap();
         let declaration = PlanExecutionProjectFileInput {
             relative_path: "member.txt".to_owned(),

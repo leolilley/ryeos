@@ -41,8 +41,9 @@ pub use exec::{
     configure_owner_private_creation_mask, configure_subprocess_limits, disable_process_core_dumps,
     inherited_descriptor_coordinate, inherited_descriptor_path_for, inherited_duplex_channel_pair,
     protect_descriptor_from_exec, replace_current_process, sealed_executable_memfd,
-    sealed_executable_memfd_from_reader, sealed_memfd, supervised_launcher_attachment_status_pipe,
-    supervised_launcher_status_pipe, validate_subprocess_limits,
+    sealed_executable_memfd_from_reader, sealed_memfd, sealed_normalized_data_memfd,
+    supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
+    validate_subprocess_limits,
 };
 pub use exec::{
     inherited_executable_path, take_inherited_descriptor_authority,

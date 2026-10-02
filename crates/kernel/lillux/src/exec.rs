@@ -515,6 +515,35 @@ pub fn sealed_memfd(
     )
 }
 
+/// Capture sealed non-executable data with an exact portable input mode.
+/// Protocol data should continue to use `sealed_memfd` and its private default.
+/// Only owner-private or normalized read-only guest data modes are admitted.
+#[cfg(target_os = "linux")]
+pub fn sealed_normalized_data_memfd(
+    name: &std::ffi::CStr,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<InheritedDescriptorAuthority, String> {
+    if !matches!(mode, 0o600 | 0o644) {
+        return Err("sealed data mode must be 0600 or 0644".to_owned());
+    }
+    sealed_memfd_with_flags(
+        name,
+        bytes,
+        libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        Some(mode as libc::mode_t),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn sealed_normalized_data_memfd(
+    _name: &std::ffi::CStr,
+    _bytes: &[u8],
+    _mode: u32,
+) -> Result<InheritedDescriptorAuthority, String> {
+    Err("sealed data memfd is supported only on Linux".to_owned())
+}
+
 /// Create a sealed anonymous file that the supported Linux kernel may execute.
 /// This is separate from protocol-data memfds so hardened `memfd_noexec`
 /// policies cannot silently turn an exact executable capture into a noexec fd.

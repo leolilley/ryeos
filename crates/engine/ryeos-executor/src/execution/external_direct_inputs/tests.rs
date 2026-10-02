@@ -609,6 +609,63 @@ fn selected_c_member_uses_sealed_cas_descriptor_and_refuses_missing_custody() {
             .count(),
         1
     );
+    // Carry the actual prepared C descriptor through package inventory,
+    // staging and guest content recheck. A private 0600 capture advertised
+    // as 0644 fails this boundary even when its bytes and digest agree.
+    assert_eq!(
+        proof
+            .input_authority()
+            .regular_file_observation()
+            .unwrap()
+            .permission_mode()
+            .unwrap(),
+        0o644
+    );
+    let package_parent = tempfile::tempdir().unwrap();
+    let package_parent = lillux::PinnedDirectory::open(package_parent.path())
+        .unwrap()
+        .unwrap();
+    let bootstrap_bytes = b"candidate-file-package-bootstrap";
+    let supervisor_bytes = b"candidate-file-package-supervisor";
+    let launcher_bytes = b"candidate-file-package-launcher";
+    let bootstrap = lillux::sealed_memfd(c"candidate-package-bootstrap", bootstrap_bytes).unwrap();
+    let supervisor =
+        lillux::sealed_executable_memfd(c"candidate-package-supervisor", supervisor_bytes).unwrap();
+    let launcher =
+        lillux::sealed_executable_memfd(c"candidate-package-launcher", launcher_bytes).unwrap();
+    let expected = ryeos_external_execution_contract::staging_package::GuestStagingExpected {
+        inputs: prepared.authority.projection(),
+        activation_request_digest: &"d".repeat(64),
+        bootstrap_sha256: &lillux::sha256_hex(bootstrap_bytes),
+        supervisor_sha256: &lillux::sha256_hex(supervisor_bytes),
+        launcher_sha256: &lillux::sha256_hex(launcher_bytes),
+        maximum_regular_bytes: 16 * 1024 * 1024,
+        maximum_framed_bytes: 16 * 1024 * 1024,
+    };
+    let package = ryeos_external_execution::guest_package_producer::prepare_private_guest_package(
+        &package_parent,
+        &prepared.authority,
+        &bootstrap,
+        &supervisor,
+        &launcher,
+        &expected,
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+    )
+    .unwrap();
+    let configuration_index = prepared
+        .authority
+        .projection()
+        .inputs
+        .iter()
+        .position(|input| input.role == GuestMountRole::Configuration)
+        .unwrap();
+    let configuration_path = format!("input-{configuration_index:02}");
+    assert!(package.manifest().entries.iter().any(|entry| {
+        matches!(entry, ryeos_external_execution_contract::staging_package::GuestStagingEntry::RegularFile {
+            path, mode: 0o644, ..
+        } if path == &configuration_path)
+    }));
+    package.discard().unwrap();
     assert!(prepare_external_direct_project_file(&capsule, &protocol, None).is_err());
     let mut no_evaluate = capsule.clone();
     no_evaluate.sealed_invocation["candidate_evaluation"] = serde_json::Value::Null;
