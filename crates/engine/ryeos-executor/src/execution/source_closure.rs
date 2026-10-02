@@ -42,10 +42,6 @@ pub(crate) fn bind_external_source(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
 ) -> anyhow::Result<Option<ExternalSourceDelivery>> {
-    use ryeos_external_execution_contract::{
-        GuestMountAccess, GuestMountContentAuthority, GuestMountInput, GuestMountKind,
-        GuestMountRole,
-    };
     capsule.validate()?;
     let expected = ryeos_state::objects::AdmittedLaunchCapsule::source_projection_in_program(
         &capsule.exact_program,
@@ -60,6 +56,69 @@ pub(crate) fn bind_external_source(
         actual == expected,
         "external source resolution differs from the retained launch capsule"
     );
+    bind_external_source_bytes(state, resolution, expected.as_ref())
+}
+
+/// Redeem only the B-owned source bytes admitted by the real source owner.
+/// This is not a substitute for the original mechanism root, deadline,
+/// fixture, program, or born-capsule checks at their respective owners.
+pub(crate) fn bind_external_admitted_source(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    source: &ryeos_app::source_closure_admission::AdmittedSourceClosure,
+) -> anyhow::Result<ExternalSourceDelivery> {
+    let projection = resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+        .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
+        .transpose()?
+        .ok_or_else(|| anyhow::anyhow!("admitted source has no finalized source projection"))?;
+    let (proof, store) = source.finalization_evidence();
+    anyhow::ensure!(
+        proof.projection() == &projection
+            && source.binding().digest()? == projection.binding_hash
+            && source.manifest().digest()? == projection.content_manifest_hash
+            && source.binding().owner_key()? == projection.owner_key
+            && source.manifest().totals.file_count == projection.file_count
+            && source.manifest().totals.total_bytes == projection.total_bytes,
+        "finalized B source differs from its admitted capture"
+    );
+    source
+        .binding()
+        .validate_content_manifest(source.manifest())?;
+    let source_authority = source.source_authority()?;
+    let state_authority = state.state_store.pinned_state_authority()?;
+    anyhow::ensure!(
+        source_authority.cas_directory().identity()?
+            == state_authority.cas_directory().identity()?
+            && store.source_closure_available(
+                &projection.binding_hash,
+                &projection.content_manifest_hash,
+            )?,
+        "admitted B source lost its original pinned CAS authority"
+    );
+    let delivered = bind_external_source_bytes(state, resolution, Some(&projection))?
+        .ok_or_else(|| anyhow::anyhow!("admitted B source produced no external delivery"))?;
+    anyhow::ensure!(
+        delivered.records.binding() == source.binding()
+            && delivered.records.manifest() == source.manifest(),
+        "delivered B source differs from its admitted binding and manifest"
+    );
+    Ok(delivered)
+}
+
+/// Shared CAS redemption and descriptor construction after the caller's
+/// independent capsule or retained-source-owner provenance check.
+fn bind_external_source_bytes(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    expected: Option<&ryeos_state::objects::EffectiveSourceClosureProjection>,
+) -> anyhow::Result<Option<ExternalSourceDelivery>> {
+    use ryeos_external_execution_contract::{
+        GuestMountAccess, GuestMountContentAuthority, GuestMountInput, GuestMountKind,
+        GuestMountRole,
+    };
     validate_external_mount_separation(state, resolution, SourceMountPlacement::ExecutionRuntime)?;
     let Some(bound) = bind_source(
         state,
@@ -73,9 +132,7 @@ pub(crate) fn bind_external_source(
     };
     let records = bound.records.clone();
     records.validate_projection(
-        expected
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("external source lacks capsule authority"))?,
+        expected.ok_or_else(|| anyhow::anyhow!("external source lacks admitted authority"))?,
     )?;
     let binding_bytes = lillux::canonical_json(&records.binding().to_value()?)?;
     let manifest_bytes = lillux::canonical_json(&records.manifest().to_value()?)?;
