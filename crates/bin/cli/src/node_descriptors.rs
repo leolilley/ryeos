@@ -128,6 +128,8 @@ mod tests {
         let snapshot = NodeConfigSnapshot {
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
+            guest_runtime_materialization: Vec::new(),
+            runtime_snapshot_qualification: Vec::new(),
             bundles: vec![],
             routes: vec![],
             commands: vec![ryeos_runtime::CommandDef {
