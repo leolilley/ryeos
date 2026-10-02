@@ -1,5 +1,6 @@
 """Bounded offline fixtures: no native libraries, CUDA, weights or providers."""
 import contextlib
+import ctypes
 import hashlib
 import importlib.util
 import json
@@ -141,7 +142,15 @@ class RuntimeTests(unittest.TestCase):
                     expected_uuid_v2_hex='0' * 32,
                 )
         calls = []
-        generated = SimpleNamespace(__file__=str(self.root / 'tinygrad/tinygrad/runtime/autogen/cuda.py'))
+        def device_count(output):
+            calls.append(('count', None))
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_int)).contents.value = 1
+            return 0
+        generated = SimpleNamespace(
+            __file__=str(self.root / 'tinygrad/tinygrad/runtime/autogen/cuda.py'),
+            cuInit=lambda flags: calls.append(('init', flags)) or 0,
+            cuDeviceGetCount=device_count,
+        )
         lifecycle_module = SimpleNamespace(install=lambda **kwargs: calls.append(('install', kwargs)) or object())
         with patch.object(runtime, 'prepare_environment', return_value=(self.root, self.root, self.root, self.root)) as prepare:
             with patch.object(runtime, 'verify_origins'):
@@ -158,9 +167,37 @@ class RuntimeTests(unittest.TestCase):
                             )
         self.assertIs(prepare.call_args.kwargs['gnu_bounds'], selected)
         self.assertIs(prepare.call_args.kwargs['driver_bounds'], selected)
-        self.assertEqual([name for name, _ in calls], ['install'])
-        self.assertEqual(calls[0][1]['expected_uuid_v2_hex'], '1' * 32)
-        self.assertEqual(calls[0][1]['bindings'], generated)
+        self.assertEqual([name for name, _ in calls], ['init', 'count', 'install'])
+        self.assertEqual(calls[-1][1]['expected_uuid_v2_hex'], '1' * 32)
+        self.assertEqual(calls[-1][1]['bindings'], generated)
+
+    def test_zero_multiple_and_failed_device_counts_refuse_before_lifecycle(self):
+        selected = runtime.TreeBounds(100, 10, 1024, 4096)
+        for visible_count, init_status, count_status in ((0, 0, 0), (2, 0, 0), (1, 1, 0), (1, 0, 1)):
+            with self.subTest(visible_count=visible_count, init_status=init_status, count_status=count_status):
+                calls = []
+                def device_count(output):
+                    calls.append('count')
+                    ctypes.cast(output, ctypes.POINTER(ctypes.c_int)).contents.value = visible_count
+                    return count_status
+                generated = SimpleNamespace(
+                    __file__=str(self.root / 'tinygrad/tinygrad/runtime/autogen/cuda.py'),
+                    cuInit=lambda flags: calls.append('init') or init_status,
+                    cuDeviceGetCount=device_count,
+                )
+                lifecycle_module = SimpleNamespace(install=lambda **kwargs: calls.append('install'))
+                with patch.object(runtime, 'prepare_environment', return_value=(self.root, self.root, self.root, self.root)):
+                    with patch.object(runtime, 'verify_origins'):
+                        with patch.dict(sys.modules, {
+                            'cuda_lifecycle': lifecycle_module,
+                            'tinygrad.runtime.autogen.cuda': generated,
+                        }):
+                            with self.assertRaisesRegex(RuntimeError, 'CUDA'):
+                                runtime.run_product(
+                                    observe=lambda _: None, gnu_bounds=selected, driver_bounds=selected,
+                                    expected_uuid_v2_hex='1' * 32,
+                                )
+                self.assertNotIn('install', calls)
 
     def test_lifecycle_wraps_import_session_and_constructor_failure(self):
         for fail in ('import', 'constructor', None):
