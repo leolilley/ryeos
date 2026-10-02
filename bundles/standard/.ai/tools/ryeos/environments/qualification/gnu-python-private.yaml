@@ -49,7 +49,7 @@ config:
     - utf8
     - -c
     - literal: |
-        import json, os, re, subprocess, sys
+        import json, os, re, selectors, subprocess, sys, time
 
         producer_manifest = "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf"
         keys = {"id", "kind", "mode", "manifest_hash", "entry_count", "total_bytes", "mount_root", "mount"}
@@ -82,6 +82,34 @@ config:
                 re.fullmatch(r"[0-9a-f]{64}", support_selection["manifest_hash"]) is None):
             raise SystemExit("private GNU verifier ELF-inspection support changed")
 
+        def run_limited(command, *, environment, limit, timeout):
+            with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, env=environment) as process:
+                chunks, total = [], 0
+                deadline = time.monotonic() + timeout
+                selector = selectors.DefaultSelector()
+                selector.register(process.stdout, selectors.EVENT_READ)
+                try:
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0 or not selector.select(remaining):
+                            raise SystemExit("private GNU verifier child exceeded its deadline")
+                        chunk = os.read(process.stdout.fileno(), min(65536, limit + 1 - total))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total > limit:
+                            raise SystemExit("private GNU verifier child exceeded its output bound")
+                    status = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+                except BaseException:
+                    process.kill()
+                    process.wait()
+                    raise
+                finally:
+                    selector.close()
+            return status, b"".join(chunks)
+
         root = "/ryeos/realizations/python-gnu-private/python"
         command = [root + "/lib/ld-linux-x86-64.so.2", "--inhibit-cache",
                    "--library-path", root + "/lib", root + "/bin/python3.14",
@@ -91,13 +119,12 @@ config:
         environment.update({"LANG": "C", "LC_ALL": "C", "PATH": "",
                             "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1",
                             "PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1"})
-        completed = subprocess.run(command, input=b"", stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, env=environment,
-                                   timeout=180, check=False)
-        if len(completed.stdout) > 262144 or completed.returncode != 0:
+        returncode, output = run_limited(command, environment=environment,
+                                         limit=262144, timeout=180)
+        if returncode != 0:
             raise SystemExit("private GNU subject probe failed or exceeded its output bound")
         try:
-            result = json.loads(completed.stdout)
+            result = json.loads(output)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise SystemExit("private GNU subject returned invalid evidence") from error
         claims = ["gnu_python_private_origin_startup_providers_v1", "gnu_python_zlib_1_3_2"]
@@ -106,9 +133,32 @@ config:
                 result.get("subject_manifest_hash") != subject["manifest_hash"] or
                 result.get("claims") != claims):
             raise SystemExit("private GNU evidence is not bound to the selected product")
+        evidence = result.get("probe_evidence")
+        if (not isinstance(evidence, dict) or
+                evidence.get("schema") != "ryeos.gnu_python_private_origin_probe.v1" or
+                evidence.get("subject_manifest_hash") != subject["manifest_hash"] or
+                evidence.get("runtime_root") != "/ryeos/realizations/python-gnu-private/python" or
+                evidence.get("provider_mappings") != {
+                    "libgcc_s.so.1": "/ryeos/realizations/python-gnu-private/python/lib/libgcc_s.so.1",
+                    "libpthread.so.0": "/ryeos/realizations/python-gnu-private/python/lib/libpthread.so.0"} or
+                not isinstance(evidence.get("inventory_sha256"), str) or
+                re.fullmatch(r"[0-9a-f]{64}", evidence["inventory_sha256"]) is None or
+                evidence.get("fixed_rescue_provider_sha256") !=
+                    "30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af" or
+                not isinstance(evidence.get("negative_omission"), dict) or
+                evidence["negative_omission"].get("missing_provider") != "libgcc_s.so.1" or
+                evidence["negative_omission"].get("fixed_rescue_control_mounted") is not True or
+                evidence["negative_omission"].get("failure_before_python") is not True or
+                evidence["negative_omission"].get("provider_absent_from_selected_copy") is not True or
+                type(evidence["negative_omission"].get("probe_exit_code")) is not int or
+                evidence["negative_omission"]["probe_exit_code"] == 0 or
+                not isinstance(evidence["negative_omission"].get("failure_output_sha256"), str) or
+                re.fullmatch(r"[0-9a-f]{64}", evidence["negative_omission"]["failure_output_sha256"]) is None or
+                evidence.get("zlib_runtime_version") != "1.3.2"):
+            raise SystemExit("private GNU probe evidence is incomplete or outside its claims")
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     - literal: |
-        import _ctypes, ctypes, hashlib, json, os, shutil, stat, subprocess, sys, sysconfig, tempfile, zlib
+        import _ctypes, ctypes, hashlib, json, os, re, selectors, shutil, stat, subprocess, sys, sysconfig, tempfile, time, zlib
 
         root = "/ryeos/realizations/python-gnu-private/python"
         fixed = "/ryeos/realizations/python-gnu/python"
@@ -126,6 +176,34 @@ config:
             raise SystemExit("private GNU probe has a wrong subject or rescue control")
 
         support = "/ryeos/realizations/gnu-python-support"
+
+        def run_limited(command, *, environment, limit, timeout):
+            with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, env=environment) as process:
+                chunks, total = [], 0
+                deadline = time.monotonic() + timeout
+                selector = selectors.DefaultSelector()
+                selector.register(process.stdout, selectors.EVENT_READ)
+                try:
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0 or not selector.select(remaining):
+                            raise SystemExit("private GNU verifier child exceeded its deadline")
+                        chunk = os.read(process.stdout.fileno(), min(65536, limit + 1 - total))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total > limit:
+                            raise SystemExit("private GNU verifier child exceeded its output bound")
+                    status = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+                except BaseException:
+                    process.kill()
+                    process.wait()
+                    raise
+                finally:
+                    selector.close()
+            return status, b"".join(chunks)
 
         def read_regular(path, limit, expected_bytes=None, expected_sha256=None):
             fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
@@ -162,14 +240,13 @@ config:
             command = [support + "/elf/lib/ld-linux-x86-64.so.2", "--inhibit-cache",
                        "--library-path", support + "/elf/lib",
                        support + "/elf/bin/readelf", "-W", *options, root + "/" + member]
-            completed = subprocess.run(command, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT,
-                                       env={"LANG": "C", "LC_ALL": "C", "PATH": ""},
-                                       timeout=15, check=False)
-            if completed.returncode != 0 or len(completed.stdout) > 1048576:
+            status, output = run_limited(
+                command, environment={"LANG": "C", "LC_ALL": "C", "PATH": ""},
+                limit=1048576, timeout=15)
+            if status != 0:
                 raise SystemExit("selected GNU readelf refused the private ELF member")
             try:
-                return completed.stdout.decode("utf-8")
+                return output.decode("utf-8")
             except UnicodeDecodeError as error:
                 raise SystemExit("selected GNU readelf output is not UTF-8") from error
 
@@ -349,19 +426,19 @@ config:
             if os.path.lexists(os.path.join(probe_lib, "libgcc_s.so.1")):
                 raise SystemExit("private GNU omission fixture retained the selected libgcc")
             sentinel = os.path.join(temporary, "python-started")
-            failed = subprocess.run([
+            failed_status, failed_output = run_limited([
                 root + "/lib/ld-linux-x86-64.so.2", "--inhibit-cache", "--library-path", probe_lib,
                 probe_python, "-I", "-S", "-B", "-c",
                 "open(" + repr(sentinel) + ", 'w').close()"],
-                input=b"", stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                env={"LANG": "C", "LC_ALL": "C", "PATH": ""},
-                timeout=30, check=False)
-            if (failed.returncode == 0 or b"libgcc_s.so.1" not in failed.stdout or
+                environment={"LANG": "C", "LC_ALL": "C", "PATH": ""},
+                limit=65536, timeout=30)
+            if (failed_status == 0 or b"libgcc_s.so.1" not in failed_output or
                     os.path.exists(sentinel)):
                 raise SystemExit("private GNU omitted-provider fixture did not fail in the loader")
             negative = {"missing_provider": "libgcc_s.so.1", "fixed_rescue_control_mounted": True,
-                        "failure_before_python": True, "probe_exit_code": failed.returncode,
-                        "provider_absent_from_selected_copy": True}
+                        "failure_before_python": True, "probe_exit_code": failed_status,
+                        "provider_absent_from_selected_copy": True,
+                        "failure_output_sha256": hashlib.sha256(failed_output).hexdigest()}
 
         if (zlib.ZLIB_RUNTIME_VERSION != "1.3.2" or zlib.__spec__.origin != "built-in" or
                 _ctypes.__spec__.origin != "built-in"):
@@ -388,8 +465,10 @@ config:
             "inventory_sha256": inventory_sha256,
             "runtime_root": root,
             "provider_hashes": provider_hashes,
+            "provider_mappings": {name: next(iter(paths)) for name, paths in mapped.items()},
             "versioned_symbols": symbol_probes,
             "negative_omission": negative,
+            "fixed_rescue_provider_path": fixed_provider,
             "fixed_rescue_provider_sha256": fixed_provider_sha256,
             "zlib_runtime_version": zlib.ZLIB_RUNTIME_VERSION,
             "zlib_origin": zlib.__spec__.origin,

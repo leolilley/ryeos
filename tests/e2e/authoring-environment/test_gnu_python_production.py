@@ -317,6 +317,7 @@ class GnuPythonProductionTests(unittest.TestCase):
                          "prepared_inputs_to_gnu_python_private_qualification")
         for program in programs:
             compile(program, str(PRIVATE_VERIFIER_PATH), "exec")
+        outer = programs[0]
         probe = programs[-1]
         self.assertEqual(policy["product_qualification_policy"]["allowed_claims"], [
             "gnu_python_private_origin_startup_providers_v1", "gnu_python_zlib_1_3_2"])
@@ -326,6 +327,9 @@ class GnuPythonProductionTests(unittest.TestCase):
                         if item["name"] == "runtime_private_to_qualified_runtime")
         self.assertEqual(relation["qualification"]["policy_ref"],
                          "config:ryeos/environments/qualification/gnu-python-private")
+        self.assertIn('"failure_before_python") is not True', outer)
+        self.assertIn('"failure_output_sha256"', outer)
+        self.assertIn('"provider_mappings"', outer)
         self.assertIn('"ryeos.gnu-python-elf-inventory.v3"', probe)
         self.assertIn('"private_origin_v1"', probe)
         self.assertIn('"$ORIGIN/../lib"', probe)
@@ -340,9 +344,32 @@ class GnuPythonProductionTests(unittest.TestCase):
         self.assertIn('read_regular(root + "/" + member', probe)
         self.assertIn('name == "libgcc_s.so.1"', probe)
         self.assertIn('"failure_before_python": True', probe)
+        self.assertIn('"failure_output_sha256": hashlib.sha256(failed_output).hexdigest()', probe)
+        self.assertIn('"provider_mappings": {name: next(iter(paths))', probe)
         self.assertIn('os.path.exists(sentinel)', probe)
         self.assertIn('"gnu_python_private_origin_startup_providers_v1"', probe)
         self.assertIn('"gnu_python_zlib_1_3_2"', probe)
+        self.assertIn("def run_limited(", probe)
+        self.assertIn("limit + 1 - total", probe)
+        self.assertNotIn("subprocess.run(", probe)
+        tree = ast.parse(probe)
+        re_import = next(node for node in tree.body
+                         if isinstance(node, ast.Import) and
+                         any(alias.name == "re" for alias in node.names))
+        expected = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and
+                        node.name == "expected_runpath")
+        namespace = {}
+        exec(compile(ast.Module(body=[re_import, expected], type_ignores=[]),
+                     str(PRIVATE_VERIFIER_PATH), "exec"), namespace)
+        path_for = namespace["expected_runpath"]
+        self.assertEqual(path_for("bin/python3.14"), "$ORIGIN/../lib")
+        self.assertEqual(path_for("lib/libc.so.6"), "$ORIGIN")
+        self.assertEqual(path_for("lib/python3.14/lib-dynload/math.so"), "$ORIGIN/../..")
+        with self.assertRaisesRegex(SystemExit, "unsafe member path"):
+            path_for("../../etc/passwd")
+        with self.assertRaisesRegex(SystemExit, "unsupported relative layout"):
+            path_for("other/module.so")
 
     def test_independent_verifier_rejects_self_verification_before_subject_execution(self):
         verifier = yaml.safe_load(VERIFIER_PATH.read_text())
