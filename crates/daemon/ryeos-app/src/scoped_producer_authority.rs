@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 #[cfg(test)]
 use ryeos_engine::isolation::IsolationDescriptorBoundCommand;
 use ryeos_engine::isolation::{
@@ -168,13 +168,37 @@ impl ScopedProducerAttemptCoordinate {
 /// mount and workspace leases without exposing their implementation to app.
 /// Its destruction cannot itself prove process death; the journal and scope
 /// owner must settle the launched child separately.
+/// Commands promoted together from one root's retained realizations. The
+/// helper variant has one process target: supervisor. Launcher is an input,
+/// and cannot be selected independently by a callback.
+#[derive(Clone)]
+pub enum ScopedProducerScenarioCommands {
+    SubjectMember(IsolationAdmittedCommand),
+    MechanismHelpers {
+        supervisor: IsolationAdmittedCommand,
+        launcher: IsolationAdmittedCommand,
+    },
+}
+
+impl ScopedProducerScenarioCommands {
+    fn members(&self) -> Vec<&IsolationAdmittedCommand> {
+        match self {
+            Self::SubjectMember(command) => vec![command],
+            Self::MechanismHelpers {
+                supervisor,
+                launcher,
+            } => vec![supervisor, launcher],
+        }
+    }
+}
+
 pub struct ScopedProducerLiveAuthority {
     command: IsolationAdmittedCommand,
     scenario_commands: BTreeMap<
         String,
         (
             ProductProducerRecipeSourceIdentity,
-            IsolationAdmittedCommand,
+            ScopedProducerScenarioCommands,
         ),
     >,
     workspace: lillux::PinnedDirectory,
@@ -245,7 +269,7 @@ impl ScopedProducerLiveAuthority {
             String,
             (
                 ProductProducerRecipeSourceIdentity,
-                IsolationAdmittedCommand,
+                ScopedProducerScenarioCommands,
             ),
         >,
     ) -> Result<Self> {
@@ -256,7 +280,10 @@ impl ScopedProducerLiveAuthority {
             );
             source.validate()?;
             ensure!(
-                matches!(command, IsolationAdmittedCommand::RealizationMember(_)),
+                command
+                    .members()
+                    .iter()
+                    .all(|member| matches!(member, IsolationAdmittedCommand::RealizationMember(_))),
                 "scoped producer scenario command is not a realization member"
             );
         }
@@ -283,11 +310,44 @@ impl ScopedProducerLiveAuthority {
                     admitted_source == source,
                     "promoted producer command differs from current signed recipe source"
                 );
+                let ScopedProducerScenarioCommands::SubjectMember(command) = command else {
+                    anyhow::bail!("producer subject recipe selected helper authority");
+                };
                 ensure!(
                     command.authority().identity().content_hash == *executable_sha256,
                     "promoted producer command differs from signed executable hash"
                 );
                 Ok(command.clone())
+            }
+            ProducerExecutableSource::AdmittedMechanismHelpers {
+                supervisor,
+                launcher,
+            } => {
+                let (admitted_source, commands) = self
+                    .scenario_commands
+                    .get(scenario)
+                    .context("signed mechanism scenario has no promoted helper tuple")?;
+                ensure!(
+                    admitted_source == source,
+                    "promoted helpers differ from signed recipe source"
+                );
+                let ScopedProducerScenarioCommands::MechanismHelpers {
+                    supervisor: admitted_supervisor,
+                    launcher: admitted_launcher,
+                } = commands
+                else {
+                    anyhow::bail!("mechanism recipe selected subject authority");
+                };
+                ensure!(
+                    admitted_supervisor.authority().identity().content_hash
+                        == supervisor.executable_sha256
+                        && admitted_launcher.authority().identity().content_hash
+                            == launcher.executable_sha256,
+                    "promoted helpers differ from signed executable hashes"
+                );
+                // A helper tuple is admission only. Trusted bootstrap preparation
+                // must succeed before this command may be released.
+                Ok(admitted_supervisor.clone())
             }
         }
     }
@@ -395,7 +455,10 @@ impl ScopedProducerLiveAuthority {
                 ProducerStdinSource::InteractiveVerifierChannel { .. },
             ) => {
                 let mut retained_member = false;
-                for (_, command) in self.scenario_commands.values() {
+                for (_, commands) in self.scenario_commands.values() {
+                    let ScopedProducerScenarioCommands::SubjectMember(command) = commands else {
+                        continue;
+                    };
                     if command.same_binding_as(selected_command)? {
                         retained_member = true;
                         break;
@@ -716,7 +779,7 @@ mod tests {
     fn recipe_request_has_only_signed_arguments_input_and_environment() {
         let authority = authority();
         let recipe = ProductProducerRecipe::from_value(serde_json::json!({
-            "schema": "ryeos.product_producer_recipe.v5",
+            "schema": "ryeos.product_producer_recipe.v6",
             "executable_source": {"kind":"admitted_verifier_executable"},
             "argv": ["--scenario-driver"],
             "stdin_source": {"kind":"signed_verifier_parameters"},
@@ -986,7 +1049,7 @@ mod tests {
     fn interactive_realization_recipe_refuses_a_verifier_command() {
         let authority = authority();
         let recipe = ProductProducerRecipe::from_value(serde_json::json!({
-            "schema": "ryeos.product_producer_recipe.v5",
+            "schema": "ryeos.product_producer_recipe.v6",
             "executable_source": {
                 "kind": "admitted_realization_member",
                 "realization_id": "codex_runtime",

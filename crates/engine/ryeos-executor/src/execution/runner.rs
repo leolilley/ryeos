@@ -3162,7 +3162,7 @@ fn promoted_scoped_producer_commands(
         String,
         (
             ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity,
-            ryeos_engine::isolation::IsolationAdmittedCommand,
+            ryeos_app::scoped_producer_authority::ScopedProducerScenarioCommands,
         ),
     >,
     bool,
@@ -3179,28 +3179,50 @@ fn promoted_scoped_producer_commands(
                 scenario_id,
             )?;
         requires_ingress_handoff |= selected.recipe.loopback_ingress.is_some();
-        let ProducerExecutableSource::AdmittedRealizationMember {
-            realization_id,
-            manifest_hash,
-            relative_path,
-            executable_sha256,
-        } = &selected.recipe.executable_source
-        else {
-            continue;
+        use ryeos_app::scoped_producer_authority::ScopedProducerScenarioCommands;
+        let command = match &selected.recipe.executable_source {
+            ProducerExecutableSource::AdmittedVerifierExecutable => continue,
+            ProducerExecutableSource::AdmittedRealizationMember {
+                realization_id,
+                manifest_hash,
+                relative_path,
+                executable_sha256,
+            } => {
+                if realization_id != &purpose.subject_declaration_id
+                    || manifest_hash != &purpose.subject_manifest_hash
+                {
+                    bail!("signed producer command differs from sealed qualification subject");
+                }
+                let external =
+                    external.context("signed producer command has no retained realization")?;
+                ScopedProducerScenarioCommands::SubjectMember(external.bind_recipe_member_command(
+                    state.isolation.as_ref(),
+                    realization_id,
+                    manifest_hash,
+                    Path::new(relative_path),
+                    executable_sha256,
+                )?)
+            }
+            ProducerExecutableSource::AdmittedMechanismHelpers {
+                supervisor,
+                launcher,
+            } => {
+                let external = external
+                    .context("signed mechanism helpers have no retained root realizations")?;
+                let bind = |member: &ryeos_state::external_content::products::producer_recipe::ProducerRealizationMemberIdentity| {
+                    external.bind_recipe_member_command(
+                        state.isolation.as_ref(), &member.realization_id, &member.manifest_hash,
+                        Path::new(&member.relative_path), &member.executable_sha256,
+                    )
+                };
+                // Both are pinned before registration. No callback resolver or
+                // independent launcher attempt is created by this tuple.
+                ScopedProducerScenarioCommands::MechanismHelpers {
+                    supervisor: bind(supervisor)?,
+                    launcher: bind(launcher)?,
+                }
+            }
         };
-        if realization_id != &purpose.subject_declaration_id
-            || manifest_hash != &purpose.subject_manifest_hash
-        {
-            bail!("signed producer command differs from sealed qualification subject");
-        }
-        let external = external.context("signed producer command has no retained realization")?;
-        let command = external.bind_recipe_member_command(
-            state.isolation.as_ref(),
-            realization_id,
-            manifest_hash,
-            Path::new(relative_path),
-            executable_sha256,
-        )?;
         commands.insert(scenario_id.clone(), (selected.source_identity()?, command));
     }
     Ok((commands, requires_ingress_handoff))

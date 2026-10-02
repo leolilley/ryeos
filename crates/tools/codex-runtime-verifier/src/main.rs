@@ -1640,7 +1640,7 @@ mod tests {
     #[test]
     fn signed_direct_environment_and_cwd_match_applied_fields() {
         let recipe = ProductProducerRecipe::from_value(json!({
-            "schema":"ryeos.product_producer_recipe.v5",
+            "schema":"ryeos.product_producer_recipe.v6",
             "executable_source":{
                 "kind":"admitted_realization_member",
                 "realization_id":"subject",
@@ -1991,7 +1991,7 @@ mod tests {
     #[test]
     fn observed_recipe_must_match_prelaunch_signed_bytes_and_stream_bounds() {
         let expected = ProductProducerRecipe::from_value(json!({
-            "schema":"ryeos.product_producer_recipe.v5",
+            "schema":"ryeos.product_producer_recipe.v6",
             "executable_source":{"kind":"admitted_verifier_executable"},
             "argv":["--scenario-driver"],
             "stdin_source":{"kind":"signed_verifier_parameters"},

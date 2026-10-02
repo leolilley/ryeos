@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::objects::canonical_value_digest;
 
-pub const PRODUCER_RECIPE_SCHEMA: &str = "ryeos.product_producer_recipe.v5";
+pub const PRODUCER_RECIPE_SCHEMA: &str = "ryeos.product_producer_recipe.v6";
 pub const MAX_PRODUCER_RECIPE_BYTES: usize = 16 * 1024;
 pub const MAX_PRODUCER_ARGV: usize = 32;
 pub const MAX_PRODUCER_ARG_BYTES: usize = 1024;
@@ -37,6 +37,56 @@ pub const MAX_PRODUCER_PREPARED_DIRECTORIES: usize = MAX_PRODUCER_ENVIRONMENT_BI
 pub const MAX_PRODUCER_PREPARED_IMMUTABLE_FILES: usize = 8;
 pub const MAX_PRODUCER_PREPARED_IMMUTABLE_FILE_BYTES: u64 = 1024 * 1024;
 
+/// Exact member of a realization already retained by the admitted root.
+/// This identity grants no mount, descriptor, or launch authority on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProducerRealizationMemberIdentity {
+    pub realization_id: String,
+    pub manifest_hash: String,
+    pub relative_path: String,
+    pub executable_sha256: String,
+}
+
+impl ProducerRealizationMemberIdentity {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_realization_member(
+            &self.realization_id,
+            &self.manifest_hash,
+            &self.relative_path,
+            &self.executable_sha256,
+        )
+    }
+}
+
+fn validate_realization_member(
+    realization_id: &str,
+    manifest_hash: &str,
+    relative_path: &str,
+    executable_sha256: &str,
+) -> anyhow::Result<()> {
+    if realization_id.is_empty()
+        || realization_id.len() > 64
+        || !realization_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+    {
+        bail!("producer realization id is not canonical");
+    }
+    crate::objects::validate_canonical_project_relative_path(relative_path)?;
+    if relative_path.len() > 1024
+        || ![manifest_hash, executable_sha256].into_iter().all(|hash| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        bail!("producer realization member identity is not canonical");
+    }
+    Ok(())
+}
+
 /// A signed executable selector, never a caller-supplied host path. The
 /// realization member still requires the root's retained admitted mount and
 /// the isolation engine's descriptor promotion before launch.
@@ -50,10 +100,16 @@ pub enum ProducerExecutableSource {
         relative_path: String,
         executable_sha256: String,
     },
+    /// One actual supervisor target with a separately admitted launcher input.
+    /// The trusted root must prepare both descriptors before scoped release.
+    AdmittedMechanismHelpers {
+        supervisor: ProducerRealizationMemberIdentity,
+        launcher: ProducerRealizationMemberIdentity,
+    },
 }
 
 /// Input shape is selected by the signed recipe, not inferred from a callback
-/// or from the presence of a live channel. Both variants have finite budgets.
+/// or from the presence of a live channel. Interactive input has finite budgets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProducerStdinSource {
@@ -63,6 +119,9 @@ pub enum ProducerStdinSource {
         maximum_total_bytes: u64,
         maximum_frames: u32,
     },
+    /// No caller-supplied stdin. The trusted root must prepare a finite,
+    /// fixed-descriptor bootstrap before the mechanism helper may launch.
+    TrustedMechanismBootstrap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,34 +400,47 @@ impl ProductProducerRecipe {
                 bail!("producer immutable file destination is duplicated");
             }
         }
-        if let ProducerExecutableSource::AdmittedRealizationMember {
-            realization_id,
-            manifest_hash,
-            relative_path,
-            executable_sha256,
-        } = &self.executable_source
-        {
-            if realization_id.is_empty()
-                || realization_id.len() > 64
-                || !realization_id.bytes().all(|byte| {
-                    byte.is_ascii_lowercase()
-                        || byte.is_ascii_digit()
-                        || matches!(byte, b'_' | b'-')
-                })
-            {
-                bail!("producer realization id is not canonical");
+        match &self.executable_source {
+            ProducerExecutableSource::AdmittedRealizationMember {
+                realization_id,
+                manifest_hash,
+                relative_path,
+                executable_sha256,
+            } => validate_realization_member(
+                realization_id,
+                manifest_hash,
+                relative_path,
+                executable_sha256,
+            )?,
+            ProducerExecutableSource::AdmittedMechanismHelpers {
+                supervisor,
+                launcher,
+            } => {
+                supervisor.validate()?;
+                launcher.validate()?;
             }
-            crate::objects::validate_canonical_project_relative_path(relative_path)?;
-            if relative_path.len() > 1024
-                || ![manifest_hash, executable_sha256].into_iter().all(|hash| {
-                    hash.len() == 64
-                        && hash
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                })
-            {
-                bail!("producer realization member identity is not canonical");
+            ProducerExecutableSource::AdmittedVerifierExecutable => {}
+        }
+        match (&self.executable_source, &self.stdin_source) {
+            (
+                ProducerExecutableSource::AdmittedMechanismHelpers { .. },
+                ProducerStdinSource::TrustedMechanismBootstrap,
+            ) => {
+                if !self.argv.is_empty()
+                    || !matches!(self.cwd_source, ProducerCwdSource::VerifierPrivateWorkspace)
+                    || !self.environment_sources.is_empty()
+                    || !self.environment_bindings.is_empty()
+                    || !self.prepared_immutable_files.is_empty()
+                    || self.loopback_ingress.is_some()
+                {
+                    bail!("mechanism helper recipe cannot add process input or ambient bindings");
+                }
             }
+            (ProducerExecutableSource::AdmittedMechanismHelpers { .. }, _)
+            | (_, ProducerStdinSource::TrustedMechanismBootstrap) => {
+                bail!("producer mechanism helper and bootstrap input modes disagree");
+            }
+            _ => {}
         }
         if let ProducerStdinSource::InteractiveVerifierChannel {
             maximum_frame_bytes,
@@ -429,6 +501,93 @@ mod tests {
             "bounds": {"maximum_wall_time_ms": 1000, "maximum_stdout_bytes": 1024,
                 "maximum_stderr_bytes": 1024, "maximum_memory_bytes": 1048576,
                 "maximum_processes": 1}})
+    }
+
+    fn mechanism() -> Value {
+        let mut value = valid();
+        value["executable_source"] = json!({
+            "kind":"admitted_mechanism_helpers",
+            "supervisor": {
+                "realization_id":"supervisor_helper",
+                "manifest_hash":"a".repeat(64),
+                "relative_path":"bin/external-candidate-supervisor",
+                "executable_sha256":"b".repeat(64)
+            },
+            "launcher": {
+                "realization_id":"launcher_helper",
+                "manifest_hash":"c".repeat(64),
+                "relative_path":"bin/external-candidate-launcher",
+                "executable_sha256":"d".repeat(64)
+            }
+        });
+        value["argv"] = json!([]);
+        value["stdin_source"] = json!({"kind":"trusted_mechanism_bootstrap"});
+        value["environment_sources"] = json!([]);
+        value
+    }
+
+    #[test]
+    fn mechanism_helpers_require_closed_v6_and_trusted_input_shape() {
+        let value = mechanism();
+        let recipe = ProductProducerRecipe::from_value(value.clone()).unwrap();
+        assert_eq!(
+            recipe.digest().unwrap(),
+            canonical_value_digest(&value).unwrap()
+        );
+        assert!(ProductProducerRecipe::from_value(valid()).is_ok());
+
+        let mut wrong_schema = value.clone();
+        wrong_schema["schema"] = json!("ryeos.product_producer_recipe.v5");
+        assert!(ProductProducerRecipe::from_value(wrong_schema).is_err());
+        let mut wrong_schema = valid();
+        wrong_schema["schema"] = json!("ryeos.product_producer_recipe.v5");
+        assert!(ProductProducerRecipe::from_value(wrong_schema).is_err());
+        let mut wrong_input = value.clone();
+        wrong_input["stdin_source"] = json!({"kind":"signed_verifier_parameters"});
+        assert!(ProductProducerRecipe::from_value(wrong_input).is_err());
+        let mut wrong_input = valid();
+        wrong_input["stdin_source"] = json!({"kind":"trusted_mechanism_bootstrap"});
+        assert!(ProductProducerRecipe::from_value(wrong_input).is_err());
+        for (field, supplied) in [
+            ("fd", json!(44)),
+            ("host_path", json!("/tmp/bootstrap")),
+            ("callback_value", json!("replacement")),
+        ] {
+            let mut changed = value.clone();
+            changed["stdin_source"][field] = supplied;
+            assert!(ProductProducerRecipe::from_value(changed).is_err(), "{field}");
+        }
+
+        for (field, added) in [
+            ("argv", json!(["--assignment-b64"])),
+            ("cwd_source", json!({"kind":"prepared_directory","id":"activation"})),
+            ("environment_sources", json!(["admitted_realizations"])),
+            ("environment_bindings", json!({"HOME":{"kind":"verifier_private_workspace"}})),
+            ("prepared_immutable_files", json!([{
+                "prepared_directory_id":"activation","leaf_name":"assignment.json",
+                "maximum_bytes":1024,"expected_sha256":"e".repeat(64)
+            }])),
+            ("loopback_ingress", json!({"address":"127.0.0.1:18765"})),
+        ] {
+            let mut changed = value.clone();
+            changed[field] = added;
+            assert!(ProductProducerRecipe::from_value(changed).is_err(), "{field}");
+        }
+        for role in ["supervisor", "launcher"] {
+            for (field, invalid) in [
+                ("realization_id", json!("../helper")),
+                ("manifest_hash", json!("A".repeat(64))),
+                ("relative_path", json!("../bin/helper")),
+                ("executable_sha256", json!("0")),
+            ] {
+                let mut changed = value.clone();
+                changed["executable_source"][role][field] = invalid;
+                assert!(ProductProducerRecipe::from_value(changed).is_err(), "{role}.{field}");
+            }
+        }
+        let mut extra = value;
+        extra["executable_source"]["launcher"]["host_path"] = json!("/bin/sh");
+        assert!(ProductProducerRecipe::from_value(extra).is_err());
     }
 
     #[test]

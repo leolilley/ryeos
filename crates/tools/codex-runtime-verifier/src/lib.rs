@@ -1685,7 +1685,7 @@ mod tests {
             },
             expected_producer_recipe_ref: "config:fixtures/codex-runtime/direct-codex".into(),
             expected_producer_recipe: ProductProducerRecipe::from_value(serde_json::json!({
-                "schema":"ryeos.product_producer_recipe.v5",
+                "schema":"ryeos.product_producer_recipe.v6",
                 "executable_source":{"kind":"admitted_realization_member",
                     "realization_id":"subject", "manifest_hash":"a".repeat(64),
                     "relative_path":"bin/codex", "executable_sha256":"e".repeat(64)},
