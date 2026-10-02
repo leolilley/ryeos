@@ -605,6 +605,12 @@ pub struct SpawnedExecutionAwaitingAttachment {
 }
 
 impl SpawnedExecutionAwaitingAttachment {
+    /// Forward unconditional structural custody from the real held owner.
+    /// Validation follows retention; this never mints native admission.
+    pub fn capture_existing_held_occurrence(&self) -> lillux::exec::ProcessLocalHeldOccurrence {
+        self.pending.capture_existing_held_occurrence()
+    }
+
     pub fn pid(&self) -> u32 {
         self.pending.pid()
     }
@@ -682,6 +688,31 @@ pub enum SelectedNativeExecutionWaitOutcome {
 }
 
 impl RunningExecution {
+    /// Borrowed association with the same actual held pin and cached identity.
+    /// Neither this comparison nor backend equality proves a funded retirement.
+    pub fn require_original_held_occurrence(
+        &self,
+        held: &lillux::exec::ProcessLocalHeldOccurrence,
+    ) -> Result<(), EngineError> {
+        let context = self.selected_launch_context.as_ref().ok_or_else(|| {
+            EngineError::Internal("held association lacks actual selected compiler context".into())
+        })?;
+        if context.original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "original held association context expired before comparison".into(),
+            ));
+        }
+        self.running
+            .require_same_held_occurrence(held)
+            .map_err(EngineError::Internal)?;
+        if context.original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "original held association context expired during comparison".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Observe the existing bounded raw-byte capture. This grants no process
     /// lifecycle authority: the caller must keep the normal wait/abort owner
     /// advancing concurrently. Protocol decoders must not reconstruct binary

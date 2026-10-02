@@ -172,6 +172,9 @@ enum FundingPhase {
 /// Clone/serde/Drop refund, replay constructor or replacement deadline.
 /// This component alone does not own physical scratch or admit execution.
 pub(crate) struct OriginalFundingOwner {
+    // Real held OS-owner association retained before any postbirth refusal.
+    // Raw presence is never acknowledged attachment or retirement evidence.
+    held_occurrence: Option<Arc<lillux::exec::ProcessLocalHeldOccurrence>>,
     accounting: Arc<AccountingDb>,
     state_store: Arc<crate::state_store::StateStore>,
     original_budget: crate::handler_context::OriginalExecutionBudget,
@@ -188,6 +191,16 @@ pub(crate) struct OriginalFundingOwner {
 }
 
 impl OriginalFundingOwner {
+    // Pure borrow: no ledger/clock/filesystem work while original-start locks.
+    pub(crate) fn acknowledged_held_occurrence(
+        &self,
+    ) -> Option<&Arc<lillux::exec::ProcessLocalHeldOccurrence>> {
+        if self.phase != FundingPhase::Attached {
+            return None;
+        }
+        self.held_occurrence.as_ref()
+    }
+
     pub(crate) fn prepare(
         state: &crate::state::AppState,
         inputs: &crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs,
@@ -280,6 +293,7 @@ impl OriginalFundingOwner {
             bail!("original funding budget is not on same current financial owner");
         }
         Ok(Self {
+            held_occurrence: None,
             gate_id: envelope.gate_id()?,
             request_digest: envelope.request_digest()?,
             operation_id: envelope.operation_id()?,
@@ -566,9 +580,21 @@ impl OriginalFundingOwner {
             bail!("original financial birth attachment is one-use");
         }
         self.phase = FundingPhase::AttachAttempted;
+        // Capture raw real-held association BEFORE clock/live identity/shape
+        // or write checks. Lost/late acknowledgement keeps the original link.
+        if self.held_occurrence.is_some() {
+            bail!("original held association cannot be replaced");
+        }
+        self.held_occurrence = Some(Arc::new(held.capture_existing_held_occurrence()));
         self.require_contact_window()?;
+        let actual_held_identity = held.exact_process_identity()?;
+        self.held_occurrence
+            .as_ref()
+            .expect("raw held association rooted first")
+            .require_cached_identity(&actual_held_identity)
+            .map_err(anyhow::Error::msg)?;
         let mut identity = crate::process::execution_process_identity_from_lillux(
-            held.exact_process_identity()?,
+            actual_held_identity,
             held.scope_recovery().cloned(),
         )?;
         if identity.process_scope.is_some() {
@@ -904,6 +930,7 @@ mod tests {
         };
         envelope.validate().unwrap();
         let owner = OriginalFundingOwner {
+            held_occurrence: None,
             gate_id: envelope.gate_id().unwrap(),
             request_digest: envelope.request_digest().unwrap(),
             operation_id: envelope.operation_id().unwrap(),

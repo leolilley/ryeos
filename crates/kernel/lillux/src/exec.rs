@@ -4666,6 +4666,41 @@ pub struct RunningProcess {
     wrapper_reaped: bool,
 }
 
+/// Process-local raw association from a real held owner, never native proof.
+/// Private fields prohibit descriptor/PID/serialized reconstruction.
+pub struct ProcessLocalHeldOccurrence {
+    #[cfg(target_os = "linux")]
+    pin: Arc<OwnedFd>,
+    held_identity: Option<crate::ExactProcessIdentity>,
+}
+
+impl ProcessLocalHeldOccurrence {
+    /// Validate correspondence only after the raw association is rooted.
+    pub fn require_cached_identity(
+        &self,
+        actual: &crate::ExactProcessIdentity,
+    ) -> Result<(), String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = actual;
+            return Err("held pin association unavailable on this platform".into());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let cached = self
+                .held_identity
+                .as_ref()
+                .ok_or("raw held association lacks selected identity cache")?;
+            cached.validate()?;
+            actual.validate()?;
+            if cached != actual {
+                return Err("actual held identity differs from retained pin association".into());
+            }
+            Ok(())
+        }
+    }
+}
+
 /// A subprocess whose exact target identity exists, but whose target program
 /// cannot execute until the caller durably attaches that identity.
 ///
@@ -4816,6 +4851,23 @@ impl ProcessAwaitingAttachment {
         }
         #[cfg(not(target_os = "linux"))]
         Err("attachment-pending exact process identity is unavailable on this OS".to_owned())
+    }
+
+    /// Structural custody only: no time/context/cache validation, I/O or syscall.
+    /// Missing cache/unsupported OS preserves uncertainty rather than no birth.
+    pub fn capture_existing_held_occurrence(&self) -> ProcessLocalHeldOccurrence {
+        let held_identity = match self.owner.as_ref() {
+            Some(AttachmentPendingOwner::Supervised { running }) => running
+                .native_settlement
+                .as_ref()
+                .and_then(|channel| channel.held_target_identity.clone()),
+            _ => None,
+        };
+        ProcessLocalHeldOccurrence {
+            #[cfg(target_os = "linux")]
+            pin: Arc::clone(&self.pidfd),
+            held_identity,
+        }
     }
 
     /// Borrow the already-pinned exact process identity. Durable lifecycle
@@ -5292,6 +5344,51 @@ impl Drop for ProcessAwaitingAttachment {
 }
 
 impl RunningProcess {
+    /// Compare the existing OS owner and cached incarnation, without reopening,
+    /// duplicating, reading, waiting or reconstructing terminal evidence.
+    pub fn require_same_held_occurrence(
+        &self,
+        held: &ProcessLocalHeldOccurrence,
+    ) -> Result<(), String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = held;
+            return Err("running held association unavailable on this platform".into());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let channel = self
+                .native_settlement
+                .as_ref()
+                .ok_or("held association lacks selected running channel")?;
+            if channel.original_deadline.has_elapsed() {
+                return Err("original held association expired before comparison".into());
+            }
+            if channel.failure.is_some()
+                || self.applied_receipt_failure.is_some()
+                || channel.selected_wait_phase == SelectedNativeTerminalWaitPhase::Failed
+            {
+                return Err("original held association retains a native refusal".into());
+            }
+            let pin = self
+                .attachment_target_lifetime
+                .as_ref()
+                .ok_or("running owner lost actual held lifetime pin")?;
+            if !Arc::ptr_eq(pin, &held.pin) {
+                return Err("running owner differs from actual held pin owner".into());
+            }
+            let identity = channel
+                .held_target_identity
+                .as_ref()
+                .ok_or("running owner lacks original held identity cache")?;
+            held.require_cached_identity(identity)?;
+            if channel.original_deadline.has_elapsed() {
+                return Err("original held association expired during comparison".into());
+            }
+            Ok(())
+        }
+    }
+
     /// Borrow the selected channel's retained raw observations and terminal result.
     pub fn native_terminal_raw_view(&self) -> Option<NativeTerminalRawView<'_>> {
         let channel = self.native_settlement.as_ref()?;
@@ -10063,6 +10160,32 @@ mod absolute_spawn_deadline_tests {
         };
         assert!(error.result.stderr.contains("deadline expired"));
         assert!(error.cleanup_is_settled()); // process settlement, not driver/funding proof
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_held_raw_pin_survives_expiry_and_missing_selected_cache_without_acceptance() {
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let held =
+            lib_spawn_awaiting_attachment_until(request("exec /bin/sleep 30"), original).unwrap();
+        let actual = held.exact_process_identity().unwrap();
+        thread::sleep(original.remaining() + Duration::from_millis(5));
+        assert!(original.has_elapsed());
+        // Direct ordinary held owner has no selected cache. Structural capture
+        // still retains its real pin AFTER expiry, without minting authority.
+        let raw = held.capture_existing_held_occurrence();
+        assert!(Arc::ptr_eq(&raw.pin, &held.pidfd));
+        assert!(raw.held_identity.is_none());
+        assert!(raw.require_cached_identity(&actual).is_err());
+        let error = match held.release_after_attachment() {
+            Err(error) => error,
+            Ok(running) => {
+                running.abort();
+                panic!("late held release must refuse");
+            }
+        };
+        assert!(error.cleanup_is_settled()); // ordinary process cleanup only
+        assert!(raw.require_cached_identity(&actual).is_err());
     }
 
     #[cfg(target_os = "linux")]

@@ -833,6 +833,7 @@ struct PooledStartRetention {
 // stay refused and funded/scratch uncertainty is never converted to proof.
 struct OriginalNativeCheckGuard<'a> {
     running: Option<ryeos_engine::dispatch::RunningExecution>,
+    held_occurrence: Arc<lillux::exec::ProcessLocalHeldOccurrence>,
     inputs: Option<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
     original: &'a PersistentSessionPooledStart,
 }
@@ -852,7 +853,12 @@ impl OriginalNativeCheckGuard<'_> {
             && retained.retained_running.is_empty()
             && retained.quarantined_inputs.is_empty()
             && retained.original_funding.is_some()
-            && retained.original_spawn_permit.is_some();
+            && retained.original_spawn_permit.is_some()
+            && retained
+                .original_funding
+                .as_ref()
+                .and_then(|funding| funding.acknowledged_held_occurrence())
+                .is_some_and(|actual| Arc::ptr_eq(actual, &self.held_occurrence));
         drop(retained);
         anyhow::ensure!(
             exclusive,
@@ -1172,6 +1178,11 @@ impl PersistentSessionPooledStart {
                 && retained.retained_running.len() == 1
                 && retained.trusted_inputs.is_some()
                 && retained.original_funding.is_some()
+                && retained
+                    .original_funding
+                    .as_ref()
+                    .and_then(|funding| funding.acknowledged_held_occurrence())
+                    .is_some()
                 && retained.original_spawn_permit.is_some()
                 && retained.original_contact_attempted
                 && retained.original_held_attached
@@ -1191,6 +1202,13 @@ impl PersistentSessionPooledStart {
             retained.native_check_in_flight = true;
             OriginalNativeCheckGuard {
                 running: retained.retained_running.pop(),
+                held_occurrence: Arc::clone(
+                    retained
+                        .original_funding
+                        .as_ref()
+                        .and_then(|funding| funding.acknowledged_held_occurrence())
+                        .expect("actual acknowledged funding link checked before checkout"),
+                ),
                 inputs: retained.trusted_inputs.take(),
                 original: self,
             }
@@ -1208,6 +1226,12 @@ impl PersistentSessionPooledStart {
                 .as_ref()
                 .expect("actual original execution checked out")
                 .require_original_backend_capture(&capture)
+                .map_err(anyhow::Error::new)?;
+            guard
+                .running
+                .as_ref()
+                .expect("actual execution before wait")
+                .require_original_held_occurrence(&guard.held_occurrence)
                 .map_err(anyhow::Error::new)?;
             let original_budget = self
                 .original_callback_budget
@@ -1246,6 +1270,13 @@ impl PersistentSessionPooledStart {
                 }
             };
             if matches!(phase, OriginalNativeCheckOutcome::CollectedFacts) {
+                guard.require_exclusive()?;
+                guard
+                    .running
+                    .as_ref()
+                    .expect("typed outcome restored before held match")
+                    .require_original_held_occurrence(&guard.held_occurrence)
+                    .map_err(anyhow::Error::new)?;
                 guard
                     .running
                     .as_mut()
@@ -1253,6 +1284,12 @@ impl PersistentSessionPooledStart {
                     .require_cached_original_native_correspondence(&capture)
                     .map_err(anyhow::Error::new)?;
                 inputs.require_original_isolation_expectation(state)?;
+                guard
+                    .running
+                    .as_ref()
+                    .expect("same owner after terminal correspondence")
+                    .require_original_held_occurrence(&guard.held_occurrence)
+                    .map_err(anyhow::Error::new)?;
                 guard.require_exclusive()?;
             }
             Ok(phase)
