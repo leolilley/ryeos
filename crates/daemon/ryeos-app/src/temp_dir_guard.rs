@@ -442,6 +442,94 @@ impl TempDirGuard {
 
     /// Remove the exact pinned directory tree now. Failure leaves the guard
     /// armed so recovery retains both the journal evidence and the path.
+    /// Physically dispose only the SAME already-preserved pinned scratch.
+    /// Every lock/traversal step shares the original expiry. Partial error
+    /// keeps the armed path and remaining aliases; it is no cleanup receipt.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn remove_now_until(
+        &self,
+        budget: lillux::secure_fs::DirectoryTraversalBudget,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> anyhow::Result<()> {
+        if !self.owns_removal || !self.explicit_cleanup.load(Ordering::Acquire) {
+            anyhow::bail!("original finite scratch removal requires preserved ORIGINAL ownership");
+        }
+        let pinned = self.pinned_removal.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("finite scratch removal cannot reopen a replacement pathname guard")
+        })?;
+        let view = Self::lock_original_cleanup(&self.workspace_view, deadline)?;
+        if view
+            .as_ref()
+            .is_some_and(|slot| !matches!(slot, WorkspaceViewSlot::Closed { .. }))
+        {
+            anyhow::bail!("finite scratch removal requires ORIGINAL view physical-close proof");
+        }
+        let mut path_slot = Self::lock_original_cleanup(&self.inner, deadline)?;
+        let mut leases = Self::lock_original_cleanup(&self.leases, deadline)?;
+        if path_slot.is_none() {
+            anyhow::bail!(
+                "original finite scratch guard is disarmed; replay grants no disposal proof"
+            );
+        }
+        Self::require_original_cleanup_window(deadline)?;
+        pinned.root.ensure_path_binding()?;
+        pinned.parent.ensure_path_binding()?;
+        Self::require_original_cleanup_window(deadline)?;
+        pinned
+            .root
+            .remove_contents_recursive_bounded_until(budget, deadline)?;
+        Self::require_original_cleanup_window(deadline)?;
+        if !pinned
+            .parent
+            .remove_empty_child_if_same(&pinned.name, &pinned.root)?
+        {
+            anyhow::bail!("original pinned scratch remained nonempty; cleanup is unproved");
+        }
+        Self::require_original_cleanup_window(deadline)?;
+        while !leases.is_empty() {
+            Self::require_original_cleanup_window(deadline)?;
+            drop(leases.pop()); // original descriptor closes, not driver retirement
+            Self::require_original_cleanup_window(deadline)?;
+        }
+        Self::require_original_cleanup_window(deadline)?;
+        *path_slot = None;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn require_original_cleanup_window(
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> anyhow::Result<()> {
+        if deadline.has_elapsed() {
+            anyhow::bail!("original scratch cleanup deadline expired; disposal may be partial");
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn lock_original_cleanup<T>(
+        mutex: &Mutex<T>,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> anyhow::Result<std::sync::MutexGuard<'_, T>> {
+        loop {
+            Self::require_original_cleanup_window(deadline)?;
+            match mutex.try_lock() {
+                Ok(guard) => {
+                    Self::require_original_cleanup_window(deadline)?;
+                    return Ok(guard);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    anyhow::bail!("original scratch cleanup mutex poisoned")
+                }
+                Err(std::sync::TryLockError::WouldBlock) => lillux::time::sleep(
+                    deadline
+                        .remaining()
+                        .min(lillux::time::Duration::from_millis(1)),
+                ),
+            }
+        }
+    }
+
     pub fn remove_now(&self) -> anyhow::Result<()> {
         if !self.owns_removal {
             anyhow::bail!("borrowed cache/workspace guard does not own directory removal");
@@ -1108,6 +1196,100 @@ mod tests {
             .close_workspace_view("view-one", &"a".repeat(64), close_deadline())
             .unwrap();
         guard.remove_now().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_scratch_expiry_before_removal_keeps_same_guard_and_contents() {
+        let cache = tempfile::tempdir().unwrap();
+        let (path, guard) = create_projectless_workspace(cache.path(), "finite-expired").unwrap();
+        std::fs::write(path.join("retained"), b"original").unwrap();
+        guard.preserve_for_explicit_cleanup();
+        assert!(
+            guard
+                .remove_now_until(
+                    lillux::secure_fs::DirectoryTraversalBudget::new(8, 4),
+                    lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO)
+                )
+                .is_err()
+        );
+        assert_eq!(guard.path().as_deref(), Some(path.as_path()));
+        assert_eq!(std::fs::read(path.join("retained")).unwrap(), b"original");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_scratch_mutex_expiry_retains_physical_namespace() {
+        let cache = tempfile::tempdir().unwrap();
+        let (path, guard) = create_projectless_workspace(cache.path(), "finite-mutex").unwrap();
+        std::fs::write(path.join("retained"), b"original").unwrap();
+        guard.preserve_for_explicit_cleanup();
+        let original_slot = guard.inner.lock().unwrap();
+        let waiting = Arc::clone(&guard);
+        let original =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(40));
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sent.send(waiting.remove_now_until(
+                lillux::secure_fs::DirectoryTraversalBudget::new(8, 4),
+                original,
+            ))
+            .unwrap();
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(2));
+        drop(original_slot);
+        worker.join().unwrap();
+        assert!(
+            result
+                .expect("actual original guard waiter must expire before mutex release")
+                .is_err()
+        );
+        assert!(original.has_elapsed());
+        assert_eq!(guard.path().as_deref(), Some(path.as_path()));
+        assert_eq!(std::fs::read(path.join("retained")).unwrap(), b"original");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_scratch_entry_bound_refusal_preserves_same_contents() {
+        let cache = tempfile::tempdir().unwrap();
+        let (path, guard) = create_projectless_workspace(cache.path(), "finite-entries").unwrap();
+        std::fs::write(path.join("one"), b"one").unwrap();
+        std::fs::write(path.join("two"), b"two").unwrap();
+        guard.preserve_for_explicit_cleanup();
+        assert!(
+            guard
+                .remove_now_until(
+                    lillux::secure_fs::DirectoryTraversalBudget::new(1, 4),
+                    lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(2))
+                )
+                .is_err()
+        );
+        assert_eq!(guard.path().as_deref(), Some(path.as_path()));
+        assert_eq!(std::fs::read(path.join("one")).unwrap(), b"one");
+        assert_eq!(std::fs::read(path.join("two")).unwrap(), b"two");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_scratch_finite_removal_uses_same_parent_and_never_follows_symlink() {
+        let cache = tempfile::tempdir().unwrap();
+        let outside = cache.path().join("outside");
+        std::fs::write(&outside, b"outside-original").unwrap();
+        let (path, guard) = create_projectless_workspace(cache.path(), "finite-success").unwrap();
+        std::fs::create_dir(path.join("nested")).unwrap();
+        std::fs::write(path.join("nested/value"), b"value").unwrap();
+        std::os::unix::fs::symlink(&outside, path.join("alias")).unwrap();
+        guard.preserve_for_explicit_cleanup();
+        guard
+            .remove_now_until(
+                lillux::secure_fs::DirectoryTraversalBudget::new(8, 4),
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(2)),
+            )
+            .unwrap();
+        assert!(guard.path().is_none());
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(outside).unwrap(), b"outside-original");
     }
 
     #[test]

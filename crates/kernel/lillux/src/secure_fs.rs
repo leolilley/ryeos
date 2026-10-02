@@ -937,6 +937,16 @@ fn directory_names_bounded(
     directory: &File,
     max_entries: Option<usize>,
 ) -> Result<Vec<std::ffi::OsString>> {
+    directory_names_bounded_with_deadline(directory, max_entries, None)
+}
+
+#[cfg(target_os = "linux")]
+fn directory_names_bounded_with_deadline(
+    directory: &File,
+    max_entries: Option<usize>,
+    deadline: Option<crate::time::MonotonicDeadline>,
+) -> Result<Vec<std::ffi::OsString>> {
+    check_original_traversal_deadline(deadline)?;
     use std::os::unix::ffi::OsStringExt as _;
 
     struct DirectoryStream(*mut libc::DIR);
@@ -980,6 +990,7 @@ fn directory_names_bounded(
     let stream = DirectoryStream(stream);
     let mut names = Vec::new();
     loop {
+        check_original_traversal_deadline(deadline)?;
         if max_entries.is_some_and(|maximum| names.len() >= maximum) {
             break;
         }
@@ -1005,7 +1016,9 @@ fn directory_names_bounded(
         }
         names.push(std::ffi::OsString::from_vec(name.to_vec()));
     }
+    check_original_traversal_deadline(deadline)?;
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    check_original_traversal_deadline(deadline)?;
     Ok(names)
 }
 
@@ -1016,6 +1029,34 @@ fn directory_names_with_limit(
 ) -> Result<Vec<std::ffi::OsString>> {
     let read_limit = max_entries.saturating_add(1);
     let names = directory_names_bounded(directory, Some(read_limit))?;
+    if names.len() > max_entries {
+        anyhow::bail!("secure directory traversal exceeds maximum entry count {max_entries}");
+    }
+    Ok(names)
+}
+
+fn check_original_traversal_deadline(
+    deadline: Option<crate::time::MonotonicDeadline>,
+) -> Result<()> {
+    if deadline.is_some_and(|expiry| expiry.has_elapsed()) {
+        anyhow::bail!(
+            "original secure directory traversal deadline expired; disposal may be partial"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn directory_names_with_limit_until(
+    directory: &File,
+    max_entries: usize,
+    deadline: crate::time::MonotonicDeadline,
+) -> Result<Vec<std::ffi::OsString>> {
+    let names = directory_names_bounded_with_deadline(
+        directory,
+        Some(max_entries.saturating_add(1)),
+        Some(deadline),
+    )?;
     if names.len() > max_entries {
         anyhow::bail!("secure directory traversal exceeds maximum entry count {max_entries}");
     }
@@ -2534,10 +2575,31 @@ impl PinnedDirectory {
         #[cfg(unix)]
         {
             let mut remaining = budget.max_entries;
-            self.remove_contents_same_mount_bounded(&mut remaining, budget.max_depth, 0)?;
+            self.remove_contents_same_mount_bounded(&mut remaining, budget.max_depth, 0, None)?;
             self.directory.sync_all()?;
             Ok(())
         }
+    }
+
+    /// SAME retained inode, global entry/depth budget and original expiry.
+    /// Errors preserve partial disposal uncertainty; kernel I/O is not hard-contained.
+    #[cfg(target_os = "linux")]
+    pub fn remove_contents_recursive_bounded_until(
+        &self,
+        budget: DirectoryTraversalBudget,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<()> {
+        check_original_traversal_deadline(Some(deadline))?;
+        let mut remaining = budget.max_entries;
+        self.remove_contents_same_mount_bounded(
+            &mut remaining,
+            budget.max_depth,
+            0,
+            Some(deadline),
+        )?;
+        check_original_traversal_deadline(Some(deadline))?;
+        self.directory.sync_all()?;
+        check_original_traversal_deadline(Some(deadline))
     }
 
     #[cfg(unix)]
@@ -2546,17 +2608,20 @@ impl PinnedDirectory {
         remaining: &mut usize,
         max_depth: usize,
         depth: usize,
+        deadline: Option<crate::time::MonotonicDeadline>,
     ) -> Result<()> {
         use std::os::unix::ffi::OsStrExt as _;
 
+        check_original_traversal_deadline(deadline)?;
         if depth > max_depth {
             anyhow::bail!("recursive removal exceeds its directory depth bound");
         }
-        let entries = self.entries_no_follow_bounded(*remaining)?;
+        let entries = self.entries_no_follow_with_limit_and_deadline(Some(*remaining), deadline)?;
         *remaining = remaining
             .checked_sub(entries.len())
             .ok_or_else(|| anyhow::anyhow!("recursive removal entry budget underflow"))?;
         for entry in entries {
+            check_original_traversal_deadline(deadline)?;
             let name_c = std::ffi::CString::new(entry.name.as_bytes())?;
             if entry.entry_type == PinnedEntryType::Directory {
                 if depth >= max_depth {
@@ -2583,7 +2648,9 @@ impl PinnedDirectory {
                         "directory changed identity during recursive removal"
                     );
                     self.ensure_open_child_same_mount(&child)?;
+                    check_original_traversal_deadline(deadline)?;
                     if self.remove_empty_child_if_same(&entry.name, &child)? {
+                        check_original_traversal_deadline(deadline)?;
                         continue;
                     }
                 }
@@ -2596,12 +2663,19 @@ impl PinnedDirectory {
                     "directory changed identity during recursive removal"
                 );
                 self.ensure_open_child_same_mount(&child)?;
-                child.remove_contents_same_mount_bounded(remaining, max_depth, depth + 1)?;
+                child.remove_contents_same_mount_bounded(
+                    remaining,
+                    max_depth,
+                    depth + 1,
+                    deadline,
+                )?;
+                check_original_traversal_deadline(deadline)?;
                 if !self.remove_empty_child_if_same(&entry.name, &child)? {
                     anyhow::bail!("directory remained non-empty: {}", child.path.display());
                 }
             } else if {
                 self.ensure_entry_same_mount(&entry)?;
+                check_original_traversal_deadline(deadline)?;
                 (unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) }) != 0
             } {
                 return Err(std::io::Error::last_os_error()).with_context(|| {
@@ -2612,8 +2686,9 @@ impl PinnedDirectory {
                 });
             }
         }
+        check_original_traversal_deadline(deadline)?;
         self.directory.sync_all()?;
-        Ok(())
+        check_original_traversal_deadline(deadline)
     }
 
     #[cfg(unix)]
@@ -2954,12 +3029,30 @@ impl PinnedDirectory {
         &self,
         max_entries: Option<usize>,
     ) -> Result<Vec<PinnedDirectoryEntryMetadata>> {
+        self.entries_no_follow_with_limit_and_deadline(max_entries, None)
+    }
+
+    #[cfg(unix)]
+    fn entries_no_follow_with_limit_and_deadline(
+        &self,
+        max_entries: Option<usize>,
+        deadline: Option<crate::time::MonotonicDeadline>,
+    ) -> Result<Vec<PinnedDirectoryEntryMetadata>> {
+        check_original_traversal_deadline(deadline)?;
         let mut entries = Vec::new();
-        let names = match max_entries {
-            Some(max_entries) => directory_names_with_limit(&self.directory, max_entries)?,
-            None => directory_names(&self.directory)?,
+        let names = match (max_entries, deadline) {
+            #[cfg(target_os = "linux")]
+            (Some(max_entries), Some(deadline)) => {
+                directory_names_with_limit_until(&self.directory, max_entries, deadline)?
+            }
+            (_, Some(_)) => anyhow::bail!(
+                "original-expiry directory enumeration requires supported bounded Linux owner"
+            ),
+            (Some(max_entries), None) => directory_names_with_limit(&self.directory, max_entries)?,
+            (None, None) => directory_names(&self.directory)?,
         };
         for name in names {
+            check_original_traversal_deadline(deadline)?;
             let c_name = std::ffi::CString::new(name.as_bytes())?;
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             if unsafe {
@@ -2978,6 +3071,7 @@ impl PinnedDirectory {
                     )
                 });
             }
+            check_original_traversal_deadline(deadline)?;
             let entry_type = match stat.st_mode & libc::S_IFMT {
                 libc::S_IFDIR => PinnedEntryType::Directory,
                 libc::S_IFREG => PinnedEntryType::Regular,
@@ -2998,6 +3092,7 @@ impl PinnedDirectory {
             });
         }
         entries.sort_by(|left, right| left.name.cmp(&right.name));
+        check_original_traversal_deadline(deadline)?;
         Ok(entries)
     }
 
@@ -8299,6 +8394,45 @@ mod tests {
             assert!(root.ensure_entry_same_mount(&proc).is_err());
             assert!(root.ensure_open_child_same_mount(&open_proc).is_err());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_traversal_expiry_refuses_before_actual_directory_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("root");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("original"), b"original").unwrap();
+        let root = PinnedDirectory::open(&path).unwrap().unwrap();
+        assert!(
+            root.remove_contents_recursive_bounded_until(
+                DirectoryTraversalBudget::new(8, 4),
+                crate::time::MonotonicDeadline::after(crate::time::Duration::ZERO)
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path.join("original")).unwrap(), b"original");
+        assert!(path.is_dir());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_traversal_global_entry_bound_survives_deadline_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("root");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("one"), b"one").unwrap();
+        std::fs::write(path.join("two"), b"two").unwrap();
+        let root = PinnedDirectory::open(&path).unwrap().unwrap();
+        assert!(
+            root.remove_contents_recursive_bounded_until(
+                DirectoryTraversalBudget::new(1, 4),
+                crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(2))
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path.join("one")).unwrap(), b"one");
+        assert_eq!(std::fs::read(path.join("two")).unwrap(), b"two");
     }
 
     #[test]
