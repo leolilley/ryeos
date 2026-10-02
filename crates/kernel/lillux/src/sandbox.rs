@@ -173,13 +173,17 @@ pub struct LinuxSandboxRequest {
     pub target_limits: Option<crate::SubprocessLimits>,
 }
 
+const SEALED_STAGING_NAME: &str = ".lillux-sealed-staging";
+
 /// Whether a guest mount would overlap namespace structure owned by Lillux.
 /// Higher layers may reserve their own authored destinations, but must never
 /// reproduce the host backend's proc/device/system/private-tmp layout.
 pub fn linux_sandbox_mount_overlaps_managed_namespace(destination: &Path) -> bool {
+    let staging = Path::new("/").join(SEALED_STAGING_NAME);
     ["/proc", "/dev", "/sys", "/tmp"]
         .into_iter()
         .map(Path::new)
+        .chain(std::iter::once(staging.as_path()))
         .any(|managed| destination.starts_with(managed) || managed.starts_with(destination))
 }
 
@@ -1681,7 +1685,6 @@ mod imp {
 
     const ROOT: &str = "/tmp";
     const OLD_ROOT: &str = "/tmp/.lillux-old-root";
-    const SEALED_STAGING_NAME: &str = ".lillux-sealed-staging";
     const CHILD_READY: u8 = 0;
     const CHILD_TARGET_READY: u8 = 2;
     const MOUNT_PREPARATION_SCHEMA: u8 = 1;
@@ -9027,6 +9030,36 @@ mod tests {
             std::fs::remove_file(state_path.join("unexpected")).unwrap();
             destroy().unwrap();
             assert!(state.entries_no_follow().unwrap().is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
+mod managed_mount_destination_tests {
+    use super::*;
+
+    #[test]
+    fn managed_namespace_preflight_includes_the_native_sealed_staging_surface() {
+        assert!(!linux_sandbox_mount_overlaps_managed_namespace(Path::new(
+            "/candidate-input"
+        )));
+        assert!(!linux_sandbox_mount_overlaps_managed_namespace(Path::new(
+            "/.lillux-sealed-staging-sibling"
+        )));
+        for destination in [
+            "/",
+            "/proc",
+            "/proc/custom",
+            "/dev/input",
+            "/sys/custom",
+            "/tmp/file",
+            "/.lillux-sealed-staging",
+            "/.lillux-sealed-staging/file",
+        ] {
+            assert!(
+                linux_sandbox_mount_overlaps_managed_namespace(Path::new(destination)),
+                "{destination}"
+            );
         }
     }
 }
