@@ -33,9 +33,14 @@ SHA256 `c0cd6dec81c3e46f17607f1ae13440a2abfda2eb982d9c1be338bf084509403f`,
 introduced by cleanup commit `fd0940f43df6342146d409351c1cf419495b438e` and
 extended with explicit L4 profiles in `d8d16c1b4e49d44aeed2c5409aa3a75e50da5f7a`.
 That helper takes injected bindings and the whole raw `ExecutionResourceSelection`;
-it does not discover or load NVML. Product source in this worktree is based on D checkpoint
-`d17f059bbca83702488380e25df872404d40d192`; final integration must include the
-cleanup owner's exact module and regenerate the complete worker-source digest.
+it does not discover or load NVML. The joined unsigned source is at integration
+checkpoint `073cd6332894cc5988d4643f9ea255507ae24d64`. The existing source-manifest
+helper in `bundles/local-inference/test_contract.py` computes the current complete
+worker closure digest as
+`56beb472b9d714b781b094e67b3aac72c69f8e1c2243d33f8890326747ed8f9d`; this value
+is now recorded in the unsigned worker draft. Its previous digest
+`febc08b1ee73799546ee27c12d1b6c434c5b788fd2fa7f1c1261b7aa5274c743` is retained
+here as historical source metadata. No signature or activation was produced.
 
 ## Product-qualification edge
 
