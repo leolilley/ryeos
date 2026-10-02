@@ -324,6 +324,10 @@ pub struct LinuxSandboxProcess {
     /// never for helper/probe children. Kept private and non-serializable.
     #[cfg(target_os = "linux")]
     namespace_lifetime: Option<std::os::fd::OwnedFd>,
+    /// Present only for the existing externally-held adapter route which
+    /// bound this actual native fork before readiness. Drop is never cancel.
+    #[cfg(target_os = "linux")]
+    namespace_occupancy_watchdog: Option<crate::exec::OccupancyWatchdog>,
     /// Lillux-private, close-on-exec evidence channel. A record proves setup
     /// or exec failed before the workload existed. EOF alone does not prove
     /// execution: killing a pre-exec child also closes its descriptor. It is
@@ -1266,10 +1270,23 @@ impl LinuxSandboxProcess {
             return Err("sandbox namespace has an unsupported terminal status".into());
         };
         let launch_failure = imp::read_launch_failure(self.launch_failure.take())?;
+        self.cancel_namespace_occupancy_after_owned_reap()?;
         Ok(Some(LinuxSandboxTermination {
             exit,
             launch_failure,
         }))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cancel_namespace_occupancy_after_owned_reap(&mut self) -> Result<(), String> {
+        if self.pid != 0 {
+            return Err("watchdog cancellation requires exact owned native reap".into());
+        }
+        if let Some(watchdog) = self.namespace_occupancy_watchdog.as_mut() {
+            watchdog.cancel_and_reap()?;
+        }
+        self.namespace_occupancy_watchdog = None;
+        Ok(())
     }
 
     pub fn child_pid(&self) -> u32 {
@@ -1294,6 +1311,9 @@ impl LinuxSandboxProcess {
                 let waited = unsafe { libc::waitpid(self.pid, &mut status, 0) };
                 if waited == self.pid {
                     self.pid = 0;
+                    if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
+                        self.cancel_namespace_occupancy_after_owned_reap()?;
+                    }
                     if libc::WIFEXITED(status) {
                         let exit = LinuxSandboxExit::Code(libc::WEXITSTATUS(status));
                         if let Some(failure) = imp::read_launch_failure(self.launch_failure.take())?
@@ -1409,6 +1429,36 @@ pub fn inspect_linux_sandbox() -> Result<LinuxSandboxInspection, String> {
 /// process, not an application daemon.
 pub fn launch_linux_sandbox(request: LinuxSandboxRequest) -> Result<LinuxSandboxProcess, String> {
     imp::launch(request)
+}
+
+/// Same externally-held adapter lifecycle and actual native custodian, with
+/// the original outside watcher. This owns no release writer or financial
+/// authority; the existing outer attachment/Runtime owner remains responsible.
+/// No ordinary Run request can select this stronger held-only operation.
+#[cfg(target_os = "linux")]
+pub fn launch_linux_sandbox_with_original_namespace_occupancy(
+    request: LinuxSandboxRequest,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: crate::time::Duration,
+    original_deadline: crate::time::MonotonicDeadline,
+) -> Result<LinuxSandboxProcess, String> {
+    if !matches!(
+        request.lifecycle,
+        LinuxSandboxLifecycle::AwaitRelease { .. }
+    ) {
+        return Err(
+            "original namespace occupancy requires existing externally-held lifecycle".into(),
+        );
+    }
+    let mut pending = crate::exec::PendingNamespaceWatchdog::prepare(
+        limit,
+        cleanup_allowance,
+        original_deadline,
+    )?;
+    let mut process =
+        imp::launch_with_stdio_with_namespace_watchdog(request, None, None, Some(&mut pending))?;
+    process.namespace_occupancy_watchdog = Some(pending.finish()?);
+    Ok(process)
 }
 
 /// Launch a held isolated target with one exact namespace-local listener.
@@ -4073,6 +4123,7 @@ mod imp {
         let mut process = LinuxSandboxProcess {
             pid,
             namespace_lifetime: None,
+            namespace_occupancy_watchdog: None,
             launch_failure: Some(unsafe { File::from_raw_fd(launch_failure[0]) }),
             applied_launch: Some(unsafe { File::from_raw_fd(applied_launch[0]) }),
             observed_applied_launch: None,
@@ -6129,6 +6180,7 @@ mod imp {
                 LinuxSandboxProcess {
                     pid,
                     namespace_lifetime: None,
+                    namespace_occupancy_watchdog: None,
                     launch_failure: Some(unsafe { File::from_raw_fd(pipe[0]) }),
                     applied_launch: None,
                     observed_applied_launch: None,
@@ -8327,6 +8379,7 @@ mod tests {
             process: LinuxSandboxProcess {
                 pid: 0,
                 namespace_lifetime: None,
+                namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
@@ -8400,6 +8453,7 @@ mod tests {
             process: LinuxSandboxProcess {
                 pid: 0,
                 namespace_lifetime: None,
+                namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
@@ -8442,6 +8496,7 @@ mod tests {
             process: LinuxSandboxProcess {
                 pid: 0,
                 namespace_lifetime: None,
+                namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
@@ -8477,6 +8532,7 @@ mod tests {
         let mut process = LinuxSandboxProcess {
             pid: 0,
             namespace_lifetime: None,
+            namespace_occupancy_watchdog: None,
             launch_failure: None,
             applied_launch: None,
             observed_applied_launch: None,
@@ -8634,6 +8690,22 @@ mod tests {
             nested_sandbox: false,
             aggregate_limits: None,
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_adapter_occupancy_refuses_ordinary_run_before_any_fork() {
+        let limit =
+            crate::time::OccupancyLimit::new(crate::time::occupancy_now().unwrap(), 10_000_000_000)
+                .unwrap();
+        let error = launch_linux_sandbox_with_original_namespace_occupancy(
+            minimal_request(),
+            &limit,
+            crate::time::Duration::from_secs(1),
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1)),
+        )
+        .unwrap_err();
+        assert!(error.contains("existing externally-held lifecycle"));
     }
 
     #[test]

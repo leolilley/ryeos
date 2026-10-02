@@ -2904,6 +2904,7 @@ mod namespace_occupancy;
 pub(crate) use namespace_occupancy::PendingNamespaceWatchdog;
 
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
 pub(crate) struct OccupancyWatchdog {
     pid: libc::pid_t,
     cancel: Option<std::fs::File>,
