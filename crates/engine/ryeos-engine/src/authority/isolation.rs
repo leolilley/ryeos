@@ -4638,7 +4638,26 @@ impl IsolationRuntime {
             }
         }
         let argv0 = command_argv0.unwrap_or_else(|| command_path.to_string_lossy().into_owned());
+        let target_limits = limits
+            .filter(|limits| {
+                limits.max_open_files.is_some()
+                    || limits.max_address_space_bytes.is_some()
+                    || limits.max_cpu_seconds.is_some()
+                    || limits.max_processes.is_some()
+                    || limits.deny_process_creation
+            })
+            .map(|limits| ryeos_isolation_protocol::IsolationTargetLimits {
+                max_open_files: match (self.inspection.limits.open_files, limits.max_open_files) {
+                    (Some(policy), Some(requested)) => Some(policy.min(requested)),
+                    (_, requested) => requested,
+                },
+                max_address_space_bytes: limits.max_address_space_bytes,
+                max_cpu_seconds: limits.max_cpu_seconds,
+                max_processes: limits.max_processes,
+                deny_process_creation: limits.deny_process_creation,
+            });
         let plan = IsolationPlan {
+            target_limits,
             target: IsolationTarget {
                 executable: target_authority,
                 argv0,
@@ -4805,9 +4824,9 @@ impl IsolationRuntime {
                 .and_then(|limits| limits.max_address_space_bytes),
             max_cpu_seconds: limits.as_ref().and_then(|limits| limits.max_cpu_seconds),
             max_processes: limits.as_ref().and_then(|limits| limits.max_processes),
-            deny_process_creation: limits
-                .as_ref()
-                .is_some_and(|limits| limits.deny_process_creation),
+            // The sealed target carrier has already passed capability admission.
+            // Trusted adapter setup still needs to fork the final target.
+            deny_process_creation: false,
         });
 
         Ok(CompiledIsolationLaunch {
@@ -9745,6 +9764,7 @@ mod tests {
     #[test]
     fn launch_plan_digest_redacts_arguments_and_environment_values() {
         let mut plan = IsolationPlan {
+            target_limits: None,
             target: IsolationTarget {
                 executable: IsolationAuthorityId::new("target").unwrap(),
                 argv0: "tool".to_string(),
@@ -9787,6 +9807,15 @@ mod tests {
         assert_ne!(target.argv_sha256, changed.argv_sha256);
         assert_ne!(target.environment_sha256, changed.environment_sha256);
 
+        plan.target_limits = Some(ryeos_isolation_protocol::IsolationTargetLimits {
+            max_open_files: None,
+            max_address_space_bytes: None,
+            max_cpu_seconds: Some(3),
+            max_processes: None,
+            deny_process_creation: true,
+        });
+        assert_ne!(redacted_plan_digest(&plan).unwrap(), digest);
+        plan.target_limits = None;
         plan.network = IsolationNetwork::Host;
         assert_ne!(redacted_plan_digest(&plan).unwrap(), digest);
     }
@@ -9804,6 +9833,7 @@ mod tests {
             purpose: IsolationAuthorityPurpose::Executable,
         };
         let mut plan = IsolationPlan {
+            target_limits: None,
             target: IsolationTarget {
                 executable: id.clone(),
                 argv0: "tool".into(),
@@ -9853,6 +9883,7 @@ mod tests {
     #[test]
     fn loopback_receipt_requires_exact_held_request_and_one_descriptor() {
         let plan = IsolationPlan {
+            target_limits: None,
             target: IsolationTarget {
                 executable: IsolationAuthorityId::new("target").unwrap(),
                 argv0: "tool".into(),

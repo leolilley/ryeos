@@ -30,5 +30,6 @@ isolation_backends:
       - process.isolated_pid_namespace
       - process.target_pid_reporting
       - lifecycle.shared_process_group
+      - process.target_limits
       - process.nested_sandbox
       - ipc.target_unix_stream

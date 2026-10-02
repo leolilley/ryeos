@@ -523,7 +523,18 @@ fn translate_launch(request: &AdapterLaunchRequest) -> Result<lillux::LinuxSandb
         // stays outside this adapter/target namespace. The current protocol
         // admits no aggregate-limit request; ordinary rlimits do not supply it.
         aggregate_limits: None,
-        target_limits: None,
+        target_limits: request
+            .plan
+            .target_limits
+            .map(|limits| lillux::SubprocessLimits {
+                max_open_files: limits.max_open_files,
+                max_address_space_bytes: limits.max_address_space_bytes,
+                max_cpu_seconds: limits.max_cpu_seconds,
+                max_processes: limits.max_processes,
+                deny_process_creation: limits.deny_process_creation,
+                max_stdout_bytes: None,
+                max_stderr_bytes: None,
+            }),
     })
 }
 
@@ -739,6 +750,12 @@ fn supported_capabilities(
     let mut capabilities = BTreeSet::new();
     if inspection.private_root {
         capabilities.insert(IsolationCapability::FilesystemPrivateRoot);
+        if cfg!(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )) {
+            capabilities.insert(IsolationCapability::ProcessTargetLimits);
+        }
     }
     if inspection.descriptor_mounts {
         capabilities.extend([

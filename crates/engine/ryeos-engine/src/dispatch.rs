@@ -87,11 +87,6 @@ fn context_with_plan_limits(
             .map_err(|error| EngineError::ExecutionFailed {
                 reason: error.to_string(),
             })?;
-        if ctx.isolation.is_enforced() && authored.deny_process_creation {
-            return Err(EngineError::ExecutionFailed {
-                reason: "isolated target process-creation restriction is unsupported: outer adapter requires a setup fork".to_owned(),
-            });
-        }
         let existing = ctx.subprocess_limits.unwrap_or_default();
         fn tighter(left: Option<u64>, right: Option<u64>) -> Option<u64> {
             match (left, right) {

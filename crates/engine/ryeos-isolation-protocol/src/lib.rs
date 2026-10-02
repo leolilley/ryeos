@@ -238,6 +238,8 @@ pub enum IsolationCapability {
     LifecycleSharedProcessGroup,
     #[serde(rename = "process.nested_sandbox")]
     ProcessNestedSandbox,
+    #[serde(rename = "process.target_limits")]
+    ProcessTargetLimits,
     #[serde(rename = "ipc.target_unix_stream")]
     IpcTargetUnixStream,
 }
@@ -610,9 +612,41 @@ pub struct IsolationTarget {
     pub cwd: IsolationPath,
 }
 
+/// Restrictions installed only in the final native target. Pipe-output
+/// retention remains with the existing launch/drain owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationTargetLimits {
+    pub max_open_files: Option<u64>,
+    pub max_address_space_bytes: Option<u64>,
+    pub max_cpu_seconds: Option<u64>,
+    pub max_processes: Option<u64>,
+    pub deny_process_creation: bool,
+}
+
+impl IsolationTargetLimits {
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        for (name, value) in [
+            ("max_open_files", self.max_open_files),
+            ("max_address_space_bytes", self.max_address_space_bytes),
+            ("max_cpu_seconds", self.max_cpu_seconds),
+            ("max_processes", self.max_processes),
+        ] {
+            if value == Some(0) || value == Some(u64::MAX) {
+                return Err(ProtocolValidationError::new(format!(
+                    "{name} must be positive and finite"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IsolationPlan {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_limits: Option<IsolationTargetLimits>,
     pub target: IsolationTarget,
     pub mounts: Vec<IsolationMount>,
     pub fixed_parent_views: Vec<IsolationFixedParentView>,
@@ -639,6 +673,9 @@ impl IsolationPlan {
         &self,
         authorities: &[IsolationAuthority],
     ) -> Result<BTreeSet<IsolationCapability>, ProtocolValidationError> {
+        if let Some(limits) = self.target_limits {
+            limits.validate()?;
+        }
         if let Some(ingress) = &self.loopback_ingress {
             ingress.validate()?;
             if self.network != IsolationNetwork::Isolated {
@@ -1086,6 +1123,9 @@ impl IsolationPlan {
         });
         if self.shared_process_group {
             capabilities.insert(IsolationCapability::LifecycleSharedProcessGroup);
+        }
+        if self.target_limits.is_some() {
+            capabilities.insert(IsolationCapability::ProcessTargetLimits);
         }
         if self.nested_sandbox {
             capabilities.insert(IsolationCapability::ProcessNestedSandbox);
@@ -1903,6 +1943,7 @@ mod tests {
         let writable = IsolationAuthorityId::new("workspace").unwrap();
         (
             IsolationPlan {
+                target_limits: None,
                 target: IsolationTarget {
                     executable: executable.clone(),
                     argv0: "python".to_string(),
@@ -2410,6 +2451,31 @@ mod tests {
                 max_depth: 4,
             },
         }
+    }
+
+    #[test]
+    fn target_limits_require_explicit_presence_closed_values_and_capability() {
+        let (mut plan, authorities) = complete_plan();
+        let mut missing = serde_json::to_value(&plan).unwrap();
+        missing.as_object_mut().unwrap().remove("target_limits");
+        assert!(serde_json::from_value::<IsolationPlan>(missing).is_err());
+        plan.target_limits = Some(IsolationTargetLimits {
+            max_open_files: Some(64),
+            max_address_space_bytes: Some(134217728),
+            max_cpu_seconds: Some(3),
+            max_processes: None,
+            deny_process_creation: true,
+        });
+        assert!(
+            plan.validate(&authorities)
+                .unwrap()
+                .contains(&IsolationCapability::ProcessTargetLimits)
+        );
+        let mut unknown = serde_json::to_value(&plan).unwrap();
+        unknown["target_limits"]["max_stdout_bytes"] = serde_json::json!(32768);
+        assert!(serde_json::from_value::<IsolationPlan>(unknown).is_err());
+        plan.target_limits.as_mut().unwrap().max_cpu_seconds = Some(0);
+        assert!(plan.validate(&authorities).is_err());
     }
 
     #[test]
