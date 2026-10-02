@@ -1121,6 +1121,59 @@ fn external_direct_prebirth_constraints_need_no_born_program_or_guest_inputs() {
 }
 
 #[test]
+fn mechanical_projection_checks_do_not_enable_ordinary_guest_support() {
+    let mut fixture = Fixture::new();
+    fixture.plan.filesystem_authority_ceiling = IsolationFilesystemAuthorityCeiling::CapturedInputs;
+    fixture.plan.subprocess_limits = Some(ryeos_engine::contracts::ExecutionSubprocessLimits {
+        max_open_files: Some(128),
+        max_address_space_bytes: Some(256 * 1024 * 1024),
+        max_cpu_seconds: Some(2),
+        max_processes: None,
+        deny_process_creation: true,
+        max_stdout_bytes: Some(32768),
+        max_stderr_bytes: Some(8192),
+    });
+    // Mechanical validation grants no root/purpose, compiled fixture, process,
+    // allocation, or qualification authority. Ordinary admission remains shut.
+    validate_external_direct_plan_semantics(&fixture.plan, &fixture.protocol.descriptor).unwrap();
+    assert!(validate_external_direct_plan(&fixture.plan, &fixture.protocol.descriptor).is_err());
+    for invalid in [0, u64::MAX] {
+        fixture
+            .plan
+            .subprocess_limits
+            .as_mut()
+            .unwrap()
+            .max_cpu_seconds = Some(invalid);
+        assert!(
+            validate_external_direct_plan_semantics(&fixture.plan, &fixture.protocol.descriptor)
+                .is_err()
+        );
+    }
+    fixture
+        .plan
+        .subprocess_limits
+        .as_mut()
+        .unwrap()
+        .max_cpu_seconds = Some(2);
+    fixture.plan.network_authority_ceiling = IsolationNetworkAuthorityCeiling::NodePolicy;
+    assert!(
+        validate_external_direct_plan_semantics(&fixture.plan, &fixture.protocol.descriptor)
+            .is_err()
+    );
+    fixture.plan.network_authority_ceiling = IsolationNetworkAuthorityCeiling::Isolated;
+    fixture.protocol.descriptor.env_injections.push(
+        ryeos_engine::protocol_vocabulary::EnvInjection {
+            name: "AUTHORITY".into(),
+            source: EnvInjectionSource::ThreadAuthToken,
+        },
+    );
+    assert!(
+        validate_external_direct_plan_semantics(&fixture.plan, &fixture.protocol.descriptor)
+            .is_err()
+    );
+}
+
+#[test]
 fn feature_claims_follow_sealed_view_and_target_limits_not_output_only_caps() {
     use ryeos_external_execution_contract::{
         CAPTURED_INPUTS_SUPPORT_CLAIM, TARGET_LIMITS_SUPPORT_CLAIM,

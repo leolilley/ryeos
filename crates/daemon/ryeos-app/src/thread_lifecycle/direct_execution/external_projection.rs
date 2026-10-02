@@ -402,9 +402,27 @@ pub(super) fn validate_external_direct_plan(
         plan.subprocess_limits.is_none(),
         "external direct native subprocess limits require admitted current guest support before provider contact"
     );
+    ensure!(
+        plan.filesystem_authority_ceiling == IsolationFilesystemAuthorityCeiling::CapturedExecution,
+        "external direct execution requires captured filesystem and isolated network ceilings"
+    );
+    validate_external_direct_plan_semantics(plan, protocol)
+}
+
+/// Validate the projection's finite mechanical meaning, independently of
+/// ordinary guest support admission. This grants no allocation, dispatch,
+/// qualification or fixture provenance. A mechanism preparation owner must
+/// authenticate its original root/purpose and actual fixture closure before
+/// using these semantics; ordinary callers retain the support gates above.
+pub(super) fn validate_external_direct_plan_semantics(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+    protocol: &ryeos_engine::protocols::ProtocolDescriptor,
+) -> Result<()> {
+    plan.validate_endpoint_for_sealing()?;
     if let Some(limits) = plan.subprocess_limits {
         limits.validate()?;
     }
+    direct_target_limits(plan)?;
 
     ensure!(
         matches!(
@@ -427,8 +445,11 @@ pub(super) fn validate_external_direct_plan(
         "external direct protocol requests unsupported controller authority"
     );
     ensure!(
-        plan.filesystem_authority_ceiling == IsolationFilesystemAuthorityCeiling::CapturedExecution
-            && plan.network_authority_ceiling == IsolationNetworkAuthorityCeiling::Isolated,
+        matches!(
+            plan.filesystem_authority_ceiling,
+            IsolationFilesystemAuthorityCeiling::CapturedExecution
+                | IsolationFilesystemAuthorityCeiling::CapturedInputs
+        ) && plan.network_authority_ceiling == IsolationNetworkAuthorityCeiling::Isolated,
         "external direct execution requires captured filesystem and isolated network ceilings"
     );
     ensure!(
