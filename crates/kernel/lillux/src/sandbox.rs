@@ -8704,6 +8704,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn native_target_limits_refuse_invalid_or_pipe_limits_before_setup() {
         let mut request = minimal_request();
         request.target_limits = Some(crate::SubprocessLimits {
