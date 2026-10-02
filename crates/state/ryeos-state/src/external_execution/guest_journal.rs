@@ -223,7 +223,10 @@ fn hash(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn retained_launcher_occurrence_digest(conn: &Connection, binding_digest: &str) -> Result<String> {
+fn retained_launcher_occurrence(
+    conn: &Connection,
+    binding_digest: &str,
+) -> Result<LauncherOccurrenceEvidence> {
     let (process_json, launcher_artifact_digest, channel_challenge_digest): (
         String,
         String,
@@ -243,8 +246,11 @@ fn retained_launcher_occurrence_digest(conn: &Connection, binding_digest: &str) 
         process_identity,
         &launcher_artifact_digest,
         &channel_challenge_digest,
-    )?
-    .digest()
+    )
+}
+
+fn retained_launcher_occurrence_digest(conn: &Connection, binding_digest: &str) -> Result<String> {
+    retained_launcher_occurrence(conn, binding_digest)?.digest()
 }
 
 struct GuestStore {
@@ -333,6 +339,40 @@ impl LauncherOccurrenceEvidence {
         Ok(lillux::sha256_hex(
             lillux::canonical_json(&serde_json::to_value(self)?)?.as_bytes(),
         ))
+    }
+}
+
+/// Retained journal testimony about a held launcher occurrence and readiness.
+/// State authenticates immutable rows and owner custody, not the process or
+/// handshake described by them. The live executor must independently join
+/// these records to its actual process and authenticated channel. This is
+/// neither executable authority nor qualification testimony.
+#[derive(Debug)]
+pub struct RetainedLauncherReady {
+    binding_digest: String,
+    occurrence: LauncherOccurrenceEvidence,
+    occurrence_digest: String,
+    handshake_transcript_digest: String,
+}
+
+impl RetainedLauncherReady {
+    pub fn binding_digest(&self) -> &str {
+        &self.binding_digest
+    }
+    pub fn process_identity(&self) -> &lillux::ExactProcessIdentity {
+        &self.occurrence.process_identity
+    }
+    pub fn launcher_artifact_digest(&self) -> &str {
+        &self.occurrence.launcher_artifact_digest
+    }
+    pub fn channel_challenge_digest(&self) -> &str {
+        &self.occurrence.channel_challenge_digest
+    }
+    pub fn occurrence_digest(&self) -> &str {
+        &self.occurrence_digest
+    }
+    pub fn handshake_transcript_digest(&self) -> &str {
+        &self.handshake_transcript_digest
     }
 }
 
@@ -733,6 +773,39 @@ impl RecoveredGuestJournal {
 }
 
 impl LiveGuestJournal {
+    /// Read immutable occurrence and readiness testimony under the same
+    /// pinned journal and live owner. Process and channel corroboration
+    /// belongs to the executor; these records alone do not prove execution.
+    pub fn retained_launcher_ready(&self) -> Result<RetainedLauncherReady> {
+        self.0.validate()?;
+        let binding_digest = self.0.binding.digest()?;
+        let lifecycle: String = self.0.conn.query_row(
+            "SELECT lifecycle FROM external_guest_meta WHERE singleton=1 AND binding_digest=?1",
+            [&binding_digest],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            lifecycle == "ready",
+            "launcher observation lacks authenticated readiness"
+        );
+        let occurrence = retained_launcher_occurrence(&self.0.conn, &binding_digest)?;
+        let occurrence_digest = occurrence.digest()?;
+        let handshake_transcript_digest: String = self.0.conn.query_row(
+            "SELECT handshake_transcript_digest FROM external_guest_launcher_ready WHERE binding_digest=?1",
+            [&binding_digest], |row| row.get(0),
+        )?;
+        hash(
+            &handshake_transcript_digest,
+            "observed launcher handshake transcript",
+        )?;
+        Ok(RetainedLauncherReady {
+            binding_digest,
+            occurrence,
+            occurrence_digest,
+            handshake_transcript_digest,
+        })
+    }
+
     pub fn binding(&self) -> &ExecutionChannelBinding {
         &self.0.binding
     }
@@ -3187,6 +3260,43 @@ mod tests {
         let (_, ready_performed) = live.apply_once(ready_token, |_| Ok(())).unwrap();
         live.finish(ready_performed).unwrap();
         (live, binding, owner, supervisor, bootstrap, store_identity)
+    }
+
+    #[test]
+    fn launcher_readiness_observation_reads_exact_immutable_live_journal() {
+        let (_state_root, authority) = state_authority();
+        let root = tempfile::tempdir().unwrap();
+        let (live, binding, _, _, _, _) = live_store(&root, &authority);
+        let observed = live.retained_launcher_ready().unwrap();
+        assert_eq!(observed.binding_digest(), binding.digest().unwrap());
+        assert_eq!(observed.process_identity().target_pid, 100);
+        assert_eq!(observed.process_identity().target_start_time_ticks, 200);
+        assert_eq!(observed.launcher_artifact_digest(), "7".repeat(64));
+        assert_eq!(observed.channel_challenge_digest(), "6".repeat(64));
+        assert_eq!(observed.handshake_transcript_digest(), "5".repeat(64));
+        assert_eq!(
+            observed.occurrence_digest(),
+            retained_launcher_occurrence_digest(&live.0.conn, &binding.digest().unwrap()).unwrap()
+        );
+        assert!(
+            live.0
+                .conn
+                .execute(
+                    "UPDATE external_guest_launcher_ready SET handshake_transcript_digest=?1",
+                    [&"8".repeat(64)],
+                )
+                .is_err()
+        );
+        assert!(
+            live.0
+                .conn
+                .execute("DELETE FROM external_guest_launcher_occurrence", [],)
+                .is_err()
+        );
+        assert_eq!(
+            live.retained_launcher_ready().unwrap().occurrence_digest(),
+            observed.occurrence_digest()
+        );
     }
 
     fn state_authority() -> (tempfile::TempDir, PinnedStateAuthority) {

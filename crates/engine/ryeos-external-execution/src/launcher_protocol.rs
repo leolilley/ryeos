@@ -196,6 +196,35 @@ pub struct LiveInheritedExternalCandidateSupervisor {
     qualification_settled: bool,
 }
 
+/// Launcher readiness observed through this executor's live process and
+/// authenticated inherited channel. State journal testimony alone cannot
+/// construct this value. It is not applied-exec or terminal qualification.
+#[derive(Debug)]
+pub struct ObservedLauncherReady {
+    retained: ryeos_state::external_execution::guest_journal::RetainedLauncherReady,
+}
+
+impl ObservedLauncherReady {
+    pub fn binding_digest(&self) -> &str {
+        self.retained.binding_digest()
+    }
+    pub fn process_identity(&self) -> &lillux::ExactProcessIdentity {
+        self.retained.process_identity()
+    }
+    pub fn launcher_artifact_digest(&self) -> &str {
+        self.retained.launcher_artifact_digest()
+    }
+    pub fn channel_challenge_digest(&self) -> &str {
+        self.retained.channel_challenge_digest()
+    }
+    pub fn occurrence_digest(&self) -> &str {
+        self.retained.occurrence_digest()
+    }
+    pub fn handshake_transcript_digest(&self) -> &str {
+        self.retained.handshake_transcript_digest()
+    }
+}
+
 pub enum ExternalOwnerFrameOutcome {
     Application(SupervisorApplicationOutcome),
     Capture(crate::supervisor::SupervisorCaptureOutcome),
@@ -210,6 +239,19 @@ pub struct ExternalOwnerFrameDispatch {
 }
 
 impl LiveInheritedExternalCandidateSupervisor {
+    /// Observe this live launcher's retained held occurrence and authenticated
+    /// readiness. This does not assert applied exec or terminal settlement.
+    pub fn observed_launcher_ready(&self) -> Result<ObservedLauncherReady> {
+        let observed = self.supervisor.journal().retained_launcher_ready()?;
+        ensure!(
+            observed.process_identity() == &self.process_identity
+                && observed.occurrence_digest() == self.occurrence_digest
+                && observed.binding_digest() == self.binding().digest()?,
+            "launcher readiness observation lost its original live occurrence"
+        );
+        Ok(ObservedLauncherReady { retained: observed })
+    }
+
     pub fn binding(&self) -> &ExecutionChannelBinding {
         self.supervisor.journal().binding()
     }
