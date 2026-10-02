@@ -3049,6 +3049,19 @@ fn start_capsule_process(
             return Err(error);
         }
     };
+    if session_protocol.cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup
+    {
+        // SAME actual callback state/original start; selected custody returns
+        // uncertainty before Started/Ready, even when native facts correspond.
+        original_start.retain_and_check_original_native(
+            state,
+            running,
+            held.lifelines,
+            cleanup_observer,
+            held.retirement_observer,
+        )?;
+        bail!("original native diagnostic cannot admit pooled readiness");
+    }
     Ok(StartedPersistentSession {
         running,
         socket: held.socket,

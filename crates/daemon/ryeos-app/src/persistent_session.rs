@@ -804,6 +804,13 @@ struct PooledStartRetention {
     // Destroy ALL best-effort process owners before scratch/capture lifelines.
     // Group/pool destruction is never native or financial settlement proof.
     retained_running: Vec<ryeos_engine::dispatch::RunningExecution>,
+    // Checked-out originals are never replaced by another supplied input.
+    quarantined_inputs:
+        Vec<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
+    native_check_attempted: bool,
+    native_check_in_flight: bool,
+    native_check_refused: bool,
+    original_held_attached: bool,
     phase: PooledStartPhase,
     lifelines: Vec<Box<dyn Send + Sync>>,
     resource_observer: Option<PersistentSessionCleanupObserver>,
@@ -821,11 +828,89 @@ struct PooledStartRetention {
         Option<crate::runtime_db::process_resource_launch::TrustedResourceSpawnPermit>,
 }
 
+// The guard can restore only objects it actually owns. A panic inside a
+// consuming wait may destroy the moved RunningExecution; higher originals
+// stay refused and funded/scratch uncertainty is never converted to proof.
+struct OriginalNativeCheckGuard<'a> {
+    running: Option<ryeos_engine::dispatch::RunningExecution>,
+    inputs: Option<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
+    original: &'a PersistentSessionPooledStart,
+}
+
+impl OriginalNativeCheckGuard<'_> {
+    fn require_exclusive(&self) -> Result<()> {
+        let retained = self
+            .original
+            .retained
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let exclusive = retained.native_check_attempted
+            && retained.native_check_in_flight
+            && !retained.native_check_refused
+            && !retained.admission_refused
+            && retained.trusted_inputs.is_none()
+            && retained.retained_running.is_empty()
+            && retained.quarantined_inputs.is_empty()
+            && retained.original_funding.is_some()
+            && retained.original_spawn_permit.is_some();
+        drop(retained);
+        anyhow::ensure!(
+            exclusive,
+            "original native check lost exclusive retained custody"
+        );
+        Ok(())
+    }
+}
+
+impl Drop for OriginalNativeCheckGuard<'_> {
+    fn drop(&mut self) {
+        let mut retained = self
+            .original
+            .retained
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(running) = self.running.take() {
+            retained.retained_running.push(running);
+        }
+        if let Some(inputs) = self.inputs.take() {
+            if let Some(unexpected) = retained.trusted_inputs.take() {
+                retained.quarantined_inputs.push(unexpected);
+            }
+            retained.trusted_inputs = Some(inputs);
+        }
+        retained.native_check_in_flight = false;
+        retained.native_check_refused = true;
+        retained.admission_refused = true;
+        retained.phase = PooledStartPhase::Unsettled;
+        // No callback, validation, formatting, object destruction or wait
+        // while locked; every actual collision remains in existing custody.
+    }
+}
+
+enum OriginalNativeCheckOutcome {
+    CollectedFacts,
+    Incomplete,
+    Failed,
+    Unsupported,
+}
+
 impl PersistentSessionPooledStart {
+    fn native_check_blocks_mutation(retained: &PooledStartRetention) -> bool {
+        retained.native_check_attempted
+            || retained.native_check_in_flight
+            || retained.native_check_refused
+            || !retained.quarantined_inputs.is_empty()
+    }
+
     fn new() -> Self {
         Self {
             retained: Mutex::new(PooledStartRetention {
                 retained_running: Vec::new(),
+                quarantined_inputs: Vec::new(),
+                native_check_attempted: false,
+                native_check_in_flight: false,
+                native_check_refused: false,
+                original_held_attached: false,
                 phase: PooledStartPhase::Preparing,
                 lifelines: Vec::new(),
                 resource_observer: None,
@@ -850,7 +935,8 @@ impl PersistentSessionPooledStart {
         allocation_scope: &ryeos_state::objects::AdmittedAccountingScope,
     ) -> Result<()> {
         let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
-        if retained.phase != PooledStartPhase::Preparing
+        if Self::native_check_blocks_mutation(&retained)
+            || retained.phase != PooledStartPhase::Preparing
             || retained.admission_refused
             || self.original_callback_budget.get().is_some()
         {
@@ -885,13 +971,18 @@ impl PersistentSessionPooledStart {
         let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
         // Every actually supplied physical owner stays rooted on refusal.
         retained.lifelines.push(Box::new(Arc::clone(&scratch)));
-        if retained.trusted_inputs.is_some() {
-            retained.lifelines.push(Box::new(inputs));
+        if Self::native_check_blocks_mutation(&retained) || retained.trusted_inputs.is_some() {
+            retained.quarantined_inputs.push(inputs);
+            retained.native_check_refused |=
+                retained.native_check_attempted || retained.native_check_in_flight;
             retained.admission_refused = true;
             bail!("original trusted funding attempt cannot replace verified input owner");
         }
         retained.trusted_inputs = Some(inputs);
-        if retained.phase != PooledStartPhase::Preparing || retained.admission_refused {
+        if Self::native_check_blocks_mutation(&retained)
+            || retained.phase != PooledStartPhase::Preparing
+            || retained.admission_refused
+        {
             retained.admission_refused = true;
             bail!("original pooled owner no longer admits funding preparation");
         }
@@ -984,7 +1075,8 @@ impl PersistentSessionPooledStart {
         crate::runtime_db::ProcessResourceReservationRecord,
     )> {
         let mut retained = self.lock_original_contact_retention()?;
-        if retained.phase != PooledStartPhase::Preparing
+        if Self::native_check_blocks_mutation(&retained)
+            || retained.phase != PooledStartPhase::Preparing
             || retained.admission_refused
             || retained.original_contact_attempted
         {
@@ -1032,7 +1124,8 @@ impl PersistentSessionPooledStart {
         held: &ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
     ) -> Result<crate::process::ExecutionProcessIdentity> {
         let mut retained = self.lock_original_contact_retention()?;
-        if retained.phase != PooledStartPhase::Preparing
+        if Self::native_check_blocks_mutation(&retained)
+            || retained.phase != PooledStartPhase::Preparing
             || retained.admission_refused
             || !retained.original_contact_attempted
             || retained.original_spawn_permit.is_none()
@@ -1048,15 +1141,152 @@ impl PersistentSessionPooledStart {
             .map(|(identity, _binding)| identity);
         if result.is_err() {
             retained.admission_refused = true;
+        } else {
+            retained.original_held_attached = true;
         }
         result
+    }
+
+    /// Actual selected pooled callback only, after held release and before Ready.
+    /// Root every supplied object first; all outcomes remain refused for Ready,
+    /// startup/driver/physical retirement and financial settlement.
+    /// Flags and backend correspondence do not attest a funded occurrence:
+    /// the actual Executor held/attach/release caller supplies source lineage.
+    /// A later issuer still needs an actual held/funding occurrence join.
+    pub fn retain_and_check_original_native(
+        &self,
+        state: &crate::state::AppState,
+        running: ryeos_engine::dispatch::RunningExecution,
+        lifelines: Vec<Box<dyn Send + Sync>>,
+        resource: Option<PersistentSessionCleanupObserver>,
+        retirement: Option<PersistentSessionCleanupObserver>,
+    ) -> Result<()> {
+        let mut guard = {
+            let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+            retained.retained_running.push(running);
+            retained.lifelines.extend(lifelines);
+            stage_pooled_obligation_owners(&mut retained, &resource, &retirement);
+            let eligible = !Self::native_check_blocks_mutation(&retained)
+                && !retained.admission_refused
+                && retained.phase == PooledStartPhase::Preparing
+                && retained.retained_running.len() == 1
+                && retained.trusted_inputs.is_some()
+                && retained.original_funding.is_some()
+                && retained.original_spawn_permit.is_some()
+                && retained.original_contact_attempted
+                && retained.original_held_attached
+                && self.is_in_flight()
+                && self.original_callback_budget.get().is_some();
+            retained.native_check_attempted = true;
+            retained.phase = PooledStartPhase::Unsettled;
+            if !eligible {
+                retained.native_check_refused = true;
+                retained.admission_refused = true;
+                drop(retained);
+                return Err(anyhow!(
+                    "original native diagnostic lacks exclusive original held/funded custody"
+                )
+                .context(PersistentSessionCleanupUnproved));
+            }
+            retained.native_check_in_flight = true;
+            OriginalNativeCheckGuard {
+                running: retained.retained_running.pop(),
+                inputs: retained.trusted_inputs.take(),
+                original: self,
+            }
+        };
+        let observed = (|| -> Result<OriginalNativeCheckOutcome> {
+            guard.require_exclusive()?;
+            let inputs = guard
+                .inputs
+                .as_ref()
+                .expect("actual original input checked out");
+            inputs.require_original_isolation_expectation(state)?;
+            let capture = Arc::clone(inputs.original_isolation_capture(state)?);
+            guard
+                .running
+                .as_ref()
+                .expect("actual original execution checked out")
+                .require_original_backend_capture(&capture)
+                .map_err(anyhow::Error::new)?;
+            let original_budget = self
+                .original_callback_budget
+                .get()
+                .context("original native diagnostic lost callback budget")?;
+            let slice =
+                Duration::from_millis(200).min(original_budget.contact_expiry().remaining());
+            guard.require_exclusive()?;
+            let running = guard
+                .running
+                .take()
+                .expect("same execution before consuming wait");
+            // No catch_unwind promise: panic INSIDE wait(self) can destroy the
+            // moved execution. Higher inputs/funding/scratch stay refused.
+            let outcome = running.wait_for_natural_exit_retaining_native(slice);
+            let phase = match outcome {
+                Ok(ryeos_engine::dispatch::SelectedNativeExecutionWaitOutcome::Collected(
+                    running,
+                )) => {
+                    guard.running = Some(running);
+                    OriginalNativeCheckOutcome::CollectedFacts
+                }
+                Ok(ryeos_engine::dispatch::SelectedNativeExecutionWaitOutcome::Incomplete(
+                    running,
+                )) => {
+                    guard.running = Some(running);
+                    OriginalNativeCheckOutcome::Incomplete
+                }
+                Ok(ryeos_engine::dispatch::SelectedNativeExecutionWaitOutcome::Failed(running)) => {
+                    guard.running = Some(running);
+                    OriginalNativeCheckOutcome::Failed
+                }
+                Err(running) => {
+                    guard.running = Some(running);
+                    OriginalNativeCheckOutcome::Unsupported
+                }
+            };
+            if matches!(phase, OriginalNativeCheckOutcome::CollectedFacts) {
+                guard
+                    .running
+                    .as_mut()
+                    .expect("typed outcome restored before check")
+                    .require_cached_original_native_correspondence(&capture)
+                    .map_err(anyhow::Error::new)?;
+                inputs.require_original_isolation_expectation(state)?;
+                guard.require_exclusive()?;
+            }
+            Ok(phase)
+        })();
+        // Restore exact objects/collisions BEFORE diagnostics or callback return.
+        drop(guard);
+        let error = match observed {
+            Ok(OriginalNativeCheckOutcome::CollectedFacts) => anyhow!(
+                "original native facts correspond; readiness/driver/physical retirement remains unproved"
+            ),
+            Ok(OriginalNativeCheckOutcome::Incomplete) => {
+                anyhow!("original native collection remains incomplete")
+            }
+            Ok(OriginalNativeCheckOutcome::Failed) => {
+                anyhow!("original native collection retained a refusal")
+            }
+            Ok(OriginalNativeCheckOutcome::Unsupported) => {
+                anyhow!("original native collection lacks selected context")
+            }
+            Err(error) => error.context("original protected native diagnostic refused"),
+        };
+        Err(error.context(PersistentSessionCleanupUnproved))
     }
 
     /// An ordinary process-group reap is not trusted driver/physical release.
     /// No public completion callback or decoded row can clear this obligation.
     fn has_original_trusted_obligation(&self) -> bool {
         let retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
-        retained.trusted_inputs.is_some() || retained.original_funding.is_some()
+        retained.trusted_inputs.is_some()
+            || retained.original_funding.is_some()
+            || retained.native_check_attempted
+            || retained.native_check_in_flight
+            || retained.native_check_refused
+            || !retained.quarantined_inputs.is_empty()
     }
 
     /// Move actual ORIGINAL guards/bindings into the already owned start slot.
@@ -1065,7 +1295,10 @@ impl PersistentSessionPooledStart {
     pub fn retain_before_contact(&self, lifelines: Vec<Box<dyn Send + Sync>>) -> Result<()> {
         let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
         retained.lifelines.extend(lifelines); // Root supplied owners even on refusal.
-        if retained.phase != PooledStartPhase::Preparing || retained.admission_refused {
+        if Self::native_check_blocks_mutation(&retained)
+            || retained.phase != PooledStartPhase::Preparing
+            || retained.admission_refused
+        {
             retained.admission_refused = true;
             bail!("pooled start no longer accepts pre-contact retention");
         }
@@ -1081,7 +1314,10 @@ impl PersistentSessionPooledStart {
     ) -> Result<()> {
         let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
         stage_pooled_obligation_owners(&mut retained, &resource, &retirement);
-        if retained.phase != PooledStartPhase::Preparing || retained.admission_refused {
+        if Self::native_check_blocks_mutation(&retained)
+            || retained.phase != PooledStartPhase::Preparing
+            || retained.admission_refused
+        {
             retained.admission_refused = true;
             bail!("pooled start no longer accepts cleanup obligations");
         }
@@ -1100,7 +1336,7 @@ impl PersistentSessionPooledStart {
             &started.cleanup_observer,
             &started.retirement_observer,
         );
-        if retained.admission_refused {
+        if Self::native_check_blocks_mutation(&retained) || retained.admission_refused {
             bail!("pooled start previously substituted an original cleanup obligation");
         }
         if retained.trusted_inputs.is_some() || retained.original_funding.is_some() {
@@ -1136,7 +1372,8 @@ impl PersistentSessionPooledStart {
 
     fn has_retained_custody(&self) -> bool {
         let retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
-        !retained.retained_running.is_empty()
+        Self::native_check_blocks_mutation(&retained)
+            || !retained.retained_running.is_empty()
             || !retained.lifelines.is_empty()
             || retained.resource_observer.is_some()
             || retained.retirement_observer.is_some()
@@ -1145,20 +1382,31 @@ impl PersistentSessionPooledStart {
             || retained.original_funding.is_some()
     }
 
-    fn publish(&self) {
-        self.retained
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .phase = PooledStartPhase::Registered;
+    fn publish(&self) -> bool {
+        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        if Self::native_check_blocks_mutation(&retained)
+            || retained.admission_refused
+            || retained.trusted_inputs.is_some()
+            || retained.original_funding.is_some()
+            || !retained.retained_running.is_empty()
+        {
+            retained.phase = PooledStartPhase::Unsettled;
+            retained.admission_refused = true;
+            return false;
+        }
+        retained.phase = PooledStartPhase::Registered;
+        true
     }
 
-    // Only the one-use pooled-ready refusal and SessionProcess::drop deposit.
+    // Actual pooled-ready refusal and SessionProcess::drop deposits only.
     // Root every actual owner before checking multiplicity; never evict one.
     fn retain_running_unsettled(&self, running: ryeos_engine::dispatch::RunningExecution) {
         let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
         retained.retained_running.push(running);
         retained.phase = PooledStartPhase::Unsettled;
-        if retained.retained_running.len() > 1 {
+        if Self::native_check_blocks_mutation(&retained) || retained.retained_running.len() > 1 {
+            retained.native_check_refused |=
+                retained.native_check_attempted || retained.native_check_in_flight;
             retained.admission_refused = true;
         }
     }
@@ -1181,7 +1429,9 @@ impl PersistentSessionPooledStart {
         }
         let (lifelines, resource, retirement, supplied_owners) = {
             let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
-            if !retained.retained_running.is_empty() {
+            if Self::native_check_blocks_mutation(&retained)
+                || !retained.retained_running.is_empty()
+            {
                 retained.phase = PooledStartPhase::Unsettled;
                 retained.admission_refused = true;
                 bail!("retained original running custody cannot be settled by ordinary cleanup");
@@ -2829,12 +3079,14 @@ impl PersistentSessionPool {
                         process.leased.store(true, Ordering::Release);
                         // The SAME start stays owned/in-flight through reader admission.
                         group.processes.push(Arc::clone(&process));
-                        original_start.publish();
+                        let original_published = original_start.publish();
                         let closed = self.inner.shutdown.load(Ordering::Acquire);
                         drop(state);
                         #[cfg(test)]
                         self.pause_pooled_start(PooledStartPauseStage::ReaderAdmission);
-                        let admission = if closed {
+                        let admission = if !original_published {
+                            Err(anyhow!("original pooled custody refuses ready publication"))
+                        } else if closed {
                             Err(anyhow!(
                                 "persistent-session admission is closed for daemon shutdown"
                             ))
@@ -4759,6 +5011,72 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_native_callback_roots_actual_owners_and_blocks_publication_and_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let fixture =
+            crate::handler_context::budget_test_support::build(root.path(), Duration::from_secs(2))
+                .unwrap();
+        let start = PersistentSessionPooledStart::new();
+        let (_scratch_root, path, guard) = owned_start_scratch();
+        let called = Arc::new(AtomicBool::new(false));
+        let observer: PersistentSessionCleanupObserver = {
+            let called = Arc::clone(&called);
+            Arc::new(move || {
+                called.store(true, Ordering::Release);
+                Ok(())
+            })
+        };
+        // Actual ordinary child/state only: missing original funding/inputs
+        // must refuse before any native check and can never become evidence.
+        let first = fake_framed_session().unwrap();
+        let error = start
+            .retain_and_check_original_native(
+                &fixture.state,
+                first.running,
+                vec![Box::new(Arc::clone(&guard))],
+                Some(Arc::clone(&observer)),
+                None,
+            )
+            .unwrap_err();
+        assert!(error.is::<PersistentSessionCleanupUnproved>());
+        let second = fake_framed_session().unwrap();
+        assert!(
+            start
+                .retain_and_check_original_native(
+                    &fixture.state,
+                    second.running,
+                    Vec::new(),
+                    Some(observer),
+                    None,
+                )
+                .is_err()
+        );
+        drop(guard);
+        assert!(start.has_retained_custody());
+        assert!(!start.publish());
+        assert!(start.prove_cleanup().is_err());
+        assert!(!called.load(Ordering::Acquire));
+        {
+            let retained = start.retained.lock().unwrap();
+            assert_eq!(retained.retained_running.len(), 2);
+            assert!(retained.native_check_attempted && retained.native_check_refused);
+            assert!(!retained.native_check_in_flight);
+            assert!(retained.phase == PooledStartPhase::Unsettled);
+            assert!(!retained.obligation_owners.is_empty());
+        }
+        assert!(path.join("sentinel").is_file());
+        let (_extra_root, extra_path, extra_guard) = owned_start_scratch();
+        assert!(
+            start
+                .retain_before_contact(vec![Box::new(Arc::clone(&extra_guard))])
+                .is_err()
+        );
+        drop(extra_guard);
+        assert!(extra_path.join("sentinel").is_file());
+        // Destruction is best-effort only; there is no settlement assertion.
+    }
 
     #[test]
     fn unsupported_native_wait_returns_actual_execution_for_ordinary_readiness() {
