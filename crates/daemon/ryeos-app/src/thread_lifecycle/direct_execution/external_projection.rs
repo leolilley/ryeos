@@ -299,6 +299,49 @@ fn direct_workspace_view(
     }
 }
 
+fn direct_target_limits(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+) -> Result<Option<ryeos_state::external_execution::admission::ExternalNativeProcessLimits>> {
+    let target_limits = plan
+        .subprocess_limits
+        .filter(|limits| {
+            limits.max_open_files.is_some()
+                || limits.max_address_space_bytes.is_some()
+                || limits.max_cpu_seconds.is_some()
+                || limits.max_processes.is_some()
+                || limits.deny_process_creation
+        })
+        .map(
+            |limits| ryeos_state::external_execution::admission::ExternalNativeProcessLimits {
+                max_open_files: limits.max_open_files,
+                max_address_space_bytes: limits.max_address_space_bytes,
+                max_cpu_seconds: limits.max_cpu_seconds,
+                max_processes: limits.max_processes,
+                deny_process_creation: limits.deny_process_creation,
+            },
+        );
+    if let Some(limits) = target_limits {
+        limits.validate()?;
+    }
+    Ok(target_limits)
+}
+
+pub(super) fn required_direct_feature_claims(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+) -> Result<Vec<&'static str>> {
+    use ryeos_external_execution_contract::{
+        CAPTURED_INPUTS_SUPPORT_CLAIM, GuestWorkspaceView, TARGET_LIMITS_SUPPORT_CLAIM,
+    };
+    let mut required = Vec::new();
+    if direct_workspace_view(plan)? == GuestWorkspaceView::CapturedInputs {
+        required.push(CAPTURED_INPUTS_SUPPORT_CLAIM);
+    }
+    if direct_target_limits(plan)?.is_some() {
+        required.push(TARGET_LIMITS_SUPPORT_CLAIM);
+    }
+    Ok(required)
+}
+
 /// Join the guest's C filesystem to the retained launch, independently of the
 /// B-owned evaluator source. This checks identity, not descriptor redemption or
 /// the placement owner's authenticated born-thread allocation authority.
@@ -617,23 +660,7 @@ fn compile_external_direct_program_parts(
         .transpose()?
         .unwrap_or_default();
     let requested = plan.subprocess_limits;
-    let target_limits = requested
-        .filter(|limits| {
-            limits.max_open_files.is_some()
-                || limits.max_address_space_bytes.is_some()
-                || limits.max_cpu_seconds.is_some()
-                || limits.max_processes.is_some()
-                || limits.deny_process_creation
-        })
-        .map(
-            |limits| ryeos_state::external_execution::admission::ExternalNativeProcessLimits {
-                max_open_files: limits.max_open_files,
-                max_address_space_bytes: limits.max_address_space_bytes,
-                max_cpu_seconds: limits.max_cpu_seconds,
-                max_processes: limits.max_processes,
-                deny_process_creation: limits.deny_process_creation,
-            },
-        );
+    let target_limits = direct_target_limits(&plan)?;
     let stdout_max_bytes = requested
         .and_then(|limits| limits.max_stdout_bytes)
         .map_or(stdout_max_bytes, |limit| stdout_max_bytes.min(limit));

@@ -642,11 +642,13 @@ impl PreparedItemPlan {
             .as_ref()
             .ok_or_else(|| anyhow!("external direct endpoint has not been sealed"))?;
         let spec = external_projection::ordinary_direct_subprocess(&self.plan)?;
+        let required_features = external_projection::required_direct_feature_claims(&self.plan)?;
         crate::external_placement::preflight_external_direct_endpoint(
             state,
             &self.plan.endpoint_requirement,
             endpoint,
             spec.timeout_secs,
+            &required_features,
         )?;
         Ok(())
     }

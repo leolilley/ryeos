@@ -1121,6 +1121,53 @@ fn external_direct_prebirth_constraints_need_no_born_program_or_guest_inputs() {
 }
 
 #[test]
+fn feature_claims_follow_sealed_view_and_target_limits_not_output_only_caps() {
+    use ryeos_external_execution_contract::{
+        CAPTURED_INPUTS_SUPPORT_CLAIM, TARGET_LIMITS_SUPPORT_CLAIM,
+    };
+    let mut fixture = Fixture::new();
+    fixture.plan.subprocess_limits = Some(ryeos_engine::contracts::ExecutionSubprocessLimits {
+        max_open_files: None,
+        max_address_space_bytes: None,
+        max_cpu_seconds: None,
+        max_processes: None,
+        deny_process_creation: false,
+        max_stdout_bytes: Some(32768),
+        max_stderr_bytes: Some(8192),
+    });
+    assert!(
+        required_direct_feature_claims(&fixture.plan)
+            .unwrap()
+            .is_empty()
+    );
+    fixture.plan.filesystem_authority_ceiling = IsolationFilesystemAuthorityCeiling::CapturedInputs;
+    assert_eq!(
+        required_direct_feature_claims(&fixture.plan).unwrap(),
+        vec![CAPTURED_INPUTS_SUPPORT_CLAIM]
+    );
+    fixture
+        .plan
+        .subprocess_limits
+        .as_mut()
+        .unwrap()
+        .deny_process_creation = true;
+    assert_eq!(
+        required_direct_feature_claims(&fixture.plan).unwrap(),
+        vec![CAPTURED_INPUTS_SUPPORT_CLAIM, TARGET_LIMITS_SUPPORT_CLAIM]
+    );
+    fixture
+        .plan
+        .subprocess_limits
+        .as_mut()
+        .unwrap()
+        .max_cpu_seconds = Some(u64::MAX);
+    assert!(required_direct_feature_claims(&fixture.plan).is_err());
+    // This control derives requirements; unsupported source remains refused
+    // by admission and cannot use the data assertion as execution authority.
+    assert!(validate_external_direct_plan(&fixture.plan, &fixture.protocol.descriptor).is_err());
+}
+
+#[test]
 fn external_direct_projection_refuses_semantics_it_cannot_preserve() {
     for (name, mutate) in [
         ("native limits", |f: &mut Fixture| {

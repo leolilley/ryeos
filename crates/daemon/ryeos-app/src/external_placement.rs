@@ -1538,6 +1538,7 @@ pub(crate) fn preflight_external_direct_endpoint(
     requirement: &ryeos_engine::contracts::ExecutionEndpointRequirement,
     identity: &ryeos_engine::contracts::ExternalEndpointBindingIdentity,
     timeout_seconds: u64,
+    required_feature_claims: &[&str],
 ) -> Result<RetainedExternalExecutionBinding> {
     preflight_external_direct_dependencies(
         &state.node_config.external_execution,
@@ -1555,6 +1556,10 @@ pub(crate) fn preflight_external_direct_endpoint(
             )
         },
         |binding| {
+            require_guest_support_claim_selection(
+                &binding.backend_contract(),
+                required_feature_claims,
+            )?;
             require_current_runtime_qualification_for_start(
                 state,
                 &binding.backend_contract(),
