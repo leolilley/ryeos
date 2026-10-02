@@ -7979,6 +7979,7 @@ requires:
             target: None,
             endpoint: None,
             resource_authority_ceiling: None,
+            subprocess_limits: None,
         }
     }
 

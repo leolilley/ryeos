@@ -224,7 +224,7 @@ session:
         "entrypoint":"spawn","capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
         "materialization_requirements":[],"network_authority_ceiling":"isolated","filesystem_authority_ceiling":"captured_execution",
         "target_requirement":target,"endpoint_requirement":{"kind":"local"},"external_endpoint_binding":null,
-        "resource_authority_ceiling":"node_policy","cache_key":"factory","executor_chain":["worker:test/factory","native:factory"],"executor_authorities":[],"runtime_identity":runtime
+        "subprocess_limits":null, "resource_authority_ceiling":"node_policy","cache_key":"factory","executor_chain":["worker:test/factory","native:factory"],"executor_authorities":[],"runtime_identity":runtime
     })).unwrap();
     plan.validate_endpoint_for_sealing().unwrap();
     let execution_plan = serde_json::to_value(&plan).unwrap();

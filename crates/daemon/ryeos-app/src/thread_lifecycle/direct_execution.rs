@@ -3374,7 +3374,10 @@ pub fn spawn_item(
             isolation_writable_runtime_view_mounts: Vec::new(),
             isolation_target_channels,
             isolation_workspace,
-            subprocess_limits: None,
+            subprocess_limits: plan
+                .subprocess_limits
+                .map(|limits| limits.to_native())
+                .transpose()?,
             inherited_fds,
             thread_id: thread_id.to_string(),
             chain_root_id: chain_root_id.to_string(),
@@ -3969,7 +3972,7 @@ mod tests {
             "target_requirement": null,
             "endpoint_requirement": {"kind": "local"},
             "external_endpoint_binding": null,
-            "resource_authority_ceiling": "node_policy",
+            "subprocess_limits":null, "resource_authority_ceiling": "node_policy",
             "cache_key": "test",
             "thread_kind": "tool",
             "executor_chain": ["tool:test/run", "tool:test/runtime"],

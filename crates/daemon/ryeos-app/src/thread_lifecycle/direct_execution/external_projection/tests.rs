@@ -1123,6 +1123,17 @@ fn external_direct_prebirth_constraints_need_no_born_program_or_guest_inputs() {
 #[test]
 fn external_direct_projection_refuses_semantics_it_cannot_preserve() {
     for (name, mutate) in [
+        ("native limits", |f: &mut Fixture| {
+            f.plan.subprocess_limits = Some(ryeos_engine::contracts::ExecutionSubprocessLimits {
+                max_open_files: None,
+                max_address_space_bytes: Some(134217728),
+                max_cpu_seconds: Some(3),
+                max_processes: None,
+                deny_process_creation: true,
+                max_stdout_bytes: Some(32768),
+                max_stderr_bytes: Some(8192),
+            });
+        }),
         (
             "model",
             (|f: &mut Fixture| f.plan.capabilities.requires_model = true) as fn(&mut Fixture),

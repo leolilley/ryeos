@@ -188,7 +188,7 @@ fn retained_inputs_capsule(
         "endpoint_requirement":{"kind":"external","binding_id":"component-direct",
             "stdout_max_bytes":4096,"stderr_max_bytes":2048},
         "external_endpoint_binding":{"binding_id":"component-direct","binding_digest":"e".repeat(64)},
-        "resource_authority_ceiling":"node_policy", "cache_key":"component",
+        "subprocess_limits":null, "resource_authority_ceiling":"node_policy", "cache_key":"component",
         "thread_kind":"tool", "executor_chain":[records.binding().owner.canonical_ref,capsule.executor_ref],
         "executor_authorities":[], "runtime_identity":runtime_identity, "debug_raw":false
     })).unwrap();

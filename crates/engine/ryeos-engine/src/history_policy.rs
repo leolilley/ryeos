@@ -682,6 +682,7 @@ mod tests {
                 target: None,
                 endpoint: None,
                 resource_authority_ceiling: None,
+                subprocess_limits: None,
                 aliases: HashMap::new(),
                 alias_max_depth: 8,
                 terminator: None,

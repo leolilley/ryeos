@@ -16,6 +16,7 @@ mod execution_endpoint;
 mod execution_plan;
 mod execution_target;
 mod runtime_decorations;
+mod subprocess_limits;
 pub use crate::scheduled_fire_context::ScheduledFireContext;
 pub use execution_endpoint::{ExecutionEndpointRequirement, ExternalEndpointBindingIdentity};
 pub use execution_plan::{
@@ -35,6 +36,7 @@ pub use execution_target::{
 pub use runtime_decorations::{
     CancellationMode, ExecutionDecorations, NativeAsyncSpec, NativeResumeSpec, RuntimeEnvSource,
 };
+pub use subprocess_limits::ExecutionSubprocessLimits;
 
 // ── Wiring contract: ValueShape ──────────────────────────────────────
 

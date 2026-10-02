@@ -1359,6 +1359,7 @@ fn build_plan_with_execution_root(
     let target_requirement = execution.project_target_requirement(root_value)?;
     let endpoint_requirement = execution.project_endpoint_requirement(root_value)?;
     let resource_authority_ceiling = execution.project_resource_authority_ceiling(root_value)?;
+    let subprocess_limits = execution.project_subprocess_limits(root_value)?;
     resource_authority_ceiling
         .admits(target_requirement.as_ref())
         .map_err(|error| EngineError::SchemaLoaderError {
@@ -1468,6 +1469,7 @@ fn build_plan_with_execution_root(
         endpoint_requirement,
         external_endpoint_binding: None,
         resource_authority_ceiling,
+        subprocess_limits,
         cache_key,
         thread_kind: Some(resolved.kind.clone()),
         executor_chain: terminal.chain,

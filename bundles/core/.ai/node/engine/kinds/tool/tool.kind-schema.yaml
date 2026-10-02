@@ -53,6 +53,8 @@ execution:
       max_requirements: 1
       max_resource_count: 1
       max_facts_per_requirement: 16
+  subprocess_limits:
+    path: [subprocess_limits]
   resource_authority_ceiling:
     path: [resource_authority]
     default: node_policy
@@ -174,6 +176,9 @@ composed_value_contract:
     execution_endpoint:
       type: single
       prim: mapping
+    subprocess_limits:
+      type: single
+      prim: mapping
     resource_authority:
       type: single
       prim: string
@@ -194,6 +199,7 @@ runtime:
   # claimed by a registered handler is a hard `UnknownRuntimeBlock`
   # error.
   ignored_keys:
+    - subprocess_limits
     - version
     - category
     - description

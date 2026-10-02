@@ -108,6 +108,10 @@ pub(crate) fn retained_external_direct_endpoint(
     let plan = super::decode_retained_direct_plan(closure, artifact)?;
     plan.validate_endpoint_for_sealing()?;
     ensure!(
+        plan.subprocess_limits.is_none(),
+        "external direct projection cannot enforce authored native subprocess limits"
+    );
+    ensure!(
         matches!(
             plan.endpoint_requirement,
             ExecutionEndpointRequirement::External { .. }
@@ -321,6 +325,10 @@ pub(super) fn validate_external_direct_plan(
     protocol: &ryeos_engine::protocols::ProtocolDescriptor,
 ) -> Result<()> {
     plan.validate_endpoint_for_sealing()?;
+    ensure!(
+        plan.subprocess_limits.is_none(),
+        "external direct projection cannot enforce authored native subprocess limits"
+    );
     ensure!(
         matches!(
             plan.endpoint_requirement,

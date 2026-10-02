@@ -1052,6 +1052,13 @@ pub struct FilesystemAuthorityCeilingDecl {
     pub default: crate::isolation::IsolationFilesystemAuthorityCeiling,
 }
 
+/// Kind-owned path to signed native subprocess restrictions.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubprocessLimitsDecl {
+    pub path: Vec<String>,
+}
+
 /// Kind-owned location of a signed process target. Direct subprocesses and
 /// persistent workers use this one projection; session protocols retain only
 /// framing and lifecycle semantics.
@@ -1239,6 +1246,8 @@ pub struct ExecutionSchema {
     pub endpoint: Option<ExecutionEndpointDecl>,
     #[serde(default)]
     pub resource_authority_ceiling: Option<ResourceAuthorityCeilingDecl>,
+    #[serde(default)]
+    pub subprocess_limits: Option<SubprocessLimitsDecl>,
     /// Kind-level method dispatch: the route shared by all methods plus
     /// the default method invoked when `/execute` omits `call.method`.
     /// Present iff `methods` is non-empty (enforced at load time).
@@ -1262,6 +1271,34 @@ pub struct ExecutionSchema {
 }
 
 impl ExecutionSchema {
+    pub fn project_subprocess_limits(
+        &self,
+        composed: &Value,
+    ) -> Result<Option<crate::contracts::ExecutionSubprocessLimits>, EngineError> {
+        let Some(declaration) = &self.subprocess_limits else {
+            return Ok(None);
+        };
+        let mut value = composed;
+        for segment in &declaration.path {
+            let Some(next) = value.get(segment) else {
+                return Ok(None);
+            };
+            value = next;
+        }
+        let limits: crate::contracts::ExecutionSubprocessLimits =
+            serde_json::from_value(value.clone()).map_err(|error| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("invalid signed subprocess limits: {error}"),
+                }
+            })?;
+        limits
+            .validate()
+            .map_err(|error| EngineError::SchemaLoaderError {
+                reason: error.to_string(),
+            })?;
+        Ok(Some(limits))
+    }
+
     pub fn project_endpoint_requirement(
         &self,
         composed: &Value,
@@ -2793,6 +2830,7 @@ fn parse_execution_schema(
         "target",
         "endpoint",
         "resource_authority_ceiling",
+        "subprocess_limits",
         "method_dispatch",
         "methods",
         "augmentation_methods",
@@ -3117,6 +3155,28 @@ fn parse_execution_schema(
         None => None,
     };
 
+    let subprocess_limits = match execution_value.get("subprocess_limits") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<SubprocessLimitsDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid execution.subprocess_limits: {error}"),
+                })?;
+            if declaration.path.is_empty()
+                || declaration.path.iter().any(|segment| {
+                    segment.trim().is_empty() || segment.trim() != segment || segment.contains('.')
+                })
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.subprocess_limits.path must contain canonical non-empty segments"
+                    ),
+                });
+            }
+            Some(declaration)
+        }
+        None => None,
+    };
+
     let target = match execution_value.get("target") {
         Some(value) => {
             let declaration = serde_yaml::from_value::<ExecutionTargetDecl>(value.clone())
@@ -3408,6 +3468,7 @@ fn parse_execution_schema(
         target,
         endpoint,
         resource_authority_ceiling,
+        subprocess_limits,
         method_dispatch,
         methods,
         augmentation_methods,
@@ -4931,6 +4992,35 @@ execution:
                 .to_string()
                 .contains("unknown value")
         );
+    }
+
+    #[test]
+    fn subprocess_limits_follow_only_the_signed_kind_path() {
+        let execution = parse_exec("execution:\n  subprocess_limits:\n    path: [restrictions]\n  delegate:\n    via: runtime_registry\n").unwrap().unwrap();
+        assert!(
+            execution
+                .project_subprocess_limits(&serde_json::json!({}))
+                .unwrap()
+                .is_none()
+        );
+        let authored = serde_json::json!({"restrictions": {
+            "max_cpu_seconds":3, "deny_process_creation":true,
+            "max_stdout_bytes":32768, "max_stderr_bytes":8192
+        }});
+        assert_eq!(
+            execution
+                .project_subprocess_limits(&authored)
+                .unwrap()
+                .unwrap()
+                .max_cpu_seconds,
+            Some(3)
+        );
+        assert!(
+            execution
+                .project_subprocess_limits(&serde_json::json!({"restrictions": null}))
+                .is_err()
+        );
+        assert!(parse_exec("execution:\n  subprocess_limits:\n    path: []\n  delegate:\n    via: runtime_registry\n").is_err());
     }
 
     #[test]

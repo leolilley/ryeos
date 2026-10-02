@@ -22993,7 +22993,7 @@ mod tests {
                 else {json!({"kind":"local"})},
             "external_endpoint_binding":if external {json!({"binding_id":"storage-direct",
                 "binding_digest":"c".repeat(64)})} else {Value::Null},
-            "resource_authority_ceiling":"node_policy","cache_key":"storage",
+            "subprocess_limits":null, "resource_authority_ceiling":"node_policy","cache_key":"storage",
             "executor_chain":["graph:test/storage-fixture",executor_ref],
             "executor_authorities":[],"runtime_identity":runtime
         }))

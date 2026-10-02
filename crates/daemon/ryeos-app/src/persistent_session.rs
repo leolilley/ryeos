@@ -4729,6 +4729,7 @@ while True:
             target_requirement: None,
             endpoint_requirement: ryeos_engine::contracts::ExecutionEndpointRequirement::Local {},
             external_endpoint_binding: None,
+            subprocess_limits: None,
             resource_authority_ceiling:
                 ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
             cache_key: "fixture".to_owned(),

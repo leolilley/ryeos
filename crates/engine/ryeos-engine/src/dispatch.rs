@@ -22,6 +22,8 @@ pub fn execute_plan(
     ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
     validate_plan_target_without_selection(plan)?;
+    let effective_ctx = context_with_plan_limits(plan, ctx)?;
+    let ctx = &effective_ctx;
     let mut result: Option<ExecutionCompletion> = None;
 
     for node in &plan.nodes {
@@ -71,6 +73,46 @@ pub fn execute_plan(
         continuation_request: None,
         metadata: None,
     }))
+}
+
+/// Apply retained subject restrictions even for callers outside the app launcher.
+fn context_with_plan_limits(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+) -> Result<EngineContext, EngineError> {
+    let mut effective = ctx.clone();
+    if let Some(limits) = plan.subprocess_limits {
+        let authored = limits
+            .to_native()
+            .map_err(|error| EngineError::ExecutionFailed {
+                reason: error.to_string(),
+            })?;
+        if ctx.isolation.is_enforced() && authored.deny_process_creation {
+            return Err(EngineError::ExecutionFailed {
+                reason: "isolated target process-creation restriction is unsupported: outer adapter requires a setup fork".to_owned(),
+            });
+        }
+        let existing = ctx.subprocess_limits.unwrap_or_default();
+        fn tighter(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+            match (left, right) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (left, right) => left.or(right),
+            }
+        }
+        effective.subprocess_limits = Some(lillux::SubprocessLimits {
+            max_open_files: tighter(authored.max_open_files, existing.max_open_files),
+            max_address_space_bytes: tighter(
+                authored.max_address_space_bytes,
+                existing.max_address_space_bytes,
+            ),
+            max_cpu_seconds: tighter(authored.max_cpu_seconds, existing.max_cpu_seconds),
+            max_processes: tighter(authored.max_processes, existing.max_processes),
+            deny_process_creation: authored.deny_process_creation || existing.deny_process_creation,
+            max_stdout_bytes: tighter(authored.max_stdout_bytes, existing.max_stdout_bytes),
+            max_stderr_bytes: tighter(authored.max_stderr_bytes, existing.max_stderr_bytes),
+        });
+    }
+    Ok(effective)
 }
 
 fn validate_plan_target_without_selection(plan: &ExecutionPlan) -> Result<(), EngineError> {
@@ -805,6 +847,8 @@ fn spawn_first_plan_node(
     devices: Option<&lillux::CharacterDeviceSet>,
     deadline: Option<lillux::time::MonotonicDeadline>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    let effective_ctx = context_with_plan_limits(plan, ctx)?;
+    let ctx = &effective_ctx;
     if let Some(node) = plan.nodes.first() {
         match node {
             PlanNode::DispatchSubprocess { spec, .. } => {
@@ -1199,6 +1243,7 @@ mod tests {
             target_requirement: None,
             endpoint_requirement: crate::contracts::ExecutionEndpointRequirement::Local {},
             external_endpoint_binding: None,
+            subprocess_limits: None,
             resource_authority_ceiling:
                 crate::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
             cache_key: "test".into(),
@@ -1207,6 +1252,35 @@ mod tests {
             runtime_identity: None,
             debug_raw: false,
         }
+    }
+
+    #[test]
+    fn retained_limits_can_only_narrow_existing_context_limits() {
+        let mut plan = make_plan(Vec::new());
+        plan.subprocess_limits = Some(crate::contracts::ExecutionSubprocessLimits {
+            max_open_files: None,
+            max_address_space_bytes: Some(134217728),
+            max_cpu_seconds: Some(3),
+            max_processes: None,
+            deny_process_creation: true,
+            max_stdout_bytes: Some(32768),
+            max_stderr_bytes: Some(8192),
+        });
+        let mut ctx = test_engine_context();
+        ctx.subprocess_limits = Some(lillux::SubprocessLimits {
+            max_cpu_seconds: Some(2),
+            max_stdout_bytes: Some(4096),
+            ..Default::default()
+        });
+        let effective = context_with_plan_limits(&plan, &ctx).unwrap();
+        let limits = effective.subprocess_limits.unwrap();
+        assert_eq!(limits.max_cpu_seconds, Some(2));
+        assert_eq!(limits.max_stdout_bytes, Some(4096));
+        assert_eq!(limits.max_stderr_bytes, Some(8192));
+        assert!(limits.deny_process_creation);
+        assert!(!ctx.subprocess_limits.unwrap().deny_process_creation);
+        plan.subprocess_limits.as_mut().unwrap().max_cpu_seconds = Some(0);
+        assert!(context_with_plan_limits(&plan, &ctx).is_err());
     }
 
     #[test]
@@ -1265,7 +1339,11 @@ mod tests {
             serde_json::json!({"kind":"local"})
         );
         assert!(local["external_endpoint_binding"].is_null());
-        for field in ["endpoint_requirement", "external_endpoint_binding"] {
+        for field in [
+            "endpoint_requirement",
+            "external_endpoint_binding",
+            "subprocess_limits",
+        ] {
             let mut predecessor = local.clone();
             predecessor.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<ExecutionPlan>(predecessor).is_err());

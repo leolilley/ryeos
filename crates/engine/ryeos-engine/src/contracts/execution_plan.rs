@@ -518,6 +518,9 @@ pub struct ExecutionPlan {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub external_endpoint_binding: Option<super::ExternalEndpointBindingIdentity>,
     pub resource_authority_ceiling: super::ExecutionResourceAuthorityCeiling,
+    /// Required explicit null prevents predecessor plans from silently losing limits.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub subprocess_limits: Option<super::ExecutionSubprocessLimits>,
     pub cache_key: String,
     /// Daemon supervision profile hint, derived from the root item's kind.
     #[serde(default)]

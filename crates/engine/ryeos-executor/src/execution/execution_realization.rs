@@ -666,7 +666,7 @@ mod tests {
             "external_endpoint_binding": if external { serde_json::json!({
                 "binding_id":"evaluate", "binding_digest":"9".repeat(64)
             }) } else { serde_json::Value::Null },
-            "resource_authority_ceiling":"node_policy", "cache_key":"properties",
+            "subprocess_limits":null, "resource_authority_ceiling":"node_policy", "cache_key":"properties",
             "executor_authorities":[]
         }))
         .unwrap()
