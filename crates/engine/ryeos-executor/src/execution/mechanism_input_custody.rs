@@ -1,7 +1,7 @@
 //! Exact B product and source byte custody beside one original mechanism fixture.
 //!
-//! This is neither a project authority nor a native guest program. A later
-//! owner must independently admit any protocol, guest input and execution.
+//! This retains compiled program data and byte custody. A later owner must
+//! independently admit native execution; no project or launch grant is made.
 
 use std::path::Path;
 
@@ -9,12 +9,18 @@ use anyhow::{Result, ensure};
 use ryeos_app::operator_external_content::product_qualification::{
     CapturedMechanismProbeSource, CurrentBundleProducerRecipe, PreparedMechanismFixtureTransfer,
 };
+use ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority;
+use ryeos_external_execution_contract::{
+    EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA, ExternalGuestInputProjection, GuestBaseSnapshotInput,
+};
 use ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView;
 
 /// Keep materialization leases and descriptors before the fixture transfer and
 /// its staged source/product/config publication owner in Rust field-drop order.
 #[allow(dead_code)]
 pub(crate) struct PreparedMechanismInputCustody {
+    program: ryeos_state::external_execution::admission::AdmittedExternalDirectProgram,
+    authority: ExternalGuestInputAuthority,
     products: super::external_guest_inputs::PreparedProductInputs,
     source: Option<super::source_closure::ExternalSourceDelivery>,
     fixture: PreparedMechanismFixtureTransfer,
@@ -31,12 +37,20 @@ pub(crate) fn prepare_mechanism_input_custody(
     selected: &CurrentBundleProducerRecipe,
     fixture: PreparedMechanismFixtureTransfer,
 ) -> Result<PreparedMechanismInputCustody> {
-    let (products, source) = captured.with_original_fixture_byte_custody(
+    let (program, authority, (products, source)) = captured.with_original_fixture_program_data(
         state,
         purpose,
         selected,
         &fixture,
-        |resolution, admitted_source, _admitted_external, deadline| {
+        |resolution,
+         admitted_source,
+         _admitted_external,
+         measurement,
+         base_descriptor,
+         environment,
+         executable_search,
+         workspace_view,
+         deadline| {
             ensure!(
                 !deadline.has_elapsed(),
                 "mechanism byte custody deadline elapsed before product materialization"
@@ -56,10 +70,55 @@ pub(crate) fn prepare_mechanism_input_custody(
                     super::source_closure::bind_external_admitted_source(state, resolution, source)
                 })
                 .transpose()?;
-            Ok((products, source))
+            let mut projection = ExternalGuestInputProjection {
+                schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+                workspace_view,
+                base_snapshot: GuestBaseSnapshotInput {
+                    descriptor: base_descriptor
+                        .inherited_descriptor()
+                        .map_err(anyhow::Error::msg)?,
+                    snapshot_hash: measurement.snapshot_hash.clone(),
+                    closure_digest: measurement.closure_digest.clone(),
+                    object_count: measurement.object_count,
+                    blob_count: measurement.blob_count,
+                    total_bytes: measurement.total_bytes,
+                },
+                workspace_outputs: None,
+                inputs: products.inputs.clone(),
+                executable_search: executable_search.to_vec(),
+                environment: environment.clone(),
+            };
+            let mut descriptors = products.authorities.clone();
+            let mut records = products.manifest_authorities.clone();
+            let source_records = if let Some(source) = source.as_ref() {
+                projection.inputs.push(source.input.clone());
+                descriptors.push(source.directory.clone());
+                records.extend(source.content_records.iter().cloned());
+                Some(source.records.clone())
+            } else {
+                None
+            };
+            ensure!(
+                !deadline.has_elapsed(),
+                "mechanism byte custody deadline elapsed before input authority binding"
+            );
+            // The returned private wrapper keeps original leases and source
+            // directory custody beside this descriptor authority. No fixture
+            // or cache owner is erased into a Send+Sync trait object here.
+            let authority = ExternalGuestInputAuthority::new(
+                projection,
+                base_descriptor.clone(),
+                None,
+                descriptors,
+                records,
+                Vec::new(),
+            )?;
+            Ok((authority, source_records, (products, source)))
         },
     )?;
     Ok(PreparedMechanismInputCustody {
+        program,
+        authority,
         products,
         source,
         fixture,

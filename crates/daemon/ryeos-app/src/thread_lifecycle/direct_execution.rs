@@ -1393,6 +1393,158 @@ impl PreparedItemPlan {
         Ok(identity)
     }
 
+    pub(crate) fn projectless_mechanism_environment(
+        &self,
+        protocol: &ryeos_engine::protocols::VerifiedProtocol,
+        root_thread_id: &str,
+        source: Option<&ryeos_state::source_verification::VerifiedAdmittedSourceRecords>,
+    ) -> Result<(
+        std::collections::BTreeMap<String, String>,
+        Vec<String>,
+        ryeos_external_execution_contract::GuestWorkspaceView,
+    )> {
+        external_projection::projectless_mechanism_environment(
+            &self.plan,
+            protocol,
+            root_thread_id,
+            source,
+        )
+    }
+
+    pub(crate) fn compile_projectless_mechanism_parts(
+        &self,
+        closure: &ryeos_state::objects::AdmittedExecutionClosure,
+        artifact: &ryeos_state::objects::AdmittedLaunchArtifactIdentity,
+        protocol: &ryeos_engine::protocols::VerifiedProtocol,
+        root_thread_id: &str,
+        inputs: &ryeos_external_execution_contract::ExternalGuestInputProjection,
+        source: Option<&ryeos_state::source_verification::VerifiedAdmittedSourceRecords>,
+    ) -> Result<ryeos_state::external_execution::admission::AdmittedExternalDirectProgram> {
+        let program = external_projection::compile_projectless_mechanism_parts(
+            closure,
+            artifact,
+            protocol,
+            root_thread_id,
+            inputs,
+            source,
+        )?;
+        ensure!(
+            program.execution_plan_hash()
+                == match artifact {
+                    ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                        execution_plan_hash,
+                        ..
+                    } => execution_plan_hash,
+                    _ => bail!("mechanism program lost its direct artifact identity"),
+                },
+            "mechanism program differs from its actual prepared artifact"
+        );
+        Ok(program)
+    }
+
+    /// Build only projectless mechanism program data from the already captured
+    /// B member. The original root owner must call this inside its checked
+    /// generation and deadline window; no ordinary project or spawn grant is
+    /// created here.
+    pub(crate) fn mechanism_direct_closure(
+        &self,
+        request: &ResolvedExecutionRequest,
+        protocol: &ryeos_engine::protocols::VerifiedProtocol,
+        trust_store: &ryeos_engine::trust::TrustStore,
+        authority: &ryeos_state::PinnedStateAuthority,
+        guard: &ryeos_state::CasMutationGuard,
+    ) -> Result<(
+        ryeos_state::objects::AdmittedExecutionClosure,
+        ryeos_state::objects::AdmittedLaunchArtifactIdentity,
+    )> {
+        authority.ensure_guard(guard)?;
+        ensure!(
+            self.plan.root_ref == request.item_ref
+                && matches!(
+                    self.plan.endpoint_requirement,
+                    ryeos_engine::contracts::ExecutionEndpointRequirement::External { .. }
+                )
+                && self.admitted_command.is_none(),
+            "mechanism closure has no exact projectless external plan"
+        );
+        validate_admitted_direct_executor_binding(&self.plan, &request.executor_ref)?;
+        external_projection::validate_external_direct_plan_semantics(
+            &self.plan,
+            &protocol.descriptor,
+        )?;
+        ensure!(
+            protocol.descriptor.env_injections.iter().all(|injection| {
+                injection.source
+                    != ryeos_engine::protocol_vocabulary::EnvInjectionSource::ProjectPath
+            }),
+            "projectless mechanism protocol requests a project path"
+        );
+        let member = self
+            .realization_command
+            .as_ref()
+            .ok_or_else(|| anyhow!("mechanism closure has no captured realization member"))?;
+        let spec = external_projection::ordinary_direct_subprocess(&self.plan)?;
+        ensure!(
+            spec.args.iter().all(|argument| !matches!(
+                argument,
+                PlanArgument::AdmittedExecutionProjectFile { .. }
+                    | PlanArgument::AdmittedSourceMember { .. }
+            )),
+            "projectless mechanism plan requests unissued project or source member authority"
+        );
+        let expected_path = member
+            .mount_root
+            .destination(Some(Path::new(ADMITTED_DIRECT_PROJECT_ROOT)), &member.mount)?
+            .join(&member.relative_path);
+        let verified = spec
+            .verified_command
+            .as_ref()
+            .ok_or_else(|| anyhow!("mechanism realization member has no verified command"))?
+            .code();
+        ensure!(
+            spec.cmd == expected_path.display().to_string()
+                && verified.source_path == expected_path
+                && verified.content_hash == member.executable_blob_hash
+                && authority
+                    .cas_store()?
+                    .open_blob(&member.executable_blob_hash)?
+                    .is_some(),
+            "mechanism plan changed its captured B realization member"
+        );
+        let document = capture_signed_descriptor_document(
+            &protocol.descriptor_path,
+            &protocol.raw_content_digest,
+            &protocol.signer_fingerprint,
+            trust_store,
+        )?;
+        let retained: ryeos_engine::protocols::ProtocolDescriptor =
+            serde_yaml::from_str(&document)?;
+        ensure!(
+            serde_json::to_value(&retained)? == serde_json::to_value(&protocol.descriptor)?,
+            "mechanism signed protocol interpretation changed"
+        );
+        external_projection::validate_external_direct_plan_semantics(&self.plan, &retained)?;
+        let execution_plan = admitted_execution_plan_value_for_command(&self.plan, true)?;
+        let closure = ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
+            execution_plan,
+            protocol_descriptor_document: document,
+            command: ryeos_state::objects::AdmittedDirectCommandClosure::RealizationMember {
+                executable_blob_hash: member.executable_blob_hash.clone(),
+                realization_id: member.realization_id.clone(),
+                realization_manifest_hash: member.manifest_hash.clone(),
+                realization_mount_root: member.mount_root,
+                realization_mount: member.mount.clone(),
+                relative_path: member.relative_path.clone(),
+                execution_path: expected_path,
+            },
+            admitted_project_root: None,
+        };
+        closure.validate()?;
+        let artifact = self.admitted_artifact_identity(request, protocol)?;
+        authority.ensure_guard(guard)?;
+        Ok((closure, artifact))
+    }
+
     pub fn admit_execution_closure(
         &mut self,
         cas: &lillux::cas::CasStore,

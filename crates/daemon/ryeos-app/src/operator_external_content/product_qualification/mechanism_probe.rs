@@ -52,6 +52,10 @@ pub(crate) struct PreparedMechanismProbeProgram {
     coordinate: ScopedProducerAttemptCoordinate,
     deadline: lillux::time::MonotonicDeadline,
     finalized: ryeos_engine::effective_program::FinalizedEffectiveProgram,
+    request: crate::thread_lifecycle::ResolvedExecutionRequest,
+    protocol: ryeos_engine::protocols::VerifiedProtocol,
+    closure: ryeos_state::objects::AdmittedExecutionClosure,
+    artifact: ryeos_state::objects::AdmittedLaunchArtifactIdentity,
     plan: crate::thread_lifecycle::PreparedItemPlan,
     source: Option<crate::source_closure_admission::AdmittedSourceClosure>,
     external: crate::external_content_admission::AdmittedExternalRealizations,
@@ -405,10 +409,19 @@ impl CapturedMechanismProbeSource {
                 scheduled_fire: None,
                 validate_only: false,
             };
+            let executor_ref = self
+                .verified
+                .resolved
+                .metadata
+                .executor_id
+                .as_ref()
+                .filter(|value| !value.is_empty() && value.trim() == value)
+                .context("mechanism Tool has no signed root executor identity")?
+                .clone();
             let request = crate::thread_lifecycle::ResolvedExecutionRequest {
                 kind: self.verified.resolved.kind.clone(),
                 item_ref: canonical.to_string(),
-                executor_ref: String::new(),
+                executor_ref,
                 launch_mode: "wait".to_owned(),
                 current_site_id: context.current_site_id.clone(),
                 origin_site_id: context.origin_site_id.clone(),
@@ -424,7 +437,20 @@ impl CapturedMechanismProbeSource {
                 plan_context: context,
                 root_admission: None,
             };
-            let prepared = {
+            let protocol_ref = match execution
+                .terminator
+                .as_ref()
+                .context("mechanism Tool has no signed subprocess terminator")?
+            {
+                ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => protocol
+                    .resolve(&finalized.resolution().composed.composed)
+                    .map_err(anyhow::Error::msg)?,
+                ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => {
+                    anyhow::bail!("mechanism Tool has no subprocess protocol")
+                }
+            };
+            let protocol = state.engine.protocols.require(&protocol_ref)?.clone();
+            let (prepared, closure, artifact) = {
                 let authority = publication
                     .as_ref()
                     .context("mechanism realization has no retained CAS publication")?
@@ -443,8 +469,29 @@ impl CapturedMechanismProbeSource {
                     &guard,
                     state.isolation.verified_command_file_bytes(),
                 )?;
+                ensure!(
+                    plan.execution_plan()
+                        .executor_chain
+                        .first()
+                        .map(String::as_str)
+                        == Some(request.item_ref.as_str())
+                        && plan
+                            .execution_plan()
+                            .executor_chain
+                            .get(1)
+                            .map(String::as_str)
+                            == Some(request.executor_ref.as_str()),
+                    "mechanism compiled plan changed its signed root executor"
+                );
+                let (closure, artifact) = plan.mechanism_direct_closure(
+                    &request,
+                    &protocol,
+                    &state.engine.node_trust_store,
+                    &authority,
+                    &guard,
+                )?;
                 authority.ensure_guard(&guard)?;
-                plan
+                (plan, closure, artifact)
             };
             self.require_original_root_in_generation(
                 state, generation, key, purpose, scenario, selected, coordinate, deadline,
@@ -464,6 +511,10 @@ impl CapturedMechanismProbeSource {
                 coordinate: coordinate.clone(),
                 deadline,
                 finalized,
+                request,
+                protocol,
+                closure,
+                artifact,
                 plan: prepared,
                 source,
                 external,
@@ -519,6 +570,46 @@ impl CapturedMechanismProbeSource {
                     .filter(|_| program.config_snapshots.is_some())
                     .map(|hooks| hooks.plan_derived.as_str()),
             )?;
+            ensure!(
+                program.request.item_ref == current.root.resolved_ref
+                    && program
+                        .plan
+                        .execution_plan()
+                        .executor_chain
+                        .get(1)
+                        .map(String::as_str)
+                        == Some(program.request.executor_ref.as_str())
+                    && program.request.root_raw_content_digest
+                        == self.verified.resolved.raw_content_digest,
+                "mechanism byte custody changed its captured request identity"
+            );
+            let execution = state
+                .engine
+                .kinds
+                .get(&self.verified.resolved.kind)
+                .and_then(|schema| schema.execution.as_ref())
+                .context("mechanism Tool lost its signed execution declaration")?;
+            let protocol_ref = match execution
+                .terminator
+                .as_ref()
+                .context("mechanism Tool lost its signed terminator")?
+            {
+                ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => protocol
+                    .resolve(&current.composed.composed)
+                    .map_err(anyhow::Error::msg)?,
+                ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => {
+                    anyhow::bail!("mechanism Tool changed its subprocess terminator")
+                }
+            };
+            let current_protocol = state.engine.protocols.require(&protocol_ref)?;
+            ensure!(
+                current_protocol.canonical_ref == program.protocol.canonical_ref
+                    && current_protocol.raw_content_digest == program.protocol.raw_content_digest
+                    && current_protocol.signer_fingerprint == program.protocol.signer_fingerprint
+                    && serde_json::to_value(&current_protocol.descriptor)?
+                        == serde_json::to_value(&program.protocol.descriptor)?,
+                "mechanism byte custody changed its signed protocol"
+            );
             let source_projection = current
                 .composed
                 .derived
@@ -647,13 +738,12 @@ impl CapturedMechanismProbeSource {
         })
     }
 
-    /// Lend only the actual finalized B resolution and its admitted source and
-    /// product owners for byte materialization. The fixture and staged program
-    /// remain opaque and owned by the caller; this grants no project, guest or
-    /// helper execution authority. The callback is trusted application code:
-    /// this guard authenticates its inputs and result window, but cannot
-    /// confine unrelated side effects it might perform.
-    pub fn with_original_fixture_byte_custody<T: 'static>(
+    /// Lend actual B proof and measured fixture bytes to the trusted Executor
+    /// materializer, then compile inert program data from its returned exact
+    /// descriptor authority. This does not grant project, guest or helper
+    /// execution. The trusted callback can perform unrelated side effects;
+    /// these guards authenticate only the inputs and result window.
+    pub fn with_original_fixture_program_data<T: 'static>(
         &self,
         state: &AppState,
         purpose: &QualificationExecutionPurposeView<'_>,
@@ -663,9 +753,22 @@ impl CapturedMechanismProbeSource {
             &ResolutionOutput,
             Option<&crate::source_closure_admission::AdmittedSourceClosure>,
             &crate::external_content_admission::AdmittedExternalRealizations,
+            &ryeos_project_capture::ProjectSnapshotTransferMeasurement,
+            &lillux::InheritedDescriptorAuthority,
+            &BTreeMap<String, String>,
+            &[String],
+            ryeos_external_execution_contract::GuestWorkspaceView,
             lillux::time::MonotonicDeadline,
-        ) -> Result<T>,
-    ) -> Result<T> {
+        ) -> Result<(
+            ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+            Option<ryeos_state::source_verification::VerifiedAdmittedSourceRecords>,
+            T,
+        )>,
+    ) -> Result<(
+        ryeos_state::external_execution::admission::AdmittedExternalDirectProgram,
+        ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+        T,
+    )> {
         let program = &fixture.program;
         ensure!(
             program.root_key == self.root_key
@@ -750,14 +853,179 @@ impl CapturedMechanismProbeSource {
                 !program.deadline.has_elapsed(),
                 "mechanism byte custody deadline elapsed before materialization"
             );
-            // No CAS guard is held while Executor materializes its own exact
-            // product/source leases and descriptors. T is owned, so none of
-            // these borrowed proof references can escape this guarded call.
-            let bytes = materialize(
+            let (chain_root_id, capsule_hash, _) = state
+                .state_store
+                .admitted_launch_capsule_with_coordinates(&program.root_key.root_thread_id)?
+                .context("mechanism program lost its original root coordinate")?;
+            ensure!(
+                chain_root_id == program.root_key.root_thread_id
+                    && capsule_hash == program.root_capsule_hash,
+                "mechanism program changed its enclosing verifier root"
+            );
+            ensure!(
+                program.request.item_ref == current.root.resolved_ref
+                    && program
+                        .plan
+                        .execution_plan()
+                        .executor_chain
+                        .get(1)
+                        .map(String::as_str)
+                        == Some(program.request.executor_ref.as_str())
+                    && program.request.root_raw_content_digest
+                        == self.verified.resolved.raw_content_digest,
+                "mechanism byte custody changed its captured request identity"
+            );
+            let execution = state
+                .engine
+                .kinds
+                .get(&self.verified.resolved.kind)
+                .and_then(|schema| schema.execution.as_ref())
+                .context("mechanism Tool lost its signed execution declaration")?;
+            let protocol_ref = match execution
+                .terminator
+                .as_ref()
+                .context("mechanism Tool lost its signed terminator")?
+            {
+                ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => protocol
+                    .resolve(&current.composed.composed)
+                    .map_err(anyhow::Error::msg)?,
+                ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => {
+                    anyhow::bail!("mechanism Tool changed its subprocess terminator")
+                }
+            };
+            let current_protocol = state.engine.protocols.require(&protocol_ref)?;
+            ensure!(
+                current_protocol.canonical_ref == program.protocol.canonical_ref
+                    && current_protocol.raw_content_digest == program.protocol.raw_content_digest
+                    && current_protocol.signer_fingerprint == program.protocol.signer_fingerprint
+                    && serde_json::to_value(&current_protocol.descriptor)?
+                        == serde_json::to_value(&program.protocol.descriptor)?,
+                "mechanism byte custody changed its signed protocol"
+            );
+            let expected_source = program
+                .source
+                .as_ref()
+                .map(|source| {
+                    let projection = source.finalization_evidence().0.projection();
+                    let binding = lillux::canonical_json(&source.binding().to_value()?)?;
+                    let manifest = lillux::canonical_json(&source.manifest().to_value()?)?;
+                    ryeos_state::source_verification::VerifiedAdmittedSourceRecords::from_canonical_bytes(
+                        &projection.binding_hash,
+                        &projection.content_manifest_hash,
+                        binding.as_bytes(),
+                        manifest.as_bytes(),
+                    )
+                })
+                .transpose()?;
+            let (environment, search, workspace) = program.plan.projectless_mechanism_environment(
+                &program.protocol,
+                &program.root_key.root_thread_id,
+                expected_source.as_ref(),
+            )?;
+            // No CAS guard spans Executor's source/product materializers or
+            // owner cleanup. T is owned, so proof borrows cannot escape.
+            let materialized = materialize(
                 current,
                 program.source.as_ref(),
                 &program.external,
+                &fixture.measurement,
+                &fixture.descriptor,
+                &environment,
+                &search,
+                workspace,
                 program.deadline,
+            )?;
+            ensure!(
+                materialized.0.projection().base_snapshot.snapshot_hash
+                    == fixture.measurement.snapshot_hash
+                    && materialized.0.projection().base_snapshot.closure_digest
+                        == fixture.measurement.closure_digest
+                    && materialized.0.projection().base_snapshot.object_count
+                        == fixture.measurement.object_count
+                    && materialized.0.projection().base_snapshot.blob_count
+                        == fixture.measurement.blob_count
+                    && materialized.0.projection().base_snapshot.total_bytes
+                        == fixture.measurement.total_bytes
+                    && materialized.0.projection().base_snapshot.descriptor
+                        == fixture.descriptor.inherited_descriptor().map_err(anyhow::Error::msg)?
+                    && materialized.0.projection().workspace_outputs.is_none()
+                    && materialized.0.projection().environment == environment
+                    && materialized.0.projection().executable_search == search
+                    && materialized.0.projection().workspace_view == workspace,
+                "mechanism guest inputs changed original fixture or pure plan facts"
+            );
+            let delivered_products = materialized
+                .0
+                .projection()
+                .inputs
+                .iter()
+                .filter(|input| {
+                    input.role == ryeos_external_execution_contract::GuestMountRole::Product
+                })
+                .collect::<Vec<_>>();
+            ensure!(
+                delivered_products.len() == realized.iter().len()
+                    && delivered_products.iter().zip(realized.iter()).all(|(input, entry)| {
+                        let destination = entry.mount_root.destination(
+                            Some(std::path::Path::new("/workspace")),
+                            &entry.mount,
+                        );
+                        let ryeos_external_execution_contract::GuestMountContentAuthority::ProductManifest {
+                            manifest_hash,
+                            ..
+                        } = &input.content_authority else {
+                            return false;
+                        };
+                        destination
+                            .as_ref()
+                            .ok()
+                            .and_then(|path| path.to_str())
+                            == Some(input.destination.as_str())
+                            && input.authority_id == entry.id
+                            && manifest_hash == &entry.manifest_hash
+                            && input.bytes == entry.total_bytes
+                            && input.access
+                                == ryeos_external_execution_contract::GuestMountAccess::ReadOnly
+                            && match entry.kind {
+                                ryeos_state::objects::ExternalContentKind::Tree => {
+                                    input.kind
+                                        == ryeos_external_execution_contract::GuestMountKind::Directory
+                                        && input.normalized_mode.is_none()
+                                }
+                                ryeos_state::objects::ExternalContentKind::File => {
+                                    input.kind
+                                        == ryeos_external_execution_contract::GuestMountKind::RegularFile
+                                        && input.normalized_mode.is_some()
+                                }
+                            }
+                    })
+                    && materialized.0.projection().inputs.len()
+                        == delivered_products.len() + usize::from(expected_source.is_some()),
+                "mechanism guest products differ from the complete admitted realization inventory"
+            );
+            ensure!(
+                match (expected_source.as_ref(), materialized.1.as_ref()) {
+                    (None, None) => true,
+                    (Some(expected), Some(actual)) => {
+                        expected.binding_hash() == actual.binding_hash()
+                            && expected.content_manifest_hash() == actual.content_manifest_hash()
+                            && expected.owner_key() == actual.owner_key()
+                            && expected.binding() == actual.binding()
+                            && expected.manifest() == actual.manifest()
+                            && expected.runtime_destination() == actual.runtime_destination()
+                            && expected.runtime_entry_path() == actual.runtime_entry_path()
+                    }
+                    _ => false,
+                },
+                "mechanism delivered B source differs from admitted source records"
+            );
+            let direct = program.plan.compile_projectless_mechanism_parts(
+                &program.closure,
+                &program.artifact,
+                &program.protocol,
+                &program.root_key.root_thread_id,
+                materialized.0.projection(),
+                materialized.1.as_ref(),
             )?;
             ensure!(
                 fixture.selected_snapshot_hash == self.selected_fixture_snapshot_hash()?
@@ -783,7 +1051,7 @@ impl CapturedMechanismProbeSource {
                 !program.deadline.has_elapsed(),
                 "mechanism byte custody deadline elapsed after final source recapture"
             );
-            Ok(bytes)
+            Ok((direct, materialized.0, materialized.2))
         })
     }
 

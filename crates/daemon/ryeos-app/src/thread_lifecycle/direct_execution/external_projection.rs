@@ -290,6 +290,51 @@ pub fn external_direct_environment(
     Ok((environment, search, direct_workspace_view(&plan)?))
 }
 
+/// Pure input facts for a projectless probe under its authenticated enclosing
+/// verifier root. The fixture later supplies bytes at /workspace, never a
+/// project identity or ProjectPath protocol injection.
+pub(crate) fn projectless_mechanism_environment(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+    protocol: &VerifiedProtocol,
+    root_thread_id: &str,
+    source: Option<&VerifiedAdmittedSourceRecords>,
+) -> Result<(
+    BTreeMap<String, String>,
+    Vec<String>,
+    ryeos_external_execution_contract::GuestWorkspaceView,
+)> {
+    validate_external_direct_plan_semantics(plan, &protocol.descriptor)?;
+    ensure!(
+        protocol
+            .descriptor
+            .env_injections
+            .iter()
+            .all(|injection| { injection.source != EnvInjectionSource::ProjectPath }),
+        "projectless mechanism protocol requests a project path"
+    );
+    let spec = ordinary_direct_subprocess(plan)?;
+    ensure!(
+        spec.args.iter().all(|argument| !matches!(
+            argument,
+            PlanArgument::AdmittedExecutionProjectFile { .. }
+                | PlanArgument::AdmittedSourceMember { .. }
+        )),
+        "projectless mechanism plan requests unissued project or source member authority"
+    );
+    let environment = compile_direct_environment(
+        spec,
+        &protocol.descriptor,
+        root_thread_id,
+        root_thread_id,
+        source,
+    )?;
+    let search = environment
+        .get("PATH")
+        .map(|path| path.split(':').map(str::to_owned).collect())
+        .unwrap_or_default();
+    Ok((environment, search, direct_workspace_view(plan)?))
+}
+
 fn direct_workspace_view(
     plan: &ryeos_engine::contracts::ExecutionPlan,
 ) -> Result<ryeos_external_execution_contract::GuestWorkspaceView> {
@@ -517,12 +562,40 @@ fn retained_external_direct_plan(
     ryeos_engine::contracts::ExecutionPlan,
     ryeos_engine::protocols::ProtocolDescriptor,
 )> {
+    let (mut plan, retained) = retained_direct_plan_and_protocol(closure, artifact, protocol)?;
+    let AdmittedExecutionClosure::DirectItemExecutor {
+        admitted_project_root,
+        ..
+    } = closure
+    else {
+        unreachable!("retained direct plan checked above")
+    };
+    validate_external_direct_plan(&plan, &retained)?;
+    ensure!(
+        admitted_project_root.is_some(),
+        "external direct execution requires a retained project view"
+    );
+    super::relocate_admitted_direct_plan(
+        &mut plan,
+        admitted_project_root.as_deref(),
+        Some(Path::new("/workspace")),
+    )?;
+    Ok((plan, retained))
+}
+
+fn retained_direct_plan_and_protocol(
+    closure: &AdmittedExecutionClosure,
+    artifact: &AdmittedLaunchArtifactIdentity,
+    protocol: &VerifiedProtocol,
+) -> Result<(
+    ryeos_engine::contracts::ExecutionPlan,
+    ryeos_engine::protocols::ProtocolDescriptor,
+)> {
     closure.validate()?;
     artifact.validate()?;
-    let mut plan = super::decode_retained_direct_plan(closure, artifact)?;
+    let plan = super::decode_retained_direct_plan(closure, artifact)?;
     let AdmittedExecutionClosure::DirectItemExecutor {
         protocol_descriptor_document,
-        admitted_project_root,
         ..
     } = closure
     else {
@@ -553,16 +626,6 @@ fn retained_external_direct_plan(
         "external direct protocol interpretation changed its retained document"
     );
     ryeos_engine::protocols::validate_admitted_protocol_descriptor(protocol_ref, &retained)?;
-    validate_external_direct_plan(&plan, &retained)?;
-    ensure!(
-        admitted_project_root.is_some(),
-        "external direct execution requires a retained project view"
-    );
-    super::relocate_admitted_direct_plan(
-        &mut plan,
-        admitted_project_root.as_deref(),
-        Some(Path::new("/workspace")),
-    )?;
     Ok((plan, retained))
 }
 
@@ -599,6 +662,82 @@ fn compile_external_direct_program_parts_with_project_file(
     project_file: Option<&PreparedExternalDirectProjectFile>,
 ) -> Result<AdmittedExternalDirectProgram> {
     let (plan, retained) = retained_external_direct_plan(closure, artifact, protocol)?;
+    compile_direct_program_from_plan(
+        &plan,
+        &retained,
+        closure,
+        artifact,
+        thread_id,
+        chain_root_id,
+        inputs,
+        source,
+        project_file,
+    )
+}
+
+/// Compile only program data for the original projectless mechanism owner.
+/// The caller must retain its sealed root, signed fixture and byte owners.
+pub(crate) fn compile_projectless_mechanism_parts(
+    closure: &AdmittedExecutionClosure,
+    artifact: &AdmittedLaunchArtifactIdentity,
+    protocol: &VerifiedProtocol,
+    root_thread_id: &str,
+    inputs: &ExternalGuestInputProjection,
+    source: Option<&VerifiedAdmittedSourceRecords>,
+) -> Result<AdmittedExternalDirectProgram> {
+    let (plan, retained) = retained_direct_plan_and_protocol(closure, artifact, protocol)?;
+    ensure!(
+        matches!(
+            closure,
+            AdmittedExecutionClosure::DirectItemExecutor {
+                admitted_project_root: None,
+                ..
+            }
+        ),
+        "mechanism program cannot claim an execution project root"
+    );
+    validate_external_direct_plan_semantics(&plan, &retained)?;
+    ensure!(
+        retained
+            .env_injections
+            .iter()
+            .all(|injection| { injection.source != EnvInjectionSource::ProjectPath }),
+        "projectless mechanism protocol requests a project path"
+    );
+    let spec = ordinary_direct_subprocess(&plan)?;
+    ensure!(
+        spec.args.iter().all(|argument| !matches!(
+            argument,
+            PlanArgument::AdmittedExecutionProjectFile { .. }
+                | PlanArgument::AdmittedSourceMember { .. }
+        )),
+        "projectless mechanism plan requests unissued project or source member authority"
+    );
+    compile_direct_program_from_plan(
+        &plan,
+        &retained,
+        closure,
+        artifact,
+        root_thread_id,
+        root_thread_id,
+        inputs,
+        source,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_direct_program_from_plan(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+    retained: &ryeos_engine::protocols::ProtocolDescriptor,
+    closure: &AdmittedExecutionClosure,
+    artifact: &AdmittedLaunchArtifactIdentity,
+    thread_id: &str,
+    chain_root_id: &str,
+    inputs: &ExternalGuestInputProjection,
+    source: Option<&VerifiedAdmittedSourceRecords>,
+    project_file: Option<&PreparedExternalDirectProjectFile>,
+) -> Result<AdmittedExternalDirectProgram> {
     let target = plan
         .target_requirement
         .as_ref()
