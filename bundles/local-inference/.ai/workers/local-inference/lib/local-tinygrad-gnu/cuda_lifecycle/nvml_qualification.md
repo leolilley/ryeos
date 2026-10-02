@@ -85,8 +85,8 @@ not support MIG. Inference: strict success-only queries likely refuse this M1
 target; actual selected L4/nvproxy query behavior remains UNOBSERVED. This is not
 permission to reinterpret every unsupported query as disabled.
 
-D and coordinator agreed the existing ProductQualificationPolicy.v3
-verifier_parameters static signed inputs are the data seam. The retained verifier
+The existing signed product-qualification policy's static `verifier_parameters`
+remain the data seam. The retained verifier
 may select ONE product-owned L4QueryPolicy through that seam only after exact
 observer/product/provider/native-occurrence qualification. The helper accepts
 that enum as optional l4_query_policy OUTSIDE raw assignment JSON. A plain string,
