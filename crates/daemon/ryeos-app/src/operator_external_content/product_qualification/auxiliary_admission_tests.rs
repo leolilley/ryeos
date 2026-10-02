@@ -926,6 +926,81 @@ product_qualification_policy:
 }
 
 #[test]
+fn signed_probe_dependency_capture_refuses_changed_tool_envelope() -> Result<()> {
+    use ryeos_engine::canonical_ref::CanonicalRef;
+
+    let fixture = fixture()?;
+    let canonical = CanonicalRef::parse(AUX_VERIFIER)?;
+    let site = fixture.state.threads.site_id().to_owned();
+    let context = PlanContext {
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: fixture.context.fingerprint.clone(),
+            scopes: vec![],
+        }),
+        project_context: ProjectContext::None,
+        subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+        current_site_id: site.clone(),
+        origin_site_id: site,
+        execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
+        validate_only: true,
+    };
+    let resolution = fixture
+        .state
+        .engine
+        .with_checked_bundle_generation(|generation| {
+            let verified =
+                generation.verify(&context, generation.resolve(&context, &canonical)?)?;
+            let resolution =
+                resolve_consumer_definition_in_generation(generation, AUX_VERIFIER, "tool")?;
+            anyhow::ensure!(
+                verified.resolved.raw_content_digest == resolution.root.raw_content_digest
+                    && verified.resolved.content_hash == resolution.root.source_content_digest,
+                "signed probe dependency differs from its effective resolution"
+            );
+            let sources = generation.capture_verified_signed_bundle_sources(&resolution)?;
+            anyhow::ensure!(
+                sources
+                    .iter()
+                    .any(|source| source.resolved_ref == AUX_VERIFIER),
+                "signed probe dependency root was not captured"
+            );
+            let manifests = generation.capture_verified_source_bundle_manifests(&sources)?;
+            anyhow::ensure!(
+                !manifests.is_empty(),
+                "signed probe Bundle manifest was not captured"
+            );
+            Ok::<_, anyhow::Error>(resolution)
+        })?;
+
+    // Mutate the installed Tool without its signed envelope. A retained
+    // resolution cannot authorize a later capture from changed installed bytes.
+    let path = fixture
+        .directory
+        .path()
+        .join("fixture-bundle/.ai/tools/qualification-fixture/auxiliary.yaml");
+    let original = fs::read_to_string(&path)?;
+    anyhow::ensure!(original.contains("Local source fixture checker"));
+    fs::write(
+        &path,
+        original.replace(
+            "Local source fixture checker",
+            "Changed source fixture checker",
+        ),
+    )?;
+    assert!(
+        fixture
+            .state
+            .engine
+            .with_checked_bundle_generation(|generation| {
+                generation.capture_verified_signed_bundle_sources(&resolution)
+            })
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn signed_auxiliary_fixture_reconstructs_its_current_verifier() -> Result<()> {
     let fixture = fixture()?;
     let authority = fixture.state.state_store.pinned_state_authority()?;
