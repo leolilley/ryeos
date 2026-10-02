@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import struct
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Sequence
 
 
 _ELF_HEADER = struct.Struct('<16sHHIQQQIHHHHHH')
@@ -254,14 +254,21 @@ def inspect_cuda_driver_closure(
     *,
     gnu_bounds: TreeBounds,
     driver_bounds: TreeBounds,
+    entry_sonames: Sequence[str] = ('libcuda.so.1',),
 ) -> DriverClosure:
-    """Require libcuda's complete NEEDED graph to resolve only in selected roots.
+    """Require each selected driver entry's NEEDED graph to resolve in selected roots.
 
     ``gnu_library_root`` is the already selected GNU ``python/lib`` directory;
     ``driver_root`` is the selected driver's ``lib`` directory. The caller still
     needs destination qualification for symbol versions, actual mappings, ABI,
     and physical device identity.
     """
+    required_entries = tuple(entry_sonames)
+    if (not required_entries or len(set(required_entries)) != len(required_entries)
+            or any(not isinstance(name, str) or not name.endswith('.so.1')
+                   or '/' in name or '\\' in name or name in ('.so.1', '..so.1')
+                   for name in required_entries)):
+        raise DriverClosureError('required driver entry SONAME set is invalid')
     roots = tuple(path.resolve(strict=True) for path in (gnu_library_root, driver_root))
     if (any(not root.is_dir() for root in roots) or roots[0] == roots[1]
             or _within(roots[0], roots[1]) or _within(roots[1], roots[0])):
@@ -315,16 +322,22 @@ def inspect_cuda_driver_closure(
                 raise DriverClosureError(f'ambiguous selected provider for {info.soname}')
             index[info.soname] = resolved
 
-    cuda_path = (roots[1] / 'libcuda.so.1').resolve(strict=True)
-    if not _within(roots[1], cuda_path) or not cuda_path.is_file():
-        raise DriverClosureError('selected libcuda.so.1 escaped or is not a regular file')
-    cuda_info = info_by_path.get(cuda_path)
-    if cuda_info is None:
-        raise DriverClosureError('selected driver entry was not indexed under its product bounds')
-    if cuda_info.soname != 'libcuda.so.1':
-        raise DriverClosureError('selected driver entry has an unexpected DT_SONAME')
-    if index.get('libcuda.so.1') != cuda_path:
-        raise DriverClosureError('selected driver entry is ambiguous in its admitted root')
+    entry_paths: dict[str, Path] = {}
+    for soname in required_entries:
+        try:
+            entry_path = (roots[1] / soname).resolve(strict=True)
+        except OSError as error:
+            raise DriverClosureError(f'selected driver entry is missing: {soname}') from error
+        if not _within(roots[1], entry_path) or not entry_path.is_file():
+            raise DriverClosureError(f'selected {soname} escaped or is not a regular file')
+        entry_info = info_by_path.get(entry_path)
+        if entry_info is None:
+            raise DriverClosureError('selected driver entry was not indexed under its product bounds')
+        if entry_info.soname != soname:
+            raise DriverClosureError(f'selected driver entry has unexpected DT_SONAME for {soname}')
+        if index.get(soname) != entry_path:
+            raise DriverClosureError(f'selected driver entry is ambiguous for {soname}')
+        entry_paths[soname] = entry_path
 
     selected: dict[str, Path] = {}
     ordered: list[Path] = []
@@ -392,7 +405,11 @@ def inspect_cuda_driver_closure(
         selected[soname] = provider
         ordered.append(provider)
 
-    visit('libcuda.so.1')
+    for soname in required_entries:
+        visit(soname)
     providers = dict(selected)
-    providers['cuda'] = cuda_path
+    if 'libcuda.so.1' in entry_paths:
+        providers['cuda'] = entry_paths['libcuda.so.1']
+    if 'libnvidia-ml.so.1' in entry_paths:
+        providers['nvml'] = entry_paths['libnvidia-ml.so.1']
     return DriverClosure(MappingProxyType(providers), tuple(ordered))
