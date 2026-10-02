@@ -21,6 +21,7 @@ def _shared_object(
     conflicting_string_map: bool = False,
     partial_string_map: bool = False,
     zero_fill_string_map: bool = False,
+    trailing_short_load: bool = False,
     load_memory_size: int | None = None,
 ) -> None:
     strings = bytearray(b'\0')
@@ -38,7 +39,7 @@ def _shared_object(
     dynamic.append((driver_closure._DT_STRSZ, len(strings)))
     dynamic.append((driver_closure._DT_NULL, 0))
     extra_mapping = conflicting_string_map or partial_string_map or zero_fill_string_map
-    header_count = 3 if extra_mapping else 2
+    header_count = 2 + int(extra_mapping) + int(trailing_short_load)
     dynamic_offset = 64 + header_count * driver_closure._PROGRAM_HEADER.size
     dynamic_bytes = b''.join(driver_closure._DYNAMIC.pack(tag, value) for tag, value in dynamic)
     string_offset = dynamic_offset + len(dynamic_bytes)
@@ -48,7 +49,8 @@ def _shared_object(
     string_offset = dynamic_offset + len(dynamic_bytes)
     dynamic[-3] = (driver_closure._DT_STRTAB, string_offset)
     dynamic_bytes = b''.join(driver_closure._DYNAMIC.pack(tag, value) for tag, value in dynamic)
-    end = string_offset + len(strings) + (1 if conflicting_string_map or partial_string_map else 0)
+    base_end = string_offset + len(strings)
+    end = base_end + (1 if conflicting_string_map or partial_string_map else 0)
     ident = b'\x7fELF\x02\x01\x01\0' + b'\0' * 8
     header = driver_closure._ELF_HEADER.pack(
         ident, driver_closure._ET_DYN, driver_closure._EM_X86_64, 1,
@@ -76,13 +78,19 @@ def _shared_object(
         extra_load = driver_closure._PROGRAM_HEADER.pack(
             1, 4, start, start, start, 0, len(strings) - half, 1,
         )
+    trailing_load = (
+        driver_closure._PROGRAM_HEADER.pack(
+            1, 4, base_end, base_end + 4096, base_end + 4096, 1, 1, 1,
+        )
+        if trailing_short_load else b''
+    )
     dynamic_header = driver_closure._PROGRAM_HEADER.pack(
         driver_closure._PT_DYNAMIC, 4, dynamic_offset, dynamic_offset,
         dynamic_offset, len(dynamic_bytes), len(dynamic_bytes), 8,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(header + load + extra_load + dynamic_header + dynamic_bytes + strings +
-                     (b'\0' if conflicting_string_map or partial_string_map else b''))
+    path.write_bytes(header + load + extra_load + trailing_load + dynamic_header + dynamic_bytes + strings +
+                     (b'\0' if conflicting_string_map or partial_string_map or trailing_short_load else b''))
 
 
 class DriverClosureTests(unittest.TestCase):
@@ -132,6 +140,16 @@ class DriverClosureTests(unittest.TestCase):
             selected_libraries={'nvrtc': self.driver / 'libhelper.so.1'},
         )
         self.assertIsNone(poisoned_map('nvrtc', ['/ambient']))
+
+    def test_short_nonoverlapping_segment_does_not_change_file_extent_check(self):
+        _shared_object(
+            self.driver / 'libcuda.so.1', 'libcuda.so.1',
+            ('libhelper.so.1', 'libc.so.6'), '$ORIGIN', trailing_short_load=True,
+        )
+        self.assertEqual(
+            self.inspect().providers['cuda'],
+            (self.driver / 'libcuda.so.1').resolve(),
+        )
 
     def test_missing_soname_and_unreachable_provider_refuse(self):
         (self.driver / 'libhelper.so.1').unlink()

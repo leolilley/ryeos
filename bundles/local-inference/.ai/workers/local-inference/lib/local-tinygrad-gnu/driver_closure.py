@@ -101,23 +101,23 @@ def _file_translation(
     virtual: int,
     length: int,
     loads: tuple[tuple[int, int, int, int], ...],
-    file_size: int,
+    total_file_bytes: int,
     name: str,
 ) -> int:
     end = virtual + length
     offsets = []
-    for load_virtual, file_offset, file_size, memory_size in loads:
+    for load_virtual, file_offset, load_file_bytes, memory_size in loads:
         memory_end = load_virtual + memory_size
         if virtual >= memory_end or load_virtual >= end:
             continue
-        file_end = load_virtual + file_size
+        file_end = load_virtual + load_file_bytes
         if virtual < load_virtual or end > file_end:
             raise DriverClosureError(f'{name} overlaps a partial or zero-filled PT_LOAD range')
         offsets.append(file_offset + virtual - load_virtual)
     if len(offsets) != 1:
         raise DriverClosureError(f'{name} has missing or ambiguous PT_LOAD file mapping')
     offset = offsets[0]
-    if offset < 0 or offset + length > file_size:
+    if offset < 0 or offset + length > total_file_bytes:
         raise DriverClosureError(f'{name} PT_LOAD mapping is outside the file')
     return offset
 
