@@ -23,8 +23,9 @@ use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMount
 use ryeos_state::external_execution::guest_journal::PreparedGuestJournal;
 use ryeos_state::external_execution::supervisor_journal::{
     AttachedExternalSupervisorJournal, ExternalSupervisorJournalRecovery,
-    ExternalSupervisorJournalStoreIdentity, LaunchIntentExternalSupervisorJournal,
-    PreparedExternalSupervisorJournal, RecoveredExternalSupervisorJournal,
+    ExternalSupervisorJournalStoreIdentity, ExternalSupervisorTransportCapture,
+    LaunchIntentExternalSupervisorJournal, PreparedExternalSupervisorJournal,
+    RecoveredExternalSupervisorJournal,
 };
 use ryeos_state::external_execution::transport::{
     ExternalCapturedNetworkInputs, ExternalNetworkInputPolicy, ExternalNetworkInputSelection,
@@ -32,8 +33,9 @@ use ryeos_state::external_execution::transport::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::relay_transport::OriginalRelayMailbox;
 use crate::{
-    AttachedExternalExecutionChannel, attach_external_execution_channel_exact,
+    AttachedExternalExecutionTransport, attach_external_execution_channel_exact,
     reconnect_external_execution_channel,
 };
 
@@ -55,6 +57,8 @@ pub struct ExternalCandidateSupervisorInputs {
     pub state_root: lillux::PinnedDirectory,
     pub candidate_runtime: lillux::PinnedDirectory,
     pub candidate_private_parent: lillux::PinnedDirectory,
+    pub relay_mailbox: Option<lillux::PinnedDirectory>,
+    pub staged_source: Option<lillux::PinnedDirectory>,
     pub launcher: lillux::InheritedDescriptorAuthority,
     pub workspace_outputs: Option<lillux::InheritedDescriptorAuthority>,
     pub runtime_mounts: Vec<lillux::InheritedDescriptorAuthority>,
@@ -103,7 +107,7 @@ struct LiveExternalCandidateSupervisor {
     driver: Option<
         ExternalCandidateTransportDriver<
             LiveInheritedExternalCandidateSupervisor,
-            AttachedExternalExecutionChannel,
+            AttachedExternalExecutionTransport,
         >,
     >,
     execution_deadline: lillux::time::MonotonicDeadline,
@@ -123,12 +127,18 @@ pub fn run_external_candidate_supervisor(
         state_root,
         candidate_runtime,
         candidate_private_parent,
+        relay_mailbox,
+        staged_source,
         launcher,
         workspace_outputs,
         runtime_mounts,
         content_records: _,
     } = inputs;
-    let state = ProtectedSupervisorState::open_or_create(state_root, bootstrap)?;
+    let state = ProtectedSupervisorState::open_or_create_with_mailbox(
+        state_root,
+        bootstrap,
+        relay_mailbox.as_ref(),
+    )?;
     if let Some(outcome) = state.recovery_only_outcome()? {
         return Ok(outcome);
     }
@@ -137,6 +147,8 @@ pub fn run_external_candidate_supervisor(
         execution_guest_inputs,
         candidate_runtime,
         candidate_private_parent,
+        relay_mailbox,
+        staged_source,
         launcher,
         workspace_outputs,
         runtime_mounts,
@@ -147,6 +159,33 @@ pub fn run_external_candidate_supervisor(
 fn validate_authorities(inputs: &ExternalCandidateSupervisorInputs) -> Result<()> {
     inputs.bootstrap.validate()?;
     inputs.execution_guest_inputs.validate()?;
+    ensure!(
+        inputs.relay_mailbox.is_some() == inputs.bootstrap.controller.relay().is_ok(),
+        "relay mailbox presence differs from sealed transport selection"
+    );
+    if let Some(mailbox) = inputs.relay_mailbox.as_ref() {
+        let staged = inputs
+            .staged_source
+            .as_ref()
+            .context("relay supervisor has no original staged source")?;
+        inputs
+            .bootstrap
+            .candidate_program
+            .validate_guest_inputs(&inputs.execution_guest_inputs)?;
+        for protected in [
+            &inputs.state_root,
+            &inputs.candidate_runtime,
+            &inputs.candidate_private_parent,
+            staged,
+        ] {
+            mailbox.require_disjoint_directory_tree(protected)?;
+        }
+        mailbox.require_owner_private_directory()?;
+        ensure!(
+            mailbox.path() == std::path::Path::new(&inputs.bootstrap.relay_mailbox_root()?),
+            "relay mailbox path differs from sealed occurrence"
+        );
+    }
     ensure!(
         inputs.execution_guest_inputs.identity_digest()? == inputs.bootstrap.guest_input_identity,
         "external execution projection changed sealed guest-input identity"
@@ -227,6 +266,9 @@ fn validate_authorities(inputs: &ExternalCandidateSupervisorInputs) -> Result<()
                 inputs
                     .candidate_private_parent
                     .require_disjoint_directory_tree(&pinned)?;
+                if let Some(mailbox) = inputs.relay_mailbox.as_ref() {
+                    mailbox.require_disjoint_directory_tree(&pinned)?;
+                }
                 for existing in &directory_inputs {
                     existing.require_disjoint_directory_tree(&pinned)?;
                 }
@@ -392,6 +434,14 @@ fn verify_source_input(
 }
 
 impl ProtectedSupervisorState {
+    #[cfg(test)]
+    fn open_or_create(
+        state_root: lillux::PinnedDirectory,
+        bootstrap: ExternalSupervisorBootstrap,
+    ) -> Result<Self> {
+        Self::open_or_create_with_mailbox(state_root, bootstrap, None)
+    }
+
     fn recovery_only_outcome(&self) -> Result<Option<ExternalCandidateSupervisorOutcome>> {
         let Some(RetainedSupervisorJournal::LaunchIntent(recovered)) = &self.journal else {
             return Ok(None);
@@ -405,9 +455,10 @@ impl ProtectedSupervisorState {
         }))
     }
 
-    fn open_or_create(
+    fn open_or_create_with_mailbox(
         state_root: lillux::PinnedDirectory,
         bootstrap: ExternalSupervisorBootstrap,
+        relay_mailbox: Option<&lillux::PinnedDirectory>,
     ) -> Result<Self> {
         state_root.require_owner_private_directory()?;
         let state_lock = state_root
@@ -417,27 +468,39 @@ impl ProtectedSupervisorState {
         let names = state_root.entry_names()?;
         if names.is_empty() {
             bootstrap.validate_at(lillux::time::timestamp_millis())?;
-            return Self::create(state_root, state_lock, bootstrap);
+            return Self::create(state_root, state_lock, bootstrap, relay_mailbox);
         }
-        Self::recover(state_root, state_lock, bootstrap, names)
+        Self::recover(state_root, state_lock, bootstrap, relay_mailbox, names)
     }
 
     fn create(
         state_root: lillux::PinnedDirectory,
         state_lock: lillux::PinnedDirectoryLock,
         bootstrap: ExternalSupervisorBootstrap,
+        relay_mailbox: Option<&lillux::PinnedDirectory>,
     ) -> Result<Self> {
-        // This branch alone samples the selected target-local files, while the
-        // protected root is locked and still empty. Recovery must never reach it.
-        let network_inputs = capture_network_inputs(&bootstrap.controller.network_inputs)?;
+        // Only HTTP samples target-local network files. Relay captures the
+        // original pinned mailbox identity while this protected root is fresh.
         let outer_directory = state_root.create_child(OsStr::new(OUTER_DIRECTORY), 0o700)?;
         let guest_directory = state_root.create_child(OsStr::new(GUEST_DIRECTORY), 0o700)?;
-        let journal = PreparedExternalSupervisorJournal::create(
-            outer_directory,
-            bootstrap,
-            network_inputs,
-            lillux::crypto::generate_signing_key(),
-        )?;
+        let journal = if let Some(mailbox) = relay_mailbox {
+            bootstrap.controller.relay()?;
+            PreparedExternalSupervisorJournal::create_relay(
+                outer_directory,
+                bootstrap,
+                mailbox,
+                lillux::crypto::generate_signing_key(),
+            )?
+        } else {
+            let network_inputs =
+                capture_network_inputs(&bootstrap.controller.http()?.network_inputs)?;
+            PreparedExternalSupervisorJournal::create(
+                outer_directory,
+                bootstrap,
+                network_inputs,
+                lillux::crypto::generate_signing_key(),
+            )?
+        };
         let anchor = ExternalSupervisorStateAnchor {
             schema: 1,
             state_root_identity: state_root.identity()?,
@@ -458,6 +521,7 @@ impl ProtectedSupervisorState {
         state_root: lillux::PinnedDirectory,
         state_lock: lillux::PinnedDirectoryLock,
         bootstrap: ExternalSupervisorBootstrap,
+        relay_mailbox: Option<&lillux::PinnedDirectory>,
         _observed_names: Vec<OsString>,
     ) -> Result<Self> {
         require_state_entries(&state_root)?;
@@ -484,6 +548,24 @@ impl ProtectedSupervisorState {
             .context("external supervisor guest journal directory is absent")?;
         let recovered =
             ExternalSupervisorJournalRecovery::open(outer_directory, &anchor.outer_store_identity)?;
+        let capture = match &recovered {
+            ExternalSupervisorJournalRecovery::Prepared(journal) => journal.transport_capture(),
+            ExternalSupervisorJournalRecovery::Attached(journal) => journal.transport_capture(),
+            ExternalSupervisorJournalRecovery::LaunchIntent(journal) => journal.transport_capture(),
+        };
+        match (capture, relay_mailbox) {
+            (ExternalSupervisorTransportCapture::Http(_), None) => {}
+            (ExternalSupervisorTransportCapture::Relay(capture), Some(mailbox)) => {
+                ensure!(
+                    mailbox.identity()? == capture.mailbox_identity()
+                        && mailbox.path() == std::path::Path::new(capture.mailbox_root()),
+                    "external supervisor recovery changed original relay mailbox"
+                );
+                mailbox.require_owner_private_directory()?;
+                mailbox.ensure_path_binding()?;
+            }
+            _ => bail!("external supervisor recovery changed transport custody"),
+        }
         let retained_bootstrap = match &recovered {
             ExternalSupervisorJournalRecovery::Prepared(journal) => journal.bootstrap(),
             ExternalSupervisorJournalRecovery::Attached(journal) => journal.bootstrap(),
@@ -539,12 +621,38 @@ fn capture_network_inputs(
     ExternalCapturedNetworkInputs::from_bytes(policy, resolver.bytes(), hosts.bytes())
 }
 
+fn adopt_relay_mailbox(
+    bootstrap: &ExternalSupervisorBootstrap,
+    capture: &ryeos_state::external_execution::supervisor_journal::ExternalRelayMailboxCapture,
+    mailbox: Option<lillux::PinnedDirectory>,
+    state_root: &lillux::PinnedDirectory,
+    candidate_runtime: &lillux::PinnedDirectory,
+    candidate_private_parent: &lillux::PinnedDirectory,
+    staged_source: Option<&lillux::PinnedDirectory>,
+) -> Result<OriginalRelayMailbox> {
+    capture.validate_for(bootstrap)?;
+    let mailbox = mailbox.context("relay journal lost original mailbox descriptor")?;
+    let staged_source = staged_source.context("relay journal lost mounted source descriptor")?;
+    let retained_bootstrap = serde_json::from_slice(&bootstrap.canonical_bytes()?)?;
+    OriginalRelayMailbox::adopt(
+        retained_bootstrap,
+        mailbox,
+        capture.mailbox_identity(),
+        state_root,
+        candidate_runtime,
+        candidate_private_parent,
+        staged_source,
+    )
+}
+
 impl LiveExternalCandidateSupervisor {
     fn start(
         mut state: ProtectedSupervisorState,
         execution_guest_inputs: ExternalGuestInputProjection,
         candidate_runtime: lillux::PinnedDirectory,
         candidate_private_parent: lillux::PinnedDirectory,
+        mut relay_mailbox: Option<lillux::PinnedDirectory>,
+        staged_source: Option<lillux::PinnedDirectory>,
         launcher: lillux::InheritedDescriptorAuthority,
         workspace_outputs: Option<lillux::InheritedDescriptorAuthority>,
         runtime_mounts: Vec<lillux::InheritedDescriptorAuthority>,
@@ -558,22 +666,84 @@ impl LiveExternalCandidateSupervisor {
             .take()
             .context("external supervisor state lost its retained journal")?
         {
-            RetainedSupervisorJournal::Prepared(prepared) => {
-                let (binding, transport) = attach_external_execution_channel_exact(
-                    prepared.bootstrap(),
-                    prepared.supervisor_signing_key(),
-                    prepared.attachment_request(),
-                    prepared.captured_network_inputs(),
-                )?;
-                (prepared.record_binding(binding)?, transport)
-            }
+            RetainedSupervisorJournal::Prepared(prepared) => match prepared.transport_capture() {
+                ExternalSupervisorTransportCapture::Http(_) => {
+                    let (binding, transport) = attach_external_execution_channel_exact(
+                        prepared.bootstrap(),
+                        prepared.supervisor_signing_key(),
+                        prepared.attachment_request(),
+                        prepared.captured_network_inputs()?,
+                    )?;
+                    (
+                        prepared.record_binding(binding)?,
+                        AttachedExternalExecutionTransport::from(transport),
+                    )
+                }
+                ExternalSupervisorTransportCapture::Relay(capture) => {
+                    let mut mailbox = adopt_relay_mailbox(
+                        prepared.bootstrap(),
+                        capture,
+                        relay_mailbox.take(),
+                        &state._state_root,
+                        &candidate_runtime,
+                        &candidate_private_parent,
+                        staged_source.as_ref(),
+                    )?;
+                    let deadline = lillux::time::MonotonicDeadline::after(
+                        lillux::time::Duration::from_millis(u64::from(
+                            prepared.bootstrap().controller.relay()?.poll_deadline_ms,
+                        )),
+                    );
+                    let authenticated = mailbox.attach_exact(
+                        prepared.supervisor_signing_key(),
+                        prepared.attachment_request(),
+                        deadline,
+                    )?;
+                    let binding = authenticated.binding().clone();
+                    let attached =
+                        prepared.record_relay_binding(binding, authenticated.response_digest())?;
+                    let transport = mailbox.into_attached(authenticated)?;
+                    (
+                        attached,
+                        AttachedExternalExecutionTransport::from(transport),
+                    )
+                }
+            },
             RetainedSupervisorJournal::Attached(attached) => {
-                let transport = reconnect_external_execution_channel(
-                    attached.bootstrap(),
-                    attached.supervisor_signing_key(),
-                    attached.binding(),
-                    attached.captured_network_inputs(),
-                )?;
+                let transport = match attached.transport_capture() {
+                    ExternalSupervisorTransportCapture::Http(_) => {
+                        AttachedExternalExecutionTransport::from(
+                            reconnect_external_execution_channel(
+                                attached.bootstrap(),
+                                attached.supervisor_signing_key(),
+                                attached.binding(),
+                                attached.captured_network_inputs()?,
+                            )?,
+                        )
+                    }
+                    ExternalSupervisorTransportCapture::Relay(capture) => {
+                        let mailbox = adopt_relay_mailbox(
+                            attached.bootstrap(),
+                            capture,
+                            relay_mailbox.take(),
+                            &state._state_root,
+                            &candidate_runtime,
+                            &candidate_private_parent,
+                            staged_source.as_ref(),
+                        )?;
+                        let deadline = lillux::time::MonotonicDeadline::after(
+                            lillux::time::Duration::from_millis(u64::from(
+                                attached.bootstrap().controller.relay()?.poll_deadline_ms,
+                            )),
+                        );
+                        AttachedExternalExecutionTransport::from(mailbox.reconnect_retained(
+                            attached.attachment_request(),
+                            attached.binding(),
+                            &attached.relay_attach_response_digest()?,
+                            deadline,
+                        )?)
+                    }
+                };
                 (attached, transport)
             }
             RetainedSupervisorJournal::LaunchIntent(_) => {
@@ -673,7 +843,7 @@ trait ExternalCandidateControlDriver: Sized {
 impl ExternalCandidateControlDriver
     for ExternalCandidateTransportDriver<
         LiveInheritedExternalCandidateSupervisor,
-        AttachedExternalExecutionChannel,
+        AttachedExternalExecutionTransport,
     >
 {
     fn has_durable_capture(&self) -> bool {
@@ -953,7 +1123,8 @@ mod tests {
                 connect_timeout_ms: 1_000,
                 request_timeout_ms: 2_000,
                 maximum_response_bytes: 64 * 1024,
-            },
+            }
+            .into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-placement".into(),
             occurrence_id: occurrence.into(),
@@ -1374,6 +1545,8 @@ mod tests {
             state_root: state,
             candidate_runtime: candidate,
             candidate_private_parent: private,
+            relay_mailbox: None,
+            staged_source: None,
             launcher,
             workspace_outputs: None,
             runtime_mounts: vec![runtime],
@@ -1456,6 +1629,8 @@ mod tests {
             state_root: nested_state,
             candidate_runtime: nested_candidate,
             candidate_private_parent: nested_private,
+            relay_mailbox: None,
+            staged_source: None,
             launcher: nested_launcher,
             workspace_outputs: None,
             runtime_mounts: vec![exposed_ancestor],
@@ -1507,6 +1682,8 @@ mod tests {
                     state_root: state,
                     candidate_runtime: candidate,
                     candidate_private_parent: private,
+                    relay_mailbox: None,
+                    staged_source: None,
                     launcher,
                     workspace_outputs: None,
                     runtime_mounts: vec![runtime],
@@ -1741,9 +1918,20 @@ mod tests {
                 "captured-network",
                 lillux::time::timestamp_millis() + 60_000,
             );
-            original.controller.network_inputs.resolver.source =
-                resolver_path.to_str().unwrap().into();
-            original.controller.network_inputs.hosts.source = hosts_path.to_str().unwrap().into();
+            original
+                .controller
+                .http_mut()
+                .unwrap()
+                .network_inputs
+                .resolver
+                .source = resolver_path.to_str().unwrap().into();
+            original
+                .controller
+                .http_mut()
+                .unwrap()
+                .network_inputs
+                .hosts
+                .source = hosts_path.to_str().unwrap().into();
             let original_bytes = original.canonical_bytes().unwrap();
             let mut state =
                 ProtectedSupervisorState::open_or_create(pinned(root.path()), original).unwrap();
@@ -1751,7 +1939,11 @@ mod tests {
                 RetainedSupervisorJournal::Prepared(journal) => journal,
                 _ => panic!("fresh state must be prepared"),
             };
-            let capture_digest = prepared.captured_network_inputs().digest().unwrap();
+            let capture_digest = prepared
+                .captured_network_inputs()
+                .unwrap()
+                .digest()
+                .unwrap();
             let original_store_identity = prepared.store_identity().clone();
             assert_eq!(
                 prepared.bootstrap().canonical_bytes().unwrap(),
@@ -1773,12 +1965,12 @@ mod tests {
             let (retained, capture, identity) = match recovered.journal.as_ref().unwrap() {
                 RetainedSupervisorJournal::Prepared(journal) => (
                     journal.bootstrap(),
-                    journal.captured_network_inputs(),
+                    journal.captured_network_inputs().unwrap(),
                     journal.store_identity(),
                 ),
                 RetainedSupervisorJournal::Attached(journal) => (
                     journal.bootstrap(),
-                    journal.captured_network_inputs(),
+                    journal.captured_network_inputs().unwrap(),
                     journal.store_identity(),
                 ),
                 _ => panic!("recovery changed the prelaunch stage"),
@@ -1797,8 +1989,13 @@ mod tests {
             drop(recovered);
             let mut changed: ExternalSupervisorBootstrap =
                 serde_json::from_slice(&original_bytes).unwrap();
-            changed.controller.network_inputs.resolver.source =
-                sources.path().join("missing").to_str().unwrap().into();
+            changed
+                .controller
+                .http_mut()
+                .unwrap()
+                .network_inputs
+                .resolver
+                .source = sources.path().join("missing").to_str().unwrap().into();
             let error = ProtectedSupervisorState::open_or_create(pinned(root.path()), changed)
                 .err()
                 .unwrap();
@@ -1817,8 +2014,20 @@ mod tests {
             }
             let mut admitted =
                 bootstrap("invalid-network", lillux::time::timestamp_millis() + 60_000);
-            admitted.controller.network_inputs.resolver.source = path.to_str().unwrap().into();
-            admitted.controller.network_inputs.resolver.max_bytes = 1;
+            admitted
+                .controller
+                .http_mut()
+                .unwrap()
+                .network_inputs
+                .resolver
+                .source = path.to_str().unwrap().into();
+            admitted
+                .controller
+                .http_mut()
+                .unwrap()
+                .network_inputs
+                .resolver
+                .max_bytes = 1;
             assert!(
                 ProtectedSupervisorState::open_or_create(pinned(root.path()), admitted).is_err()
             );

@@ -176,8 +176,11 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertIn("#   category: ryeos/development/cargo-vendor-finalize", finalizer_source)
         self.assertIn("#   executor_id: tool:ryeos/development/authoring-environment-production/runtime",
                       finalizer_source)
-        self.assertIn("9e8e1a93918f8e229cdbb8a037aa1a4fbbccbe5efe1257519396bb8fc3103f09",
-                      finalizer_source)
+        self.assertIn("#     type: strict_signed_project_bundle", finalizer_source)
+        self.assertIn("#     bundle_name: standard", finalizer_source)
+        intent_path = "bundles/standard/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml"
+        self.assertIn("#     config_path: " + intent_path, finalizer_source)
+        self.assertRegex(load(intent_path)["expected_sha256"], r"^[0-9a-f]{64}$")
         self.assertIn('OUTPUT = Path("products/cargo-vendor/Cargo.lock")', finalizer_source)
         execution = load(".ai/config/execution/execution.yaml")["items"]
         self.assertEqual(execution["graph"]["ryeos/development/cargo-vendor-production"]["timeout"], 360)

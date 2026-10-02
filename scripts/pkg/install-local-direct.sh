@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-09-29T04:22:20Z:aeb65d531de8d3eeee4ccff44546893372c2dd5986aa1e4e2f02c4d8ae0564aa:hz3VsLqKI1htcdNA53qV7r00ZM1R1Gb7jzYFc9RHGk3PJRYsncJjVH7zSlI1p8QeePcODU4QrjbWWhCHm0OkBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T05:24:20Z:98d9f91aadb1ffc18fc28ea2a59ed817973e04b748f504ea854b2aba935e36bb:UBkYxW9DlwU8uYxnq5DMtRvGi/cA8xOWuBtDL/3ynTLxRSGwrxlzYRMyBu8Xd9aHjWULZ6ZUoQl6YHGRknCYDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Fast local packaged-layout install from this checkout.
 #
 # This intentionally skips yay/makepkg but installs the same runtime layout
@@ -225,6 +225,7 @@ build_install_init_profile_args() {
 preflight_existing_node_policy() {
     local policy_generation_path="$1"
     local reset_generation="$2"
+    shift 2
     local -a command=(
         "$target_dir/ryeosd"
         init-policy-preflight
@@ -239,6 +240,11 @@ preflight_existing_node_policy() {
     }
     if [[ "$reset_generation" == "1" ]]; then
         command+=(--schema-cut)
+    else
+        local bundle_name
+        for bundle_name in "$@"; do
+            command+=(--active-bundle "$bundle_name")
+        done
     fi
     if [[ "$invoking_user" != "$(id -un)" ]]; then
         sudo -H -u "$invoking_user" "${command[@]}"
@@ -874,7 +880,7 @@ if [[ $run_init -eq 1 ]]; then
         "$policy_generation_path" "$node_init_profile" "$reset_node_policy_generation" || \
         die "could not resolve init-profile arguments"
     if ! preflight_existing_node_policy \
-        "$policy_generation_path" "$reset_node_policy_generation"; then
+        "$policy_generation_path" "$reset_node_policy_generation" "${bundle_names[@]}"; then
         if [[ $reset_node_policy_generation -eq 1 ]]; then
             die "existing node policy generation is not a complete signed schema-cut occupant; node lifecycle was not changed"
         fi

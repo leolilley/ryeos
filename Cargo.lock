@@ -2607,6 +2607,7 @@ dependencies = [
  "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
+ "ryeos-external-execution-contract",
  "ryeos-graph-definition",
  "ryeos-handler-protocol",
  "ryeos-node",
@@ -2834,6 +2835,7 @@ dependencies = [
  "lillux",
  "ryeos-external-execution-contract",
  "serde",
+ "serde_json",
  "toml",
 ]
 
@@ -2845,6 +2847,28 @@ dependencies = [
  "lillux",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "ryeos-codex-runtime-verifier"
+version = "0.5.102"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "lillux",
+ "rmp-serde",
+ "ryeos-codex-external-configuration",
+ "ryeos-external-execution",
+ "ryeos-external-execution-contract",
+ "ryeos-project-capture",
+ "ryeos-runtime",
+ "ryeos-state",
+ "serde",
+ "serde_json",
+ "shlex",
+ "tempfile",
+ "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -3103,6 +3127,7 @@ dependencies = [
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3198,25 +3223,6 @@ dependencies = [
  "ureq-proto",
  "url",
  "zeroize",
-]
-
-[[package]]
-name = "ryeos-independent-runtime-verifier"
-version = "0.5.102"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "lillux",
- "ryeos-external-execution",
- "ryeos-external-execution-contract",
- "ryeos-project-capture",
- "ryeos-runtime",
- "ryeos-state",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
 ]
 
 [[package]]
@@ -3332,6 +3338,7 @@ dependencies = [
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "ryeos-http-transport",
+ "ryeos-state",
  "serde",
  "serde_json",
  "signal-hook",
@@ -3449,13 +3456,13 @@ dependencies = [
  "ryeos-api",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-codex-runtime-verifier",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-external-candidate-launcher",
  "ryeos-external-candidate-supervisor",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
- "ryeos-independent-runtime-verifier",
  "ryeos-isolation-protocol",
  "ryeos-project-capture",
  "ryeos-state",
@@ -3590,13 +3597,13 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-api",
  "ryeos-app",
+ "ryeos-codex-runtime-verifier",
  "ryeos-core-tools",
  "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-external-candidate-supervisor",
  "ryeos-external-execution-contract",
- "ryeos-independent-runtime-verifier",
  "ryeos-isolation-protocol",
  "ryeos-node",
  "ryeos-provider-contract",

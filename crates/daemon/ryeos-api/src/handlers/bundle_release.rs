@@ -30,7 +30,8 @@ use serde_json::{Value, json};
 
 use super::bundle_release_execution::{
     PinnedGraphExecution, ReleaseSourceGeneration, accept_dispatch_products, execute_pinned_graph,
-    publish_qualification, successful_dispatch_result as dispatch_result,
+    execute_protected_qualification, publish_qualification,
+    successful_dispatch_result as dispatch_result,
 };
 
 const RELEASE_GRAPH_REF: &str = "graph:ryeos/bundle-release/publish";
@@ -1836,8 +1837,7 @@ async fn calibrate_signed_bundle(
         capture_manifest == signed.evidence().output_content_manifest_hash(),
         "{bundle_name} calibration capture changed the node-signed tree"
     );
-    let verifier_chain_root_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let qualification_envelope = run_pinned_release_graph_from_generation(
+    let qualification_envelope = run_protected_release_qualifier_from_generation(
         qualifier,
         Arc::clone(source_generation),
         build_recipe.clone(),
@@ -1847,7 +1847,6 @@ async fn calibrate_signed_bundle(
         Some(capture_recipe.clone()),
         capture_recipe_ref,
         capture_digest.clone(),
-        json!({}),
         {
             let mut selections = environment.runtime;
             selections.push(ryeos_state::external_content::products::composition::ProductSelectionInput {
@@ -1861,11 +1860,13 @@ async fn calibrate_signed_bundle(
             });
             selections
         },
-        Some(verifier_chain_root_id.clone()),
+        capture_product.witness_hash.clone(),
+        qualification_relationship,
         context.clone(),
         Arc::clone(&state),
     )
     .await?;
+    let verifier_chain_root_id = qualification_thread_id(&qualification_envelope)?;
     anyhow::ensure!(
         dispatch_result(&qualification_envelope)?["schema"]
             == "ryeos.product_qualification_result.v1",
@@ -2023,8 +2024,7 @@ async fn calibrate_substrate(
         &build_digest,
         &build_parameters,
     )?;
-    let verifier_chain_root_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let qualification_envelope = run_pinned_release_graph_from_generation(
+    let qualification_envelope = run_protected_release_qualifier_from_generation(
         SUBSTRATE_QUALIFY_TOOL_REF,
         Arc::clone(source_generation),
         build_recipe.clone(),
@@ -2034,7 +2034,6 @@ async fn calibrate_substrate(
         None,
         "config:bundle-release/substrate-build-products",
         build_digest.clone(),
-        json!({}),
         {
             let mut selections = environment_selections;
             selections.push(ryeos_state::external_content::products::composition::ProductSelectionInput {
@@ -2048,11 +2047,13 @@ async fn calibrate_substrate(
             });
             selections
         },
-        Some(verifier_chain_root_id.clone()),
+        product.witness_hash.clone(),
+        "substrate_release_to_qualification",
         context.clone(),
         Arc::clone(&state),
     )
     .await?;
+    let verifier_chain_root_id = qualification_thread_id(&qualification_envelope)?;
     anyhow::ensure!(
         dispatch_result(&qualification_envelope)?["schema"]
             == "ryeos.product_qualification_result.v1",
@@ -2583,6 +2584,56 @@ async fn run_pinned_release_graph_from_generation(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn run_protected_release_qualifier_from_generation(
+    qualifier_ref: &'static str,
+    source_generation: Arc<ReleaseSourceGeneration>,
+    signed_build_recipe: String,
+    build_recipe_filename: &'static str,
+    build_recipe_must_match_source: bool,
+    capture_recipe_filename: &'static str,
+    signed_capture_recipe: Option<String>,
+    recipe_ref: &'static str,
+    expected_recipe_raw_digest: String,
+    product_selections: Vec<
+        ryeos_state::external_content::products::composition::ProductSelectionInput,
+    >,
+    witness_hash: String,
+    relationship_name: &str,
+    context: HandlerContext,
+    state: Arc<AppState>,
+) -> anyhow::Result<Value> {
+    execute_protected_qualification(
+        PinnedGraphExecution {
+            graph_ref: qualifier_ref,
+            source_generation,
+            signed_build_recipe,
+            build_recipe_filename,
+            build_recipe_must_match_source,
+            capture_recipe_filename,
+            signed_capture_recipe,
+            recipe_ref,
+            expected_recipe_raw_digest,
+            parameters: json!({}),
+            product_selections,
+            pre_minted_thread_id: None,
+        },
+        witness_hash,
+        relationship_name.to_owned(),
+        context,
+        state,
+    )
+    .await
+}
+
+fn qualification_thread_id(envelope: &Value) -> anyhow::Result<String> {
+    Ok(envelope
+        .pointer("/thread/thread_id")
+        .and_then(Value::as_str)
+        .context("protected qualification omitted its retained terminal thread")?
+        .to_owned())
+}
+
 fn substrate_build_handler(
     params: Value,
     context: HandlerContext,
@@ -2841,8 +2892,7 @@ fn substrate_qualify_handler(
                 qualification_hash: None,
             },
         });
-        let verifier_chain_root_id = ryeos_app::thread_lifecycle::new_thread_id();
-        let result = run_pinned_release_graph_from_generation(
+        let result = run_protected_release_qualifier_from_generation(
             SUBSTRATE_QUALIFY_TOOL_REF,
             Arc::clone(&source_generation),
             request.substrate_build_recipe_signed_config,
@@ -2852,13 +2902,14 @@ fn substrate_qualify_handler(
             None,
             "config:bundle-release/substrate-build-products",
             request.substrate_build_recipe_raw_digest,
-            json!({}),
             selections,
-            Some(verifier_chain_root_id.clone()),
+            request.substrate_product_witness.clone(),
+            "substrate_release_to_qualification",
             context.clone(),
             Arc::clone(&state),
         )
         .await?;
+        let verifier_chain_root_id = qualification_thread_id(&result)?;
         let terminal = dispatch_result(&result)?;
         anyhow::ensure!(
             terminal.get("schema").and_then(Value::as_str)
@@ -3179,8 +3230,7 @@ fn core_seed_qualify_handler(
                 qualification_hash: None,
             },
         });
-        let verifier_chain_root_id = ryeos_app::thread_lifecycle::new_thread_id();
-        let result = run_pinned_release_graph_from_generation(
+        let result = run_protected_release_qualifier_from_generation(
             ryeos_app::bundle_publication::core_seed::QUALIFIER,
             Arc::clone(&source_generation),
             request.build_recipe_signed_config,
@@ -3190,13 +3240,14 @@ fn core_seed_qualify_handler(
             Some(request.capture_recipe_signed_config),
             ryeos_app::bundle_publication::core_seed::CAPTURE_RECIPE,
             request.capture_recipe_raw_digest,
-            json!({}),
             selections,
-            Some(verifier_chain_root_id.clone()),
+            request.signed_product_witness.clone(),
+            "signed_core_seed_to_qualification",
             context.clone(),
             Arc::clone(&state),
         )
         .await?;
+        let verifier_chain_root_id = qualification_thread_id(&result)?;
         anyhow::ensure!(
             dispatch_result(&result)?["schema"] == "ryeos.product_qualification_result.v1",
             "Core seed qualification returned another contract"
@@ -3726,8 +3777,7 @@ fn generation_qualify_handler(
                 qualification_hash: None,
             },
         });
-        let verifier_chain_root_id = ryeos_app::thread_lifecycle::new_thread_id();
-        let result = run_pinned_release_graph_from_generation(
+        let result = run_protected_release_qualifier_from_generation(
             qualifier,
             Arc::clone(&source_generation),
             request.build_recipe_signed_config.clone(),
@@ -3737,13 +3787,14 @@ fn generation_qualify_handler(
             Some(request.capture_recipe_signed_config.clone()),
             capture_recipe_ref,
             request.capture_recipe_raw_digest.clone(),
-            json!({}),
             selections,
-            Some(verifier_chain_root_id.clone()),
+            request.signed_product_witness.clone(),
+            relationship,
             context.clone(),
             Arc::clone(&state),
         )
         .await?;
+        let verifier_chain_root_id = qualification_thread_id(&result)?;
         let terminal_result = dispatch_result(&result)?;
         anyhow::ensure!(
             terminal_result.get("schema").and_then(Value::as_str)
@@ -4076,6 +4127,7 @@ pub const AUTHORITY_CALIBRATE: ServiceDescriptor = ServiceDescriptor {
         "ryeos.execute.config.bundle-release/signed-capture-products",
         "ryeos.execute.config.bundle-release/substrate-build-products",
         "ryeos.execute.service.bundle-release/authority-calibrate",
+        "ryeos.execute.service.external-content/launch-product-qualification",
         "ryeos.execute.tool.ryeos/bundle-release/core-seed-build",
         "ryeos.execute.tool.ryeos/bundle-release/core-seed-capture",
         "ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify",
@@ -4145,6 +4197,7 @@ pub const CORE_SEED_QUALIFY: ServiceDescriptor = ServiceDescriptor {
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
         "ryeos.execute.service.bundle-release/core-seed-qualify",
+        "ryeos.execute.service.external-content/launch-product-qualification",
         "ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify",
     ],
     handler: core_seed_qualify_handler,
@@ -4181,6 +4234,7 @@ pub const GENERATION_QUALIFY: ServiceDescriptor = ServiceDescriptor {
         "ryeos.execute.config.bundle-release/native-qualification",
         "ryeos.execute.config.bundle-release/portable-qualification",
         "ryeos.execute.service.bundle-release/generation-qualify",
+        "ryeos.execute.service.external-content/launch-product-qualification",
         "ryeos.execute.tool.ryeos/bundle-release/native-qualify",
         "ryeos.execute.tool.ryeos/bundle-release/portable-qualify",
     ],
@@ -4214,6 +4268,7 @@ pub const SUBSTRATE_QUALIFY: ServiceDescriptor = ServiceDescriptor {
         "ryeos.execute.config.bundle-release/execution-environment-products",
         "ryeos.execute.config.bundle-release/execution-tool-products",
         "ryeos.execute.service.bundle-release/substrate-qualify",
+        "ryeos.execute.service.external-content/launch-product-qualification",
         "ryeos.execute.tool.ryeos/bundle-release/substrate-qualify",
     ],
     handler: substrate_qualify_handler,

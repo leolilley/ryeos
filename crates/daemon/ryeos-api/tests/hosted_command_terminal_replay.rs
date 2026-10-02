@@ -32,7 +32,7 @@ fn store_structured_session_capsule_with_schema(
         PersistentSessionWireContract,
     };
 
-    let contract = json!({"fixture":"terminal-replay", "auxiliary_configs":[], "runtime_configs":[], "external_candidate":null, "workload_client":null});
+    let contract = json!({"fixture":"terminal-replay", "schema_version":ryeos_state::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]}, "auxiliary_configs":[], "runtime_configs":[], "external_candidate":null, "workload_client":null});
     let profile_hash = ryeos_state::objects::canonical_value_digest(&contract).unwrap();
     let schema_hashes =
         std::collections::BTreeMap::from([("request.json".to_owned(), "e".repeat(64))]);
@@ -109,6 +109,11 @@ fn store_structured_session_capsule_with_schema(
             schema_hashes: schema_hashes.clone(),
             baseline_source: "baseline.toml".to_owned(),
             baseline_destination: "config.toml".to_owned(),
+            configuration_absence: ryeos_state::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
             auxiliary_configs: Vec::new(),
             runtime_configs: Vec::new(),
         }),

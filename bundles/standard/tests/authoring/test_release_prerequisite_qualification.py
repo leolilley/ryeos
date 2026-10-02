@@ -1,11 +1,11 @@
-# ryeos:signed:2026-09-22T06:28:31Z:1a4d9f1406a5405f1e175e7204af80fe5640dd07f24358b4d32c304e98098ecd:f09yr62FQIHLzns1a3m+sI0DS2Cmby7PjgRc3ShO9KO12mI6RO8VdfocHqodwCXxolk5HcebfzdSv3xpIJ2qCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T03:29:28Z:5166cbd268fc3f9e725f33f9a4595cd3e631feb579afc64582653beebb4bcc7c:o3GPDNc5GPkpNCxPq4LsMEnM2nBmy4Pp1wloPurrCB40IW5nohbpT0fR7IGZS0Hs2TEONOmMLLWC34ZvSPlNBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 from __future__ import annotations
 
 import hashlib
+import copy
 import importlib.util
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 import tempfile
@@ -55,80 +55,6 @@ def sealed(subject_hash="1" * 64):
 
 
 class ReleasePrerequisiteQualificationTests(unittest.TestCase):
-    def test_vendor_finalizer_runtime_entry_uses_admitted_project(self):
-        path = ROOT / ".ai/tools/ryeos/development/cargo-vendor-finalize/run.py"
-        with tempfile.TemporaryDirectory() as temporary:
-            project = Path(temporary)
-            source = project / "Cargo.lock"
-            source.write_bytes((ROOT / "Cargo.lock").read_bytes())
-            (project / "products/cargo-vendor").mkdir(parents=True)
-            before = source.stat()
-            run = subprocess.run([sys.executable, "-B", str(path), "--project-path", str(project)],
-                                 input=b"{}", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 check=True)
-            result = json.loads(run.stdout)
-            self.assertEqual(result["sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
-            self.assertEqual((project / result["path"]).read_bytes(), source.read_bytes())
-            after = source.stat()
-            self.assertEqual((before.st_ino, before.st_size, before.st_mtime_ns),
-                             (after.st_ino, after.st_size, after.st_mtime_ns))
-
-    def test_vendor_finalizer_retains_exact_lock_without_source_mutation(self):
-        path = ROOT / ".ai/tools/ryeos/development/cargo-vendor-finalize/run.py"
-        spec = importlib.util.spec_from_file_location("cargo_vendor_finalize", path)
-        module = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "Cargo.lock"
-            output = root / "products/cargo-vendor/Cargo.lock"
-            output.parent.mkdir(parents=True)
-            data = b'version = 4\n'
-            source.write_bytes(data)
-            digest = hashlib.sha256(data).hexdigest()
-            before = source.stat()
-            with mock.patch.object(module, "LOCK", source), \
-                    mock.patch.object(module, "OUTPUT", output), \
-                    mock.patch.object(module, "EXPECTED_SHA256", digest):
-                result = module.execute({})
-            after = source.stat()
-            self.assertEqual(output.read_bytes(), data)
-            self.assertEqual(result["sha256"], digest)
-            self.assertEqual((before.st_ino, before.st_size, before.st_mtime_ns),
-                             (after.st_ino, after.st_size, after.st_mtime_ns))
-            with mock.patch.object(module, "LOCK", source), \
-                    mock.patch.object(module, "OUTPUT", output), \
-                    mock.patch.object(module, "EXPECTED_SHA256", digest):
-                with self.assertRaisesRegex(ValueError, "already contains"):
-                    module.execute({})
-
-    def test_vendor_finalizer_rejects_a_lock_identity_race(self):
-        path = ROOT / ".ai/tools/ryeos/development/cargo-vendor-finalize/run.py"
-        spec = importlib.util.spec_from_file_location("cargo_vendor_finalize_race", path)
-        module = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-        with tempfile.NamedTemporaryFile() as stream:
-            stream.write(b'version = 4\n')
-            stream.flush()
-            real_fstat = os.fstat
-            calls = 0
-
-            def moved(descriptor):
-                nonlocal calls
-                value = real_fstat(descriptor)
-                calls += 1
-                if calls == 2:
-                    fields = list(value)
-                    fields[8] += 1
-                    return os.stat_result(fields)
-                return value
-
-            with mock.patch.object(module.os, "fstat", side_effect=moved):
-                with self.assertRaisesRegex(ValueError, "changed while retained"):
-                    module.stable_lock(Path(stream.name))
-
     def test_platform_policy_and_relationships_require_typed_claims(self):
         module, tool = load_tool("development-platform")
         self.assertIn("native/bin/ar", module.REQUIRED_EXECUTABLES)
@@ -148,7 +74,7 @@ class ReleasePrerequisiteQualificationTests(unittest.TestCase):
         self.assertEqual(slot["relationship"], "platform_to_qualification_verifier")
         policy = yaml.safe_load((POLICIES / "development-platform.yaml").read_text())[
             "product_qualification_policy"]
-        claims = ["development_platform_abi_v1",
+        claims = ["development_platform_profile_v2",
                   "development_platform_target_x86_64_linux_gnu_v1"]
         self.assertEqual(policy["allowed_claims"], claims)
         self.assertEqual(list(module.QUALIFICATION_CLAIMS), claims)
@@ -178,10 +104,10 @@ class ReleasePrerequisiteQualificationTests(unittest.TestCase):
             with self.subTest(identity=value), mock.patch.object(
                     module, "run_program", return_value=value + "\nCopyright\n") as probe:
                 if value == expected:
-                    self.assertEqual(module.gcc_identity(), expected)
+                    self.assertEqual(module.gcc_identity(expected), expected)
                 else:
                     with self.assertRaisesRegex(ValueError, "native compiler identity changed"):
-                        module.gcc_identity()
+                        module.gcc_identity(expected)
                 probe.assert_called_once_with(module.ROOT / "native/bin/gcc", "--version")
 
     def test_platform_collect2_probe_selects_only_retained_linker(self):
@@ -317,7 +243,9 @@ class ReleasePrerequisiteQualificationTests(unittest.TestCase):
         module, _ = load_tool("development-platform")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            bootstrap = "".join(f"{key}={value}\n" for key, value in module.EXPECTED_BOOTSTRAP.items())
+            expected = yaml.safe_load((POLICIES / "development-platform.yaml").read_text())[
+                "product_qualification_policy"]["verifier_parameters"]["bootstrap"]
+            bootstrap = "".join(f"{key}={value}\n" for key, value in expected.items())
             (root / "RYEOS-BOOTSTRAP").write_text(bootstrap)
             entries = [
                 # The CAS materializer may normalize directory permissions;
@@ -335,12 +263,135 @@ class ReleasePrerequisiteQualificationTests(unittest.TestCase):
             contracts = [{"path": "native/tool", "interpreter": None,
                           "needed": ["libc.so.6"], "search": []}]
             with mock.patch.object(module, "ROOT", root):
-                module.validate_bootstrap_testimony()
+                module.validate_bootstrap_testimony(expected)
                 module.validate_tree_testimony(entries)
                 module.validate_runtime_testimony(entries, contracts)
                 (root / "RYEOS-BOOTSTRAP").write_text(bootstrap.replace("zig_version=0.15.2", "zig_version=0"))
                 with self.assertRaisesRegex(ValueError, "bootstrap testimony changed"):
-                    module.validate_bootstrap_testimony()
+                    module.validate_bootstrap_testimony(expected)
+
+    def test_platform_signed_provenance_profile_rejects_swaps(self):
+        module, tool = load_tool("development-platform")
+        profile = yaml.safe_load((POLICIES / "development-platform.yaml").read_text())[
+            "product_qualification_policy"]["verifier_parameters"]
+        original = module.expected_bootstrap(profile)
+        changed = copy.deepcopy(profile)
+        changed["bootstrap"]["producer_sha256"] = "a" * 64
+        alternate = module.expected_bootstrap(changed)
+        self.assertEqual(tool["external_content"][0]["digest"], PRODUCER)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            testimony = root / "RYEOS-BOOTSTRAP"
+            testimony.write_text("".join(f"{key}={value}\n" for key, value in original.items()))
+            with mock.patch.object(module, "ROOT", root):
+                module.validate_bootstrap_testimony(original)
+                with self.assertRaisesRegex(ValueError, "bootstrap testimony changed"):
+                    module.validate_bootstrap_testimony(alternate)
+                testimony.write_text("".join(f"{key}={value}\n" for key, value in alternate.items()))
+                module.validate_bootstrap_testimony(alternate)
+                with self.assertRaisesRegex(ValueError, "bootstrap testimony changed"):
+                    module.validate_bootstrap_testimony(original)
+        unsupported = copy.deepcopy(profile)
+        unsupported["bootstrap"]["rust_version"] = "1.96.0-beta"
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            module.expected_bootstrap(unsupported)
+
+    def test_platform_version_profiles_drive_real_probe_processes_and_reject_swaps(self):
+        module, _ = load_tool("development-platform")
+        original = yaml.safe_load((POLICIES / "development-platform.yaml").read_text())[
+            "product_qualification_policy"]["verifier_parameters"]
+        alternate = copy.deepcopy(original)
+        alternate["bootstrap"].update(rust_version="1.96.0", zig_version="0.16.0")
+        alternate["tool_versions"] = {
+            "cargo": "cargo 1.96.0 (123456789 2026-05-01)",
+            "gcc": "gcc (Debian 14.2.0-20) 14.2.0",
+            "collect2": "collect2 version 14.3.0",
+            "linker": "LLD 22.1.3 (compatible with GNU linkers)",
+            "archiver": "GNU ar (GNU Binutils for Debian) 2.45",
+        }
+        # Synthetic executable probes exercise the actual subprocess path. They
+        # establish profile interpretation, not qualification of real toolchains.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def script(relative, body):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"#!{sys.executable}\n" + body)
+                path.chmod(0o755)
+
+            script("lib/ld-linux-x86-64.so.2", "import os, sys\nos.execv(sys.argv[3], sys.argv[3:])\n")
+
+            def install(profile):
+                bootstrap, versions = profile["bootstrap"], profile["tool_versions"]
+                outputs = {
+                    "rust/bin/rustc": (f'release: {bootstrap["rust_version"]}\n'
+                                       f'host: {bootstrap["rust_host"]}\ncommit-hash: synthetic'),
+                    "rust/bin/cargo": versions["cargo"],
+                    "native/bin/gcc": versions["gcc"],
+                    "native/bin/collect2": versions["collect2"],
+                    "native/bin/ld.lld": versions["linker"],
+                    "native/bin/ar": versions["archiver"],
+                    "zig/zig": bootstrap["zig_version"],
+                }
+                for relative, output in outputs.items():
+                    script(relative, f"print({output!r})\n")
+
+            def probe(profile):
+                bootstrap = module.expected_bootstrap(profile)
+                return module.probe_compilers(bootstrap, profile["tool_versions"])[1]
+
+            with mock.patch.object(module, "ROOT", root):
+                for selected, rejected in ((original, alternate), (alternate, original)):
+                    install(selected)
+                    observed = probe(selected)
+                    self.assertEqual(observed["release"], selected["bootstrap"]["rust_version"])
+                    self.assertEqual(observed["zig"], selected["bootstrap"]["zig_version"])
+                    for field, value in selected["tool_versions"].items():
+                        self.assertEqual(observed[field], value)
+                    with self.assertRaisesRegex(ValueError, "target or release changed"):
+                        probe(rejected)
+                    # Every output remains independently exact, including
+                    # patch/build changes that share the same release prefix.
+                    for field in selected["tool_versions"]:
+                        changed = copy.deepcopy(selected)
+                        changed["tool_versions"][field] += "-different"
+                        with self.subTest(field=field), self.assertRaisesRegex(ValueError, "identity changed"):
+                            probe(changed)
+                    changed = copy.deepcopy(selected)
+                    changed["bootstrap"]["zig_version"] = "0.99.0"
+                    with self.assertRaisesRegex(ValueError, "Zig identity changed"):
+                        probe(changed)
+
+    def test_platform_profile_refuses_unbounded_or_incoherent_expectations(self):
+        module, _ = load_tool("development-platform")
+        original = yaml.safe_load((POLICIES / "development-platform.yaml").read_text())[
+            "product_qualification_policy"]["verifier_parameters"]
+        for mutate in (
+                lambda value: value.update(schema="ryeos.development_platform_profile.v1"),
+                lambda value: value["tool_versions"].pop("gcc"),
+                lambda value: value["tool_versions"].update(extra="unexpected"),
+                lambda value: value["tool_versions"].update(gcc="gcc\nextra"),
+                lambda value: value["tool_versions"].update(gcc="x" * 513),
+                lambda value: value["tool_versions"].update(cargo="cargo 1.95.00 (different)"),
+                lambda value: value["bootstrap"].update(target="aarch64-unknown-linux-gnu"),
+        ):
+            profile = copy.deepcopy(original)
+            mutate(profile)
+            with self.assertRaises(ValueError):
+                module.expected_bootstrap(profile)
+
+    def test_gnu_python_fixed_zlib_proposition_is_not_profile_selected(self):
+        policy = yaml.safe_load((POLICIES / "gnu-python.yaml").read_text())[
+            "product_qualification_policy"]
+        tool = yaml.safe_load((TOOLS / "gnu-python.yaml").read_text())
+        scripts = [arg["literal"] for arg in tool["config"]["args"] if isinstance(arg, dict)]
+        self.assertEqual(policy["verifier_parameters"], {})
+        self.assertIn("gnu_python_zlib_1_3_2", policy["allowed_claims"])
+        self.assertIn('zlib.ZLIB_RUNTIME_VERSION != "1.3.2"', scripts[1])
+        self.assertIn('"gnu_python_zlib_1_3_2"', scripts[0])
+        self.assertIn('"gnu_python_zlib_1_3_2"', scripts[1])
+        self.assertNotIn("${params_json}", str(tool["config"]))
 
     def test_vendor_verifier_proves_lock_checksum_and_file_closure(self):
         module, tool = load_tool("cargo-vendor")

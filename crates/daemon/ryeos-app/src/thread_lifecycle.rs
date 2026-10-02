@@ -56,8 +56,9 @@ pub use direct_execution::{
     SpawnItemFailureDisposition, SpawnItemParams, SpawnedItemAwaitingAttachment,
     SpawnedPersistentSessionAwaitingAttachment, capsule_requires_external_direct,
     effective_child_external_content_declarations, external_direct_environment,
-    prepare_bundle_item_plan_for_qualification, prepare_captured_item_plan, prepare_item_plan,
-    spawn_item,
+    prepare_bundle_item_plan_for_qualification, prepare_captured_item_plan,
+    prepare_external_qualification_local_worker_plan, prepare_item_plan, spawn_item,
+    with_prepared_external_qualification_local_worker_plan,
 };
 pub(crate) use direct_execution::{
     CompiledExternalDirectProgram, compile_external_direct_program,
@@ -2122,6 +2123,43 @@ fn validate_admitted_runtime_route_identity(
     Ok(())
 }
 
+/// Both fresh admission and retained replay preserve the daemon-derived
+/// unqualified subject. Additional Root inputs are supported only in the
+/// pinned lane; their exact declared coverage and proofs are checked by normal
+/// product composition before finalization and bound into the sealed program.
+fn validate_qualification_root_selections(
+    purpose: &QualificationLaunchPurpose,
+    selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    pinned_lane: bool,
+) -> Result<()> {
+    use ryeos_state::external_content::products::composition::{
+        ProductSelectionTarget, validate_product_selection_inputs,
+    };
+    let (product_witness_hash, witness_source, _) = purpose.subject.captured_product()?;
+    validate_product_selection_inputs(selections)?;
+    if selections.is_empty() && !pinned_lane {
+        return Ok(()); // Existing projectless fixed-pin lane.
+    }
+    if (!pinned_lane && selections.len() != 1)
+        || selections
+            .iter()
+            .any(|input| !matches!(input.target, ProductSelectionTarget::Root {}))
+    {
+        bail!("qualification purpose has unsupported Root product selections");
+    }
+    let subject = selections
+        .iter()
+        .find(|input| input.selection.declaration_id == purpose.subject_declaration_id)
+        .context("qualification purpose omits its exact unqualified subject selection")?;
+    if subject.selection.witness_hash.as_str() != product_witness_hash
+        || &subject.selection.witness_source != witness_source
+        || subject.selection.qualification_hash.is_some()
+    {
+        bail!("qualification purpose differs from admitted unqualified subject selection");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 enum ContentQualificationAttachment {
     Fresh {
@@ -2929,20 +2967,11 @@ impl RootExecutionAdmission {
                     "activated content qualification requires exact fixed-pin projectless admission"
                 );
             } else {
-                let (product_witness_hash, witness_source, _) =
-                    purpose.subject.captured_product()?;
-                match (pinned_lane, self.product_selections.as_slice()) {
-                (false, []) => {}, // Signed fixed pin is checked against the exact subject realization.
-                (_, [selected])
-                    if matches!(
-                        selected.target,
-                        ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
-                    ) && selected.selection.declaration_id == purpose.subject_declaration_id
-                        && selected.selection.witness_hash == product_witness_hash
-                        && &selected.selection.witness_source == witness_source
-                        && selected.selection.qualification_hash.is_none() => {}
-                _ => bail!("qualification purpose differs from admitted unqualified subject selection"),
-            }
+                validate_qualification_root_selections(
+                    purpose,
+                    &self.product_selections,
+                    pinned_lane,
+                )?;
             }
         } else if self.authenticated_content_qualification_digest.is_some() {
             bail!("content qualification attachment has no purpose");

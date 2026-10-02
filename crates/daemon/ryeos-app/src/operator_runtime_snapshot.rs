@@ -1099,11 +1099,13 @@ fn verify_qualification_occurrence_under_contact_gate(
 /// Contact the consumer verifier below an existing born qualification root.
 /// The caller retains delivery custody; the existing attempt journal owns
 /// one-shot contact. This returns observation only, never qualification or
-/// provider-death authority. No public service enables this entry yet.
+/// provider-death authority. Operator recovery and callback invocation retain
+/// their distinct authenticated owners.
 pub(crate) fn verify_consumer_qualification_occurrence(
     state: &AppState,
     context: &HandlerContext,
     intent: &RestoredVerifierAttemptIntent,
+    input: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
     archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     deadline: lillux::time::MonotonicDeadline,
@@ -1113,6 +1115,7 @@ pub(crate) fn verify_consumer_qualification_occurrence(
         state,
         ConsumerVerifierInvocation::Operator(context),
         intent,
+        input,
         archive,
         limits,
         deadline,
@@ -1291,6 +1294,7 @@ pub fn verify_consumer_qualification_occurrence_for_callback(
     state: &AppState,
     token: &str,
     intent: &RestoredVerifierAttemptIntent,
+    input: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
     archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     deadline: lillux::time::MonotonicDeadline,
@@ -1299,6 +1303,7 @@ pub fn verify_consumer_qualification_occurrence_for_callback(
         state,
         ConsumerVerifierInvocation::Callback(token),
         intent,
+        input,
         archive,
         limits,
         deadline,
@@ -1317,6 +1322,10 @@ pub enum ConsumerVerificationObservation {
         /// Exact bounded canonical CAS bytes decoded as opaque JSON. Only the
         /// independently admitted product verifier may interpret their semantics.
         evidence: Option<serde_json::Value>,
+        qualification_worker: Option<ryeos_state::objects::QualificationWorkerTranscriptReference>,
+    },
+    TranscriptChunk {
+        chunk: ryeos_state::objects::QualificationWorkerTranscriptChunkResponse,
     },
 }
 
@@ -1374,9 +1383,10 @@ pub fn observe_consumer_verifier_attempt_for_callback(
             state, &authority, &guard, limits, token,
             "runtime.consumer_verification_observe", coordinate, qualification_operation_id,
         )?;
-        return final_admission.with_live_callback(|| {
-            Ok(ConsumerVerificationObservation::NotReserved { operation_id })
-        });
+        return state.state_store.disclose_to_current_consumer_callback(
+            &final_admission,
+            ConsumerVerificationObservation::NotReserved { operation_id },
+        );
     };
     let evidence = match attempt.observation.as_ref() {
         None => None,
@@ -1397,8 +1407,73 @@ pub fn observe_consumer_verifier_attempt_for_callback(
         "runtime.consumer_verification_observe", coordinate, qualification_operation_id,
     )?;
     final_admission.require_attempt(&attempt.intent, &qualified.intent)?;
-    final_admission
-        .with_live_callback(|| Ok(ConsumerVerificationObservation::Retained { attempt, evidence }))
+    let qualification_worker = if evidence.is_some() {
+        Some(
+            crate::qualification_consumer_observation::read_retained_reference(
+                state,
+                &authority,
+                &guard,
+                coordinate,
+                qualification_operation_id,
+                &final_admission.purpose().owner_fingerprint,
+            )?,
+        )
+    } else {
+        None
+    };
+    // Manifest traversal may outlive the preceding admission. Authenticate
+    // again before exposing the journal-owned reference under the bearer gate.
+    let final_admission = crate::operator_external_content::product_qualification::authenticate_consumer_callback_root(
+        state, &authority, &guard, limits, token,
+        "runtime.consumer_verification_observe", coordinate, qualification_operation_id,
+    )?;
+    final_admission.require_attempt(&attempt.intent, &qualified.intent)?;
+    state.state_store.disclose_to_current_consumer_callback(
+        &final_admission,
+        ConsumerVerificationObservation::Retained {
+            attempt,
+            evidence,
+            qualification_worker,
+        },
+    )
+}
+
+/// Read only the selected chunk from this root's fully settled Q manifest.
+/// No caller-provided blob hash or arbitrary CAS object is accepted.
+pub fn observe_consumer_worker_transcript_chunk_for_callback(
+    state: &AppState,
+    token: &str,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    qualification_operation_id: &str,
+    selection: &ryeos_state::objects::QualificationWorkerTranscriptChunkSelection,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+) -> Result<ConsumerVerificationObservation> {
+    selection.validate()?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let admission = crate::operator_external_content::product_qualification::authenticate_consumer_callback_root(
+        state, &authority, &guard, limits, token,
+        "runtime.consumer_verification_observe", coordinate, qualification_operation_id,
+    )?;
+    let reference = crate::qualification_consumer_observation::read_retained_reference(
+        state,
+        &authority,
+        &guard,
+        coordinate,
+        qualification_operation_id,
+        &admission.purpose().owner_fingerprint,
+    )?;
+    let chunk = crate::qualification_consumer_observation::read_selected_chunk(
+        &authority, &guard, &reference, selection,
+    )?;
+    let final_admission = crate::operator_external_content::product_qualification::authenticate_consumer_callback_root(
+        state, &authority, &guard, limits, token,
+        "runtime.consumer_verification_observe", coordinate, qualification_operation_id,
+    )?;
+    state.state_store.disclose_to_current_consumer_callback(
+        &final_admission,
+        ConsumerVerificationObservation::TranscriptChunk { chunk },
+    )
 }
 
 enum ConsumerVerifierInvocation<'a> {
@@ -1448,6 +1523,7 @@ fn verify_consumer_occurrence_with_invocation(
     state: &AppState,
     invocation: ConsumerVerifierInvocation<'_>,
     intent: &RestoredVerifierAttemptIntent,
+    input: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
     archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     deadline: lillux::time::MonotonicDeadline,
@@ -1479,6 +1555,14 @@ fn verify_consumer_occurrence_with_invocation(
                 &intent.qualification_operation_id,
             )?;
             let selection = admission.selection().clone();
+            input.validate_attempt(intent)?;
+            ensure!(
+                input.purpose == *admission.purpose()
+                    && input.coordinate == *admission.coordinate()
+                    && input.selection == selection,
+                "consumer contact input differs from authenticated accepted root"
+            );
+            archive.require_consumer_input_record(input)?;
             archive.require_verifier_selection(&selection)?;
             let qualified = state
                 .state_store
@@ -1549,7 +1633,7 @@ fn verify_consumer_occurrence_with_invocation(
             );
             state
                 .state_store
-                .reserve_consumer_verifier_attempt(intent, admission)?;
+                .reserve_consumer_verifier_attempt(intent, input, admission)?;
             // Root authentication is intentionally repeated and consumed, not
             // cloned from reservation. The transaction checks live occurrence
             // and same-occurrence prerequisite immediately before first contact.
@@ -3270,6 +3354,7 @@ mod tests {
         let mut verifier = RestoredVerifierAttemptRecord {
             intent: verifier_intent,
             consumer_selection: None,
+            consumer_input_blob_hash: None,
             phase: RestoredVerifierAttemptPhase::Observed,
             observation: Some(RestoredVerifierObservation::OwnerMeasurement { observation }),
             created_at_ms: 5,

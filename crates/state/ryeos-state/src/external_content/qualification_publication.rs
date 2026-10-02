@@ -151,6 +151,21 @@ fn verify(
     let QualificationSubject::ActivatedContent { content } = &evidence.purpose.subject else {
         bail!("content qualification has no activated source");
     };
+    let mut source_roots = vec![
+        content.activation_receipt_hash.clone(),
+        content.binding_hash.clone(),
+        content.manifest_hash.clone(),
+    ];
+    if let Some(consumer) = &evidence.purpose.consumer_content {
+        source_roots.push(consumer.worker_source.binding_hash.clone());
+        source_roots.extend(
+            consumer
+                .worker_literals
+                .iter()
+                .chain(consumer.environment_realizations.iter())
+                .map(|realized| realized.manifest_hash.clone()),
+        );
+    }
     verify_retained_execution_verifiers(
         authority,
         &std::iter::once(&evidence.verifier)
@@ -162,11 +177,7 @@ fn verify(
                     .map(|participant| &participant.verifier),
             )
             .collect::<Vec<_>>(),
-        &[
-            content.activation_receipt_hash.clone(),
-            content.binding_hash.clone(),
-            content.manifest_hash.clone(),
-        ],
+        &source_roots,
         limits,
         guard,
     )

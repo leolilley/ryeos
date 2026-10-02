@@ -16,10 +16,12 @@ CREATE TABLE restored_verifier_attempt (
     qualification_operation_id TEXT NOT NULL REFERENCES runtime_snapshot_qualification(operation_id),
     intent_json TEXT NOT NULL,
     consumer_selection_json TEXT,
+    consumer_input_blob_hash TEXT,
     phase TEXT NOT NULL CHECK (phase IN ('reserved','attempt_pending','quarantined','observed')),
     observation_json TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
+    CHECK ((consumer_selection_json IS NULL) = (consumer_input_blob_hash IS NULL)),
     CHECK ((phase='observed') = (observation_json IS NOT NULL))
 );
 CREATE TRIGGER restored_verifier_attempt_immutable
@@ -28,6 +30,7 @@ WHEN NEW.operation_id!=OLD.operation_id
     OR NEW.qualification_operation_id!=OLD.qualification_operation_id
     OR NEW.intent_json!=OLD.intent_json
     OR NEW.consumer_selection_json IS NOT OLD.consumer_selection_json
+    OR NEW.consumer_input_blob_hash IS NOT OLD.consumer_input_blob_hash
     OR NEW.created_at_ms!=OLD.created_at_ms
 BEGIN SELECT RAISE(ABORT, 'restored verifier attempt is immutable'); END;
 CREATE TRIGGER restored_verifier_attempt_no_delete
@@ -64,6 +67,7 @@ impl RestoredVerifierAttemptPhase {
 pub struct RestoredVerifierAttemptRecord {
     pub intent: RestoredVerifierAttemptIntent,
     pub consumer_selection: Option<ConsumerRuntimeVerifierSelection>,
+    pub consumer_input_blob_hash: Option<String>,
     pub phase: RestoredVerifierAttemptPhase,
     pub observation: Option<RestoredVerifierObservation>,
     pub created_at_ms: i64,
@@ -174,9 +178,9 @@ mod callback_launch_tests {
 }
 
 fn read(conn: &Connection, operation_id: &str) -> Result<Option<RestoredVerifierAttemptRecord>> {
-    let row: Option<(String, String, Option<String>, String, Option<String>, i64, i64)> = conn
+    let row: Option<(String, String, Option<String>, Option<String>, String, Option<String>, i64, i64)> = conn
         .query_row(
-            "SELECT qualification_operation_id,intent_json,consumer_selection_json,phase,observation_json,created_at_ms,updated_at_ms
+            "SELECT qualification_operation_id,intent_json,consumer_selection_json,consumer_input_blob_hash,phase,observation_json,created_at_ms,updated_at_ms
              FROM restored_verifier_attempt WHERE operation_id=?1",
             [operation_id],
             |row| {
@@ -188,6 +192,7 @@ fn read(conn: &Connection, operation_id: &str) -> Result<Option<RestoredVerifier
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             },
         )
@@ -196,6 +201,7 @@ fn read(conn: &Connection, operation_id: &str) -> Result<Option<RestoredVerifier
         qualification_id,
         intent_json,
         selection_json,
+        consumer_input_blob_hash,
         phase,
         observation_json,
         created_at_ms,
@@ -237,11 +243,23 @@ fn read(conn: &Connection, operation_id: &str) -> Result<Option<RestoredVerifier
             Ok(selection)
         })
         .transpose()?;
-    match (&intent.purpose, &consumer_selection) {
-        (RemoteVerificationPurpose::OwnerMeasurement { .. }, None) => {
+    match (
+        &intent.purpose,
+        &consumer_selection,
+        &consumer_input_blob_hash,
+    ) {
+        (RemoteVerificationPurpose::OwnerMeasurement { .. }, None, None) => {
             intent.validate_for(&source.intent, locator, &qualification.intent, occurrence)?;
         }
-        (RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. }, Some(selection)) => {
+        (
+            RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. },
+            Some(selection),
+            Some(hash),
+        ) => {
+            ensure!(
+                lillux::valid_hash(hash),
+                "consumer input blob hash is invalid"
+            );
             intent.validate_consumer_for(
                 &source.intent,
                 locator,
@@ -257,7 +275,7 @@ fn read(conn: &Connection, operation_id: &str) -> Result<Option<RestoredVerifier
                 coordinate,
             )?;
         }
-        _ => anyhow::bail!("verifier purpose contradicts retained selection"),
+        _ => anyhow::bail!("verifier purpose contradicts retained consumer input or selection"),
     }
     ensure!(
         intent.operation_id == operation_id
@@ -311,6 +329,7 @@ fn read(conn: &Connection, operation_id: &str) -> Result<Option<RestoredVerifier
     Ok(Some(RestoredVerifierAttemptRecord {
         intent,
         consumer_selection,
+        consumer_input_blob_hash,
         phase,
         observation,
         created_at_ms,
@@ -332,7 +351,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
 
 /// Called inside the reservation/contact transaction. A prior read cannot
 /// exclude a subsequently retained termination intent or extend guest life.
-fn require_live_occurrence(
+pub(super) fn require_live_occurrence(
     conn: &Connection,
     qualification: &super::runtime_snapshot_qualification::SnapshotQualificationRecord,
     now: i64,
@@ -365,7 +384,7 @@ fn require_live_occurrence(
 /// Transaction-local prerequisite authentication. The caller owns the
 /// transaction and must hold the occurrence contact gate before using this
 /// check for a reservation or contact claim.
-fn read_consumer_prerequisite(
+pub(super) fn read_consumer_prerequisite(
     conn: &Connection,
     qualification_operation_id: &str,
     owner_principal: &str,
@@ -389,18 +408,43 @@ fn read_consumer_prerequisite(
 /// eligibility: settled occurrences must remain readable after termination.
 /// Only an owner observation can satisfy this prerequisite, so consumer
 /// evidence cannot recursively become another consumer's measurement root.
-fn read_retained_consumer_prerequisite(
+pub(super) fn read_retained_consumer_prerequisite(
     conn: &Connection,
     qualification_operation_id: &str,
     owner_principal: &str,
     coordinate: &ConsumerRuntimeVerificationCoordinate,
+) -> Result<RestoredVerifierAttemptRecord> {
+    coordinate.validate()?;
+    let record = read_retained_owner_measurement_prerequisite(
+        conn,
+        qualification_operation_id,
+        owner_principal,
+        &coordinate.prerequisite_measurement_attempt_id,
+    )?;
+    let observation = record
+        .observation
+        .as_ref()
+        .context("consumer prerequisite observation absent")?
+        .owner_measurement()?;
+    ensure!(
+        observation.digest()? == coordinate.prerequisite_measurement_observation_digest,
+        "consumer prerequisite differs from its retained observation digest"
+    );
+    Ok(record)
+}
+
+fn read_retained_owner_measurement_prerequisite(
+    conn: &Connection,
+    qualification_operation_id: &str,
+    owner_principal: &str,
+    measurement_attempt_id: &str,
 ) -> Result<RestoredVerifierAttemptRecord> {
     // Reject a consumer prerequisite before `read` follows its own prerequisite.
     // This both enforces the owner-only root and bounds corrupt-record recursion.
     let raw: Option<String> = conn
         .query_row(
             "SELECT intent_json FROM restored_verifier_attempt WHERE operation_id=?1",
-            [&coordinate.prerequisite_measurement_attempt_id],
+            [measurement_attempt_id],
             |row| row.get(0),
         )
         .optional()?;
@@ -417,7 +461,7 @@ fn read_retained_consumer_prerequisite(
         ),
         "consumer prerequisite is not owner measurement"
     );
-    let record = read(conn, &coordinate.prerequisite_measurement_attempt_id)?
+    let record = read(conn, measurement_attempt_id)?
         .context("consumer verification prerequisite is absent")?;
     ensure!(
         record.phase == RestoredVerifierAttemptPhase::Observed
@@ -442,9 +486,8 @@ fn read_retained_consumer_prerequisite(
         .as_ref()
         .context("consumer prerequisite observation is absent")?
         .owner_measurement()?
-        .validate_consumer_prerequisite(
+        .validate_for_retained(
             &record.intent,
-            coordinate,
             &source.intent,
             source
                 .locator
@@ -457,22 +500,48 @@ fn read_retained_consumer_prerequisite(
             &qualification.intent,
             occurrence,
         )?;
+    ensure!(
+        !record
+            .observation
+            .as_ref()
+            .unwrap()
+            .owner_measurement()?
+            .contact_deadline_exceeded,
+        "consumer prerequisite owner measurement exceeded its contact deadline"
+    );
     Ok(record)
 }
 
 impl RuntimeDb {
-    /// Raw evidence is a Blob root, never an inferred generic CAS Object.
-    /// These bytes are retained by the existing attempt, not another ledger.
-    pub(crate) fn restored_verifier_evidence_blob_roots(&self) -> Result<Vec<String>> {
-        let mut statement = self.conn.prepare(
-            "SELECT operation_id FROM restored_verifier_attempt WHERE phase='observed' ORDER BY operation_id",
-        )?;
+    /// Historical disclosure depends on the enclosing callback launch, not
+    /// provider liveness. The writer lock closes claim/stop races at this read.
+    pub(crate) fn disclose_to_current_consumer_callback<T>(
+        &self,
+        root: &str,
+        launch_owner: &str,
+        value: T,
+    ) -> Result<T> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        require_current_callback_launch(&tx, root, launch_owner)?;
+        tx.commit()?;
+        Ok(value)
+    }
+
+    /// Consumer input is rooted from reservation onward; evidence is rooted
+    /// after observation. Both are Blob roots owned by the existing attempt.
+    pub(crate) fn restored_verifier_blob_roots(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT operation_id FROM restored_verifier_attempt ORDER BY operation_id")?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut roots = BTreeSet::new();
         for id in ids {
             let record = read(&self.conn, &id)?.context("verifier evidence root disappeared")?;
+            if let Some(hash) = record.consumer_input_blob_hash {
+                roots.insert(hash);
+            }
             if let Some(RestoredVerifierObservation::ConsumerRuntime { observation }) =
                 record.observation
             {
@@ -527,6 +596,37 @@ impl RuntimeDb {
         Ok(current)
     }
 
+    /// Read-only prelaunch admission. No born root/capsule coordinate exists
+    /// yet; these exact selectors never grant contact or renew occurrence life.
+    pub(crate) fn observed_consumer_invocation_prerequisite(
+        &self,
+        owner_principal: &str,
+        selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
+    ) -> Result<super::runtime_snapshot_qualification::SnapshotQualificationRecord> {
+        selection.validate()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        read_retained_owner_measurement_prerequisite(
+            &tx,
+            &selection.qualification_operation_id,
+            owner_principal,
+            &selection.prerequisite_measurement_attempt_id,
+        )?;
+        let qualification = super::runtime_snapshot_qualification::read(
+            &tx,
+            &selection.qualification_operation_id,
+        )?
+        .context("consumer invocation qualification is absent")?;
+        ensure!(qualification.phase == super::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound,
+            "consumer invocation has no bound occurrence");
+        require_live_occurrence(
+            &tx,
+            &qualification,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )?;
+        tx.commit()?;
+        Ok(qualification)
+    }
+
     /// Load authenticated prerequisite evidence without granting contact.
     /// The consumer reservation/claim must repeat these checks in its own
     /// transaction; this read cannot exclude a later termination. Accepted-root,
@@ -559,22 +659,34 @@ impl RuntimeDb {
         &self,
         intent: &RestoredVerifierAttemptIntent,
     ) -> Result<RestoredVerifierAttemptRecord> {
-        self.reserve_verifier_attempt(intent, None)
+        self.reserve_verifier_attempt(intent, None, None)
     }
 
     pub(crate) fn reserve_consumer_verifier_attempt(
         &self,
         intent: &RestoredVerifierAttemptIntent,
+        consumer_input_blob_hash: &str,
         admission: &AuthenticatedConsumerRoot,
     ) -> Result<RestoredVerifierAttemptRecord> {
-        self.reserve_verifier_attempt(intent, Some(admission))
+        self.reserve_verifier_attempt(intent, Some(consumer_input_blob_hash), Some(admission))
     }
 
     fn reserve_verifier_attempt(
         &self,
         intent: &RestoredVerifierAttemptIntent,
+        consumer_input_blob_hash: Option<&str>,
         admission: Option<&AuthenticatedConsumerRoot>,
     ) -> Result<RestoredVerifierAttemptRecord> {
+        match (&intent.purpose, consumer_input_blob_hash) {
+            (RemoteVerificationPurpose::OwnerMeasurement { .. }, None) => {}
+            (RemoteVerificationPurpose::ConsumerRuntime { .. }, Some(hash)) => {
+                ensure!(
+                    lillux::valid_hash(hash),
+                    "consumer input blob hash is invalid"
+                );
+            }
+            _ => anyhow::bail!("verifier reservation requires its matching consumer input lane"),
+        }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let qualification =
             super::runtime_snapshot_qualification::read(&tx, &intent.qualification_operation_id)?
@@ -582,7 +694,9 @@ impl RuntimeDb {
         let selection = admitted_consumer_selection(&tx, intent, &qualification.intent, admission)?;
         if let Some(existing) = read(&tx, &intent.operation_id)? {
             ensure!(
-                existing.intent == *intent && existing.consumer_selection == selection,
+                existing.intent == *intent
+                    && existing.consumer_selection == selection
+                    && existing.consumer_input_blob_hash.as_deref() == consumer_input_blob_hash,
                 "restored verifier reservation replay changed"
             );
             tx.commit()?;
@@ -630,13 +744,14 @@ impl RuntimeDb {
         );
         tx.execute(
             "INSERT INTO restored_verifier_attempt
-             (operation_id,qualification_operation_id,intent_json,consumer_selection_json,phase,observation_json,created_at_ms,updated_at_ms)
-             VALUES(?1,?2,?3,?4,'reserved',NULL,?5,?5)",
+             (operation_id,qualification_operation_id,intent_json,consumer_selection_json,consumer_input_blob_hash,phase,observation_json,created_at_ms,updated_at_ms)
+             VALUES(?1,?2,?3,?4,?5,'reserved',NULL,?6,?6)",
             params![
                 intent.operation_id,
                 intent.qualification_operation_id,
                 canonical(intent)?,
                 selection.as_ref().map(canonical).transpose()?,
+                consumer_input_blob_hash,
                 now
             ],
         )?;

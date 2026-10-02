@@ -164,6 +164,21 @@ impl TempDirGuard {
             .ok_or_else(|| anyhow::anyhow!("temporary guard has no owned scratch parent"))
     }
 
+    /// The Q private-directory owner never invokes backend Create. Check that
+    /// its original pinned workspace has not acquired, drained or closed a
+    /// backend view. This is a custody check, not isolation evidence.
+    pub fn require_uncreated_private_workspace(&self) -> anyhow::Result<()> {
+        let view = self.workspace_view.lock().unwrap();
+        anyhow::ensure!(
+            self.owns_removal
+                && self.pinned_removal.is_some()
+                && self.inner.lock().unwrap().is_some()
+                && matches!(view.as_ref(), Some(WorkspaceViewSlot::Uncreated)),
+            "private workspace has no original uncreated pinned owner"
+        );
+        self.owned_scratch_root()?.ensure_path_binding()
+    }
+
     /// Borrow the exact effective directory below this guard's retained
     /// descriptor-owned root. This is distinct from an isolation workspace
     /// view: disabled/trusted execution has no backend view, but an external
@@ -210,22 +225,46 @@ impl TempDirGuard {
         evidence: &ryeos_engine::isolation::WorkspaceLifecycleEvidence,
         authority: ryeos_engine::isolation::CreatedWorkspaceView,
     ) -> anyhow::Result<()> {
+        self.install_workspace_view_retaining_authority(evidence, authority)
+            .map_err(|(_, error)| error)
+    }
+
+    /// Q custody must retain the backend's original descriptor if installing
+    /// its Create view fails. Return the authority on every refusal so the
+    /// caller can quarantine it beside the original workspace owner.
+    pub fn install_workspace_view_retaining_authority(
+        &self,
+        evidence: &ryeos_engine::isolation::WorkspaceLifecycleEvidence,
+        authority: ryeos_engine::isolation::CreatedWorkspaceView,
+    ) -> std::result::Result<(), (ryeos_engine::isolation::CreatedWorkspaceView, anyhow::Error)>
+    {
         if evidence.operation != ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create {
-            anyhow::bail!("only Create may install a workspace view");
+            return Err((
+                authority,
+                anyhow::anyhow!("only Create may install a workspace view"),
+            ));
         }
-        let path = self
-            .path()
-            .ok_or_else(|| anyhow::anyhow!("workspace is disarmed"))?;
+        let Some(path) = self.path() else {
+            return Err((authority, anyhow::anyhow!("workspace is disarmed")));
+        };
         if path.file_name().and_then(|name| name.to_str()) != Some(&evidence.workspace_id) {
-            anyhow::bail!("created view belongs to another workspace");
+            return Err((
+                authority,
+                anyhow::anyhow!("created view belongs to another workspace"),
+            ));
         }
-        let view_identity = evidence
-            .mount_identity
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("created workspace has no view identity"))?;
+        let Some(view_identity) = evidence.mount_identity.as_ref() else {
+            return Err((
+                authority,
+                anyhow::anyhow!("created workspace has no view identity"),
+            ));
+        };
         let mut slot = self.workspace_view.lock().unwrap();
         if !matches!(*slot, Some(WorkspaceViewSlot::Uncreated)) {
-            anyhow::bail!("workspace view slot is not awaiting its original Create result");
+            return Err((
+                authority,
+                anyhow::anyhow!("workspace view slot is not awaiting its original Create result"),
+            ));
         }
         *slot = Some(WorkspaceViewSlot::Available(OwnedWorkspaceView {
             workspace_id: evidence.workspace_id.clone(),
@@ -416,6 +455,79 @@ impl TempDirGuard {
         {
             anyhow::bail!("workspace removal requires original view physical-close proof");
         }
+        self.remove_owned_directory_now()
+    }
+
+    /// Remove an original pinned Q workspace whose durable start never
+    /// authorized backend Create. Its view slot is still Uncreated, so there
+    /// is no view identity to close or synthesize. The caller must first hold
+    /// the journal's no-Create cleanup intent and exact custody entry.
+    pub fn remove_uncreated_workspace_now(&self) -> anyhow::Result<()> {
+        if !self.owns_removal || self.pinned_removal.is_none() {
+            anyhow::bail!("uncreated workspace has no original pinned removal owner");
+        }
+        let view = self.workspace_view.lock().unwrap();
+        if !matches!(view.as_ref(), Some(WorkspaceViewSlot::Uncreated)) {
+            anyhow::bail!("uncreated workspace removal changed its original view slot");
+        }
+        let removed = self.remove_owned_directory_now();
+        drop(view);
+        removed
+    }
+
+    /// Prove that this original, uncreated workspace was removed through its
+    /// pinned parent. This also accepts a successful unlink whose following
+    /// journal update was interrupted; a disarmed guard alone is insufficient.
+    pub fn prove_uncreated_workspace_removed(&self) -> anyhow::Result<()> {
+        let pinned = self
+            .pinned_removal
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("uncreated workspace has no pinned removal owner"))?;
+        if !self.owns_removal
+            || !matches!(
+                self.workspace_view.lock().unwrap().as_ref(),
+                Some(WorkspaceViewSlot::Uncreated)
+            )
+            || self.inner.lock().unwrap().is_some()
+        {
+            anyhow::bail!("uncreated workspace has no physical removal proof");
+        }
+        pinned.parent.ensure_path_binding()?;
+        if pinned.root.path().parent() != Some(pinned.parent.path())
+            || pinned.root.path().file_name() != Some(pinned.name.as_os_str())
+            || pinned.parent.open_child_directory(&pinned.name)?.is_some()
+        {
+            anyhow::bail!("uncreated workspace reappeared or changed its pinned parent");
+        }
+        Ok(())
+    }
+
+    /// Prove an original pinned scratch child is absent after `remove_now()`.
+    /// The retained parent and child descriptors, not a reopened diagnostic
+    /// pathname, identify what this process physically removed. This permits
+    /// a lost post-unlink journal ACK to retry without reminting custody.
+    pub fn prove_owned_scratch_removed(&self) -> anyhow::Result<()> {
+        let pinned = self
+            .pinned_removal
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("scratch has no original pinned removal owner"))?;
+        if !self.owns_removal
+            || self.workspace_view.lock().unwrap().is_some()
+            || self.inner.lock().unwrap().is_some()
+        {
+            anyhow::bail!("scratch has no original physical removal proof");
+        }
+        pinned.parent.ensure_path_binding()?;
+        if pinned.root.path().parent() != Some(pinned.parent.path())
+            || pinned.root.path().file_name() != Some(pinned.name.as_os_str())
+            || pinned.parent.open_child_directory(&pinned.name)?.is_some()
+        {
+            anyhow::bail!("scratch reappeared or changed its pinned parent");
+        }
+        Ok(())
+    }
+
+    fn remove_owned_directory_now(&self) -> anyhow::Result<()> {
         let mut path_slot = self.inner.lock().unwrap();
         let Some(path) = path_slot.as_ref() else {
             return Ok(());
@@ -593,24 +705,118 @@ pub fn create_runtime_workspace(
     let execution_root =
         lillux::PinnedDirectory::open_or_create(&runtime_cache_root.join("executions"))?;
     execution_root.set_mode(0o700)?;
+    create_runtime_workspace_under_execution_root(execution_root, workspace_name)
+}
+
+/// Create the original runtime workspace beneath a retained cache descriptor.
+/// The journaled caller can therefore avoid reopening its reserved parent by
+/// pathname between durable reservation and the first directory side effect.
+pub fn create_runtime_workspace_in_pinned_cache(
+    runtime_cache: &lillux::PinnedDirectory,
+    workspace_name: &str,
+) -> Result<(PathBuf, Arc<TempDirGuard>), PinnedWorkspaceCreationFailure> {
+    ryeos_engine::execution_workspace::validate_workspace_id(workspace_name)
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
+    runtime_cache
+        .require_owner_private_directory()
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
+    runtime_cache
+        .ensure_path_binding()
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
+    let execution_root = runtime_cache
+        .open_or_create_child(std::ffi::OsStr::new("executions"), 0o700)
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
+    execution_root
+        .require_owner_private_directory()
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
+    create_runtime_workspace_under_execution_root_with_custody(execution_root, workspace_name)
+}
+
+/// A failed pinned Q workspace creation may still own its newly created
+/// original directory. The caller must retain that guard if exact removal
+/// failed; a path reconstructed later cannot replace its pinned authority.
+pub struct PinnedWorkspaceCreationFailure {
+    pub error: anyhow::Error,
+    pub retained_workspace: Option<Arc<TempDirGuard>>,
+}
+
+impl PinnedWorkspaceCreationFailure {
+    fn without_guard(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            error: error.into(),
+            retained_workspace: None,
+        }
+    }
+}
+
+/// The exact workspace child could have been created, but no original pinned
+/// owner survived to prove its removal. A caller with a durable reservation
+/// must fence cleanup rather than infer absence from this error.
+#[derive(Debug)]
+pub struct PinnedWorkspaceCreationUnproved;
+
+impl std::fmt::Display for PinnedWorkspaceCreationUnproved {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("pinned workspace creation cleanup is unproved")
+    }
+}
+
+impl std::error::Error for PinnedWorkspaceCreationUnproved {}
+
+fn create_runtime_workspace_under_execution_root(
+    execution_root: lillux::PinnedDirectory,
+    workspace_name: &str,
+) -> anyhow::Result<(PathBuf, Arc<TempDirGuard>)> {
+    create_runtime_workspace_under_execution_root_with_custody(execution_root, workspace_name)
+        .map_err(|failure| failure.error)
+}
+
+fn create_runtime_workspace_under_execution_root_with_custody(
+    execution_root: lillux::PinnedDirectory,
+    workspace_name: &str,
+) -> Result<(PathBuf, Arc<TempDirGuard>), PinnedWorkspaceCreationFailure> {
+    ryeos_engine::execution_workspace::validate_workspace_id(workspace_name)
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
     let name = std::ffi::OsString::from(workspace_name);
-    let workspace = execution_root.create_child(&name, 0o700)?;
+    let workspace = execution_root.create_child(&name, 0o700).map_err(|error| {
+        let error = if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|cause| cause.kind() == std::io::ErrorKind::AlreadyExists)
+        {
+            error
+        } else {
+            error.context(PinnedWorkspaceCreationUnproved)
+        };
+        PinnedWorkspaceCreationFailure::without_guard(error)
+    })?;
     // Own rollback before any fallible initialization below the new root.
     // The caller transfers successful construction to its durable journal.
     let mut guard = TempDirGuard::new_pinned(execution_root, name, workspace);
-    let workspace = guard.owned_scratch_root()?;
-    workspace.create_child(
-        std::ffi::OsStr::new(ryeos_engine::execution_workspace::PROJECT_DIR),
-        0o700,
-    )?;
-    workspace.sync()?;
-    let project = workspace
+    let project = guard
+        .owned_scratch_root()
+        .expect("new pinned workspace has its original descriptor")
         .path()
         .join(ryeos_engine::execution_workspace::PROJECT_DIR);
     guard.effective_path = project.clone();
     guard.workspace_view = Mutex::new(Some(WorkspaceViewSlot::Uncreated));
-    let guard = Arc::new(guard);
-    Ok((project, guard))
+    let prepared = (|| {
+        let workspace = guard.owned_scratch_root()?;
+        workspace.create_child(
+            std::ffi::OsStr::new(ryeos_engine::execution_workspace::PROJECT_DIR),
+            0o700,
+        )?;
+        workspace.sync()?;
+        Ok::<_, anyhow::Error>(project)
+    })();
+    match prepared {
+        Ok(project) => Ok((project, Arc::new(guard))),
+        // The Q caller journals a cleanup fence before trying to remove this
+        // exact child. The ordinary caller still has its Drop rollback.
+        Err(error) => Err(PinnedWorkspaceCreationFailure {
+            error,
+            retained_workspace: Some(Arc::new(guard)),
+        }),
+    }
 }
 
 impl std::fmt::Debug for TempDirGuard {
@@ -958,6 +1164,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let (project, original) = create_runtime_workspace(cache.path(), "view-uncreated").unwrap();
         original.preserve_for_explicit_cleanup();
+        original.require_uncreated_private_workspace().unwrap();
         assert!(
             original
                 .close_workspace_view("view-uncreated", &"a".repeat(64), close_deadline())
@@ -966,6 +1173,7 @@ mod tests {
         assert!(original.remove_now().is_err());
         let root = original.path().unwrap();
         let reopened = TempDirGuard::new_workspace(root, project.clone()).unwrap();
+        assert!(reopened.require_uncreated_private_workspace().is_err());
         assert!(
             reopened
                 .close_workspace_view("view-uncreated", &"a".repeat(64), close_deadline())
@@ -978,6 +1186,9 @@ mod tests {
         );
         assert!(reopened.remove_now().is_err());
         assert!(project.is_dir());
+        original.remove_uncreated_workspace_now().unwrap();
+        original.prove_uncreated_workspace_removed().unwrap();
+        assert!(original.require_uncreated_private_workspace().is_err());
     }
 
     #[test]

@@ -42,7 +42,7 @@ impl BoundedHttpClient {
             client: HttpClient::new(network),
             tls_roots_der,
             setup_timeout: Duration::from_millis(u64::from(
-                bootstrap.controller.connect_timeout_ms,
+                bootstrap.controller.http()?.connect_timeout_ms,
             )),
         })
     }

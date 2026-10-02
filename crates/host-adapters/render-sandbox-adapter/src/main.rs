@@ -5,6 +5,8 @@
 mod activation_contact;
 mod provider_spec;
 mod proxy_route;
+mod relay_contact;
+mod relay_file;
 mod restored_verifier_contact;
 mod snapshot_bootstrap;
 mod snapshot_production;
@@ -276,6 +278,7 @@ fn run() -> Result<()> {
         Some("inspect") => inspect(&adapter),
         Some("verify-runtime-probe") => verify_runtime_probe(&adapter),
         Some("operate") => operate(),
+        Some("relay-file") => relay_file::operate(),
         Some("produce-snapshot") => snapshot_production::operate(&adapter),
         Some("produce-snapshot-upload") => snapshot_production::operate_upload(&adapter),
         Some("produce-snapshot-create") => snapshot_production::operate_create(&adapter),
@@ -480,6 +483,24 @@ fn operate() -> Result<()> {
         request.canonical_bytes()? == request_bytes,
         "operation request is noncanonical"
     );
+    let maximum_provider_spec_bytes = usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?;
+    let provider_spec_bytes =
+        read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, maximum_provider_spec_bytes)?;
+    let provider_spec_sha256 = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
+        .context("missing captured provider spec digest")?;
+    let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
+    let (provider_spec, _provider_spec_sha256) =
+        parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)?;
+    // A disabled signed profile cannot turn an already claimed activation
+    // into a silent pending observation. Reject before reading guest inputs,
+    // network inputs, or credentials. Reconciliation remains observation-only
+    // for an earlier, possibly contacted attempt.
+    if matches!(&request, LifecycleAdapterRequest::ActivateSupervisor { .. }) {
+        ensure!(
+            provider_spec.one_shot_activation_enabled(),
+            "signed Render provider spec does not authorize supervisor activation contact"
+        );
+    }
     let activation_input = if let LifecycleAdapterRequest::ActivateSupervisor {
         guest_package,
         ..
@@ -526,14 +547,6 @@ fn operate() -> Result<()> {
     if let LifecycleAdapterRequest::ActivateSupervisor { activation, .. } = &request {
         deadline = request_deadline(activation.attachment_deadline_ms, deadline)?;
     }
-    let maximum_provider_spec_bytes = usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?;
-    let provider_spec_bytes =
-        read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, maximum_provider_spec_bytes)?;
-    let provider_spec_sha256 = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
-        .context("missing captured provider spec digest")?;
-    let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
-    let (provider_spec, _provider_spec_sha256) =
-        parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)?;
     let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
     ensure!(
         lillux::sha256_hex(&settings_bytes) == request.common().settings_digest,
@@ -575,27 +588,25 @@ fn operate() -> Result<()> {
             activation,
             ..
         } => {
-            if provider_spec.one_shot_activation_enabled() {
-                let input = activation_input
-                    .as_ref()
-                    .context("first Render activation lost its verified sealed inputs")?;
-                // Once this call begins, any stage may have reached Render.
-                // Even a complete run response is not authenticated Ready;
-                // every transport outcome remains Pending for the original
-                // supervisor channel to settle. Reconciliation never calls
-                // this one-shot sequence again.
-                let _ = activation_contact::first_activation_contact(
-                    &network,
-                    &provider_spec,
-                    &settings,
-                    &occurrence.occurrence_id,
-                    &input.delivery,
-                    &input.signed_import,
-                    &input.package,
-                    deadline,
-                    &cancellation,
-                );
-            }
+            let input = activation_input
+                .as_ref()
+                .context("first Render activation lost its verified sealed inputs")?;
+            // Once this call begins, any stage may have reached Render.
+            // Even a complete run response is not authenticated Ready;
+            // every transport outcome remains Pending for the original
+            // supervisor channel to settle. Reconciliation never calls
+            // this one-shot sequence again.
+            let _ = activation_contact::first_activation_contact(
+                &network,
+                &provider_spec,
+                &settings,
+                &occurrence.occurrence_id,
+                &input.delivery,
+                &input.signed_import,
+                &input.package,
+                deadline,
+                &cancellation,
+            );
             LifecycleAdapterResponse::SupervisorPending {
                 operation_id: common.operation_id.clone(),
                 activation_request_digest: activation.activation_request_digest.clone(),
@@ -845,7 +856,7 @@ fn allocate(
         &url,
         &route_target.path_segments,
         route_target.owner_id_query.as_deref(),
-        route_target.upload_path_query.as_deref(),
+        route_target.file_path_query.as_deref(),
     )
     .is_err()
     {
@@ -1118,7 +1129,7 @@ fn terminate(
         &url,
         &route_target.path_segments,
         route_target.owner_id_query.as_deref(),
-        route_target.upload_path_query.as_deref(),
+        route_target.file_path_query.as_deref(),
     )
     .is_err()
     {
@@ -1219,7 +1230,7 @@ fn observe_termination_with_network(
         &url,
         &route_target.path_segments,
         route_target.owner_id_query.as_deref(),
-        route_target.upload_path_query.as_deref(),
+        route_target.file_path_query.as_deref(),
     )
     .is_err()
     {
@@ -1469,10 +1480,10 @@ fn api_url<S: RenderApiSettings>(
     route: RouteName,
     occurrence_id: Option<&str>,
     settings: &S,
-    upload_path: Option<&str>,
+    file_path: Option<&str>,
 ) -> Result<(url::Url, RouteTarget)> {
     let route_target =
-        provider_spec.route_target(route, occurrence_id, settings.owner_id(), upload_path)?;
+        provider_spec.route_target(route, occurrence_id, settings.owner_id(), file_path)?;
     let mut url = url::Url::parse(provider_spec.api_base())?;
     {
         let mut segments = url
@@ -1486,8 +1497,8 @@ fn api_url<S: RenderApiSettings>(
     if let Some(owner_id) = &route_target.owner_id_query {
         url.query_pairs_mut().append_pair("ownerId", owner_id);
     }
-    if let Some(upload_path) = &route_target.upload_path_query {
-        url.query_pairs_mut().append_pair("path", upload_path);
+    if let Some(file_path) = &route_target.file_path_query {
+        url.query_pairs_mut().append_pair("path", file_path);
     }
     Ok((url, route_target))
 }

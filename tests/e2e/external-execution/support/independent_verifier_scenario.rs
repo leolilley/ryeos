@@ -3,12 +3,13 @@
 //! The independent verifier must perform every selected-subject check before
 //! it returns claims. These sources are not wired into any Worker relationship.
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use lillux::crypto::SigningKey;
-use ryeos_external_execution_contract::LifecycleCapability;
-use ryeos_independent_runtime_verifier::{
-    DIRECT_PRODUCER_RECIPE_REF, QualificationExecutionEnvironment,
+use ryeos_codex_runtime_verifier::{
+    DIRECT_QUALIFICATION_CLAIMS, GuestCommandFixture, QualificationExecutionEnvironment,
+    RoutedRuntimeProfile,
 };
+use ryeos_external_execution_contract::LifecycleCapability;
 use ryeos_state::external_content::products::producer_recipe::ProductProducerRecipe;
 use ryeos_state::external_execution::admission::{
     ExternalCandidateQualificationUse, ExternalCandidateRequirement,
@@ -19,18 +20,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, net::SocketAddr};
 
-pub const TOOL_REF: &str = "tool:fixtures/independent-runtime/verify";
-pub const POLICY_REF: &str = "config:fixtures/independent-runtime/qualification";
-pub const PRODUCER_SCENARIO_ID: &str = ryeos_independent_runtime_verifier::PRODUCER_SCENARIO_ID;
-pub const VERIFIER_BIN: &str = "independent-runtime-verifier";
+pub const TOOL_REF: &str = "tool:fixtures/codex-runtime/verify";
+pub const POLICY_REF: &str = "config:fixtures/codex-runtime/qualification";
+pub const PRODUCER_SCENARIO_ID: &str = "native_codex";
+pub const DIRECT_PRODUCER_RECIPE_REF: &str = "config:fixtures/codex-runtime/direct-codex";
+pub const VERIFIER_BIN: &str = "codex-runtime-verifier";
 const SCENARIO: &str = "test.independent_routed_runtime.v1";
-pub const CLAIMS: [&str; 5] = [
-    "bounded_candidate_capture",
-    "candidate_only_execution",
-    "controller_credential_exclusion",
-    "native_writer_exclusion",
-    "no_local_execution_fallback",
-];
+pub const CLAIMS: [&str; 5] = DIRECT_QUALIFICATION_CLAIMS;
 
 /// Exact authored fixture tuple, never reconstructed from observed output.
 /// The configurations input contains the canonical admission-compiled profile,
@@ -41,6 +37,7 @@ pub const CLAIMS: [&str; 5] = [
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IndependentVerifierScenario {
+    pub profile: RoutedRuntimeProfile,
     pub subject_manifest_hash: String,
     pub controller_manifest_hash: String,
     pub tools_manifest_hash: String,
@@ -65,7 +62,7 @@ impl IndependentVerifierScenario {
     /// supplies the four exact manifest hashes before this call. Neither a
     /// verifier result nor a hand-built partial profile is an input.
     pub fn from_admitted_inputs(
-        configuration: ryeos_independent_runtime_verifier::ExactScenario,
+        configuration: ryeos_codex_runtime_verifier::ExactScenario,
         profile: &AdmittedStructuredSessionProfile,
         source: &EffectiveSourceClosureProjection,
     ) -> Result<Self> {
@@ -78,6 +75,7 @@ impl IndependentVerifierScenario {
             &configuration.execution_environment.process_environment,
         )?;
         let scenario = Self {
+            profile: configuration.profile,
             subject_manifest_hash: configuration.subject_manifest_hash,
             controller_manifest_hash: configuration.controller_manifest_hash,
             tools_manifest_hash: configuration.tools_manifest_hash,
@@ -131,17 +129,20 @@ impl IndependentVerifierScenario {
         );
         self.requirement.validate()?;
         self.expected_producer_recipe.validate()?;
+        self.profile.validate()?;
+        ryeos_state::external_content::products::validate_canonical_unsuffixed_ref(
+            "expected producer recipe",
+            &self.expected_producer_recipe_ref,
+        )?;
         ensure!(
-            self.expected_producer_recipe_ref == DIRECT_PRODUCER_RECIPE_REF,
-            "scenario expected producer ref differs from signed Config"
+            self.expected_producer_recipe_ref.starts_with("config:"),
+            "scenario expected producer must be a Config"
         );
         ensure!(
-            self.requirement.provider_declaration_id == "codex-hosted"
-                && self.requirement.runtime_product_declaration_id == "guest-runtime"
-                && self.requirement.required_lifecycle_capabilities
-                    == [LifecycleCapability::ExactTerminalObservation]
-                        .into_iter()
-                        .collect(),
+            self.requirement.required_lifecycle_capabilities
+                == [LifecycleCapability::ExactTerminalObservation]
+                    .into_iter()
+                    .collect(),
             "scenario does not select the signed Codex guest-runtime lifecycle requirement"
         );
         self.qualification_use.validate()?;
@@ -180,7 +181,7 @@ impl IndependentVerifierScenario {
             encoded.len() <= 8 * 1024,
             "scenario exceeds qualification parameter bound"
         );
-        ryeos_independent_runtime_verifier::Parameters::parse(encoded.as_bytes())?;
+        ryeos_codex_runtime_verifier::Parameters::parse(encoded.as_bytes())?;
         Ok(value)
     }
 
@@ -217,16 +218,22 @@ impl IndependentVerifierScenario {
         if reserved_resume_race {
             tool["config"]["args"] = json!(["--scoped-resume-race-probe"]);
         }
+        let recipe_path = format!(
+            ".ai/config/{}.yaml",
+            self.expected_producer_recipe_ref
+                .strip_prefix("config:")
+                .context("scenario recipe is not a Config")?
+        );
         [
-            (".ai/tools/fixtures/independent-runtime/verify.yaml", tool),
             (
-                ".ai/config/fixtures/independent-runtime/qualification.yaml",
+                ".ai/tools/fixtures/codex-runtime/verify.yaml".to_owned(),
+                tool,
+            ),
+            (
+                ".ai/config/fixtures/codex-runtime/qualification.yaml".to_owned(),
                 policy,
             ),
-            (
-                ".ai/config/fixtures/independent-runtime/direct-codex.yaml",
-                recipe,
-            ),
+            (recipe_path, recipe),
         ]
         .into_iter()
         .map(|(path, value)| {
@@ -255,8 +262,8 @@ impl IndependentVerifierScenario {
         })
         .collect::<Vec<_>>();
         let tool = json!({
-            "category":"fixtures/independent-runtime", "name":"verify", "version":"1.0.0",
-            "description":"Independently check exact scripted runtime scenario; not production profile qualification",
+            "category":"fixtures/codex-runtime", "name":"verify", "version":"3.0.0",
+            "description":"Independently check exact scripted Codex app-server scenario; not production profile qualification",
             "executor_id":"@subprocess", "execution_protocol":"protocol:ryeos/core/qualification_scoped_callback",
             "effects":"live", "filesystem_authority":"node_policy", "network_authority":"node_policy",
             "external_content":declarations,
@@ -267,15 +274,21 @@ impl IndependentVerifierScenario {
             }, "required":["scenario","configuration",QUALIFICATION_CONTEXT_PARAMETER],
             "additionalProperties":false}
         });
-        let policy = json!({"category":"fixtures/independent-runtime","version":"1.0.0",
+        let policy = json!({"category":"fixtures/codex-runtime","version":"3.0.0",
             "description":"Finite fixture verifier allowance; no runtime qualification is asserted by authoring",
-            "product_qualification_policy":{"schema":"ryeos.product_qualification_policy.v3",
+            "product_qualification_policy":{"schema":"ryeos.product_qualification_policy.v4",
                 "verifier_ref":TOOL_REF,"subject_declaration_id":"subject",
                 "allowed_claims":CLAIMS,
                 "minimum_verifier_process_settlement":"scope_empty",
                 "verifier_parameters":parameters,
-                "producer_scenarios":{(PRODUCER_SCENARIO_ID):{"recipe_ref":DIRECT_PRODUCER_RECIPE_REF}}}});
-        let recipe = json!({"category":"fixtures/independent-runtime","name":"direct-codex",
+                "producer_scenarios":{(&self.profile.producer_scenario_id):{"recipe_ref":self.expected_producer_recipe_ref}}}});
+        let (recipe_category, recipe_name) = self
+            .expected_producer_recipe_ref
+            .strip_prefix("config:")
+            .context("expected recipe must be a Config")?
+            .rsplit_once('/')
+            .context("expected recipe requires category and name")?;
+        let recipe = json!({"category":recipe_category,"name":recipe_name,
             "version":"1.0.0",
             "description":"Exact bounded daemon-owned direct Codex target",
             "product_producer_recipe":self.expected_producer_recipe});
@@ -286,6 +299,10 @@ impl IndependentVerifierScenario {
         Ok((tool, policy, recipe))
     }
 }
+
+#[cfg(test)]
+#[path = "independent_verifier_profile_acceptance.rs"]
+mod profile_acceptance;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -350,6 +367,15 @@ pub(crate) mod tests {
             .unwrap();
         qualification_use.execution_environment_digest = execution_environment.digest().unwrap();
         IndependentVerifierScenario {
+            profile: RoutedRuntimeProfile {
+                schema: "ryeos.codex_routed_runtime_profile.v2".into(),
+                producer_scenario_id: PRODUCER_SCENARIO_ID.into(),
+                command_fixture: GuestCommandFixture::WorkspaceRgVersion,
+                candidate: ryeos_codex_runtime_verifier::CandidateFixture {
+                    relative_path: "candidate-strategy.txt".into(),
+                    content: "composed external candidate C\n".into(),
+                },
+            },
             subject_manifest_hash: "a".repeat(64),
             controller_manifest_hash: "b".repeat(64),
             tools_manifest_hash: "c".repeat(64),
@@ -383,7 +409,7 @@ pub(crate) mod tests {
                 "prepared_immutable_files":[
                     {"prepared_directory_id":"codex-home","leaf_name":"config.toml","maximum_bytes":65536,"expected_sha256":"2".repeat(64)},
                     {"prepared_directory_id":"codex-home","leaf_name":"environments.toml","maximum_bytes":65536,
-                        "expected_sha256":ryeos_independent_runtime_verifier::staging::direct_command_environment_sha256().unwrap()}],
+                        "expected_sha256":ryeos_codex_runtime_verifier::staging::direct_command_environment_sha256().unwrap()}],
                 "loopback_ingress":{"address":"127.0.0.1:18765"},
                 "bounds":{"maximum_wall_time_ms":170000,
                     "maximum_stdout_bytes":6291456,
@@ -394,6 +420,26 @@ pub(crate) mod tests {
             .unwrap(),
             capture_limit_bytes: 4096,
         }
+    }
+    pub(crate) fn scenario_for_fixture(
+        fixture: GuestCommandFixture,
+    ) -> IndependentVerifierScenario {
+        let mut selected = scenario();
+        if fixture == GuestCommandFixture::WorkspaceRgVersionRequireAbsentCandidate {
+            selected.profile.producer_scenario_id = "native_codex_empty_candidate".into();
+            selected.profile.command_fixture = fixture;
+            selected.profile.candidate = ryeos_codex_runtime_verifier::CandidateFixture {
+                relative_path: "candidate-alternative.txt".into(),
+                content: "signed alternative candidate\nsecond independently authored line\n"
+                    .into(),
+            };
+            selected.expected_producer_recipe_ref =
+                "config:fixtures/codex-runtime/direct-codex-empty-candidate".into();
+            selected
+                .expected_command_output
+                .push_str("candidate-absent\n");
+        }
+        selected
     }
     #[test]
     fn use_context_is_derived_from_the_admitted_profile_and_source() {
@@ -446,7 +492,7 @@ pub(crate) mod tests {
             ])
         );
         let parameters = scenario.parameters().unwrap();
-        let parsed = ryeos_independent_runtime_verifier::Parameters::parse(
+        let parsed = ryeos_codex_runtime_verifier::Parameters::parse(
             &serde_json::to_vec(&parameters).unwrap(),
         )
         .unwrap();
@@ -488,10 +534,7 @@ pub(crate) mod tests {
             serde_json::to_value(&scenario.qualification_use).unwrap()
         );
         assert_eq!(tool["config"]["input_data"], "${params_json}");
-        assert_eq!(
-            tool["config"]["command"],
-            "bin:independent-runtime-verifier"
-        );
+        assert_eq!(tool["config"]["command"], "bin:codex-runtime-verifier");
         assert_eq!(
             tool["execution_protocol"],
             "protocol:ryeos/core/qualification_scoped_callback"
@@ -524,6 +567,51 @@ pub(crate) mod tests {
             ])
         );
     }
+    #[test]
+    fn signed_profiles_bind_the_selected_scenario_recipe_and_finite_command() {
+        use ryeos_state::external_content::products::qualification::ProductQualificationPolicy;
+        let first = scenario();
+        let mut second =
+            scenario_for_fixture(GuestCommandFixture::WorkspaceRgVersionRequireAbsentCandidate);
+        let (first_tool, first_policy, _) = first.sources().unwrap();
+        let (second_tool, second_policy, second_recipe) = second.sources().unwrap();
+        let first_policy =
+            ProductQualificationPolicy::from_value(&first_policy["product_qualification_policy"])
+                .unwrap();
+        let second_policy =
+            ProductQualificationPolicy::from_value(&second_policy["product_qualification_policy"])
+                .unwrap();
+        assert_ne!(
+            first_policy.admitted_parameters_digest().unwrap(),
+            second_policy.admitted_parameters_digest().unwrap()
+        );
+        assert_eq!(first_tool["config"], second_tool["config"]);
+        assert_eq!(first_policy.allowed_claims, second_policy.allowed_claims);
+        assert_eq!(
+            first_policy.minimum_verifier_process_settlement,
+            second_policy.minimum_verifier_process_settlement
+        );
+        assert_eq!(
+            second_policy.producer_scenarios[&second.profile.producer_scenario_id].recipe_ref,
+            second.expected_producer_recipe_ref
+        );
+        assert_eq!(second_recipe["name"], "direct-codex-empty-candidate");
+        assert_ne!(
+            first.profile.command_script(),
+            second.profile.command_script()
+        );
+        let key = SigningKey::from_bytes(&[47; 32]);
+        let sources = second.signed_sources(&key, "2026-09-29T00:00:00Z").unwrap();
+        assert!(
+            sources.contains_key(
+                ".ai/config/fixtures/codex-runtime/direct-codex-empty-candidate.yaml"
+            )
+        );
+        assert!(!sources.contains_key(".ai/config/fixtures/codex-runtime/direct-codex.yaml"));
+        second.expected_producer_recipe_ref = "config:fixtures/../escape".into();
+        assert!(second.signed_sources(&key, "2026-09-29T00:00:00Z").is_err());
+    }
+
     #[test]
     fn identity_and_endpoint_changes_are_not_normalized_away() {
         let original = scenario();

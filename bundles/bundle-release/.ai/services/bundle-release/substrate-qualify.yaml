@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-23T04:35:55Z:7533f802a3f4dfb1d991004386504300bf5b63fdc3630c18a97b4f19e64450b4:+BuY44y/L+nNvzEoWaV1KoGR/LKqM5bxYhSF4HBfFwWrADG06JplMaUOVUM7zxqDYlrX6kvI2YZ3gkAyKZARAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T01:29:18Z:09749dbedeb737a8c8f5735ea21d578df805ec53861e95ca6bebc85b68a6e374:lJ2tIsVrgA6waQHIHRhAcpNx2ESd9ej0ZAtx7Igra1wh30SadrxbldwM0/7p/DO2b6WgzM71QgwbDpg1sSH5Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: substrate-qualify
-version: "1.0.0"
+version: "1.1.0"
 description: Independently qualify one retained substrate release receipt product.
 endpoint: bundle_release.substrate_qualify
 ui_read_only: false
@@ -11,6 +11,7 @@ availability: daemon_only
 required_caps:
   - ryeos.execute.config.bundle-release/execution-environment-products
   - ryeos.execute.config.bundle-release/execution-tool-products
+  - ryeos.execute.service.external-content/launch-product-qualification
   - ryeos.execute.service.bundle-release/substrate-qualify
   - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
 schema:

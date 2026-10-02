@@ -12,9 +12,52 @@ use anyhow::ensure;
 mod channel;
 pub use channel::ExternalDirectOutput;
 pub(crate) mod connector;
+mod qualification_batch;
+mod qualification_command;
+mod qualification_controller_canary;
+mod qualification_evidence;
+mod qualification_fixture_receiver;
+mod qualification_guest_scratch;
+mod qualification_local_start;
+mod qualification_process;
+mod qualification_transcript;
+mod relay_bootstrap;
+mod relay_transfer;
 pub(crate) use channel::{
     ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
     ExternalSupervisorExchange, RetainedExternalCandidateImport,
+    RetainedExternalQualificationScopeSettlement,
+};
+pub(crate) use qualification_batch::{
+    QualificationWorkerBatchAck, QualificationWorkerObservationBatchRecord,
+};
+pub(crate) use qualification_command::{
+    QualificationWorkerCommandPhase, QualificationWorkerCommandRecord,
+};
+pub use qualification_controller_canary::QualificationControllerCanaryIntent;
+pub(crate) use qualification_evidence::QualificationHistoricalTransportEvidence;
+pub(super) use qualification_fixture_receiver::JOURNAL_SQL as QUALIFICATION_FIXTURE_RECEIVER_SQL;
+pub(crate) use qualification_fixture_receiver::verify_qualification_fixture_receiver_custody;
+pub(super) use qualification_guest_scratch::JOURNAL_SQL as QUALIFICATION_GUEST_SCRATCH_SQL;
+pub(crate) use qualification_guest_scratch::{
+    QualificationGuestScratchPhase, QualificationGuestScratchRecord,
+};
+pub(super) use qualification_local_start::JOURNAL_SQL as QUALIFICATION_LOCAL_START_SQL;
+pub use qualification_local_start::{
+    QualificationLocalCredentialCustody, QualificationLocalStartPhase,
+    QualificationLocalStartRecord, QualificationWorkspaceBorrowIntent,
+};
+pub(crate) use qualification_process::{
+    QualificationWorkerDeathProof, QualificationWorkerProcessPhase,
+    QualificationWorkerProcessRecord,
+};
+pub(crate) use qualification_transcript::QualificationWorkerTranscriptRecord;
+pub(crate) use relay_bootstrap::ExternalRelayBootstrapCommitment;
+pub(super) use relay_bootstrap::JOURNAL_SQL as RELAY_BOOTSTRAP_SQL;
+pub(super) use relay_transfer::JOURNAL_SQL as RELAY_TRANSFER_SQL;
+pub(crate) use relay_transfer::{
+    ClaimedRelayFileContact, RelayApplicationDecision, RelayDirection, RelayKind,
+    RelayTransferIntent, RelayTransferPhase, RelayTransferRecord,
 };
 
 pub(super) const FIRST_EPOCH: u32 = 40;
@@ -147,6 +190,295 @@ WHEN NEW.phase IN ('no_contact','contacted_no_occurrence','terminated')
  AND EXISTS(SELECT 1 FROM external_execution_connector c
     WHERE c.placement_thread_id=OLD.placement_thread_id AND c.state!='closed')
 BEGIN SELECT RAISE(ABORT, 'external allocation retains a live local connector'); END;
+
+-- This is local process custody for a Q allocation, not an ordinary dedicated
+-- session. One placement admits one held Worker incarnation and no relaunch.
+CREATE TABLE external_qualification_worker_process (
+    placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
+    accepted_root_id TEXT NOT NULL,
+    accepted_capsule_hash TEXT NOT NULL,
+    qualification_operation_id TEXT NOT NULL,
+    qualification_occurrence_id TEXT NOT NULL,
+    channel_binding_digest TEXT NOT NULL,
+    process_identity_json TEXT NOT NULL,
+    daemon_generation_id TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK (phase IN ('attached','terminal')),
+    attached_at_ms INTEGER NOT NULL,
+    terminal_at_ms INTEGER,
+    provider_configuration_json TEXT NOT NULL CHECK (
+        length(CAST(provider_configuration_json AS BLOB)) <= 4096
+        AND json_valid(provider_configuration_json)),
+    CHECK ((phase='attached' AND terminal_at_ms IS NULL)
+        OR (phase='terminal' AND terminal_at_ms IS NOT NULL
+            AND terminal_at_ms >= attached_at_ms))
+);
+CREATE TRIGGER external_qualification_worker_process_insert_guard
+BEFORE INSERT ON external_qualification_worker_process
+WHEN NEW.phase!='attached'
+ OR NOT EXISTS(SELECT 1 FROM external_execution_allocation a
+    JOIN external_execution_channel c ON c.placement_thread_id=a.placement_thread_id
+    JOIN external_execution_connector x ON x.placement_thread_id=a.placement_thread_id
+    WHERE a.placement_thread_id=NEW.placement_thread_id AND a.phase='bound'
+      AND json_extract(a.reservation_json,'$.owner.kind')='qualification_candidate'
+      AND json_extract(a.reservation_json,'$.owner.coordinate.accepted_root_id')=NEW.accepted_root_id
+      AND json_extract(a.reservation_json,'$.owner.coordinate.accepted_capsule_hash')=NEW.accepted_capsule_hash
+      AND json_extract(a.reservation_json,'$.owner.qualification_operation_id')=NEW.qualification_operation_id
+      AND json_extract(a.reservation_json,'$.owner.qualification_occurrence.occurrence_id')=NEW.qualification_occurrence_id
+      AND c.binding_digest=NEW.channel_binding_digest AND c.state='running'
+      AND x.channel_binding_digest=NEW.channel_binding_digest AND x.state='prepared')
+BEGIN SELECT RAISE(ABORT, 'qualification Worker attachment lost its released Q owner'); END;
+CREATE TRIGGER external_qualification_worker_process_transition_guard
+BEFORE UPDATE ON external_qualification_worker_process
+WHEN OLD.phase!='attached' OR NEW.phase!='terminal'
+ OR NEW.placement_thread_id!=OLD.placement_thread_id
+ OR NEW.accepted_root_id!=OLD.accepted_root_id
+ OR NEW.accepted_capsule_hash!=OLD.accepted_capsule_hash
+ OR NEW.qualification_operation_id!=OLD.qualification_operation_id
+ OR NEW.qualification_occurrence_id!=OLD.qualification_occurrence_id
+ OR NEW.channel_binding_digest!=OLD.channel_binding_digest
+ OR NEW.process_identity_json!=OLD.process_identity_json
+ OR NEW.provider_configuration_json!=OLD.provider_configuration_json
+ OR NEW.daemon_generation_id!=OLD.daemon_generation_id
+ OR NEW.attached_at_ms!=OLD.attached_at_ms
+BEGIN SELECT RAISE(ABORT, 'qualification Worker process identity is immutable'); END;
+CREATE TRIGGER external_qualification_worker_process_no_delete
+BEFORE DELETE ON external_qualification_worker_process
+BEGIN SELECT RAISE(ABORT, 'qualification Worker process occurrence is retained'); END;
+CREATE TRIGGER external_qualification_worker_process_settlement_guard
+BEFORE UPDATE OF phase ON external_execution_allocation
+WHEN NEW.phase IN ('no_contact','contacted_no_occurrence','terminated')
+ AND EXISTS(SELECT 1 FROM external_qualification_worker_process p
+    WHERE p.placement_thread_id=OLD.placement_thread_id AND p.phase!='terminal')
+BEGIN SELECT RAISE(ABORT, 'external allocation retains a live qualification Worker process'); END;
+
+-- One possible-contact framed request for the exact Q Worker incarnation.
+-- A Final response and a completed turn are separate facts. Neither alone
+-- grants a positive qualification claim.
+CREATE TABLE external_qualification_worker_command (
+    placement_thread_id TEXT PRIMARY KEY REFERENCES external_qualification_worker_process(placement_thread_id),
+    accepted_root_id TEXT NOT NULL,
+    accepted_capsule_hash TEXT NOT NULL,
+    qualification_operation_id TEXT NOT NULL,
+    qualification_occurrence_id TEXT NOT NULL,
+    channel_binding_digest TEXT NOT NULL,
+    process_incarnation_digest TEXT NOT NULL,
+    setup_request_digest TEXT NOT NULL,
+    setup_contacted_at_ms INTEGER,
+    setup_final_response_digest TEXT,
+    setup_final_response_json TEXT,
+    setup_final_wire_max_bytes INTEGER,
+    setup_owner_send_settled_at_ms INTEGER,
+    request_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('reserved','setup_possible_contact','setup_settled','possible_contact','turn_completed','outcome_unknown')),
+    turn_id TEXT,
+    turn_started_at_ms INTEGER,
+    turn_start_digest TEXT,
+    turn_completed_at_ms INTEGER,
+    turn_completion_digest TEXT,
+    delta_response_digest TEXT,
+    delta_response_json TEXT,
+    delta_wire_max_bytes INTEGER,
+    final_response_digest TEXT,
+    final_response_json TEXT,
+    final_wire_max_bytes INTEGER,
+    reserved_at_ms INTEGER NOT NULL,
+    contacted_at_ms INTEGER,
+    completed_at_ms INTEGER,
+    owner_send_settled_at_ms INTEGER,
+    CHECK (setup_request_digest != request_digest),
+    CHECK (setup_contacted_at_ms IS NULL OR setup_contacted_at_ms >= reserved_at_ms),
+    CHECK ((setup_final_response_digest IS NULL AND setup_final_response_json IS NULL
+            AND setup_final_wire_max_bytes IS NULL)
+        OR (setup_contacted_at_ms IS NOT NULL AND setup_final_response_digest IS NOT NULL
+            AND setup_final_response_json IS NOT NULL
+            AND setup_final_wire_max_bytes IS NOT NULL
+            AND setup_final_wire_max_bytes BETWEEN 1 AND 16777216
+            AND length(CAST(setup_final_response_json AS BLOB)) <= setup_final_wire_max_bytes)),
+    CHECK (setup_owner_send_settled_at_ms IS NULL
+        OR (setup_contacted_at_ms IS NOT NULL AND setup_final_response_digest IS NOT NULL
+            AND setup_owner_send_settled_at_ms >= setup_contacted_at_ms)),
+    CHECK (contacted_at_ms IS NULL
+        OR (setup_owner_send_settled_at_ms IS NOT NULL
+            AND contacted_at_ms >= setup_owner_send_settled_at_ms)),
+    CHECK (contacted_at_ms IS NOT NULL
+        OR (turn_id IS NULL AND delta_response_digest IS NULL AND final_response_digest IS NULL
+            AND completed_at_ms IS NULL AND owner_send_settled_at_ms IS NULL)),
+    CHECK (final_wire_max_bytes IS NULL OR final_wire_max_bytes = setup_final_wire_max_bytes),
+    CHECK (delta_wire_max_bytes IS NULL OR delta_wire_max_bytes = setup_final_wire_max_bytes),
+    CHECK ((turn_id IS NULL AND turn_started_at_ms IS NULL AND turn_start_digest IS NULL
+            AND turn_completed_at_ms IS NULL AND turn_completion_digest IS NULL)
+        OR (turn_id IS NOT NULL AND turn_started_at_ms IS NOT NULL
+            AND turn_start_digest IS NOT NULL
+            AND ((turn_completed_at_ms IS NULL AND turn_completion_digest IS NULL)
+              OR (turn_completed_at_ms >= turn_started_at_ms
+                  AND turn_completion_digest IS NOT NULL)))),
+    CHECK ((final_response_digest IS NULL AND final_response_json IS NULL
+            AND final_wire_max_bytes IS NULL)
+        OR (final_response_digest IS NOT NULL AND final_response_json IS NOT NULL
+            AND final_wire_max_bytes BETWEEN 1 AND 16777216
+            AND length(CAST(final_response_json AS BLOB)) <= final_wire_max_bytes)),
+    CHECK ((delta_response_digest IS NULL AND delta_response_json IS NULL
+            AND delta_wire_max_bytes IS NULL)
+        OR (delta_response_digest IS NOT NULL AND delta_response_json IS NOT NULL
+            AND delta_wire_max_bytes BETWEEN 1 AND 16777216
+            AND length(CAST(delta_response_json AS BLOB)) <= delta_wire_max_bytes)),
+    CHECK (owner_send_settled_at_ms IS NULL
+        OR (contacted_at_ms IS NOT NULL AND final_response_digest IS NOT NULL
+            AND owner_send_settled_at_ms >= contacted_at_ms)),
+    CHECK ((state='reserved' AND setup_contacted_at_ms IS NULL
+            AND setup_final_response_digest IS NULL AND setup_owner_send_settled_at_ms IS NULL
+            AND contacted_at_ms IS NULL AND turn_id IS NULL
+            AND delta_response_digest IS NULL AND final_response_digest IS NULL
+            AND completed_at_ms IS NULL AND owner_send_settled_at_ms IS NULL)
+        OR (state='setup_possible_contact' AND setup_contacted_at_ms IS NOT NULL
+            AND setup_owner_send_settled_at_ms IS NULL AND contacted_at_ms IS NULL)
+        OR (state='setup_settled' AND setup_owner_send_settled_at_ms IS NOT NULL
+            AND contacted_at_ms IS NULL)
+        OR (state='possible_contact' AND contacted_at_ms IS NOT NULL
+            AND completed_at_ms IS NULL)
+        OR (state='turn_completed' AND contacted_at_ms IS NOT NULL
+            AND turn_completed_at_ms IS NOT NULL AND final_response_digest IS NOT NULL
+            AND completed_at_ms IS NOT NULL)
+        OR (state='outcome_unknown' AND setup_contacted_at_ms IS NOT NULL))
+);
+CREATE TRIGGER external_qualification_worker_command_insert_guard
+BEFORE INSERT ON external_qualification_worker_command
+WHEN NEW.state!='reserved'
+ OR NOT EXISTS(SELECT 1 FROM external_qualification_worker_process p
+    WHERE p.placement_thread_id=NEW.placement_thread_id AND p.phase='attached'
+      AND p.accepted_root_id=NEW.accepted_root_id
+      AND p.accepted_capsule_hash=NEW.accepted_capsule_hash
+      AND p.qualification_operation_id=NEW.qualification_operation_id
+      AND p.qualification_occurrence_id=NEW.qualification_occurrence_id
+      AND p.channel_binding_digest=NEW.channel_binding_digest)
+BEGIN SELECT RAISE(ABORT, 'qualification command changed its attached Worker owner'); END;
+CREATE TRIGGER external_qualification_worker_command_transition_guard
+BEFORE UPDATE ON external_qualification_worker_command
+WHEN NEW.placement_thread_id!=OLD.placement_thread_id
+ OR NEW.accepted_root_id!=OLD.accepted_root_id
+ OR NEW.accepted_capsule_hash!=OLD.accepted_capsule_hash
+ OR NEW.qualification_operation_id!=OLD.qualification_operation_id
+ OR NEW.qualification_occurrence_id!=OLD.qualification_occurrence_id
+ OR NEW.channel_binding_digest!=OLD.channel_binding_digest
+ OR NEW.process_incarnation_digest!=OLD.process_incarnation_digest
+ OR NEW.setup_request_digest!=OLD.setup_request_digest
+ OR NEW.setup_contacted_at_ms IS NOT OLD.setup_contacted_at_ms
+    AND OLD.setup_contacted_at_ms IS NOT NULL
+ OR NEW.setup_final_response_digest IS NOT OLD.setup_final_response_digest
+    AND OLD.setup_final_response_digest IS NOT NULL
+ OR NEW.setup_final_response_json IS NOT OLD.setup_final_response_json
+    AND OLD.setup_final_response_json IS NOT NULL
+ OR NEW.setup_final_wire_max_bytes IS NOT OLD.setup_final_wire_max_bytes
+    AND OLD.setup_final_wire_max_bytes IS NOT NULL
+ OR NEW.setup_owner_send_settled_at_ms IS NOT OLD.setup_owner_send_settled_at_ms
+    AND OLD.setup_owner_send_settled_at_ms IS NOT NULL
+ OR NEW.request_digest!=OLD.request_digest
+ OR NEW.reserved_at_ms!=OLD.reserved_at_ms
+ OR NEW.contacted_at_ms IS NOT OLD.contacted_at_ms
+    AND OLD.contacted_at_ms IS NOT NULL
+ OR NEW.turn_id IS NOT OLD.turn_id AND OLD.turn_id IS NOT NULL
+ OR NEW.turn_started_at_ms IS NOT OLD.turn_started_at_ms
+    AND OLD.turn_started_at_ms IS NOT NULL
+ OR NEW.turn_start_digest IS NOT OLD.turn_start_digest
+    AND OLD.turn_start_digest IS NOT NULL
+ OR NEW.turn_completed_at_ms IS NOT OLD.turn_completed_at_ms
+    AND OLD.turn_completed_at_ms IS NOT NULL
+ OR NEW.turn_completion_digest IS NOT OLD.turn_completion_digest
+    AND OLD.turn_completion_digest IS NOT NULL
+ OR NEW.delta_response_digest IS NOT OLD.delta_response_digest
+    AND OLD.delta_response_digest IS NOT NULL
+ OR NEW.delta_response_json IS NOT OLD.delta_response_json
+    AND OLD.delta_response_json IS NOT NULL
+ OR NEW.delta_wire_max_bytes IS NOT OLD.delta_wire_max_bytes
+    AND OLD.delta_wire_max_bytes IS NOT NULL
+ OR NEW.final_response_digest IS NOT OLD.final_response_digest
+    AND OLD.final_response_digest IS NOT NULL
+ OR NEW.final_response_json IS NOT OLD.final_response_json
+    AND OLD.final_response_json IS NOT NULL
+ OR NEW.final_wire_max_bytes IS NOT OLD.final_wire_max_bytes
+    AND OLD.final_wire_max_bytes IS NOT NULL
+ OR NEW.completed_at_ms IS NOT OLD.completed_at_ms
+    AND OLD.completed_at_ms IS NOT NULL
+ OR NEW.owner_send_settled_at_ms IS NOT OLD.owner_send_settled_at_ms
+    AND OLD.owner_send_settled_at_ms IS NOT NULL
+ OR (OLD.state='turn_completed' AND NEW.state='outcome_unknown'
+    AND EXISTS(SELECT 1 FROM external_qualification_worker_transcript t
+      WHERE t.placement_thread_id=OLD.placement_thread_id))
+ OR NOT ((OLD.state='reserved' AND NEW.state='setup_possible_contact')
+      OR (OLD.state='setup_possible_contact' AND NEW.state IN
+          ('setup_possible_contact','setup_settled','outcome_unknown'))
+      OR (OLD.state='setup_settled' AND NEW.state IN ('possible_contact','outcome_unknown'))
+      OR (OLD.state='possible_contact' AND NEW.state IN
+          ('possible_contact','turn_completed','outcome_unknown'))
+      OR (OLD.state='turn_completed' AND NEW.state IN ('turn_completed','outcome_unknown')))
+BEGIN SELECT RAISE(ABORT, 'qualification command transition changed retained authority'); END;
+CREATE TRIGGER external_qualification_worker_command_no_delete
+BEFORE DELETE ON external_qualification_worker_command
+BEGIN SELECT RAISE(ABORT, 'qualification Worker request occurrence is retained'); END;
+
+-- Exact pushed Worker batches are independent from the request-correlated
+-- Delta/Final turn journal. Their events and sequence chain remain available
+-- for restartable semantic verification; an ACK is returned only after commit.
+CREATE TABLE external_qualification_worker_observation_batch (
+    placement_thread_id TEXT NOT NULL REFERENCES external_qualification_worker_command(placement_thread_id),
+    process_incarnation_digest TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    first_sequence INTEGER NOT NULL CHECK (first_sequence > 0),
+    through_sequence INTEGER NOT NULL CHECK (through_sequence >= first_sequence),
+    previous_digest TEXT,
+    batch_digest TEXT NOT NULL,
+    canonical_batch_json TEXT NOT NULL,
+    wire_max_bytes INTEGER NOT NULL CHECK (wire_max_bytes BETWEEN 1 AND 16777216),
+    retained_at_ms INTEGER NOT NULL CHECK (retained_at_ms > 0),
+    PRIMARY KEY (placement_thread_id, first_sequence),
+    CHECK (through_sequence - first_sequence < 128),
+    CHECK (length(CAST(canonical_batch_json AS BLOB)) <= 393216),
+    CHECK (length(CAST(canonical_batch_json AS BLOB)) <= wire_max_bytes)
+);
+CREATE TRIGGER external_qualification_worker_observation_batch_insert_guard
+BEFORE INSERT ON external_qualification_worker_observation_batch
+WHEN NOT EXISTS(SELECT 1 FROM external_qualification_worker_command c
+    JOIN external_qualification_worker_process p
+      ON p.placement_thread_id=c.placement_thread_id
+    WHERE c.placement_thread_id=NEW.placement_thread_id
+      AND c.state IN ('setup_possible_contact','setup_settled','possible_contact','turn_completed')
+      AND c.setup_contacted_at_ms IS NOT NULL
+      AND c.request_digest=NEW.request_digest
+      AND c.process_incarnation_digest=NEW.process_incarnation_digest
+      AND p.phase='attached')
+BEGIN SELECT RAISE(ABORT, 'qualification observation lost its contacted Worker'); END;
+CREATE TRIGGER external_qualification_worker_observation_batch_no_update
+BEFORE UPDATE ON external_qualification_worker_observation_batch
+BEGIN SELECT RAISE(ABORT, 'qualification observation batch is immutable'); END;
+CREATE TRIGGER external_qualification_worker_observation_batch_no_delete
+BEFORE DELETE ON external_qualification_worker_observation_batch
+BEGIN SELECT RAISE(ABORT, 'qualification observation batch is retained'); END;
+
+-- A structural CAS root retained only after the exact Q Worker died and the
+-- one-send owner succeeded. This does not confer semantic success.
+CREATE TABLE external_qualification_worker_transcript (
+    placement_thread_id TEXT PRIMARY KEY REFERENCES external_qualification_worker_command(placement_thread_id),
+    owner_principal TEXT NOT NULL,
+    manifest_hash TEXT NOT NULL,
+    manifest_json TEXT NOT NULL CHECK (length(CAST(manifest_json AS BLOB)) <= 1048576),
+    retained_at_ms INTEGER NOT NULL CHECK (retained_at_ms > 0)
+);
+CREATE TRIGGER external_qualification_worker_transcript_insert_guard
+BEFORE INSERT ON external_qualification_worker_transcript
+WHEN NOT EXISTS(SELECT 1 FROM external_qualification_worker_command c
+    JOIN external_qualification_worker_process p
+      ON p.placement_thread_id=c.placement_thread_id
+    WHERE c.placement_thread_id=NEW.placement_thread_id
+      AND c.state='turn_completed' AND c.setup_owner_send_settled_at_ms IS NOT NULL
+      AND c.setup_final_response_digest IS NOT NULL AND c.owner_send_settled_at_ms IS NOT NULL
+      AND p.phase='terminal' AND p.channel_binding_digest=c.channel_binding_digest)
+BEGIN SELECT RAISE(ABORT, 'qualification transcript lacks a terminal successful Worker'); END;
+CREATE TRIGGER external_qualification_worker_transcript_no_update
+BEFORE UPDATE ON external_qualification_worker_transcript
+BEGIN SELECT RAISE(ABORT, 'qualification transcript is immutable'); END;
+CREATE TRIGGER external_qualification_worker_transcript_no_delete
+BEFORE DELETE ON external_qualification_worker_transcript
+BEGIN SELECT RAISE(ABORT, 'qualification transcript CAS root is retained'); END;
 
 CREATE TABLE external_execution_no_occurrence (
     placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
@@ -404,10 +736,24 @@ pub struct ExternalDedicatedSessionOwner {
     pub worker_boot_epoch: u64,
 }
 
+/// One accepted consumer's qualification-only Worker allocation. The full
+/// program and coordinate remain in the immutable reservation so recovery
+/// never has to reconstruct contact authority from current project state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalQualificationCandidateOwner {
+    pub coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    pub qualification_operation_id: String,
+    pub qualification_occurrence: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationOccurrence,
+    pub operator_principal: String,
+    pub program: ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExternalAllocationOwner {
     DedicatedSession(ExternalDedicatedSessionOwner),
+    QualificationCandidate(ExternalQualificationCandidateOwner),
     DirectThread {
         chain_root_id: String,
         launch_owner: LaunchOwner,
@@ -420,6 +766,9 @@ impl ExternalAllocationOwner {
         match self {
             Self::DedicatedSession(owner) => Ok(owner),
             Self::DirectThread { .. } => {
+                bail!("external allocation has no dedicated-session owner")
+            }
+            Self::QualificationCandidate(_) => {
                 bail!("external allocation has no dedicated-session owner")
             }
         }
@@ -456,6 +805,34 @@ impl ExternalAllocationOwner {
                     launch_owner.thread_id == placement
                         && (1..=i64::MAX as u64).contains(&launch_owner.monotonic_launch_epoch),
                     "external direct launch owner is invalid"
+                );
+            }
+            Self::QualificationCandidate(owner) => {
+                owner.coordinate.validate()?;
+                owner.program.validate()?;
+                validate_sha256(
+                    "external qualification operation",
+                    &owner.qualification_operation_id,
+                )?;
+                validate_bounded_runtime_text(
+                    "external qualification operator",
+                    &owner.operator_principal,
+                    256,
+                )?;
+                ensure!(
+                    placement
+                        == ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+                            &owner.coordinate,
+                            &owner.qualification_operation_id,
+                        )?
+                        && owner.qualification_occurrence.operation_id
+                            == owner.qualification_operation_id
+                        && owner.program.qualification_purpose_digest
+                            == owner.coordinate.qualification_purpose_digest
+                        && ryeos_state::objects::canonical_value_digest(
+                            &serde_json::to_value(&owner.program.qualification_use)?,
+                        )? == owner.coordinate.use_digest,
+                    "external qualification candidate changed its accepted operation or program"
                 );
             }
         }
@@ -565,6 +942,12 @@ impl ExternalAllocationReservation {
         }
         validate_bounded_runtime_text("external placement", &self.placement_thread_id, 256)?;
         self.owner.validate(&self.placement_thread_id)?;
+        if let ExternalAllocationOwner::QualificationCandidate(owner) = &self.owner {
+            ensure!(
+                self.admitted_capsule_hash == owner.coordinate.accepted_capsule_hash,
+                "external qualification candidate changed its accepted capsule"
+            );
+        }
         for hash in [
             &self.admitted_capsule_hash,
             &self.base_snapshot_hash,
@@ -842,6 +1225,28 @@ fn reserved_runtime_manifest<'a>(
             );
             program.runtime_manifest_hash()
         }
+        ExternalAllocationOwner::QualificationCandidate(owner) => {
+            let selected = contract.workload.qualification_structured_session()?;
+            let program = &owner.program;
+            program.validate()?;
+            ensure!(
+                contract.max_export_bytes == 0
+                    && contract.runtime_content_qualification.is_none()
+                    && program.requirement.provider_declaration_id
+                        == selected.provider_declaration_id
+                    && program.requirement.provider_configuration_destination
+                        == selected.provider_configuration_destination
+                    && program.requirement.connector_protocol == selected.connector_protocol
+                    && program.requirement.qualification_requirement_digest()?
+                        == selected.requirement_digest
+                    && program.qualification_use.profile_hash == selected.worker_profile_hash
+                    && program.runtime_manifest_hash == selected.runtime_manifest_hash
+                    && program.runtime_member.executable_sha256 == selected.runtime_member_sha256
+                    && reservation.timeout_seconds <= contract.timeout_seconds,
+                "qualification activation changed its signed zero-export program or binding"
+            );
+            Ok(&program.runtime_manifest_hash)
+        }
     }
 }
 
@@ -868,7 +1273,7 @@ pub(crate) fn external_supervisor_activation_request_digest(
     ryeos_state::objects::canonical_value_digest(&serde_json::json!({
         "domain":"ryeos.external-supervisor-activation.v1",
         "controller":&contract.controller_transport,
-        "tls_root_bundle_digest":&contract.controller_transport.tls_root_bundle_digest,
+        "tls_root_bundle_digest":contract.controller_transport.http().map(|http| http.tls_root_bundle_digest.as_str()).ok(),
         "placement_thread_id":&reservation.placement_thread_id,
         "occurrence_id":&occurrence.occurrence_id,
         "allocation_request_digest":&reservation.request_digest,
@@ -930,6 +1335,7 @@ impl ExternalSupervisorActivationObservation {
 pub(crate) struct ExternalSupervisorActivationRecord {
     pub intent: ExternalSupervisorActivationIntent,
     pub observation: Option<ExternalSupervisorActivationObservation>,
+    pub relay_bootstrap: Option<ExternalRelayBootstrapCommitment>,
 }
 
 /// Durable request written before the one allowed termination mutation. The
@@ -1439,11 +1845,41 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
                     .context("external supervisor activation lost its occurrence")?,
                 &retained.backend_contract(),
             )?;
+            relay_bootstrap::read_commitment(
+                conn,
+                &record.reservation,
+                record
+                    .occurrence
+                    .as_ref()
+                    .context("relay bootstrap lost its original occurrence")?,
+                &intent,
+                &retained.backend_contract(),
+            )?;
+        } else {
+            ensure!(
+                read_canonical_evidence::<ExternalRelayBootstrapCommitment>(
+                    conn,
+                    "external_execution_relay_bootstrap",
+                    "commitment_json",
+                    &placement,
+                )?
+                .is_none(),
+                "relay bootstrap commitment has no original activation"
+            );
         }
         validate_lifecycle_evidence(conn, &record)?;
     }
     channel::validate_channels(conn)?;
     connector::validate_connectors(conn)?;
+    qualification_local_start::validate_local_starts(conn)?;
+    qualification_guest_scratch::validate_scratches(conn)?;
+    qualification_process::validate_processes(conn)?;
+    qualification_command::validate_commands(conn)?;
+    qualification_batch::validate_batches(conn)?;
+    qualification_transcript::validate_transcripts(conn)?;
+    qualification_fixture_receiver::validate_receivers(conn)?;
+    relay_bootstrap::validate_no_orphans(conn)?;
+    relay_transfer::validate_transfers(conn)?;
     Ok(())
 }
 
@@ -1497,7 +1933,77 @@ fn require_retained_owner(
             );
             Ok(())
         }
+        ExternalAllocationOwner::QualificationCandidate(owner) => {
+            let qualification = super::runtime_snapshot_qualification::read(
+                conn,
+                &owner.qualification_operation_id,
+            )?
+            .context("external qualification candidate lost its operation")?;
+            ensure!(
+                qualification.intent.owner_principal == owner.operator_principal
+                    && qualification.occurrence.as_ref() == Some(&owner.qualification_occurrence),
+                "external qualification candidate changed its retained operator or occurrence"
+            );
+            super::restored_verifier_attempt::read_retained_consumer_prerequisite(
+                conn,
+                &owner.qualification_operation_id,
+                &owner.operator_principal,
+                &owner.coordinate,
+            )?;
+            Ok(())
+        }
     }
+}
+
+/// A Q allocation's first contact depends on the same live occurrence and
+/// observed owner measurement in this writer transaction. Callback launch
+/// claims are additionally checked by the ephemeral proof at first contact;
+/// the completed-root operator lane has no live callback claim.
+fn require_contactable_qualification_owner(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+) -> Result<()> {
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+        bail!("external qualification contact requires a qualification candidate");
+    };
+    require_retained_owner(conn, reservation)?;
+    let qualification =
+        super::runtime_snapshot_qualification::read(conn, &owner.qualification_operation_id)?
+            .context("external qualification contact lost its operation")?;
+    super::restored_verifier_attempt::require_live_occurrence(
+        conn,
+        &qualification,
+        i64::try_from(lillux::time::timestamp_millis())?,
+    )?;
+    Ok(())
+}
+
+/// Expiry or a retained termination intent closes transport without treating
+/// the historical prerequisite or allocation as corrupt. Cleanup can still
+/// read the original reservation and occurrence.
+fn qualification_owner_is_contactable(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+) -> Result<bool> {
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+        bail!("external qualification transport requires its candidate owner");
+    };
+    require_retained_owner(conn, reservation)?;
+    let qualification =
+        super::runtime_snapshot_qualification::read(conn, &owner.qualification_operation_id)?
+            .context("external qualification transport lost its operation")?;
+    let terminated: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_snapshot_qualification_termination
+         WHERE qualification_operation_id=?1)",
+        [&owner.qualification_operation_id],
+        |row| row.get(0),
+    )?;
+    let expires_at = qualification
+        .created_at_ms
+        .checked_add(i64::from(qualification.intent.maximum_lifetime_seconds) * 1000)
+        .context("external qualification occurrence lifetime overflow")?;
+    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    Ok(!terminated && now >= qualification.created_at_ms && now < expires_at)
 }
 
 fn require_contactable_direct_owner(
@@ -1549,23 +2055,42 @@ fn direct_owner_is_contactable(
 fn require_new_owner(
     conn: &Connection,
     reservation: &ExternalAllocationReservation,
-    proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
+    direct_proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
+    qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
 ) -> Result<()> {
     match &reservation.owner {
         ExternalAllocationOwner::DedicatedSession(_) => {
             ensure!(
-                proof.is_none(),
-                "session allocation cannot consume direct thread proof"
+                direct_proof.is_none() && qualification_proof.is_none(),
+                "session allocation cannot consume another owner's proof"
             );
             require_session_owner(conn, reservation)?;
             require_contactable_session(conn, &reservation.placement_thread_id)
         }
         ExternalAllocationOwner::DirectThread { .. } => {
             ensure!(
-                proof.is_some_and(|proof| proof.matches(reservation)),
+                qualification_proof.is_none()
+                    && direct_proof.is_some_and(|proof| proof.matches(reservation)),
                 "external direct allocation requires verified born capsule authority"
             );
             require_contactable_direct_owner(conn, reservation)
+        }
+        ExternalAllocationOwner::QualificationCandidate(owner) => {
+            ensure!(
+                direct_proof.is_none()
+                    && qualification_proof.is_some_and(|proof| proof.matches(reservation)),
+                "external qualification contact requires authenticated accepted root, product member and occurrence"
+            );
+            let proof = qualification_proof
+                .context("external qualification contact lost its accepted-root proof")?;
+            if let Some(launch_owner) = proof.callback_launch_owner() {
+                super::restored_verifier_attempt::require_current_callback_launch(
+                    conn,
+                    &owner.coordinate.accepted_root_id,
+                    launch_owner,
+                )?;
+            }
+            require_contactable_qualification_owner(conn, reservation)
         }
     }
 }
@@ -1605,7 +2130,9 @@ impl RuntimeDb {
                AND ((json_extract(a.reservation_json,'$.owner.kind')='direct_thread'
                      AND json_extract(a.reservation_json,'$.owner.chain_root_id')=?1)
                  OR (json_extract(a.reservation_json,'$.owner.kind')='dedicated_session'
-                     AND s.chain_root_id=?1))",
+                     AND s.chain_root_id=?1)
+                 OR (json_extract(a.reservation_json,'$.owner.kind')='qualification_candidate'
+                     AND json_extract(a.reservation_json,'$.owner.coordinate.accepted_root_id')=?1))",
             [chain_root_id],
             |row| row.get(0),
         )?;
@@ -1668,6 +2195,33 @@ impl RuntimeDb {
         retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
         proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
     ) -> Result<ExternalAllocationRecord> {
+        self.reserve_external_allocation_with_proofs(reservation, retained_binding, proof, None)
+    }
+
+    /// The StateStore supplies a non-serializable proof of the exact accepted
+    /// root, immutable guest base, selected runtime member and live Q identity.
+    /// Direct and session admission cannot consume this proof.
+    pub(crate) fn reserve_external_qualification_allocation_with_verified_owner(
+        &self,
+        reservation: &ExternalAllocationReservation,
+        retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
+    ) -> Result<ExternalAllocationRecord> {
+        self.reserve_external_allocation_with_proofs(
+            reservation,
+            retained_binding,
+            None,
+            Some(proof),
+        )
+    }
+
+    fn reserve_external_allocation_with_proofs(
+        &self,
+        reservation: &ExternalAllocationReservation,
+        retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        direct_proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
+        qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
+    ) -> Result<ExternalAllocationRecord> {
         reservation.validate()?;
         retained_binding.validate()?;
         retained_binding
@@ -1706,7 +2260,14 @@ impl RuntimeDb {
             tx.commit()?;
             return Ok(existing);
         }
-        require_new_owner(&tx, reservation, proof)?;
+        require_new_owner(&tx, reservation, direct_proof, qualification_proof)?;
+        if matches!(
+            &reservation.owner,
+            ExternalAllocationOwner::QualificationCandidate(_)
+        ) {
+            qualification_guest_scratch::require_created_for_allocation(&tx, reservation)?;
+            reserved_runtime_manifest(reservation, &retained_binding.backend_contract())?;
+        }
         if read_guard(&tx)? >= 256 {
             bail!("node external allocation ceiling reached");
         }
@@ -1762,6 +2323,30 @@ impl RuntimeDb {
         request_digest: &str,
         proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
     ) -> Result<ExternalAllocationContactClaim> {
+        self.claim_external_allocation_contact_with_proofs(placement, request_digest, proof, None)
+    }
+
+    pub(crate) fn claim_external_qualification_allocation_contact_with_verified_owner(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
+    ) -> Result<ExternalAllocationContactClaim> {
+        self.claim_external_allocation_contact_with_proofs(
+            placement,
+            request_digest,
+            None,
+            Some(proof),
+        )
+    }
+
+    fn claim_external_allocation_contact_with_proofs(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        direct_proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
+        qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
+    ) -> Result<ExternalAllocationContactClaim> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read(&tx, placement)?.context("external allocation was not reserved")?;
         if record.reservation.request_digest != request_digest {
@@ -1787,7 +2372,7 @@ impl RuntimeDb {
             ExternalAllocationPhase::Reserved => {}
             _ => unreachable!("settled external phase returned before owner validation"),
         }
-        require_new_owner(&tx, &record.reservation, proof)?;
+        require_new_owner(&tx, &record.reservation, direct_proof, qualification_proof)?;
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         record.reservation.require_startup_time(now)?;
         if now >= record.reservation.contact_deadline_ms {
@@ -1944,6 +2529,45 @@ impl RuntimeDb {
         placement: &str,
         intent: &ExternalSupervisorActivationIntent,
     ) -> Result<bool> {
+        self.begin_external_supervisor_activation_with_relay(placement, intent, None, None)
+    }
+
+    pub(crate) fn begin_external_relay_supervisor_activation(
+        &self,
+        placement: &str,
+        intent: &ExternalSupervisorActivationIntent,
+        relay_bootstrap: &ExternalRelayBootstrapCommitment,
+    ) -> Result<bool> {
+        self.begin_external_supervisor_activation_with_relay(
+            placement,
+            intent,
+            Some(relay_bootstrap),
+            None,
+        )
+    }
+
+    pub(crate) fn begin_external_qualification_supervisor_activation_with_verified_owner(
+        &self,
+        placement: &str,
+        intent: &ExternalSupervisorActivationIntent,
+        relay_bootstrap: Option<&ExternalRelayBootstrapCommitment>,
+        proof: &crate::state_store::VerifiedExternalQualificationOwner,
+    ) -> Result<bool> {
+        self.begin_external_supervisor_activation_with_relay(
+            placement,
+            intent,
+            relay_bootstrap,
+            Some(proof),
+        )
+    }
+
+    fn begin_external_supervisor_activation_with_relay(
+        &self,
+        placement: &str,
+        intent: &ExternalSupervisorActivationIntent,
+        relay_bootstrap: Option<&ExternalRelayBootstrapCommitment>,
+        qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
+    ) -> Result<bool> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read(&tx, placement)?.context("external allocation is absent")?;
         let occurrence = record
@@ -1958,6 +2582,22 @@ impl RuntimeDb {
             occurrence,
             &retained.backend_contract(),
         )?;
+        match (&retained.backend_contract().controller_transport, relay_bootstrap) {
+            (
+                ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_),
+                Some(commitment),
+            ) => commitment.validate_for(
+                &record.reservation,
+                occurrence,
+                intent,
+                &retained.backend_contract(),
+            )?,
+            (
+                ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_),
+                None,
+            ) => {}
+            _ => bail!("external activation changed its original relay bootstrap custody"),
+        }
         let prior: Option<ExternalSupervisorActivationIntent> = read_canonical_evidence(
             &tx,
             "external_execution_supervisor_activation_intent",
@@ -1969,6 +2609,18 @@ impl RuntimeDb {
                 prior == *intent,
                 "external supervisor activation intent changed"
             );
+            ensure!(
+                relay_bootstrap::read_commitment(
+                    &tx,
+                    &record.reservation,
+                    occurrence,
+                    &prior,
+                    &retained.backend_contract(),
+                )?
+                .as_ref()
+                    == relay_bootstrap,
+                "external supervisor activation changed its original relay bootstrap"
+            );
             tx.commit()?;
             return Ok(false);
         }
@@ -1976,6 +2628,15 @@ impl RuntimeDb {
             record.phase == ExternalAllocationPhase::Bound,
             "new external supervisor activation requires an executable bound occurrence"
         );
+        match &record.reservation.owner {
+            ExternalAllocationOwner::QualificationCandidate(_) => {
+                require_new_owner(&tx, &record.reservation, None, qualification_proof)?;
+            }
+            _ => ensure!(
+                qualification_proof.is_none(),
+                "Q supervisor activation changed its allocation owner kind"
+            ),
+        }
         channel::require_current_execution_owner(&tx, &record.reservation)?;
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         record.reservation.require_startup_time(now)?;
@@ -1990,6 +2651,15 @@ impl RuntimeDb {
                 lillux::canonical_json(&serde_json::to_value(intent)?)?
             ],
         )?;
+        if let Some(commitment) = relay_bootstrap {
+            tx.execute(
+                "INSERT INTO external_execution_relay_bootstrap VALUES(?1,?2)",
+                params![
+                    placement,
+                    lillux::canonical_json(&serde_json::to_value(commitment)?)?
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(true)
     }
@@ -2020,6 +2690,13 @@ impl RuntimeDb {
             occurrence,
             &retained.backend_contract(),
         )?;
+        let relay_bootstrap = relay_bootstrap::read_commitment(
+            &self.conn,
+            &record.reservation,
+            occurrence,
+            &intent,
+            &retained.backend_contract(),
+        )?;
         let observation = read_canonical_evidence::<ExternalSupervisorActivationObservation>(
             &self.conn,
             "external_execution_supervisor_activation_observation",
@@ -2032,6 +2709,7 @@ impl RuntimeDb {
         Ok(Some(ExternalSupervisorActivationRecord {
             intent,
             observation,
+            relay_bootstrap,
         }))
     }
 
@@ -2154,6 +2832,16 @@ impl RuntimeDb {
                 |row| row.get(0),
             )
             .optional()?;
+        if matches!(
+            &record.reservation.owner,
+            ExternalAllocationOwner::QualificationCandidate(_)
+        ) && channel.is_none()
+        {
+            ensure!(
+                record.phase == ExternalAllocationPhase::Quarantined,
+                "bound Q normal termination lost its required channel"
+            );
+        }
         if let Some(binding_digest) = channel {
             let revoked: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM external_execution_revocation
@@ -2166,18 +2854,24 @@ impl RuntimeDb {
                     record.phase == ExternalAllocationPhase::Bound,
                     "quarantined external execution cannot acquire a new normal settlement intent"
                 );
-                ensure!(
-                    matches!(
-                        record.reservation.owner,
-                        ExternalAllocationOwner::DirectThread { .. }
-                    ),
-                    "external termination requires durable channel revocation"
-                );
-                require_contactable_direct_owner(&tx, &record.reservation)?;
-                ensure!(
-                    channel::complete_applied_direct_output_tx(&tx, placement)?.is_some(),
-                    "normal external termination requires complete applied target observations"
-                );
+                match &record.reservation.owner {
+                    ExternalAllocationOwner::DirectThread { .. } => {
+                        require_contactable_direct_owner(&tx, &record.reservation)?;
+                        ensure!(
+                            channel::complete_applied_direct_output_tx(&tx, placement)?.is_some(),
+                            "normal external termination requires complete applied target observations"
+                        );
+                    }
+                    ExternalAllocationOwner::QualificationCandidate(_) => {
+                        channel::require_applied_qualification_normal_settlement_tx(
+                            &tx,
+                            &record.reservation,
+                        )?;
+                    }
+                    ExternalAllocationOwner::DedicatedSession(_) => {
+                        bail!("external termination requires durable channel revocation")
+                    }
+                }
             }
         }
         tx.execute(
@@ -2219,6 +2913,33 @@ impl RuntimeDb {
         )?
         .context("external terminal observation has no durable termination intent")?;
         observation.validate(&record.reservation, occurrence, &intent)?;
+        if matches!(
+            &record.reservation.owner,
+            ExternalAllocationOwner::QualificationCandidate(_)
+        ) {
+            let channel_digest: Option<String> = tx
+                .query_row(
+                    "SELECT binding_digest FROM external_execution_channel
+                     WHERE placement_thread_id=?1",
+                    [placement],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(channel_digest) = channel_digest {
+                if !ryeos_state::external_execution::journal::revoked(&tx, &channel_digest)? {
+                    channel::require_applied_qualification_normal_settlement_tx(
+                        &tx,
+                        &record.reservation,
+                    )?;
+                }
+            } else {
+                ensure!(
+                    record.phase == ExternalAllocationPhase::Quarantined
+                        || record.phase == ExternalAllocationPhase::Terminated,
+                    "bound Q provider terminal lost its required channel"
+                );
+            }
+        }
         if record.phase == ExternalAllocationPhase::Terminated {
             let prior: Option<ExternalTerminalObservation> = read_canonical_evidence(
                 &tx,
@@ -2230,6 +2951,7 @@ impl RuntimeDb {
                 prior.as_ref() == Some(observation),
                 "external terminal observation changed"
             );
+            relay_transfer::close_placement_after_terminal_tx(&tx, placement)?;
             tx.commit()?;
             return Ok(());
         }
@@ -2254,6 +2976,7 @@ impl RuntimeDb {
         )?;
         let settled = read(&tx, placement)?.context("settled allocation disappeared")?;
         validate_lifecycle_evidence(&tx, &settled)?;
+        relay_transfer::close_placement_after_terminal_tx(&tx, placement)?;
         tx.commit()?;
         Ok(())
     }
@@ -2294,6 +3017,12 @@ impl RuntimeDb {
         let mut statement = self
             .conn
             .prepare("SELECT snapshot_hash FROM external_execution_import")?;
+        for root in statement.query_map([], |row| row.get::<_, String>(0))? {
+            roots.insert(root?);
+        }
+        let mut statement = self
+            .conn
+            .prepare("SELECT manifest_hash FROM external_qualification_worker_transcript")?;
         for root in statement.query_map([], |row| row.get::<_, String>(0))? {
             roots.insert(root?);
         }

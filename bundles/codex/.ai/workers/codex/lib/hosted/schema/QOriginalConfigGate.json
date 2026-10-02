@@ -1,0 +1,903 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QOriginalConfigGate",
+  "description": "Pinned rust-v0.147.0 config/read projection and raw layers. Requires original pre-bootstrap absence/custody and sealed provider configuration separately. This is not an applied-thread/tool-registry witness; code_mode false is only a default.",
+  "definitions": {
+    "systemName": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "system"
+        },
+        "file": {
+          "const": "/etc/codex/config.toml"
+        }
+      },
+      "required": [
+        "type",
+        "file"
+      ],
+      "additionalProperties": false
+    },
+    "userName": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "user"
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]*$"
+        },
+        "profile": {
+          "const": null
+        }
+      },
+      "required": [
+        "type",
+        "file",
+        "profile"
+      ],
+      "additionalProperties": false
+    },
+    "projectName": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "project"
+        },
+        "dotCodexFolder": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]*$"
+        }
+      },
+      "required": [
+        "type",
+        "dotCodexFolder"
+      ],
+      "additionalProperties": false
+    },
+    "sessionFlagsName": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "sessionFlags"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "enterpriseManagedName": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "enterpriseManaged"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "legacyManagedConfigTomlFromFileName": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "legacyManagedConfigTomlFromFile"
+        },
+        "file": {
+          "const": "/etc/codex/managed_config.toml"
+        }
+      },
+      "required": [
+        "type",
+        "file"
+      ],
+      "additionalProperties": false
+    },
+    "RawSessionFlags": {
+      "const": {
+        "forced_login_method": "chatgpt",
+        "cli_auth_credentials_store": "file",
+        "model_provider": "openai",
+        "mcp_servers": {},
+        "notify": [],
+        "orchestrator": {
+          "skills": {
+            "enabled": false
+          },
+          "mcp": {
+            "enabled": false
+          }
+        },
+        "check_for_update_on_startup": false,
+        "approval_policy": "never",
+        "approvals_reviewer": "user",
+        "default_permissions": "danger-full-access",
+        "web_search": "disabled",
+        "allow_login_shell": false,
+        "shell_environment_policy": {
+          "inherit": "all",
+          "ignore_default_excludes": false,
+          "filters": {
+            "PATH": "include",
+            "LANG": "include",
+            "LC_ALL": "include",
+            "LC_CTYPE": "include",
+            "TERM": "include",
+            "TZ": "include",
+            "TMPDIR": "include",
+            "GIT_CONFIG_NOSYSTEM": "include",
+            "GIT_CONFIG_GLOBAL": "include",
+            "GIT_PAGER": "include",
+            "HOME": "exclude",
+            "CODEX_HOME": "exclude",
+            "DBUS_*": "exclude",
+            "SSH_*": "exclude",
+            "*PROXY": "exclude"
+          }
+        },
+        "agents": {
+          "enabled": false
+        },
+        "features": {
+          "image_generation": false,
+          "goals": false,
+          "apps": false,
+          "plugins": false,
+          "skill_mcp_dependency_install": false,
+          "remote_plugin": false,
+          "hooks": false,
+          "multi_agent": false,
+          "multi_agent_v2": false,
+          "memories": false,
+          "network_proxy": false,
+          "code_mode_host": true,
+          "code_mode": {
+            "enabled": false
+          }
+        }
+      }
+    },
+    "RawUserConfig": {
+      "type": "object",
+      "properties": {
+        "forced_login_method": {
+          "const": "chatgpt"
+        },
+        "cli_auth_credentials_store": {
+          "const": "file"
+        },
+        "model_provider": {
+          "const": "openai"
+        },
+        "mcp_servers": {
+          "const": {}
+        },
+        "notify": {
+          "const": []
+        },
+        "check_for_update_on_startup": {
+          "const": false
+        },
+        "approval_policy": {
+          "const": "never"
+        },
+        "approvals_reviewer": {
+          "const": "user"
+        },
+        "default_permissions": {
+          "const": "danger-full-access"
+        },
+        "web_search": {
+          "const": "disabled"
+        },
+        "allow_login_shell": {
+          "const": false
+        },
+        "shell_environment_policy": {
+          "const": {
+            "inherit": "all",
+            "ignore_default_excludes": false,
+            "filters": {
+              "PATH": "include",
+              "LANG": "include",
+              "LC_ALL": "include",
+              "LC_CTYPE": "include",
+              "TERM": "include",
+              "TZ": "include",
+              "TMPDIR": "include",
+              "GIT_CONFIG_NOSYSTEM": "include",
+              "GIT_CONFIG_GLOBAL": "include",
+              "GIT_PAGER": "include",
+              "HOME": "exclude",
+              "CODEX_HOME": "exclude",
+              "DBUS_*": "exclude",
+              "SSH_*": "exclude",
+              "*PROXY": "exclude"
+            }
+          }
+        },
+        "agents": {
+          "const": {
+            "enabled": false
+          }
+        },
+        "features": {
+          "const": {
+            "image_generation": false,
+            "goals": false,
+            "apps": false,
+            "plugins": false,
+            "skill_mcp_dependency_install": false,
+            "remote_plugin": false,
+            "hooks": false,
+            "multi_agent": false,
+            "multi_agent_v2": false,
+            "memories": false,
+            "network_proxy": false,
+            "code_mode_host": true,
+            "code_mode": {
+              "enabled": false
+            }
+          }
+        },
+        "orchestrator": {
+          "const": {
+            "skills": {
+              "enabled": false
+            },
+            "mcp": {
+              "enabled": false
+            }
+          }
+        },
+        "projects": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^/[^\\u0000-\\u001f\\u007f]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "trust_level": {
+                "const": "trusted"
+              }
+            },
+            "required": [
+              "trust_level"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "forced_login_method",
+        "cli_auth_credentials_store",
+        "model_provider",
+        "mcp_servers",
+        "notify",
+        "check_for_update_on_startup",
+        "approval_policy",
+        "approvals_reviewer",
+        "default_permissions",
+        "web_search",
+        "allow_login_shell",
+        "shell_environment_policy",
+        "agents",
+        "features",
+        "orchestrator"
+      ],
+      "additionalProperties": false
+    },
+    "MergedConfig": {
+      "type": "object",
+      "properties": {
+        "model": {},
+        "review_model": {},
+        "model_provider": {
+          "const": "openai"
+        },
+        "model_context_window": {},
+        "model_auto_compact_token_limit": {},
+        "model_auto_compact_token_limit_scope": {},
+        "approval_policy": {
+          "const": "never"
+        },
+        "approvals_reviewer": {
+          "const": "user"
+        },
+        "auto_review": {
+          "const": null
+        },
+        "shell_environment_policy": {
+          "const": {
+            "inherit": "all",
+            "ignore_default_excludes": false,
+            "filters": {
+              "path": "include",
+              "lang": "include",
+              "lc_all": "include",
+              "lc_ctype": "include",
+              "term": "include",
+              "tz": "include",
+              "tmpdir": "include",
+              "git_config_nosystem": "include",
+              "git_config_global": "include",
+              "git_pager": "include",
+              "home": "exclude",
+              "codex_home": "exclude",
+              "dbus_*": "exclude",
+              "ssh_*": "exclude",
+              "*proxy": "exclude"
+            },
+            "exclude": null,
+            "set": null,
+            "include_only": null,
+            "experimental_use_profile": null
+          }
+        },
+        "allow_login_shell": {
+          "const": false
+        },
+        "sandbox_mode": {},
+        "sandbox_workspace_write": {},
+        "default_permissions": {
+          "const": "danger-full-access"
+        },
+        "permissions": {
+          "const": null
+        },
+        "notify": {
+          "const": []
+        },
+        "instructions": {},
+        "developer_instructions": {},
+        "include_permissions_instructions": {},
+        "include_apps_instructions": {},
+        "include_collaboration_mode_instructions": {},
+        "include_environment_context": {},
+        "model_instructions_file": {
+          "const": null
+        },
+        "compact_prompt": {},
+        "forced_chatgpt_workspace_id": {},
+        "forced_login_method": {
+          "const": "chatgpt"
+        },
+        "cli_auth_credentials_store": {
+          "const": "file"
+        },
+        "mcp_servers": {
+          "const": {}
+        },
+        "mcp_oauth_credentials_store": {},
+        "mcp_oauth_callback_port": {},
+        "mcp_oauth_callback_url": {},
+        "model_providers": {
+          "const": {}
+        },
+        "project_doc_max_bytes": {},
+        "project_doc_fallback_filenames": {},
+        "tool_output_token_limit": {},
+        "background_terminal_max_timeout": {},
+        "js_repl_node_path": {},
+        "js_repl_node_module_dirs": {},
+        "profile": {
+          "const": null
+        },
+        "profiles": {
+          "const": {}
+        },
+        "history": {},
+        "sqlite_home": {},
+        "log_dir": {},
+        "debug": {
+          "const": null
+        },
+        "file_opener": {},
+        "tui": {},
+        "hide_agent_reasoning": {},
+        "show_raw_agent_reasoning": {},
+        "model_reasoning_effort": {},
+        "plan_mode_reasoning_effort": {},
+        "model_reasoning_summary": {},
+        "model_verbosity": {},
+        "model_catalog_json": {
+          "const": null
+        },
+        "personality": {},
+        "service_tier": {},
+        "chatgpt_base_url": {
+          "const": null
+        },
+        "apps_mcp_product_sku": {},
+        "orchestrator": {
+          "const": {
+            "skills": {
+              "enabled": false
+            },
+            "mcp": {
+              "enabled": false
+            }
+          }
+        },
+        "openai_base_url": {
+          "const": null
+        },
+        "audio": {},
+        "experimental_realtime_ws_base_url": {},
+        "experimental_realtime_webrtc_call_base_url": {},
+        "experimental_realtime_ws_model": {},
+        "realtime": {},
+        "experimental_realtime_ws_backend_prompt": {},
+        "experimental_realtime_ws_startup_context": {},
+        "experimental_realtime_start_instructions": {},
+        "experimental_thread_config_endpoint": {
+          "const": null
+        },
+        "experimental_thread_store_endpoint": {
+          "const": null
+        },
+        "experimental_thread_store": {
+          "const": null
+        },
+        "projects": {
+          "anyOf": [
+            {
+              "const": null
+            },
+            {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^/[^\\u0000-\\u001f\\u007f]*$"
+              },
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "trust_level": {
+                    "const": "trusted"
+                  }
+                },
+                "required": [
+                  "trust_level"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ]
+        },
+        "web_search": {
+          "const": "disabled"
+        },
+        "tools": {
+          "const": null
+        },
+        "tool_suggest": {
+          "const": null
+        },
+        "agents": {
+          "const": {
+            "enabled": false,
+            "max_concurrent_threads_per_session": null,
+            "max_depth": null,
+            "default_subagent_model": null,
+            "default_subagent_reasoning_effort": null,
+            "job_max_runtime_seconds": null,
+            "interrupt_message": null
+          }
+        },
+        "memories": {},
+        "skills": {
+          "const": null
+        },
+        "hooks": {
+          "const": null
+        },
+        "plugins": {
+          "const": {}
+        },
+        "marketplaces": {
+          "const": {}
+        },
+        "features": {
+          "const": {
+            "image_generation": false,
+            "goals": false,
+            "apps": false,
+            "plugins": false,
+            "skill_mcp_dependency_install": false,
+            "remote_plugin": false,
+            "hooks": false,
+            "multi_agent": false,
+            "multi_agent_v2": false,
+            "memories": false,
+            "network_proxy": false,
+            "code_mode_host": true,
+            "code_mode": {
+              "enabled": false
+            },
+            "auth_elicitation": true,
+            "mcp_2026_07_28": false,
+            "mentions_v2": true,
+            "remote_control": false,
+            "tool_suggest": true
+          }
+        },
+        "suppress_unstable_features_warning": {},
+        "ghost_snapshot": {},
+        "project_root_markers": {},
+        "check_for_update_on_startup": {
+          "const": false
+        },
+        "disable_paste_burst": {},
+        "analytics": {},
+        "feedback": {},
+        "apps": {
+          "const": null
+        },
+        "desktop": {},
+        "otel": {
+          "const": null
+        },
+        "windows": {},
+        "notice": {},
+        "experimental_compact_prompt_file": {
+          "const": null
+        },
+        "experimental_use_unified_exec_tool": {
+          "const": null
+        },
+        "oss_provider": {
+          "const": null
+        }
+      },
+      "required": [
+        "agents",
+        "allow_login_shell",
+        "approval_policy",
+        "approvals_reviewer",
+        "apps",
+        "auto_review",
+        "chatgpt_base_url",
+        "check_for_update_on_startup",
+        "cli_auth_credentials_store",
+        "debug",
+        "default_permissions",
+        "experimental_compact_prompt_file",
+        "experimental_thread_config_endpoint",
+        "experimental_thread_store",
+        "experimental_thread_store_endpoint",
+        "experimental_use_unified_exec_tool",
+        "features",
+        "forced_login_method",
+        "hooks",
+        "marketplaces",
+        "mcp_servers",
+        "model_catalog_json",
+        "model_instructions_file",
+        "model_provider",
+        "model_providers",
+        "notify",
+        "openai_base_url",
+        "orchestrator",
+        "oss_provider",
+        "otel",
+        "permissions",
+        "plugins",
+        "profile",
+        "profiles",
+        "projects",
+        "shell_environment_policy",
+        "skills",
+        "tool_suggest",
+        "tools",
+        "web_search"
+      ],
+      "additionalProperties": false,
+      "maxProperties": 96
+    },
+    "Layer": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "$ref": "#/definitions/systemName"
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "config": {
+              "const": {}
+            },
+            "disabledReason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "config"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "$ref": "#/definitions/userName"
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "config": {
+              "$ref": "#/definitions/RawUserConfig"
+            },
+            "disabledReason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "config"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "$ref": "#/definitions/projectName"
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "config": {
+              "const": {}
+            },
+            "disabledReason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "config"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "$ref": "#/definitions/sessionFlagsName"
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "config": {
+              "$ref": "#/definitions/RawSessionFlags"
+            },
+            "disabledReason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "config"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "$ref": "#/definitions/enterpriseManagedName"
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "config": {
+              "const": {}
+            },
+            "disabledReason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "config"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "$ref": "#/definitions/legacyManagedConfigTomlFromFileName"
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "config": {
+              "const": {}
+            },
+            "disabledReason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "config"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Metadata": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/systemName"
+            },
+            {
+              "$ref": "#/definitions/userName"
+            },
+            {
+              "$ref": "#/definitions/projectName"
+            },
+            {
+              "$ref": "#/definitions/sessionFlagsName"
+            },
+            {
+              "$ref": "#/definitions/enterpriseManagedName"
+            },
+            {
+              "$ref": "#/definitions/legacyManagedConfigTomlFromFileName"
+            }
+          ]
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "config": {
+      "$ref": "#/definitions/MergedConfig"
+    },
+    "origins": {
+      "type": "object",
+      "maxProperties": 512,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/Metadata"
+      }
+    },
+    "layers": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/definitions/Layer"
+      },
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/definitions/systemName"
+              }
+            }
+          }
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/definitions/userName"
+              }
+            }
+          }
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/definitions/sessionFlagsName"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "required": [
+    "config",
+    "origins",
+    "layers"
+  ],
+  "additionalProperties": false
+}

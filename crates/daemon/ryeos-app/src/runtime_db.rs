@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -1927,10 +1927,14 @@ const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence 
 
 fn runtime_schema_sql() -> String {
     format!(
-        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         external_execution::GUARD_SQL,
         ryeos_state::external_execution::journal::CHANNEL_SQL,
         external_execution::JOURNAL_SQL,
+        external_execution::QUALIFICATION_LOCAL_START_SQL,
+        external_execution::QUALIFICATION_GUEST_SCRATCH_SQL,
+        external_execution::QUALIFICATION_FIXTURE_RECEIVER_SQL,
+        external_execution::RELAY_TRANSFER_SQL,
         scoped_child_attempt::JOURNAL_SQL,
         runtime_snapshot_bootstrap::JOURNAL_SQL,
         runtime_snapshot_bootstrap_termination::JOURNAL_SQL,
@@ -1939,6 +1943,7 @@ fn runtime_schema_sql() -> String {
         runtime_snapshot_qualification::JOURNAL_SQL,
         restored_verifier_attempt::JOURNAL_SQL,
         runtime_snapshot_qualification_termination::JOURNAL_SQL,
+        external_execution::RELAY_BOOTSTRAP_SQL,
     )
 }
 
@@ -2707,13 +2712,43 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 103 binds consumer attempts to the retained installed guest runtime
 // manifest. Predecessor purposes cannot acquire an account/profile identity
 // from an uploaded archive or mutable settings during recovery.
-// Epoch 104 requires explicit resource settlement authority in process
-// identity v6 and tagged local/trusted resource launch reservations. Predecessor
-// rows cannot infer trusted authority or reconstruct a held-spawn permit.
-// Epoch 105 retains required-nullable resource runtime custody, transferred
-// atomically into the existing owner. Populated custody cannot be generically
-// cleared before its original workspace/content cleanup owner is joined.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 106;
+// Epoch 104 retains the exact canonical consumer input before the contact
+// claim. Earlier consumer attempts had no durable input-byte commitment.
+// Epoch 105 retains one Q local Worker process before release and requires
+// exact process death proof before its allocation can settle.
+// Epoch 106 retains one Q framed request, its possible-contact boundary,
+// request-correlated Final and separately observed completed turn.
+// Epoch 107 retains one Q-local workspace Create and process-scope attempt,
+// including exact held creator, view, recovery, and Worker attachment joins.
+// Epoch 108 retains the bounded canonical Q Worker Final and the selected
+// signed wire maximum for restartable semantic verification.
+// Epoch 109 retains one possible borrow of the original Q workspace view
+// before its descriptor can be cloned for the held Worker.
+// Epoch 110 retains exact no-contact Q local cleanup, physical view close,
+// backend Destroy, original pinned-root removal, and scope retirement.
+// Epoch 111 retains bounded, request-bound Q Worker pushed batches in their
+// exact local sequence chain. This local transport receipt is not a portable
+// signed qualification fact or a semantic success permit.
+// Epoch 112 retains the exact request-correlated Delta and a one-way send
+// settlement marker, separately from observation-driven turn completion.
+// Epoch 114 retained a one-use Q guest-input scratch intent before Create.
+// Epoch 115 adds exact original-descriptor physical removal and Closed evidence.
+// Epoch 116 retains one-use Render Q relay transfer intents and exact file bytes.
+// Epoch 117 binds the original sealed relay bootstrap to its activation.
+// Epoch 118 retains one semantic application attempt and its exact signed
+// response before any controller-to-guest relay file can be uploaded.
+// Epoch 119 retains the original private Q project directory and its one-use
+// descriptor borrow, without backend workspace or process-scope authority.
+// Epoch 120 retains distinct one-use Q setup and turn contact/settlement.
+// Epoch 121 retains Q credential profile custody through exact local retirement.
+// Epoch 124 retains current-only transcript manifest4/streamv3 native capture
+// semantics. Actual owned DDL remains unchanged; predecessor manifests refuse.
+// Epoch 125 retains original Q canary intent, binding and terminal observation.
+// Epoch 126 is the combined owner contract: preserve all epoch 125 Q/callback
+// journals while requiring process identity v6, tagged resource launch authority,
+// runtime custody v2 and the process_resource_owner.runtime_custody column.
+// Neither predecessor history gains authority through defaults or migration.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 126;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -3024,6 +3059,23 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "observation_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_relay_bootstrap",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "commitment_json",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
@@ -3644,6 +3696,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "consumer_input_blob_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "phase",
                         col_type: "TEXT",
                         pk: false,
@@ -3733,6 +3791,372 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_relay_application",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "kind",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "sequence",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "bootstrap_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "request_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "response_sha256",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "response_bytes",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_relay_transfer",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "kind",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "sequence",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "direction",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "remote_path",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "intent_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "read_attempts",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "observed_sha256",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "observed_bytes",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "canonical_bytes",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_qualification_guest_scratch",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "qualification_operation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "record_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_qualification_local_start",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "accepted_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "accepted_capsule_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "qualification_operation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "qualification_occurrence_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "channel_binding_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "record_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "controller_canary_intent_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "controller_canary_binding_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "controller_canary_terminal_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_qualification_fixture_receiver",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "binding_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "completion_frame_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "settlement_frame_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "program_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reference_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "stage_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "verified_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_qualification_worker_transcript",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "manifest_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "manifest_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "retained_at_ms",
                         col_type: "INTEGER",
                         pk: false,
                         not_null: true,
@@ -3831,6 +4255,333 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_qualification_worker_observation_batch",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_incarnation_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "request_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "first_sequence",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "through_sequence",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "previous_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "batch_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "canonical_batch_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "wire_max_bytes",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "retained_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_qualification_worker_command",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "accepted_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "accepted_capsule_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "qualification_operation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "qualification_occurrence_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "channel_binding_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_incarnation_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "setup_request_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "setup_contacted_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "setup_final_response_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "setup_final_response_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "setup_final_wire_max_bytes",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "setup_owner_send_settled_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "request_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "turn_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "turn_started_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "turn_start_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "turn_completed_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "turn_completion_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "delta_response_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "delta_response_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "delta_wire_max_bytes",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "final_response_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "final_response_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "final_wire_max_bytes",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reserved_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "contacted_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "completed_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_send_settled_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_qualification_worker_process",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "accepted_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "accepted_capsule_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "qualification_operation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "qualification_occurrence_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "channel_binding_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_identity_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "daemon_generation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "attached_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "terminal_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "provider_configuration_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
                     },
                 ],
             },
@@ -6207,6 +6958,67 @@ fn read_scope_lifetime_fence(conn: &Connection) -> Result<Option<lillux::Process
 fn ensure_scope_lifetime_resettable(conn: &Connection, stored_epoch: u32) -> Result<()> {
     // Independent of host lifetime: remote execution can survive its owner.
     external_execution::ensure_resettable(conn, stored_epoch)?;
+    // A Q workspace can exist before any process scope is allocated. The
+    // original local custody is not reconstructible after a schema reset.
+    if stored_epoch >= 107 {
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM external_qualification_local_start WHERE phase!='closed'",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            pending == 0,
+            "execution-history reset retains Q local workspace cleanup"
+        );
+    }
+    if stored_epoch >= 114 {
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM external_qualification_guest_scratch WHERE phase!='closed'",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            pending == 0,
+            "execution-history reset retains Q guest-input scratch custody"
+        );
+    }
+    if stored_epoch >= 116 {
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM external_execution_relay_transfer WHERE phase!='terminal_closed'",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            pending == 0,
+            "execution-history reset retains an open external relay transfer"
+        );
+    }
+    if stored_epoch >= 118 {
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM external_execution_relay_application WHERE phase='applying'",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            pending == 0,
+            "execution-history reset retains an indeterminate external relay application"
+        );
+        let unproven_closed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM external_execution_relay_application a
+             LEFT JOIN external_execution_allocation p
+               ON p.placement_thread_id=a.placement_thread_id
+             LEFT JOIN external_execution_terminal_observation t
+               ON t.placement_thread_id=a.placement_thread_id
+             WHERE a.phase='terminal_closed'
+               AND (p.phase IS NULL OR p.phase!='terminated' OR t.placement_thread_id IS NULL)",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            unproven_closed == 0,
+            "execution-history reset has relay closure without provider terminal evidence"
+        );
+    }
     // The coarse owner starts with the first scope-capable runtime cut. Older
     // owned epochs could not allocate these resources; never decode their
     // execution rows. Every epoch from this cut onward requires the witness,
@@ -7933,7 +8745,11 @@ impl RuntimeDb {
                         AND dedicated_session.state IN ('admitted','binding','outcome_unknown'))
                 AND NOT EXISTS(SELECT 1 FROM credential_profile_reservation
                       WHERE credential_profile_reservation.reservation_id=credential_profile.lock_owner
-                        AND credential_profile_reservation.state='reserved')",
+                        AND credential_profile_reservation.state='reserved')
+                AND NOT EXISTS(SELECT 1 FROM external_qualification_local_start q
+                      WHERE json_extract(q.record_json,'$.credential_custody.profile_id')=credential_profile.profile_id
+                        AND json_type(q.record_json,'$.credential_custody')='object'
+                        AND json_type(q.record_json,'$.credential_custody.released_at_ms')='null')",
             [now],
         )?;
         tx.commit()?;
@@ -16683,6 +17499,18 @@ impl RuntimeDb {
                 |row| row.get(0),
             )?
         };
+        // Q has no ordinary chain owner. Its one-use local scope remains a
+        // global host-lifetime obligation until a separate exact retirement
+        // protocol proves whole-scope and workspace cleanup.
+        let qualification: i64 = if chain_root_id.is_none() {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM external_qualification_local_start WHERE phase!='closed'",
+                [],
+                |row| row.get(0),
+            )?
+        } else {
+            0
+        };
         u64::try_from(
             dedicated
                 .checked_add(reservations)
@@ -16690,6 +17518,7 @@ impl RuntimeDb {
                 .and_then(|v| v.checked_add(attached_threads))
                 .and_then(|v| v.checked_add(owners))
                 .and_then(|v| v.checked_add(scoped_children))
+                .and_then(|v| v.checked_add(qualification))
                 .context("process-scope obligation count overflow")?,
         )
         .context("negative process-scope obligation count")

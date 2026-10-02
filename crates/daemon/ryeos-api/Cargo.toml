@@ -33,6 +33,7 @@ ryeos-app = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-graph-definition = { workspace = true }
 ryeos-executor = { workspace = true }
+ryeos-external-execution-contract = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-node = { workspace = true }

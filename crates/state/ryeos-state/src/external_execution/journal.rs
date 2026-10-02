@@ -332,8 +332,6 @@ pub fn append_frame(
         u64::try_from(last_ack)?,
     )?
     .require_successor(frame, u64::try_from(peer_sequence)?)?;
-    let mut budget = retained_budget(tx, &frame.binding_digest, direction)?;
-    budget.retain(&binding, &frame.payload, wire.len() as u64)?;
     let (state, completion): (String, Option<String>) = tx.query_row(
         "SELECT state,completion_request_digest FROM external_execution_channel WHERE placement_thread_id=?1",
         [placement], |row|Ok((row.get(0)?,row.get(1)?)))?;
@@ -341,19 +339,36 @@ pub fn append_frame(
     if matches!(
         frame.payload,
         ExecutionChannelPayload::RuntimeApplied { .. }
-    ) {
+            | ExecutionChannelPayload::QualificationScopeSettled { .. }
+    ) || (matches!(
+        binding.execution_mode,
+        super::ExternalExecutionMode::QualificationStructuredSession {}
+    ) && matches!(frame.payload, ExecutionChannelPayload::ProtocolEof))
+    {
+        let kind = if matches!(
+            frame.payload,
+            ExecutionChannelPayload::RuntimeApplied { .. }
+        ) {
+            "runtime_applied"
+        } else if matches!(frame.payload, ExecutionChannelPayload::ProtocolEof) {
+            "protocol_eof"
+        } else {
+            "qualification_scope_settled"
+        };
         let already_retained: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='supervisor_to_owner'
-               AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied')",
-            [&frame.binding_digest],
+               AND json_extract(frame_json,'$.frame.payload.kind')=?2)",
+            params![&frame.binding_digest, kind],
             |row| row.get(0),
         )?;
         ensure!(
             !already_retained,
-            "external runtime-applied observation was already retained"
+            "external native observation was already retained"
         );
     }
+    let mut budget = retained_budget(tx, &binding, direction)?;
+    retain_frame_budget(tx, &binding, frame, wire.len() as u64, &mut budget)?;
     require_direct_command_append(tx, &binding, &frame.payload)?;
     let next = ChannelPhase::parse(&state)?.advance(
         completion.as_deref(),
@@ -422,6 +437,9 @@ pub fn append_frame(
                 [&frame.binding_digest])?;
         }
         ExecutionChannelPayload::Quiesce {
+            completion_request_digest,
+        }
+        | ExecutionChannelPayload::QualificationComplete {
             completion_request_digest,
         } => {
             tx.execute("UPDATE external_execution_channel SET completion_request_digest=?2 WHERE placement_thread_id=?1",
@@ -1290,6 +1308,7 @@ pub fn claim_application(
     let non_input_observation = matches!(
         verified.frame().payload,
         ExecutionChannelPayload::RuntimeApplied { .. }
+            | ExecutionChannelPayload::QualificationScopeSettled { .. }
             | ExecutionChannelPayload::CommandOutput { .. }
             | ExecutionChannelPayload::CommandTerminated { .. }
     );
@@ -1541,6 +1560,7 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
         let mut terminal_close_observed = sticky_revoked;
         let mut pending_input = false;
         let mut revoked_input = false;
+        let mut q_eof_seen = false;
         while let Some(row) = rows.next()? {
             ordinal += 1;
             let wire: String = row.get(4)?;
@@ -1550,6 +1570,17 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
                 binding.issued_at_ms,
             )?;
             let frame = verified.frame();
+            if matches!(
+                binding.execution_mode,
+                super::ExternalExecutionMode::QualificationStructuredSession {}
+            ) && matches!(frame.payload, ExecutionChannelPayload::ProtocolEof)
+            {
+                ensure!(
+                    !q_eof_seen,
+                    "Q transcript has competing protocol EOF observations"
+                );
+                q_eof_seen = true;
+            }
             if matches!(frame.payload, ExecutionChannelPayload::Cancel) {
                 let retained: Option<String> = conn
                     .query_row(
@@ -1693,11 +1724,20 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
                 Some(verified.digest().to_owned()),
                 frame.acknowledged_peer_sequence,
             )?;
-            budgets[index].retain(&binding, &frame.payload, wire.len() as u64)?;
+            retain_frame_budget(
+                conn,
+                &binding,
+                frame,
+                wire.len() as u64,
+                &mut budgets[index],
+            )?;
             command_transcript.observe(binding.execution_mode, &frame.payload)?;
             state = state.advance(completion.as_deref(), &frame.payload, true)?;
             match &frame.payload {
                 ExecutionChannelPayload::Quiesce {
+                    completion_request_digest,
+                }
+                | ExecutionChannelPayload::QualificationComplete {
                     completion_request_digest,
                 } => completion = Some(completion_request_digest.clone()),
                 ExecutionChannelPayload::ExportSealed {
@@ -1770,18 +1810,155 @@ fn application_state_proves(
     }
 }
 
+fn retain_frame_budget(
+    conn: &Connection,
+    binding: &ExecutionChannelBinding,
+    frame: &ExecutionFrame,
+    bytes: u64,
+    budget: &mut ExecutionChannelBudget,
+) -> Result<()> {
+    if let ExecutionChannelPayload::Acknowledge {
+        peer_frame_sequence,
+        peer_frame_digest,
+        application,
+    } = &frame.payload
+    {
+        let application = match application {
+            ExecutionFrameApplication::Retained => "retained",
+            ExecutionFrameApplication::Claimed => "claimed",
+            ExecutionFrameApplication::Applied => "applied",
+            ExecutionFrameApplication::Revoked => "revoked",
+        };
+        if qualification_finish_ack(
+            conn,
+            binding,
+            frame.direction,
+            frame.sequence,
+            frame.acknowledged_peer_sequence,
+            *peer_frame_sequence,
+            peer_frame_digest,
+            application,
+            true,
+        )? {
+            return budget.retain_checked_q_finish_ack(binding, bytes);
+        }
+    }
+    budget.retain(binding, &frame.payload, bytes)
+}
+
+/// First exact lifecycle evidence only. Fresh idle copies remain ordinary.
+/// The node suppresses ACK-of-ACK, so only the supervisor's single reply to an
+/// owner receipt is eligible; recursion is limited to that one extra edge.
+fn qualification_finish_ack(
+    conn: &Connection,
+    binding: &ExecutionChannelBinding,
+    direction: ChannelDirection,
+    sequence: u64,
+    frontier: u64,
+    peer_sequence: u64,
+    peer_digest: &str,
+    application: &str,
+    allow_ack_peer: bool,
+) -> Result<bool> {
+    if !matches!(
+        binding.execution_mode,
+        super::ExternalExecutionMode::QualificationStructuredSession {}
+    ) || peer_sequence == 0
+        || peer_sequence > frontier
+    {
+        return Ok(false);
+    }
+    let digest = binding.digest()?;
+    let peer: Option<(String, u64, Option<u64>, Option<String>, Option<String>)> = conn.query_row(
+        "SELECT json_extract(frame_json,'$.frame.payload.kind'),acknowledged_peer_sequence,
+            json_extract(frame_json,'$.frame.payload.peer_frame_sequence'),
+            json_extract(frame_json,'$.frame.payload.peer_frame_digest'),
+            json_extract(frame_json,'$.frame.payload.application')
+         FROM external_execution_frame WHERE binding_digest=?1 AND direction=?2 AND sequence=?3 AND frame_digest=?4",
+        params![&digest, direction.opposite().as_str(), peer_sequence, peer_digest],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
+    let Some((kind, peer_frontier, target_sequence, target_digest, target_application)) = peer
+    else {
+        return Ok(false);
+    };
+    let eligible = match kind.as_str() {
+        "qualification_complete" => {
+            direction == ChannelDirection::SupervisorToOwner && application == "applied"
+        }
+        "protocol_eof" => {
+            direction == ChannelDirection::OwnerToSupervisor
+                && matches!(application, "retained" | "claimed" | "applied")
+        }
+        "qualification_scope_settled" => {
+            direction == ChannelDirection::OwnerToSupervisor
+                && matches!(application, "retained" | "applied")
+        }
+        "acknowledge"
+            if allow_ack_peer
+                && direction == ChannelDirection::SupervisorToOwner
+                && application == "applied" =>
+        {
+            match (target_sequence, target_digest, target_application) {
+                (Some(target_sequence), Some(target_digest), Some(target_application)) => {
+                    qualification_finish_ack(
+                        conn,
+                        binding,
+                        direction.opposite(),
+                        peer_sequence,
+                        peer_frontier,
+                        target_sequence,
+                        &target_digest,
+                        &target_application,
+                        false,
+                    )?
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    if !eligible {
+        return Ok(false);
+    }
+    // Ordinary polling targets fail the indexed peer check above without a
+    // historical duplicate scan. Only finite finish targets reach this check.
+    let duplicate: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+         WHERE binding_digest=?1 AND direction=?2 AND sequence<?3
+           AND json_extract(frame_json,'$.frame.payload.kind')='acknowledge'
+           AND json_extract(frame_json,'$.frame.payload.peer_frame_sequence')=?4
+           AND json_extract(frame_json,'$.frame.payload.peer_frame_digest')=?5
+           AND json_extract(frame_json,'$.frame.payload.application')=?6)",
+        params![
+            &digest,
+            direction.as_str(),
+            sequence,
+            peer_sequence,
+            peer_digest,
+            application
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(!duplicate)
+}
+
 fn retained_budget(
     conn: &Connection,
-    digest: &str,
+    binding: &ExecutionChannelBinding,
     direction: &str,
 ) -> Result<ExecutionChannelBudget> {
+    let digest = binding.digest()?;
+    let q_mode = matches!(
+        binding.execution_mode,
+        super::ExternalExecutionMode::QualificationStructuredSession {}
+    );
     let mut budget = ExecutionChannelBudget::default();
     let mut statement = conn.prepare(
         "SELECT json_extract(frame_json,'$.frame.payload.kind'),
         COUNT(*),SUM(frame_bytes) FROM external_execution_frame
         WHERE binding_digest=?1 AND direction=?2 GROUP BY 1",
     )?;
-    let mut rows = statement.query(params![digest, direction])?;
+    let mut rows = statement.query(params![&digest, direction])?;
     while let Some(row) = rows.next()? {
         let kind: String = row.get(0)?;
         let count = u64::try_from(row.get::<_, i64>(1)?)?;
@@ -1789,9 +1966,66 @@ fn retained_budget(
         if matches!(kind.as_str(), "cancel" | "stopped") {
             budget.terminal_frames += count;
             budget.terminal_bytes += bytes;
+        } else if q_mode
+            && matches!(
+                kind.as_str(),
+                "qualification_complete" | "qualification_scope_settled" | "protocol_eof"
+            )
+        {
+            budget.q_finish_frames += count;
+            budget.q_finish_bytes += bytes;
         } else {
             budget.ordinary_frames += count;
             budget.ordinary_bytes += bytes;
+        }
+    }
+    if q_mode {
+        ensure!(
+            budget.ordinary_frames + budget.q_finish_frames + budget.terminal_frames
+                <= u64::from(binding.max_frames) + 1
+                && budget.ordinary_bytes + budget.q_finish_bytes + budget.terminal_bytes
+                    <= binding.max_bytes + TERMINAL_CONTROL_BYTES,
+            "retained Q transcript exceeds signed bounds"
+        );
+        // Read only small ACK coordinates, never materialize or reverify all
+        // retained wire bodies on each append. Non-Q keeps grouped accounting.
+        let mut acknowledgements = conn.prepare(
+            "SELECT sequence,acknowledged_peer_sequence,frame_bytes,
+                json_extract(frame_json,'$.frame.payload.peer_frame_sequence'),
+                json_extract(frame_json,'$.frame.payload.peer_frame_digest'),
+                json_extract(frame_json,'$.frame.payload.application')
+             FROM external_execution_frame WHERE binding_digest=?1 AND direction=?2
+               AND json_extract(frame_json,'$.frame.payload.kind')='acknowledge' ORDER BY sequence",
+        )?;
+        let direction = match direction {
+            "owner_to_supervisor" => ChannelDirection::OwnerToSupervisor,
+            "supervisor_to_owner" => ChannelDirection::SupervisorToOwner,
+            _ => bail!("unknown channel direction"),
+        };
+        let mut rows = acknowledgements.query(params![&digest, direction.as_str()])?;
+        while let Some(row) = rows.next()? {
+            let sequence: u64 = row.get(0)?;
+            let frontier: u64 = row.get(1)?;
+            let bytes: u64 = row.get(2)?;
+            let peer_sequence: u64 = row.get(3)?;
+            let peer_digest: String = row.get(4)?;
+            let application: String = row.get(5)?;
+            if qualification_finish_ack(
+                conn,
+                binding,
+                direction,
+                sequence,
+                frontier,
+                peer_sequence,
+                &peer_digest,
+                &application,
+                true,
+            )? {
+                budget.ordinary_frames -= 1;
+                budget.ordinary_bytes -= bytes;
+                budget.q_finish_frames += 1;
+                budget.q_finish_bytes += bytes;
+            }
         }
     }
     Ok(budget)
@@ -1800,10 +2034,403 @@ fn retained_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::TransactionBehavior;
     use crate::external_execution::{ExecutionFrame, ExternalStopReason};
     use anyhow::ensure;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use lillux::crypto::SigningKey;
+
+    #[test]
+    fn full_q_ordinary_journal_preserves_whole_finish_and_exact_receipts() {
+        use super::super::{
+            ExternalExecutionMode, NativeNamespaceExit, NativeQualificationScopeSettlement,
+            NativeQualificationScopeSettlementObservation, NativeWriterExclusionMechanism,
+            Q_FINISH_BYTES, Q_FINISH_FRAMES,
+        };
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(CHANNEL_SQL).unwrap();
+        conn.execute_batch("CREATE TABLE test_owner(binding_digest TEXT PRIMARY KEY, permits_input_transport INTEGER NOT NULL DEFAULT 1)").unwrap();
+        let (mut binding, owner, supervisor) = super::super::tests::binding();
+        let now = lillux::time::timestamp_millis();
+        binding.issued_at_ms = now - 1000;
+        binding.execution_deadline_ms = now + 60_000;
+        binding.expires_at_ms = now + 120_000;
+        binding.execution_mode = ExternalExecutionMode::QualificationStructuredSession {};
+        binding.candidate_export_max_bytes = 0;
+        binding.max_frames = Q_FINISH_FRAMES + 2;
+        binding.max_bytes = Q_FINISH_BYTES + 8192;
+        let digest = binding.digest().unwrap();
+        conn.execute("INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL,NULL)",
+            params![&binding.placement_thread_id,&digest,lillux::canonical_json(&serde_json::to_value(&binding).unwrap()).unwrap()]).unwrap();
+        conn.execute(
+            "INSERT INTO test_owner(binding_digest) VALUES(?1)",
+            [&digest],
+        )
+        .unwrap();
+        let author = |direction: ChannelDirection,
+                      payload: ExecutionChannelPayload,
+                      apply: bool|
+         -> Result<AuthenticatedExecutionFrame> {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let key = if direction == ChannelDirection::OwnerToSupervisor {
+                &owner
+            } else {
+                &supervisor
+            };
+            let frame = author_frame(
+                &tx,
+                &TestOwner,
+                &binding.placement_thread_id,
+                direction,
+                key,
+                payload,
+            )?;
+            if apply {
+                claim_application(
+                    &tx,
+                    &TestOwner,
+                    &binding.placement_thread_id,
+                    direction,
+                    frame.frame().sequence,
+                    frame.digest(),
+                )?;
+                finish_application(
+                    &tx,
+                    &TestOwner,
+                    &binding.placement_thread_id,
+                    direction,
+                    frame.frame().sequence,
+                    frame.digest(),
+                )?;
+            }
+            tx.commit()?;
+            Ok(frame)
+        };
+        let ack = |peer: &AuthenticatedExecutionFrame, application| {
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: peer.frame().sequence,
+                peer_frame_digest: peer.digest().into(),
+                application,
+            }
+        };
+        let ready = author(
+            ChannelDirection::SupervisorToOwner,
+            ExecutionChannelPayload::Ready {
+                supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                base_snapshot_hash: binding.base_snapshot_hash.clone(),
+            },
+            true,
+        )
+        .unwrap();
+        let release = author(
+            ChannelDirection::OwnerToSupervisor,
+            ExecutionChannelPayload::Release,
+            true,
+        )
+        .unwrap();
+        author(
+            ChannelDirection::OwnerToSupervisor,
+            ack(&ready, ExecutionFrameApplication::Applied),
+            true,
+        )
+        .unwrap();
+        let poll = author(
+            ChannelDirection::SupervisorToOwner,
+            ack(&release, ExecutionFrameApplication::Applied),
+            true,
+        )
+        .unwrap();
+        // Both directions have consumed their entire ordinary frame allowance.
+        assert!(
+            author(
+                ChannelDirection::SupervisorToOwner,
+                poll.frame().payload.clone(),
+                true
+            )
+            .is_err()
+        );
+        let eof = author(
+            ChannelDirection::SupervisorToOwner,
+            ExecutionChannelPayload::ProtocolEof,
+            false,
+        )
+        .unwrap();
+        for state in [
+            ExecutionFrameApplication::Retained,
+            ExecutionFrameApplication::Claimed,
+            ExecutionFrameApplication::Applied,
+        ] {
+            if state == ExecutionFrameApplication::Claimed {
+                claim(
+                    &conn,
+                    &binding,
+                    ChannelDirection::SupervisorToOwner,
+                    eof.frame().sequence,
+                    eof.digest(),
+                )
+                .unwrap();
+            } else if state == ExecutionFrameApplication::Applied {
+                finish(
+                    &conn,
+                    &binding,
+                    ChannelDirection::SupervisorToOwner,
+                    eof.frame().sequence,
+                    eof.digest(),
+                )
+                .unwrap();
+            }
+            let receipt =
+                author(ChannelDirection::OwnerToSupervisor, ack(&eof, state), true).unwrap();
+            let reply = author(
+                ChannelDirection::SupervisorToOwner,
+                ack(&receipt, ExecutionFrameApplication::Applied),
+                true,
+            )
+            .unwrap();
+            assert!(
+                author(
+                    ChannelDirection::SupervisorToOwner,
+                    reply.frame().payload.clone(),
+                    true
+                )
+                .is_err()
+            );
+            assert!(
+                author(
+                    ChannelDirection::OwnerToSupervisor,
+                    receipt.frame().payload.clone(),
+                    true
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            author(
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ProtocolEof,
+                true
+            )
+            .is_err()
+        );
+        {
+            // Simulate an inconsistent retained history using an otherwise
+            // valid, freshly signed successor. Cold validation must enforce
+            // the same one-EOF invariant even without the live append gate.
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+            let duplicate = prepare_frame(
+                &tx,
+                &TestOwner,
+                &binding.placement_thread_id,
+                ChannelDirection::SupervisorToOwner,
+                &supervisor,
+                ExecutionChannelPayload::ProtocolEof,
+            )
+            .unwrap();
+            let ordinal: i64 = tx
+                .query_row(
+                    "SELECT MAX(ordinal)+1 FROM external_execution_frame WHERE binding_digest=?1",
+                    [&digest],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            tx.execute("INSERT INTO external_execution_frame VALUES(?1,'supervisor_to_owner',?2,?3,?4,?5,?6,?7,'pending')",
+                params![&digest, duplicate.frame().sequence, ordinal, duplicate.digest(), duplicate.canonical(),
+                    duplicate.canonical().len() as u64, duplicate.frame().acknowledged_peer_sequence]).unwrap();
+            assert!(
+                validate_channels(&tx, &TestOwner)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("competing protocol EOF")
+            );
+            tx.rollback().unwrap();
+        }
+        let completion = author(
+            ChannelDirection::OwnerToSupervisor,
+            ExecutionChannelPayload::QualificationComplete {
+                completion_request_digest: "a".repeat(64),
+            },
+            true,
+        )
+        .unwrap();
+        author(
+            ChannelDirection::SupervisorToOwner,
+            ack(&completion, ExecutionFrameApplication::Applied),
+            true,
+        )
+        .unwrap();
+        let settlement = author(
+            ChannelDirection::SupervisorToOwner,
+            ExecutionChannelPayload::QualificationScopeSettled {
+                observation: NativeQualificationScopeSettlement {
+                    schema: 3,
+                    observation: NativeQualificationScopeSettlementObservation {
+                        schema: 1,
+                        binding_digest: digest.clone(),
+                        launcher_occurrence_digest: "1".repeat(64),
+                        applied_runtime_receipt_digest: "2".repeat(64),
+                        completion_frame_digest: completion.digest().into(),
+                        completion_request_digest: "a".repeat(64),
+                        mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+                        exit: NativeNamespaceExit::Code(0),
+                    },
+                    fixture_capture: None,
+                    fixture_content: None,
+                },
+            },
+            false,
+        )
+        .unwrap();
+        for state in [
+            ExecutionFrameApplication::Retained,
+            ExecutionFrameApplication::Applied,
+        ] {
+            if state == ExecutionFrameApplication::Applied {
+                claim(
+                    &conn,
+                    &binding,
+                    ChannelDirection::SupervisorToOwner,
+                    settlement.frame().sequence,
+                    settlement.digest(),
+                )
+                .unwrap();
+                finish(
+                    &conn,
+                    &binding,
+                    ChannelDirection::SupervisorToOwner,
+                    settlement.frame().sequence,
+                    settlement.digest(),
+                )
+                .unwrap();
+            }
+            let receipt = author(
+                ChannelDirection::OwnerToSupervisor,
+                ack(&settlement, state),
+                true,
+            )
+            .unwrap();
+            author(
+                ChannelDirection::SupervisorToOwner,
+                ack(&receipt, ExecutionFrameApplication::Applied),
+                true,
+            )
+            .unwrap();
+        }
+        assert!(
+            author(
+                ChannelDirection::SupervisorToOwner,
+                settlement.frame().payload.clone(),
+                true
+            )
+            .is_err()
+        );
+        // Reconstruct after later ACKs exist: own-sequence cutoffs preserve the
+        // first receipt's classification. Full cold validation uses it too.
+        let supervisor_budget = retained_budget(&conn, &binding, "supervisor_to_owner").unwrap();
+        assert_eq!(
+            (
+                supervisor_budget.ordinary_frames,
+                supervisor_budget.q_finish_frames
+            ),
+            (2, 8)
+        );
+        let owner_budget = retained_budget(&conn, &binding, "owner_to_supervisor").unwrap();
+        assert_eq!(
+            (owner_budget.ordinary_frames, owner_budget.q_finish_frames),
+            (2, 6)
+        );
+        validate_channels(&conn, &TestOwner).unwrap();
+        assert!(
+            !qualification_finish_ack(
+                &conn,
+                &binding,
+                ChannelDirection::OwnerToSupervisor,
+                99,
+                settlement.frame().sequence,
+                settlement.frame().sequence,
+                settlement.digest(),
+                "claimed",
+                true,
+            )
+            .unwrap()
+        );
+        let mut other_binding = binding.clone();
+        other_binding.channel_nonce = "9".repeat(64);
+        assert!(
+            !qualification_finish_ack(
+                &conn,
+                &other_binding,
+                ChannelDirection::OwnerToSupervisor,
+                99,
+                settlement.frame().sequence,
+                settlement.frame().sequence,
+                settlement.digest(),
+                "applied",
+                true,
+            )
+            .unwrap()
+        );
+        // A forged peer digest or receipt frontier cannot acquire the reserve.
+        assert!(
+            !qualification_finish_ack(
+                &conn,
+                &binding,
+                ChannelDirection::OwnerToSupervisor,
+                99,
+                settlement.frame().sequence,
+                settlement.frame().sequence,
+                &"f".repeat(64),
+                "applied",
+                true
+            )
+            .unwrap()
+        );
+        assert!(
+            !qualification_finish_ack(
+                &conn,
+                &binding,
+                ChannelDirection::OwnerToSupervisor,
+                99,
+                0,
+                settlement.frame().sequence,
+                settlement.digest(),
+                "applied",
+                true
+            )
+            .unwrap()
+        );
+        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+        let cancel = prepare_frame(
+            &tx,
+            &TestOwner,
+            &binding.placement_thread_id,
+            ChannelDirection::OwnerToSupervisor,
+            &owner,
+            ExecutionChannelPayload::Cancel,
+        )
+        .unwrap();
+        record_revocation(
+            &tx,
+            &TestOwner,
+            &binding.placement_thread_id,
+            cancel.canonical().as_bytes(),
+        )
+        .unwrap();
+        append_frame(
+            &tx,
+            &TestOwner,
+            &binding.placement_thread_id,
+            cancel.canonical().as_bytes(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            retained_budget(&conn, &binding, "owner_to_supervisor")
+                .unwrap()
+                .terminal_frames,
+            1
+        );
+        validate_channels(&conn, &TestOwner).unwrap();
+    }
 
     struct TestOwner;
 

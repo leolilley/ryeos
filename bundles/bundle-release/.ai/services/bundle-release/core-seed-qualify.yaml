@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-21T01:02:20Z:8a7b54d63d8f6437308f15e312d419b19713c3d71c2f9f718bbf25a7f33cbaeb:nUgg3+YF4iR7J0/10V1gfBXiSZTNUkkbRYqZF3UBI5z8Subx8gdi0Ckn0LWTbjChQ+firvL9uAnUna9G9Ab3BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T01:29:18Z:7e1b101b3610c19bb10d13fcfd948b76c56f99f46846291027ecf468d8a39716:S6ZcwYeuqDT8b+Npc/7JU9NCWhbt19GjpFhmAiGBZpZVsGY+XHhBl3vI2EgshqsWJwZxmXSdiAV7x+0Ls29lDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: core-seed-qualify
-version: "1.0.0"
+version: "1.1.0"
 description: Independently qualify the exact signed Core seed before substrate assembly.
 endpoint: bundle_release.core_seed_qualify
 ui_read_only: false
@@ -10,6 +10,7 @@ record_thread: true
 availability: daemon_only
 required_caps:
   - ryeos.execute.config.bundle-release/execution-environment-products
+  - ryeos.execute.service.external-content/launch-product-qualification
   - ryeos.execute.service.bundle-release/core-seed-qualify
   - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify
 schema:

@@ -194,6 +194,7 @@ fn ordinary_direct_preflight_two_node_plan_reaches_endpoint_admission() {
     let fixture = Fixture::new();
     assert!(state.node_config.external_execution.is_empty());
     let prepared = super::super::PreparedItemPlan {
+        resource_policy: super::super::PersistentSessionResourcePolicy::Ordinary,
         timeout_secs: 30,
         plan: fixture.plan,
         root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity::Project,
@@ -773,6 +774,7 @@ fn external_closure_capture_is_portable_and_rechecks_final_authority() {
         ]);
         let mut project = immutable_project_authority("1".repeat(64));
         let mut prepared = super::super::PreparedItemPlan {
+            resource_policy: super::super::PersistentSessionResourcePolicy::Ordinary,
             timeout_secs: 30,
             plan: fixture.plan,
             root_subject_source_identity: DirectRootSourceIdentity::Project,

@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-29T00:19:35Z:ecd22eaf8ab8927bfe9ad74fa5afce215d5c20ffa328d3adc94fb564c2314c67:DOG5AAveRXJkXCsF4C3wm0/Z+YZLr6eUuAdDdO4ZFvxFcNqSbJVq0ylWFQHsEOVxrTNO39uxDHxBjq+COrRXAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T03:29:27Z:8eb25563e0572fa77a2c3fa32dec70c628e5a92cc87d805d145a865ab41d8368:XcHXIvSVKpZ5SA0tVj0ETHR3blgiutTBJdypRECSMSu1pFRe1eL1sOrjdJRQHJEzoF2Q5271fuxmGlyy7nTlBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: data-driven-runtime-verification
 title: Data-Driven Runtime Verification
 description: Future separation of declarative verification policy, reusable evidence transport, and runtime-specific protocol interpreters
 entry_type: design
-version: "0.2.0"
+version: "0.4.0"
 ```
 
 # Data-Driven Runtime Verification
@@ -21,11 +21,37 @@ designs without depending on a temporary plan's continued presence.
 
 ## Status and scope
 
-Deferred design, recorded on 2026-09-25. This note captures the longer-term
+Broader deferred design, originally recorded on 2026-09-25. This note captures the longer-term
 direction discussed while implementing the independent Codex runtime
 qualification. It does not change the active qualification contract, enable a
 qualification claim, or require the current Codex verifier to become a
 universal verifier.
+
+The 2026-09-29 source migration implements a bounded subset. The explicitly
+named Codex checker accepts a required signed v2 profile selecting the producer
+scenario, exact recipe, finite command and candidate filename/content. Protocol
+steps and mandatory checks remain compiled; supported fixture bytes vary through
+one checker. Runtime membership preflight compares complete independently
+admitted owners instead of a second fixed helper inventory; its source coverage
+does not complete the outstanding production evidence joins.
+
+Development profiles select compiler versions/provenance and the supported
+static-link member/byte expectations through new profile-bound claims and
+migrated consumers. Cargo-vendor lock intent and static-link producer contract
+intent use existing strict signed project-source configuration. Shared qualification admits complete
+subject-plus-dependency selections. Local evidence and installed acceptance
+remain separate; this is not a universal verifier implementation.
+See [the Codex contract](../development/scoped-codex-qualification-boundary.md)
+and [the common qualification guide](../development/remote-development-and-qualification.md)
+for the actual authoring surface and evidence limits.
+
+This source migration proceeds independently while the existing Render proof
+continues. It does not establish live qualification of the migrated artifacts,
+enable the disabled strong Codex claims, or prove another runtime's protocol
+compatibility. The universal adapter/interpreter ideas below remain deferred
+until a real second consumer supplies their requirements. Provider-profile
+generalization separately requires an accepted baseline and a real second
+operational profile/provider.
 
 The active qualification is intentionally Codex-specific. Its signed policy
 selects a verifier and scenario; Codex app-server code interprets the runtime

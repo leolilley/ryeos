@@ -60,9 +60,11 @@ use ryeos_engine::roots;
 
 pub mod external_channel;
 pub mod external_connector;
+pub mod external_relay_bootstrap;
 pub mod placement;
 use external_channel::ExternalChannelAuthorityAccess;
 use external_connector::ExternalConnectorCapabilityAccess;
+use external_relay_bootstrap::{ExternalRelayBootstrapAccess, ProtectedExternalRelayBootstrap};
 use placement::PlacementCredentialAccess;
 
 // Vault key-name policy + write helpers live in
@@ -165,6 +167,26 @@ fn runtime_physical_prefix(bundle_id: &str, namespace: &str) -> Result<String> {
 
 /// Read-only operator-secret store. Daemon-owned, swappable backend.
 pub trait NodeVault: Send + Sync + std::fmt::Debug {
+    /// Seal the exact original file-relay bootstrap before first activation
+    /// contact. A retry may only find identical canonical bytes.
+    fn retain_external_relay_bootstrap(
+        &self,
+        _access: &ExternalRelayBootstrapAccess,
+        _bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        _signed_import: &ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization,
+    ) -> Result<()> {
+        bail!("vault backend does not support protected external relay bootstrap")
+    }
+
+    /// Read only the original sealed bootstrap; this does not authorize guest
+    /// input reconstruction or a second provider activation.
+    fn external_relay_bootstrap(
+        &self,
+        _access: &ExternalRelayBootstrapAccess,
+    ) -> Result<ProtectedExternalRelayBootstrap> {
+        bail!("vault backend does not support protected external relay bootstrap")
+    }
+
     /// Retrieve one app-private local connector capability generation. It is
     /// distinct from the remote supervisor bootstrap and never appears in
     /// operator/runtime secret enumeration.
@@ -670,6 +692,113 @@ pub struct SealedEnvelopeVault {
 }
 
 impl SealedEnvelopeVault {
+    fn relay_bootstrap_key(
+        &self,
+        access: &ExternalRelayBootstrapAccess,
+        create: bool,
+    ) -> Result<lillux::vault::VaultSecretKey> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        #[derive(serde::Serialize, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct KeyDocument {
+            schema: u32,
+            secret_key: String,
+        }
+        impl Drop for KeyDocument {
+            fn drop(&mut self) {
+                use zeroize::Zeroize as _;
+                self.secret_key.zeroize();
+            }
+        }
+        let decode = |raw: &str| -> Result<lillux::vault::VaultSecretKey> {
+            let document: KeyDocument = serde_json::from_str(raw)?;
+            anyhow::ensure!(
+                document.schema == 1
+                    && lillux::canonical_json(&serde_json::to_value(&document)?)? == raw,
+                "protected relay artifact master key is not canonical"
+            );
+            let bytes = zeroize::Zeroizing::new(STANDARD.decode(&document.secret_key)?);
+            anyhow::ensure!(
+                bytes.len() == 32 && STANDARD.encode(&bytes) == document.secret_key,
+                "protected relay key is not canonical"
+            );
+            let mut raw: [u8; 32] = bytes.as_slice().try_into()?;
+            let key = lillux::vault::VaultSecretKey::from_bytes(raw);
+            zeroize::Zeroize::zeroize(&mut raw);
+            Ok(key)
+        };
+        if create {
+            self.read_modify_write(|map| {
+                if let Some(raw) = map.get(access.physical_key()) {
+                    return decode(raw);
+                }
+                let key = lillux::vault::VaultSecretKey::generate();
+                let mut key_bytes = key.to_bytes();
+                let document = KeyDocument {
+                    schema: 1,
+                    secret_key: STANDARD.encode(key_bytes),
+                };
+                zeroize::Zeroize::zeroize(&mut key_bytes);
+                let raw = lillux::canonical_json(&serde_json::to_value(&document)?)?;
+                map.insert(access.physical_key().to_owned(), raw);
+                Ok(key)
+            })
+        } else {
+            let mut entries = self.read_all_internal()?;
+            let raw = zeroize::Zeroizing::new(
+                entries
+                    .remove(access.physical_key())
+                    .ok_or_else(|| anyhow!("protected original relay bootstrap key is absent"))?,
+            );
+            use zeroize::Zeroize as _;
+            for value in entries.values_mut() {
+                value.zeroize();
+            }
+            decode(raw.as_str())
+        }
+    }
+
+    fn relay_bootstrap_directory(
+        &self,
+        access: &ExternalRelayBootstrapAccess,
+        create: bool,
+    ) -> Result<lillux::PinnedDirectory> {
+        let parent_path = self
+            .store_path
+            .parent()
+            .ok_or_else(|| anyhow!("vault store has no parent"))?;
+        let parent = lillux::PinnedDirectory::open(parent_path)?
+            .ok_or_else(|| anyhow!("protected vault directory is absent"))?;
+        parent.require_owner_private_directory()?;
+        let child = parent.open_child_directory(access.artifact_parent())?;
+        let child = match child {
+            Some(child) => child,
+            None if create => parent.create_child(access.artifact_parent(), 0o700)?,
+            None => bail!("protected original relay bootstrap directory is absent"),
+        };
+        child.require_owner_private_directory()?;
+        Ok(child)
+    }
+
+    fn read_relay_bootstrap_artifact(
+        &self,
+        access: &ExternalRelayBootstrapAccess,
+        key: &lillux::vault::VaultSecretKey,
+    ) -> Result<ProtectedExternalRelayBootstrap> {
+        let directory = self.relay_bootstrap_directory(access, false)?;
+        let file = directory
+            .open_pinned_regular(access.artifact_name(), false)?
+            .ok_or_else(|| anyhow!("protected original relay bootstrap artifact is absent"))?;
+        #[cfg(unix)]
+        file.require_owner(unsafe { libc::geteuid() })?;
+        let observed = file.observation()?;
+        let encoded =
+            file.read_stable_bounded(&observed, external_relay_bootstrap::MAX_ARTIFACT_BYTES)?;
+        let envelope: lillux::vault::SealedEnvelope =
+            toml::from_str(std::str::from_utf8(&encoded)?)?;
+        let bytes = zeroize::Zeroizing::new(lillux::vault::open(key, &envelope)?);
+        access.decode(bytes)
+    }
     /// Build a vault from an in-memory key + on-disk store path.
     pub fn new(store_path: PathBuf, secret_key: lillux::vault::VaultSecretKey) -> Self {
         Self {
@@ -774,6 +903,55 @@ impl SealedEnvelopeVault {
 }
 
 impl NodeVault for SealedEnvelopeVault {
+    fn retain_external_relay_bootstrap(
+        &self,
+        access: &ExternalRelayBootstrapAccess,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        signed_import: &ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization,
+    ) -> Result<()> {
+        let expected = access.canonical_document(bootstrap, signed_import)?;
+        // The master key is one immutable internal vault value. Vault rewrap
+        // carries it with the ordinary sealed store; artifact count does not
+        // consume the vault entry or plaintext budgets per placement.
+        let key = self.relay_bootstrap_key(access, true)?;
+        let directory = self.relay_bootstrap_directory(access, true)?;
+        if directory
+            .open_pinned_regular(access.artifact_name(), false)?
+            .is_none()
+        {
+            let envelope = lillux::vault::seal(&key.public_key(), &expected)?;
+            let encoded = toml::to_string(&envelope)?;
+            anyhow::ensure!(
+                encoded.len() as u64 <= external_relay_bootstrap::MAX_ARTIFACT_BYTES,
+                "protected relay bootstrap envelope exceeds its byte bound"
+            );
+            // A previously published original is never replaced. Any existing
+            // artifact must be read and compared below before contact.
+            directory.atomic_create_pinned_regular(
+                access.artifact_name(),
+                encoded.as_bytes(),
+                0o600,
+            )?;
+        }
+        let retained = self.read_relay_bootstrap_artifact(access, &key)?;
+        anyhow::ensure!(
+            access
+                .canonical_document(retained.bootstrap(), retained.signed_import())?
+                .as_slice()
+                == expected.as_slice(),
+            "protected original relay document changed before activation"
+        );
+        Ok(())
+    }
+
+    fn external_relay_bootstrap(
+        &self,
+        access: &ExternalRelayBootstrapAccess,
+    ) -> Result<ProtectedExternalRelayBootstrap> {
+        let key = self.relay_bootstrap_key(access, false)?;
+        self.read_relay_bootstrap_artifact(access, &key)
+    }
+
     fn external_connector_capability(
         &self,
         access: &ExternalConnectorCapabilityAccess,

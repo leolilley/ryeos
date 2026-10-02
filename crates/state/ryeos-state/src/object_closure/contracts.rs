@@ -76,6 +76,8 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "project_snapshot",
     "project_snapshot_policy",
     "project_tree",
+    "qualification_fixture_capture",
+    "qualification_worker_transcript",
     "retained_lifecycle_artifacts",
     "ryeos.effective_source_binding",
     "ryeos.source_closure_manifest",
@@ -209,6 +211,16 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         links: links_project_tree,
     },
     ObjectContract {
+        kind: crate::objects::qualification_fixture::Q_FIXTURE_CAPTURE_KIND,
+        validate: validate_qualification_fixture_capture,
+        links: links_qualification_fixture_capture,
+    },
+    ObjectContract {
+        kind: crate::objects::QUALIFICATION_WORKER_TRANSCRIPT_KIND,
+        validate: validate_qualification_worker_transcript,
+        links: links_qualification_worker_transcript,
+    },
+    ObjectContract {
         kind: crate::objects::RETAINED_LIFECYCLE_ARTIFACTS_KIND,
         validate: validate_retained_lifecycle_artifacts,
         links: links_retained_lifecycle_artifacts,
@@ -302,6 +314,51 @@ fn validate_admitted_execution_realization(value: &Value) -> anyhow::Result<()> 
 
 fn validate_attestation(value: &Value) -> anyhow::Result<()> {
     crate::objects::Attestation::from_value(value).map(|_| ())
+}
+
+fn validate_qualification_fixture_capture(value: &Value) -> anyhow::Result<()> {
+    crate::objects::qualification_fixture::QFixtureCaptureMetadata::from_value(value).map(|_| ())
+}
+
+fn links_qualification_fixture_capture(value: &Value) -> Result<ContractLinks, String> {
+    let metadata =
+        crate::objects::qualification_fixture::QFixtureCaptureMetadata::from_value(value)
+            .map_err(|error| format!("invalid Q fixture capture: {error:#}"))?;
+    // Native, fixture-contract and derived ProjectFile digests are commitments,
+    // not CAS object links. Only the captured blob belongs to this closure.
+    Ok(ContractLinks {
+        object_edges: Vec::new(),
+        blob_hashes: vec![metadata.blob_hash],
+        large_object_hashes: Vec::new(),
+    })
+}
+
+fn validate_qualification_worker_transcript(value: &Value) -> anyhow::Result<()> {
+    crate::objects::QualificationWorkerTranscriptManifest::from_current_value(value).map(|_| ())
+}
+
+fn links_qualification_worker_transcript(value: &Value) -> Result<ContractLinks, String> {
+    let manifest = crate::objects::QualificationWorkerTranscriptManifest::from_current_value(value)
+        .map_err(|error| format!("invalid Q Worker transcript: {error:#}"))?;
+    Ok(ContractLinks {
+        object_edges: manifest
+            .fixture_capture
+            .into_iter()
+            .map(|capture| ObjectEdge {
+                hash: capture.metadata_hash,
+                expected: ExpectedObject::Kind(
+                    crate::objects::qualification_fixture::Q_FIXTURE_CAPTURE_KIND,
+                ),
+                history_graph: None,
+            })
+            .collect(),
+        blob_hashes: manifest
+            .chunks
+            .into_iter()
+            .map(|chunk| chunk.blob_hash)
+            .collect(),
+        large_object_hashes: Vec::new(),
+    })
 }
 
 fn validate_bundle_event(value: &Value) -> anyhow::Result<()> {
@@ -637,6 +694,14 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
         if let Some(content) = &evidence.consumer_content {
             push_qualification_consumer_content_edges(content, &mut links)?;
         }
+        if let Some(hash) = &evidence.qualification_worker_transcript_manifest_hash {
+            super::push_typed_hash(
+                hash,
+                ExpectedObject::Kind(crate::objects::QUALIFICATION_WORKER_TRANSCRIPT_KIND),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
         push_qualification_subordinate_edges(&evidence.execution_proof, &mut links);
         for verifier in evidence.execution_verifiers() {
             super::push_typed_hash(
@@ -687,6 +752,9 @@ fn push_qualification_subordinate_edges(
         links
             .blob_hashes
             .push(proof.observation.evidence_sha256.clone());
+        links
+            .blob_hashes
+            .push(proof.consumer_input_blob_hash.clone());
     }
 }
 
@@ -1906,6 +1974,48 @@ mod tests {
         let mut malformed = value;
         malformed["products"][0]["witness_hash"] = serde_json::json!("not-a-hash");
         assert!(links_product_build_accepted_result(&malformed).is_err());
+    }
+
+    #[test]
+    fn q_fixture_capture_roots_only_its_exact_blob() {
+        use crate::external_execution::{
+            NativeNamespaceExit, NativeQualificationScopeSettlementObservation,
+            NativeWriterExclusionMechanism,
+        };
+        use crate::objects::qualification_fixture::{
+            Q_FIXTURE_CAPTURE_KIND, Q_FIXTURE_CAPTURE_SCHEMA, QFixtureCaptureMetadata,
+        };
+        let metadata = QFixtureCaptureMetadata {
+            kind: Q_FIXTURE_CAPTURE_KIND.into(),
+            schema: Q_FIXTURE_CAPTURE_SCHEMA,
+            fixture_contract_digest: "a".repeat(64),
+            blob_hash: "b".repeat(64),
+            size_bytes: 3,
+            normalized_mode: crate::objects::ProjectFile::REGULAR_MODE,
+            native_settlement: NativeQualificationScopeSettlementObservation {
+                schema: 1,
+                binding_digest: "c".repeat(64),
+                launcher_occurrence_digest: "d".repeat(64),
+                applied_runtime_receipt_digest: "e".repeat(64),
+                completion_frame_digest: "f".repeat(64),
+                completion_request_digest: "0".repeat(64),
+                mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+                exit: NativeNamespaceExit::Signal(9),
+            },
+        };
+        let value = metadata.to_value().unwrap();
+        let contract = contract(Q_FIXTURE_CAPTURE_KIND).unwrap();
+        (contract.validate)(&value).unwrap();
+        let links = (contract.links)(&value).unwrap();
+        assert_eq!(links.blob_hashes, vec![metadata.blob_hash]);
+        assert!(links.object_edges.is_empty() && links.large_object_hashes.is_empty());
+        let mut changed = value.clone();
+        changed["normalized_mode"] = serde_json::json!(493);
+        assert!((contract.validate)(&changed).is_err());
+        assert!((contract.links)(&changed).is_err());
+        changed = value;
+        changed["schema"] = serde_json::json!(0);
+        assert!((contract.links)(&changed).is_err());
     }
 
     #[test]

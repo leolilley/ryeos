@@ -46,6 +46,7 @@ pub(crate) enum RouteName {
     SandboxById,
     SandboxTerminateById,
     SandboxFileUploadTokenById,
+    SandboxFileDownloadTokenById,
     SandboxRunStreamTokenById,
 }
 
@@ -61,6 +62,8 @@ enum RouteLiteral {
     Files,
     #[serde(rename = "upload")]
     Upload,
+    #[serde(rename = "download")]
+    Download,
     #[serde(rename = "runs")]
     Runs,
     #[serde(rename = "stream")]
@@ -77,6 +80,7 @@ impl RouteLiteral {
             Self::Terminate => "terminate",
             Self::Files => "files",
             Self::Upload => "upload",
+            Self::Download => "download",
             Self::Runs => "runs",
             Self::Stream => "stream",
             Self::Token => "token",
@@ -113,19 +117,19 @@ struct RouteQuery {
     #[serde(rename = "ownerId")]
     owner_id: StringSource,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    path: Option<UploadPathSource>,
+    path: Option<FilePathSource>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-enum UploadPathFieldSource {
-    #[serde(rename = "operation.upload_path")]
-    OperationUploadPath,
+enum FilePathFieldSource {
+    #[serde(rename = "operation.file_path")]
+    OperationFilePath,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct UploadPathSource {
-    source: UploadPathFieldSource,
+struct FilePathSource {
+    source: FilePathFieldSource,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -248,6 +252,7 @@ enum OperationKind {
     CreateOnce,
     UploadThenRunOncePending,
     UploadThenRunOnce,
+    JournalClaimedFileRelay,
     UnsupportedPending,
     TerminateOnceThenObserveExact,
     ObserveExactOccurrence,
@@ -287,6 +292,7 @@ pub(crate) struct Operations {
     reconcile_allocation: OperationSpec,
     activate_supervisor: OperationSpec,
     reconcile_supervisor_activation: OperationSpec,
+    relay_file: OperationSpec,
     pub(crate) terminate: OperationSpec,
     pub(crate) reconcile_termination: OperationSpec,
     bootstrap_terminated_list: OperationSpec,
@@ -299,6 +305,7 @@ struct Routes {
     sandbox_by_id: RouteSpec,
     sandbox_terminate_by_id: RouteSpec,
     sandbox_file_upload_token_by_id: RouteSpec,
+    sandbox_file_download_token_by_id: RouteSpec,
     sandbox_run_stream_token_by_id: RouteSpec,
 }
 
@@ -306,7 +313,7 @@ struct Routes {
 pub(crate) struct RouteTarget {
     pub(crate) path_segments: Vec<String>,
     pub(crate) owner_id_query: Option<String>,
-    pub(crate) upload_path_query: Option<String>,
+    pub(crate) file_path_query: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -368,7 +375,7 @@ impl ProviderSpec {
 
     fn validate(&self, settings_schema_digest: &str) -> Result<()> {
         ensure!(
-            self.schema == 3
+            self.schema == 5
                 && self.provider_profile == ProviderProfile::RenderSandboxV1
                 && self.origin_profile == OriginProfile::RenderApiV1
                 && self.settings_schema_digest == settings_schema_digest
@@ -417,7 +424,18 @@ impl ProviderSpec {
                     RouteSegmentExpectation::Literal(RouteLiteral::Upload),
                     RouteSegmentExpectation::Literal(RouteLiteral::Token),
                 ],
-                ExpectedRouteQuery::OwnerAndUploadPath,
+                ExpectedRouteQuery::OwnerAndFilePath,
+            ) && route_matches(
+                &self.routes.sandbox_file_download_token_by_id,
+                &[
+                    RouteSegmentExpectation::Literal(RouteLiteral::V1),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Sandboxes),
+                    RouteSegmentExpectation::Bound(RouteBinding::OccurrenceId),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Files),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Download),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Token),
+                ],
+                ExpectedRouteQuery::OwnerAndFilePath,
             ) && route_matches(
                 &self.routes.sandbox_run_stream_token_by_id,
                 &[
@@ -510,6 +528,15 @@ impl ProviderSpec {
                     .is_empty_pending(),
             "provider spec reconciliation or activation operation is unsupported"
         );
+        ensure!(
+            self.operations.relay_file.is_empty_pending()
+                || (self
+                    .operations
+                    .activate_supervisor
+                    .is_one_shot_pending_activation()
+                    && self.operations.relay_file.is_journal_claimed_file_relay()),
+            "provider spec relay file operation is unsupported"
+        );
         let terminate = &self.operations.terminate;
         ensure!(
             terminate.kind == OperationKind::TerminateOnceThenObserveExact
@@ -586,6 +613,34 @@ impl ProviderSpec {
         self.operations
             .activate_supervisor
             .is_one_shot_pending_activation()
+    }
+
+    pub(crate) fn relay_file_enabled(&self) -> bool {
+        self.operations.relay_file.is_journal_claimed_file_relay()
+    }
+
+    pub(crate) fn relay_file_upload_route(&self) -> Result<RouteName> {
+        ensure!(
+            self.relay_file_enabled(),
+            "signed Render relay file operation is disabled"
+        );
+        Ok(self
+            .operations
+            .relay_file
+            .mutation_route
+            .expect("validated relay upload route"))
+    }
+
+    pub(crate) fn relay_file_download_route(&self) -> Result<RouteName> {
+        ensure!(
+            self.relay_file_enabled(),
+            "signed Render relay file operation is disabled"
+        );
+        Ok(self
+            .operations
+            .relay_file
+            .observation_route
+            .expect("validated relay download route"))
     }
 
     pub(crate) fn api_base(&self) -> &'static str {
@@ -669,13 +724,16 @@ impl ProviderSpec {
         name: RouteName,
         occurrence_id: Option<&str>,
         settings_owner_id: &str,
-        upload_path: Option<&str>,
+        file_path: Option<&str>,
     ) -> Result<RouteTarget> {
         let route = match name {
             RouteName::SandboxCollection => &self.routes.sandbox_collection,
             RouteName::SandboxById => &self.routes.sandbox_by_id,
             RouteName::SandboxTerminateById => &self.routes.sandbox_terminate_by_id,
             RouteName::SandboxFileUploadTokenById => &self.routes.sandbox_file_upload_token_by_id,
+            RouteName::SandboxFileDownloadTokenById => {
+                &self.routes.sandbox_file_download_token_by_id
+            }
             RouteName::SandboxRunStreamTokenById => &self.routes.sandbox_run_stream_token_by_id,
         };
         let mut path_segments = Vec::with_capacity(route.segments.len());
@@ -703,10 +761,10 @@ impl ProviderSpec {
             Some(_) => anyhow::bail!("provider spec query projection is unsupported"),
             None => None,
         };
-        let upload_path_query = match (&route.query, upload_path) {
+        let file_path_query = match (&route.query, file_path) {
             (Some(query), Some(path))
                 if query.path.as_ref().is_some_and(|source| {
-                    source.source == UploadPathFieldSource::OperationUploadPath
+                    source.source == FilePathFieldSource::OperationFilePath
                 }) =>
             {
                 ensure!(
@@ -721,18 +779,18 @@ impl ProviderSpec {
                                         || matches!(byte, b'-' | b'_' | b'.')
                                 })
                         }),
-                    "operation upload path is invalid"
+                    "operation file path is invalid"
                 );
                 Some(path.to_owned())
             }
             (Some(query), None) if query.path.is_none() => None,
             (None, None) => None,
-            _ => anyhow::bail!("operation upload path does not match the signed route"),
+            _ => anyhow::bail!("operation file path does not match the signed route"),
         };
         Ok(RouteTarget {
             path_segments,
             owner_id_query,
-            upload_path_query,
+            file_path_query,
         })
     }
 
@@ -862,6 +920,18 @@ impl ProviderSpec {
 }
 
 impl OperationSpec {
+    fn is_journal_claimed_file_relay(&self) -> bool {
+        self.kind == OperationKind::JournalClaimedFileRelay
+            && self.route.is_none()
+            && self.precondition_profile.is_none()
+            && self.body.is_none()
+            && self.bind_proof_profile.is_none()
+            && self.no_occurrence_proof_profile.is_none()
+            && self.mutation_route == Some(RouteName::SandboxFileUploadTokenById)
+            && self.observation_route == Some(RouteName::SandboxFileDownloadTokenById)
+            && self.terminal_proof_profile.is_none()
+    }
+
     fn is_one_shot_pending_activation(&self) -> bool {
         self.kind == OperationKind::UploadThenRunOncePending
             && self.precondition_profile == Some(PreconditionProfile::RenderQualifiedGuestRuntimeV1)
@@ -896,7 +966,7 @@ enum RouteSegmentExpectation {
 enum ExpectedRouteQuery {
     None,
     Owner,
-    OwnerAndUploadPath,
+    OwnerAndFilePath,
 }
 
 fn route_matches(
@@ -922,10 +992,10 @@ fn route_matches(
             (Some(query), ExpectedRouteQuery::Owner) => {
                 query.owner_id.source == StringFieldSource::SettingsOwnerId && query.path.is_none()
             }
-            (Some(query), ExpectedRouteQuery::OwnerAndUploadPath) => {
+            (Some(query), ExpectedRouteQuery::OwnerAndFilePath) => {
                 query.owner_id.source == StringFieldSource::SettingsOwnerId
                     && query.path.as_ref().is_some_and(|source| {
-                        source.source == UploadPathFieldSource::OperationUploadPath
+                        source.source == FilePathFieldSource::OperationFilePath
                     })
             }
             _ => false,
@@ -1036,6 +1106,80 @@ mod tests {
     }
 
     #[test]
+    fn relay_file_requires_explicit_exact_signed_operation_and_activation_selection() {
+        let mut value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        let pending = ProviderSpec::parse(&fixture(), SETTINGS_SCHEMA_DIGEST).unwrap();
+        assert!(!pending.relay_file_enabled());
+        assert!(pending.relay_file_upload_route().is_err());
+        assert!(pending.relay_file_download_route().is_err());
+        let mut missing = value.clone();
+        missing["operations"]
+            .as_object_mut()
+            .unwrap()
+            .remove("relay_file");
+        assert!(
+            ProviderSpec::parse(
+                &serde_json::to_vec(&missing).unwrap(),
+                SETTINGS_SCHEMA_DIGEST
+            )
+            .is_err()
+        );
+        missing = value.clone();
+        missing["schema"] = serde_json::json!(4);
+        assert!(
+            ProviderSpec::parse(
+                &serde_json::to_vec(&missing).unwrap(),
+                SETTINGS_SCHEMA_DIGEST
+            )
+            .is_err()
+        );
+
+        value["operations"]["relay_file"] = serde_json::json!({
+            "kind": "journal_claimed_file_relay",
+            "mutation_route": "sandbox_file_upload_token_by_id",
+            "observation_route": "sandbox_file_download_token_by_id"
+        });
+        assert!(
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
+        );
+        value["operations"]["activate_supervisor"] = serde_json::json!({
+            "kind": "upload_then_run_once_pending",
+            "precondition_profile": "render_qualified_guest_runtime_v1"
+        });
+        let selected =
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .unwrap();
+        assert_eq!(
+            selected.relay_file_upload_route().unwrap(),
+            RouteName::SandboxFileUploadTokenById
+        );
+        assert_eq!(
+            selected.relay_file_download_route().unwrap(),
+            RouteName::SandboxFileDownloadTokenById
+        );
+        assert!(
+            !selected
+                .effective_capabilities()
+                .contains(&LifecycleCapability::SupervisorActivation)
+        );
+
+        value["operations"]["relay_file"]["observation_route"] =
+            serde_json::json!("sandbox_run_stream_token_by_id");
+        assert!(
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
+        );
+        value["operations"]["relay_file"]["observation_route"] =
+            serde_json::json!("sandbox_file_download_token_by_id");
+        value["operations"]["relay_file"]["route"] = serde_json::json!("sandbox_collection");
+        assert!(
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn one_shot_activation_profile_is_closed_and_reconciliation_stays_pending() {
         let mut value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
         value["operations"]["activate_supervisor"] = serde_json::json!({
@@ -1093,7 +1237,7 @@ mod tests {
             RouteTarget {
                 path_segments: vec!["v1".into(), "sandboxes".into(), "sbx-fixture-1".into()],
                 owner_id_query: Some("owner-1".into()),
-                upload_path_query: None,
+                file_path_query: None,
             }
         );
         assert_eq!(
@@ -1114,7 +1258,28 @@ mod tests {
                     "token".into(),
                 ],
                 owner_id_query: Some("owner-1".into()),
-                upload_path_query: Some("/ryeos/activation/guest-package".into()),
+                file_path_query: Some("/ryeos/activation/guest-package".into()),
+            }
+        );
+        assert_eq!(
+            spec.route_target(
+                RouteName::SandboxFileDownloadTokenById,
+                Some("sbx-fixture-1"),
+                "owner-1",
+                Some("/ryeos/relay/attach-request"),
+            )
+            .unwrap(),
+            RouteTarget {
+                path_segments: vec![
+                    "v1".into(),
+                    "sandboxes".into(),
+                    "sbx-fixture-1".into(),
+                    "files".into(),
+                    "download".into(),
+                    "token".into(),
+                ],
+                owner_id_query: Some("owner-1".into()),
+                file_path_query: Some("/ryeos/relay/attach-request".into()),
             }
         );
         assert!(
@@ -1133,8 +1298,8 @@ mod tests {
     fn spec_rejects_unknown_configuration_and_unreviewed_routes() {
         let fixture = String::from_utf8(fixture()).unwrap();
         let with_capability_claim = fixture.replacen(
-            "\"schema\": 3,",
-            "\"schema\": 3,\n  \"capabilities\": [\"exact_terminal_observation\"],",
+            "\"schema\": 5,",
+            "\"schema\": 5,\n  \"capabilities\": [\"exact_terminal_observation\"],",
             1,
         );
         assert!(
@@ -1168,9 +1333,18 @@ mod tests {
             ProviderSpec::parse(arbitrary_token_route.as_bytes(), SETTINGS_SCHEMA_DIGEST).is_err()
         );
         let arbitrary_upload_source =
-            fixture.replace("operation.upload_path", "settings.snapshot_id");
+            fixture.replace("operation.file_path", "settings.snapshot_id");
         assert!(
             ProviderSpec::parse(arbitrary_upload_source.as_bytes(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
+        );
+        let arbitrary_download_route = fixture.replacen(
+            "\"sandbox_file_download_token_by_id\": {",
+            "\"sandbox_file_download_token_by_id\": {\"unreviewed\": true,",
+            1,
+        );
+        assert!(
+            ProviderSpec::parse(arbitrary_download_route.as_bytes(), SETTINGS_SCHEMA_DIGEST)
                 .is_err()
         );
     }

@@ -747,8 +747,8 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
     let node_config = ryeos_app::node_config::NodeConfigSnapshot {
         external_execution: Vec::new(),
         runtime_snapshot_production: Vec::new(),
-        guest_runtime_materialization: Vec::new(),
         runtime_snapshot_qualification: Vec::new(),
+        guest_runtime_materialization: Vec::new(),
         bundles: vec![],
         routes: vec![],
         commands: vec![],
@@ -817,6 +817,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         ),
         scoped_producer_authorities: Arc::new(Default::default()),
         scoped_producer_processes: Arc::new(Default::default()),
+        qualification_workspace_custody: Arc::new(Default::default()),
     };
     (tmpdir, state)
 }

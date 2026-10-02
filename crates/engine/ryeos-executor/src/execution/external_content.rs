@@ -1279,6 +1279,24 @@ pub(crate) fn bind_retained_external_guest_realizations(
     )
 }
 
+/// Redeem the same accepted Q realization set for its local Worker. Project
+/// mounts target the supplied owned runtime workspace, while fixed runtime
+/// mounts keep their signed execution-runtime coordinates.
+pub(crate) fn bind_retained_qualification_local_realizations(
+    state: &ryeos_app::state::AppState,
+    realized: &ryeos_state::objects::ExternalContentRealizationSet,
+    workspace: &Path,
+    budget: &PrivateMaterializationBudget,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    bind_external_realization_set_with(
+        state,
+        realized.clone(),
+        workspace,
+        ExternalRealizationBinding::PrivateRuntimeView,
+        Some(budget),
+    )
+}
+
 /// Exact project-relative roots populated from separately admitted external
 /// realizations. Native private-copy fold-back excludes these operational
 /// shadows so input realizations never become project output bytes.

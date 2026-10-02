@@ -235,6 +235,11 @@ pub enum DurableCasPublicationKey {
         binding_digest: String,
         occurrence_digest: String,
     },
+    /// Finite Q evidence retention, never a candidate snapshot/export receipt.
+    QFixtureOccurrence {
+        binding_digest: String,
+        completion_frame_digest: String,
+    },
     /// Exact controller-local source preparation. This is neither an
     /// execution capture nor an external-content import; the coordinate must
     /// bind recipe, installed source and admitted operator before publication.
@@ -289,6 +294,18 @@ impl DurableCasPublicationKey {
         let key = Self::ExternalCandidateOccurrence {
             binding_digest: binding_digest.to_owned(),
             occurrence_digest: occurrence_digest.to_owned(),
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
+    pub fn qualification_fixture_occurrence(
+        binding_digest: &str,
+        completion_frame_digest: &str,
+    ) -> Result<Self> {
+        let key = Self::QFixtureOccurrence {
+            binding_digest: binding_digest.into(),
+            completion_frame_digest: completion_frame_digest.into(),
         };
         key.validate()?;
         Ok(key)
@@ -354,6 +371,13 @@ impl DurableCasPublicationKey {
             } => {
                 validate_hash("external-candidate binding digest", binding_digest)?;
                 validate_hash("external-candidate occurrence digest", occurrence_digest)
+            }
+            Self::QFixtureOccurrence {
+                binding_digest,
+                completion_frame_digest,
+            } => {
+                validate_hash("Q fixture binding", binding_digest)?;
+                validate_hash("Q fixture completion", completion_frame_digest)
             }
             Self::GuestRuntimeMaterialization {
                 binding_digest,
@@ -481,6 +505,16 @@ impl DurableExternalCandidateReceipt {
     pub fn large_object_hashes(&self) -> &BTreeSet<String> {
         &self.large_object_hashes
     }
+}
+
+/// Exact non-expiring two-root Q receipt. It conveys no ordinary publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableQFixtureReceipt {
+    pub staging_id: String,
+    pub owner_principal: String,
+    pub publication_key: DurableCasPublicationKey,
+    pub metadata_hash: String,
+    pub blob_hash: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -801,6 +835,12 @@ impl DurableCasUploadStage {
     ) -> Result<()> {
         self.ensure_active()?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
+        if matches!(
+            self.record.publication_key,
+            DurableCasPublicationKey::QFixtureOccurrence { .. }
+        ) {
+            anyhow::bail!("Q fixture evidence requires retained two-root custody");
+        }
         validate_hash("admitted durable upload target", admitted_target_hash)?;
         if !self.record.object_hashes.contains(admitted_target_hash) {
             anyhow::bail!("admitted publication target was not protected by the upload stage");
@@ -826,6 +866,66 @@ impl DurableCasUploadStage {
         }
         drop(self.lock_file.take());
         Ok(())
+    }
+
+    /// Preserve exactly the Q metadata object and blob as non-expiring roots.
+    /// This must precede committing a guest settlement row or signed frame.
+    pub fn retain_qualification_fixture(
+        &mut self,
+        guard: &CasMutationGuard,
+        reference: &crate::objects::qualification_fixture::QFixtureCaptureReference,
+    ) -> Result<DurableQFixtureReceipt> {
+        self.ensure_active()?;
+        self.recovery.ensure_guard(guard)?;
+        reference.validate()?;
+        if !matches!(
+            self.record.publication_key,
+            DurableCasPublicationKey::QFixtureOccurrence { .. }
+        ) || self.record.object_hashes != BTreeSet::from([reference.metadata_hash.clone()])
+            || self.record.blob_hashes != BTreeSet::from([reference.blob_hash.clone()])
+            || !self.record.large_object_hashes.is_empty()
+            || self.record.expected_previous_hash.is_some()
+        {
+            anyhow::bail!("Q fixture retention changed its exact two-root contract");
+        }
+        let now = lillux::time::iso8601_now();
+        let mut candidate = self.record.clone();
+        candidate.admitted_target_hash = Some(reference.metadata_hash.clone());
+        candidate.admitted_at = Some(now.clone());
+        candidate.retained_at = Some(now);
+        self.persist_record(&candidate)?;
+        self.record = candidate;
+        let receipt = self.qualification_fixture_receipt()?;
+        drop(self.lock_file.take());
+        Ok(receipt)
+    }
+
+    pub fn qualification_fixture_receipt(&self) -> Result<DurableQFixtureReceipt> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
+        validate_durable_upload_record(&self.record)?;
+        if !matches!(
+            self.record.publication_key,
+            DurableCasPublicationKey::QFixtureOccurrence { .. }
+        ) || self.record.retained_at.is_none()
+        {
+            anyhow::bail!("upload is not retained Q fixture evidence");
+        }
+        Ok(DurableQFixtureReceipt {
+            staging_id: self.record.staging_id.clone(),
+            owner_principal: self.record.owner_principal.clone(),
+            publication_key: self.record.publication_key.clone(),
+            metadata_hash: self
+                .record
+                .admitted_target_hash
+                .clone()
+                .context("Q fixture metadata is absent")?,
+            blob_hash: self
+                .record
+                .blob_hashes
+                .first()
+                .context("Q fixture blob is absent")?
+                .clone(),
+        })
     }
 
     /// Convert an external-candidate staging capability into an immutable,
@@ -2931,6 +3031,12 @@ fn validate_durable_upload_record(record: &DurableCasUploadRecord) -> Result<()>
     ) {
         (None, None, None) => {}
         (Some(hash), Some(admitted_at), None) => {
+            if matches!(
+                record.publication_key,
+                DurableCasPublicationKey::QFixtureOccurrence { .. }
+            ) {
+                anyhow::bail!("Q fixture receipt cannot discard its retained roots");
+            }
             validate_hash("durable upload admitted target", hash)?;
             crate::objects::parse_canonical_timestamp(admitted_at)
                 .context("durable upload admitted_at is not canonical")?;
@@ -2942,22 +3048,31 @@ fn validate_durable_upload_record(record: &DurableCasUploadRecord) -> Result<()>
             }
         }
         (Some(hash), Some(admitted_at), Some(retained_at)) => {
-            validate_hash("retained external-candidate snapshot", hash)?;
+            validate_hash("retained occurrence target", hash)?;
             crate::objects::parse_canonical_timestamp(admitted_at)
-                .context("retained external-candidate admitted_at is not canonical")?;
+                .context("retained occurrence admitted_at is not canonical")?;
             crate::objects::parse_canonical_timestamp(retained_at)
-                .context("retained external-candidate retained_at is not canonical")?;
+                .context("retained occurrence retained_at is not canonical")?;
             if admitted_at != retained_at {
-                anyhow::bail!("retained external-candidate timestamps do not match");
+                anyhow::bail!("retained occurrence timestamps do not match");
             }
-            if !matches!(
-                record.publication_key,
-                DurableCasPublicationKey::ExternalCandidateOccurrence { .. }
-            ) {
-                anyhow::bail!("only an external-candidate occurrence may retain CAS roots");
+            match record.publication_key {
+                DurableCasPublicationKey::ExternalCandidateOccurrence { .. } => {}
+                DurableCasPublicationKey::QFixtureOccurrence { .. } => {
+                    if record.object_hashes.len() != 1
+                        || record.blob_hashes.len() != 1
+                        || !record.large_object_hashes.is_empty()
+                        || record.expected_previous_hash.is_some()
+                    {
+                        anyhow::bail!(
+                            "retained Q fixture must have exactly its metadata and blob roots"
+                        );
+                    }
+                }
+                _ => anyhow::bail!("only candidate or Q fixture occurrences may retain CAS roots"),
             }
             if !record.object_hashes.contains(hash) {
-                anyhow::bail!("retained external-candidate snapshot is not a protected root");
+                anyhow::bail!("retained occurrence target is not a protected root");
             }
         }
         _ => anyhow::bail!("durable upload admission receipt is incomplete"),
@@ -3131,6 +3246,140 @@ mod tests {
             "blob_hashes": [],
             "large_object_hashes": [],
         })
+    }
+
+    #[test]
+    fn q_fixture_receipt_retains_exact_roots_across_retirement_and_reopen() {
+        use crate::objects::qualification_fixture::QFixtureCaptureReference;
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let key =
+            DurableCasPublicationKey::qualification_fixture_occurrence(&hash("a"), &hash("b"))
+                .unwrap();
+        let reference = QFixtureCaptureReference {
+            metadata_hash: hash("d"),
+            blob_hash: hash("e"),
+            size_bytes: 5,
+        };
+        let owner = hash("c");
+        let receipt;
+        {
+            let guard = CasMutationGuard::acquire_shared(temp.path()).unwrap();
+            let mut stage = store
+                .begin_durable_cas_upload_admitted(&guard, &owner, "q-fixture", &key, None)
+                .unwrap();
+            assert!(
+                stage
+                    .retain_qualification_fixture(&guard, &reference)
+                    .is_err()
+            );
+            stage
+                .protect_cas_closure(
+                    &guard,
+                    [reference.metadata_hash.as_str()],
+                    [reference.blob_hash.as_str()],
+                )
+                .unwrap();
+            assert!(
+                stage
+                    .finish_admitted(&guard, &reference.metadata_hash)
+                    .is_err()
+            );
+            receipt = stage
+                .retain_qualification_fixture(&guard, &reference)
+                .unwrap();
+            assert!(stage.external_candidate_receipt().is_err());
+            assert!(
+                stage
+                    .protect_cas_closure(&guard, [hash("f").as_str()], [])
+                    .is_err()
+            );
+        }
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        assert_eq!(
+            store
+                .retire_durable_cas_uploads_created_before("9999-12-31T23:59:59Z", &guard)
+                .unwrap(),
+            0
+        );
+        let roots = store.active_staged_cas_root_hashes().unwrap();
+        assert!(roots.object_hashes.contains(&reference.metadata_hash));
+        assert!(roots.blob_hashes.contains(&reference.blob_hash));
+        let stage = store
+            .open_durable_cas_upload_admitted(&guard, &receipt.staging_id, &owner)
+            .unwrap();
+        assert_eq!(stage.qualification_fixture_receipt().unwrap(), receipt);
+        let other =
+            DurableCasPublicationKey::qualification_fixture_occurrence(&hash("a"), &hash("f"))
+                .unwrap();
+        assert!(stage.ensure_publication_contract(&other, None).is_err());
+        let mut malformed = stage.record.clone();
+        malformed.retained_at = None;
+        malformed.object_hashes.clear();
+        malformed.blob_hashes.clear();
+        assert!(validate_durable_upload_record(&malformed).is_err());
+        malformed = stage.record.clone();
+        malformed.blob_hashes.insert(hash("f"));
+        assert!(validate_durable_upload_record(&malformed).is_err());
+        malformed = stage.record.clone();
+        malformed.publication_key =
+            DurableCasPublicationKey::external_content_import(&hash("a")).unwrap();
+        assert!(validate_durable_upload_record(&malformed).is_err());
+    }
+
+    #[test]
+    fn q_fixture_unretained_stage_expiry_never_reopens_a_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let key =
+            DurableCasPublicationKey::qualification_fixture_occurrence(&hash("a"), &hash("b"))
+                .unwrap();
+        let owner = hash("c");
+        let original_id = {
+            let guard = CasMutationGuard::acquire_shared(temp.path()).unwrap();
+            let stage = store
+                .begin_durable_cas_upload_admitted(
+                    &guard,
+                    &owner,
+                    "qualification-fixture-receiver",
+                    &key,
+                    None,
+                )
+                .unwrap();
+            stage.staging_id().to_owned()
+        };
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        assert_eq!(
+            store
+                .retire_durable_cas_uploads_created_before("9999-12-31T23:59:59Z", &guard,)
+                .unwrap(),
+            1
+        );
+        assert!(
+            store
+                .open_durable_cas_upload_admitted(&guard, &original_id, &owner,)
+                .is_err()
+        );
+        // Even a fresh capability with the same publication key does not
+        // restore an immutable receiver row's selected stage identity.
+        let replacement = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &owner,
+                "qualification-fixture-receiver",
+                &key,
+                None,
+            )
+            .unwrap();
+        assert_ne!(replacement.staging_id(), original_id);
+        assert!(replacement.qualification_fixture_receipt().is_err());
+        assert!(
+            store
+                .open_durable_cas_upload_admitted(&guard, &original_id, &owner,)
+                .is_err()
+        );
     }
 
     #[test]

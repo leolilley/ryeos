@@ -122,6 +122,16 @@ def assert_slot(test, document, slot_id, mount):
 
 
 class BundleReleaseExecutionClosureTests(unittest.TestCase):
+    def test_protected_qualification_has_recorded_attempt_and_declared_capability(self):
+        capability = "ryeos.execute.service.external-content/launch-product-qualification"
+        for name in ("generation-qualify", "core-seed-qualify", "substrate-qualify", "authority-calibrate"):
+            service = load_yaml(ASSET / "services/bundle-release" / f"{name}.yaml")
+            self.assertIs(service.get("record_thread"), True, name)
+            self.assertIn(capability, service["required_caps"], name)
+        for name in ("publish", "bootstrap", "authority-calibrate"):
+            graph = load_yaml(GRAPHS / f"{name}.yaml")
+            self.assertIn(capability, graph["requires"]["capabilities"]["declared"], name)
+
     def test_release_graphs_explicitly_hand_exact_selections_to_child_tools(self):
         expected = {
             "portable-build": ("portable-build", {"python"}),
@@ -405,7 +415,7 @@ class BundleReleaseExecutionClosureTests(unittest.TestCase):
                 })
                 self.assertEqual(relationship["qualification"], {
                     "policy_ref": "config:ryeos/environments/qualification/static-link-inputs",
-                    "required_claims": ["static_link_inputs_x86_64_linux_gnu_v1"],
+                    "required_claims": ["static_link_inputs_profile_x86_64_linux_gnu_v2"],
                 })
 
     def test_calibration_requires_all_four_qualified_product_selections(self):

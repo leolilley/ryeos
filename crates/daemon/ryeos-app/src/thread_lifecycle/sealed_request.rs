@@ -937,24 +937,11 @@ impl SealedRootExecutionRequest {
             content.verify_verifier_realizations(&realizations, &purpose.subject_declaration_id)?;
             return Ok(());
         }
-        let (product_witness_hash, witness_source, _) = purpose.subject.captured_product()?;
-        let is_exact_root_subject = |selected: &ryeos_state::external_content::products::composition::ProductSelectionInput| {
-            matches!(
-                selected.target,
-                ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
-            ) && selected.selection.declaration_id == purpose.subject_declaration_id
-                && selected.selection.witness_hash == product_witness_hash
-                && &selected.selection.witness_source == witness_source
-                && selected.selection.qualification_hash.is_none()
-        };
-        match (pinned_lane, self.product_selections.as_slice()) {
-            (true, [selected]) if is_exact_root_subject(selected) => {}
-            // Preserve the legacy projectless fixed-pin lane (with its
-            // optional pre-existing selected-root admission form).
-            (false, []) => {}
-            (false, [selected]) if is_exact_root_subject(selected) => {}
-            _ => bail!("sealed qualification subject selection differs from launch purpose"),
-        }
+        super::validate_qualification_root_selections(
+            purpose,
+            &self.product_selections,
+            pinned_lane,
+        )?;
         Ok(())
     }
 
@@ -1006,6 +993,12 @@ impl SealedRootExecutionRequest {
 
     pub fn item_ref(&self) -> &str {
         &self.item_ref
+    }
+
+    /// The admitted thread profile name, distinct from the source item kind.
+    /// Runtime terminal snapshots retain this profile (for example graph_run).
+    pub fn thread_profile(&self) -> &str {
+        &self.kind
     }
 
     /// Exact caller-authored reference bindings sealed at admission. Recovery
@@ -2650,7 +2643,7 @@ mod authority_tests {
     }
 
     #[test]
-    fn pinned_qualification_requires_exact_snapshot_and_one_root_subject_selection() {
+    fn pinned_qualification_requires_exact_snapshot_and_subject_among_root_inputs() {
         use ryeos_state::objects::{
             EnvironmentAuthority, PinnedProjectRealization, PinnedTerminalPublication,
         };
@@ -2749,6 +2742,27 @@ mod authority_tests {
         ];
 
         sealed.validate_qualification_purpose().unwrap();
+
+        let mut with_auxiliary = sealed.clone();
+        let mut auxiliary = with_auxiliary.product_selections[0].clone();
+        auxiliary.selection.declaration_id = "verifier-platform".into();
+        auxiliary.selection.witness_hash = "7".repeat(64);
+        auxiliary.selection.qualification_hash = Some("8".repeat(64));
+        with_auxiliary.product_selections.push(auxiliary);
+        with_auxiliary.validate_qualification_purpose().unwrap();
+
+        let mut replaced_subject = with_auxiliary.clone();
+        replaced_subject.product_selections[0]
+            .selection
+            .witness_hash = "9".repeat(64);
+        assert!(replaced_subject.validate_qualification_purpose().is_err());
+
+        let mut non_root_auxiliary = with_auxiliary.clone();
+        non_root_auxiliary.product_selections[1].target =
+            ryeos_state::external_content::products::composition::ProductSelectionTarget::ContentDependency {
+                binding: "environment".into(),
+            };
+        assert!(non_root_auxiliary.validate_qualification_purpose().is_err());
 
         let mut empty = sealed.clone();
         empty.product_selections.clear();

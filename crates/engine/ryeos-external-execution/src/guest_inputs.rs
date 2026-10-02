@@ -13,7 +13,7 @@ pub struct ExternalGuestInputAuthority {
     workspace_outputs: Option<lillux::InheritedDescriptorAuthority>,
     inputs: Vec<lillux::InheritedDescriptorAuthority>,
     content_records: Vec<lillux::InheritedDescriptorAuthority>,
-    lifelines: Vec<Box<dyn Send + Sync>>,
+    lifelines: std::sync::Arc<Vec<Box<dyn Send + Sync>>>,
 }
 
 impl std::fmt::Debug for ExternalGuestInputAuthority {
@@ -107,7 +107,7 @@ impl ExternalGuestInputAuthority {
             workspace_outputs,
             inputs,
             content_records,
-            lifelines,
+            lifelines: std::sync::Arc::new(lifelines),
         })
     }
 
@@ -148,8 +148,38 @@ impl ExternalGuestInputAuthority {
         descriptors
     }
 
+    /// Keep the SAME materialization owners alive for a later original-input
+    /// exclusion check. This opaque hold grants no activation/contact and does
+    /// not clone this one-use authority or reconstruct it from its projection.
+    pub fn retain_exclusion_witness(&self) -> Result<ExternalGuestInputExclusionWitness> {
+        Ok(ExternalGuestInputExclusionWitness {
+            identity_digest: self.identity_digest()?,
+            descriptors: self.retained_descriptors(),
+            _lifelines: std::sync::Arc::clone(&self.lifelines),
+        })
+    }
+
     pub fn retained_lifeline_count(&self) -> usize {
         self.lifelines.len()
+    }
+}
+
+/// Complete original input inventory and its same materialization lifetime.
+/// Constructible only from the original one-use authority. This witness has
+/// no serialization, Clone, activation, package production or contact API.
+pub struct ExternalGuestInputExclusionWitness {
+    identity_digest: String,
+    descriptors: Vec<lillux::InheritedDescriptorAuthority>,
+    _lifelines: std::sync::Arc<Vec<Box<dyn Send + Sync>>>,
+}
+
+impl ExternalGuestInputExclusionWitness {
+    pub fn identity_digest(&self) -> &str {
+        &self.identity_digest
+    }
+
+    pub fn retained_descriptors(&self) -> &[lillux::InheritedDescriptorAuthority] {
+        &self.descriptors
     }
 }
 
@@ -352,7 +382,26 @@ mod tests {
             descriptors[3].inherited_descriptor().unwrap(),
             fixture.records[1].inherited_descriptor().unwrap()
         );
+        let original_hold = authority.retain_exclusion_witness().unwrap();
+        assert_eq!(
+            original_hold.identity_digest(),
+            authority.identity_digest().unwrap()
+        );
+        assert_eq!(
+            original_hold.retained_descriptors().len(),
+            descriptors.len()
+        );
+        for (original, retained) in descriptors.iter().zip(original_hold.retained_descriptors()) {
+            assert_eq!(
+                original.inherited_descriptor().unwrap(),
+                retained.inherited_descriptor().unwrap()
+            );
+        }
         drop(authority);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        // Descriptor-only clones do not preserve the original cache leases.
+        // The explicit original hold does, until the later owner releases it.
+        drop(original_hold);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 }

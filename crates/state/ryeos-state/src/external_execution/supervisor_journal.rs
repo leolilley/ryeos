@@ -20,16 +20,19 @@ use zeroize::Zeroizing;
 
 use super::guest_journal::GuestJournalStoreIdentity;
 use super::transport::{
-    ExternalCapturedNetworkInputs, ExternalChannelAttachRequest, ExternalSupervisorBootstrap,
+    ExternalCapturedNetworkInputs, ExternalChannelAttachRequest,
+    ExternalControllerTransportSelection, ExternalSupervisorBootstrap,
     MAX_EXTERNAL_NETWORK_CAPTURE_JSON_BYTES,
 };
 use super::{ExecutionChannelBinding, encode_channel_public_key};
 
 const DATABASE_NAME: &str = "external-supervisor.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4553; // RYES
-// Epoch 5 requires the exact policy-bound network capture. Predecessor stores
-// remain historical evidence; recovery must never recapture target-local files.
-const SCHEMA_EPOCH: i64 = 6;
+// HTTP epoch 6 retains the exact policy-bound network capture. Relay epoch 7
+// binds the original mailbox inode and exact authenticated attach response.
+// Predecessor stores remain historical evidence; recovery never recaptures.
+const HTTP_SCHEMA_EPOCH: i64 = 6;
+const RELAY_SCHEMA_EPOCH: i64 = 7;
 
 const SCHEMA: &str = r#"
 CREATE TABLE external_supervisor_meta (
@@ -113,12 +116,85 @@ struct SupervisorStore {
     _lifetime_lock: lillux::PinnedDirectoryLock,
     database_file: File,
     bootstrap: ExternalSupervisorBootstrap,
-    captured_network_inputs: ExternalCapturedNetworkInputs,
+    transport_capture: ExternalSupervisorTransportCapture,
     supervisor_signing_key: lillux::crypto::SigningKey,
     attachment_request: ExternalChannelAttachRequest,
     binding: Option<ExecutionChannelBinding>,
     launch_intent: Option<ExternalSupervisorLaunchIntent>,
     store_identity: ExternalSupervisorJournalStoreIdentity,
+}
+
+/// The relay stores the original descriptor identity and signed pathname,
+/// never a sampled network file or a recreated mailbox on recovery.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalRelayMailboxCapture {
+    schema: u32,
+    mailbox_root: String,
+    mailbox_identity: lillux::PinnedDirectoryIdentity,
+}
+
+impl ExternalRelayMailboxCapture {
+    pub fn new(
+        bootstrap: &ExternalSupervisorBootstrap,
+        mailbox: &lillux::PinnedDirectory,
+    ) -> Result<Self> {
+        let capture = Self {
+            schema: 1,
+            mailbox_root: bootstrap.relay_mailbox_root()?,
+            mailbox_identity: mailbox.identity()?,
+        };
+        capture.validate_for(bootstrap)?;
+        ensure!(
+            mailbox.path() == std::path::Path::new(&capture.mailbox_root),
+            "original relay mailbox path differs from signed occurrence"
+        );
+        mailbox.require_owner_private_directory()?;
+        mailbox.ensure_path_binding()?;
+        Ok(capture)
+    }
+
+    pub fn validate_for(&self, bootstrap: &ExternalSupervisorBootstrap) -> Result<()> {
+        bootstrap.controller.relay()?;
+        ensure!(
+            self.schema == 1 && self.mailbox_root == bootstrap.relay_mailbox_root()?,
+            "external relay mailbox capture differs from sealed bootstrap"
+        );
+        Ok(())
+    }
+
+    pub fn mailbox_identity(&self) -> lillux::PinnedDirectoryIdentity {
+        self.mailbox_identity
+    }
+
+    pub fn mailbox_root(&self) -> &str {
+        &self.mailbox_root
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::json!({
+                "domain":"ryeos.external-relay-mailbox-capture.v1",
+                "capture":self,
+            }))?
+            .as_bytes(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalSupervisorTransportCapture {
+    Http(ExternalCapturedNetworkInputs),
+    Relay(ExternalRelayMailboxCapture),
+}
+
+impl ExternalSupervisorTransportCapture {
+    fn digest(&self) -> Result<String> {
+        match self {
+            Self::Http(capture) => capture.digest(),
+            Self::Relay(capture) => capture.digest(),
+        }
+    }
 }
 
 /// Independent outer anchor supplied again by the lifecycle owner on reopen.
@@ -161,7 +237,7 @@ pub enum ExternalSupervisorJournalRecovery {
 impl ExternalSupervisorJournalStoreIdentity {
     pub fn digest(&self) -> Result<String> {
         ensure!(
-            self.schema == 3,
+            self.schema == 3 || self.schema == 4,
             "unsupported supervisor journal identity schema"
         );
         hash(&self.journal_nonce, "supervisor journal nonce")?;
@@ -174,8 +250,17 @@ impl ExternalSupervisorJournalStoreIdentity {
 }
 
 impl PreparedExternalSupervisorJournal {
-    pub fn captured_network_inputs(&self) -> &ExternalCapturedNetworkInputs {
-        &self.0.captured_network_inputs
+    pub fn transport_capture(&self) -> &ExternalSupervisorTransportCapture {
+        &self.0.transport_capture
+    }
+
+    pub fn captured_network_inputs(&self) -> Result<&ExternalCapturedNetworkInputs> {
+        match &self.0.transport_capture {
+            ExternalSupervisorTransportCapture::Http(value) => Ok(value),
+            ExternalSupervisorTransportCapture::Relay(_) => {
+                anyhow::bail!("relay journal has no network capture")
+            }
+        }
     }
 
     pub fn create(
@@ -185,10 +270,57 @@ impl PreparedExternalSupervisorJournal {
         supervisor_signing_key: lillux::crypto::SigningKey,
     ) -> Result<Self> {
         bootstrap.validate()?;
-        captured_network_inputs.validate_for(&bootstrap.controller.network_inputs)?;
-        let capture_digest = captured_network_inputs.digest()?;
-        let capture_json =
-            lillux::canonical_json(&serde_json::to_value(&captured_network_inputs)?)?;
+        captured_network_inputs.validate_for(&bootstrap.controller.http()?.network_inputs)?;
+        Self::create_with_capture(
+            directory,
+            bootstrap,
+            ExternalSupervisorTransportCapture::Http(captured_network_inputs),
+            supervisor_signing_key,
+        )
+    }
+
+    pub fn create_relay(
+        directory: lillux::PinnedDirectory,
+        bootstrap: ExternalSupervisorBootstrap,
+        mailbox: &lillux::PinnedDirectory,
+        supervisor_signing_key: lillux::crypto::SigningKey,
+    ) -> Result<Self> {
+        let capture = ExternalRelayMailboxCapture::new(&bootstrap, mailbox)?;
+        Self::create_with_capture(
+            directory,
+            bootstrap,
+            ExternalSupervisorTransportCapture::Relay(capture),
+            supervisor_signing_key,
+        )
+    }
+
+    fn create_with_capture(
+        directory: lillux::PinnedDirectory,
+        bootstrap: ExternalSupervisorBootstrap,
+        transport_capture: ExternalSupervisorTransportCapture,
+        supervisor_signing_key: lillux::crypto::SigningKey,
+    ) -> Result<Self> {
+        let (capture_digest, capture_json, schema_epoch, identity_schema) = match &transport_capture
+        {
+            ExternalSupervisorTransportCapture::Http(capture) => {
+                capture.validate_for(&bootstrap.controller.http()?.network_inputs)?;
+                (
+                    capture.digest()?,
+                    lillux::canonical_json(&serde_json::to_value(capture)?)?,
+                    HTTP_SCHEMA_EPOCH,
+                    3,
+                )
+            }
+            ExternalSupervisorTransportCapture::Relay(capture) => {
+                capture.validate_for(&bootstrap)?;
+                (
+                    capture.digest()?,
+                    lillux::canonical_json(&serde_json::to_value(capture)?)?,
+                    RELAY_SCHEMA_EPOCH,
+                    4,
+                )
+            }
+        };
         ensure!(
             capture_json.len() <= MAX_EXTERNAL_NETWORK_CAPTURE_JSON_BYTES,
             "external supervisor network capture JSON exceeds bounds"
@@ -215,7 +347,7 @@ impl PreparedExternalSupervisorJournal {
         directory.sync()?;
         let database_identity = lillux::pinned_regular_file_identity(&database_file)?;
         let store_identity = ExternalSupervisorJournalStoreIdentity {
-            schema: 3,
+            schema: identity_schema,
             journal_nonce: lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
             directory_identity: directory.identity()?,
             database_identity,
@@ -225,14 +357,14 @@ impl PreparedExternalSupervisorJournal {
         store_identity.digest()?;
         let conn = open_exact(&directory, &database_file)?;
         configure(&conn)?;
-        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(&schema_for(schema_epoch)?)?;
         conn.pragma_update(None, "application_id", APPLICATION_ID)?;
-        conn.pragma_update(None, "user_version", SCHEMA_EPOCH)?;
+        conn.pragma_update(None, "user_version", schema_epoch)?;
         let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO external_supervisor_meta VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'prepared')",
             params![
-                SCHEMA_EPOCH,
+                schema_epoch,
                 &store_identity.journal_nonce,
                 lillux::canonical_json(&serde_json::to_value(store_identity.directory_identity)?)?,
                 lillux::canonical_json(&serde_json::to_value(store_identity.database_identity)?)?,
@@ -255,7 +387,7 @@ impl PreparedExternalSupervisorJournal {
             _lifetime_lock: lifetime_lock,
             database_file,
             bootstrap,
-            captured_network_inputs,
+            transport_capture,
             supervisor_signing_key,
             attachment_request,
             binding: None,
@@ -283,8 +415,42 @@ impl PreparedExternalSupervisorJournal {
     }
 
     pub fn record_binding(
+        self,
+        binding: ExecutionChannelBinding,
+    ) -> Result<AttachedExternalSupervisorJournal> {
+        ensure!(
+            matches!(
+                &self.0.transport_capture,
+                ExternalSupervisorTransportCapture::Http(_)
+            ),
+            "relay attachment requires its exact authenticated response digest"
+        );
+        self.record_binding_inner(binding, None)
+    }
+
+    pub fn record_relay_binding(
+        self,
+        binding: ExecutionChannelBinding,
+        response_digest: &str,
+    ) -> Result<AttachedExternalSupervisorJournal> {
+        ensure!(
+            matches!(
+                &self.0.transport_capture,
+                ExternalSupervisorTransportCapture::Relay(_)
+            ),
+            "HTTP attachment cannot retain a relay response digest"
+        );
+        hash(
+            response_digest,
+            "authenticated relay attachment response digest",
+        )?;
+        self.record_binding_inner(binding, Some(response_digest))
+    }
+
+    fn record_binding_inner(
         mut self,
         binding: ExecutionChannelBinding,
+        response_digest: Option<&str>,
     ) -> Result<AttachedExternalSupervisorJournal> {
         self.0.bootstrap.validate_attached_binding(
             &binding,
@@ -294,10 +460,17 @@ impl PreparedExternalSupervisorJournal {
         let binding_digest = binding.digest()?;
         let binding_json = lillux::canonical_json(&serde_json::to_value(&binding)?)?;
         let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO external_supervisor_binding VALUES(1,?1,?2)",
-            params![&binding_digest, &binding_json],
-        )?;
+        if let Some(response_digest) = response_digest {
+            tx.execute(
+                "INSERT INTO external_supervisor_binding VALUES(1,?1,?2,?3)",
+                params![&binding_digest, &binding_json, response_digest],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO external_supervisor_binding VALUES(1,?1,?2)",
+                params![&binding_digest, &binding_json],
+            )?;
+        }
         let changed = tx.execute(
             "UPDATE external_supervisor_meta SET lifecycle='attached'
              WHERE singleton=1 AND lifecycle='prepared'",
@@ -313,8 +486,17 @@ impl PreparedExternalSupervisorJournal {
 }
 
 impl AttachedExternalSupervisorJournal {
-    pub fn captured_network_inputs(&self) -> &ExternalCapturedNetworkInputs {
-        &self.0.captured_network_inputs
+    pub fn transport_capture(&self) -> &ExternalSupervisorTransportCapture {
+        &self.0.transport_capture
+    }
+
+    pub fn captured_network_inputs(&self) -> Result<&ExternalCapturedNetworkInputs> {
+        match &self.0.transport_capture {
+            ExternalSupervisorTransportCapture::Http(value) => Ok(value),
+            ExternalSupervisorTransportCapture::Relay(_) => {
+                anyhow::bail!("relay journal has no network capture")
+            }
+        }
     }
 
     pub fn store_identity(&self) -> &ExternalSupervisorJournalStoreIdentity {
@@ -327,6 +509,27 @@ impl AttachedExternalSupervisorJournal {
 
     pub fn binding(&self) -> &ExecutionChannelBinding {
         self.0.binding.as_ref().expect("attached stage has binding")
+    }
+
+    pub fn attachment_request(&self) -> &ExternalChannelAttachRequest {
+        &self.0.attachment_request
+    }
+
+    pub fn relay_attach_response_digest(&self) -> Result<String> {
+        ensure!(
+            matches!(
+                &self.0.transport_capture,
+                ExternalSupervisorTransportCapture::Relay(_)
+            ),
+            "HTTP journal has no relay attachment response"
+        );
+        let digest: String = self.0.conn.query_row(
+            "SELECT attach_response_digest FROM external_supervisor_binding WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        hash(&digest, "retained relay attachment response digest")?;
+        Ok(digest)
     }
 
     pub fn supervisor_signing_key(&self) -> &lillux::crypto::SigningKey {
@@ -399,8 +602,17 @@ impl AttachedExternalSupervisorJournal {
 }
 
 impl LaunchIntentExternalSupervisorJournal {
-    pub fn captured_network_inputs(&self) -> &ExternalCapturedNetworkInputs {
-        &self.0.captured_network_inputs
+    pub fn transport_capture(&self) -> &ExternalSupervisorTransportCapture {
+        &self.0.transport_capture
+    }
+
+    pub fn captured_network_inputs(&self) -> Result<&ExternalCapturedNetworkInputs> {
+        match &self.0.transport_capture {
+            ExternalSupervisorTransportCapture::Http(value) => Ok(value),
+            ExternalSupervisorTransportCapture::Relay(_) => {
+                anyhow::bail!("relay journal has no network capture")
+            }
+        }
     }
 
     pub fn store_identity(&self) -> &ExternalSupervisorJournalStoreIdentity {
@@ -475,7 +687,7 @@ impl ExternalSupervisorJournalRecovery {
         validate_schema(&conn, &directory)?;
         let (
             bootstrap,
-            captured_network_inputs,
+            transport_capture,
             supervisor_signing_key,
             attachment_request,
             binding,
@@ -487,7 +699,7 @@ impl ExternalSupervisorJournalRecovery {
             _lifetime_lock: lifetime_lock,
             database_file,
             bootstrap,
-            captured_network_inputs,
+            transport_capture,
             supervisor_signing_key,
             attachment_request,
             binding,
@@ -506,8 +718,17 @@ impl ExternalSupervisorJournalRecovery {
 }
 
 impl RecoveredExternalSupervisorJournal {
-    pub fn captured_network_inputs(&self) -> &ExternalCapturedNetworkInputs {
-        &self.0.captured_network_inputs
+    pub fn transport_capture(&self) -> &ExternalSupervisorTransportCapture {
+        &self.0.transport_capture
+    }
+
+    pub fn captured_network_inputs(&self) -> Result<&ExternalCapturedNetworkInputs> {
+        match &self.0.transport_capture {
+            ExternalSupervisorTransportCapture::Http(value) => Ok(value),
+            ExternalSupervisorTransportCapture::Relay(_) => {
+                anyhow::bail!("relay journal has no network capture")
+            }
+        }
     }
 
     pub fn store_identity(&self) -> &ExternalSupervisorJournalStoreIdentity {
@@ -541,6 +762,25 @@ impl SupervisorStore {
     fn validate(&self) -> Result<()> {
         ensure_same_file(&self.directory, &self.database_file)?;
         self.store_identity.digest()?;
+        ensure!(
+            matches!(
+                (
+                    &self.transport_capture,
+                    &self.bootstrap.controller,
+                    self.store_identity.schema
+                ),
+                (
+                    ExternalSupervisorTransportCapture::Http(_),
+                    ExternalControllerTransportSelection::HttpJson(_),
+                    3
+                ) | (
+                    ExternalSupervisorTransportCapture::Relay(_),
+                    ExternalControllerTransportSelection::ControllerFileRelay(_),
+                    4
+                )
+            ),
+            "external supervisor transport capture changed journal identity kind"
+        );
         validate_store_identity_row(&self.conn, &self.store_identity)?;
         ensure!(
             self.store_identity.directory_identity == self.directory.identity()?
@@ -549,7 +789,7 @@ impl SupervisorStore {
                     self.store_identity.database_identity,
                 )?
                 && self.store_identity.bootstrap_digest == self.bootstrap.digest()?
-                && self.store_identity.capture_digest == self.captured_network_inputs.digest()?,
+                && self.store_identity.capture_digest == self.transport_capture.digest()?,
             "external supervisor store changed its retained identity"
         );
         validate_schema(&self.conn, &self.directory)?;
@@ -563,7 +803,7 @@ impl SupervisorStore {
         ) = load_content(&self.conn)?;
         ensure!(
             loaded_bootstrap.canonical_bytes()? == self.bootstrap.canonical_bytes()?
-                && loaded_capture == self.captured_network_inputs
+                && loaded_capture == self.transport_capture
                 && loaded_request.canonical_bytes()?
                     == self.attachment_request.canonical_bytes()?
                 && loaded_key.to_bytes() == self.supervisor_signing_key.to_bytes()
@@ -581,15 +821,35 @@ fn validate_schema(conn: &Connection, directory: &lillux::PinnedDirectory) -> Re
     let quick_check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     ensure!(
         application_id == i64::from(APPLICATION_ID)
-            && user_version == SCHEMA_EPOCH
+            && matches!(user_version, HTTP_SCHEMA_EPOCH | RELAY_SCHEMA_EPOCH)
             && quick_check == "ok",
         "external supervisor database is not the exact current schema"
     );
     crate::sqlite_schema::assert_complete_schema_sql(
         conn,
-        SCHEMA,
+        &schema_for(user_version)?,
         &directory.path().join(DATABASE_NAME),
     )
+}
+
+fn schema_for(epoch: i64) -> Result<String> {
+    match epoch {
+        HTTP_SCHEMA_EPOCH => Ok(SCHEMA.to_owned()),
+        RELAY_SCHEMA_EPOCH => {
+            let binding_column = "binding_json TEXT NOT NULL\n);";
+            ensure!(
+                SCHEMA.matches(binding_column).count() == 1,
+                "relay schema lost its binding table anchor"
+            );
+            Ok(SCHEMA
+                .replace("CHECK(schema_epoch=6)", "CHECK(schema_epoch=7)")
+                .replace(
+                    binding_column,
+                    "binding_json TEXT NOT NULL,\n    attach_response_digest TEXT NOT NULL\n);",
+                ))
+        }
+        _ => anyhow::bail!("unsupported external supervisor journal schema"),
+    }
 }
 
 fn validate_store_identity_row(
@@ -629,7 +889,7 @@ fn load_content(
     conn: &Connection,
 ) -> Result<(
     ExternalSupervisorBootstrap,
-    ExternalCapturedNetworkInputs,
+    ExternalSupervisorTransportCapture,
     lillux::crypto::SigningKey,
     ExternalChannelAttachRequest,
     Option<ExecutionChannelBinding>,
@@ -686,15 +946,36 @@ fn load_content(
         "external supervisor bootstrap changed its canonical identity"
     );
     let signing_seed_base64 = Zeroizing::new(signing_seed_base64);
-    let captured_network_inputs: ExternalCapturedNetworkInputs =
-        serde_json::from_str(&capture_json)
-            .map_err(|_| anyhow::anyhow!("external supervisor network capture JSON is invalid"))?;
-    captured_network_inputs.validate_for(&bootstrap.controller.network_inputs)?;
-    ensure!(
-        lillux::canonical_json(&serde_json::to_value(&captured_network_inputs)?)? == capture_json
-            && captured_network_inputs.digest()? == capture_digest,
-        "external supervisor network capture changed its canonical identity"
-    );
+    let schema_epoch: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let transport_capture = match (schema_epoch, &bootstrap.controller) {
+        (HTTP_SCHEMA_EPOCH, ExternalControllerTransportSelection::HttpJson(http)) => {
+            let capture: ExternalCapturedNetworkInputs = serde_json::from_str(&capture_json)
+                .map_err(|_| {
+                    anyhow::anyhow!("external supervisor network capture JSON is invalid")
+                })?;
+            capture.validate_for(&http.network_inputs)?;
+            ensure!(
+                lillux::canonical_json(&serde_json::to_value(&capture)?)? == capture_json
+                    && capture.digest()? == capture_digest,
+                "external supervisor network capture changed its canonical identity"
+            );
+            ExternalSupervisorTransportCapture::Http(capture)
+        }
+        (RELAY_SCHEMA_EPOCH, ExternalControllerTransportSelection::ControllerFileRelay(_)) => {
+            let capture: ExternalRelayMailboxCapture = serde_json::from_str(&capture_json)
+                .map_err(|_| {
+                    anyhow::anyhow!("external supervisor relay capture JSON is invalid")
+                })?;
+            capture.validate_for(&bootstrap)?;
+            ensure!(
+                lillux::canonical_json(&serde_json::to_value(&capture)?)? == capture_json
+                    && capture.digest()? == capture_digest,
+                "external supervisor relay capture changed its canonical identity"
+            );
+            ExternalSupervisorTransportCapture::Relay(capture)
+        }
+        _ => anyhow::bail!("external supervisor journal transport differs from schema epoch"),
+    };
     let signing_seed = Zeroizing::new(
         STANDARD
             .decode(signing_seed_base64.as_bytes())
@@ -719,14 +1000,34 @@ fn load_content(
         "external supervisor attachment request changed its exact bytes"
     );
     attachment_request.validate_for_bootstrap(&bootstrap)?;
+    let binding_sql = if schema_epoch == RELAY_SCHEMA_EPOCH {
+        "SELECT binding_digest,binding_json,attach_response_digest FROM external_supervisor_binding WHERE singleton=1"
+    } else {
+        "SELECT binding_digest,binding_json,NULL FROM external_supervisor_binding WHERE singleton=1"
+    };
     let binding = conn
-        .query_row(
-            "SELECT binding_digest,binding_json FROM external_supervisor_binding WHERE singleton=1",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
+        .query_row(binding_sql, [], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
         .optional()?
-        .map(|(digest, json)| -> Result<_> {
+        .map(|(digest, json, response_digest)| -> Result<_> {
+            if schema_epoch == RELAY_SCHEMA_EPOCH {
+                hash(
+                    response_digest
+                        .as_deref()
+                        .context("relay attachment lost response digest")?,
+                    "retained relay attachment response digest",
+                )?;
+            } else {
+                ensure!(
+                    response_digest.is_none(),
+                    "HTTP attachment gained a relay response"
+                );
+            }
             let binding: ExecutionChannelBinding = serde_json::from_str(&json)?;
             ensure!(
                 lillux::canonical_json(&serde_json::to_value(&binding)?)? == json
@@ -797,7 +1098,7 @@ fn load_content(
     );
     Ok((
         bootstrap,
-        captured_network_inputs,
+        transport_capture,
         supervisor_signing_key,
         attachment_request,
         binding,
@@ -993,7 +1294,7 @@ mod tests {
                 connect_timeout_ms: 1_000,
                 request_timeout_ms: 2_000,
                 maximum_response_bytes: 64 * 1024,
-            },
+            }.into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-supervisor-journal".into(),
             occurrence_id: "occurrence-supervisor-journal".into(),
@@ -1100,7 +1401,7 @@ mod tests {
 
     fn capture() -> ExternalCapturedNetworkInputs {
         ExternalCapturedNetworkInputs::from_bytes(
-            &bootstrap().controller.network_inputs,
+            &bootstrap().controller.http().unwrap().network_inputs,
             b"nameserver 127.0.0.1\n",
             b"127.0.0.1 localhost\n",
         )
@@ -1154,7 +1455,11 @@ mod tests {
             panic!("wrong recovered state")
         };
         assert_eq!(
-            recovered.captured_network_inputs().digest().unwrap(),
+            recovered
+                .captured_network_inputs()
+                .unwrap()
+                .digest()
+                .unwrap(),
             capture().digest().unwrap()
         );
     }
@@ -1176,7 +1481,12 @@ mod tests {
                 if mutation == 1 {
                     replacement.resolver_base64 = STANDARD.encode(b"tampered");
                 } else if mutation == 2 {
-                    let mut policy = bootstrap().controller.network_inputs;
+                    let mut policy = bootstrap()
+                        .controller
+                        .http()
+                        .unwrap()
+                        .network_inputs
+                        .clone();
                     policy.hosts.source = "/other/hosts".into();
                     replacement =
                         ExternalCapturedNetworkInputs::from_bytes(&policy, b"", b"").unwrap();
@@ -1184,7 +1494,7 @@ mod tests {
                     // Internally valid replacement with a matching row digest must
                     // still fail the independently retained outer anchor.
                     replacement = ExternalCapturedNetworkInputs::from_bytes(
-                        &bootstrap().controller.network_inputs,
+                        &bootstrap().controller.http().unwrap().network_inputs,
                         b"different",
                         b"",
                     )
@@ -1531,7 +1841,7 @@ mod tests {
     fn predecessor_schema_epoch_is_not_reopened_as_current_authority() {
         let (root, identity) = fresh_journal();
         let conn = Connection::open(root.path().join(DATABASE_NAME)).unwrap();
-        conn.pragma_update(None, "user_version", SCHEMA_EPOCH - 1)
+        conn.pragma_update(None, "user_version", HTTP_SCHEMA_EPOCH - 1)
             .unwrap();
         drop(conn);
         assert!(

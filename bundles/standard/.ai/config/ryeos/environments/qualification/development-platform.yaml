@@ -1,12 +1,35 @@
-# ryeos:signed:2026-09-22T00:24:35Z:bf32dc7e814b39e635af364a9285c081f698780c12c8fc7c89b43e0c79c60a1f:YJp7qRq0ocsldYSrUKPhtVrBIoZi7cJUJMRQ61QaDqPSdv1r1+67LGKo5pltyKXyUKTqku5RmvhTuK+pXZmjDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-30T20:05:49Z:3192dcf2630bc33ba42685c5385bd5aea8e02be9384c2a1a7edda8116504541e:9dln8roop5uiEiM2Q3rLHQi2Wepktgw9ysjxbtop9QfIztgN7D7yiWK6Y6POzkZuq5ybpcJHaCjUNVHDZX9zCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/environments/qualification
-version: "1.0.0"
-description: Independent policy for the retained RyeOS development platform
+version: "2.0.0"
+description: Independent x86-64 GNU platform conformance to the admitted version profile
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v1
+  schema: ryeos.product_qualification_policy.v4
   verifier_ref: tool:ryeos/environments/qualification/development-platform
   subject_declaration_id: subject
   allowed_claims:
-    - development_platform_abi_v1
+    - development_platform_profile_v2
     - development_platform_target_x86_64_linux_gnu_v1
-  verifier_parameters: {}
+  minimum_verifier_process_settlement: trusted_process_group_absent
+  verifier_parameters:
+    # Stable Rust/Zig releases and exact observed tool versions are signed
+    # selections. The checker retains the existing platform layout and GNU ABI.
+    schema: ryeos.development_platform_profile.v2
+    bootstrap:
+      schema: ryeos.development-toolchain-bootstrap.v2
+      artifact_class: runtime_closed_platform_candidate
+      execution_gate: target_local_binding_and_isolated_acceptance_required
+      target: x86_64-unknown-linux-gnu
+      rust_version: "1.95.0"
+      rust_host: x86_64-unknown-linux-gnu
+      zig_version: "0.15.2"
+      source_date_epoch: "1776297600"
+      publisher_image: docker.io/library/rust@sha256:443dd9a3260cf23c22fc05051dd5661dd7b4028d3d25dbaffab6563b63c3539c
+      input_contract_body_sha256: f45aeeedd561db476cc61fd8261e916aed98ebab971885779d7f98aeea6ab243
+      producer_sha256: 1cb9cd66e11cc322e9f6bd77e8ae0fd8f4aa8bfab1c7b67698e5eb052ec9019b
+      runtime_helper_sha256: de788af40f4fa79241cd43b703cebd1e28fb54d3c81eb18a118f4724121e4dc3
+    tool_versions:
+      cargo: "cargo 1.95.0 (f2d3ce0bd 2026-03-21)"
+      gcc: "gcc (Debian 14.2.0-19) 14.2.0"
+      collect2: "collect2 version 14.2.0"
+      linker: "LLD 22.1.2 (/checkout/src/llvm-project/llvm 1cb4e3833c1919c2e6fb579a23ac0e2b22587b7e) (compatible with GNU linkers)"
+      archiver: "GNU ar (GNU Binutils for Debian) 2.44"

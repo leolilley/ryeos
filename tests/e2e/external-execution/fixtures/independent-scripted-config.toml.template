@@ -1,0 +1,39 @@
+model = "gpt-5.5"
+model_provider = "routing-fixture"
+approval_policy = "never"
+default_permissions = "danger-full-access"
+check_for_update_on_startup = false
+web_search = "disabled"
+allow_login_shell = false
+mcp_servers = {}
+notify = []
+[permissions.danger-full-access]
+filesystem = { ":root" = "write" }
+network = { enabled = true }
+[agents]
+enabled = false
+[orchestrator.skills]
+enabled = false
+[orchestrator.mcp]
+enabled = false
+[features]
+apps = false
+plugins = false
+skill_mcp_dependency_install = false
+remote_plugin = false
+hooks = false
+multi_agent = false
+multi_agent_v2 = false
+memories = false
+network_proxy = false
+code_mode_host = true
+[features.code_mode]
+enabled = false
+[model_providers.routing-fixture]
+name = "credential-free deterministic routing fixture"
+base_url = "{ORIGIN}"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0

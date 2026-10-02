@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-22T04:12:04Z:500d509e0dc69c7805c2645a860f95a9438d381421fc3881ccac984d8d8b2b0f:NoMy4gbs7npON0/AA8l7beUtBZyqkknYZWBIgAYygMKS+N6+AjVqcds/IvBF1GlqKWQDRjSndVkcnRLT5DVvDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T03:29:27Z:198874212e219e7c1754775916de1e036ad042808ca89dd171ae1d709e1a89e2:QoddHDW21O8s95GZ35sPj+FW79bjgVmuQUoeUGwEkfwJkWIQfvPXMqatY1yECMRBBbYrhqrexGeSWrYFVQuRCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Shared bounded static-input contract parser; no acquisition or execution."""
 import json
 from pathlib import PurePosixPath
@@ -28,6 +28,13 @@ def read_contract(path):
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
         raise ValueError('unsafe or oversized static-link contract')
     text = path.read_text()
+    return parse_contract(text)
+
+
+def parse_contract(text):
+    """Validate already-read contract bytes without reopening their source."""
+    if not isinstance(text, str) or len(text.encode("utf-8")) > 65536:
+        raise ValueError('unsafe or oversized static-link contract')
     if text.startswith('# ryeos:signed:'):
         text = text.split('\n', 1)[1]
     contract = json.loads(text, object_pairs_hook=unique_object)

@@ -8,6 +8,15 @@
 
 pub mod guest_import_authorization;
 pub mod guest_supervisor_descriptors;
+pub mod provider_configuration;
+pub use provider_configuration::{
+    PROVIDER_CONFIGURATION_RESPONSE_PROTOCOL, PROVIDER_CONFIGURATION_RESPONSE_SCHEMA,
+    ProviderCommandEnvironmentProjection, ProviderCommandEnvironmentTransport,
+    ProviderConfigurationLaunchInput, ProviderConfigurationResponse,
+};
+pub mod qualification_fixture;
+pub mod qualification_request_binding;
+pub mod relay_file;
 pub mod restored_runtime_measurement;
 pub mod runtime_snapshot;
 pub mod runtime_snapshot_bootstrap;
@@ -24,6 +33,7 @@ use sha2::{Digest as _, Sha256};
 use zeroize::Zeroize as _;
 
 pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v2";
+pub const PROVIDER_DECLARATION_PROTOCOL: &str = "ryeos.external-execution.provider-declaration.v2";
 pub const PROVIDER_CONFIGURATION_PROTOCOL: &str =
     "ryeos.external-execution.provider-configuration.v1";
 pub const MAX_LIFECYCLE_REQUEST_BYTES: usize = 256 * 1024;
@@ -61,13 +71,15 @@ pub const MAX_GUEST_ENVIRONMENT_ENTRIES: usize = 256;
 pub const MAX_GUEST_EXECUTABLE_SEARCH_ENTRIES: usize = 64;
 
 /// The admitted command protocol, not a choice the executable may change.
-/// Direct commands have no structured-session stdin or candidate export lane.
+/// Qualification sessions have structured protocol traffic without candidate
+/// export authority. Direct commands have neither lane.
 /// Raw stream ceilings do not reserve authenticated journal space: the channel
 /// independently bounds encoded frames and may refuse before either raw cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExternalExecutionMode {
     StructuredSession {},
+    QualificationStructuredSession {},
     DirectCommand {
         stdout_max_bytes: u64,
         stderr_max_bytes: u64,
@@ -103,7 +115,9 @@ impl ExternalExecutionMode {
                 ExternalCommandOutputStream::Stdout => *stdout_max_bytes,
                 ExternalCommandOutputStream::Stderr => *stderr_max_bytes,
             }),
-            Self::StructuredSession {} => bail!("session mode has no direct command output"),
+            Self::StructuredSession {} | Self::QualificationStructuredSession {} => {
+                bail!("session mode has no direct command output")
+            }
         }
     }
 }
@@ -768,6 +782,9 @@ pub struct ExternalProviderDeclaration {
     pub connector_process_group: ExternalProviderConnectorProcessGroup,
     pub configuration_adapter: String,
     pub configuration_destination: String,
+    /// Explicit opt-in on this same captured adapter, not a second executable.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub qualification_request_binding_protocol: Option<String>,
 }
 
 /// Process-control behavior of the signed provider's command environment.
@@ -813,12 +830,28 @@ pub struct LifecycleProviderSpecIdentity {
 }
 
 impl ExternalProviderDeclaration {
+    pub fn require_qualification_request_binding(&self) -> Result<()> {
+        self.validate()?;
+        ensure!(
+            self.qualification_request_binding_protocol.as_deref()
+                == Some(qualification_request_binding::QUALIFICATION_REQUEST_BINDING_PROTOCOL),
+            "selected provider declaration does not admit qualification request binding"
+        );
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         bounded_identifier(&self.id, 128, "external provider declaration id")?;
         ensure!(
-            self.protocol == PROVIDER_CONFIGURATION_PROTOCOL,
+            self.protocol == PROVIDER_DECLARATION_PROTOCOL,
             "external provider declaration has an unsupported protocol"
         );
+        if let Some(protocol) = &self.qualification_request_binding_protocol {
+            ensure!(
+                protocol == qualification_request_binding::QUALIFICATION_REQUEST_BINDING_PROTOCOL,
+                "external provider declaration has an unsupported qualification binder"
+            );
+        }
         validate_targets(&self.targets)?;
         validate_executable_name(&self.connector, "external provider connector")?;
         validate_executable_name(
@@ -2034,6 +2067,27 @@ mod tests {
     }
 
     #[test]
+    fn qualification_session_mode_has_distinct_closed_wire_identity() {
+        let mode = ExternalExecutionMode::QualificationStructuredSession {};
+        mode.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(mode).unwrap(),
+            serde_json::json!({"kind":"qualification_structured_session"})
+        );
+        assert_ne!(mode, ExternalExecutionMode::StructuredSession {});
+        assert!(
+            mode.output_limit(ExternalCommandOutputStream::Stdout)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ExternalExecutionMode>(
+                serde_json::json!({"kind":"qualification_structured_session","candidate_export_max_bytes":1})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn command_termination_cannot_substitute_eof_or_cleanup() {
         let original = command_termination();
         original.validate(direct_mode()).unwrap();
@@ -2520,14 +2574,32 @@ mod tests {
     fn signed_declarations_bind_a_closed_bundle_relative_provider_spec() {
         let provider = ExternalProviderDeclaration {
             id: "codex-hosted".into(),
-            protocol: PROVIDER_CONFIGURATION_PROTOCOL.into(),
+            protocol: PROVIDER_DECLARATION_PROTOCOL.into(),
             targets: vec!["x86_64-unknown-linux-gnu".into()],
             connector: "ryeos-external-candidate-connector".into(),
             connector_process_group: ExternalProviderConnectorProcessGroup::New,
             configuration_adapter: "ryeos-codex-external-configuration".into(),
             configuration_destination: "environments.toml".into(),
+            qualification_request_binding_protocol: None,
         };
         provider.validate().unwrap();
+        let mut missing = serde_json::to_value(&provider).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("qualification_request_binding_protocol");
+        assert!(serde_json::from_value::<ExternalProviderDeclaration>(missing).is_err());
+        let mut old = provider.clone();
+        old.protocol = PROVIDER_CONFIGURATION_PROTOCOL.into();
+        assert!(old.validate().is_err());
+        let mut capable = provider.clone();
+        capable.qualification_request_binding_protocol =
+            Some(qualification_request_binding::QUALIFICATION_REQUEST_BINDING_PROTOCOL.into());
+        capable.validate().unwrap();
+        capable.require_qualification_request_binding().unwrap();
+        assert!(provider.require_qualification_request_binding().is_err());
+        capable.qualification_request_binding_protocol = Some("arbitrary".into());
+        assert!(capable.validate().is_err());
 
         let lifecycle = ExternalLifecycleAdapterDeclaration {
             id: "synthetic".into(),

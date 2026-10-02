@@ -1,11 +1,50 @@
-# ryeos:signed:2026-09-22T04:12:14Z:b00ebb6d394e55e54d4c7eb050fb1985559a522c2662e69976362d2200f6446d:y8udT94E0dxP3XB3FYKQARpyl5kVTCHsgdfa/Qnlm+GIycOTkE0tZVcx6+PH4nx8OG8DrL40K0vkAAZmdNqiAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-30T20:05:49Z:04631b5bb52d8b681f32b99806c793255ab51c6db02c63a23c38068dfc598d97:bOMglT+Pp3wrefL2XyiHNYhpkoR2v5Zc6yt0aTgUT20Iy7/JP2ltw8+7IXgTrMU+BRFGGxq6GMbglYjm2Z5uAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/environments/qualification
-version: "1.0.0"
-description: Exact supplementary GNU static-link checksum closure; no execution claim
+version: "2.0.0"
+description: Admitted supplementary GNU member and checksum profile; no compiler execution claim
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v1
+  schema: ryeos.product_qualification_policy.v4
   verifier_ref: tool:ryeos/environments/qualification/static-link-inputs
   subject_declaration_id: subject
   allowed_claims:
-    - static_link_inputs_x86_64_linux_gnu_v1
-  verifier_parameters: {}
+    - static_link_inputs_profile_x86_64_linux_gnu_v2
+  minimum_verifier_process_settlement: trusted_process_group_absent
+  verifier_parameters:
+    # This policy owns the exact member set. Supported archive/object basenames
+    # may change; this checksum claim does not prove that a new set can link.
+    schema: ryeos.static_link_input_profile.v2
+    target: x86_64-unknown-linux-gnu
+    files:
+      usr/lib/x86_64-linux-gnu/libc.a:
+        bytes: 5669090
+        sha256: 421b7c3395b35301a4626593b35842849ae1ba43582320383ffbc9790d918515
+      usr/lib/x86_64-linux-gnu/libm.a:
+        bytes: 132
+        sha256: aef85c72b98fbeb021f6bdd3abb137e62643d7970bd59f84dc1a7c43fa6b9f14
+      usr/lib/x86_64-linux-gnu/libm-2.41.a:
+        bytes: 2502842
+        sha256: 0d748002785b531c0aa84679682deee556828ab21f9912569edd6bfae484ed0e
+      usr/lib/x86_64-linux-gnu/libmvec.a:
+        bytes: 1762900
+        sha256: 60f1a89b047a78bbd64843d1e388b8b7ee6f4d6b9faf425f0f21f1617a8dbd4f
+      usr/lib/x86_64-linux-gnu/libpthread.a:
+        bytes: 8
+        sha256: f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5
+      usr/lib/x86_64-linux-gnu/libdl.a:
+        bytes: 8
+        sha256: f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5
+      usr/lib/x86_64-linux-gnu/librt.a:
+        bytes: 8
+        sha256: f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5
+      usr/lib/x86_64-linux-gnu/libutil.a:
+        bytes: 8
+        sha256: f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5
+      usr/lib/x86_64-linux-gnu/rcrt1.o:
+        bytes: 1640
+        sha256: 4ca31259aee8415b60fe566c00cecfa5858f1103296b8043f175ccf2489f00ec
+      usr/lib/x86_64-linux-gnu/crt1.o:
+        bytes: 1776
+        sha256: 8cd1a50edd44a4ded5856bf2254dc106401b37c285dcc55a594475438cd6ec1a
+      usr/share/doc/libc6/copyright:
+        bytes: 51200
+        sha256: f5788886720a2605a946e81d571e6c8162b09f58d2e2ceb8d36e5768fccd850d

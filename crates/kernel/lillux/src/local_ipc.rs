@@ -57,6 +57,7 @@ impl AuthenticatedUnixPeer {
             bail!("authenticated exact process identity is unavailable on this OS")
         }
     }
+
     /// Diagnostic executable-name guard on an already-pinned peer. This is
     /// not content authentication (use executable_digest_exact for that).
     /// Linux comm is mutable and becomes an FD number after descriptor exec;

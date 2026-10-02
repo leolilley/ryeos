@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "title": "ExternalThreadResumeParams",
+  "description": "Recovery of the retained thread with only owner-supplied cwd and reviewer; no sticky configuration overrides.",
+  "properties": {
+    "threadId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cwd": {
+      "type": "string",
+      "minLength": 1
+    },
+    "approvalsReviewer": {
+      "const": "user"
+    }
+  },
+  "required": [
+    "threadId",
+    "cwd",
+    "approvalsReviewer"
+  ]
+}

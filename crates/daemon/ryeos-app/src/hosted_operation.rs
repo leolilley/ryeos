@@ -200,6 +200,51 @@ pub fn acquire_credential_profile_operation_sync(
     acquire_credential_profile_operation_blocking(profile_id)
 }
 
+/// Acquire exclusive profile-operation ownership under the caller's original
+/// monotonic deadline. This blocks the calling thread; async callers must use
+/// a blocking owner. Expiry removes writer priority and wakes contacts that
+/// were waiting only for this operation, without changing existing leases.
+pub fn acquire_credential_profile_operation_until(
+    profile_id: &str,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<CredentialProfileOperationLease> {
+    let gate = credential_gate(profile_id);
+    {
+        let mut state = gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if deadline.has_elapsed() {
+            bail!("credential-profile operation deadline elapsed before acquisition");
+        }
+        state.exclusive_waiters = state
+            .exclusive_waiters
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("credential-profile operation waiter count overflow"))?;
+        loop {
+            // Recheck before granting, including after a notification or a
+            // spurious wake. A newly free gate never renews the caller's clock.
+            let remaining = deadline.remaining();
+            if remaining.is_zero() {
+                state.exclusive_waiters -= 1;
+                gate.changed.notify_all();
+                bail!("credential-profile operation deadline elapsed while waiting");
+            }
+            if !state.exclusive_held && state.active_contacts == 0 {
+                state.exclusive_waiters -= 1;
+                state.exclusive_held = true;
+                break;
+            }
+            let (next, _) = gate
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
+        }
+    }
+    Ok(CredentialProfileOperationLease { gate })
+}
+
 /// Acquire a primary worker-contact lane. Waiting exclusive operations block
 /// new commands, preventing revoke/termination starvation.
 pub async fn acquire_credential_profile_contact(
@@ -772,6 +817,92 @@ mod tests {
                 Ok(appendable.load(std::sync::atomic::Ordering::Acquire))
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn expired_credential_operation_never_takes_an_available_gate() {
+        let profile = "profile-expired-bounded-operation";
+        let gate = credential_gate(profile);
+        assert!(
+            acquire_credential_profile_operation_until(
+                profile,
+                lillux::time::MonotonicDeadline::after(std::time::Duration::ZERO),
+            )
+            .is_err()
+        );
+        let state = gate.state.lock().unwrap();
+        assert!(!state.exclusive_held);
+        assert_eq!(state.exclusive_waiters, 0);
+    }
+
+    fn wait_for_credential_writer(gate: &ExclusiveGate) {
+        let deadline = lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(2));
+        while gate.state.lock().unwrap().exclusive_waiters == 0 {
+            assert!(!deadline.has_elapsed(), "credential writer did not queue");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn bounded_credential_operation_acquires_only_after_prior_owner_releases() {
+        let profile = "profile-bounded-operation-release";
+        let prior = acquire_credential_profile_operation_sync(profile);
+        let gate = credential_gate(profile);
+        let waiter = std::thread::spawn(move || {
+            acquire_credential_profile_operation_until(
+                profile,
+                lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(2)),
+            )
+        });
+        wait_for_credential_writer(&gate);
+        assert!(!waiter.is_finished());
+        drop(prior);
+        let next = waiter.join().unwrap().unwrap();
+        assert!(gate.state.lock().unwrap().exclusive_held);
+        assert_eq!(gate.state.lock().unwrap().exclusive_waiters, 0);
+        drop(next);
+        assert!(!gate.state.lock().unwrap().exclusive_held);
+    }
+
+    #[test]
+    fn expired_writer_releases_priority_and_preserves_causal_contacts() {
+        let profile = "profile-bounded-operation-expiry";
+        let primary = acquire_credential_profile_contact_blocking(profile, "active", false);
+        let gate = credential_gate(profile);
+        let waiter = std::thread::spawn(move || {
+            acquire_credential_profile_operation_until(
+                profile,
+                lillux::time::MonotonicDeadline::after(std::time::Duration::from_millis(100)),
+            )
+        });
+        wait_for_credential_writer(&gate);
+        // A queued writer still admits causal settlement of the active command.
+        let causal = acquire_credential_profile_contact_blocking(profile, "active", true);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let unrelated = std::thread::spawn(move || {
+            let contact = acquire_credential_profile_contact_blocking(profile, "unrelated", false);
+            sender.send(()).unwrap();
+            contact
+        });
+        assert!(waiter.join().unwrap().is_err());
+        // Primary remains held: this new contact can proceed only because the
+        // expired writer removed its priority and notified waiting contacts.
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let unrelated = unrelated.join().unwrap();
+        assert_eq!(gate.state.lock().unwrap().exclusive_waiters, 0);
+        assert!(!gate.state.lock().unwrap().exclusive_held);
+        drop(unrelated);
+        drop(causal);
+        drop(primary);
+        drop(
+            acquire_credential_profile_operation_until(
+                profile,
+                lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(1)),
+            )
+            .unwrap(),
         );
     }
 

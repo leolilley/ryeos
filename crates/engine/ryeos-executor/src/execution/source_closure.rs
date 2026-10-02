@@ -321,6 +321,37 @@ pub(crate) fn validate_external_mount_separation(
     Ok(())
 }
 
+/// The Q root carries these two accepted projections separately. Check their
+/// exact runtime destinations without constructing a live ResolutionOutput.
+pub(crate) fn validate_retained_qualification_mount_separation(
+    state: &ryeos_app::state::AppState,
+    source: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    realizations: &ryeos_state::objects::ExternalContentRealizationSet,
+) -> anyhow::Result<()> {
+    realizations.validate()?;
+    let authority = super::pinned_state_authority(state)?;
+    let cas = authority.cas_store()?;
+    let (binding, _) = retained_source_records_for_projection(&cas, source)?;
+    let source = SourceMountPlacement::Project.relative_mount(&binding)?;
+    let source = Path::new(&source);
+    for realization in realizations.iter() {
+        if mount_destinations_overlap(source, Path::new(&realization.mount)) {
+            anyhow::bail!("qualification Worker source and realization destinations overlap");
+        }
+    }
+    // Private descriptor delivery collapses both logical roots into one
+    // physical directory. Cross-root aliases must refuse before copying.
+    let entries: Vec<_> = realizations.iter().collect();
+    for (index, left) in entries.iter().enumerate() {
+        for right in &entries[index + 1..] {
+            if mount_destinations_overlap(Path::new(&left.mount), Path::new(&right.mount)) {
+                anyhow::bail!("qualification private realization destinations overlap");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn mount_destinations_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
@@ -337,6 +368,24 @@ pub(crate) fn bind_source(
         workspace,
         BindingMode::IsolationMount(placement),
         None,
+    )
+}
+
+/// Redeem the source projection held by an authenticated qualification root.
+/// The caller owns its accepted-root/profile join; this function only verifies
+/// the exact retained CAS binding and materializes its immutable source bytes.
+pub(crate) fn bind_retained_qualification_source(
+    state: &ryeos_app::state::AppState,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    workspace: &Path,
+    budget: &super::external_content::PrivateMaterializationBudget,
+) -> anyhow::Result<BoundSourceClosure> {
+    bind_source_projection_with(
+        state,
+        projection,
+        workspace,
+        BindingMode::PrivateWorkspace,
+        Some(budget),
     )
 }
 
@@ -362,13 +411,29 @@ fn bind_source_with(
     mode: BindingMode,
     budget: Option<&super::external_content::PrivateMaterializationBudget>,
 ) -> anyhow::Result<Option<BoundSourceClosure>> {
+    let Some(value) = resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+    else {
+        return Ok(None);
+    };
+    let projection = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)?;
+    bind_source_projection_with(state, &projection, workspace, mode, budget).map(Some)
+}
+
+fn bind_source_projection_with(
+    state: &ryeos_app::state::AppState,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    workspace: &Path,
+    mode: BindingMode,
+    budget: Option<&super::external_content::PrivateMaterializationBudget>,
+) -> anyhow::Result<BoundSourceClosure> {
     let authority = super::pinned_state_authority(state)?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
-    let Some((binding, manifest, projection)) = retained_source_records(&cas, resolution)? else {
-        return Ok(None);
-    };
+    let (binding, manifest) = retained_source_records_for_projection(&cas, projection)?;
     let records =
         ryeos_state::source_verification::VerifiedAdmittedSourceRecords::from_canonical_bytes(
             &projection.binding_hash,
@@ -490,7 +555,7 @@ fn bind_source_with(
         }
     };
     authority.ensure_guard(&guard)?;
-    Ok(Some(BoundSourceClosure {
+    Ok(BoundSourceClosure {
         mounts,
         sealed_identity_env,
         execution_entry_path: destination.join(entry),
@@ -505,7 +570,7 @@ fn bind_source_with(
         private_workspace_identity,
         records,
         _leases: vec![lease],
-    }))
+    })
 }
 
 fn retained_source_records(
@@ -526,6 +591,18 @@ fn retained_source_records(
         return Ok(None);
     };
     let projection = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)?;
+    let (binding, manifest) = retained_source_records_for_projection(cas, &projection)?;
+    Ok(Some((binding, manifest, projection)))
+}
+
+fn retained_source_records_for_projection(
+    cas: &lillux::CasStore,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+) -> anyhow::Result<(
+    ryeos_state::objects::EffectiveSourceBinding,
+    ryeos_state::objects::SourceClosureManifest,
+)> {
+    projection.validate()?;
     let binding_value = cas
         .get_object(&projection.binding_hash)?
         .ok_or_else(|| anyhow::anyhow!("admitted source binding is missing"))?;
@@ -540,11 +617,7 @@ fn retained_source_records(
             lillux::canonical_json(&manifest_value)?.as_bytes(),
         )?;
     records.validate_projection(&projection)?;
-    Ok(Some((
-        records.binding().clone(),
-        records.manifest().clone(),
-        projection,
-    )))
+    Ok((records.binding().clone(), records.manifest().clone()))
 }
 
 fn logical_mount(binding: &ryeos_state::objects::EffectiveSourceBinding) -> anyhow::Result<String> {

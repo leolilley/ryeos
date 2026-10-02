@@ -496,7 +496,7 @@ impl SessionProcess {
         {
             if let Err(error) = observer() {
                 let reason =
-                    format!("persistent-session resource settlement remains unproved: {error}");
+                    format!("persistent-session resource settlement remains unproved: {error:#}");
                 *self
                     .cleanup_unproved
                     .lock()
@@ -1463,6 +1463,48 @@ impl PersistentSessionPool {
             on_delta,
             absolute_deadline,
         )
+    }
+
+    /// Check the selected exclusive session's complete Request frame before a
+    /// domain owner commits its one-use possible-contact boundary. The actual
+    /// request id consists of two decimal u64 values separated by `-`; using
+    /// their maximum width makes this a conservative size check. This is only
+    /// a preflight: the sender still checks the real frame at the write edge.
+    pub fn ensure_exclusive_request_fits(
+        &self,
+        session_id: &str,
+        request_body: &Value,
+        expected_wire_max_bytes: u32,
+    ) -> Result<()> {
+        self.ensure_admission_open()?;
+        validate_exclusive_session_id(session_id)?;
+        let wire = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = state
+                .exclusive
+                .get(session_id)
+                .ok_or_else(|| anyhow!("exclusive persistent session is not attached"))?;
+            entry.contract.wire.clone()
+        };
+        if wire.max_frame_bytes != expected_wire_max_bytes {
+            bail!("exclusive Request changed its selected signed wire maximum");
+        }
+        let maximum_request_id = format!("{}-{}", u64::MAX, u64::MAX);
+        encode_frame(
+            &wire,
+            &PersistentSessionFrame {
+                protocol: wire.wire_protocol.clone(),
+                version: wire.wire_version,
+                kind: PersistentSessionFrameKind::Request,
+                request_id: Some(maximum_request_id),
+                body: Some(request_body.clone()),
+            },
+        )?;
+        Ok(())
     }
 
     pub fn execute_exclusive_attributed_with_deadline<C, D>(
@@ -3600,7 +3642,9 @@ fn refuse_ready_process(
     }
 }
 
-fn combine_retirement_observers(
+/// Retain both original settlement obligations in one observer, attempting
+/// them in order and preserving both errors. This grants no resource authority.
+pub fn combine_retirement_observers(
     resource: Option<PersistentSessionCleanupObserver>,
     retirement: Option<PersistentSessionCleanupObserver>,
 ) -> Option<PersistentSessionCleanupObserver> {
@@ -5556,6 +5600,144 @@ while True:
                 ExclusiveRetirementOutcome::Unproved
             );
         }
+    }
+
+    // Exercise the same observer composition as the Q caller through actual
+    // Started readiness and exclusive retirement. These are session lifecycle
+    // controls, not Q journal, callback or native-settlement testimony.
+    fn assert_nonfinancial_retirement(process_fails: bool, connector_fails: bool) {
+        struct RetainedLifetime(Arc<AtomicBool>);
+        impl Drop for RetainedLifetime {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let process_calls = Arc::clone(&calls);
+        let connector_calls = Arc::clone(&calls);
+        let observer = combine_retirement_observers(
+            Some(Arc::new(move || {
+                process_calls.lock().unwrap().push("process");
+                anyhow::ensure!(!process_fails, "original process settlement refused");
+                Ok(())
+            })),
+            Some(Arc::new(move || {
+                connector_calls.lock().unwrap().push("connector");
+                anyhow::ensure!(!connector_fails, "original connector settlement refused");
+                Ok(())
+            })),
+        )
+        .unwrap();
+        let released = Arc::new(AtomicBool::new(false));
+        let mut started = fake_framed_session().unwrap();
+        started
+            .lifelines
+            .push(Box::new(RetainedLifetime(Arc::clone(&released))));
+        let lifeline_count = started.lifelines.len();
+        started.retirement_observer = Some(Arc::clone(&observer));
+        assert!(started.cleanup_observer.is_none());
+        assert!(started.resource_occupancy_limit.is_none());
+        assert!(started.resource_cleanup_allowance_ms.is_none());
+        assert!(started.resource_attribution_sink.is_none());
+        assert!(started.resource_eligibility.is_none());
+
+        let pool = PersistentSessionPool::new();
+        let id = "nonfinancial-retirement";
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        pool.reserve_exclusive(id, &lifecycle, &test_wire())
+            .unwrap()
+            .bind(started)
+            .unwrap();
+        let retained = {
+            let state = pool.inner.state.lock().unwrap();
+            Arc::clone(&state.exclusive.get(id).unwrap().process)
+        };
+        assert!(Arc::ptr_eq(
+            retained.cleanup_observer.lock().unwrap().as_ref().unwrap(),
+            &observer,
+        ));
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(!released.load(Ordering::Acquire));
+
+        if process_fails || connector_fails {
+            for _ in 0..2 {
+                assert_eq!(
+                    pool.retire_exclusive(id).unwrap(),
+                    ExclusiveRetirementOutcome::Unproved
+                );
+                assert_eq!(*calls.lock().unwrap(), ["process", "connector"]);
+                assert_eq!(retained.lifelines.lock().unwrap().len(), lifeline_count);
+                assert!(!released.load(Ordering::Acquire));
+                let reason = retained.cleanup_unproved.lock().unwrap();
+                let reason = reason.as_ref().unwrap();
+                assert_eq!(
+                    reason.contains("original process settlement refused"),
+                    process_fails
+                );
+                assert_eq!(
+                    reason.contains("original connector settlement refused"),
+                    connector_fails
+                );
+            }
+        } else {
+            assert_eq!(
+                pool.retire_exclusive(id).unwrap(),
+                ExclusiveRetirementOutcome::Reaped
+            );
+            assert!(released.load(Ordering::Acquire));
+            assert!(retained.lifelines.lock().unwrap().is_empty());
+            retained.retire().unwrap();
+            assert_eq!(*calls.lock().unwrap(), ["process", "connector"]);
+        }
+    }
+
+    #[test]
+    fn nonfinancial_retirement_composite_accepts_started_and_releases_lifelines() {
+        assert_nonfinancial_retirement(false, false);
+    }
+
+    #[test]
+    fn nonfinancial_retirement_process_refusal_keeps_lifelines() {
+        assert_nonfinancial_retirement(true, false);
+    }
+
+    #[test]
+    fn nonfinancial_retirement_connector_refusal_keeps_lifelines() {
+        assert_nonfinancial_retirement(false, true);
+    }
+
+    #[test]
+    fn nonfinancial_retirement_both_refusals_keep_errors_and_lifelines() {
+        assert_nonfinancial_retirement(true, true);
+    }
+
+    #[test]
+    fn financial_cleanup_without_resource_tuple_still_refuses_started() {
+        let calls = Arc::new(Mutex::new(0));
+        let observed = Arc::clone(&calls);
+        let mut started = fake_framed_session().unwrap();
+        started.cleanup_observer = Some(Arc::new(move || {
+            *observed.lock().unwrap() += 1;
+            Ok(())
+        }));
+        let pool = PersistentSessionPool::new();
+        let id = "missing-resource-tuple";
+        let result = pool
+            .reserve_exclusive(id, &test_lifecycle(), &test_wire())
+            .unwrap()
+            .bind(started);
+        let error = match result {
+            Ok(_) => panic!("resource cleanup without occupancy authority became ready"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}")
+                .contains("resource-bearing persistent session has no bounded occupancy authority")
+        );
+        assert_eq!(*calls.lock().unwrap(), 1);
+        assert!(!pool.inner.state.lock().unwrap().exclusive.contains_key(id));
     }
 
     #[test]

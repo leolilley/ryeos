@@ -10,6 +10,7 @@ use ryeos_external_execution_contract::LifecycleCapability;
 use serde::{Deserialize, Serialize};
 
 use crate::external_content::products::composition::ResolvedExternalProductSelections;
+use crate::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram;
 use crate::objects::{
     AdmittedStructuredSessionProfile, EFFECTIVE_SOURCE_BINDING_SCHEMA,
     EXTERNAL_CONTENT_MANIFEST_KIND, EffectiveSourceClosureProjection, ExecutableSearchPathEntry,
@@ -909,6 +910,7 @@ impl AdmittedExternalCandidateProgram {
 )]
 pub enum AdmittedExternalExecutionProgram {
     StructuredSession(AdmittedExternalCandidateProgram),
+    QualificationStructuredSession(AdmittedExternalQualificationSessionProgram),
     DirectCommand(AdmittedExternalDirectProgram),
 }
 
@@ -922,6 +924,7 @@ impl AdmittedExternalExecutionProgram {
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::StructuredSession(program) => program.validate(),
+            Self::QualificationStructuredSession(program) => program.validate(),
             Self::DirectCommand(program) => program.validate(),
         }
     }
@@ -929,6 +932,7 @@ impl AdmittedExternalExecutionProgram {
     pub fn digest(&self) -> Result<String> {
         match self {
             Self::StructuredSession(program) => program.digest(),
+            Self::QualificationStructuredSession(program) => program.digest(),
             Self::DirectCommand(program) => program.digest(),
         }
     }
@@ -936,6 +940,7 @@ impl AdmittedExternalExecutionProgram {
     pub fn runtime_manifest_hash(&self) -> Result<&str> {
         match self {
             Self::StructuredSession(program) => Ok(&program.runtime_manifest_hash),
+            Self::QualificationStructuredSession(program) => Ok(&program.runtime_manifest_hash),
             Self::DirectCommand(program) => program.runtime_manifest_hash(),
         }
     }
@@ -945,6 +950,9 @@ impl AdmittedExternalExecutionProgram {
             Self::StructuredSession(_) => {
                 ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {}
             }
+            Self::QualificationStructuredSession(_) => {
+                ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {}
+            }
             Self::DirectCommand(program) => program.projection.execution_mode,
         }
     }
@@ -952,14 +960,18 @@ impl AdmittedExternalExecutionProgram {
     pub fn worker(&self) -> Result<&AdmittedExternalCandidateProgram> {
         match self {
             Self::StructuredSession(program) => Ok(program),
-            Self::DirectCommand(_) => anyhow::bail!("external program is not a structured session"),
+            Self::QualificationStructuredSession(_) | Self::DirectCommand(_) => {
+                anyhow::bail!("external program is not an ordinary structured session")
+            }
         }
     }
 
     pub fn worker_mut(&mut self) -> Result<&mut AdmittedExternalCandidateProgram> {
         match self {
             Self::StructuredSession(program) => Ok(program),
-            Self::DirectCommand(_) => anyhow::bail!("external program is not a structured session"),
+            Self::QualificationStructuredSession(_) | Self::DirectCommand(_) => {
+                anyhow::bail!("external program is not an ordinary structured session")
+            }
         }
     }
 
@@ -971,6 +983,7 @@ impl AdmittedExternalExecutionProgram {
         inputs.validate()?;
         match self {
             Self::StructuredSession(_) => Ok(()),
+            Self::QualificationStructuredSession(program) => program.validate_guest_inputs(inputs),
             Self::DirectCommand(program) => program.validate_guest_inputs(inputs),
         }
     }
@@ -1427,11 +1440,13 @@ pub mod test_support {
         requirement: &ExternalCandidateRequirement,
     ) -> anyhow::Result<AdmittedStructuredSessionProfile> {
         let contract = json!({
+            "schema_version": crate::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
             "external_candidate": requirement,
             "workload_client": null,
             "workload_realization_id": "codex",
             "auxiliary_configs": [],
             "runtime_configs": [],
+            "configuration_absence": {"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
         });
         Ok(AdmittedStructuredSessionProfile {
             profile_hash: canonical_value_digest(&contract)?,
@@ -1441,6 +1456,11 @@ pub mod test_support {
             baseline_destination: "config.conf".into(),
             auxiliary_configs: Vec::new(),
             runtime_configs: Vec::new(),
+            configuration_absence: crate::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
         })
     }
 
@@ -1701,6 +1721,7 @@ pub mod test_support {
                 policy_source: product.policy_source.clone(),
                 consumer_definitions: None,
                 consumer_content: None,
+                consumer_invocation: None,
                 producer_recipe_sources: BTreeMap::new(),
                 remote_verifier_sources: BTreeMap::new(),
                 subject_declaration_id: product.verifier.subject_declaration_id.clone(),

@@ -7,6 +7,7 @@
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use url::Url;
 
 use super::admission::AdmittedExternalExecutionProgram;
@@ -18,6 +19,9 @@ pub const EXTERNAL_CHANNEL_TRANSPORT_SCHEMA: u32 = 1;
 pub const MAX_PLACEMENT_ID_BYTES: usize = 256;
 pub const MAX_OCCURRENCE_ID_BYTES: usize = 512;
 pub const EXTERNAL_CHANNEL_ROUTE_CONTRACT: &str = "ryeos.external-channel.http-json.v1";
+pub const EXTERNAL_CHANNEL_RELAY_CONTRACT: &str = "ryeos.external-channel.controller-file-relay.v1";
+pub const EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA: u32 = 1;
+pub const EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA: u32 = 8;
 pub const EXTERNAL_CHANNEL_ATTACH_PATH: &str = "/external-execution/channel/attach";
 pub const EXTERNAL_CHANNEL_EXCHANGE_PATH: &str = "/external-execution/channel/exchange";
 pub const MAX_TLS_ROOT_CERTIFICATES: usize = 8;
@@ -88,6 +92,18 @@ pub struct ExternalCapturedNetworkInputs {
     pub hosts_base64: String,
     pub resolver_digest: String,
     pub hosts_digest: String,
+}
+
+impl std::fmt::Debug for ExternalCapturedNetworkInputs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExternalCapturedNetworkInputs")
+            .field("schema", &self.schema)
+            .field("policy_digest", &self.policy_digest)
+            .field("resolver_digest", &self.resolver_digest)
+            .field("hosts_digest", &self.hosts_digest)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ExternalCapturedNetworkInputs {
@@ -245,6 +261,111 @@ impl ExternalControllerTransportContract {
     }
 }
 
+/// Signed policy for a controller-initiated, occurrence-private file relay.
+/// The exact mailbox child is derived from the sealed bootstrap coordinates;
+/// this policy carries no HTTPS origin, TLS roots or guest network authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalControllerFileRelayContract {
+    pub schema: u32,
+    pub route_contract: String,
+    pub owner_workspace_id: String,
+    pub private_mailbox_parent: String,
+    pub maximum_file_bytes: u64,
+    pub maximum_frames: u32,
+    pub poll_interval_ms: u32,
+    pub poll_deadline_ms: u32,
+}
+
+impl ExternalControllerFileRelayContract {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == 3 && self.route_contract == EXTERNAL_CHANNEL_RELAY_CONTRACT,
+            "unsupported external controller file relay contract"
+        );
+        ensure!(
+            !self.owner_workspace_id.is_empty()
+                && self.owner_workspace_id.len() <= 256
+                && self
+                    .owner_workspace_id
+                    .bytes()
+                    .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') }),
+            "external relay owner workspace is invalid"
+        );
+        let path = &self.private_mailbox_parent;
+        ensure!(
+            path.starts_with('/')
+                && !path.starts_with("//")
+                && path.len() <= 2048
+                && !path.chars().any(char::is_control)
+                && path[1..]
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != ".."),
+            "external relay mailbox parent is not a lexical absolute path"
+        );
+        ensure!(
+            (((MAX_FRAME_BYTES.div_ceil(3) * 4 + 4_096) as u64)..=2 * 1024 * 1024)
+                .contains(&self.maximum_file_bytes)
+                && (64..=65_536).contains(&self.maximum_frames)
+                && (250..=10_000).contains(&self.poll_interval_ms)
+                && (1_000..=300_000).contains(&self.poll_deadline_ms)
+                && self.poll_interval_ms <= self.poll_deadline_ms,
+            "external relay transfer or polling bound is invalid"
+        );
+        Ok(())
+    }
+}
+
+/// The legacy HTTP object remains canonical on the wire. The relay is
+/// distinguished by its disjoint schema and fields; both reject unknown
+/// fields, so neither can silently interpret the other's authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ExternalControllerTransportSelection {
+    HttpJson(ExternalControllerTransportContract),
+    ControllerFileRelay(ExternalControllerFileRelayContract),
+}
+
+impl From<ExternalControllerTransportContract> for ExternalControllerTransportSelection {
+    fn from(value: ExternalControllerTransportContract) -> Self {
+        Self::HttpJson(value)
+    }
+}
+
+impl ExternalControllerTransportSelection {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::HttpJson(http) => http.validate(),
+            Self::ControllerFileRelay(relay) => relay.validate(),
+        }
+    }
+
+    pub fn http(&self) -> Result<&ExternalControllerTransportContract> {
+        match self {
+            Self::HttpJson(http) => Ok(http),
+            Self::ControllerFileRelay(_) => {
+                anyhow::bail!("controller file relay cannot use guest-originated HTTP transport")
+            }
+        }
+    }
+
+    pub fn http_mut(&mut self) -> Result<&mut ExternalControllerTransportContract> {
+        match self {
+            Self::HttpJson(http) => Ok(http),
+            Self::ControllerFileRelay(_) => {
+                anyhow::bail!("controller file relay cannot use guest-originated HTTP transport")
+            }
+        }
+    }
+
+    pub fn relay(&self) -> Result<&ExternalControllerFileRelayContract> {
+        match self {
+            Self::ControllerFileRelay(relay) => Ok(relay),
+            Self::HttpJson(_) => anyhow::bail!("HTTP controller transport has no file relay"),
+        }
+    }
+}
+
 pub fn external_tls_root_bundle_digest(certificates_der_base64: &[String]) -> Result<String> {
     ensure!(
         !certificates_der_base64.is_empty()
@@ -289,7 +410,7 @@ pub fn external_tls_root_bundle_digest(certificates_der_base64: &[String]) -> Re
 #[serde(deny_unknown_fields)]
 pub struct ExternalSupervisorBootstrap {
     pub schema: u32,
-    pub controller: ExternalControllerTransportContract,
+    pub controller: ExternalControllerTransportSelection,
     pub tls_root_certificates_der_base64: Vec<String>,
     pub placement_thread_id: String,
     pub occurrence_id: String,
@@ -309,7 +430,8 @@ pub struct ExternalSupervisorBootstrap {
     pub attachment_deadline_ms: i64,
     pub execution_timeout_seconds: u32,
     pub post_execution_timeout_seconds: u32,
-    /// Raw candidate-content ceiling. The separate channel ceiling includes
+    /// Raw candidate-content ceiling. Qualification sessions and direct
+    /// commands require zero. The separate channel ceiling includes
     /// authenticated framing and transfer encoding overhead.
     pub candidate_export_max_bytes: u64,
     pub channel_max_bytes: u64,
@@ -318,15 +440,31 @@ pub struct ExternalSupervisorBootstrap {
 impl ExternalSupervisorBootstrap {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 7,
-            "unsupported external supervisor bootstrap schema"
+            self.schema
+                == match &self.controller {
+                    ExternalControllerTransportSelection::HttpJson(_) => 7,
+                    ExternalControllerTransportSelection::ControllerFileRelay(_) => {
+                        EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA
+                    }
+                },
+            "unsupported external supervisor bootstrap schema for selected transport"
         );
         self.controller.validate()?;
-        ensure!(
-            external_tls_root_bundle_digest(&self.tls_root_certificates_der_base64)?
-                == self.controller.tls_root_bundle_digest,
-            "external supervisor TLS roots changed their signed identity"
-        );
+        match &self.controller {
+            ExternalControllerTransportSelection::HttpJson(http) => ensure!(
+                external_tls_root_bundle_digest(&self.tls_root_certificates_der_base64)?
+                    == http.tls_root_bundle_digest,
+                "external supervisor TLS roots changed their signed identity"
+            ),
+            ExternalControllerTransportSelection::ControllerFileRelay(_) => ensure!(
+                self.tls_root_certificates_der_base64.is_empty()
+                    && matches!(
+                        self.candidate_program.execution_mode(),
+                        ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {}
+                    ),
+                "external controller file relay requires a zero-export qualification guest without TLS roots"
+            ),
+        }
         bounded_text(
             &self.placement_thread_id,
             MAX_PLACEMENT_ID_BYTES,
@@ -385,6 +523,28 @@ impl ExternalSupervisorBootstrap {
             (1..=64 * 1024 * 1024).contains(&self.channel_max_bytes),
             "external supervisor channel byte bound is invalid"
         );
+        // Do not call binding_max_frames here: it validates this bootstrap.
+        super::validate_channel_journal_limits(
+            self.candidate_program.execution_mode(),
+            u32::try_from(
+                self.channel_max_bytes
+                    .div_ceil(MAX_CHUNK_BYTES as u64)
+                    .saturating_mul(4)
+                    .clamp(64, 65_536),
+            )?,
+            self.channel_max_bytes,
+        )?;
+        if let ExternalControllerTransportSelection::ControllerFileRelay(relay) = &self.controller {
+            let required_frames = self
+                .channel_max_bytes
+                .div_ceil(MAX_CHUNK_BYTES as u64)
+                .saturating_mul(4)
+                .clamp(64, 65_536);
+            ensure!(
+                u64::from(relay.maximum_frames) >= required_frames,
+                "external relay frame budget is smaller than its signed channel"
+            );
+        }
         match self.candidate_program.execution_mode() {
             ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {} => {
                 ensure!(
@@ -392,10 +552,11 @@ impl ExternalSupervisorBootstrap {
                     "external session supervisor export bound is invalid"
                 );
             }
-            ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand { .. } => {
+            ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {}
+            | ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand { .. } => {
                 ensure!(
                     self.candidate_export_max_bytes == 0,
-                    "external direct supervisor has no candidate export authority"
+                    "external supervisor mode has no candidate export authority"
                 );
             }
         }
@@ -409,6 +570,21 @@ impl ExternalSupervisorBootstrap {
             "external supervisor attachment deadline has expired"
         );
         Ok(())
+    }
+
+    /// Lexical occurrence coordinate only. A later installed relay owner must
+    /// pin and prove this private directory before any provider transfer.
+    pub fn relay_mailbox_root(&self) -> Result<String> {
+        self.validate()?;
+        let relay = self.controller.relay()?;
+        let child = crate::objects::canonical_value_digest(&serde_json::json!({
+            "domain": "ryeos.external-controller-relay-mailbox.v1",
+            "owner_workspace_id": relay.owner_workspace_id,
+            "placement_thread_id": self.placement_thread_id,
+            "occurrence_id": self.occurrence_id,
+            "execution_binding_hash": self.execution_binding_hash,
+        }))?;
+        Ok(format!("{}/{}", relay.private_mailbox_parent, child))
     }
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
@@ -762,6 +938,152 @@ impl ExternalChannelExchangeResponse {
     }
 }
 
+/// The controller signs the complete file-relay response, including transport
+/// metadata that is not covered by the signed channel frames. This envelope
+/// is distinct from the HTTP response: an uploaded file has no TLS peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalRelayResponseKind {
+    Attach,
+    Exchange,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalRelayResponsePayload {
+    pub schema: u32,
+    pub kind: ExternalRelayResponseKind,
+    pub bootstrap_digest: String,
+    pub placement_thread_id: String,
+    pub occurrence_id: String,
+    pub request_digest: String,
+    pub binding_digest: Option<String>,
+    pub response: Value,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalRelayResponseEnvelope {
+    pub payload: ExternalRelayResponsePayload,
+    pub signature: String,
+}
+
+impl ExternalRelayResponseEnvelope {
+    fn signing_bytes(payload: &ExternalRelayResponsePayload) -> Result<Vec<u8>> {
+        Ok(lillux::canonical_json(&serde_json::json!({
+            "domain": "ryeos.external-controller-file-relay-response.v1",
+            "payload": payload,
+        }))?
+        .into_bytes())
+    }
+
+    /// Controller-side constructor for an exact authenticated response file.
+    /// It grants no channel state; the consumer still validates the typed
+    /// attachment or exchange response against the active binding.
+    pub fn sign(
+        bootstrap: &ExternalSupervisorBootstrap,
+        kind: ExternalRelayResponseKind,
+        request_digest: &str,
+        binding_digest: Option<&str>,
+        response: &impl Serialize,
+        owner_signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<Self> {
+        use lillux::crypto::Signer as _;
+
+        bootstrap.controller.relay()?;
+        ensure!(
+            super::encode_channel_public_key(&owner_signing_key.verifying_key())?
+                == bootstrap.owner_public_key,
+            "external relay response signer differs from sealed owner"
+        );
+        hash(request_digest)?;
+        ensure!(
+            matches!(kind, ExternalRelayResponseKind::Attach) == binding_digest.is_none(),
+            "external relay response kind has the wrong binding coordinate"
+        );
+        if let Some(digest) = binding_digest {
+            hash(digest)?;
+        }
+        let payload = ExternalRelayResponsePayload {
+            schema: EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA,
+            kind,
+            bootstrap_digest: bootstrap.digest()?,
+            placement_thread_id: bootstrap.placement_thread_id.clone(),
+            occurrence_id: bootstrap.occurrence_id.clone(),
+            request_digest: request_digest.to_owned(),
+            binding_digest: binding_digest.map(str::to_owned),
+            response: serde_json::to_value(response)?,
+        };
+        let signature = STANDARD.encode(
+            owner_signing_key
+                .sign(&Self::signing_bytes(&payload)?)
+                .to_bytes(),
+        );
+        let envelope = Self { payload, signature };
+        ensure!(
+            u64::try_from(envelope.canonical_bytes()?.len())?
+                <= bootstrap.controller.relay()?.maximum_file_bytes,
+            "external relay response exceeds its signed file bound"
+        );
+        Ok(envelope)
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        Ok(lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes())
+    }
+
+    /// Reject noncanonical, replayed, mismatched, and unsigned uploaded files
+    /// before interpreting any response field as controller output.
+    pub fn decode_verified<T: serde::de::DeserializeOwned>(
+        bytes: &[u8],
+        bootstrap: &ExternalSupervisorBootstrap,
+        expected_kind: ExternalRelayResponseKind,
+        request_digest: &str,
+        binding_digest: Option<&str>,
+    ) -> Result<T> {
+        bootstrap.controller.relay()?;
+        ensure!(
+            u64::try_from(bytes.len())? <= bootstrap.controller.relay()?.maximum_file_bytes,
+            "external relay response exceeds its signed file bound"
+        );
+        hash(request_digest)?;
+        if let Some(digest) = binding_digest {
+            hash(digest)?;
+        }
+        let envelope: Self =
+            serde_json::from_slice(bytes).context("decode external relay response envelope")?;
+        ensure!(
+            envelope.canonical_bytes()? == bytes,
+            "external relay response envelope is not canonical"
+        );
+        let payload = &envelope.payload;
+        ensure!(
+            payload.schema == EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA
+                && payload.kind == expected_kind
+                && payload.bootstrap_digest == bootstrap.digest()?
+                && payload.placement_thread_id == bootstrap.placement_thread_id
+                && payload.occurrence_id == bootstrap.occurrence_id
+                && payload.request_digest == request_digest
+                && payload.binding_digest.as_deref() == binding_digest
+                && (matches!(expected_kind, ExternalRelayResponseKind::Attach)
+                    == binding_digest.is_none()),
+            "external relay response changed its sealed request coordinate"
+        );
+        let signature_bytes = STANDARD
+            .decode(&envelope.signature)
+            .context("external relay response signature is invalid base64")?;
+        ensure!(
+            STANDARD.encode(&signature_bytes) == envelope.signature,
+            "external relay response signature is not canonical"
+        );
+        let signature = lillux::crypto::Signature::from_slice(&signature_bytes)?;
+        super::public_key(&bootstrap.owner_public_key)?
+            .verify_strict(&Self::signing_bytes(payload)?, &signature)?;
+        serde_json::from_value(payload.response.clone())
+            .context("decode authenticated external relay response")
+    }
+}
+
 fn bounded_text(value: &str, maximum: usize, label: &str) -> Result<()> {
     ensure!(
         !value.is_empty() && value.len() <= maximum,
@@ -775,10 +1097,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::external_content::products::qualification::ProductQualificationConsumerRuntimeMemberIdentity;
     use crate::external_execution::admission::{
-        AdmittedExternalCandidateProgram, ExternalCandidateProcFilesystem,
-        ExternalCandidateRequirement, ExternalCandidateRuntimeRecipe, PROTOCOL,
+        AdmittedExternalCandidateProgram, AdmittedExternalExecutionProgram,
+        ExternalCandidateProcFilesystem, ExternalCandidateRequirement,
+        ExternalCandidateRuntimeRecipe, PROTOCOL,
     };
+    use crate::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram;
+    use crate::objects::ExternalContentKind;
 
     fn controller(roots: &[String]) -> ExternalControllerTransportContract {
         ExternalControllerTransportContract {
@@ -863,7 +1189,7 @@ mod tests {
             .unwrap();
         ExternalSupervisorBootstrap {
             schema: 7,
-            controller: controller(&roots),
+            controller: controller(&roots).into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-placement".into(),
             occurrence_id: "occurrence-one".into(),
@@ -910,6 +1236,268 @@ mod tests {
                 max_bytes: 65536,
             },
         }
+    }
+
+    fn relay_bootstrap() -> ExternalSupervisorBootstrap {
+        let mut value = bootstrap();
+        let ordinary = match value.candidate_program {
+            AdmittedExternalExecutionProgram::StructuredSession(program) => program,
+            _ => unreachable!(),
+        };
+        let member = ProductQualificationConsumerRuntimeMemberIdentity {
+            product_declaration_id: ordinary.requirement.runtime_product_declaration_id.clone(),
+            relative_path: ordinary
+                .requirement
+                .runtime_recipe
+                .executable_relative_path
+                .clone(),
+            executable_sha256: "6".repeat(64),
+        };
+        value.candidate_program = AdmittedExternalExecutionProgram::QualificationStructuredSession(
+            AdmittedExternalQualificationSessionProgram {
+                schema: crate::external_execution::qualification_session::QUALIFICATION_SESSION_PROGRAM_SCHEMA,
+                qualification_purpose_digest: "7".repeat(64),
+                consumer_content_digest: "8".repeat(64),
+                requirement: ordinary.requirement.clone(),
+                qualification_use: ordinary.qualification_use,
+                runtime_manifest_kind: ordinary.runtime_manifest_kind,
+                runtime_content_kind: ExternalContentKind::Tree,
+                runtime_manifest_hash: ordinary.runtime_manifest_hash,
+                runtime_member: member,
+                runtime_recipe_digest: ordinary.runtime_recipe_digest,
+                fixture: None,
+            },
+        );
+        value.schema = EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA;
+        value.controller = ExternalControllerTransportSelection::ControllerFileRelay(
+            ExternalControllerFileRelayContract {
+                schema: 3,
+                route_contract: EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
+                owner_workspace_id: "render-owner".into(),
+                private_mailbox_parent: "/run/ryeos/private-relay".into(),
+                maximum_file_bytes: 1024 * 1024,
+                maximum_frames: 1024,
+                poll_interval_ms: 1000,
+                poll_deadline_ms: 30_000,
+            },
+        );
+        value.tls_root_certificates_der_base64.clear();
+        value.candidate_export_max_bytes = 0;
+        value.validate().unwrap();
+        value
+    }
+
+    #[test]
+    fn q_bootstrap_refuses_channel_without_reserved_settlement_capacity() {
+        let mut bootstrap = relay_bootstrap();
+        bootstrap.channel_max_bytes = super::super::Q_FINISH_BYTES;
+        assert!(bootstrap.validate().is_err());
+        bootstrap.channel_max_bytes += 1;
+        bootstrap.validate().unwrap();
+        assert_eq!(bootstrap.binding_max_frames().unwrap(), 64);
+    }
+
+    #[test]
+    fn q_program_fixture_is_required_nullable_and_changes_program_identity() {
+        use ryeos_external_execution_contract::qualification_fixture::{
+            Q_FIXTURE_MOUNT_DESTINATION, QFixtureContract,
+        };
+        let bootstrap = relay_bootstrap();
+        let AdmittedExternalExecutionProgram::QualificationStructuredSession(mut program) =
+            bootstrap.candidate_program
+        else {
+            unreachable!()
+        };
+        let before = program.digest().unwrap();
+        let wire = serde_json::to_value(&program).unwrap();
+        assert!(wire["fixture"].is_null());
+        let mut missing = wire.clone();
+        missing.as_object_mut().unwrap().remove("fixture");
+        assert!(
+            serde_json::from_value::<AdmittedExternalQualificationSessionProgram>(missing).is_err()
+        );
+        let mut old = wire;
+        old["schema"] = serde_json::json!(1);
+        assert!(
+            serde_json::from_value::<AdmittedExternalQualificationSessionProgram>(old)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        program.fixture = Some(QFixtureContract {
+            schema: 1,
+            mount_destination: Q_FIXTURE_MOUNT_DESTINATION.into(),
+            leaf: "candidate.txt".into(),
+            initial_content_b64: String::new(),
+            initial_blob_hash: lillux::sha256_hex(b""),
+            max_bytes: 65536,
+        });
+        program.validate().unwrap();
+        assert_ne!(before, program.digest().unwrap());
+        assert_eq!(program.fixture(), program.fixture.as_ref());
+        program.fixture.as_mut().unwrap().leaf = "../escape".into();
+        assert!(program.validate().is_err());
+    }
+
+    #[test]
+    fn relay_response_envelope_authenticates_exact_request_and_full_response() {
+        let bootstrap = relay_bootstrap();
+        let owner = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+        let request_digest = lillux::sha256_hex(b"canonical attach request");
+        let envelope = ExternalRelayResponseEnvelope::sign(
+            &bootstrap,
+            ExternalRelayResponseKind::Attach,
+            &request_digest,
+            None,
+            &serde_json::json!({"binding":"fixture"}),
+            &owner,
+        )
+        .unwrap();
+        let bytes = envelope.canonical_bytes().unwrap();
+        let accepted: Value = ExternalRelayResponseEnvelope::decode_verified(
+            &bytes,
+            &bootstrap,
+            ExternalRelayResponseKind::Attach,
+            &request_digest,
+            None,
+        )
+        .unwrap();
+        assert_eq!(accepted, serde_json::json!({"binding":"fixture"}));
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &bytes,
+                &bootstrap,
+                ExternalRelayResponseKind::Attach,
+                &lillux::sha256_hex(b"different request"),
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &bytes,
+                &bootstrap,
+                ExternalRelayResponseKind::Exchange,
+                &request_digest,
+                Some(&"9".repeat(64)),
+            )
+            .is_err()
+        );
+        let mut wrong_owner: ExternalSupervisorBootstrap =
+            serde_json::from_slice(&bootstrap.canonical_bytes().unwrap()).unwrap();
+        wrong_owner.owner_public_key = super::super::encode_channel_public_key(
+            &lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key(),
+        )
+        .unwrap();
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &bytes,
+                &wrong_owner,
+                ExternalRelayResponseKind::Attach,
+                &request_digest,
+                None,
+            )
+            .is_err()
+        );
+        let binding_digest = "9".repeat(64);
+        let exchange = ExternalRelayResponseEnvelope::sign(
+            &bootstrap,
+            ExternalRelayResponseKind::Exchange,
+            &request_digest,
+            Some(&binding_digest),
+            &serde_json::json!({"incoming_new":false}),
+            &owner,
+        )
+        .unwrap();
+        let exchange_bytes = exchange.canonical_bytes().unwrap();
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &exchange_bytes,
+                &bootstrap,
+                ExternalRelayResponseKind::Exchange,
+                &request_digest,
+                Some(&binding_digest),
+            )
+            .is_ok()
+        );
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &exchange_bytes,
+                &bootstrap,
+                ExternalRelayResponseKind::Exchange,
+                &request_digest,
+                Some(&"0".repeat(64)),
+            )
+            .is_err()
+        );
+        let mut changed: Value = serde_json::from_slice(&bytes).unwrap();
+        changed["payload"]["response"]["binding"] = serde_json::json!("substituted");
+        let changed = lillux::canonical_json(&changed).unwrap();
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                changed.as_bytes(),
+                &bootstrap,
+                ExternalRelayResponseKind::Attach,
+                &request_digest,
+                None,
+            )
+            .is_err()
+        );
+        let mut noncanonical = bytes.clone();
+        noncanonical.push(b' ');
+        assert!(
+            ExternalRelayResponseEnvelope::decode_verified::<Value>(
+                &noncanonical,
+                &bootstrap,
+                ExternalRelayResponseKind::Attach,
+                &request_digest,
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn file_relay_is_a_distinct_bounded_signed_transport_selection() {
+        let http = controller(&[STANDARD.encode(b"fixture DER root")]);
+        let selected = ExternalControllerTransportSelection::HttpJson(http.clone());
+        assert_eq!(
+            serde_json::to_value(&selected).unwrap(),
+            serde_json::to_value(http).unwrap()
+        );
+        let relay = ExternalControllerFileRelayContract {
+            schema: 3,
+            route_contract: EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
+            owner_workspace_id: "render-owner".into(),
+            private_mailbox_parent: "/run/ryeos/private-relay".into(),
+            maximum_file_bytes: 1024 * 1024,
+            maximum_frames: 1024,
+            poll_interval_ms: 1000,
+            poll_deadline_ms: 30_000,
+        };
+        relay.validate().unwrap();
+        let wire = serde_json::to_value(ExternalControllerTransportSelection::ControllerFileRelay(
+            relay.clone(),
+        ))
+        .unwrap();
+        let decoded: ExternalControllerTransportSelection =
+            serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            decoded,
+            ExternalControllerTransportSelection::ControllerFileRelay(relay)
+        );
+        assert!(decoded.http().is_err());
+        let mut hybrid = wire;
+        hybrid["https_origin"] = serde_json::json!("https://controller.example");
+        assert!(serde_json::from_value::<ExternalControllerTransportSelection>(hybrid).is_err());
+        let mut ordinary = bootstrap();
+        ordinary.controller = decoded;
+        ordinary.schema = EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA;
+        ordinary.tls_root_certificates_der_base64.clear();
+        assert!(
+            ordinary.validate().is_err(),
+            "ordinary guest cannot select Q file relay"
+        );
     }
 
     #[test]
@@ -1171,11 +1759,23 @@ mod tests {
         let bootstrap = bootstrap();
         bootstrap.validate_at(1_000_000).unwrap();
         assert_eq!(
-            bootstrap.controller.attach_url().unwrap().as_str(),
+            bootstrap
+                .controller
+                .http()
+                .unwrap()
+                .attach_url()
+                .unwrap()
+                .as_str(),
             "https://controller.example:7443/external-execution/channel/attach"
         );
         assert_eq!(
-            bootstrap.controller.exchange_url().unwrap().as_str(),
+            bootstrap
+                .controller
+                .http()
+                .unwrap()
+                .exchange_url()
+                .unwrap()
+                .as_str(),
             "https://controller.example:7443/external-execution/channel/exchange"
         );
         let supervisor_public_key = super::super::encode_channel_public_key(
@@ -1215,7 +1815,8 @@ mod tests {
 
         let mut changed: ExternalSupervisorBootstrap =
             serde_json::from_value(serde_json::to_value(&bootstrap).unwrap()).unwrap();
-        changed.controller.https_origin = "https://controller.example:443".into();
+        changed.controller.http_mut().unwrap().https_origin =
+            "https://controller.example:443".into();
         assert!(changed.validate().is_err());
         let mut changed: ExternalSupervisorBootstrap =
             serde_json::from_value(serde_json::to_value(&bootstrap).unwrap()).unwrap();

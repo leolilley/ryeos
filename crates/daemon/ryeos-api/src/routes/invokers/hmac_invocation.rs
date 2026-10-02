@@ -1416,6 +1416,7 @@ mod tests {
             ),
             scoped_producer_authorities: std::sync::Arc::new(Default::default()),
             scoped_producer_processes: std::sync::Arc::new(Default::default()),
+            qualification_workspace_custody: std::sync::Arc::new(Default::default()),
         };
         (tmpdir, state)
     }

@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-28T23:56:24Z:3ec6e5497656cb3f1953584c48154eda3c4da00dd907d3ec50ee5101dffc14dd:oLZOMxQc25rvMbZ+ufkg3BrzZLsgsO3BYUiSwg6GguDx4UtamLLVVkiXlE5ALp53RNXhjLssp47Vs33Oga+RAQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-30T10:59:04Z:85999fd19f119eadc706b227920de2f671941782d7897741b0466e5a926139d4:S59tedmd0PdJVm27MQ46Vy3JW2zu9dzLPT0pOGqbyKcgulA4uD9HagEnNb2ONxF4Cjjq3+q2oZ3MIkGnWSYdDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.0.2"
+version: "1.1.14"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -61,6 +61,169 @@ at admission (including the managed runtime ref/hash/signer/served kind, or the
 exact direct route). A discriminant or executor string alone is insufficient:
 recovery must be able to validate the route without consulting today's runtime
 registry.
+
+## Product qualification admission and consumption
+
+Product qualification retains its daemon-derived purpose and the complete
+canonical Root product selection batch. Fresh admission and sealed-request
+validation apply the same subject rule: the exact policy subject is unqualified
+and cannot be replaced by an auxiliary. Read-only pinned qualification may carry
+additional inputs authenticated through normal product composition. It requires
+the exact snapshot authority and no workspace outputs. The existing projectless
+fixed-pin lane remains supported; it cannot acquire auxiliary inputs implicitly.
+
+Direct verifier compilation uses `ADMITTED_DIRECT_PROJECT_ROOT` for logical
+paths. The physical materialization and its lifetime proof remain in the exact
+pinned admission context; a temporary checkout path is not a portable program
+identity. The same snapshot resolver is used when a dependency's qualification
+requires reopening its own retained pinned context.
+
+Consuming a qualification additionally reconstructs the checker under current
+trusted policy and compares its exact identity with the retained evidence. This
+eligibility check does not change a recovering invocation's sealed program or
+authorize execution with newly selected inputs. See
+[remote development and qualification](remote-development-and-qualification.md)
+for the supported signed profiles and input contract. Source coverage of these
+boundaries is separate from an installed verifier's execution and settlement
+evidence.
+
+An activated-content qualification has a different source owner. Its accepted
+launch derives the subject, policy, verifier and claims from the current
+node-signed activation and signed consumer allowance, then seals that exact
+purpose in a projectless, fixed-pin verifier root. `qualify-content` constructs
+testimony from the accepted root, terminal and retained execution realization;
+its immutable node-signed publication head is keyed by the sealed purpose and
+terminal coordinates. A fresh read of that head must also check its expiry,
+current activation and binding, signed allowance, and current verifier identity.
+Neither the head nor a successful verifier run alone grants hosted Worker
+admission. The consumer-context product claim still needs an independently
+authorized hosted lifecycle and its exact runtime parity evidence. These
+source paths require an installed acceptance run before they can be reported
+as operational qualification.
+
+An external structured-session binding selects acquired runtime compatibility
+through its separate, required-nullable `runtime_content_qualification` slot.
+The selection names an exact activation, immutable qualification coordinate
+and attestation, owner, and finite required claims; fresh placement must rejoin
+that testimony to the session runtime manifest. This is separate from the
+guest-owner snapshot `runtime_qualification` and from the Worker product slot.
+Current source checks the selection before fresh placement, retains the exact
+content attestation and evidence in persistent-session capsule schema 20, and
+authenticates that historical testimony during recovery. Recovery does not
+select a newer head or renew contact permission. A binding without the fresh
+proof cannot obtain structured-session contact from this source generation.
+These source joins have not yet passed the final build or hosted acceptance
+run.
+
+The admitted external-candidate program now tags its runtime source as
+`CapturedProduct` or `ActivatedContent`. An activated source retains the exact
+content subject and qualification coordinate; it cannot be reconstructed as
+a product witness or satisfied by a product selector for the same runtime slot.
+The signed worker requirement also selects `captured_product` or
+`activated_content` explicitly. The first lane resolves from retained product
+selections. The second resolves from an authenticated activated-content
+qualification and requires a unique signed placement binding for the exact
+provider, protocol and runtime manifest. Admission compares that prepared
+testimony with a fresh placement preflight before sealing the capsule; it
+cannot silently switch lanes when one source is absent or unqualified.
+Persistent-session recovery reconstructs that program from its retained
+content testimony and checks the exact source-specific program identity.
+The source has not yet established an activated-runtime guest transfer or
+hosted Worker lifecycle, so this admission join remains an untested source
+contract rather than an operational qualification claim.
+
+Consumer qualification content now retains its declaration authority as a
+tagged source. A captured product retains the exact signed relationship
+definition; activated content retains the exact activation definition,
+declaration ID and signed allowance. The shared same-generation Worker,
+environment and execution definition resolver returns identities only. A
+product evidence reader still requires the captured-product arm, while the
+activated-content evidence reader still refuses consumer execution context.
+The new retained shape therefore does not enable hosted Worker claims by
+itself; that requires the separate applied-runtime and lifecycle proof.
+
+For either declaration authority, the qualification subject is retained as a
+separate `runtime_realization`. It must match the authenticated product or
+activated-content subject and cannot also appear among Worker literals. The
+other exact Worker and environment realizations remain bound to their signed
+definitions. Remote consumers additionally retain the admission-derived
+qualification use and its digest over the complete execution environment.
+Consumer-context testimony requires a daemon-owned scoped producer attempt.
+The accepted purpose now retains the signed remote verifier source closure and
+its exact payload; later contact must match the protected selection, occurrence,
+accepted root and retained source. These are source contracts, not operational
+qualification. The product result claim gate still refuses consumer-context
+claims until applied-runtime parity and hosted lifecycle evidence are joined.
+
+## Qualification schema cut
+
+The current qualification purpose is a tagged source: a captured product and
+an activated content subject have different provenance. Sealed-root schema 22
+and admitted capsule schema 34 retain that distinction. The current decoder
+does not reinterpret predecessor schema-21 roots or schema-30 through 33
+capsules as new launch authority. A node retaining those heads must complete an explicit,
+reviewed execution-history recovery cut before the new generation can admit
+fresh execution. Retained CAS bytes can remain archival evidence; they do not
+become current qualification or consumer permission.
+
+The retained source and consumer-input cuts advance qualification launch purpose
+to v5, product qualification evidence to v12 and activated-content evidence
+to v5. Predecessor evidence is not reinterpreted under these decoders. Even
+when its subject bytes are unchanged, a product needed by the current release
+consumer must be requalified under the final installed generation; the A/B
+static-input qualifications remain evidence of their earlier verifier runs,
+not current four-slot `native-build` or `core-seed-build` permission.
+
+Dispatch-effect replay moves to operational epoch 14 for the schema-34
+contract. Capsule 34 binds retained remote-verifier sources and complete
+production consumer inputs into the launch authority. Exact source retention
+and protected contact joins remain separate admission requirements. The
+supported explicit reset retires
+predecessor dispatch-effect rows and preserves independent provider-call
+rows from the immediate prior epoch. It does not reinterpret predecessor
+qualification or launch authority.
+This source decision does not reset a node. Recovery must use the exact
+final binary's guarded dry-run and account for every authority it would retire;
+affected products and consumer proofs require current qualification afterward.
+
+When the runtime operator epoch is incompatible, the explicit history reset
+replaces the entire daemon-owned runtime SQLite schema with the current empty
+schema. It does not migrate selected predecessor tables. Its dry-run reports
+runtime row counts as unavailable for that predecessor layout, so the operator
+must review a separate read-only inventory of nonempty tables and retained
+chain/project heads before confirming the cut. The reset also requires settled
+process-scope lifetimes and a stopped node; an incompatible capsule alone is
+not permission to discard live execution authority.
+Runtime operator epoch 95 introduced pre-release executable, argv,
+environment and cwd commitments in the scoped attempt journal. A later
+observation must match that journaled target and the relay handoff. The
+current source advances to operator epoch 103 as remote verifier attempts,
+retained source closure, production consumer inputs and the consumer's outer
+process owner acquire distinct stable coordinates. Neither a consumer
+coordinate nor a retained contact transcript alone grants hosted-runtime
+qualification. Predecessor runtime rows cannot
+supply the current attempt and consumer authority by reinterpretation.
+
+The signed runtime-snapshot qualification profile now requires schema 3. Its
+bounded `consumer_verifiers` map selects a verifier artifact and exact signed
+scenario source for each consumer scenario, separately from the owner-measurement
+verifier artifact. A missing scenario, changed source digest, or schema-2
+profile is refused. This signed selection is only artifact authority: the
+consumer attempt still needs daemon-owned prerequisite measurement, accepted
+root and same-occurrence joins before remote contact, and the observed guest
+runtime and applied launch joins before it can support a qualification claim.
+
+The prerequisite journal read now rehydrates the observed owner-measurement
+attempt and compares its exact observation digest with the consumer coordinate.
+It refuses another operator, a retained termination intent or an expired
+occurrence. The accepted verifier root, signed scenario and provider authority
+still belong to the contact owner's later transaction. Separately, the
+controller can recover one applied `RuntimeApplied` frame from its retained
+external channel after checking its binding, signature, digest and sequence.
+That frame is guest launch evidence only. A qualification issuer must join it
+to the selected Worker product and guest occurrence, the direct probe's
+independently observed target, lifecycle termination and writer settlement.
+Neither read path currently enables consumer contact or claims.
 
 ## What recovery must NOT do
 

@@ -14,7 +14,7 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 struct InputsRequest {
     thread_id: String,
-    selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
+    selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationScenarioSelection,
 }
 
 fn parse_inputs(params: &Value, thread_id: &str) -> Result<InputsRequest> {
@@ -59,6 +59,7 @@ struct ObserveRequest {
     thread_id: String,
     qualification_operation_id: String,
     coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    transcript_chunk: Option<ryeos_state::objects::QualificationWorkerTranscriptChunkSelection>,
 }
 
 /// Product-edge record bytes are opaque to the generic transport. The daemon
@@ -115,6 +116,31 @@ pub(super) async fn start(
         let prepared = ryeos_app::operator_external_content::product_qualification::prepare_retained_consumer_verifier_for_callback(
             &state, &token, &request.coordinate, &request.qualification_operation_id, limits,
         )?;
+        // The shared envelope validates exact accepted coordinates. Its
+        // scenario_input remains opaque product-owned data throughout delivery.
+        let input = ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord::parse(
+            request.record.as_bytes(),
+        )?;
+        ensure!(
+            input.purpose == *prepared.purpose()
+                && input.coordinate == *prepared.coordinate()
+                && input.selection == *prepared.selection()
+                && input.requirement == *prepared.requirement(),
+            "consumer START input differs from its authenticated retained authority"
+        );
+        // Actual Q owns a separate allocation, with the restored owner
+        // measurement as provenance. Complete its signed Worker/native/local/
+        // provider lifecycle before the independent diagnostic can be observed.
+        // A lost START acknowledgement permits observation, never a second Q.
+        ryeos_executor::execution::external_qualification_start::run_consumer_runtime_verification_transport_for_callback(
+            &state, &token, &request.coordinate, &request.qualification_operation_id,
+        )?;
+        // Q does not consume or renew the later diagnostic contact timeout.
+        // The same live callback/root is rechecked after Q; its enclosing
+        // signed lifetime has continued to run throughout this blocking owner.
+        let prepared = ryeos_app::operator_external_content::product_qualification::prepare_retained_consumer_verifier_for_callback(
+            &state, &token, &request.coordinate, &request.qualification_operation_id, limits,
+        )?;
         let attempt = ryeos_app::operator_runtime_snapshot::prepare_consumer_verifier_attempt_for_callback(
             &state, &token, &prepared, &request.qualification_operation_id, limits,
         )?;
@@ -124,11 +150,11 @@ pub(super) async fn start(
             &state.config.runtime_root().cache(), &scratch_name,
         )?;
         let archive = ryeos_executor::execution::external_consumer_delivery::prepare_retained_consumer_archive(
-            &state, &prepared, request.record.as_bytes(), scratch.owned_scratch_root()?, deadline,
+            &state, &prepared, &input, scratch.owned_scratch_root()?, deadline,
         )?;
         let intent = attempt.bind_archive(&archive)?;
         serde_json::to_value(ryeos_app::operator_runtime_snapshot::verify_consumer_qualification_occurrence_for_callback(
-            &state, &token, &intent, &archive, limits, deadline,
+            &state, &token, &intent, &input, &archive, limits, deadline,
         )?).map_err(Into::into)
     }).await.map_err(|error| anyhow::anyhow!("consumer start owner did not settle: {error}"))?
 }
@@ -139,6 +165,10 @@ pub(super) async fn settle(
     cap: &CallbackCapability,
 ) -> Result<Value> {
     let request = parse_observe(params, &cap.thread_id)?;
+    ensure!(
+        request.transcript_chunk.is_none(),
+        "consumer settlement cannot select transcript bytes"
+    );
     let state = state.clone();
     let token = cap.token.clone();
     // The existing durable termination journal owns a claimed provider
@@ -164,6 +194,9 @@ fn parse_observe(params: &Value, thread_id: &str) -> Result<ObserveRequest> {
         "consumer observation names another root"
     );
     request.coordinate.validate()?;
+    if let Some(selection) = &request.transcript_chunk {
+        selection.validate()?;
+    }
     ensure!(
         lillux::valid_hash(&request.qualification_operation_id),
         "consumer observation requires exact operation digests"
@@ -184,6 +217,14 @@ pub(super) async fn observe(
             .node_policy
             .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
+        if let Some(selection) = &request.transcript_chunk {
+            return serde_json::to_value(
+                ryeos_app::operator_runtime_snapshot::observe_consumer_worker_transcript_chunk_for_callback(
+                    &state, &token, &request.coordinate, &request.qualification_operation_id,
+                    selection, limits,
+                )?
+            ).map_err(Into::into);
+        }
         serde_json::to_value(
             ryeos_app::operator_runtime_snapshot::observe_consumer_verifier_attempt_for_callback(
                 &state,
@@ -217,8 +258,7 @@ mod tests {
 
     fn inputs_request() -> Value {
         json!({"thread_id":"T-root", "selection": {
-            "scenario_id":"consumer", "qualification_operation_id":"a".repeat(64),
-            "prerequisite_measurement_attempt_id":"b".repeat(64),
+            "scenario_id":"consumer",
         }})
     }
 
@@ -242,7 +282,7 @@ mod tests {
             "prerequisite_measurement_attempt_id",
         ] {
             let mut bad = inputs_request();
-            bad["selection"][field] = json!("not-an-operation");
+            bad["selection"][field] = json!("a".repeat(64));
             assert!(parse_inputs(&bad, "T-root").is_err());
         }
     }

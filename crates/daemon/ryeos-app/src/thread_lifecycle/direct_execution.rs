@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::ensure;
 
 mod external_projection;
 #[cfg(test)]
@@ -449,6 +450,32 @@ pub struct PreparedItemPlan {
     root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity,
     admitted_command: Option<ryeos_engine::isolation::IsolationAdmittedCommand>,
     realization_command: Option<PreparedRealizationCommand>,
+    resource_policy: PersistentSessionResourcePolicy,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersistentSessionResourcePolicy {
+    Ordinary,
+    QualificationNoResources,
+}
+
+/// The Q process journal has no resource or financial owner. Check the signed
+/// target itself as well as the node's current selection, so even a changed
+/// selector or an unexpected financial ceiling fails before process contact.
+fn require_qualification_no_resources(
+    target: Option<&ryeos_engine::contracts::ExecutionTargetRequirement>,
+    selected: &crate::execution_resources::SelectedExecutionResources,
+) -> Result<()> {
+    ensure!(
+        target.is_none_or(|target| target.resources.is_empty())
+            && selected.selections().is_empty()
+            && selected.devices().is_none()
+            && selected.accounting_authorities().is_empty()
+            && selected.max_concurrent_exclusive_allocations().is_none()
+            && selected.cleanup_allowance_ms().is_none(),
+        "qualification-only Worker cannot select execution resources or financial operations"
+    );
+    Ok(())
 }
 
 /// Portable coordinate for an executable member of one admitted realization.
@@ -1738,6 +1765,7 @@ impl PreparedItemPlan {
             root_subject_source_identity: root_subject_source_identity.clone(),
             admitted_command,
             realization_command,
+            resource_policy: PersistentSessionResourcePolicy::Ordinary,
         })
     }
 
@@ -1824,6 +1852,14 @@ impl PreparedItemPlan {
         let selected_resources = state
             .execution_resources
             .select(self.plan.target_requirement.as_ref())?;
+        if self.resource_policy == PersistentSessionResourcePolicy::QualificationNoResources {
+            // Repeat the preflight against the selected generation immediately
+            // before any scope/resource reservation or held child creation.
+            require_qualification_no_resources(
+                self.plan.target_requirement.as_ref(),
+                &selected_resources,
+            )?;
+        }
         let mut prepared_scope = None;
         let resource_reservation = match (process_scope.as_ref(), process_scope_allocation) {
             (Some(scope), Some(allocation)) => {
@@ -2593,6 +2629,201 @@ pub fn prepare_bundle_item_plan_for_qualification(
     )
 }
 
+/// Compile the accepted qualification-only Worker as a local direct plan.
+/// The typed root was joined to retained CAS Worker source and profile at
+/// admission. The Worker, environment and WorkerExecution are re-resolved
+/// from one current signed Bundle generation here; callers supply neither a
+/// raw plan nor an ordinary persistent-session capsule. This has no contact
+/// or resource-allocation authority.
+pub fn prepare_external_qualification_local_worker_plan(
+    state: &crate::state::AppState,
+    root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+) -> Result<PreparedItemPlan> {
+    with_prepared_external_qualification_local_worker_plan(state, root, |plan, _, _, _| Ok(plan))
+}
+
+/// Keep one checked signed Bundle generation through local Q material binding.
+/// The caller may redeem only the accepted root's retained CAS source/products
+/// and publish its profile into an already-owned state root in this window.
+pub fn with_prepared_external_qualification_local_worker_plan<T>(
+    state: &crate::state::AppState,
+    root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+    bind: impl FnOnce(
+        PreparedItemPlan,
+        &ryeos_engine::kind_registry::PersistentSessionDecl,
+        &ryeos_engine::protocols::VerifiedProtocol,
+        &Value,
+    ) -> Result<T>,
+) -> Result<T> {
+    state.engine.with_checked_bundle_generation(|generation| {
+        let resolution = root.current_local_worker_resolution(generation)?;
+        let content = root
+            .purpose()
+            .consumer_content
+            .as_ref()
+            .context("qualification-only root has no accepted Worker content")?;
+        let identity = &content.definitions.worker;
+        let canonical = CanonicalRef::parse(&identity.canonical_ref)?;
+        let execute_cap = ryeos_runtime::authorizer::canonical_cap(
+            &canonical.kind,
+            &canonical.bare_id,
+            "execute",
+        );
+        let site = state.threads.site_id().to_owned();
+        let context = PlanContext {
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: state.identity.fingerprint().to_owned(),
+                scopes: vec![execute_cap],
+            }),
+            project_context: ProjectContext::None,
+            subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+            current_site_id: site.clone(),
+            origin_site_id: site,
+            execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
+            validate_only: false,
+        };
+        let resolved = generation.resolve(&context, &canonical)?;
+        if resolved.canonical_ref != canonical
+            || resolved.raw_content_digest != identity.raw_content_digest
+            || resolved.source_space != ItemSpace::Bundle
+            || !matches!(&resolved.source_root, ItemSourceRoot::Bundle { .. })
+            || resolved
+                .signature_header
+                .as_ref()
+                .map(|header| header.signer_fingerprint.as_str())
+                != Some(identity.publisher_fingerprint.as_str())
+        {
+            bail!("qualification-only plan subject differs from accepted Worker definition");
+        }
+        let verified = generation.verify(&context, resolved)?;
+        let execution = state
+            .engine
+            .kinds
+            .get("worker")
+            .and_then(|schema| schema.execution.as_ref())
+            .context("qualification-only Worker has no execution schema")?;
+        let declaration = execution
+            .persistent_session
+            .as_ref()
+            .context("qualification-only Worker has no signed session lifecycle")?;
+        let protocol_ref = match execution
+            .terminator
+            .as_ref()
+            .context("qualification-only Worker has no terminator")?
+        {
+            ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => protocol
+                .resolve(&resolution.composed.composed)
+                .map_err(anyhow::Error::msg)?,
+            ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => {
+                bail!("qualification-only Worker has no subprocess session terminator")
+            }
+        };
+        let signed_protocol = state.engine.protocols.require(&protocol_ref)?;
+        let session = ryeos_engine::protocols::validate_persistent_session_protocol(
+            &signed_protocol.descriptor,
+        )
+        .map_err(anyhow::Error::msg)?;
+        use ryeos_engine::protocols::descriptor::{
+            PersistentSessionProcessMode, PersistentSessionWorkspaceAuthority,
+        };
+        if session.process_mode != PersistentSessionProcessMode::ExclusiveSession
+            || session.cleanup_authority
+                != ryeos_engine::protocols::PersistentSessionCleanupAuthority::TrustedProcessGroup
+            || session.workspace_authority != PersistentSessionWorkspaceAuthority::RuntimeWorkspace
+            || session.channel
+                != ryeos_engine::protocols::PersistentSessionChannel::InheritedUnixSocket
+        {
+            bail!("qualification-only local Worker requires a dedicated trusted session protocol");
+        }
+        if session.readiness_identity_env.is_none()
+            || (!content.process_environment.is_empty()
+                && !session.runtime_env_allowlist.iter().any(|name| {
+                    name == ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV
+                }))
+        {
+            bail!("qualification-only Worker protocol lacks its signed readiness or process environment slot");
+        }
+        let filesystem_ceiling =
+            execution.project_filesystem_authority_ceiling(&resolution.composed.composed)?;
+        let network_ceiling =
+            execution.project_network_authority_ceiling(&resolution.composed.composed)?;
+        let endpoint = execution.project_endpoint_requirement(&resolution.composed.composed)?;
+        if !matches!(
+            &endpoint,
+            ryeos_engine::contracts::ExecutionEndpointRequirement::Local {}
+        ) {
+            bail!("qualification-only local Worker selects a nonlocal endpoint");
+        }
+        let mut plan = generation.build_plan(
+            &context,
+            &verified,
+            &Value::Object(Default::default()),
+            &context.execution_hints,
+            None,
+            filesystem_ceiling,
+        )?;
+        if plan.root_ref != identity.canonical_ref || plan.item_kind != "worker" {
+            bail!("qualification-only plan changed its accepted Worker subject");
+        }
+        plan.network_authority_ceiling = network_ceiling;
+        plan.filesystem_authority_ceiling = plan
+            .filesystem_authority_ceiling
+            .intersect(filesystem_ceiling);
+        plan.endpoint_requirement = endpoint;
+        plan.validate_endpoint_for_planning()?;
+        let expected_name = match &verified.resolved.source_root {
+            ItemSourceRoot::Bundle { name } => name.as_str(),
+            other => bail!("qualification-only Worker has no Bundle source root: {other:?}"),
+        };
+        let bundle_root = state
+            .engine
+            .registered_bundle_root(expected_name)
+            .context("qualification-only Worker Bundle root is absent")?;
+        let bundle_identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
+            bundle_root,
+            expected_name,
+            &state.engine.node_trust_store,
+        )?;
+        let spec = first_subprocess_spec_mut(&mut plan)?;
+        if spec.verified_command.is_none()
+            && ryeos_engine::external_content::parse_realization_command_ref(&spec.cmd)?.is_none()
+        {
+            let captured = state
+                .isolation
+                .capture_verified_command(Path::new(&spec.cmd), None, None)
+                .map_err(|error| {
+                    anyhow!("capture qualification-only Worker executable: {error}")
+                })?;
+            spec.verified_command = Some(
+                ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent { code: captured },
+            );
+        }
+        let timeout_secs = spec.timeout_secs;
+        let selected_resources = state
+            .execution_resources
+            .select(plan.target_requirement.as_ref())?;
+        require_qualification_no_resources(plan.target_requirement.as_ref(), &selected_resources)?;
+        bind(
+            PreparedItemPlan {
+                plan,
+                timeout_secs,
+                root_subject_source_identity:
+                    ryeos_state::objects::DirectRootSourceIdentity::Bundle {
+                        manifest_hash: bundle_identity.body_digest,
+                        manifest_signer_fingerprint: bundle_identity.signer_fingerprint,
+                    },
+                admitted_command: None,
+                realization_command: None,
+                resource_policy: PersistentSessionResourcePolicy::QualificationNoResources,
+            },
+            declaration,
+            signed_protocol,
+            &resolution.composed.composed,
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_item_plan_with_logical_context(
     engine: &Engine,
@@ -2688,6 +2919,7 @@ fn prepare_item_plan_with_logical_context(
             root_subject_source_identity,
             admitted_command: None,
             realization_command: None,
+            resource_policy: PersistentSessionResourcePolicy::Ordinary,
         })
     })
 }
@@ -2779,6 +3011,7 @@ pub fn prepare_captured_item_plan(
             root_subject_source_identity,
             admitted_command: None,
             realization_command: None,
+            resource_policy: PersistentSessionResourcePolicy::Ordinary,
         })
     })
 }
@@ -3785,6 +4018,7 @@ mod tests {
             root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity::Project,
             admitted_command: None,
             realization_command: None,
+            resource_policy: PersistentSessionResourcePolicy::Ordinary,
         }
     }
 

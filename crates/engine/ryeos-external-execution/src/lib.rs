@@ -14,6 +14,7 @@ pub mod guest_staging;
 pub mod launcher;
 pub mod launcher_protocol;
 pub mod lifecycle_adapter;
+pub(crate) mod qualification_fixture;
 pub mod restoration_verifier_delivery;
 pub mod supervisor;
 pub mod transport;

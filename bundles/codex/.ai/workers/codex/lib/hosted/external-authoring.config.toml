@@ -1,0 +1,71 @@
+# ryeos:signed:2026-10-01T08:49:57Z:38a572a73a27a901badf34991b9154c545e3bfdc5b3101d23cad4ccf67b79c1d:Hvz6jOccPuMNxcGVzpDg1SI2wBOIMqsAZi9TKrSoSsPwpz8hq+b9L3xC57d+UlB4H+Otk+Z795y8c+g59UUUAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+forced_login_method = "chatgpt"
+cli_auth_credentials_store = "file"
+model_provider = "openai"
+mcp_servers = {}
+notify = []
+check_for_update_on_startup = false
+approval_policy = "never"
+approvals_reviewer = "user"
+# Authoring commands rely on the RyeOS execution boundary selected by the
+# worker protocol. Hard-contained nodes supply Lillux isolation; explicitly
+# opted-in trusted/disposable nodes accept the broader container boundary.
+default_permissions = "danger-full-access"
+web_search = "disabled"
+allow_login_shell = false
+
+[shell_environment_policy]
+# Start from the bridge's admitted environment, then keep only this finite
+# child-facing surface. `core` drops the broker endpoint before filters run.
+inherit = "all"
+ignore_default_excludes = false
+
+[shell_environment_policy.filters]
+"PATH" = "include"
+"LANG" = "include"
+"LC_ALL" = "include"
+"LC_CTYPE" = "include"
+"TERM" = "include"
+"TZ" = "include"
+"TMPDIR" = "include"
+"GIT_CONFIG_NOSYSTEM" = "include"
+"GIT_CONFIG_GLOBAL" = "include"
+"GIT_PAGER" = "include"
+"HOME" = "exclude"
+"CODEX_HOME" = "exclude"
+"DBUS_*" = "exclude"
+"SSH_*" = "exclude"
+"*PROXY" = "exclude"
+
+[agents]
+enabled = false
+
+[features]
+# External candidates do not admit image-provider/local-output or controller-goal tools.
+image_generation = false
+goals = false
+apps = false
+plugins = false
+skill_mcp_dependency_install = false
+remote_plugin = false
+hooks = false
+multi_agent = false
+multi_agent_v2 = false
+memories = false
+network_proxy = false
+# The authoring worker needs Codex's exact pinned host for its ordinary
+# read/edit/shell tools. RyeOS child operations remain separately admitted
+# dynamic tools; enabling this host does not expose the daemon or host PATH.
+code_mode_host = true
+
+[features.code_mode]
+# This is the default, not an effective-tool-mode prohibition: pinned Codex
+# model metadata can select code mode first. Qualification must cover that
+# mode's host and nested tool routing as well as direct tools.
+enabled = false
+
+[orchestrator.skills]
+enabled = false
+
+[orchestrator.mcp]
+enabled = false

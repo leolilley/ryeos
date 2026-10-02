@@ -538,11 +538,14 @@ async fn qualification_launch_reservation_is_one_shot_when_signed_relationship_r
     let fixture = fixture(false, 4096, true);
     let launch_id = format!("L-{}", "a".repeat(32));
     let request = product_qualification_launch::Request {
+        consumer_invocation: None,
         launch_id: launch_id.clone(),
         witness_hash: fixture.witness_hash.clone(),
         witness_source:
             ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
         relationship_name: "missing_qualification_relationship".to_owned(),
+        project_context: None,
+        auxiliary_product_selections: Vec::new(),
     };
     let first = product_qualification_launch::handle(
         request.clone(),

@@ -40,6 +40,12 @@ use crate::recovery::{
 use crate::refs::{GenericHeadRef, SignedRef, TrustStore};
 use crate::signer::Signer;
 
+mod legacy_qualification_retirement;
+pub use legacy_qualification_retirement::{
+    LegacyQualificationArchiveReceipt, LegacyQualificationHead,
+    LegacyQualificationRetirementPreview,
+};
+
 /// State of the rebuildable projection after an authoritative CAS write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionStatus {
@@ -2357,6 +2363,23 @@ impl StateDb {
         runtime_state_dir: &Path,
         trust_store: Arc<TrustStore>,
     ) -> anyhow::Result<Self> {
+        Self::open_for_projection_rebuild_inner(runtime_state_dir, trust_store, false)
+    }
+
+    /// Recovery-only opener for the exact legacy qualification retirement
+    /// owner. Every other projection-rebuild caller is fenced by its intent.
+    pub fn open_for_legacy_qualification_retirement(
+        runtime_state_dir: &Path,
+        trust_store: Arc<TrustStore>,
+    ) -> anyhow::Result<Self> {
+        Self::open_for_projection_rebuild_inner(runtime_state_dir, trust_store, true)
+    }
+
+    fn open_for_projection_rebuild_inner(
+        runtime_state_dir: &Path,
+        trust_store: Arc<TrustStore>,
+        allow_legacy_retirement: bool,
+    ) -> anyhow::Result<Self> {
         let runtime_state_directory = lillux::PinnedDirectory::open(runtime_state_dir)?
             .ok_or_else(|| anyhow::anyhow!("runtime state directory is absent"))?;
         let cas_root = runtime_state_dir.join("objects");
@@ -2377,10 +2400,22 @@ impl StateDb {
         let recovery_directory = recovery_parent
             .open_child_directory(std::ffi::OsStr::new("thread-projection"))?
             .ok_or_else(|| anyhow::anyhow!("projection recovery directory is absent"))?;
+        if !allow_legacy_retirement
+            && legacy_qualification_retirement::retirement_in_progress(&recovery_directory)?
+        {
+            anyhow::bail!(
+                "offline legacy product-qualification retirement is incomplete; resume the exact stopped-node retirement before another reset or rebuild"
+            );
+        }
         let recovery = RecoveryStore::from_pinned_directories(
             runtime_state_directory.try_clone()?,
             recovery_directory.try_clone()?,
         )?;
+        if allow_legacy_retirement && recovery.thread_history_discard_in_progress()? {
+            anyhow::bail!(
+                "offline execution-history reset is incomplete; finish that exact reset before qualification-head retirement"
+            );
+        }
 
         Ok(Self {
             _runtime_state_directory: runtime_state_directory,
@@ -2454,6 +2489,11 @@ impl StateDb {
         if recovery.thread_history_discard_in_progress()? {
             anyhow::bail!(
                 "offline execution-history reset is incomplete; rerun `ryeos node reset execution-history --confirm` while the daemon is stopped"
+            );
+        }
+        if legacy_qualification_retirement::retirement_in_progress(&recovery_directory)? {
+            anyhow::bail!(
+                "offline legacy product-qualification retirement is incomplete; resume the exact stopped-node retirement before startup"
             );
         }
 

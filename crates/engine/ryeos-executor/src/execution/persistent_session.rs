@@ -2025,7 +2025,7 @@ struct PersistentSessionResourceOverrides {
     real_uid_process_limit: Option<u64>,
 }
 
-fn apply_resource_overrides(
+pub(crate) fn apply_resource_overrides(
     declaration: &mut PersistentSessionDecl,
     composed: &Value,
 ) -> Result<()> {
@@ -3115,7 +3115,7 @@ fn start_capsule_process(
 /// Create a daemon-owned execution view under RyeOS's code-enforced
 /// `.ai/cache` snapshot exclusion. Disabled-isolation launches can materialize
 /// immutable runtime inputs here without adding them to the project candidate.
-fn create_node_owned_runtime_view(workspace: &Path) -> Result<lillux::PinnedDirectory> {
+pub(crate) fn create_node_owned_runtime_view(workspace: &Path) -> Result<lillux::PinnedDirectory> {
     let mut current = lillux::PinnedDirectory::open(workspace)?
         .ok_or_else(|| anyhow!("persistent-session workspace is missing"))?;
     for component in [".ai", "cache", "ryeos-runtime"] {
@@ -3137,21 +3137,43 @@ fn prepare_session_process_environment(
     ryeos_state::objects::PreparedSessionProcessEnvironment,
     Vec<ryeos_engine::isolation::IsolationWritableRuntimeViewMountAuthority>,
 )> {
+    prepare_retained_session_process_environment(
+        &capsule.process_environment,
+        workspace,
+        workspace_view,
+        workspace_authority,
+        enforced,
+    )
+}
+
+/// Materialize an already-admitted process environment against the original
+/// workspace view. Q has no ordinary persistent-session capsule, but its
+/// accepted root carries the same signed environment values. The caller must
+/// first prove the view's durable ownership and keep its original lifeline.
+pub(crate) fn prepare_retained_session_process_environment(
+    process_environment: &BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>,
+    workspace: &Path,
+    workspace_view: Option<&lillux::InheritedDescriptorAuthority>,
+    workspace_authority: ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority,
+    enforced: bool,
+) -> Result<(
+    ryeos_state::objects::PreparedSessionProcessEnvironment,
+    Vec<ryeos_engine::isolation::IsolationWritableRuntimeViewMountAuthority>,
+)> {
     use ryeos_state::objects::{
         PreparedSessionProcessEnvironment, SessionProcessEnvironmentValue,
         SessionRuntimeViewDelivery, runtime_view_mount_destination,
     };
-    ryeos_state::objects::validate_session_process_environment(&capsule.process_environment)?;
+    ryeos_state::objects::validate_session_process_environment(process_environment)?;
     let mut prepared = PreparedSessionProcessEnvironment {
-        bindings: capsule.process_environment.clone(),
+        bindings: process_environment.clone(),
         runtime_view_delivery: SessionRuntimeViewDelivery::DescriptorWorkspace,
     };
     if !enforced {
         prepared.validate()?;
         return Ok((prepared, Vec::new()));
     }
-    let runtime_views = capsule
-        .process_environment
+    let runtime_views = process_environment
         .iter()
         .filter_map(|(name, value)| match value {
             SessionProcessEnvironmentValue::RuntimeViewDirectory { relative_path } => {
@@ -3598,7 +3620,7 @@ fn prepare_structured_session_configuration_file(
     ))
 }
 
-fn prepare_structured_session_configurations(
+pub(crate) fn prepare_structured_session_configurations(
     profile: &ryeos_state::objects::AdmittedStructuredSessionProfile,
     source_directory: &lillux::PinnedDirectory,
     state_root: &Path,
@@ -3889,8 +3911,13 @@ fn spawn_capsule_process_held(
                 "prepare external candidate connector",
             )
         })?;
-        let (connector_mounts, connector_descriptors, connector_lifelines, settlement) =
-            connector.into_parts();
+        let (
+            connector_mounts,
+            connector_descriptors,
+            connector_lifelines,
+            settlement,
+            _configuration_observation,
+        ) = connector.into_parts();
         retirement_observer = Some(settlement);
         mounts.extend(connector_mounts);
         inherited_fds.extend(connector_descriptors);
@@ -5921,6 +5948,11 @@ session:
             schema_hashes: BTreeMap::from([("fixture.json".to_owned(), "b".repeat(64))]),
             baseline_source: "baseline.toml".to_owned(),
             baseline_destination: "config.toml".to_owned(),
+            configuration_absence: ryeos_state::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
             auxiliary_configs: Vec::new(),
             runtime_configs: Vec::new(),
         };
@@ -6017,6 +6049,11 @@ session:
             schema_hashes: BTreeMap::new(),
             baseline_source: "baseline.conf".into(),
             baseline_destination: "baseline.conf".into(),
+            configuration_absence: ryeos_state::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
             auxiliary_configs: Vec::new(),
             runtime_configs: vec![SessionRuntimeConfigurationFile {
                 source: "policy.conf".into(),
@@ -6052,6 +6089,11 @@ session:
             schema_hashes: BTreeMap::new(),
             baseline_source: "baseline.conf".into(),
             baseline_destination: "runtime.conf".into(),
+            configuration_absence: ryeos_state::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
             auxiliary_configs: vec![SessionConfigurationFile {
                 source: "environment.conf".into(),
                 destination: "environment.conf".into(),

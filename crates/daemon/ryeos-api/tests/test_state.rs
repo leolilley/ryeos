@@ -293,6 +293,7 @@ fn build_app_state(
         ),
         scoped_producer_authorities: Arc::new(Default::default()),
         scoped_producer_processes: Arc::new(Default::default()),
+        qualification_workspace_custody: Arc::new(Default::default()),
     };
 
     state

@@ -1,3 +1,4 @@
+# ryeos:signed:2026-09-30T01:52:38Z:891df7a34638a0f725990fcddaced66c818bf2217de5b895669c5cab9ce619ca:7q45ZccOzRoT6AKoPM7sQJ/x1vGVOQFTypVbEH/Sul3ojZXlA0XtRGvUdtjRAqIjQLgB99nLB6cWpTW6ugv7CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.qualify-content
 required_caps: ["ryeos.execute.service.external-content/qualify-content"]

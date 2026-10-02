@@ -243,7 +243,7 @@ fn source_directory_digest(files: &BTreeMap<String, Vec<u8>>) -> Result<String> 
 
 fn portable_worker_source() -> Result<BTreeMap<String, Vec<u8>>> {
     let profile = serde_json::to_vec(&serde_json::json!({
-        "schema_version":10,
+        "schema_version":ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
         "transport":"stdio_jsonrpc",
         "http_sse":null,
         "configuration_authority":"immutable_argv",
@@ -257,6 +257,7 @@ fn portable_worker_source() -> Result<BTreeMap<String, Vec<u8>>> {
         "baseline_destination":"fixture.conf",
         "auxiliary_configs":[],
         "runtime_configs":[],
+        "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
         "external_candidate":null,
         "portable_state":{
             "schema":1,

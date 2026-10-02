@@ -165,7 +165,7 @@ pub fn install_before_start(
     write_signed_new(
         &state_path.join(format!(".ai/node/external_execution/{BINDING_ID}.yaml")),
         &json!({
-            "kind":"node", "schema":15,
+            "kind":"node", "schema":17,
             "protocol":ryeos_state::external_execution::admission::PROTOCOL,
             "workload":{"kind":"direct_command"}, "backend":"synthetic-local",
             "account":"ordinary-fixture", "capacity_group":"ordinary-fixture",
@@ -182,6 +182,7 @@ pub fn install_before_start(
             "network_policy":"supervisor_pinned_owner_only_candidate_denied_v1",
             "storage_policy":"ephemeral_private_candidate_v1",
             "cleanup_proof":"provider_terminal_occurrence_v1",
+            "provider_network_inputs":&endpoint.transport.network_inputs,
             "controller_transport":endpoint.transport,
             "controller_tls_root_certificates_der_base64":endpoint.tls_roots_der_base64,
             "max_active":1, "timeout_seconds":120, "contact_timeout_seconds":60,

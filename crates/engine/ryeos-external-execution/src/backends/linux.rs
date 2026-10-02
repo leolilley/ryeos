@@ -29,7 +29,17 @@ use ryeos_state::{
     PinnedProjectMaterialization, PinnedStateAuthority,
 };
 
-use crate::launcher::ExternalCandidateLauncherSpec;
+use crate::launcher::{ExternalCandidateLauncherSpec, validate_qualification_fixture_mounts};
+pub use crate::qualification_fixture::CapturedQualificationFixture;
+use crate::qualification_fixture::OwnedQualificationFixture;
+
+/// Native completion facts from the one owned namespace. These data alone
+/// grant no capture, CAS, export or qualification authority; the guest journal
+/// must join them to its exact retained runtime and initiating command.
+pub struct NativeQualificationCompletion {
+    pub exit: NativeNamespaceExit,
+    pub fixture_capture: Option<CapturedQualificationFixture>,
+}
 
 /// Translate the admitted launcher contract to the explicitly selected native
 /// backend. Descriptor owners remain with the caller through preparation.
@@ -107,7 +117,26 @@ pub(crate) fn prepare_candidate(
         request,
         &spec.guest_inputs,
         spec.stdin.as_ref(),
+        spec.qualification_fixture(),
+        mount_authorities,
     )
+}
+
+/// Namespace destinations do not detect a backing directory exposed through
+/// another mount. Compare the fresh fixture against the original descriptor
+/// roots before the native process can inherit any of them.
+fn validate_fixture_source_separation(
+    fixture: &lillux::InheritedDescriptorAuthority,
+    inputs: &[lillux::InheritedDescriptorAuthority],
+) -> Result<()> {
+    let fixture = fixture.try_clone_pinned_directory("<Q-fixture>".into())?;
+    for input in inputs {
+        if input.mount_entry_kind()? == lillux::OpenMountEntryKind::Directory {
+            let source = input.try_clone_pinned_directory("<Q-admitted-input>".into())?;
+            fixture.require_disjoint_directory_tree(&source)?;
+        }
+    }
+    Ok(())
 }
 
 /// Only admitted Project inputs can acquire targets inside the private root.
@@ -305,6 +334,8 @@ pub struct NativeExternalCandidate {
     workspace_input_shadows: Vec<String>,
     workspace_input_anchors: Vec<WorkspaceInputAnchor>,
     workspace_output_authority: Option<ryeos_state::objects::WorkspaceOutputAuthority>,
+    /// Sole backing owner, mounted only into this exact held native process.
+    qualification_fixture: Option<OwnedQualificationFixture>,
     deadline: lillux::time::MonotonicDeadline,
     channel_deadline: lillux::time::MonotonicDeadline,
     released: bool,
@@ -368,10 +399,11 @@ fn execution_workspace_access(
         ExternalExecutionMode::StructuredSession {} => {
             Ok(lillux::LinuxSandboxMountAccess::Writable)
         }
-        ExternalExecutionMode::DirectCommand { .. } => {
+        ExternalExecutionMode::QualificationStructuredSession {}
+        | ExternalExecutionMode::DirectCommand { .. } => {
             ensure!(
                 !has_workspace_outputs,
-                "external direct command cannot capture or mutate its frozen execution generation"
+                "external read-only execution cannot capture or mutate its frozen execution generation"
             );
             Ok(lillux::LinuxSandboxMountAccess::ReadOnly)
         }
@@ -694,9 +726,21 @@ impl NativeExternalCandidate {
         mut request: lillux::LinuxSandboxRequest,
         guest_inputs: &ExternalGuestInputProjection,
         stdin: Option<&ryeos_state::external_execution::admission::ExternalDirectSealedInput>,
+        fixture: Option<
+            &ryeos_external_execution_contract::qualification_fixture::QFixtureContract,
+        >,
+        mount_authorities: &[lillux::InheritedDescriptorAuthority],
     ) -> Result<(Self, NativeCandidateOutput)> {
         binding.validate()?;
         guest_inputs.validate()?;
+        validate_qualification_fixture_mounts(
+            binding.execution_mode,
+            fixture,
+            request
+                .mounts
+                .iter()
+                .map(|mount| mount.destination.as_path()),
+        )?;
         let workspace_targets = workspace_input_targets(guest_inputs)?;
         let workspace_input_shadows = workspace_targets
             .iter()
@@ -705,7 +749,8 @@ impl NativeExternalCandidate {
         let workspace_output_authority =
             load_workspace_output_authority(guest_inputs, &workspace_input_shadows)?;
         let direct_input = match (binding.execution_mode, stdin) {
-            (ExternalExecutionMode::StructuredSession {}, None) => None,
+            (ExternalExecutionMode::StructuredSession {}, None)
+            | (ExternalExecutionMode::QualificationStructuredSession {}, None) => None,
             (ExternalExecutionMode::DirectCommand { .. }, Some(input)) => {
                 Some(DirectCommandInput::from_sealed(input)?)
             }
@@ -829,6 +874,24 @@ impl NativeExternalCandidate {
             access: workspace_access,
             layer: 0,
         });
+        // This separate, launcher-owned fixture is derived only from the
+        // admitted Q program. It never makes the base or a product writable.
+        let qualification_fixture = fixture
+            .map(|contract| OwnedQualificationFixture::create(private_parent, contract, deadline))
+            .transpose()?;
+        let fixture_mount = qualification_fixture
+            .as_ref()
+            .map(OwnedQualificationFixture::mount_authority)
+            .transpose()?;
+        if let Some(mount) = &fixture_mount {
+            validate_fixture_source_separation(mount, mount_authorities)?;
+            request.mounts.push(lillux::LinuxSandboxMount {
+                source_fd: mount.inherited_descriptor().map_err(anyhow::Error::msg)?,
+                destination: ryeos_external_execution_contract::qualification_fixture::Q_FIXTURE_MOUNT_DESTINATION.into(),
+                access: lillux::LinuxSandboxMountAccess::Writable,
+                layer: 0,
+            });
+        }
         let expected_applied_launch = lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
             lillux::LinuxSandboxAppliedLaunchTarget {
                 executable: &request.executable,
@@ -867,6 +930,7 @@ impl NativeExternalCandidate {
                 workspace_input_shadows,
                 workspace_input_anchors,
                 workspace_output_authority,
+                qualification_fixture,
                 deadline,
                 channel_deadline,
                 released: false,
@@ -942,7 +1006,11 @@ impl NativeExternalCandidate {
     pub fn begin_protocol_input(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()> {
         self.require_owner(frame)?;
         ensure!(
-            self.binding.execution_mode == ExternalExecutionMode::StructuredSession {},
+            matches!(
+                self.binding.execution_mode,
+                ExternalExecutionMode::StructuredSession {}
+                    | ExternalExecutionMode::QualificationStructuredSession {}
+            ),
             "external direct command has no structured-session input authority"
         );
         ensure!(
@@ -1195,6 +1263,64 @@ impl NativeExternalCandidate {
         Ok(())
     }
 
+    /// Complete only a Q session's native namespace, then capture its admitted
+    /// fixture. The exit comes from Lillux's once-reaped termination, never EOF
+    /// or cleanup init status. This proves no claim or provider termination.
+    pub fn complete_qualification(
+        &mut self,
+        frame: &AuthenticatedExecutionFrame,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<NativeQualificationCompletion> {
+        self.require_owner(frame)?;
+        ensure!(
+            self.binding.execution_mode == ExternalExecutionMode::QualificationStructuredSession {}
+                && matches!(
+                    frame.frame().payload,
+                    ExecutionChannelPayload::QualificationComplete { .. }
+                )
+                && self.released
+                && !self.terminal
+                && self.protocol.pending.is_none()
+                && self.application_fence.is_clear()
+                && !self.execution_expired()
+                && self.try_observe_applied_launch()?.is_some(),
+            "qualification completion lacks its released native occurrence"
+        );
+        self.application_fence.begin(frame.digest())?;
+        self.close_input();
+        self.native_termination = Some(
+            self.process
+                .terminate_namespace_for_export_until(deadline.min(self.channel_deadline))
+                .map_err(anyhow::Error::msg)?,
+        );
+        let proof = self
+            .native_termination
+            .as_ref()
+            .expect("native termination retained");
+        ensure!(
+            proof.launch_failure().is_none(),
+            "qualification workload failed before native execution"
+        );
+        let exit = match proof.exit() {
+            lillux::LinuxSandboxExit::Code(code) => NativeNamespaceExit::Code(code),
+            lillux::LinuxSandboxExit::Signal(signal) => NativeNamespaceExit::Signal(signal),
+        };
+        // This is the exact proof retained from self.process above, whose
+        // held/applied commitments include the co-owned fixture mount. Never
+        // accept a deserialized exit or another process's settlement here.
+        let fixture_capture = self
+            .qualification_fixture
+            .as_mut()
+            .map(|fixture| {
+                fixture.capture_after_namespace_reap(proof, deadline.min(self.channel_deadline))
+            })
+            .transpose()?;
+        Ok(NativeQualificationCompletion {
+            exit,
+            fixture_capture,
+        })
+    }
+
     pub fn capture(
         &mut self,
         frame: &AuthenticatedExecutionFrame,
@@ -1207,7 +1333,7 @@ impl NativeExternalCandidate {
         self.require_owner(frame)?;
         ensure!(
             self.binding.execution_mode == ExternalExecutionMode::StructuredSession {},
-            "external direct command cannot produce a candidate export"
+            "external execution mode cannot produce a candidate export"
         );
         let completion = match &frame.frame().payload {
             ExecutionChannelPayload::Quiesce {
@@ -1446,6 +1572,38 @@ impl NativeExternalCandidate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_backing_cannot_alias_or_contain_an_admitted_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = lillux::PinnedDirectory::open(temporary.path())
+            .unwrap()
+            .unwrap();
+        let fixture = parent
+            .create_child(std::ffi::OsStr::new("fixture"), 0o700)
+            .unwrap();
+        let child = fixture
+            .create_child(std::ffi::OsStr::new("child"), 0o700)
+            .unwrap();
+        let sibling = parent
+            .create_child(std::ffi::OsStr::new("input"), 0o700)
+            .unwrap();
+        let fixture_mount = fixture.inherited_descriptor_authority().unwrap();
+        for directory in [&parent, &fixture, &child] {
+            assert!(
+                validate_fixture_source_separation(
+                    &fixture_mount,
+                    &[directory.inherited_descriptor_authority().unwrap()],
+                )
+                .is_err()
+            );
+        }
+        validate_fixture_source_separation(
+            &fixture_mount,
+            &[sibling.inherited_descriptor_authority().unwrap()],
+        )
+        .unwrap();
+    }
 
     #[test]
     fn applied_candidate_runtime_requires_exact_target_mounts_and_held_child() {
@@ -1984,6 +2142,21 @@ mod tests {
         assert_eq!(
             execution_workspace_access(ExternalExecutionMode::StructuredSession {}, true).unwrap(),
             lillux::LinuxSandboxMountAccess::Writable
+        );
+        assert_eq!(
+            execution_workspace_access(
+                ExternalExecutionMode::QualificationStructuredSession {},
+                false,
+            )
+            .unwrap(),
+            lillux::LinuxSandboxMountAccess::ReadOnly
+        );
+        assert!(
+            execution_workspace_access(
+                ExternalExecutionMode::QualificationStructuredSession {},
+                true
+            )
+            .is_err()
         );
         assert!(
             execution_workspace_access(

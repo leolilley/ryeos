@@ -186,12 +186,16 @@ pub(crate) fn create_source_sandbox(adapter: &lillux::InheritedDescriptorAuthori
                                 &request.intent.operation_id,
                                 &settings.owner_id,
                             ),
-                            _ => cleanup_only_occurrence(
-                                cleanup_id.id,
-                                &body,
-                                &request.intent.operation_id,
-                                &settings.owner_id,
-                            ),
+                            _ => {
+                                let created_at = cleanup_created_at(&body, &cleanup_id.id);
+                                cleanup_only_occurrence(
+                                    cleanup_id.id,
+                                    created_at,
+                                    &body,
+                                    &request.intent.operation_id,
+                                    &settings.owner_id,
+                                )
+                            }
                         };
                         RuntimeSnapshotBootstrapAdapterResponse::OccurrenceBound { occurrence }
                     }
@@ -804,21 +808,89 @@ impl<'de> Deserialize<'de> for CleanupSandboxId {
     }
 }
 
+/// A malformed or future-version create response can still carry the exact
+/// creation identity needed to prove later cleanup. Parse it independently of
+/// the ID-only fallback: duplicate or invalid `createdAt` must never erase a
+/// valid cleanup target or become terminal testimony.
+struct CleanupCreateTimestamp {
+    id: String,
+    created_at: String,
+}
+
+impl<'de> Deserialize<'de> for CleanupCreateTimestamp {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct TimestampVisitor;
+        impl<'de> Visitor<'de> for TimestampVisitor {
+            type Value = CleanupCreateTimestamp;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter
+                    .write_str("a Render create response with one sandbox ID and creation time")
+            }
+            fn visit_map<M: MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> std::result::Result<Self::Value, M::Error> {
+                let mut id = None;
+                let mut created_at = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "id" => {
+                            if id.is_some() {
+                                return Err(de::Error::duplicate_field("id"));
+                            }
+                            id = Some(map.next_value::<String>()?);
+                        }
+                        "createdAt" => {
+                            if created_at.is_some() {
+                                return Err(de::Error::duplicate_field("createdAt"));
+                            }
+                            created_at = Some(map.next_value::<String>()?);
+                        }
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(CleanupCreateTimestamp {
+                    id: id.ok_or_else(|| de::Error::missing_field("id"))?,
+                    created_at: created_at.ok_or_else(|| de::Error::missing_field("createdAt"))?,
+                })
+            }
+        }
+        deserializer.deserialize_map(TimestampVisitor)
+    }
+}
+
+fn cleanup_created_at(body: &[u8], expected_id: &str) -> Option<String> {
+    let parsed: CleanupCreateTimestamp =
+        from_json_slice_strict(body, usize::try_from(crate::MAX_API_RESPONSE_BYTES).ok()?).ok()?;
+    (parsed.id == expected_id
+        && parsed.created_at.len() <= 64
+        && parsed.created_at.is_ascii()
+        && DateTime::parse_from_rfc3339(&parsed.created_at).is_ok())
+    .then_some(parsed.created_at)
+}
+
 fn cleanup_only_occurrence(
     id: String,
+    created_at: Option<String>,
     body: &[u8],
     operation_id: &str,
     requested_owner_scope: &str,
 ) -> RuntimeSnapshotBootstrapOccurrence {
+    let mut provider_creation_observation = serde_json::json!({
+        "kind": "unverified_create_response",
+        "requested_owner_scope": requested_owner_scope,
+    });
+    if let Some(created_at) = created_at {
+        provider_creation_observation["created_at"] = serde_json::json!(created_at);
+    }
     RuntimeSnapshotBootstrapOccurrence {
         schema: 1,
         operation_id: operation_id.to_owned(),
         occurrence_id: id,
         provider_response_sha256: lillux::sha256_hex(body),
-        provider_creation_observation: serde_json::json!({
-            "kind": "unverified_create_response",
-            "requested_owner_scope": requested_owner_scope,
-        }),
+        provider_creation_observation,
         creation_attributes_verified: false,
         contact_deadline_exceeded: false,
     }
@@ -989,7 +1061,10 @@ mod tests {
             )
             .is_err()
         );
-        let occurrence = cleanup_only_occurrence(id.id, body, &"a".repeat(64), "owner-fixture");
+        let created_at = cleanup_created_at(body, &id.id);
+        assert!(created_at.is_none());
+        let occurrence =
+            cleanup_only_occurrence(id.id, created_at, body, &"a".repeat(64), "owner-fixture");
         assert!(!occurrence.creation_attributes_verified);
         assert_eq!(occurrence.occurrence_id, "sbx-fixture-001");
         let duplicate = br#"{"id":"sbx-fixture-001","id":"sbx-other"}"#;
@@ -1000,6 +1075,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn cleanup_only_create_retains_only_an_unambiguous_creation_time() {
+        let body = br#"{"id":"sbx-fixture-001","status":"future_state","createdAt":"2026-09-29T00:00:00Z","newField":true}"#;
+        let id: CleanupSandboxId = from_json_slice_strict(
+            body,
+            usize::try_from(crate::MAX_API_RESPONSE_BYTES).unwrap(),
+        )
+        .unwrap();
+        let created_at = cleanup_created_at(body, &id.id);
+        let occurrence =
+            cleanup_only_occurrence(id.id, created_at, body, &"a".repeat(64), "owner-fixture");
+        assert!(!occurrence.creation_attributes_verified);
+        assert_eq!(
+            occurrence.provider_creation_observation["created_at"],
+            "2026-09-29T00:00:00Z"
+        );
+
+        let duplicate = br#"{"id":"sbx-fixture-001","createdAt":"2026-09-29T00:00:00Z","createdAt":"2026-09-30T00:00:00Z"}"#;
+        assert!(cleanup_created_at(duplicate, "sbx-fixture-001").is_none());
+        let invalid = br#"{"id":"sbx-fixture-001","createdAt":"not-a-time"}"#;
+        assert!(cleanup_created_at(invalid, "sbx-fixture-001").is_none());
+        assert!(cleanup_created_at(body, "sbx-other").is_none());
     }
 
     #[test]
