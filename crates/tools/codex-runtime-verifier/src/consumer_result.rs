@@ -1,12 +1,35 @@
 //! Finite consumer claims proposed by the independent verifier.
 //!
+//! The five ordinary claims combine the actual full Q observations with the
+//! finite-v2 audited source contract for these exact admitted inputs. They are
+//! not aliases for the independent diagnostic or claims inferred from names.
+//! `bounded_candidate_capture` combines Q's observed changed, bounded one-file
+//! native capture with the audited ordinary capture path's bounded traversal,
+//! input-anchor/exclusion checks and immutable snapshot retention. It does not
+//! assert that this Q occurrence exported an ordinary candidate project.
+//! `candidate_only_execution` means candidate effects use the selected external
+//! environment. The contract's enumerated trusted controller services and
+//! bounded CodeMode computation remain allowed; this is not a claim that all
+//! computation occurs remotely.
+//! `controller_credential_exclusion` combines the original positive canary,
+//! actual same-Q denial and terminal recheck with the audited original HOME,
+//! descriptor, mount, source and environment separation. It does not mean the
+//! trusted controller lacks its own model credentials.
+//! `native_writer_exclusion` requires the exact namespace's writer death before
+//! capture and retention, together with the audited writable-alias ownership.
+//! Provider termination alone does not prove this ordering or writer death.
+//! `no_local_execution_fallback` combines the correlated same-Q local refusal
+//! with the audited effect-family routing across the closed ordinary language.
+//! Recovery preserves its original admitted capsule; this does not upgrade a
+//! predecessor thread or broader profile into the finite-v2 contract.
+//!
 //! `independent_candidate_diagnostic` means the separate restored diagnostic
 //! passed its complete scripted protocol, canary, patch, inner/outer native
 //! observation and provider-terminal checks. It is not a denial observation
 //! from the production Q Worker.
 //! `qualification_worker_command` means the actual Q setup/turn transcript
 //! passed the signed finite command, output and exit-status expectations.
-//! Neither claim attests this enclosing verifier's own process settlement;
+//! No claim attests this enclosing verifier's own process settlement;
 //! the issuer must independently corroborate that after successful exit.
 
 use anyhow::{Result, ensure};
@@ -19,8 +42,13 @@ use crate::consumer_record::ConsumerInputRecord;
 use crate::consumer_termination::ConsumerProviderTerminalReference;
 use crate::consumer_worker_transcript::VerifiedConsumerWorkerTranscript;
 
-const SUPPORTED_CLAIMS: [&str; 2] = [
+const SUPPORTED_CLAIMS: [&str; 7] = [
+    "bounded_candidate_capture",
+    "candidate_only_execution",
+    "controller_credential_exclusion",
     "independent_candidate_diagnostic",
+    "native_writer_exclusion",
+    "no_local_execution_fallback",
     "qualification_worker_command",
 ];
 
@@ -74,6 +102,12 @@ pub(crate) fn checked_result(
         record,
     )?;
     checked_q.require_for(record, transcript)?;
+    // Re-establish the original finite-v2 source/helper pins and the exact
+    // admitted use at the result boundary. scripted_configuration requires
+    // qualification_use and compares it with the signed verifier parameters;
+    // neither a policy name nor a diagnostic-only success can supply it.
+    record.product_contract()?;
+    record.scripted_configuration()?;
     let claims = selected_claims(
         &record.purpose.policy_source.policy.allowed_claims,
         &record.purpose.required_claims,
@@ -128,15 +162,46 @@ mod tests {
     }
 
     #[test]
-    fn policy_cannot_turn_diagnostic_checks_into_production_exclusion() {
+    fn policy_cannot_select_unaudited_or_stronger_meanings() {
         for unsupported in [
-            "controller_credential_exclusion",
-            "native_writer_exclusion",
+            "ordinary_candidate_export_observed",
+            "all_computation_is_remote",
+            "provider_terminal_proves_writer_death",
             "future_claim",
         ] {
             assert!(selected_claims(&claims(&[unsupported]), &[]).is_err());
             assert!(selected_claims(&claims(&SUPPORTED_CLAIMS), &claims(&[unsupported])).is_err());
         }
+    }
+
+    #[test]
+    fn ordinary_requirements_are_supported_only_when_each_is_allowed() {
+        let ordinary = claims(ryeos_state::external_execution::admission::REQUIRED_CLAIMS);
+        assert_eq!(selected_claims(&ordinary, &ordinary).unwrap(), ordinary);
+        for missing in 0..ordinary.len() {
+            let mut allowed = ordinary.clone();
+            allowed.remove(missing);
+            assert!(selected_claims(&allowed, &ordinary).is_err());
+        }
+        let diagnostic = claims(&[
+            "independent_candidate_diagnostic",
+            "qualification_worker_command",
+        ]);
+        assert!(selected_claims(&diagnostic, &ordinary).is_err());
+        assert_eq!(
+            selected_claims(&diagnostic, &diagnostic).unwrap(),
+            diagnostic
+        );
+        // A wider implemented vocabulary never adds unallowed claims. Both
+        // underlying probes remain mandatory regardless of this selection.
+        for name in &ordinary {
+            let allowed = vec![name.clone()];
+            assert_eq!(selected_claims(&allowed, &[]).unwrap(), allowed);
+        }
+        assert_eq!(
+            selected_claims(&claims(&SUPPORTED_CLAIMS), &ordinary).unwrap(),
+            claims(&SUPPORTED_CLAIMS)
+        );
     }
 
     #[test]
