@@ -12,7 +12,15 @@ import bootstrap_support
 import driver_closure
 
 
-def _shared_object(path: Path, soname: str, needed=(), runpath: str | None = None) -> None:
+def _shared_object(
+    path: Path,
+    soname: str,
+    needed=(),
+    runpath: str | None = None,
+    *,
+    conflicting_string_map: bool = False,
+    load_memory_size: int | None = None,
+) -> None:
     strings = bytearray(b'\0')
 
     def intern(value: str) -> int:
@@ -27,7 +35,8 @@ def _shared_object(path: Path, soname: str, needed=(), runpath: str | None = Non
     dynamic.append((driver_closure._DT_STRTAB, 0))
     dynamic.append((driver_closure._DT_STRSZ, len(strings)))
     dynamic.append((driver_closure._DT_NULL, 0))
-    dynamic_offset = 64 + 2 * driver_closure._PROGRAM_HEADER.size
+    header_count = 3 if conflicting_string_map else 2
+    dynamic_offset = 64 + header_count * driver_closure._PROGRAM_HEADER.size
     dynamic_bytes = b''.join(driver_closure._DYNAMIC.pack(tag, value) for tag, value in dynamic)
     string_offset = dynamic_offset + len(dynamic_bytes)
     dynamic[-3] = (driver_closure._DT_STRTAB, string_offset)
@@ -36,19 +45,29 @@ def _shared_object(path: Path, soname: str, needed=(), runpath: str | None = Non
     string_offset = dynamic_offset + len(dynamic_bytes)
     dynamic[-3] = (driver_closure._DT_STRTAB, string_offset)
     dynamic_bytes = b''.join(driver_closure._DYNAMIC.pack(tag, value) for tag, value in dynamic)
-    end = string_offset + len(strings)
+    end = string_offset + len(strings) + (1 if conflicting_string_map else 0)
     ident = b'\x7fELF\x02\x01\x01\0' + b'\0' * 8
     header = driver_closure._ELF_HEADER.pack(
         ident, driver_closure._ET_DYN, driver_closure._EM_X86_64, 1,
-        0, 64, 0, 0, 64, driver_closure._PROGRAM_HEADER.size, 2, 0, 0, 0,
+        0, 64, 0, 0, 64, driver_closure._PROGRAM_HEADER.size, header_count, 0, 0, 0,
     )
-    load = driver_closure._PROGRAM_HEADER.pack(1, 5, 0, 0, 0, end, end, 4096)
+    load = driver_closure._PROGRAM_HEADER.pack(
+        1, 5, 0, 0, 0, end, end if load_memory_size is None else load_memory_size, 4096
+    )
+    conflicting_load = (
+        driver_closure._PROGRAM_HEADER.pack(
+            1, 4, string_offset + 1, string_offset, string_offset,
+            len(strings), len(strings), 1,
+        )
+        if conflicting_string_map else b''
+    )
     dynamic_header = driver_closure._PROGRAM_HEADER.pack(
         driver_closure._PT_DYNAMIC, 4, dynamic_offset, dynamic_offset,
         dynamic_offset, len(dynamic_bytes), len(dynamic_bytes), 8,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(header + load + dynamic_header + dynamic_bytes + strings)
+    path.write_bytes(header + load + conflicting_load + dynamic_header + dynamic_bytes + strings +
+                     (b'\0' if conflicting_string_map else b''))
 
 
 class DriverClosureTests(unittest.TestCase):
@@ -103,8 +122,21 @@ class DriverClosureTests(unittest.TestCase):
         (self.driver / 'libhelper.so.1').unlink()
         with self.assertRaisesRegex(driver_closure.DriverClosureError, 'missing selected'):
             self.inspect()
-        _shared_object(self.driver / 'libhelper.so.1', 'libhelper.so.1', ('libcuda.so.1',))
-        with self.assertRaisesRegex(driver_closure.DriverClosureError, 'not reachable'):
+        _shared_object(self.driver / 'libextra.so.1', 'libextra.so.1')
+        _shared_object(self.driver / 'libhelper.so.1', 'libhelper.so.1', ('libextra.so.1',))
+        with self.assertRaisesRegex(driver_closure.DriverClosureError, 'loader search entry'):
+            self.inspect()
+
+    def test_needed_name_must_resolve_to_first_search_entry(self):
+        renamed = self.driver / 'renamed.so.1'
+        (self.driver / 'libhelper.so.1').rename(renamed)
+        with self.assertRaisesRegex(driver_closure.DriverClosureError, 'loader search entry'):
+            self.inspect()
+
+        (self.gnu / 'libhelper.so.1').parent.mkdir(parents=True, exist_ok=True)
+        _shared_object(self.gnu / 'libhelper.so.1', 'libshadow.so.1')
+        (renamed).rename(self.driver / 'libhelper.so.1')
+        with self.assertRaisesRegex(driver_closure.DriverClosureError, 'first loader entry'):
             self.inspect()
 
     def test_ambiguous_provider_and_escaping_symlink_refuse(self):
@@ -142,6 +174,22 @@ class DriverClosureTests(unittest.TestCase):
                 self.gnu / 'libc.so.6', self.root / 'driver',
                 selected_libraries={'ambient.so': self.root / 'outside.so'},
             )
+
+    def test_ambiguous_metadata_mapping_and_oversized_load_segment_refuse(self):
+        _shared_object(
+            self.driver / 'libcuda.so.1', 'libcuda.so.1',
+            ('libhelper.so.1', 'libc.so.6'), '$ORIGIN',
+            conflicting_string_map=True,
+        )
+        with self.assertRaisesRegex(driver_closure.DriverClosureError, 'ambiguous PT_LOAD'):
+            self.inspect()
+        _shared_object(
+            self.driver / 'libcuda.so.1', 'libcuda.so.1',
+            ('libhelper.so.1', 'libc.so.6'), '$ORIGIN',
+            load_memory_size=1,
+        )
+        with self.assertRaisesRegex(driver_closure.DriverClosureError, 'exceeds memory size'):
+            self.inspect()
 
 
 if __name__ == '__main__':

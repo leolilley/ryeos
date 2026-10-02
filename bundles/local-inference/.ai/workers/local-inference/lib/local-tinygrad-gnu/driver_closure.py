@@ -66,7 +66,8 @@ class TreeBounds:
 class _DynamicInfo:
     soname: str | None
     needed: tuple[str, ...]
-    search_paths: tuple[str, ...]
+    rpath: str | None
+    runpath: str | None
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,26 @@ def _c_string(data: bytes, offset: int) -> str:
     if not value:
         raise DriverClosureError('ELF dynamic string is empty')
     return value
+
+
+def _file_translation(
+    virtual: int,
+    length: int,
+    loads: tuple[tuple[int, int, int], ...],
+    file_size: int,
+    name: str,
+) -> int:
+    offsets = [
+        file_offset + virtual - load_virtual
+        for load_virtual, file_offset, load_size in loads
+        if load_virtual <= virtual and virtual + length <= load_virtual + load_size
+    ]
+    if len(offsets) != 1:
+        raise DriverClosureError(f'{name} has missing or ambiguous PT_LOAD file mapping')
+    offset = offsets[0]
+    if offset < 0 or offset + length > file_size:
+        raise DriverClosureError(f'{name} PT_LOAD mapping is outside the file')
+    return offset
 
 
 def _dynamic_info(path: Path, maximum_file_bytes: int) -> _DynamicInfo:
@@ -126,9 +147,13 @@ def _dynamic_info(path: Path, maximum_file_bytes: int) -> _DynamicInfo:
             dynamic: tuple[int, int, int] | None = None
             for offset in range(0, phbytes, phentsize):
                 item = _PROGRAM_HEADER.unpack_from(encoded_headers, offset)
-                kind, file_offset, virtual, file_size = item[0], item[2], item[3], item[5]
+                kind, file_offset, virtual, file_size, memory_size = (
+                    item[0], item[2], item[3], item[5], item[6]
+                )
                 if file_offset + file_size > size:
                     raise DriverClosureError(f'{path.name} has an out-of-file ELF segment')
+                if file_size > memory_size:
+                    raise DriverClosureError(f'{path.name} file-backed segment exceeds memory size')
                 if kind == _PT_LOAD:
                     loads.append((virtual, file_offset, file_size))
                 elif kind == _PT_DYNAMIC:
@@ -138,12 +163,10 @@ def _dynamic_info(path: Path, maximum_file_bytes: int) -> _DynamicInfo:
             if dynamic is None:
                 raise DriverClosureError(f'{path.name} has no PT_DYNAMIC segment')
             dynamic_offset, dynamic_virtual, dynamic_size = dynamic
-            if not any(
-                load_virtual <= dynamic_virtual
-                and dynamic_virtual + dynamic_size <= load_virtual + load_size
-                and load_offset + dynamic_virtual - load_virtual == dynamic_offset
-                for load_virtual, load_offset, load_size in loads
-            ):
+            mapped_dynamic = _file_translation(
+                dynamic_virtual, dynamic_size, tuple(loads), size, f'{path.name} PT_DYNAMIC'
+            )
+            if mapped_dynamic != dynamic_offset:
                 raise DriverClosureError(f'{path.name} PT_DYNAMIC is not covered by PT_LOAD')
             if (dynamic_size == 0 or dynamic_size > maximum_file_bytes
                     or dynamic_size % _DYNAMIC.size):
@@ -167,15 +190,9 @@ def _dynamic_info(path: Path, maximum_file_bytes: int) -> _DynamicInfo:
             strings_va, strings_size = string_tables[0], string_sizes[0]
             if strings_size == 0 or strings_size > maximum_file_bytes:
                 raise DriverClosureError(f'{path.name} has no bounded dynamic string table')
-            strings_offset = None
-            for virtual, file_offset, file_size in loads:
-                if virtual <= strings_va < virtual + file_size:
-                    strings_offset = file_offset + strings_va - virtual
-                    if strings_size > virtual + file_size - strings_va:
-                        raise DriverClosureError(f'{path.name} dynamic strings escape PT_LOAD')
-                    break
-            if strings_offset is None or strings_offset + strings_size > size:
-                raise DriverClosureError(f'{path.name} dynamic strings are outside file data')
+            strings_offset = _file_translation(
+                strings_va, strings_size, tuple(loads), size, f'{path.name} dynamic strings'
+            )
             source.seek(strings_offset)
             strings = source.read(strings_size)
             if len(strings) != strings_size:
@@ -189,15 +206,18 @@ def _dynamic_info(path: Path, maximum_file_bytes: int) -> _DynamicInfo:
                 raise DriverClosureError(f'{path.name} has duplicate DT_NEEDED entries')
             if any('/' in name or name in ('.', '..') for name in needed):
                 raise DriverClosureError(f'{path.name} has a path-bearing DT_NEEDED entry')
-            paths = tuple(
-                _c_string(strings, value)
-                for tag, value in entries if tag in (_DT_RPATH, _DT_RUNPATH)
-            )
-            if len(paths) > 1:
-                raise DriverClosureError(f'{path.name} has multiple RPATH/RUNPATH entries')
+            rpaths = [_c_string(strings, value) for tag, value in entries if tag == _DT_RPATH]
+            runpaths = [_c_string(strings, value) for tag, value in entries if tag == _DT_RUNPATH]
+            if len(rpaths) > 1 or len(runpaths) > 1 or (rpaths and runpaths):
+                raise DriverClosureError(f'{path.name} has duplicate or mixed RPATH/RUNPATH entries')
+            if rpaths:
+                raise DriverClosureError(f'{path.name} uses unsupported inherited DT_RPATH')
             if sonames and ('/' in sonames[0] or sonames[0] in ('.', '..')):
                 raise DriverClosureError(f'{path.name} has a path-bearing DT_SONAME')
-            return _DynamicInfo(sonames[0] if sonames else None, needed, paths)
+            return _DynamicInfo(
+                sonames[0] if sonames else None, needed,
+                rpaths[0] if rpaths else None, runpaths[0] if runpaths else None,
+            )
     except (OSError, struct.error) as error:
         raise DriverClosureError(f'cannot inspect selected ELF member {path.name}') from error
 
@@ -327,9 +347,9 @@ def inspect_cuda_driver_closure(
             raise DriverClosureError(f'provider SONAME changed for {soname}')
         search_dirs = search_cache.get(provider)
         if search_dirs is None:
-            search_dirs = (roots[0],) + tuple(
-                path for encoded in info.search_paths
-                for path in _expand_search_path(encoded, provider.parent, roots)
+            search_dirs = (roots[0],) + (
+                _expand_search_path(info.runpath, provider.parent, roots)
+                if info.runpath else ()
             )
             search_cache[provider] = search_dirs
         for needed in info.needed:
@@ -342,9 +362,24 @@ def inspect_cuda_driver_closure(
             if (needed not in visiting and needed not in visited
                     and len(visiting) + len(visited) >= maximum_dependency_nodes):
                 raise DriverClosureError('selected dependency graph exceeds admitted entry budget')
-            if child.parent.resolve(strict=True) not in search_dirs:
+            resolved = None
+            for directory in search_dirs:
+                candidate = directory / needed
+                if candidate.is_symlink() or candidate.exists():
+                    try:
+                        resolved = candidate.resolve(strict=True)
+                    except OSError as error:
+                        raise DriverClosureError(
+                            f'broken selected loader entry for {needed}'
+                        ) from error
+                    break
+            if resolved is None:
+                raise DriverClosureError(f'{needed} has no selected loader search entry')
+            if not resolved.is_file() or not any(_within(root, resolved) for root in roots):
+                raise DriverClosureError(f'{needed} loader search selected a path outside admitted roots')
+            if resolved != child:
                 raise DriverClosureError(
-                    f'{needed} is not reachable through selected loader paths for {provider.name}'
+                    f'{needed} first loader entry differs from its unique indexed provider'
                 )
             visit(needed)
         visiting.remove(soname)
