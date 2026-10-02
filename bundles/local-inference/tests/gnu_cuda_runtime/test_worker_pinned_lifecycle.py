@@ -62,7 +62,7 @@ class WorkerPinnedLifecycleTests(unittest.TestCase):
             frames=[{'kind':'request','request_id':'original','body':outer}]
             def read(_):
                 if frames: return frames.pop(0)
-                raise EOFError('original session owner closed request input')
+                raise session.SessionInputClosed('original session owner closed request input')
             emitted=[]
             fixture.lifecycle._observe=lambda obs:emitted.append(('closed',obs))
             with patch.object(session,'QwenTokenizer',return_value=tokenizer),patch.object(session,'QwenModel',return_value=qwen),\

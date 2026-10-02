@@ -131,10 +131,17 @@ signing, production, destination admission, cloud activation and paid M1 are UNR
 The complete private closure includes GPU-cleanup commit 02c304246 (runtime
 cherry-pick cc1bbf34f). Its 20 injected-driver controls exercise actual pinned
 tinygrad Python device/program/allocator/PTX/tensor paths. The runtime suite has
-22 controls including actual session.main -> Worker.execute -> QwenModel.generate
+25 controls including actual session.main -> Worker.execute -> QwenModel.generate
 -> real Tensor/PTX kernel path -> the same lifecycle shutdown. That joint test
 injects a synthetic forward and CPU device initialization: it executes no model
 weights/native library/compiler child and establishes no numerical accuracy.
 The lifecycle import resolves from this checkout's actual GNU source closure.
 16 bootstrap controls and five unchanged CPU inbox controls also pass. Parser
 and layout tests remain distinct from actual mapped-provider/ABI qualification.
+
+Frame EOF is clean only before the first byte of a new four-byte header.
+Partial headers and payloads raise a protocol failure through the actual inbox
+and main loop even after independently authorized successful cleanup. Three real
+socket fixtures cover clean closure and truncated headers/payloads with the
+matching private shutdown command and retired frame; retirement never changes
+that failed execution into success.

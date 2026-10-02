@@ -66,7 +66,7 @@ from tokenizer import QwenTokenizer, render_chat  # noqa: E402
 
 
 
-def _read_exact(channel: int, length: int) -> bytes:
+def _read_exact(channel: int, length: int, *, frame_boundary: bool = False) -> bytes:
     output = bytearray()
     while len(output) < length:
         try:
@@ -74,7 +74,9 @@ def _read_exact(channel: int, length: int) -> bytes:
         except InterruptedError:
             continue
         if not chunk:
-            raise EOFError("persistent-session channel closed")
+            if frame_boundary and not output:
+                raise SessionInputClosed("persistent-session input closed at frame boundary")
+            raise EOFError("persistent-session frame was truncated")
         output.extend(chunk)
     return bytes(output)
 
@@ -101,7 +103,7 @@ def _strict_json_loads(encoded: bytes | str) -> Any:
 
 
 def _read_frame(channel: int) -> dict[str, Any]:
-    length = struct.unpack(">I", _read_exact(channel, 4))[0]
+    length = struct.unpack(">I", _read_exact(channel, 4, frame_boundary=True))[0]
     if length == 0 or length > MAX_FRAME_BYTES:
         raise ValueError("persistent-session frame is outside its bound")
     frame = _strict_json_loads(_read_exact(channel, length))
@@ -522,8 +524,6 @@ def main(lifecycle) -> int:
     while True:
         item = inbox.requests.get()
         if isinstance(item, BaseException):
-            if isinstance(item, EOFError):
-                raise SessionInputClosed(str(item)) from item
             raise item
         request_id, body, cancelled = item
         try:
