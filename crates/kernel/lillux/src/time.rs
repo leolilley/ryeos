@@ -608,6 +608,46 @@ impl AdoptedOriginalNamespaceOccupancy {
         let window = unsafe { crate::take_inherited_descriptor_authority(window_fd) }?;
         let clock_namespace =
             unsafe { crate::take_inherited_descriptor_authority(clock_namespace_fd) }?;
+        Self::from_owned_original_roles(window, clock_namespace, None)
+    }
+
+    /// Adopt the same original roles while checking a protected terminal writer
+    /// against the complete live inherited inventory BEFORE those roles close.
+    /// The original wire alone supplies the deadline; no caller clock is accepted.
+    /// This is role/object validation, not funding/native-generation admission.
+    ///
+    /// # Safety
+    /// Window and clock must be distinct uniquely owned inherited coordinates,
+    /// with no existing Rust owner. Writer and every companion must remain live
+    /// in the dedicated adapter. Writer is already owned and is only borrowed.
+    pub unsafe fn take_inherited_with_terminal_writer(
+        window_fd: u32,
+        clock_namespace_fd: u32,
+        writer: &crate::InheritedDescriptorAuthority,
+        companion_fds: &[u32],
+    ) -> Result<Self, String> {
+        let writer_fd = writer.inherited_descriptor()?;
+        if window_fd <= 2
+            || clock_namespace_fd <= 2
+            || window_fd == clock_namespace_fd
+            || window_fd == writer_fd
+            || clock_namespace_fd == writer_fd
+        {
+            return Err(
+                "original-window roles overlap stdio, each other or terminal writer".into(),
+            );
+        }
+        let window = unsafe { crate::take_inherited_descriptor_authority(window_fd) }?;
+        let clock_namespace =
+            unsafe { crate::take_inherited_descriptor_authority(clock_namespace_fd) }?;
+        Self::from_owned_original_roles(window, clock_namespace, Some((writer, companion_fds)))
+    }
+
+    fn from_owned_original_roles(
+        window: crate::InheritedDescriptorAuthority,
+        clock_namespace: crate::InheritedDescriptorAuthority,
+        terminal_writer: Option<(&crate::InheritedDescriptorAuthority, &[u32])>,
+    ) -> Result<Self, String> {
         original_window::require_same_clock_namespace(clock_namespace.file())?;
         let bytes = crate::sandbox::read_sealed_inherited_descriptor(
             window.inherited_descriptor()?,
@@ -632,6 +672,23 @@ impl AdoptedOriginalNamespaceOccupancy {
             Duration::from_nanos(wire.cleanup_ns),
             deadline,
         )?;
+        if let Some((writer, companion_fds)) = terminal_writer {
+            // All actual peers must still be live here. The original sealed
+            // window and actual clock are owned above, not closed/reopened.
+            let window_fd = window.inherited_descriptor()?;
+            let clock_fd = clock_namespace.inherited_descriptor()?;
+            for required in [0, 1, 2, window_fd, clock_fd] {
+                if !companion_fds.contains(&required) {
+                    return Err(
+                        "native terminal peer inventory omits stdio or original roles".into(),
+                    );
+                }
+            }
+            writer.require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+                companion_fds,
+                deadline,
+            )?;
+        }
         // The sealed input has served its one-use role; no FD reaches target.
         drop(window);
         Ok(Self {
@@ -777,6 +834,99 @@ mod original_window_tests {
                 duplicate(namespace.as_raw_fd()),
             )
         }
+    }
+
+    fn terminal_pipe() -> (
+        crate::SupervisedLauncherAttachmentStatusPipe,
+        crate::InheritedDescriptorAuthority,
+    ) {
+        let mut held = crate::supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let writer = held
+            .prepare_native_settlement_channel(MonotonicDeadline::after(Duration::from_secs(5)))
+            .unwrap();
+        (held, writer)
+    }
+
+    #[test]
+    fn terminal_peer_scan_observes_original_roles_before_close_without_extending_window() {
+        let (limit, cleanup, deadline) = window();
+        let (sealed, namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        let companions = [
+            0,
+            1,
+            2,
+            sealed.inherited_descriptor().unwrap(),
+            namespace.inherited_descriptor().unwrap(),
+        ];
+        let (_held, writer) = terminal_pipe();
+        // Private shared owning body: actual sealed/namespace objects move once,
+        // without an unregistered raw duplicate or synthetic proof fixture.
+        let adopted = AdoptedOriginalNamespaceOccupancy::from_owned_original_roles(
+            sealed,
+            namespace,
+            Some((&writer, &companions)),
+        )
+        .unwrap();
+        assert!(adopted.deadline.deadline <= deadline.deadline);
+        assert!(writer.file_identity().is_ok());
+        let (actual_limit, actual_cleanup, actual_deadline) =
+            adopted.into_original_parts().unwrap();
+        assert_eq!(actual_limit, limit);
+        assert_eq!(actual_cleanup, cleanup);
+        assert!(actual_deadline.deadline <= deadline.deadline);
+    }
+
+    #[test]
+    fn original_terminal_hook_rejects_live_writer_alias_and_missing_stdio() {
+        let (_held, writer) = terminal_pipe();
+        let alias = writer.duplicate_at_or_above(64).unwrap();
+        let (limit, cleanup, deadline) = window();
+        let (sealed, namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        let companions = [
+            0,
+            1,
+            2,
+            sealed.inherited_descriptor().unwrap(),
+            namespace.inherited_descriptor().unwrap(),
+            alias.inherited_descriptor().unwrap(),
+        ];
+        let error = AdoptedOriginalNamespaceOccupancy::from_owned_original_roles(
+            sealed,
+            namespace,
+            Some((&writer, &companions)),
+        )
+        .err()
+        .expect("writer alias admitted");
+        assert!(error.contains("aliases"), "{error}");
+        assert!(alias.file_identity().is_ok());
+        let (limit, cleanup, deadline) = window();
+        let (sealed, namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        let incomplete = [
+            sealed.inherited_descriptor().unwrap(),
+            namespace.inherited_descriptor().unwrap(),
+        ];
+        let error = AdoptedOriginalNamespaceOccupancy::from_owned_original_roles(
+            sealed,
+            namespace,
+            Some((&writer, &incomplete)),
+        )
+        .err()
+        .expect("missing stdio admitted");
+        assert!(error.contains("omits stdio"), "{error}");
+        assert!(writer.file_identity().is_ok());
     }
 
     #[test]
