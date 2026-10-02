@@ -344,4 +344,54 @@ mod tests {
         }];
         assert!(require_inputs(&plan, &inputs, Some(&proof)).is_err());
     }
+
+    #[test]
+    fn project_file_join_rejects_private_0600_descriptor_advertised_as_0644() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"exact C member";
+        std::fs::write(root.path().join("member.txt"), bytes).unwrap();
+        let metadata = ProjectFile {
+            blob_hash: lillux::sha256_hex(bytes),
+            size: bytes.len() as u64,
+            normalized_mode: 0o644,
+        };
+        let materialization =
+            ryeos_state::PinnedProjectMaterialization::from_observed_tree_for_test(
+                "a".repeat(64),
+                root.path(),
+                BTreeMap::from([("member.txt".to_owned(), metadata.clone())]),
+            )
+            .unwrap();
+
+        // Reproduce the old private memfd capture exactly: the bytes and hash
+        // agree with C, but the real descriptor mode is 0600 while its
+        // projected C metadata advertises 0644.
+        let authority = lillux::sealed_memfd(c"ryeos-project-file-mode-mismatch", bytes).unwrap();
+        let observation = authority.regular_file_observation().unwrap();
+        assert_eq!(observation.permission_mode().unwrap(), 0o600);
+        let declaration = PlanExecutionProjectFileInput {
+            relative_path: "member.txt".to_owned(),
+            destination: "/candidate-input".to_owned(),
+            max_bytes: 4096,
+            normalized_mode: 0o644,
+            access: ryeos_external_execution_contract::GuestMountAccess::ReadOnly,
+        };
+        let proof = PreparedExternalDirectProjectFile {
+            capsule_hash: "b".repeat(64),
+            snapshot_hash: "a".repeat(64),
+            declaration: declaration.clone(),
+            metadata,
+            authority,
+            observation,
+            _materialization: materialization,
+        };
+        let projected_input = proof.input().unwrap();
+        assert_eq!(projected_input.normalized_mode, Some(0o644));
+        let error = proof
+            .require_input(&declaration, &projected_input)
+            .expect_err("a private 0600 descriptor cannot satisfy the 0644 C mode");
+        assert!(error.to_string().contains(
+            "execution project file sealed descriptor changed content or observation"
+        ));
+    }
 }
