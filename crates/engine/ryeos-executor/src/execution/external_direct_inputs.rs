@@ -50,20 +50,11 @@ pub(crate) fn prepare_external_direct_inputs(
     else {
         anyhow::bail!("external direct inputs require the exact immutable pinned generation");
     };
-    // Evaluator definitions resolve from B, while the capsule and process
-    // input belong to C. Rejoin the execution materialization before reading
-    // any future selected member; definition materialization is not authority
-    // to substitute a different snapshot or a live checkout.
-    if let Some(evaluation) = sealed.candidate_evaluation_authority() {
-        evaluation.validate()?;
-        let materialization = execution_materialization
-            .context("external evaluator inputs have no verified execution materialization")?;
-        ensure!(
-            evaluation.candidate_snapshot_hash == *snapshot_hash
-                && materialization.snapshot_hash() == snapshot_hash,
-            "external evaluator execution materialization differs from sealed candidate snapshot"
-        );
-    }
+    require_evaluator_execution_materialization(
+        sealed.candidate_evaluation_authority(),
+        snapshot_hash,
+        execution_materialization,
+    )?;
     let AdmittedExecutionClosure::DirectItemExecutor {
         command:
             AdmittedDirectCommandClosure::RealizationMember {
@@ -155,4 +146,23 @@ pub(crate) fn prepare_external_direct_inputs(
         authority,
         source: source_records,
     })
+}
+
+/// Rejoin C execution custody independently of B definition/source authority.
+fn require_evaluator_execution_materialization(
+    evaluation: Option<&ryeos_app::thread_lifecycle::CandidateEvaluationAuthority>,
+    snapshot_hash: &str,
+    execution_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
+) -> Result<()> {
+    if let Some(evaluation) = evaluation {
+        evaluation.validate()?;
+        let materialization = execution_materialization
+            .context("external evaluator inputs have no verified execution materialization")?;
+        ensure!(
+            evaluation.candidate_snapshot_hash == snapshot_hash
+                && materialization.snapshot_hash() == snapshot_hash,
+            "external evaluator execution materialization differs from sealed candidate snapshot"
+        );
+    }
+    Ok(())
 }

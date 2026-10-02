@@ -422,3 +422,63 @@ fn direct_inputs_refuse_substituted_protocol_identity_and_interpretation() {
         );
     }
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn evaluator_input_custody_rejects_missing_and_b_snapshot_substitution() {
+    use ryeos_app::thread_lifecycle::{CandidateEvaluationAuthority, CandidateOperationPurpose};
+    let (root, state, records, _) =
+        crate::execution::source_closure::tests::external_delivery::state_and_source();
+    let path = root.path().join("candidate-materialization");
+    let (capsule, _, _) = retained_inputs_capsule(&state, &records, &path);
+    let ExecutionProjectAuthority::PinnedGeneration { snapshot_hash, .. } =
+        &capsule.project_authority
+    else {
+        unreachable!();
+    };
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("data.txt"), b"retained base data").unwrap();
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let guard = authority.acquire_shared_guard().unwrap();
+    let c =
+        ryeos_state::PinnedProjectMaterialization::verify(&authority, &guard, snapshot_hash, &path)
+            .unwrap();
+    let evaluation = CandidateEvaluationAuthority {
+        schema_version: CandidateEvaluationAuthority::SCHEMA_VERSION,
+        source_chain_root_id: "T-00000000-0000-4000-8000-000000000001".to_owned(),
+        source_placement_thread_id: "T-00000000-0000-4000-8000-000000000002".to_owned(),
+        owner_principal: "node:input-custody-test".to_owned(),
+        base_snapshot_hash: "a".repeat(64),
+        candidate_snapshot_hash: snapshot_hash.clone(),
+        candidate_validation_hash: "b".repeat(64),
+        integration_operation_hash: None,
+        integration_launch_id: None,
+        purpose: CandidateOperationPurpose::Evaluate,
+    };
+    require_evaluator_execution_materialization(Some(&evaluation), snapshot_hash, Some(&c))
+        .unwrap();
+    assert!(
+        require_evaluator_execution_materialization(Some(&evaluation), snapshot_hash, None)
+            .is_err()
+    );
+    // A separately verified B snapshot with identical files is still the
+    // wrong generation: matching checkout contents cannot supply C custody.
+    let cas = authority.cas_store().unwrap();
+    let mut b_snapshot = ryeos_state::objects::ProjectSnapshot::from_value(
+        &cas.get_object(snapshot_hash).unwrap().unwrap(),
+    )
+    .unwrap();
+    b_snapshot.message = Some("distinct verified B generation".to_owned());
+    let b_hash = cas.store_object(&b_snapshot.to_value()).unwrap();
+    assert_ne!(b_hash, *snapshot_hash);
+    let b = ryeos_state::PinnedProjectMaterialization::verify(&authority, &guard, &b_hash, &path)
+        .unwrap();
+    assert!(
+        require_evaluator_execution_materialization(Some(&evaluation), snapshot_hash, Some(&b))
+            .is_err()
+    );
+    assert!(
+        require_evaluator_execution_materialization(Some(&evaluation), &b_hash, Some(&c)).is_err()
+    );
+    require_evaluator_execution_materialization(None, snapshot_hash, None).unwrap();
+}
