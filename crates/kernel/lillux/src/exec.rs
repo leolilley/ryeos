@@ -162,6 +162,9 @@ pub struct SupervisedProcessStatus {
 struct NativeSettlementChannel {
     reader: InheritedDescriptorAuthority,
     original_deadline: crate::time::MonotonicDeadline,
+    /// Captured from the held target pin before release/death. A later native
+    /// record cannot supply its own expected incarnation or reopen procfs.
+    held_target_identity: Option<crate::ExactProcessIdentity>,
 }
 
 impl SupervisedProcessStatus {
@@ -319,6 +322,7 @@ impl SupervisedLauncherAttachmentStatusPipe {
         self.reader.native_settlement = Some(NativeSettlementChannel {
             reader,
             original_deadline,
+            held_target_identity: None,
         });
         Ok(writer)
     }
@@ -5765,7 +5769,7 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
             ));
         }
         let timeout = request.timeout;
-        let running = lib_spawn_with_stdio(
+        let mut running = lib_spawn_with_stdio(
             request,
             false,
             None,
@@ -5812,6 +5816,43 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
                 start,
                 format!("Invalid supervised target awaiting attachment: {error}"),
             )));
+        }
+        if let Some(channel) = running.native_settlement.as_ref() {
+            let captured = if channel.original_deadline.has_elapsed() {
+                Err("original native terminal deadline expired before held identity capture".into())
+            } else {
+                u32::try_from(running.pgid)
+                    .map_err(|_| "native terminal group identity is outside range".to_owned())
+                    .and_then(|group| {
+                        crate::process_control::capture_exact_process_identity_from_pidfd(
+                            running.pid,
+                            Some(group),
+                            pidfd.as_fd(),
+                        )
+                    })
+                    .and_then(|identity| {
+                        if channel.original_deadline.has_elapsed() {
+                            Err("original native terminal deadline expired during held identity capture".into())
+                        } else {
+                            Ok(identity)
+                        }
+                    })
+            };
+            match captured {
+                Ok(identity) => {
+                    running
+                        .native_settlement
+                        .as_mut()
+                        .expect("same selected native channel retained")
+                        .held_target_identity = Some(identity);
+                }
+                Err(error) => {
+                    return Err(running.into_spawn_failure(spawn_failure(
+                        start,
+                        format!("Failed to retain exact held native terminal identity: {error}"),
+                    )));
+                }
+            }
         }
         return verify_scoped_attachment(
             ProcessAwaitingAttachment {
