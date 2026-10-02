@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import yaml
+
 SOURCE = Path(__file__).resolve().parents[2] / '.ai/workers/local-inference/lib/local-tinygrad-gnu'
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(SOURCE))
@@ -66,6 +68,58 @@ class RuntimeTests(unittest.TestCase):
         with patch.object(runtime, 'prepare_environment', side_effect=AssertionError('too late')):
             with self.assertRaisesRegex(RuntimeError, 'binding'):
                 runtime.run_product()
+
+    def test_retained_tree_bounds_are_required_before_path_scan(self):
+        with patch.object(runtime, 'validate_paths', side_effect=AssertionError('path scan ran')):
+            for kwargs in ({}, {'gnu_bounds': {}}, {'driver_bounds': {}}):
+                with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, 'bounds'):
+                    runtime.prepare_environment(**kwargs)
+
+    def test_malformed_and_over_ceiling_bounds_refuse_before_path_scan(self):
+        valid = dict(maximum_entries=100, maximum_depth=10,
+                     maximum_file_bytes=1024, maximum_total_bytes=4096)
+        with patch.object(runtime, 'validate_paths', side_effect=AssertionError('path scan ran')):
+            with self.assertRaisesRegex(ValueError, 'exact admitted tree bounds'):
+                runtime.prepare_environment(gnu_bounds=dict(valid, unexpected=1), driver_bounds=valid)
+            over = dict(valid, maximum_entries=runtime.GNU_RUNTIME_BOUNDS_CEILING.maximum_entries + 1)
+            with self.assertRaisesRegex(ValueError, 'relationship ceiling'):
+                runtime.prepare_environment(gnu_bounds=over, driver_bounds=valid)
+
+    def test_gnu_ceiling_matches_authored_unsigned_product_relationship(self):
+        contract = yaml.safe_load(
+            (SOURCE.parents[4] / '.ai/config/ryeos-runtime/gnu-cuda-products-draft.yaml').read_text()
+        )
+        relationship = next(
+            item for item in contract['product_relationships']['relationships']
+            if item['name'] == 'gnu_runtime_to_private_worker'
+        )
+        authored = runtime.TreeBounds.from_contract(relationship['required_product']['bounds'])
+        self.assertEqual(runtime.GNU_RUNTIME_BOUNDS_CEILING, authored)
+
+    def test_channel_entry_requires_bounds_before_channel_import(self):
+        fake_channel = SimpleNamespace(
+            CleanupChannel=lambda *args: (_ for _ in ()).throw(AssertionError('channel constructed')),
+            descriptor=lambda *args: (_ for _ in ()).throw(AssertionError('descriptor read')),
+        )
+        with patch.dict(sys.modules, {'cleanup_channel': fake_channel}):
+            with self.assertRaisesRegex(ValueError, 'bounds'):
+                runtime.run_channel_product()
+
+    def test_product_requires_bounds_before_prepare_and_passes_typed_values(self):
+        selected = runtime.TreeBounds(100, 10, 1024, 4096)
+        with patch.object(runtime, 'prepare_environment', side_effect=AssertionError('prepare ran')):
+            with self.assertRaisesRegex(ValueError, 'bounds'):
+                runtime.run_product(observe=lambda _: None)
+        with patch.object(runtime, 'prepare_environment', return_value=(self.root, self.root, self.root, self.root)) as prepare:
+            # Stop after preparation without importing native/lifecycle components.
+            with patch.dict(sys.modules, {'cuda_lifecycle': SimpleNamespace(install=lambda **_: None)}):
+                with patch.object(runtime, 'run_with_lifecycle', side_effect=RuntimeError('stop after wiring')):
+                    with self.assertRaisesRegex(RuntimeError, 'stop after wiring'):
+                        runtime.run_product(
+                            observe=lambda _: None, gnu_bounds=selected, driver_bounds=selected,
+                        )
+        self.assertIs(prepare.call_args.kwargs['gnu_bounds'], selected)
+        self.assertIs(prepare.call_args.kwargs['driver_bounds'], selected)
 
     def test_lifecycle_wraps_import_session_and_constructor_failure(self):
         for fail in ('import', 'constructor', None):

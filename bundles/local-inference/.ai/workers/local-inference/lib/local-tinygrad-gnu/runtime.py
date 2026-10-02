@@ -8,8 +8,15 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Mapping
 
 from bootstrap_support import _member, _environment, inspect_layout, install_exact_library_resolver
+from driver_closure import TreeBounds, inspect_cuda_driver_closure
+
+
+# Exact ceiling from gnu_runtime_to_private_worker in the unsigned product draft.
+# Actual retained GNU bounds must be supplied separately and remain within it.
+GNU_RUNTIME_BOUNDS_CEILING = TreeBounds(10000, 64, 134217728, 268435456)
 
 
 def validate_paths(workspace: Path, worker: Path) -> dict[str, Path]:
@@ -29,6 +36,27 @@ def validate_paths(workspace: Path, worker: Path) -> dict[str, Path]:
     for name in ("home", "cache", "tmp"):
         _member(roots["scratch"], name, directory=True)
     return layout
+
+
+def _retained_tree_bounds(
+    gnu_bounds: TreeBounds | Mapping[str, object] | None,
+    driver_bounds: TreeBounds | Mapping[str, object] | None,
+) -> tuple[TreeBounds, TreeBounds]:
+    if gnu_bounds is None or driver_bounds is None:
+        raise ValueError('missing D-retained GNU or CUDA driver product bounds')
+    selected_gnu = gnu_bounds if isinstance(gnu_bounds, TreeBounds) else TreeBounds.from_contract(gnu_bounds)
+    selected_driver = driver_bounds if isinstance(driver_bounds, TreeBounds) else TreeBounds.from_contract(driver_bounds)
+    if any(
+        selected > maximum for selected, maximum in zip(
+            (selected_gnu.maximum_entries, selected_gnu.maximum_depth,
+             selected_gnu.maximum_file_bytes, selected_gnu.maximum_total_bytes),
+            (GNU_RUNTIME_BOUNDS_CEILING.maximum_entries, GNU_RUNTIME_BOUNDS_CEILING.maximum_depth,
+             GNU_RUNTIME_BOUNDS_CEILING.maximum_file_bytes, GNU_RUNTIME_BOUNDS_CEILING.maximum_total_bytes),
+            strict=True,
+        )
+    ):
+        raise ValueError('retained GNU product bounds exceed its authored relationship ceiling')
+    return selected_gnu, selected_driver
 
 
 def closed_environment(layout: dict[str, Path], supplied: dict[str, str]) -> dict[str, str]:
@@ -54,10 +82,19 @@ def verify_origins(roots: tuple[Path, ...]) -> None:
             raise RuntimeError(f"GNU module {name!r} escaped selected closure")
 
 
-def prepare_environment() -> tuple[Path, Path, Path, Path]:
+def prepare_environment(
+    *,
+    gnu_bounds: TreeBounds | Mapping[str, object] | None = None,
+    driver_bounds: TreeBounds | Mapping[str, object] | None = None,
+) -> tuple[Path, Path, Path, Path]:
+    retained_gnu_bounds, retained_driver_bounds = _retained_tree_bounds(gnu_bounds, driver_bounds)
     workspace = Path.cwd().resolve(strict=True)
     worker = Path(__file__).resolve(strict=True).parent
     layout = validate_paths(workspace, worker)
+    closure = inspect_cuda_driver_closure(
+        layout['gnu_lib'], layout['driver'] / 'lib',
+        gnu_bounds=retained_gnu_bounds, driver_bounds=retained_driver_bounds,
+    )
     environment = closed_environment(layout, dict(os.environ))
     if Path(sys.prefix).resolve(strict=True) != layout["python_home"]:
         raise RuntimeError("GNU interpreter prefix differs from selected product")
@@ -70,7 +107,10 @@ def prepare_environment() -> tuple[Path, Path, Path, Path]:
     os.environ.clear()
     os.environ.update(environment)
     verify_origins((worker, layout["python_home"]))
-    install_exact_library_resolver(layout["tinygrad"], layout["libc"], layout["driver"])
+    install_exact_library_resolver(
+        layout["tinygrad"], layout["libc"], layout["driver"],
+        selected_libraries=closure.providers,
+    )
     return workspace, layout["python-gnu"], worker, layout["tinygrad"]
 
 
@@ -95,12 +135,19 @@ def run_with_lifecycle(lifecycle, load_session, before_shutdown=None):
             raise RuntimeError("CUDA normal shutdown evidence unavailable; same owner remains uncertain")
 
 
-def run_product(*, observe=None, bindings=None, before_shutdown=None):
+def run_product(
+    *, observe=None, bindings=None, before_shutdown=None,
+    gnu_bounds: TreeBounds | Mapping[str, object] | None = None,
+    driver_bounds: TreeBounds | Mapping[str, object] | None = None,
+):
     # A Python callable is only the consumer interface, not authentication.
     # D must supply it through the admitted same-process private channel contract.
     if not callable(observe):
         raise RuntimeError("missing D-owned admitted private cleanup observation binding")
-    workspace, gnu, worker, tinygrad = prepare_environment()
+    retained_gnu_bounds, retained_driver_bounds = _retained_tree_bounds(gnu_bounds, driver_bounds)
+    workspace, gnu, worker, tinygrad = prepare_environment(
+        gnu_bounds=retained_gnu_bounds, driver_bounds=retained_driver_bounds
+    )
     import importlib
     from cuda_lifecycle import install
     lifecycle = install(selected_device=0, observe=observe, bindings=bindings)
@@ -117,11 +164,18 @@ def run_product(*, observe=None, bindings=None, before_shutdown=None):
     return run_with_lifecycle(lifecycle, load_session, before_shutdown)
 
 
-def run_channel_product():
+def run_channel_product(
+    *, gnu_bounds: TreeBounds | Mapping[str, object] | None = None,
+    driver_bounds: TreeBounds | Mapping[str, object] | None = None,
+):
+    retained_gnu_bounds, retained_driver_bounds = _retained_tree_bounds(gnu_bounds, driver_bounds)
     from cleanup_channel import CleanupChannel, descriptor
     cleanup_fd = descriptor(os.environ.get("RYEOS_RESOURCE_CLEANUP_FD"))
     session_text = os.environ.get("RYEOS_SESSION_FD", "")
     if not session_text.isascii() or not session_text.isdecimal() or str(int(session_text)) != session_text or not 0 <= int(session_text) <= 2147483647 or int(session_text) in (1, 2):
         raise RuntimeError("persistent descriptor is not canonical")
     channel = CleanupChannel(cleanup_fd, int(session_text))
-    return run_product(observe=channel.observe, before_shutdown=channel.authorize_shutdown)
+    return run_product(
+        observe=channel.observe, before_shutdown=channel.authorize_shutdown,
+        gnu_bounds=retained_gnu_bounds, driver_bounds=retained_driver_bounds,
+    )
