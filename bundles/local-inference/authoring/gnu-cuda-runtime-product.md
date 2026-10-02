@@ -55,7 +55,7 @@ CPU mmap/from_blob weight sources are preserved.
 
 Source declarations and historical archive/manifests are available references.
 No produced GNU or destination runtime/model/device witness was selected by
-this source task, and no payload was downloaded. Resolve actual GNU production
+this source task. Resolve actual GNU production
 through service:external-content/product with exact chain_root_id, thread_id,
 recipe_binding=product_recipe, product_name=runtime. Reuse existing product
 receive/qualification/bind services and the new draft private-consumer
@@ -63,6 +63,31 @@ relationship. Do not use the input manifest as the output manifest. The existing
 fixed `/ryeos` qualification does not qualify this private descriptor consumer.
 The original producer's product includes python/, notices and ELF inventory;
 no producer change or alternate production system is introduced here.
+
+On 2026-10-02, a coordinator-authorized private model preparation reused the
+five hash-verified local model/tokenizer leaves and downloaded only the immutable
+revision's LICENSE (11,343 bytes, SHA256
+832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e),
+with a 64 KiB acquisition ceiling and 30-second timeout. The existing release
+author's build_model function ran offline and generated ORIGIN.json; its existing
+realization_manifest function reproduced the exact model manifest in the table:
+seven regular files, 1,514,745,854 bytes. Preparation data stayed below the selected
+1.6 GB storage ceiling. No weights were downloaded or executed and the original
+vendor files were preserved. The private operation-result.json records the inputs,
+member digests and successful result; this is preparation evidence, not a retained
+node product, destination witness, qualification, upload or activation.
+
+The smallest GNU handoff still requires the actual producer chain_root_id and
+thread_id, product_recipe/runtime receipt, authenticated output manifest and a
+destination retention lease. The existing graph selects production-support through
+prepared_inputs_to_gnu_python_production; the tool uses the pinned musl producer
+runtime and exact GNU archive inputs. Recorded Oct1 normal-service evidence could
+not retrieve the historical GNU witness and located no current producer coordinate.
+Its threadless validate --current-head attempt refused project_source_push_first;
+this is historical evidence, not a fresh observation of the installed operator.
+An exported receipt from the producer owner is the next input. Historical input
+pins, fixed-root startup proofs and host preparation cannot replace that receipt
+or independently qualify the private consumer. No new producer or harness is used.
 
 ## Private shutdown interface
 
@@ -121,8 +146,15 @@ qwen3-0.6b-gnu-cuda-compatibility-request-v1.json, SHA256
 4070d0608443674275f22745e563ae770abde5edeed013c860108649c0e96f0e.
 Worker refuses more than 256 packed input tokens, more than eight output tokens,
 input+output greater than 2048, sampling/seed changes, thinking or tools; it never
-truncates. Actual exact tokenizer packing remains UNOBSERVED. Synthetic fixture
-counts and older 4B numeric evidence do not supply GNU 0.6B numerical qualification.
+truncates. The existing check_prompt_packing.py utility observed 20 input tokens
+and eight reserved output tokens (28 combined) from the exact local metadata,
+using host Python 3.14.7 and Unicode database 16.0.0. Rendered input is 108 bytes,
+SHA256 772f67df16bab09eedbf33706ff64c165f59713644dc92e3c22d4485e4d1a142;
+the token-ID digest is
+f27d77e1b41d9c360c3245cec811c8340903ce9c32882331573e0d7d59db7590.
+CPU and GNU tokenizer/contract/profile source bytes match. GNU destination
+tokenizer parity remains UNOBSERVED; local packing, synthetic fixture counts and
+older 4B numeric evidence do not supply GNU 0.6B numerical qualification.
 Actual GNU/native/compiler/driver/device qualification, weights, provider startup,
 signing, production, destination admission, cloud activation and paid M1 are UNRUN.
 
