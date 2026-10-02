@@ -5344,6 +5344,94 @@ impl Drop for ProcessAwaitingAttachment {
 }
 
 impl RunningProcess {
+    /// Corroborate live-at-check launch facts using the sole receipt observer
+    /// and the original held pin. This neither collects terminal evidence nor
+    /// admits a device, session, cleanup or financial outcome.
+    pub fn require_original_live_launch_correspondence(
+        &mut self,
+        held: &ProcessLocalHeldOccurrence,
+        expected: Result<
+            (
+                &crate::LinuxSandboxAppliedLaunchCommitments,
+                &crate::LinuxSandboxMountPreparationCommitments,
+                crate::time::MonotonicDeadline,
+            ),
+            String,
+        >,
+    ) -> Result<(), String> {
+        if let Some(failure) = &self.applied_receipt_failure {
+            return Err(failure.clone());
+        }
+        let (target, mounts, original) = match expected {
+            Ok(context) => context,
+            Err(failure) => {
+                return self
+                    .fail_selected_applied_launch_receipt(failure)
+                    .map(|_| ());
+            }
+        };
+        if let Err(failure) = self.require_same_held_occurrence(held) {
+            return self
+                .fail_selected_applied_launch_receipt(failure)
+                .map(|_| ());
+        }
+        if original.has_elapsed() {
+            return self
+                .fail_selected_applied_launch_receipt(
+                    "original live launch context expired before comparison".into(),
+                )
+                .map(|_| ());
+        }
+        if !self.poll_selected_applied_receipt_for_collection()? {
+            // Pending is not an irreversible refusal: retain the sole receiver.
+            return Err("original live launch receipt remains pending".into());
+        }
+        let result = (|| {
+            self.require_same_held_occurrence(held)?;
+            let receipt = match self.applied_receipt_observation.as_ref() {
+                Some(Ok(receipt)) => receipt,
+                _ => return Err("original live launch lacks accepted cached receipt".into()),
+            };
+            if !receipt.matches_commitments(target)
+                || !receipt.matches_post_release_mounts(mounts)
+                || !self
+                    .mount_preparation
+                    .as_ref()
+                    .is_some_and(|held_mount| held_mount.matches_commitments(mounts))
+            {
+                return Err(
+                    "original live launch differs from compiled target/mount expectations".into(),
+                );
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let pin = self
+                    .attachment_target_lifetime
+                    .as_ref()
+                    .ok_or("original live launch lost held pin")?;
+                if !matches!(
+                    native_terminal_pin_has_exited(pin),
+                    NativeTerminalPinObservation::NotExited
+                ) {
+                    return Err("original live launch pin is exited or unobserved".into());
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err("original live launch unavailable on this platform".into());
+            self.require_same_held_occurrence(held)?;
+            if original.has_elapsed() {
+                return Err("original live launch context expired during comparison".into());
+            }
+            Ok(())
+        })();
+        if let Err(failure) = result {
+            return self
+                .fail_selected_applied_launch_receipt(failure)
+                .map(|_| ());
+        }
+        Ok(())
+    }
+
     /// Compare the existing OS owner and cached incarnation, without reopening,
     /// duplicating, reading, waiting or reconstructing terminal evidence.
     pub fn require_same_held_occurrence(
@@ -11821,6 +11909,159 @@ mod native_terminal_existing_wait_tests {
             failure
         );
         assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
+        running.abort();
+    }
+
+    // Ordinary real-child fixture only; copied comparisons cannot issue
+    // protected startup, native or device admission.
+    #[test]
+    fn live_launch_pending_preserves_receiver_owner_and_terminal_bytes() {
+        let (mut running, writer, _frame, _sender, _applied) =
+            selected_child_with_receipt_sender("1");
+        let channel = running.native_settlement.as_ref().unwrap();
+        let original = channel.original_deadline;
+        let held = ProcessLocalHeldOccurrence {
+            pin: Arc::clone(running.attachment_target_lifetime.as_ref().unwrap()),
+            held_identity: channel.held_target_identity.clone(),
+        };
+        let target = crate::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+        };
+        let mounts = crate::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 0,
+            destination_access_sha256: [0; 32],
+        };
+        let pid = running.pid;
+        assert!(
+            running
+                .require_original_live_launch_correspondence(
+                    &held,
+                    Ok((&target, &mounts, original))
+                )
+                .unwrap_err()
+                .contains("pending")
+        );
+        assert_eq!(running.pid, pid);
+        assert!(running.applied_receipt_rx.is_some());
+        assert!(running.applied_receipt_failure.is_none());
+        let raw = running.native_terminal_raw_view().unwrap();
+        assert!(raw.frame.is_empty() && !raw.exact_eof);
+        assert!(raw.terminal_result.is_none() && raw.retained_drains.is_none());
+        assert!(!writer.file().as_raw_fd().is_negative());
+        running.abort();
+    }
+
+    #[test]
+    fn live_launch_upstream_refusal_stays_sticky_without_terminal_collection() {
+        let (mut running, writer, _frame, sender, applied) =
+            selected_child_with_receipt_sender("1");
+        let held = ProcessLocalHeldOccurrence {
+            pin: Arc::clone(running.attachment_target_lifetime.as_ref().unwrap()),
+            held_identity: running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .held_target_identity
+                .clone(),
+        };
+        sender.send(Ok(applied)).unwrap();
+        assert_eq!(
+            running
+                .require_original_live_launch_correspondence(
+                    &held,
+                    Err("protected capture refused".into())
+                )
+                .unwrap_err(),
+            "protected capture refused"
+        );
+        assert!(running.applied_receipt_observation.is_none());
+        assert!(running.applied_receipt_rx.is_none());
+        assert_eq!(
+            running.applied_receipt_failure.as_deref(),
+            Some("protected capture refused")
+        );
+        assert_eq!(
+            running
+                .poll_selected_applied_receipt_for_collection()
+                .unwrap_err(),
+            "protected capture refused"
+        );
+        let raw = running.native_terminal_raw_view().unwrap();
+        assert!(raw.frame.is_empty() && !raw.exact_eof && raw.terminal_result.is_none());
+        assert!(!writer.file().as_raw_fd().is_negative());
+        running.abort();
+    }
+
+    #[test]
+    fn live_launch_foreign_pin_then_correct_pin_preserves_first_refusal() {
+        let (mut running, writer, _frame, sender, applied) =
+            selected_child_with_receipt_sender("1");
+        let channel = running.native_settlement.as_ref().unwrap();
+        let original = channel.original_deadline;
+        let correct = ProcessLocalHeldOccurrence {
+            pin: Arc::clone(running.attachment_target_lifetime.as_ref().unwrap()),
+            held_identity: channel.held_target_identity.clone(),
+        };
+        // Independently opened pidfd is not the original Arc owner, even for
+        // the same ordinary fixture child. Neither association is proof.
+        let foreign = ProcessLocalHeldOccurrence {
+            pin: Arc::new(open_pidfd(running.pid).unwrap()),
+            held_identity: channel.held_target_identity.clone(),
+        };
+        let target = crate::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+        };
+        let mounts = crate::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 0,
+            destination_access_sha256: [0; 32],
+        };
+        sender.send(Ok(applied)).unwrap();
+        let pid = running.pid;
+        let failure = running
+            .require_original_live_launch_correspondence(&foreign, Ok((&target, &mounts, original)))
+            .unwrap_err();
+        assert!(failure.contains("differs from actual held pin"));
+        assert_eq!(
+            running
+                .require_original_live_launch_correspondence(
+                    &correct,
+                    Ok((&target, &mounts, original))
+                )
+                .unwrap_err(),
+            failure
+        );
+        assert_eq!(
+            running
+                .require_original_live_launch_correspondence(
+                    &correct,
+                    Err("later capture failure".into())
+                )
+                .unwrap_err(),
+            failure
+        );
+        assert_eq!(
+            running.applied_receipt_failure.as_deref(),
+            Some(failure.as_str())
+        );
+        assert!(
+            running.applied_receipt_rx.is_none() && running.applied_receipt_observation.is_none()
+        );
+        assert_eq!(running.pid, pid);
+        assert!(Arc::ptr_eq(
+            running.attachment_target_lifetime.as_ref().unwrap(),
+            &correct.pin
+        ));
+        let raw = running.native_terminal_raw_view().unwrap();
+        assert!(raw.frame.is_empty() && !raw.exact_eof && raw.terminal_result.is_none());
+        assert!(!writer.file().as_raw_fd().is_negative());
         running.abort();
     }
 

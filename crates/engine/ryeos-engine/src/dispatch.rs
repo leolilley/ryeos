@@ -688,6 +688,42 @@ pub enum SelectedNativeExecutionWaitOutcome {
 }
 
 impl RunningExecution {
+    /// Check original live launch correspondence without consuming this owner
+    /// or collecting terminal facts. Success is not session/device admission.
+    pub fn require_original_live_launch_correspondence(
+        &mut self,
+        held: &lillux::exec::ProcessLocalHeldOccurrence,
+        expected_capture: &std::sync::Arc<crate::isolation::VerifiedIsolationBackendCapture>,
+    ) -> Result<(), EngineError> {
+        if let Err(error) = self.require_original_backend_capture(expected_capture) {
+            return self
+                .running
+                .require_original_live_launch_correspondence(held, Err(error.to_string()))
+                .map_err(EngineError::Internal);
+        }
+        let context = self
+            .selected_launch_context
+            .as_ref()
+            .expect("protected capture check requires selected context");
+        self.running
+            .require_original_live_launch_correspondence(
+                held,
+                Ok((
+                    &context.expected_applied_launch,
+                    &context.expected_mount_preparation,
+                    context.original_deadline,
+                )),
+            )
+            .map_err(EngineError::Internal)?;
+        if let Err(error) = self.require_original_backend_capture(expected_capture) {
+            return self
+                .running
+                .require_original_live_launch_correspondence(held, Err(error.to_string()))
+                .map_err(EngineError::Internal);
+        }
+        Ok(())
+    }
+
     /// Borrowed association with the same actual held pin and cached identity.
     /// Neither this comparison nor backend equality proves a funded retirement.
     pub fn require_original_held_occurrence(
