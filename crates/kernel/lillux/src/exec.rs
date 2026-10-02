@@ -216,6 +216,36 @@ impl SupervisedProcessStatus {
         Ok(())
     }
 
+    /// Borrow the already-selected native channel's original requirements.
+    /// False means ordinary channel absence only; a selected mismatch/expiry
+    /// refuses instead of enabling a fallback or mutating a one-use setter.
+    /// This is configuration validation, not admitted/native evidence.
+    pub fn validate_existing_native_settlement_requirements(
+        &self,
+        applied_schema: &str,
+    ) -> Result<bool, String> {
+        let Some(channel) = self.native_settlement.as_ref() else {
+            return Ok(false);
+        };
+        if channel.original_deadline.remaining().is_zero() {
+            return Err("native settlement original requirement window expired".into());
+        }
+        if !matches!(
+            &self.state,
+            SupervisedProcessStatusState::AwaitingAttachment { .. }
+        ) || !self.mount_preparation_required
+            || self.applied_receipt_schema.as_deref() != Some(applied_schema)
+        {
+            return Err("native settlement existing launch requirements differ".into());
+        }
+        if channel.original_deadline.remaining().is_zero() {
+            return Err(
+                "native settlement original requirement window expired during validation".into(),
+            );
+        }
+        Ok(true)
+    }
+
     /// Require a second exact trusted-launcher status document after the
     /// target PID. The target must first be attached and released; a missing
     /// receipt is refusal, never implicit launch success.
