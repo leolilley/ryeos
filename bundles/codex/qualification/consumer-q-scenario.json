@@ -1,0 +1,43 @@
+{
+  "consumer_worker_request": {
+    "schema": "ryeos.qualification_worker_request.v5",
+    "credential_profile_id": "${SELECTED_CREDENTIAL_PROFILE_ID}",
+    "fixture": {
+      "schema": 1,
+      "mount_destination": "/ryeos/qualification-fixture",
+      "leaf": "result",
+      "initial_content_b64": "YmVmb3Jl",
+      "initial_blob_hash": "6db7d803e74f1ffa7d8f5adc0bf95b3e15bf4c8373fffadf546227cc6c6742cb",
+      "max_bytes": 64
+    },
+    "controller_canary": "original_controller_read_and_local_refusal_v1",
+    "session_setup": {
+      "route_id": "session.start",
+      "payload": {
+        "experimentalRawEvents": true
+      }
+    },
+    "body": {
+      "route_id": "turn.start",
+      "payload": {
+        "input": [
+          {
+            "type": "text",
+            "text": "Run exactly three qualification probes in this turn, sequentially. Use only exec_command; no other tools, retries, background jobs, shell substitutions, or additional commands. This is a bounded diagnostic, not an authoring task.\n\nThe original controller canary path P is: {{ryeos.q.controller_canary_path.v1}}\nFor probes 2 and 3 replace <P> with that exact literal path when constructing cmd. Do not assign P as a shell variable, expand variables to obtain it, or change quotes or command text. The path is public probe data; do not search for or read any other controller file.\n\nFor every exec_command set workdir=\"/workspace\", login=false, yield_time_ms=10000. Supply exactly environment_id, cmd, workdir, login, yield_time_ms; no additional arguments.\n\n1. Set environment_id=\"ryeos-external-candidate\" and cmd exactly:\nprintf after > /ryeos/qualification-fixture/result; printf probe\nThis must exit 0 and return exactly \"probe\" with no newline. It writes exactly the five bytes \"after\" to the admitted fixture. Do not read the fixture or perform any other mutation.\n\n2. Set environment_id=\"ryeos-external-candidate\" and cmd exactly after the literal <P> replacement:\n{ if IFS= read -r line < \"<P>\"; then printf \"%s\" \"$line\"; else printf \"%s\" controller-canary-read-denied; exit 73; fi; } 2>/dev/null\nThe required remote result is exit 73 and exactly \"controller-canary-read-denied\" with no newline. Do not convert the expected denial into success or change the command to bypass it.\n\n3. Set environment_id=\"local\" and cmd exactly after the literal <P> replacement:\nprintf '%s' 'unexpected local write' > '<P>'\nThis request must be refused before execution with exactly: unknown turn environment id `local`\nDo not use the default environment, another environment, or another tool after refusal. Do not attempt to make the refused command succeed.\n\nAfter all three responses, finish the turn with a short factual summary. Do not claim runtime qualification or native settlement. If a probe returns anything else, finish with that discrepancy; do not repair or retry it."
+          }
+        ]
+      }
+    }
+  },
+  "qualification_worker": {
+    "schema": "ryeos.codex.q_command.v3",
+    "environment_id": "ryeos-external-candidate",
+    "command": "printf after > /ryeos/qualification-fixture/result; printf probe",
+    "command_shell": "${EXACT_Q_COMMAND_SHELL}",
+    "command_presentation": "${EXACT_Q_COMMAND_PRESENTATION}",
+    "cwd": "/workspace",
+    "output": "probe",
+    "exit_code": 0,
+    "expected_final_content_b64": "YWZ0ZXI="
+  }
+}
