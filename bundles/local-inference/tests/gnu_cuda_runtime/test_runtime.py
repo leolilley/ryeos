@@ -102,6 +102,15 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'uncertain'):
                 runtime.run_with_lifecycle(life, lambda: SimpleNamespace(main=lambda _:0))
 
+    def test_publication_eof_remains_error_after_valid_retirement(self):
+        class InputClosed(EOFError): pass
+        life=SimpleNamespace(submission=contextlib.nullcontext,
+            shutdown=lambda:SimpleNamespace(status='closed',observation_delivered=True))
+        def main(_): raise EOFError('partial publication')
+        session=SimpleNamespace(main=main,SessionInputClosed=InputClosed)
+        with self.assertRaisesRegex(EOFError,'publication'):
+            runtime.run_with_lifecycle(life,lambda:session)
+
 
 class RequestTests(unittest.TestCase):
     @classmethod

@@ -26,6 +26,10 @@ MAX_TOOLS = 256
 MAX_TOOL_BYTES = 4 * 1024 * 1024
 
 
+class SessionInputClosed(EOFError):
+    """Request input ended; publication failure is a separate error."""
+
+
 def _validate_tinygrad_device(value: object) -> str:
     # The signed concrete worker owns tinygrad's backend/interface selection.
     # This shared adapter validates only a bounded tinygrad coordinate; it does
@@ -518,6 +522,8 @@ def main(lifecycle) -> int:
     while True:
         item = inbox.requests.get()
         if isinstance(item, BaseException):
+            if isinstance(item, EOFError):
+                raise SessionInputClosed(str(item)) from item
             raise item
         request_id, body, cancelled = item
         try:

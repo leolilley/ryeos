@@ -131,7 +131,7 @@ signing, production, destination admission, cloud activation and paid M1 are UNR
 The complete private closure includes GPU-cleanup commit 02c304246 (runtime
 cherry-pick cc1bbf34f). Its 20 injected-driver controls exercise actual pinned
 tinygrad Python device/program/allocator/PTX/tensor paths. The runtime suite has
-21 controls including actual session.main -> Worker.execute -> QwenModel.generate
+22 controls including actual session.main -> Worker.execute -> QwenModel.generate
 -> real Tensor/PTX kernel path -> the same lifecycle shutdown. That joint test
 injects a synthetic forward and CPU device initialization: it executes no model
 weights/native library/compiler child and establishes no numerical accuracy.

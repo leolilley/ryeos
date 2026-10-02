@@ -81,7 +81,7 @@ def run_with_lifecycle(lifecycle, load_session, before_shutdown=None):
             session = load_session()
         try:
             return session.main(lifecycle)
-        except EOFError:
+        except getattr(session, "SessionInputClosed", ()):
             # D closes the request stream before authorized teardown. The
             # finally block must still authorize and prove cooperative close.
             return 0
