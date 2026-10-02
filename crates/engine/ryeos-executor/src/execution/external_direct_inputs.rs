@@ -34,6 +34,7 @@ pub(crate) fn prepare_external_direct_inputs(
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
     thread_id: &str,
     chain_root_id: &str,
+    execution_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
 ) -> Result<PreparedExternalDirectInputs> {
     let sealed =
         ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
@@ -49,6 +50,20 @@ pub(crate) fn prepare_external_direct_inputs(
     else {
         anyhow::bail!("external direct inputs require the exact immutable pinned generation");
     };
+    // Evaluator definitions resolve from B, while the capsule and process
+    // input belong to C. Rejoin the execution materialization before reading
+    // any future selected member; definition materialization is not authority
+    // to substitute a different snapshot or a live checkout.
+    if let Some(evaluation) = sealed.candidate_evaluation_authority() {
+        evaluation.validate()?;
+        let materialization = execution_materialization
+            .context("external evaluator inputs have no verified execution materialization")?;
+        ensure!(
+            evaluation.candidate_snapshot_hash == *snapshot_hash
+                && materialization.snapshot_hash() == snapshot_hash,
+            "external evaluator execution materialization differs from sealed candidate snapshot"
+        );
+    }
     let AdmittedExecutionClosure::DirectItemExecutor {
         command:
             AdmittedDirectCommandClosure::RealizationMember {

@@ -244,7 +244,7 @@ fn direct_inputs_assemble_exact_retained_base_product_source_and_keep_source_lea
     )
     .unwrap();
     let prepared =
-        prepare_external_direct_inputs(&state, &capsule, &protocol, THREAD, CHAIN).unwrap();
+        prepare_external_direct_inputs(&state, &capsule, &protocol, THREAD, CHAIN, None).unwrap();
     assert_eq!(
         prepared.authority.projection().environment,
         BTreeMap::from([
@@ -371,10 +371,11 @@ fn direct_input_assembly_refuses_storage_only_source_capsule_before_materializat
     // must not skip its production decoder merely because source CAS is valid.
     capsule.validate().unwrap();
     let (protocol, _) = signed_protocol();
-    let error = match prepare_external_direct_inputs(&state, &capsule, &protocol, THREAD, CHAIN) {
-        Ok(_) => panic!("storage-only source capsule became executable input authority"),
-        Err(error) => error,
-    };
+    let error =
+        match prepare_external_direct_inputs(&state, &capsule, &protocol, THREAD, CHAIN, None) {
+            Ok(_) => panic!("storage-only source capsule became executable input authority"),
+            Err(error) => error,
+        };
     assert!(
         format!("{error:#}")
             .contains("sealed executor route contradicts admitted capsule executor identity"),
@@ -405,11 +406,11 @@ fn direct_inputs_refuse_substituted_protocol_identity_and_interpretation() {
             "descriptor" => changed.descriptor.env_injections.clear(),
             _ => unreachable!(),
         }
-        let error = match prepare_external_direct_inputs(&state, &capsule, &changed, THREAD, CHAIN)
-        {
-            Ok(_) => panic!("accepted changed protocol {coordinate}"),
-            Err(error) => error,
-        };
+        let error =
+            match prepare_external_direct_inputs(&state, &capsule, &changed, THREAD, CHAIN, None) {
+                Ok(_) => panic!("accepted changed protocol {coordinate}"),
+                Err(error) => error,
+            };
         let expected = if coordinate == "descriptor" {
             "external direct protocol interpretation changed its retained document"
         } else {

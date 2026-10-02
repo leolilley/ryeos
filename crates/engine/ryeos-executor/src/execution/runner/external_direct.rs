@@ -212,6 +212,7 @@ fn run(
                         &protocol,
                         thread_id,
                         chain_root_id,
+                        params.provenance.execution_input_materialization(),
                     )?;
                 check_control(state, thread_id)?;
                 placement::prepare_external_direct_start(
