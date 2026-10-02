@@ -54,9 +54,15 @@ Native result acceptance also needs consumer verification against that independe
 observation and the same live handle used for context creation. A standalone
 diagnostic followed by a second cuDeviceGet is insufficient: product wiring must
 check UUID-v2 immediately after the selected get and before creating the context,
-then retain that verified handle. This product seam is deliberately UNWIRED until
-D can project a qualified independent observation through existing authority.
-The current runtime input and cleanup wire remain unchanged.
+then retain that verified handle. Lifecycle now prepares this exact same-handle
+comparison behind optional `install(expected_uuid_v2_hex=...)`: the guarded
+cuDeviceGet queries UUID-v2 internally before returning to the pinned device
+constructor, and mismatch/query error poisons before context creation. Direct
+UUID queries stay forbidden. This is comparison code, not an admitted observer.
+The current runtime passes no expected UUID, and D has no independently admitted
+same-node UUID/provider observation or protected delivery seam. The product
+gate therefore remains UNWIRED; current runtime input and cleanup wire remain
+unchanged and GPU admission stays closed.
 
 ## Callable diagnostic input/result and refusals
 
@@ -81,7 +87,7 @@ Successful native qualification of the complete product additionally needs real
 kernel/copy/output behavior and orderly synchronization, event/module/device and
 portable-host release, context destruction, existing retired+EOF observation,
 then D's independent group retirement and financial settlement under the original
-reservation. These results remain UNOBSERVED. The seven new controls use actual
+reservation. These results remain UNOBSERVED. The focused controls use actual
 pinned generated bindings and CUDADevice with an injected DLL, prohibit native
 CDLL loading, and establish source/refusal behavior only. Earlier passed suites
 were not repeated for this follow-up.

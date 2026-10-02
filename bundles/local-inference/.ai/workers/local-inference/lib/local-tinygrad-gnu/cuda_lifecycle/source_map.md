@@ -104,8 +104,11 @@ financial settlement remain D/coordinator acceptance, never supplied by this map
 ## Agreed source interface and offline limits
 
 D's private interface record was fully read and re-ACKed after its identity
-clarification. Runtime and D ACK install(*, bindings=None, selected_device=0,
-observe=None) -> Lifecycle; submission() covers import/construction and whole
+clarification. Runtime and D ACK the original install(*, bindings=None,
+selected_device=0, observe=None) -> Lifecycle contract. The source-prepared
+optional expected_uuid_v2_hex comparison parameter leaves that call unchanged;
+None is unqualified and no runtime or D input currently supplies an admitted
+value. submission() covers import/construction and whole
 Worker.execute; shutdown() returns frozen ShutdownResult(status busy/failed/closed,
 observation_delivered, error). Busy closes new admission; only the existing owner
 quiesces and retries. A native error or partial constructor poisons the owner;
