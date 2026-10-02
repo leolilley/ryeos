@@ -61,6 +61,9 @@ pub enum IsolationProjectAuthority {
 pub enum IsolationFilesystemAuthorityCeiling {
     NodePolicy,
     CapturedExecution,
+    /// Preserve snapshot authority while exposing only separately admitted
+    /// inputs; the full project tree is not a target workspace view.
+    CapturedInputs,
 }
 
 impl IsolationFilesystemAuthorityCeiling {
@@ -70,7 +73,11 @@ impl IsolationFilesystemAuthorityCeiling {
     /// Once either requires captured content, no later launch layer may restore
     /// ambient host mounts by choosing `node_policy`.
     pub fn intersect(self, other: Self) -> Self {
-        if matches!(self, Self::CapturedExecution) || matches!(other, Self::CapturedExecution) {
+        if matches!(self, Self::CapturedInputs) || matches!(other, Self::CapturedInputs) {
+            Self::CapturedInputs
+        } else if matches!(self, Self::CapturedExecution)
+            || matches!(other, Self::CapturedExecution)
+        {
             Self::CapturedExecution
         } else {
             Self::NodePolicy
@@ -972,12 +979,17 @@ mod tests {
 
     #[test]
     fn filesystem_ceiling_intersection_cannot_restore_node_mounts() {
-        use IsolationFilesystemAuthorityCeiling::{CapturedExecution, NodePolicy};
+        use IsolationFilesystemAuthorityCeiling::{CapturedExecution, CapturedInputs, NodePolicy};
         for (parent, child, expected) in [
             (NodePolicy, NodePolicy, NodePolicy),
             (NodePolicy, CapturedExecution, CapturedExecution),
             (CapturedExecution, NodePolicy, CapturedExecution),
             (CapturedExecution, CapturedExecution, CapturedExecution),
+            (NodePolicy, CapturedInputs, CapturedInputs),
+            (CapturedInputs, NodePolicy, CapturedInputs),
+            (CapturedExecution, CapturedInputs, CapturedInputs),
+            (CapturedInputs, CapturedExecution, CapturedInputs),
+            (CapturedInputs, CapturedInputs, CapturedInputs),
         ] {
             assert_eq!(parent.intersect(child), expected);
             assert_eq!(

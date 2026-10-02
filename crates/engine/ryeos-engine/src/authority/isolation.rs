@@ -2525,6 +2525,14 @@ impl IsolationRuntime {
         // carriers. Namespace, mount, descriptor, process, and host-path
         // mechanics belong to Lillux; never add a backend-specific branch or
         // an ambient-path fallback here.
+        if context.filesystem_authority_ceiling
+            == IsolationFilesystemAuthorityCeiling::CapturedInputs
+        {
+            return Err(refused(
+                "captured inputs workspace view is not supported by this local isolation compiler"
+                    .into(),
+            ));
+        }
         if original_occupancy.is_some()
             && (self.state == IsolationRuntimeState::Disabled
                 || lifecycle != RequestedLaunchLifecycle::AwaitAttachment

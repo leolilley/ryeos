@@ -207,6 +207,9 @@ pub fn authority_ceiling_properties(
         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution => {
             "captured_execution"
         }
+        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedInputs => {
+            "captured_inputs"
+        }
     };
     let network = match network {
         ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy => "node_policy",

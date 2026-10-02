@@ -5026,11 +5026,12 @@ execution:
     #[test]
     fn filesystem_projection_uses_only_signed_defaults_and_closed_values() {
         use crate::isolation::IsolationFilesystemAuthorityCeiling::{
-            CapturedExecution, NodePolicy,
+            CapturedExecution, CapturedInputs, NodePolicy,
         };
         for (default, expected) in [
             ("node_policy", NodePolicy),
             ("captured_execution", CapturedExecution),
+            ("captured_inputs", CapturedInputs),
         ] {
             let yaml = format!(
                 "execution:\n  filesystem_authority_ceiling:\n    path: [filesystem_authority]\n    default: {default}\n  delegate:\n    via: runtime_registry\n"
@@ -5049,6 +5050,14 @@ execution:
                     }))
                     .unwrap(),
                 CapturedExecution
+            );
+            assert_eq!(
+                execution
+                    .project_filesystem_authority_ceiling(&serde_json::json!({
+                        "filesystem_authority": "captured_inputs"
+                    }))
+                    .unwrap(),
+                CapturedInputs
             );
             for invalid in [
                 serde_json::json!("host"),

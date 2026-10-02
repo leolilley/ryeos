@@ -1367,7 +1367,8 @@ fn build_plan_with_execution_root(
         })?;
     let no_host_environment = HostEnvBindings::default();
     let host_env = match filesystem_authority_ceiling {
-        crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution => {
+        crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution
+        | crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedInputs => {
             &no_host_environment
         }
         crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy => host_env,
