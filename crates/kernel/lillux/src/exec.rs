@@ -1516,6 +1516,60 @@ impl InheritedDescriptorAuthority {
         result
     }
 
+    /// Inspect live inherited role coordinates without adopting or duplicating
+    /// their ownership. Stdio coordinates are permitted here: a writer above
+    /// fd 2 may still share their pipe object. Caller retains every peer alive
+    /// throughout this point observation; this does not authenticate roles.
+    #[cfg(unix)]
+    pub fn require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+        &self,
+        companion_fds: &[u32],
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let require_time = || {
+            if original_deadline.remaining().is_zero() {
+                Err("inherited pipe peer inspection exceeded its original deadline".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        // Reuse the existing owned-writer object/mode checks. No peer File,
+        // descriptor lease owner, dup or reconstructed authority is created.
+        self.require_distinct_nonblocking_pipe_writer(&[], original_deadline)?;
+        require_time()?;
+        let identity = self.file_identity().map_err(|error| error.to_string())?;
+        require_time()?;
+        for descriptor in companion_fds {
+            require_time()?;
+            let raw = i32::try_from(*descriptor)
+                .map_err(|_| "inherited pipe peer exceeds descriptor range".to_string())?;
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            loop {
+                require_time()?;
+                // SAFETY: fstat only borrows raw, including stdio. It writes
+                // initialized stat on success and never takes descriptor ownership.
+                if unsafe { libc::fstat(raw, stat.as_mut_ptr()) } == 0 {
+                    break;
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(format!("inspect inherited pipe peer {descriptor}: {error}"));
+                }
+            }
+            require_time()?;
+            // SAFETY: the successful fstat above initialized the complete stat.
+            let stat = unsafe { stat.assume_init() };
+            if identity.device() == stat.st_dev as u64 && identity.inode() == stat.st_ino as u64 {
+                return Err("pipe writer aliases an inherited role or stdio endpoint".into());
+            }
+            require_time()?;
+        }
+        // Recheck actual writer flags and original expiry after every peer.
+        // This remains a point observation, not a concurrency/lifetime proof.
+        self.require_distinct_nonblocking_pipe_writer(&[], original_deadline)?;
+        require_time()
+    }
+
     #[cfg(unix)]
     pub fn directory_identity(&self) -> anyhow::Result<crate::secure_fs::PinnedDirectoryIdentity> {
         let lease = retain_fork_sensitive_descriptors();
@@ -10584,5 +10638,87 @@ mod native_terminal_existing_wait_tests {
         );
         assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
         running.abort();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_terminal_borrowed_role_guard_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_pipe_roles_reject_duplicate_writer_and_same_pipe_reader() {
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let writer = held.prepare_native_settlement_channel(deadline).unwrap();
+        let reader_fd = held
+            .reader
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .reader
+            .inherited_descriptor()
+            .unwrap();
+        let alias = writer.duplicate_at_or_above(64).unwrap();
+        assert!(
+            writer
+                .require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+                    &[reader_fd],
+                    deadline
+                )
+                .is_err()
+        );
+        assert!(
+            writer
+                .require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+                    &[alias.inherited_descriptor().unwrap()],
+                    deadline
+                )
+                .is_err()
+        );
+        // Both peers remain their original registered owners after borrowed checks.
+        assert!(
+            held.reader
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .reader
+                .file_identity()
+                .is_ok()
+        );
+        assert!(alias.file_identity().is_ok());
+    }
+
+    #[test]
+    fn borrowed_role_inspection_preserves_live_stdio_and_original_expiry() {
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let writer = held.prepare_native_settlement_channel(deadline).unwrap();
+        writer
+            .require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+                &[0, 1, 2],
+                deadline,
+            )
+            .unwrap();
+        for descriptor in [0, 1, 2] {
+            assert!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) } >= 0);
+        }
+        let expired = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(
+            writer
+                .require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+                    &[0, 1, 2],
+                    expired
+                )
+                .is_err()
+        );
+        assert!(writer.file_identity().is_ok());
     }
 }
