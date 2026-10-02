@@ -599,10 +599,13 @@ impl ProviderSpec {
         {
             capabilities.insert(LifecycleCapability::ExactTerminalObservation);
         }
-        // A configured one-shot delivery still returns SupervisorPending.
-        // Profile data cannot turn delivery into authenticated Ready or an
-        // independently admitted runtime. In particular, do not authorize a
-        // paid allocation merely because the delivery operation is selected.
+        // Starting requires both protected one-shot delivery and the exact
+        // journal-claimed relay used by the authenticated supervisor channel.
+        // This capability does not attest Ready: activation still returns
+        // SupervisorPending until the channel owner verifies Ready and Release.
+        if self.one_shot_activation_enabled() && self.relay_file_enabled() {
+            capabilities.insert(LifecycleCapability::SupervisorActivation);
+        }
         capabilities
     }
 
@@ -1110,6 +1113,11 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
         let pending = ProviderSpec::parse(&fixture(), SETTINGS_SCHEMA_DIGEST).unwrap();
         assert!(!pending.relay_file_enabled());
+        assert!(
+            !pending
+                .effective_capabilities()
+                .contains(&LifecycleCapability::SupervisorActivation)
+        );
         assert!(pending.relay_file_upload_route().is_err());
         assert!(pending.relay_file_download_route().is_err());
         let mut missing = value.clone();
@@ -1158,10 +1166,14 @@ mod tests {
             selected.relay_file_download_route().unwrap(),
             RouteName::SandboxFileDownloadTokenById
         );
-        assert!(
-            !selected
-                .effective_capabilities()
-                .contains(&LifecycleCapability::SupervisorActivation)
+        assert_eq!(
+            selected.effective_capabilities(),
+            BTreeSet::from([
+                LifecycleCapability::SupervisorActivation,
+                LifecycleCapability::AuthoritativeNoOccurrence,
+                LifecycleCapability::ExactTerminalObservation,
+            ]),
+            "activation plus relay admits startup, not runtime or reconciliation testimony"
         );
 
         value["operations"]["relay_file"]["observation_route"] =
