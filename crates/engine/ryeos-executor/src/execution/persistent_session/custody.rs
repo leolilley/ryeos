@@ -20,17 +20,19 @@ use ryeos_app::temp_dir_guard::TempDirGuard;
 /// No Clone, serde decoder, raw-record constructor, or process release method.
 /// It remains unwired while the parent's executable prerequisites are closed.
 pub(super) struct PreparedTrustedSessionCustody {
-    session_capsule_hash: String,
-    execution_realization_hash: String,
-    source_binding_hash: Option<String>,
-    materializations: BTreeSet<ProcessMaterializationCustody>,
+    // Captured coordinates stay attached to the owner for audit/debugging,
+    // but are not later interpreted as authority.
+    _session_capsule_hash: String,
+    _execution_realization_hash: String,
+    _source_binding_hash: Option<String>,
+    _materializations: BTreeSet<ProcessMaterializationCustody>,
     /// Scratch retention coordinate, explicitly not a durable workspace_id.
-    scratch_name: String,
-    workspace_identity: lillux::secure_fs::PinnedDirectoryIdentity,
-    workspace: Arc<TempDirGuard>,
-    external: Option<Arc<BoundExternalRealizations>>,
-    source: Option<Arc<BoundSourceClosure>>,
-    cleanup_agreement: AdmittedTrustedResourceCleanupContract,
+    _scratch_name: String,
+    _workspace_identity: lillux::secure_fs::PinnedDirectoryIdentity,
+    _workspace: Arc<TempDirGuard>,
+    _external: Option<Arc<BoundExternalRealizations>>,
+    _source: Option<Arc<BoundSourceClosure>>,
+    _cleanup_agreement: AdmittedTrustedResourceCleanupContract,
 }
 
 impl PreparedTrustedSessionCustody {
@@ -189,16 +191,16 @@ impl PreparedTrustedSessionCustody {
         runtime.ensure_path_binding()?;
         original_workspace.ensure_path_binding()?;
         Ok(Self {
-            session_capsule_hash: capsule_hash.to_owned(),
-            execution_realization_hash: capsule.execution_realization_hash,
-            source_binding_hash: capsule.source_binding_hash,
-            materializations,
-            scratch_name,
-            workspace_identity,
-            workspace,
-            external,
-            source,
-            cleanup_agreement,
+            _session_capsule_hash: capsule_hash.to_owned(),
+            _execution_realization_hash: capsule.execution_realization_hash,
+            _source_binding_hash: capsule.source_binding_hash,
+            _materializations: materializations,
+            _scratch_name: scratch_name,
+            _workspace_identity: workspace_identity,
+            _workspace: workspace,
+            _external: external,
+            _source: source,
+            _cleanup_agreement: cleanup_agreement,
         })
     }
 }

@@ -1096,29 +1096,6 @@ fn verify_qualification_occurrence_under_contact_gate(
     }
 }
 
-/// Contact the consumer verifier below an existing born qualification root.
-/// The caller retains delivery custody; the existing attempt journal owns
-/// one-shot contact. This returns observation only, never qualification or
-/// provider-death authority. No public service enables this entry yet.
-pub(crate) fn verify_consumer_qualification_occurrence(
-    state: &AppState,
-    context: &HandlerContext,
-    intent: &RestoredVerifierAttemptIntent,
-    archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
-    limits: ryeos_state::object_closure::ObjectClosureLimits,
-    deadline: lillux::time::MonotonicDeadline,
-) -> Result<RestoredVerifierAttemptRecord> {
-    crate::operator_authority::require_admitted_operator(state, context)?;
-    verify_consumer_occurrence_with_invocation(
-        state,
-        ConsumerVerifierInvocation::Operator(context),
-        intent,
-        archive,
-        limits,
-        deadline,
-    )
-}
-
 /// Prepare a challenge under the actual callback, without claiming contact.
 /// On replay the existing journal supplies the original nonce and deadline;
 /// changed archive bytes or protected selection refuse, never mint a new run.
@@ -1295,14 +1272,7 @@ pub fn verify_consumer_qualification_occurrence_for_callback(
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<RestoredVerifierAttemptRecord> {
-    verify_consumer_occurrence_with_invocation(
-        state,
-        ConsumerVerifierInvocation::Callback(token),
-        intent,
-        archive,
-        limits,
-        deadline,
-    )
+    verify_consumer_occurrence_with_callback(state, token, intent, archive, limits, deadline)
 }
 
 /// Read one exact retained consumer attempt. Observation never starts or
@@ -1401,52 +1371,9 @@ pub fn observe_consumer_verifier_attempt_for_callback(
         .with_live_callback(|| Ok(ConsumerVerificationObservation::Retained { attempt, evidence }))
 }
 
-enum ConsumerVerifierInvocation<'a> {
-    Operator(&'a HandlerContext),
-    Callback(&'a str),
-}
-
-impl ConsumerVerifierInvocation<'_> {
-    fn authenticate(
-        &self,
-        state: &AppState,
-        authority: &ryeos_state::PinnedStateAuthority,
-        guard: &ryeos_state::CasMutationGuard,
-        limits: ryeos_state::object_closure::ObjectClosureLimits,
-        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
-        qualification_operation_id: &str,
-    ) -> Result<crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot>
-    {
-        use crate::operator_external_content::product_qualification::{
-            authenticate_consumer_callback_root, authenticate_consumer_root,
-        };
-        match self {
-            Self::Operator(context) => authenticate_consumer_root(
-                state,
-                authority,
-                guard,
-                limits,
-                context,
-                coordinate,
-                qualification_operation_id,
-            ),
-            Self::Callback(token) => authenticate_consumer_callback_root(
-                state,
-                authority,
-                guard,
-                limits,
-                token,
-                "runtime.consumer_verification_start",
-                coordinate,
-                qualification_operation_id,
-            ),
-        }
-    }
-}
-
-fn verify_consumer_occurrence_with_invocation(
+fn verify_consumer_occurrence_with_callback(
     state: &AppState,
-    invocation: ConsumerVerifierInvocation<'_>,
+    token: &str,
     intent: &RestoredVerifierAttemptIntent,
     archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
@@ -1470,11 +1397,13 @@ fn verify_consumer_occurrence_with_invocation(
             };
             let authority = state.state_store.pinned_state_authority()?;
             let guard = authority.acquire_shared_guard()?;
-            let admission = invocation.authenticate(
+            let admission = crate::operator_external_content::product_qualification::authenticate_consumer_callback_root(
                 state,
                 &authority,
                 &guard,
                 limits,
+                token,
+                "runtime.consumer_verification_start",
                 coordinate,
                 &intent.qualification_operation_id,
             )?;
@@ -1553,11 +1482,13 @@ fn verify_consumer_occurrence_with_invocation(
             // Root authentication is intentionally repeated and consumed, not
             // cloned from reservation. The transaction checks live occurrence
             // and same-occurrence prerequisite immediately before first contact.
-            let claim_admission = invocation.authenticate(
+            let claim_admission = crate::operator_external_content::product_qualification::authenticate_consumer_callback_root(
                 state,
                 &authority,
                 &guard,
                 limits,
+                token,
+                "runtime.consumer_verification_start",
                 coordinate,
                 &intent.qualification_operation_id,
             )?;

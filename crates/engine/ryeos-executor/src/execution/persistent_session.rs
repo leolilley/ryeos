@@ -2928,7 +2928,7 @@ fn start_capsule_process(
     // The ORIGINAL group owns this same guard before any held contact. A
     // callback error must not let its local temporary holder remove scratch.
     original_start.retain_before_contact(vec![Box::new(Arc::clone(&workspace_lifeline))])?;
-    let mut held = spawn_capsule_process_held(
+    let held = spawn_capsule_process_held(
         state,
         capsule_hash,
         capsule,

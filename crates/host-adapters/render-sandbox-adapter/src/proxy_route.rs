@@ -49,8 +49,12 @@ pub(crate) struct BoundConnectToken {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProxyOperation<'a> {
-    UploadFile { remote_path: &'a str },
-    DownloadFile { remote_path: &'a str },
+    UploadFile {
+        remote_path: &'a str,
+    },
+    DownloadFile {
+        remote_path: &'a str,
+    },
     RunStream,
 }
 

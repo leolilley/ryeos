@@ -15,9 +15,8 @@ use std::io::Cursor;
 
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     MAX_RESTORED_OWNER_RESULT_BYTES, MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES,
-    RESTORATION_VERIFIER_REMOTE_DIRECTORY, RESTORED_VERIFIER_ADAPTER_PROTOCOL,
-    RestoredOwnerChallenge, RestoredOwnerMeasurement, RestoredVerifierAdapterRequest,
-    RestoredVerifierAdapterResponse,
+    RESTORED_VERIFIER_ADAPTER_PROTOCOL, RestoredOwnerChallenge, RestoredOwnerMeasurement,
+    RestoredVerifierAdapterRequest, RestoredVerifierAdapterResponse,
 };
 use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotIntent,

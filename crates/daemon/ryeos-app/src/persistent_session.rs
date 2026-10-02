@@ -2292,6 +2292,7 @@ impl PersistentSessionPool {
         }
     }
 
+    #[cfg(test)]
     fn acquire<F, C>(
         &self,
         key: &str,
