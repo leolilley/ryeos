@@ -355,6 +355,10 @@ pub struct LinuxSandboxProcess {
     /// presented as an independently observed target completion.
     #[cfg(target_os = "linux")]
     termination_requested: bool,
+    /// Selected original native owner context and irreversible terminal state.
+    /// Never reconstructed from numeric PID, ordinary exit or candidate bytes.
+    #[cfg(target_os = "linux")]
+    native_terminal_observation: Option<NativeTerminalObservationState>,
 }
 
 /// Native testimony from the exact owned PID-namespace init immediately
@@ -546,6 +550,76 @@ impl LinuxSandboxAppliedLaunchReceipt {
 pub struct LinuxSandboxTermination {
     exit: LinuxSandboxExit,
     launch_failure: Option<LinuxSandboxLaunchFailure>,
+}
+
+/// Opaque terminal observation from the same selected native process owner.
+/// Actual identity was pinned while held, before death. The caller must still
+/// join independently admitted launch/mount/device authority and its protected
+/// channel. This grants no driver/scratch/refund or prospective death proof.
+/// Deliberately non-Clone with private fields and no Deserialize constructor.
+#[derive(Debug)]
+pub struct LinuxSandboxNativeTerminalObservation {
+    context: NativeTerminalContext,
+    exit: LinuxSandboxExit,
+    owner_requested_termination: bool,
+    applied_launch: Option<LinuxSandboxAppliedLaunchReceipt>,
+    launch_failure: Option<LinuxSandboxLaunchFailure>,
+}
+
+#[derive(Debug)]
+struct NativeTerminalContext {
+    identity: crate::ExactProcessIdentity,
+    held_mount: LinuxSandboxMountPreparationReceipt,
+    original_deadline: crate::time::MonotonicDeadline,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+enum NativeTerminalObservationState {
+    Prepared(NativeTerminalContext),
+    Reaped(NativeTerminalReap),
+    Delivered,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct NativeTerminalReap {
+    context: NativeTerminalContext,
+    exit: LinuxSandboxExit,
+    owner_requested_termination: bool,
+    applied_launch: Option<LinuxSandboxAppliedLaunchReceipt>,
+    // Read only once after actual reap. A malformed or missing channel keeps
+    // permanent uncertainty; later retries cannot turn consumed EOF into None.
+    launch_failure: Option<Result<Option<LinuxSandboxLaunchFailure>, String>>,
+    watchdog_reaped: bool,
+}
+
+impl LinuxSandboxNativeTerminalObservation {
+    pub fn process_identity(&self) -> &crate::ExactProcessIdentity {
+        &self.context.identity
+    }
+
+    pub fn held_mount_preparation(&self) -> &LinuxSandboxMountPreparationReceipt {
+        &self.context.held_mount
+    }
+
+    pub fn exit(&self) -> LinuxSandboxExit {
+        self.exit
+    }
+
+    /// Absence of this owner's request is not independent natural-completion
+    /// or driver retirement proof; other actors may have killed the target.
+    pub fn owner_requested_termination(&self) -> bool {
+        self.owner_requested_termination
+    }
+
+    pub fn applied_launch(&self) -> Option<&LinuxSandboxAppliedLaunchReceipt> {
+        self.applied_launch.as_ref()
+    }
+
+    pub fn launch_failure(&self) -> Option<&LinuxSandboxLaunchFailure> {
+        self.launch_failure.as_ref()
+    }
 }
 
 /// Terminal status observed for the exact released target without requesting
@@ -1109,6 +1183,184 @@ fn prepare_linux_sandbox_inner_linux(
 }
 
 impl LinuxSandboxProcess {
+    /// Observe exact selected native terminal state without consuming this
+    /// owner on timeout/error. Native reap is recorded before any fallible
+    /// failure-pipe read or watchdog cancellation; retry never repeats waitpid.
+    /// No input deadline is accepted: only the original held context is used.
+    pub fn try_observe_native_terminal(
+        &mut self,
+    ) -> Result<Option<LinuxSandboxNativeTerminalObservation>, String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            let original_deadline = match self.native_terminal_observation.as_ref() {
+                Some(NativeTerminalObservationState::Prepared(context)) => {
+                    context.original_deadline
+                }
+                Some(NativeTerminalObservationState::Reaped(reaped)) => {
+                    reaped.context.original_deadline
+                }
+                Some(NativeTerminalObservationState::Delivered) => {
+                    return Err("native terminal observation was already delivered".into());
+                }
+                None => {
+                    return Err(
+                        "native terminal observation lacks original selected context".into(),
+                    );
+                }
+            };
+            if original_deadline.has_elapsed() {
+                return Err(
+                    "native terminal original deadline expired; owner remains retained".into(),
+                );
+            }
+            if let Some(NativeTerminalObservationState::Prepared(context)) =
+                self.native_terminal_observation.as_ref()
+            {
+                if self.pid <= 0 || self.pid as u32 != context.identity.target_pid {
+                    return Err("native terminal owner lost its exact unreaped child".into());
+                }
+                let lifetime = self
+                    .namespace_lifetime
+                    .as_ref()
+                    .ok_or("native terminal owner lost its original lifetime pin")?;
+                let mut descriptor = libc::pollfd {
+                    fd: lifetime.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+                if ready == 0 {
+                    return Ok(None);
+                }
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EINTR) {
+                        return Ok(None);
+                    }
+                    return Err(format!("observe exact native terminal lifetime: {error}"));
+                }
+                if descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0
+                    || descriptor.revents & libc::POLLIN == 0
+                {
+                    return Err("native terminal lifetime lacks exact exit readiness".into());
+                }
+                let mut status = 0;
+                let waited = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+                if waited == 0 {
+                    return Ok(None);
+                }
+                if waited < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+                {
+                    return Ok(None);
+                }
+                if waited != self.pid {
+                    return Err("native terminal lacks exclusive owned child wait".into());
+                }
+                let exit = if libc::WIFEXITED(status) {
+                    LinuxSandboxExit::Code(libc::WEXITSTATUS(status))
+                } else if libc::WIFSIGNALED(status) {
+                    LinuxSandboxExit::Signal(libc::WTERMSIG(status))
+                } else {
+                    return Err("native terminal lacks supported terminal wait status".into());
+                };
+                let state = self
+                    .native_terminal_observation
+                    .as_mut()
+                    .expect("selected context retained");
+                let NativeTerminalObservationState::Prepared(context) =
+                    std::mem::replace(state, NativeTerminalObservationState::Delivered)
+                else {
+                    unreachable!("same borrowed owner retains prepared context")
+                };
+                self.pid = 0;
+                self.namespace_lifetime = None;
+                // Irreversible kernel result is rooted BEFORE every following
+                // fallible step; the same owner can retry only pending work.
+                self.native_terminal_observation =
+                    Some(NativeTerminalObservationState::Reaped(NativeTerminalReap {
+                        context,
+                        exit,
+                        owner_requested_termination: self.termination_requested,
+                        applied_launch: self.observed_applied_launch.clone(),
+                        launch_failure: None,
+                        watchdog_reaped: false,
+                    }));
+            }
+            if original_deadline.has_elapsed() {
+                return Err("native terminal original deadline expired after owned reap".into());
+            }
+            let needs_failure_read = matches!(
+                self.native_terminal_observation.as_ref(),
+                Some(NativeTerminalObservationState::Reaped(NativeTerminalReap {
+                    launch_failure: None,
+                    ..
+                }))
+            );
+            if needs_failure_read {
+                let result = match self.launch_failure.take() {
+                    Some(channel) => imp::read_launch_failure(Some(channel)),
+                    None => Err("native terminal launch-failure channel is missing".into()),
+                };
+                let Some(NativeTerminalObservationState::Reaped(reaped)) =
+                    self.native_terminal_observation.as_mut()
+                else {
+                    unreachable!("same borrowed owner retains owned reap")
+                };
+                reaped.launch_failure = Some(result);
+            }
+            let Some(NativeTerminalObservationState::Reaped(reaped)) =
+                self.native_terminal_observation.as_ref()
+            else {
+                unreachable!("same borrowed owner retains owned reap")
+            };
+            if let Some(Err(error)) = reaped.launch_failure.as_ref() {
+                return Err(format!(
+                    "native terminal retained launch uncertainty: {error}"
+                ));
+            }
+            if !reaped.watchdog_reaped {
+                self.namespace_occupancy_watchdog
+                    .as_mut()
+                    .ok_or("native terminal lost its original watchdog owner")?
+                    .cancel_and_reap_until(original_deadline)?;
+                let Some(NativeTerminalObservationState::Reaped(reaped)) =
+                    self.native_terminal_observation.as_mut()
+                else {
+                    unreachable!("same borrowed owner retains owned reap")
+                };
+                reaped.watchdog_reaped = true;
+                self.namespace_occupancy_watchdog = None;
+            }
+            // Late helper/read completion never renews the original window.
+            // Retain its truthful completed state instead of redoing any wait.
+            if original_deadline.has_elapsed() {
+                return Err("native terminal original deadline expired before delivery".into());
+            }
+            let state = self
+                .native_terminal_observation
+                .as_mut()
+                .expect("owned reap retained");
+            let NativeTerminalObservationState::Reaped(reaped) =
+                std::mem::replace(state, NativeTerminalObservationState::Delivered)
+            else {
+                unreachable!("same borrowed owner retains completed native reap")
+            };
+            let Some(Ok(launch_failure)) = reaped.launch_failure else {
+                unreachable!("only observed launch-failure boundary reaches delivery")
+            };
+            Ok(Some(LinuxSandboxNativeTerminalObservation {
+                context: reaped.context,
+                exit: reaped.exit,
+                owner_requested_termination: reaped.owner_requested_termination,
+                applied_launch: reaped.applied_launch,
+                launch_failure,
+            }))
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("native terminal observation is unavailable on this platform".into())
+    }
+
     /// Return the exact child-origin final-root preparation observation. This
     /// precedes release; it must not be presented as applied-exec evidence.
     pub fn mount_preparation_receipt(&self) -> Result<LinuxSandboxMountPreparationReceipt, String> {
@@ -4135,6 +4387,7 @@ mod imp {
         let mut process = LinuxSandboxProcess {
             pid,
             namespace_lifetime: None,
+            native_terminal_observation: None,
             namespace_occupancy_watchdog: None,
             launch_failure: Some(unsafe { File::from_raw_fd(launch_failure[0]) }),
             applied_launch: Some(unsafe { File::from_raw_fd(applied_launch[0]) }),
@@ -4170,6 +4423,36 @@ mod imp {
         };
         mount_preparation.owned_child_pid = pid as u32;
         process.mount_preparation = Some(mount_preparation);
+        if let Some(watchdog) = occupancy.as_ref() {
+            use std::os::fd::AsFd as _;
+            if !matches!(
+                request.lifecycle,
+                LinuxSandboxLifecycle::AwaitRelease { .. }
+            ) {
+                return Err("native terminal context requires original held readiness".into());
+            }
+            let lifetime = process
+                .namespace_lifetime
+                .as_ref()
+                .ok_or("selected native readiness lost its original lifetime pin")?;
+            let identity = crate::process_control::capture_exact_process_identity_from_pidfd(
+                process.child_pid(),
+                None,
+                lifetime.as_fd(),
+            )?;
+            let held_mount = process.mount_preparation_receipt()?;
+            if held_mount.owned_child_pid != identity.target_pid {
+                return Err("native terminal context differs from exact held mount child".into());
+            }
+            watchdog.require_original_window()?;
+            process.native_terminal_observation = Some(NativeTerminalObservationState::Prepared(
+                NativeTerminalContext {
+                    identity,
+                    held_mount,
+                    original_deadline: watchdog.original_deadline(),
+                },
+            ));
+        }
         Ok(process)
     }
 
@@ -6193,6 +6476,7 @@ mod imp {
                 LinuxSandboxProcess {
                     pid,
                     namespace_lifetime: None,
+                    native_terminal_observation: None,
                     namespace_occupancy_watchdog: None,
                     launch_failure: Some(unsafe { File::from_raw_fd(pipe[0]) }),
                     applied_launch: None,
@@ -8392,6 +8676,7 @@ mod tests {
             process: LinuxSandboxProcess {
                 pid: 0,
                 namespace_lifetime: None,
+                native_terminal_observation: None,
                 namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
@@ -8466,6 +8751,7 @@ mod tests {
             process: LinuxSandboxProcess {
                 pid: 0,
                 namespace_lifetime: None,
+                native_terminal_observation: None,
                 namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
@@ -8509,6 +8795,7 @@ mod tests {
             process: LinuxSandboxProcess {
                 pid: 0,
                 namespace_lifetime: None,
+                native_terminal_observation: None,
                 namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
@@ -8545,6 +8832,7 @@ mod tests {
         let mut process = LinuxSandboxProcess {
             pid: 0,
             namespace_lifetime: None,
+            native_terminal_observation: None,
             namespace_occupancy_watchdog: None,
             launch_failure: None,
             applied_launch: None,
