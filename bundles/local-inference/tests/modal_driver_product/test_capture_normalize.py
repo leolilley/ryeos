@@ -128,7 +128,9 @@ class CaptureNormalizeTests(unittest.TestCase):
             outside.mkdir()
             (outside / 'capture').mkdir()
             (root / 'inputs').symlink_to(outside, target_is_directory=True)
-            with self.assertRaisesRegex(NORMALIZE.NormalizeRefused, 'no-symlink directory'):
+            with self.assertRaisesRegex(
+                NORMALIZE.NormalizeRefused, 'workspace input path is absent or contains a symlink',
+            ):
                 NORMALIZE.normalize_capture(
                     root / 'inputs/capture', root / 'products/output', realizations={},
                     gnu_root=root, workspace_root=root,
