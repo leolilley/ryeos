@@ -154,6 +154,14 @@ pub struct SupervisedProcessStatus {
     state: SupervisedProcessStatusState,
     applied_receipt_schema: Option<String>,
     mount_preparation_required: bool,
+    native_settlement: Option<NativeSettlementChannel>,
+}
+
+/// Protected adapter testimony channel retained by the same supervision owner.
+/// It is not worker I/O or decoded namespace/driver retirement evidence.
+struct NativeSettlementChannel {
+    reader: InheritedDescriptorAuthority,
+    original_deadline: crate::time::MonotonicDeadline,
 }
 
 impl SupervisedProcessStatus {
@@ -258,6 +266,124 @@ impl SupervisedLauncherAttachmentStatusPipe {
     pub fn writer_descriptor(&self) -> Result<u32, String> {
         self.writer.inherited_descriptor()
     }
+
+    /// Prepare an optional protected adapter-only terminal testimony pipe.
+    /// Configure the existing mount and applied-launch requirements first.
+    /// The reader and caller's SAME original deadline stay with supervision;
+    /// inherit the returned writer only in the authenticated adapter, never
+    /// target mappings, target environment or worker cleanup channels.
+    /// This allocates custody only; no bytes, EOF or generic target exit from
+    /// this channel currently produce native/driver retirement evidence.
+    #[cfg(target_os = "linux")]
+    pub fn prepare_native_settlement_channel(
+        &mut self,
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<InheritedDescriptorAuthority, String> {
+        if !matches!(
+            &self.reader.state,
+            SupervisedProcessStatusState::AwaitingAttachment { .. }
+        ) || !self.reader.mount_preparation_required
+            || self.reader.applied_receipt_schema.is_none()
+        {
+            return Err(
+                "native settlement channel requires held mount and applied-launch supervision"
+                    .into(),
+            );
+        }
+        if self.reader.native_settlement.is_some() {
+            return Err("native settlement channel was already prepared".into());
+        }
+        if original_deadline.remaining().is_zero() {
+            return Err("native settlement original deadline expired before preparation".into());
+        }
+        let lease =
+            retain_fork_sensitive_descriptors_until(original_deadline).map_err(|error| {
+                format!("retain native settlement descriptors within original window: {error}")
+            })?;
+        let mut descriptors = [-1; 2];
+        if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0
+        {
+            return Err(format!(
+                "create protected native settlement pipe: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: successful pipe2 returned two uniquely owned descriptors.
+        let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
+        let writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
+        let reader = InheritedDescriptorAuthority::from_owned_file(reader, &lease)?;
+        let writer = InheritedDescriptorAuthority::from_owned_file(writer, &lease)?;
+        if original_deadline.remaining().is_zero() {
+            return Err("native settlement original deadline expired during preparation".into());
+        }
+        self.reader.native_settlement = Some(NativeSettlementChannel {
+            reader,
+            original_deadline,
+        });
+        Ok(writer)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn prepare_native_settlement_channel(
+        &mut self,
+        _original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<InheritedDescriptorAuthority, String> {
+        Err("native settlement supervision is unavailable on this platform".into())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_settlement_custody_tests {
+    use super::*;
+
+    fn held_with_launch_requirements() -> SupervisedLauncherAttachmentStatusPipe {
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied-launch/v1")
+            .unwrap();
+        held
+    }
+
+    #[test]
+    fn protected_channel_requires_launch_context_and_original_live_window() {
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(1));
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        assert!(held.prepare_native_settlement_channel(deadline).is_err());
+        assert!(held.reader.native_settlement.is_none());
+        held.reader.require_mount_preparation_receipt().unwrap();
+        assert!(held.prepare_native_settlement_channel(deadline).is_err());
+        assert!(held.reader.native_settlement.is_none());
+        held.reader
+            .require_applied_launch_receipt("test.applied-launch/v1")
+            .unwrap();
+        let expired = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(held.prepare_native_settlement_channel(expired).is_err());
+        assert!(held.reader.native_settlement.is_none());
+    }
+
+    #[test]
+    fn protected_channel_is_one_use_cloexec_and_retains_same_expiry() {
+        let mut held = held_with_launch_requirements();
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(1));
+        let original_remaining = deadline.remaining();
+        let writer = held.prepare_native_settlement_channel(deadline).unwrap();
+        let retained = held.reader.native_settlement.as_ref().unwrap();
+        let reader_fd = retained.reader.file().as_raw_fd();
+        let retained_remaining = retained.original_deadline.remaining();
+        assert!(retained_remaining <= original_remaining);
+        assert!(!retained.original_deadline.has_elapsed());
+        for descriptor in [reader_fd, writer.file().as_raw_fd()] {
+            let descriptor_flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+            let status_flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+            assert!(descriptor_flags >= 0 && descriptor_flags & libc::FD_CLOEXEC != 0);
+            assert!(status_flags >= 0 && status_flags & libc::O_NONBLOCK != 0);
+        }
+        assert!(held.prepare_native_settlement_channel(deadline).is_err());
+        let same = held.reader.native_settlement.as_ref().unwrap();
+        assert_eq!(same.reader.file().as_raw_fd(), reader_fd);
+        assert!(same.original_deadline.remaining() <= retained_remaining);
+    }
 }
 
 /// Create an atomically-CLOEXEC status pipe for trusted-launcher supervision.
@@ -288,6 +414,7 @@ pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe,
             },
             applied_receipt_schema: None,
             mount_preparation_required: false,
+            native_settlement: None,
         },
         writer: InheritedDescriptorAuthority::from_owned_file(writer, &lease)?,
     })
@@ -352,6 +479,7 @@ pub fn supervised_launcher_attachment_status_pipe()
             },
             applied_receipt_schema: None,
             mount_preparation_required: false,
+            native_settlement: None,
         },
         writer: InheritedDescriptorAuthority::from_owned_file(status_writer, &lease)?,
         attachment_release_reader: InheritedDescriptorAuthority::from_owned_file(
@@ -3966,6 +4094,9 @@ pub struct RunningProcess {
     /// retirement evidence and creates no new signalling authority.
     #[cfg(target_os = "linux")]
     attachment_target_lifetime: Option<Arc<OwnedFd>>,
+    /// Optional protected adapter channel; kept separate from launch status
+    /// and target output through existing running-owner cleanup.
+    native_settlement: Option<NativeSettlementChannel>,
     /// The outer process is retained separately so timeout/overflow cleanup
     /// always reaps the launcher as well as the target process group.
     wrapper_pid: u32,
@@ -6447,34 +6578,43 @@ fn lib_spawn_with_stdio(
     let stderr_capture = Arc::new(OutputCapture::default());
     let drain_stop = Arc::new(AtomicBool::new(false));
     let (output_overflow_tx, output_overflow_rx) = std::sync::mpsc::channel();
-    let (status_reader, attachment_release, applied_receipt_schema, mount_preparation_required) =
-        match supervised_status {
-            Some(SupervisedProcessStatus {
-                state: SupervisedProcessStatusState::Run { reader },
-                applied_receipt_schema,
-                mount_preparation_required,
-            }) => (
-                Some(reader),
-                None,
-                applied_receipt_schema,
-                mount_preparation_required,
-            ),
-            Some(SupervisedProcessStatus {
-                state:
-                    SupervisedProcessStatusState::AwaitingAttachment {
-                        reader,
-                        attachment_release,
-                    },
-                applied_receipt_schema,
-                mount_preparation_required,
-            }) => (
-                Some(reader),
-                Some(attachment_release),
-                applied_receipt_schema,
-                mount_preparation_required,
-            ),
-            None => (None, None, None, false),
-        };
+    let (
+        status_reader,
+        attachment_release,
+        applied_receipt_schema,
+        mount_preparation_required,
+        native_settlement,
+    ) = match supervised_status {
+        Some(SupervisedProcessStatus {
+            state: SupervisedProcessStatusState::Run { reader },
+            applied_receipt_schema,
+            mount_preparation_required,
+            native_settlement,
+        }) => (
+            Some(reader),
+            None,
+            applied_receipt_schema,
+            mount_preparation_required,
+            native_settlement,
+        ),
+        Some(SupervisedProcessStatus {
+            state:
+                SupervisedProcessStatusState::AwaitingAttachment {
+                    reader,
+                    attachment_release,
+                },
+            applied_receipt_schema,
+            mount_preparation_required,
+            native_settlement,
+        }) => (
+            Some(reader),
+            Some(attachment_release),
+            applied_receipt_schema,
+            mount_preparation_required,
+            native_settlement,
+        ),
+        None => (None, None, None, false, None),
+    };
     // The wrapper is already an owned process, even before its target report.
     // Reuse that owner for every subsequent setup failure instead of reaping
     // the wrapper first and losing the exact process-group cleanup fence.
@@ -6486,6 +6626,7 @@ fn lib_spawn_with_stdio(
         mount_preparation: None,
         #[cfg(target_os = "linux")]
         attachment_target_lifetime: None,
+        native_settlement,
         wrapper_pid,
         wrapper_pgid,
         child,
