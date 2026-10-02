@@ -2898,6 +2898,12 @@ const ATTACHMENT_READY_PHASE: u32 = 2;
 const ATTACHMENT_RELEASE_TOKEN: u8 = 1;
 
 #[cfg(target_os = "linux")]
+#[path = "namespace_occupancy.rs"]
+mod namespace_occupancy;
+#[cfg(target_os = "linux")]
+pub(crate) use namespace_occupancy::PendingNamespaceWatchdog;
+
+#[cfg(target_os = "linux")]
 pub(crate) struct OccupancyWatchdog {
     pid: libc::pid_t,
     cancel: Option<std::fs::File>,
