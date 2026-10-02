@@ -813,7 +813,7 @@ mod tests {
                 "realization_id":"runtime","realization_manifest_hash":binding.supervisor_runtime_hash,
                 "realization_mount_root":"execution_runtime","realization_mount":"runtime","relative_path":"bin/evaluate",
                 "execution_path":"/ryeos/realizations/runtime/bin/evaluate"},
-            "projection":{"argv0":"/ryeos/realizations/runtime/bin/evaluate","arguments":["--check"],"cwd":"/workspace",
+            "projection":{"workspace_view":"full_snapshot","argv0":"/ryeos/realizations/runtime/bin/evaluate","arguments":["--check"],"cwd":"/workspace",
                 "environment":inputs.environment,"stdin":ExternalDirectSealedInput::from_bytes(b"one shot\n").unwrap(),
                 "endpoint_binding_id":"farm-direct","endpoint_binding_digest":binding.execution_binding_hash,
                 "execution_mode":binding.execution_mode,"timeout_seconds":3600,"target_limits":null,

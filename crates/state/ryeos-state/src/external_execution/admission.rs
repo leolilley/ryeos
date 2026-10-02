@@ -1130,6 +1130,7 @@ pub const MAX_EXTERNAL_DIRECT_TIMEOUT_SECONDS: u64 = 3_600;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalDirectCommandProjection {
+    pub workspace_view: ryeos_external_execution_contract::GuestWorkspaceView,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub target_limits: Option<ExternalNativeProcessLimits>,
     pub argv0: String,
@@ -1411,6 +1412,7 @@ impl AdmittedExternalDirectProgram {
         inputs.validate()?;
         ensure!(
             inputs.workspace_outputs.is_none()
+                && inputs.workspace_view == self.projection.workspace_view
                 && inputs.identity_digest()? == self.guest_input_identity
                 && inputs.environment == self.projection.environment,
             "external direct guest inputs changed their sealed read-only identity"
@@ -1438,7 +1440,7 @@ impl AdmittedExternalDirectProgram {
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         canonical_value_digest(
-            &serde_json::json!({"domain":"ryeos.external-direct-program.v2","program":self}),
+            &serde_json::json!({"domain":"ryeos.external-direct-program.v3","program":self}),
         )
     }
 }
@@ -1948,6 +1950,7 @@ mod tests {
             environment: BTreeMap::new(),
         };
         let projection = ExternalDirectCommandProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             target_limits: None,
             argv0: "/ryeos/realizations/runtime/bin/evaluate".into(),
             arguments: vec!["--check".into()],
@@ -1966,6 +1969,38 @@ mod tests {
             },
         };
         (closure, artifact, projection, inputs)
+    }
+
+    #[test]
+    fn direct_program_view_must_match_inputs_even_with_recomputed_identity() {
+        let (closure, artifact, projection, inputs) = direct_fixture();
+        let program = AdmittedExternalDirectProgram::from_compiled_closure(
+            &closure,
+            &artifact,
+            projection.clone(),
+            &inputs,
+        )
+        .unwrap();
+        let mut strict_inputs = inputs;
+        strict_inputs.workspace_view =
+            ryeos_external_execution_contract::GuestWorkspaceView::CapturedInputs;
+        let mut changed = program.clone();
+        changed.guest_input_identity = strict_inputs.identity_digest().unwrap();
+        assert!(changed.validate_guest_inputs(&strict_inputs).is_err());
+        let mut strict_projection = projection;
+        strict_projection.workspace_view = strict_inputs.workspace_view;
+        let strict = AdmittedExternalDirectProgram::from_compiled_closure(
+            &closure,
+            &artifact,
+            strict_projection,
+            &strict_inputs,
+        )
+        .unwrap();
+        strict.validate_guest_inputs(&strict_inputs).unwrap();
+        assert_ne!(program.digest().unwrap(), strict.digest().unwrap());
+        let mut wire = serde_json::to_value(strict.projection()).unwrap();
+        wire.as_object_mut().unwrap().remove("workspace_view");
+        assert!(serde_json::from_value::<ExternalDirectCommandProjection>(wire).is_err());
     }
 
     #[test]

@@ -1649,7 +1649,7 @@ mod tests {
                     "realization_id":"runtime","realization_manifest_hash":direct.supervisor_runtime_hash,
                     "realization_mount_root":"execution_runtime","realization_mount":"runtime","relative_path":"bin/evaluate",
                     "execution_path":"/ryeos/realizations/runtime/bin/evaluate"},
-                "projection":{"argv0":"/ryeos/realizations/runtime/bin/evaluate","arguments":[],"cwd":"/workspace",
+                "projection":{"workspace_view":"full_snapshot","argv0":"/ryeos/realizations/runtime/bin/evaluate","arguments":[],"cwd":"/workspace",
                     "environment":direct.guest_inputs.environment,"stdin":ExternalDirectSealedInput::from_bytes(b"").unwrap(),
                     "endpoint_binding_id":"farm-direct","endpoint_binding_digest":direct.execution_binding_hash,
                     "execution_mode":{"kind":"direct_command","stdout_max_bytes":1024,"stderr_max_bytes":2048},

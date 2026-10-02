@@ -641,6 +641,7 @@ fn compile_external_direct_program_parts(
         .and_then(|limits| limits.max_stderr_bytes)
         .map_or(stderr_max_bytes, |limit| stderr_max_bytes.min(limit));
     let projection = ExternalDirectCommandProjection {
+        workspace_view: direct_workspace_view(&plan)?,
         target_limits,
         argv0: AdmittedExternalDirectProgram::guest_executable_for_command(match closure {
             AdmittedExecutionClosure::DirectItemExecutor { command, .. } => command,
