@@ -177,3 +177,34 @@ and main loop even after independently authorized successful cleanup. Three real
 socket fixtures cover clean closure and truncated headers/payloads with the
 matching private shutdown command and retired frame; retirement never changes
 that failed execution into success.
+
+## 2026-10-02 source follow-up
+
+The private source branch adds a bounded structural check for the selected
+driver's recursive ELF `DT_NEEDED` closure and wires it into GNU worker startup.
+The check accepts only x86-64 ELF shared objects inside the separately selected
+GNU and driver `lib/` roots, enforces each retained tree's explicit entry/depth/
+file/total-byte bounds, rejects escaping or ambiguous providers, and checks that
+each dependency resolves through the loader's first exact search entry. It
+supports explicit `DT_RUNPATH`; inherited `DT_RPATH` is refused. It reads ELF
+metadata only: it does not load native code, qualify symbol versions/ABI,
+observe mapped providers, cover future `dlopen` calls, or establish a device.
+
+`run_channel_product`, `run_product` and `prepare_environment` now require both
+the retained GNU and driver bounds and normalize them to `TreeBounds`. Missing
+or malformed bounds fail before channel import or path discovery. The GNU
+values may not exceed the unsigned `gnu_runtime_to_private_worker` draft
+ceiling; that ceiling is not selected-product evidence and is never used as a
+default. The current `bootstrap.py` has no protected D-owned selected-product
+binding from which to pass either bound, and the driver draft still has no
+selected tree, bounds, or digest. Therefore production startup remains
+fail-closed until D supplies and wires the original-owner-bound selection
+contract; do not pass these values through ambient environment or user JSON.
+
+The source cuts are `1e7dd0e7b`, `976a4dfc8`, `1e083fbdf`, `0e98a1d3e` and
+`f8258ecc8`, based on D checkpoint `3b89173e7`. The focused offline suite now
+passes 38 tests, including parser ambiguity, loader reachability, exact bounds,
+and pre-scan/pre-channel refusal. No native driver, compiler child, model weight,
+CUDA device or provider was loaded or run; all ABI, actual GNU production,
+destination admission, native qualification, signing and activation gates
+remain open.
