@@ -2650,6 +2650,8 @@ impl PinnedDirectory {
                     self.ensure_open_child_same_mount(&child)?;
                     check_original_traversal_deadline(deadline)?;
                     if self.remove_empty_child_if_same(&entry.name, &child)? {
+                        #[cfg(all(test, target_os = "linux"))]
+                        original_removal_step_control::checkpoint();
                         check_original_traversal_deadline(deadline)?;
                         continue;
                     }
@@ -2685,6 +2687,8 @@ impl PinnedDirectory {
                     )
                 });
             }
+            #[cfg(all(test, target_os = "linux"))]
+            original_removal_step_control::checkpoint();
         }
         check_original_traversal_deadline(deadline)?;
         self.directory.sync_all()?;
@@ -8435,6 +8439,89 @@ mod tests {
         assert_eq!(std::fs::read(path.join("two")).unwrap(), b"two");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_traversal_global_remaining_is_not_reset_between_sibling_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("root");
+        for child in ["a-first", "b-second"] {
+            std::fs::create_dir_all(path.join(child)).unwrap();
+            std::fs::write(path.join(child).join("one"), b"one").unwrap();
+            std::fs::write(path.join(child).join("two"), b"two").unwrap();
+        }
+        let root = PinnedDirectory::open(&path).unwrap().unwrap();
+        // Two root names + two first-sibling files leave ONE global entry.
+        // Enumerating the second sibling's TWO names must refuse before unlink.
+        assert!(
+            root.remove_contents_recursive_bounded_until(
+                DirectoryTraversalBudget::new(5, 4),
+                crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(2))
+            )
+            .is_err()
+        );
+        assert!(!path.join("a-first").exists());
+        assert_eq!(std::fs::read(path.join("b-second/one")).unwrap(), b"one");
+        assert_eq!(std::fs::read(path.join("b-second/two")).unwrap(), b"two");
+        assert!(path.is_dir()); // partial disposal, never a full-removal receipt
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_traversal_mid_disposal_expiry_keeps_remaining_physical_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("root");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("a-removed"), b"first").unwrap();
+        std::fs::write(path.join("b-retained"), b"second").unwrap();
+        let root = PinnedDirectory::open(&path).unwrap().unwrap();
+        let original_identity = root.identity().unwrap();
+        let original = crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1));
+        let (stepped, observed) = std::sync::mpsc::channel();
+        let (resume, held_step) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut first = true;
+            let result = original_removal_step_control::with_hook(
+                move || {
+                    if first {
+                        first = false;
+                        stepped.send(()).unwrap();
+                        held_step
+                            .recv_timeout(std::time::Duration::from_secs(2))
+                            .unwrap();
+                    }
+                },
+                || {
+                    root.remove_contents_recursive_bounded_until(
+                        DirectoryTraversalBudget::new(8, 4),
+                        original,
+                    )
+                },
+            );
+            (result, root) // return the SAME pinned owner on partial disposal
+        });
+        let observed_step = observed.recv_timeout(std::time::Duration::from_secs(2));
+        let before_expiry = !original.has_elapsed();
+        let actual_partial = !path.join("a-removed").exists() && path.join("b-retained").exists();
+        if observed_step.is_ok() && before_expiry {
+            crate::time::sleep(original.remaining() + crate::time::Duration::from_millis(5));
+        }
+        let _ = resume.send(()); // settle real traversal before asserting, including error cases
+        let (result, retained_root) = worker
+            .join()
+            .expect("actual pinned traversal owner must join");
+        assert!(
+            observed_step.is_ok() && before_expiry && actual_partial,
+            "control must stop AFTER actual first unlink and BEFORE original expiry"
+        );
+        assert!(result.is_err());
+        retained_root.ensure_path_binding().unwrap();
+        assert_eq!(retained_root.identity().unwrap(), original_identity);
+        assert!(original.has_elapsed());
+        assert!(!path.join("a-removed").exists());
+        assert_eq!(std::fs::read(path.join("b-retained")).unwrap(), b"second");
+        assert!(path.is_dir()); // actual remaining namespace is retained, no cleanup receipt
+    }
+
     #[test]
     fn recursive_removal_of_exact_nested_entries_preserves_root() {
         for bounded in [false, true] {
@@ -9490,5 +9577,40 @@ mod tests {
         );
         assert!(digest_open_regular_file_stable_chunked_exact(&file, 9, 4).is_err());
         assert!(digest_open_regular_file_stable_chunked_exact(&file, 10, 0).is_err());
+    }
+}
+
+// Test-only acknowledgement gate on actual existing physical disposal steps.
+// It creates no production callback, registry, worker or cleanup authority.
+#[cfg(all(test, target_os = "linux"))]
+mod original_removal_step_control {
+    std::thread_local! {
+        static AFTER_ACTUAL_STEP: std::cell::RefCell<Option<Box<dyn FnMut()>>> = std::cell::RefCell::new(None);
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            AFTER_ACTUAL_STEP.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    pub(super) fn with_hook<T>(hook: impl FnMut() + 'static, operation: impl FnOnce() -> T) -> T {
+        AFTER_ACTUAL_STEP.with(|slot| {
+            assert!(
+                slot.borrow().is_none(),
+                "actual disposal test gate cannot nest"
+            );
+            *slot.borrow_mut() = Some(Box::new(hook));
+        });
+        let _reset = Reset;
+        operation()
+    }
+    pub(super) fn checkpoint() {
+        AFTER_ACTUAL_STEP.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().as_mut() {
+                hook();
+            }
+        });
     }
 }
