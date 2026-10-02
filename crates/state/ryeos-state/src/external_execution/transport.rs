@@ -1652,7 +1652,7 @@ mod tests {
                     "environment":direct.guest_inputs.environment,"stdin":ExternalDirectSealedInput::from_bytes(b"").unwrap(),
                     "endpoint_binding_id":"farm-direct","endpoint_binding_digest":direct.execution_binding_hash,
                     "execution_mode":{"kind":"direct_command","stdout_max_bytes":1024,"stderr_max_bytes":2048},
-                    "timeout_seconds":60,"native":{"kind":"linux_isolated_read_only","required_arch":"x86_64"}},
+                    "timeout_seconds":60,"target_limits":null,"native":{"kind":"linux_isolated_read_only","required_arch":"x86_64"}},
                 "guest_input_identity":direct.guest_input_identity
             }
         })).unwrap();
