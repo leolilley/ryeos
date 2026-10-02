@@ -361,6 +361,62 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn exact_retired_from_live_peer_without_eof_is_only_a_candidate() {
+        let bindings = bindings();
+        let (parent, child) = lillux::inherited_duplex_channel_pair().unwrap();
+        let mut request = lillux::SubprocessRequest {
+            cmd: "/bin/sh".into(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        child
+            .bind_to_subprocess_request(&mut request, CHANNEL_ENV, TARGET_FD)
+            .unwrap();
+        drop(child); // Only the Lillux-launched peer may keep this write end open.
+
+        let mut frame = Vec::new();
+        write_frame(&mut frame, "retired", &bindings).unwrap();
+        let octal = frame
+            .iter()
+            .map(|byte| format!("\\0{byte:03o}"))
+            .collect::<String>();
+        // The shell writes the exact frame, duplicates fd 4, closes fd 4,
+        // then blocks reading from its duplicate. A frame is not write closure.
+        request.args = vec![
+            "-c".into(),
+            format!("printf '{octal}' >&4; exec 5>&4; exec 4>&-; read hold <&5"),
+        ];
+        let process = lillux::spawn(request).unwrap();
+        let mut channel = TrustedCleanupChannel {
+            channel: parent,
+            bindings: Some(bindings),
+            deadline: lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(2)),
+            phase: Phase::ShutdownSent,
+        };
+
+        let candidate = channel.receive_candidate();
+        let process_cleanup = process.abort_and_reap_checked();
+        assert!(process_cleanup.is_ok(), "{process_cleanup:?}");
+        let Err(error) = candidate else {
+            panic!("retired without EOF cannot become a candidate");
+        };
+        assert!(
+            format!("{error:#}").contains("observe cleanup producer write closure"),
+            "{error:#}"
+        );
+        assert!(matches!(channel.phase, Phase::Failed));
+    }
+
     #[test]
     fn cleanup_wire_refuses_foreign_coordinates_and_protocol_shapes() {
         let expected = bindings();
