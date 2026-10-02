@@ -8,11 +8,23 @@ No native provider or occurrence qualification is currently selected.
 from __future__ import annotations
 
 import ctypes
+from enum import Enum
 import re
 
 
 class NvmlObservationError(RuntimeError):
     pass
+
+
+class L4QueryPolicy(Enum):
+    """Unselected product-local drafts, not policy/qualification authority.
+
+    A retained verifier may select ONE through existing signed verifier_parameters
+    only after qualifying that exact observer/provider/native L4 pattern. A raw
+    request, returned name or error code never selects these. No automatic union.
+    """
+    IS_MIG_SUCCESS_ZERO = "l4-is-mig-success-zero-mode-not-supported-v1"
+    IS_MIG_NOT_SUPPORTED = "l4-is-mig-not-supported-mode-not-supported-v1"
 
 
 _SELECTION_KEYS = frozenset(("stable_id", "class", "matched_facts",
@@ -95,19 +107,26 @@ def _assignment(request):
     return selection["stable_id"], selection["device_binding_digest"], dict(selected)
 
 
-def observe_assignment(*, request: dict, bindings) -> dict:
+def observe_assignment(*, request: dict, bindings, l4_query_policy: L4QueryPolicy | None = None) -> dict:
     """Measure the primary identity of one raw ExecutionResourceSelection.
 
     Bindings must already be selected under D's independently admitted exact
     provider and original finite qualification owner. None or absent APIs refuse
     before initialization. Strict first subset requires positive non-MIG query
-    results: NOT_SUPPORTED is not treated as disabled. NVML index is not CUDA
-    ordinal; UUID equivalence and same-handle CUDA verification are separate gates.
+    results. The optional L4-only draft requires an independently qualified exact
+    provider/product policy and exact same-handle SKU/status pattern; neither a
+    name nor NOT_SUPPORTED selects it. NVML index is not CUDA ordinal; UUID
+    equivalence and same-handle CUDA verification are separate gates.
     """
     stable_id, binding_digest, primary = _assignment(request)
+    if l4_query_policy is not None and type(l4_query_policy) is not L4QueryPolicy:
+        raise NvmlObservationError("unselected product-local L4 query policy")
+    prototypes = dict(_PROTOTYPES)
+    if l4_query_policy is not None:
+        prototypes["nvmlDeviceGetName"] = (_HANDLE, ctypes.POINTER(ctypes.c_char), ctypes.c_uint)
     functions = {}
     try:
-        for name, arguments in _PROTOTYPES.items():
+        for name, arguments in prototypes.items():
             function = getattr(bindings, name)
             if not callable(function): raise TypeError(name)
             # A retained ctypes provider needs exact ABI translation; a pure
@@ -119,12 +138,17 @@ def observe_assignment(*, request: dict, bindings) -> dict:
     except (AttributeError, TypeError) as error:
         raise NvmlObservationError("selected NVML provider lacks finite required ABI") from error
 
-    def checked(name, *args):
+    def status(name, *args):
         try:
             result = functions[name](*args)
         except Exception as error:
             raise NvmlObservationError(f"unknown native outcome in {name}") from error
-        if type(result) is not int or result != 0:
+        if type(result) is not int:
+            raise NvmlObservationError(f"unknown native status in {name}")
+        return result
+
+    def checked(name, *args):
+        if status(name, *args) != 0:
             raise NvmlObservationError(f"native observation refused in {name}")
 
     # Once initialization is attempted, attempt exactly one shutdown on every
@@ -138,12 +162,24 @@ def observe_assignment(*, request: dict, bindings) -> dict:
         handle = _HANDLE()
         checked("nvmlDeviceGetHandleByIndex_v2", 0, ctypes.byref(handle))
         if not handle.value: raise NvmlObservationError("missing selected physical handle")
+        if l4_query_policy is not None:
+            name = ctypes.create_string_buffer(b"\xff" * 96, 96)
+            checked("nvmlDeviceGetName", handle, name, 96)
+            if name.raw.find(b"\0") != 9 or name.raw[:9] != b"NVIDIA L4":
+                raise NvmlObservationError("physical handle differs from exact qualified L4 SKU")
         is_mig, current, pending = (ctypes.c_uint(_UINT_UNKNOWN) for _ in range(3))
-        checked("nvmlDeviceIsMigDeviceHandle", handle, ctypes.byref(is_mig))
-        if is_mig.value != 0: raise NvmlObservationError("MIG or unknown device handle")
-        checked("nvmlDeviceGetMigMode", handle, ctypes.byref(current), ctypes.byref(pending))
-        if current.value != 0 or pending.value != 0:
+        expected_is_mig = 3 if l4_query_policy is L4QueryPolicy.IS_MIG_NOT_SUPPORTED else 0
+        if status("nvmlDeviceIsMigDeviceHandle", handle, ctypes.byref(is_mig)) != expected_is_mig:
+            raise NvmlObservationError("unexpected physical/MIG query status for selected policy")
+        if expected_is_mig == 0 and is_mig.value != 0:
+            raise NvmlObservationError("MIG or unknown device handle")
+        expected_mode = 0 if l4_query_policy is None else 3
+        if status("nvmlDeviceGetMigMode", handle, ctypes.byref(current), ctypes.byref(pending)) != expected_mode:
+            raise NvmlObservationError("unexpected MIG mode query status for selected policy")
+        if expected_mode == 0 and (current.value != 0 or pending.value != 0):
             raise NvmlObservationError("MIG enabled, pending or unobserved")
+        # Non-success outputs are undefined, never read as disabled. Code3 has
+        # meaning only under the caller's exact qualified L4/provider profile.
         minor = ctypes.c_uint(_UINT_UNKNOWN)
         checked("nvmlDeviceGetMinorNumber", handle, ctypes.byref(minor))
         if minor.value != primary["minor"]:

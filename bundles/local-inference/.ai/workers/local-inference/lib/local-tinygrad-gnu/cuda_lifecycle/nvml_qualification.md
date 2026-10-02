@@ -9,7 +9,7 @@ The helper does not admit facts, authorize contact or modify the CUDA cleanup wi
 finite vendor translation. It accepts D's projection of ONE existing complete
 ExecutionResourceSelection and its signed primary role. It snapshots one retained
 primary character identity, initializes NVML, requires count_v2==1, obtains one
-opaque physical handle, positively checks non-MIG handle/current/pending mode,
+opaque physical handle, checks the exact selected non-MIG query interpretation,
 reads minor and UUID from THAT handle, compares minor with the retained primary,
 and shuts down NVML before returning a candidate. Index0 is neither minor0 nor
 CUDA ordinal0. Count1 without the primary identity join cannot return a result.
@@ -23,6 +23,8 @@ There is no pynvml import, name search, CDLL/dlopen, library discovery or fallba
 The pinned tinygrad checkout has no generated NVML module; it remains untouched.
 Runtime's current exact DLL resolver permits only selected libc/CUDA; no NVML
 entry, provider, load authorization or consumer call was added.
+The optional L4-only profile additionally requires nvmlDeviceGetName before any
+native call and reads its exact bounded name on that same physical handle.
 
 NVML describes the Linux minor as the number in /dev/nvidiaN; its UUID query
 returns GPU identity, and NVML enumeration need not match CUDA numbering.
@@ -74,6 +76,50 @@ subset also refuses NOT_SUPPORTED MIG queries: unsupported MIG hardware such as
 a selected target returning that status is not silently declared non-MIG. Any
 alternative interpretation requires separately qualified exact-provider policy.
 
+## Unselected L4 query interpretation
+
+The L4 is absent from NVIDIA's current MIG-supported GPU table.
+[Supported GPU products](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/supported-gpus.html).
+The MIG reference above documents GetMigMode NOT_SUPPORTED as a device that does
+not support MIG. Inference: strict success-only queries likely refuse this M1
+target; actual selected L4/nvproxy query behavior remains UNOBSERVED. This is not
+permission to reinterpret every unsupported query as disabled.
+
+D and coordinator agreed the existing ProductQualificationPolicy.v3
+verifier_parameters static signed inputs are the data seam. The retained verifier
+may select ONE product-owned L4QueryPolicy through that seam only after exact
+observer/product/provider/native-occurrence qualification. The helper accepts
+that enum as optional l4_query_policy OUTSIDE raw assignment JSON. A plain string,
+boolean, returned name, copied digest or error status does not select it. The
+enum is not authority, and the helper implements no signed-policy resolver or
+qualification acceptance. No selected policy/consumer invocation exists here;
+the existing GNU draft relationship still has policy_ref:null/empty claims.
+The Qwen model profile contains no GPU query policy and stays unchanged.
+
+| Draft profile | Required IsMigDeviceHandle | Required GetMigMode |
+|---|---|---|
+| None (strict default) | status0, written isMig0 | status0, written current0/pending0 |
+| L4QueryPolicy.IS_MIG_SUCCESS_ZERO | status0, written isMig0 | exactly status3 |
+| L4QueryPolicy.IS_MIG_NOT_SUPPORTED | exactly status3 | exactly status3 |
+
+Both L4 alternatives are UNSELECTED drafts, not a union or automatic fallback.
+Each additionally requires SAME-handle successful GetName with exact canonical
+NVIDIA L4, then unchanged physical GPU UUID/minor and retained primary195 join.
+Other names, success instead of expected3, unexpected IsMig statuses, permission/
+unknown/native failures and success with unwritten outputs refuse. Error outputs
+are undefined and are never interpreted as disabled. Code3 is accepted only at
+the two specifically qualified query positions; UUID/minor/name/close still must
+succeed. A matching SKU name is a policy comparison, never device authority.
+
+Native qualification must retain the actual GetName/IsMig/GetMigMode statuses and
+defined outputs, same opaque handle/UUID/minor, exact provider/product/occurrence
+and raw descriptor join for independent review BEFORE choosing a profile. Existing
+finite qualification tooling and original funding own that status experiment;
+the candidate DTO remains unchanged. A retained recording binding can capture the
+finite query trace separately in qualification probe detail; the new fake fixture
+demonstrates this source seam but supplies no native evidence. If observed behavior
+matches neither draft, refuse and retain the exact gap rather than guess a variant.
+
 After every initialization attempt, including an unknown/error outcome, the
 helper attempts exactly one nvmlShutdown. Failed close produces no candidate.
 NVML shutdown closes observer bookkeeping only: it proves neither CUDA resource
@@ -118,3 +164,8 @@ query/order, authoritative-primary mismatch despite count1, all required APIs,
 ambiguous/foreign/MIG assignment, native failures/unknown outputs and failed close.
 No native NVML implementation, driver, GPU, weights, provider contact, compiler,
 install, build or cloud operation runs; earlier passed suites were not repeated.
+The subsequent fifteen L4-policy controls exercise both explicit alternatives,
+strict default success/refusal, exact name/ctypes ABI, policy selection refusal,
+unexpected statuses/unwritten outputs, physical identity and close failures. Only
+this new targeted suite ran for the L4 follow-up; the thirteen earlier controls
+remain previous evidence. All native profile/occurrence gates remain open.
