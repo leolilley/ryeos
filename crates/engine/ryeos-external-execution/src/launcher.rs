@@ -423,12 +423,72 @@ fn require_absolute_normalized(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Exact immutable executable capture retained with the launcher request.
+/// A digest supplied by a caller cannot construct this custody value. It
+/// measures bytes and binds a request; it does not itself prove exec occurred.
+pub struct MeasuredLauncherExecutable {
+    authority: lillux::InheritedDescriptorAuthority,
+    observation: lillux::OpenRegularFileObservation,
+    digest: String,
+}
+
+impl MeasuredLauncherExecutable {
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub(crate) fn require_request(
+        &self,
+        request: &lillux::SubprocessRequest,
+        expected_digest: &str,
+    ) -> Result<()> {
+        self.authority.require_write_sealed_executable()?;
+        ensure!(
+            self.digest == expected_digest
+                && self
+                    .authority
+                    .digest_regular_file_stable_exact(&self.observation)?
+                    == self.digest,
+            "launcher executable differs from exact measured artifact"
+        );
+        let source = self
+            .authority
+            .inherited_descriptor()
+            .map_err(anyhow::Error::msg)?;
+        let mappings = request
+            .inherited_fd_mappings
+            .iter()
+            .filter(|mapping| mapping.target_descriptor() == LAUNCHER_EXECUTABLE_FD)
+            .collect::<Vec<_>>();
+        ensure!(
+            mappings.len() == 1
+                && mappings[0]
+                    .source_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    == source
+                && std::path::Path::new(&request.cmd)
+                    == lillux::inherited_executable_path(LAUNCHER_EXECUTABLE_FD)
+                        .map_err(anyhow::Error::msg)?,
+            "launcher request lost its exact measured executable descriptor"
+        );
+        Ok(())
+    }
+}
+
 pub struct PreparedExternalCandidateLauncherRequest {
+    pub(crate) measured_launcher: MeasuredLauncherExecutable,
     pub request: lillux::SubprocessRequest,
     pub bootstrap_digest: String,
     pub authority: ryeos_state::PinnedStateAuthority,
     /// Exact already validated program retained for live supervisor joins.
     pub candidate_program: AdmittedExternalExecutionProgram,
+}
+
+impl PreparedExternalCandidateLauncherRequest {
+    /// Digest of the exact sealed descriptor selected for this request.
+    pub fn measured_launcher_digest(&self) -> &str {
+        self.measured_launcher.digest()
+    }
 }
 
 /// Bind exact node-owned descriptors into a credential-free dedicated
@@ -444,6 +504,34 @@ pub fn prepare_launcher_subprocess_request(
     timeout_seconds: f64,
 ) -> Result<PreparedExternalCandidateLauncherRequest> {
     spec.validate()?;
+    // Imported guest artifacts are pinned regular files, not memfds. Capture
+    // the exact stable source into a sealed executable before binding it.
+    launcher.require_owned_executable()?;
+    let source_observation = launcher.regular_file_observation()?;
+    ensure!(source_observation.size() > 0 && source_observation.size()
+        <= ryeos_external_execution_contract::staging_package::MAX_GUEST_STAGING_FRAMED_BYTES,
+        "launcher source exceeds finite guest package ceiling");
+    let digest = launcher.digest_regular_file_stable_exact(&source_observation)?;
+    let mut reader = launcher.stable_regular_reader_exact(
+        source_observation.size(),
+        &digest,
+        ryeos_external_execution_contract::staging_package::MAX_GUEST_STAGING_FRAMED_BYTES,
+    )?;
+    let captured = lillux::sealed_executable_memfd_from_reader(
+        c"measured-external-launcher",
+        &mut reader,
+        source_observation.size(),
+        &digest,
+        ryeos_external_execution_contract::staging_package::MAX_GUEST_STAGING_FRAMED_BYTES,
+    )
+    .map_err(anyhow::Error::msg)?;
+    reader.finish()?;
+    captured.require_write_sealed_executable()?;
+    let measured_launcher = MeasuredLauncherExecutable {
+        observation: captured.regular_file_observation()?,
+        digest,
+        authority: captured,
+    };
     ensure!(
         runtime_mounts.len() == spec.runtime_mounts.len(),
         "external launcher runtime mount authority count changed"
@@ -493,7 +581,8 @@ pub fn prepare_launcher_subprocess_request(
         inherited_fd_mappings: vec![],
         supervised_status: None,
     };
-    launcher
+    measured_launcher
+        .authority
         .bind_as_subprocess_executable(&mut request, LAUNCHER_EXECUTABLE_FD)
         .map_err(anyhow::Error::msg)?;
     bootstrap
@@ -516,7 +605,9 @@ pub fn prepare_launcher_subprocess_request(
             .bind_to_subprocess_request(&mut request, target)
             .map_err(anyhow::Error::msg)?;
     }
+    measured_launcher.require_request(&request, measured_launcher.digest())?;
     Ok(PreparedExternalCandidateLauncherRequest {
+        measured_launcher,
         request,
         bootstrap_digest,
         authority,
@@ -1205,7 +1296,7 @@ mod tests {
                 admitted_launch_capsule_hash: "8".repeat(64),
             },
         );
-        let prepared = prepare_launcher_subprocess_request(
+        let mut prepared = prepare_launcher_subprocess_request(
             &launcher,
             &runtime,
             &private,
@@ -1230,5 +1321,60 @@ mod tests {
         );
         assert_eq!(prepared.request.inherited_fd_mappings.len(), 5);
         assert_eq!(prepared.bootstrap_digest, launch_spec.digest().unwrap());
+        let expected_launcher_digest = lillux::sha256_hex(b"#!/bin/sh\nexit 0\n");
+        assert_eq!(
+            prepared.measured_launcher_digest(),
+            expected_launcher_digest
+        );
+        assert!(launcher.require_write_sealed_executable().is_err());
+        prepared
+            .measured_launcher
+            .authority
+            .require_write_sealed_executable()
+            .unwrap();
+        // Replacing the imported file cannot replace the captured executable.
+        std::fs::write(&launcher_path, b"changed source").unwrap();
+        prepared
+            .measured_launcher
+            .require_request(&prepared.request, &expected_launcher_digest)
+            .unwrap();
+        assert!(
+            prepared
+                .measured_launcher
+                .require_request(&prepared.request, &"f".repeat(64))
+                .is_err()
+        );
+        let original_cmd =
+            std::mem::replace(&mut prepared.request.cmd, "/different-launcher".to_owned());
+        assert!(
+            prepared
+                .measured_launcher
+                .require_request(&prepared.request, &expected_launcher_digest)
+                .is_err()
+        );
+        prepared.request.cmd = original_cmd;
+        prepared
+            .request
+            .inherited_fd_mappings
+            .retain(|mapping| mapping.target_descriptor() != LAUNCHER_EXECUTABLE_FD);
+        assert!(
+            prepared
+                .measured_launcher
+                .require_request(&prepared.request, &expected_launcher_digest)
+                .is_err()
+        );
+        let other =
+            lillux::sealed_executable_memfd(c"substituted-launcher", b"#!/bin/sh\nexit 0\n")
+                .unwrap();
+        other
+            .bind_as_subprocess_executable(&mut prepared.request, LAUNCHER_EXECUTABLE_FD)
+            .unwrap();
+        // Identical bytes in a second descriptor are not the same custody.
+        assert!(
+            prepared
+                .measured_launcher
+                .require_request(&prepared.request, &expected_launcher_digest)
+                .is_err()
+        );
     }
 }

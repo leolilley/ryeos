@@ -184,6 +184,7 @@ pub struct InheritedExternalCandidateLauncherClient {
 pub struct LiveInheritedExternalCandidateSupervisor {
     supervisor: SerializedExternalCandidateSupervisor<InheritedExternalCandidateLauncherClient>,
     launcher_process: lillux::RunningProcess,
+    measured_launcher: Option<crate::launcher::MeasuredLauncherExecutable>,
     process_identity: lillux::ExactProcessIdentity,
     occurrence_digest: String,
     authority: ryeos_state::PinnedStateAuthority,
@@ -211,8 +212,8 @@ impl ObservedLauncherReady {
     pub fn process_identity(&self) -> &lillux::ExactProcessIdentity {
         self.retained.process_identity()
     }
-    pub fn launcher_artifact_digest(&self) -> &str {
-        self.retained.launcher_artifact_digest()
+    pub fn retained_launcher_artifact_digest(&self) -> &str {
+        self.retained.retained_launcher_artifact_digest()
     }
     pub fn channel_challenge_digest(&self) -> &str {
         self.retained.channel_challenge_digest()
@@ -222,6 +223,22 @@ impl ObservedLauncherReady {
     }
     pub fn handshake_transcript_digest(&self) -> &str {
         self.retained.handshake_transcript_digest()
+    }
+}
+
+/// Measured descriptor custody joined to this live launcher's readiness.
+/// It does not assert applied exec, terminal settlement or qualification.
+pub struct ObservedMeasuredLauncherReady<'a> {
+    measured: &'a crate::launcher::MeasuredLauncherExecutable,
+    ready: ObservedLauncherReady,
+}
+
+impl ObservedMeasuredLauncherReady<'_> {
+    pub fn launcher_digest(&self) -> &str {
+        self.measured.digest()
+    }
+    pub fn ready(&self) -> &ObservedLauncherReady {
+        &self.ready
     }
 }
 
@@ -250,6 +267,21 @@ impl LiveInheritedExternalCandidateSupervisor {
             "launcher readiness observation lost its original live occurrence"
         );
         Ok(ObservedLauncherReady { retained: observed })
+    }
+
+    /// Join exact executable custody and readiness at the use site. A generic
+    /// caller-authored request has no measured-artifact authority.
+    pub fn observed_measured_launcher_ready(&self) -> Result<ObservedMeasuredLauncherReady<'_>> {
+        let measured = self
+            .measured_launcher
+            .as_ref()
+            .context("generic launcher request has no measured executable custody")?;
+        let ready = self.observed_launcher_ready()?;
+        ensure!(
+            ready.retained_launcher_artifact_digest() == measured.digest(),
+            "launcher readiness differs from its measured executable custody"
+        );
+        Ok(ObservedMeasuredLauncherReady { measured, ready })
     }
 
     pub fn binding(&self) -> &ExecutionChannelBinding {
@@ -545,9 +577,16 @@ pub fn launch_external_candidate_supervisor(
     // launcher exits before authentication and strand the supervisor until
     // its full execution deadline.
     drop(child_channel);
-    let pending = lillux::spawn_awaiting_attachment(request).map_err(|failure| {
-        anyhow::anyhow!("dedicated launcher spawn failed: {}", failure.stderr)
-    })?;
+    // Capture and measurement cannot renew the original launch window.
+    // Refuse at the final reversible cut before creating any held process.
+    ensure!(
+        !deadline.has_elapsed(),
+        "launcher original deadline expired before held spawn"
+    );
+    let pending =
+        lillux::spawn_awaiting_attachment_until(request, deadline).map_err(|failure| {
+            anyhow::anyhow!("dedicated launcher spawn failed: {}", failure.stderr)
+        })?;
     let process_identity = pending
         .exact_process_identity()
         .map_err(anyhow::Error::msg)?;
@@ -623,6 +662,7 @@ pub fn launch_external_candidate_supervisor(
     Ok(LiveInheritedExternalCandidateSupervisor {
         supervisor,
         launcher_process: running,
+        measured_launcher: None,
         process_identity,
         occurrence_digest,
         authority,
@@ -651,21 +691,26 @@ pub fn launch_prepared_external_candidate_supervisor(
     prepared_journal: PreparedGuestJournal,
     prepared: PreparedExternalCandidateLauncherRequest,
     supervisor_signing_key: lillux::crypto::SigningKey,
-    launcher_artifact_digest: &str,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<LiveInheritedExternalCandidateSupervisor> {
-    launch_external_candidate_supervisor(
+    prepared
+        .measured_launcher
+        .require_request(&prepared.request, prepared.measured_launcher.digest())?;
+    let measured_launcher = prepared.measured_launcher;
+    let mut live = launch_external_candidate_supervisor(
         prepared_journal,
         prepared.request,
         prepared.authority,
         prepared.bootstrap_digest,
         prepared.candidate_program,
         supervisor_signing_key,
-        launcher_artifact_digest,
+        measured_launcher.digest(),
         "RYEOS_EXTERNAL_CANDIDATE_CONTROL_FD",
         LAUNCHER_CONTROL_FD,
         deadline,
-    )
+    )?;
+    live.measured_launcher = Some(measured_launcher);
+    Ok(live)
 }
 
 impl InheritedExternalCandidateLauncherClient {

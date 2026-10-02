@@ -1539,6 +1539,26 @@ impl InheritedDescriptorAuthority {
         crate::secure_fs::require_effective_user_owned_executable(self.file())
     }
 
+    /// Require an owned executable whose contents cannot change after exact
+    /// measurement. This checks the retained file, never a diagnostic path.
+    pub fn require_write_sealed_executable(&self) -> anyhow::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            self.require_owned_executable()?;
+            let required =
+                libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+            let observed = unsafe { libc::fcntl(self.file().as_raw_fd(), libc::F_GET_SEALS) };
+            anyhow::ensure!(
+                observed >= 0 && observed & required == required,
+                "measured executable is not sealed against content mutation"
+            );
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("sealed executable measurement requires Linux")
+    }
+
     #[cfg(unix)]
     pub fn require_owned_regular(&self) -> anyhow::Result<crate::secure_fs::OpenFileIdentity> {
         crate::secure_fs::require_effective_user_owned_regular(self.file())

@@ -362,7 +362,7 @@ impl RetainedLauncherReady {
     pub fn process_identity(&self) -> &lillux::ExactProcessIdentity {
         &self.occurrence.process_identity
     }
-    pub fn launcher_artifact_digest(&self) -> &str {
+    pub fn retained_launcher_artifact_digest(&self) -> &str {
         &self.occurrence.launcher_artifact_digest
     }
     pub fn channel_challenge_digest(&self) -> &str {
@@ -3271,7 +3271,7 @@ mod tests {
         assert_eq!(observed.binding_digest(), binding.digest().unwrap());
         assert_eq!(observed.process_identity().target_pid, 100);
         assert_eq!(observed.process_identity().target_start_time_ticks, 200);
-        assert_eq!(observed.launcher_artifact_digest(), "7".repeat(64));
+        assert_eq!(observed.retained_launcher_artifact_digest(), "7".repeat(64));
         assert_eq!(observed.channel_challenge_digest(), "6".repeat(64));
         assert_eq!(observed.handshake_transcript_digest(), "5".repeat(64));
         assert_eq!(

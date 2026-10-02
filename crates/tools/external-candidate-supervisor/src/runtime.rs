@@ -776,9 +776,6 @@ impl LiveExternalCandidateSupervisor {
         let expiry_deadline = lillux::time::MonotonicDeadline::after(
             lillux::time::Duration::from_millis(u64::try_from(expiry_remaining_ms)?),
         );
-        let launcher_observation = launcher.regular_file_observation()?;
-        let launcher_artifact_digest =
-            launcher.digest_regular_file_stable_exact(&launcher_observation)?;
         let prepared = prepare_launcher_subprocess_request(
             &launcher,
             &candidate_runtime,
@@ -788,6 +785,10 @@ impl LiveExternalCandidateSupervisor {
             &spec,
             expiry_deadline.remaining().as_secs_f64(),
         )?;
+        ensure!(
+            prepared.measured_launcher_digest() == attached.bootstrap().launcher_artifact_hash,
+            "captured launcher differs from retained admitted bootstrap artifact"
+        );
         let reserved = PreparedGuestJournal::reserve(
             state.guest_directory.try_clone()?,
             &prepared.authority,
@@ -799,14 +800,13 @@ impl LiveExternalCandidateSupervisor {
             reserved.store_identity().clone(),
             &spec.digest()?,
             &prepared.bootstrap_digest,
-            &launcher_artifact_digest,
+            prepared.measured_launcher_digest(),
         )?;
         let guest_journal = reserved.initialize()?;
         let runtime = launch_prepared_external_candidate_supervisor(
             guest_journal,
             prepared,
             signing_key,
-            &launcher_artifact_digest,
             expiry_deadline,
         )?;
         let driver = ExternalCandidateTransportDriver::new(runtime, transport)?;
