@@ -37,7 +37,7 @@ def closed_environment(layout: dict[str, Path], supplied: dict[str, str]) -> dic
     if supplied.get("RYEOS_LOCAL_MODEL_PROFILE") != "qwen3-0.6b":
         raise RuntimeError("GNU compatibility worker requires exact Qwen3-0.6B profile")
     channel = supplied.get("RYEOS_SESSION_FD", "")
-    if not channel.isascii() or not channel.isdecimal() or str(int(channel)) != channel:
+    if not channel.isascii() or not channel.isdecimal() or str(int(channel)) != channel or not 0 <= int(channel) <= 2147483647:
         raise RuntimeError("persistent descriptor is not canonical")
     env = _environment(layout, layout["scratch"], profile="qwen3-0.6b", session_fd=int(channel))
     env.update(JIT="0", PROFILE="0")
@@ -79,7 +79,12 @@ def run_with_lifecycle(lifecycle, load_session, before_shutdown=None):
     try:
         with lifecycle.submission():
             session = load_session()
-        return session.main(lifecycle)
+        try:
+            return session.main(lifecycle)
+        except EOFError:
+            # D closes the request stream before authorized teardown. The
+            # finally block must still authorize and prove cooperative close.
+            return 0
     finally:
         try:
             if before_shutdown is not None:
@@ -116,7 +121,7 @@ def run_channel_product():
     from cleanup_channel import CleanupChannel, descriptor
     cleanup_fd = descriptor(os.environ.get("RYEOS_RESOURCE_CLEANUP_FD"))
     session_text = os.environ.get("RYEOS_SESSION_FD", "")
-    if not session_text.isascii() or not session_text.isdecimal() or str(int(session_text)) != session_text:
+    if not session_text.isascii() or not session_text.isdecimal() or str(int(session_text)) != session_text or not 0 <= int(session_text) <= 2147483647 or int(session_text) in (1, 2):
         raise RuntimeError("persistent descriptor is not canonical")
     channel = CleanupChannel(cleanup_fd, int(session_text))
     return run_product(observe=channel.observe, before_shutdown=channel.authorize_shutdown)

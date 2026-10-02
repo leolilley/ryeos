@@ -4,7 +4,7 @@ version: 1.0.0
 executor_id: '@subprocess'
 description: 'UNSIGNED INCOMPLETE DRAFT: exact GNU CUDA:PTX graph-free compatibility
   worker; no activation authority.'
-execution_protocol: protocol:local-inference/gnu_cuda_persistent_session_draft
+execution_protocol: protocol:local-inference/gnu_cuda_persistent_session
 external_product_slots:
 - id: python-gnu
   relationship_ref: config:ryeos-runtime/gnu-cuda-products-draft

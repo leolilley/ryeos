@@ -101,7 +101,7 @@ policy remain explicit unresolved fields; never sign/publish them as they stand.
 Partial archive activation prepares only existing musl/tinygrad/compiler/model
 inputs; GNU produced output and exact driver admission remain separate prerequisites.
 D supplies the signed trusted cleanup/session contract and typed device requirement.
-The separate gnu_cuda_persistent_session_draft protocol retains the same wire but
+The separate gnu_cuda_persistent_session protocol retains the same wire but
 requires trusted_process_group and its independently admitted resource cleanup
 digest. Integration must add the exact new protocol to Core worker.kind-schema's
 closed allowlist; neither a CPU protocol nor a filename alias supplies GPU authority.
@@ -125,3 +125,16 @@ truncates. Actual exact tokenizer packing remains UNOBSERVED. Synthetic fixture
 counts and older 4B numeric evidence do not supply GNU 0.6B numerical qualification.
 Actual GNU/native/compiler/driver/device qualification, weights, provider startup,
 signing, production, destination admission, cloud activation and paid M1 are UNRUN.
+
+## Offline source checks
+
+The complete private closure includes GPU-cleanup commit 02c304246 (runtime
+cherry-pick cc1bbf34f). Its 20 injected-driver controls exercise actual pinned
+tinygrad Python device/program/allocator/PTX/tensor paths. The runtime suite has
+21 controls including actual session.main -> Worker.execute -> QwenModel.generate
+-> real Tensor/PTX kernel path -> the same lifecycle shutdown. That joint test
+injects a synthetic forward and CPU device initialization: it executes no model
+weights/native library/compiler child and establishes no numerical accuracy.
+The lifecycle import resolves from this checkout's actual GNU source closure.
+16 bootstrap controls and five unchanged CPU inbox controls also pass. Parser
+and layout tests remain distinct from actual mapped-provider/ABI qualification.

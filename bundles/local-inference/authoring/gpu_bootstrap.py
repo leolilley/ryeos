@@ -207,6 +207,9 @@ def worker_launch(
     original scratch/channel owners. This pure assembly is not a launch grant.
     Cleanup descriptor mechanics and collision checks remain D/Lillux-owned.
     """
+    if (type(session_fd) is not int or not 0 <= session_fd <= 2147483647
+            or session_fd in (1, 2)):
+        raise ValueError("session descriptor is invalid")
     if (type(cleanup_fd) is not int or not 3 <= cleanup_fd <= 2147483647
             or cleanup_fd == session_fd):
         raise ValueError("cleanup descriptor overlaps session or is invalid")

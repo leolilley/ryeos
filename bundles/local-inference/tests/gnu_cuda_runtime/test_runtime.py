@@ -44,7 +44,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertNotIn(key, env)
 
     def test_bad_channel_backend_and_profile_refuse(self):
-        for key, value in [('DEV','CPU'), ('JIT','1'), ('PROFILE','1'), ('RYEOS_LOCAL_MODEL_PROFILE','qwen3-4b'), ('RYEOS_SESSION_FD','01'), ('RYEOS_SESSION_FD','2')]:
+        for key, value in [('DEV','CPU'), ('JIT','1'), ('PROFILE','1'), ('RYEOS_LOCAL_MODEL_PROFILE','qwen3-4b'), ('RYEOS_SESSION_FD','01'), ('RYEOS_SESSION_FD','2'), ('RYEOS_SESSION_FD','2147483648')]:
             with self.subTest(key=key, value=value), self.assertRaises((RuntimeError, ValueError)):
                 runtime.closed_environment(self.layout, dict(self.env, **{key:value}))
 

@@ -1,6 +1,6 @@
 # UNSIGNED DRAFT; exact independently admitted cleanup digest is unresolved.
 kind: protocol
-name: gnu_cuda_persistent_session_draft
+name: gnu_cuda_persistent_session
 category: local-inference
 abi_version: v1
 description: 'UNSIGNED DRAFT: same persistent wire with trusted product/group cleanup'
