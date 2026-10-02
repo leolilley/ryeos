@@ -184,6 +184,16 @@ pub fn start_scoped_producer(
     ) {
         let live = state.scoped_producer_authorities.get_exact(key)?;
         live.admitted_command_for_recipe(scenario_id, &source, &selected.recipe.executable_source)?;
+        live.mechanism_probe_source(scenario_id, &source)?
+            .require_original_root_for_preparation(
+                state,
+                key,
+                purpose,
+                scenario_id,
+                selected,
+                coordinate,
+                release_deadline,
+            )?;
         anyhow::bail!("trusted mechanism bootstrap preparation is unavailable");
     }
 

@@ -121,7 +121,12 @@ pub enum ProducerStdinSource {
     },
     /// No caller-supplied stdin. The trusted root must prepare a finite,
     /// fixed-descriptor bootstrap before the mechanism helper may launch.
-    TrustedMechanismBootstrap,
+    TrustedMechanismBootstrap {
+        /// Exact signed Tool source selection; resolution and input authority
+        /// must be captured by the original root, never by its callback.
+        probe_ref: String,
+        probe_parameters: BTreeMap<String, Value>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,8 +429,12 @@ impl ProductProducerRecipe {
         match (&self.executable_source, &self.stdin_source) {
             (
                 ProducerExecutableSource::AdmittedMechanismHelpers { .. },
-                ProducerStdinSource::TrustedMechanismBootstrap,
+                ProducerStdinSource::TrustedMechanismBootstrap { probe_ref, .. },
             ) => {
+                super::validate_canonical_unsuffixed_ref("mechanism probe", probe_ref)?;
+                if !probe_ref.starts_with("tool:") {
+                    bail!("mechanism probe must select an exact Tool source");
+                }
                 if !self.argv.is_empty()
                     || !matches!(self.cwd_source, ProducerCwdSource::VerifierPrivateWorkspace)
                     || !self.environment_sources.is_empty()
@@ -437,7 +446,7 @@ impl ProductProducerRecipe {
                 }
             }
             (ProducerExecutableSource::AdmittedMechanismHelpers { .. }, _)
-            | (_, ProducerStdinSource::TrustedMechanismBootstrap) => {
+            | (_, ProducerStdinSource::TrustedMechanismBootstrap { .. }) => {
                 bail!("producer mechanism helper and bootstrap input modes disagree");
             }
             _ => {}
@@ -521,7 +530,8 @@ mod tests {
             }
         });
         value["argv"] = json!([]);
-        value["stdin_source"] = json!({"kind":"trusted_mechanism_bootstrap"});
+        value["stdin_source"] = json!({"kind":"trusted_mechanism_bootstrap",
+            "probe_ref":"tool:ryeos/qualification/native-probe", "probe_parameters":{}});
         value["environment_sources"] = json!([]);
         value
     }
@@ -548,6 +558,31 @@ mod tests {
         let mut wrong_input = valid();
         wrong_input["stdin_source"] = json!({"kind":"trusted_mechanism_bootstrap"});
         assert!(ProductProducerRecipe::from_value(wrong_input).is_err());
+        for probe_ref in [
+            "tool:probe@next",
+            "config:ryeos/probe",
+            "/tmp/probe",
+            " tool:probe",
+        ] {
+            let mut changed = value.clone();
+            changed["stdin_source"]["probe_ref"] = json!(probe_ref);
+            assert!(ProductProducerRecipe::from_value(changed).is_err());
+        }
+        for missing in ["probe_ref", "probe_parameters"] {
+            let mut changed = value.clone();
+            changed["stdin_source"]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            assert!(ProductProducerRecipe::from_value(changed).is_err());
+            let mut changed = value.clone();
+            changed["stdin_source"][missing] = Value::Null;
+            assert!(ProductProducerRecipe::from_value(changed).is_err());
+        }
+        let mut oversized_parameters = value.clone();
+        oversized_parameters["stdin_source"]["probe_parameters"] =
+            json!({"payload": "x".repeat(16 * 1024)});
+        assert!(ProductProducerRecipe::from_value(oversized_parameters).is_err());
         for (field, supplied) in [
             ("fd", json!(44)),
             ("host_path", json!("/tmp/bootstrap")),

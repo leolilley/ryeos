@@ -3155,6 +3155,7 @@ fn admitted_remote_consumer_grant(
 /// materialization. The callback may select a scenario, never its command.
 fn promoted_scoped_producer_commands(
     state: &AppState,
+    key: &ryeos_app::scoped_producer_authority::ScopedProducerAuthorityKey,
     purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
     external: Option<&super::external_content::BoundExternalRealizations>,
 ) -> Result<(
@@ -3220,6 +3221,11 @@ fn promoted_scoped_producer_commands(
                 ScopedProducerScenarioCommands::MechanismHelpers {
                     supervisor: bind(supervisor)?,
                     launcher: bind(launcher)?,
+                    probe_source: Arc::new(
+                        ryeos_app::operator_external_content::product_qualification::capture_root_mechanism_probe_source(
+                            state, key, &purpose.execution_view()?, scenario_id, &selected,
+                        )?,
+                    ),
                 }
             }
         };
@@ -5436,6 +5442,7 @@ pub async fn run_and_wait(
             .map_err(|error| guard.fail_before_spawn(error))?;
         let (scenario_commands, requires_ingress_handoff) = promoted_scoped_producer_commands(
             &state,
+            &key,
             &grant.purpose,
             wait_bound_external.as_deref(),
         )
@@ -6878,6 +6885,7 @@ async fn dispatch_detached_bg_task(
             let command = bg_prepared_plan.admitted_command_for_scoped_producer()?;
             let (scenario_commands, requires_ingress_handoff) = promoted_scoped_producer_commands(
                 &bg_state,
+                &key,
                 purpose,
                 bg_external_realizations.as_deref(),
             )?;

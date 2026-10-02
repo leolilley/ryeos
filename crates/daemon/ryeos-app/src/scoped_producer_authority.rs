@@ -177,6 +177,9 @@ pub enum ScopedProducerScenarioCommands {
     MechanismHelpers {
         supervisor: IsolationAdmittedCommand,
         launcher: IsolationAdmittedCommand,
+        probe_source: Arc<
+            crate::operator_external_content::product_qualification::CapturedMechanismProbeSource,
+        >,
     },
 }
 
@@ -187,6 +190,7 @@ impl ScopedProducerScenarioCommands {
             Self::MechanismHelpers {
                 supervisor,
                 launcher,
+                ..
             } => vec![supervisor, launcher],
         }
     }
@@ -279,6 +283,9 @@ impl ScopedProducerLiveAuthority {
                 "scoped producer scenario command has invalid name"
             );
             source.validate()?;
+            if let ScopedProducerScenarioCommands::MechanismHelpers { probe_source, .. } = command {
+                probe_source.require_source_identity(scenario, source)?;
+            }
             ensure!(
                 command
                     .members()
@@ -334,10 +341,12 @@ impl ScopedProducerLiveAuthority {
                 let ScopedProducerScenarioCommands::MechanismHelpers {
                     supervisor: admitted_supervisor,
                     launcher: admitted_launcher,
+                    probe_source,
                 } = commands
                 else {
                     anyhow::bail!("mechanism recipe selected subject authority");
                 };
+                probe_source.require_source_identity(scenario, source)?;
                 ensure!(
                     admitted_supervisor.authority().identity().content_hash
                         == supervisor.executable_sha256
@@ -350,6 +359,30 @@ impl ScopedProducerLiveAuthority {
                 Ok(admitted_supervisor.clone())
             }
         }
+    }
+
+    /// Borrow source provenance only. This does not expose a bootstrap,
+    /// native program, input descriptors or a process launch permission.
+    pub fn mechanism_probe_source(
+        &self,
+        scenario: &str,
+        source: &ProductProducerRecipeSourceIdentity,
+    ) -> Result<
+        &crate::operator_external_content::product_qualification::CapturedMechanismProbeSource,
+    > {
+        let (retained_source, commands) = self
+            .scenario_commands
+            .get(scenario)
+            .context("mechanism scenario has no retained source authority")?;
+        ensure!(
+            retained_source == source,
+            "mechanism source differs from signed recipe"
+        );
+        let ScopedProducerScenarioCommands::MechanismHelpers { probe_source, .. } = commands else {
+            anyhow::bail!("mechanism source selected a subject command");
+        };
+        probe_source.require_source_identity(scenario, source)?;
+        Ok(probe_source)
     }
 
     pub fn workspace(&self) -> &lillux::PinnedDirectory {
@@ -577,6 +610,12 @@ impl ScopedProducerAuthorityRegistry {
     ) -> Result<ScopedProducerAuthorityRegistration> {
         // Recheck at insertion, not only when the key was constructed.
         let key = ScopedProducerAuthorityKey::new(key.root_thread_id, key.launch_owner)?;
+        for (_, commands) in authority.scenario_commands.values() {
+            if let ScopedProducerScenarioCommands::MechanismHelpers { probe_source, .. } = commands
+            {
+                probe_source.require_root_key(&key)?;
+            }
+        }
         let mut state = self
             .state
             .lock()
