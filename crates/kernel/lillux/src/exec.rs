@@ -1372,6 +1372,82 @@ impl InheritedDescriptorAuthority {
         crate::secure_fs::same_open_file_identity(self.file(), other.file())
     }
 
+    /// Require this descriptor to be a nonblocking FIFO writer distinct from
+    /// every supplied open descriptor. This is a bounded point observation;
+    /// callers retain the original deadline and must separately prove peer
+    /// lifetime and any protocol or process authority.
+    #[cfg(unix)]
+    pub fn require_distinct_nonblocking_pipe_writer(
+        &self,
+        companions: &[&InheritedDescriptorAuthority],
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        fn require_time(deadline: crate::time::MonotonicDeadline) -> Result<(), String> {
+            if deadline.remaining().is_zero() {
+                Err("pipe writer inspection exceeded its original deadline".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+
+        require_time(original_deadline)?;
+        let lease = retain_fork_sensitive_descriptors_until(original_deadline)
+            .map_err(|error| format!("acquire pipe writer inspection lease: {error}"))?;
+        let result = (|| {
+            require_time(original_deadline)?;
+            let identity = self
+                .file_identity()
+                .map_err(|error| format!("inspect pipe writer identity: {error}"))?;
+            require_time(original_deadline)?;
+            if identity.file_type() != libc::S_IFIFO as u32 {
+                return Err("pipe writer descriptor is not a FIFO".to_owned());
+            }
+
+            use std::os::fd::AsRawFd as _;
+            let flags = unsafe { libc::fcntl(self.file().as_raw_fd(), libc::F_GETFL) };
+            if flags < 0 {
+                return Err(format!(
+                    "inspect pipe writer status flags: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if flags & libc::O_ACCMODE != libc::O_WRONLY {
+                return Err("pipe writer descriptor is not write-only".to_owned());
+            }
+            if flags & libc::O_NONBLOCK == 0 {
+                return Err("pipe writer descriptor is not nonblocking".to_owned());
+            }
+            let required_flags = flags & (libc::O_ACCMODE | libc::O_NONBLOCK);
+            require_time(original_deadline)?;
+
+            for companion in companions {
+                require_time(original_deadline)?;
+                let same = self
+                    .same_file_identity(companion)
+                    .map_err(|error| format!("compare pipe writer descriptor identity: {error}"))?;
+                require_time(original_deadline)?;
+                if same {
+                    return Err("pipe writer aliases a companion descriptor".to_owned());
+                }
+            }
+            require_time(original_deadline)?;
+            let final_flags = unsafe { libc::fcntl(self.file().as_raw_fd(), libc::F_GETFL) };
+            if final_flags < 0 {
+                return Err(format!(
+                    "recheck pipe writer status flags: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if final_flags & (libc::O_ACCMODE | libc::O_NONBLOCK) != required_flags {
+                return Err("pipe writer mode changed during inspection".to_owned());
+            }
+            require_time(original_deadline)
+        })();
+        drop(lease);
+        require_time(original_deadline)?;
+        result
+    }
+
     #[cfg(unix)]
     pub fn directory_identity(&self) -> anyhow::Result<crate::secure_fs::PinnedDirectoryIdentity> {
         let lease = retain_fork_sensitive_descriptors();
@@ -1625,6 +1701,17 @@ impl InheritedDescriptorAuthority {
     #[cfg(unix)]
     pub(crate) fn file(&self) -> &std::fs::File {
         &self.handle
+    }
+}
+
+#[cfg(not(unix))]
+impl InheritedDescriptorAuthority {
+    pub fn require_distinct_nonblocking_pipe_writer(
+        &self,
+        _companions: &[&InheritedDescriptorAuthority],
+        _original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        Err("inherited pipe inspection is unavailable on this platform".to_owned())
     }
 }
 
@@ -1915,6 +2002,101 @@ mod inherited_directory_traversal_tests {
             .unwrap();
         assert!(
             root.open_directory_descendant(Path::new("link/home"))
+                .is_err()
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod inherited_pipe_writer_tests {
+    use super::*;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fn fifo(path: &std::path::Path) {
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    }
+
+    fn authority(file: std::fs::File) -> InheritedDescriptorAuthority {
+        let lease = retain_fork_sensitive_descriptors();
+        InheritedDescriptorAuthority::from_owned_file(file, &lease).unwrap()
+    }
+
+    fn deadline() -> crate::time::MonotonicDeadline {
+        crate::time::MonotonicDeadline::after(Duration::from_secs(2))
+    }
+
+    #[test]
+    fn nonblocking_fifo_writer_requires_unique_inode_from_every_companion() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("writer");
+        fifo(&path);
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        let reader = authority(reader);
+        let writer = authority(writer);
+        let regular = authority(std::fs::File::open(directory.path()).unwrap());
+
+        writer
+            .require_distinct_nonblocking_pipe_writer(&[&regular], deadline())
+            .unwrap();
+        assert!(
+            writer
+                .require_distinct_nonblocking_pipe_writer(&[&reader], deadline())
+                .is_err()
+        );
+        let duplicate = writer.duplicate_at_or_above(32).unwrap();
+        assert!(
+            writer
+                .require_distinct_nonblocking_pipe_writer(&[&duplicate], deadline())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pipe_writer_inspection_rejects_non_fifo_read_only_blocking_and_expired() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("writer");
+        fifo(&path);
+        let reader = authority(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap(),
+        );
+        let blocking_writer = authority(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_CLOEXEC)
+                .open(&path)
+                .unwrap(),
+        );
+        let regular = authority(std::fs::File::open(directory.path()).unwrap());
+
+        assert!(reader.require_distinct_nonblocking_pipe_writer(&[], deadline()).is_err());
+        assert!(
+            blocking_writer
+                .require_distinct_nonblocking_pipe_writer(&[], deadline())
+                .is_err()
+        );
+        assert!(regular.require_distinct_nonblocking_pipe_writer(&[], deadline()).is_err());
+        assert!(
+            blocking_writer
+                .require_distinct_nonblocking_pipe_writer(
+                    &[],
+                    crate::time::MonotonicDeadline::after(Duration::ZERO),
+                )
                 .is_err()
         );
     }
