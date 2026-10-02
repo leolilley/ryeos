@@ -36,6 +36,9 @@ pub struct ExternalCandidateRuntimeMountSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalCandidateLauncherSpec {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_limits:
+        Option<ryeos_state::external_execution::admission::ExternalNativeProcessLimits>,
     pub schema: u32,
     pub binding: ExecutionChannelBinding,
     pub candidate_program: AdmittedExternalExecutionProgram,
@@ -66,6 +69,7 @@ where
 }
 
 struct LauncherCommandFields {
+    target_limits: Option<ryeos_state::external_execution::admission::ExternalNativeProcessLimits>,
     executable: String,
     argv0: String,
     arguments: Vec<String>,
@@ -82,6 +86,7 @@ fn session_command_fields(
     recipe: &ExternalCandidateRuntimeRecipe,
 ) -> Result<LauncherCommandFields> {
     Ok(LauncherCommandFields {
+        target_limits: None,
         executable: recipe.namespace_executable()?,
         argv0: recipe.argv0.clone(),
         arguments: recipe.arguments.clone(),
@@ -116,6 +121,7 @@ fn command_fields(program: &AdmittedExternalExecutionProgram) -> Result<Launcher
             // This finite mechanism is required, not inferred from the controller.
             let ryeos_state::external_execution::admission::ExternalDirectNativeRequirements::LinuxIsolatedReadOnly { .. } = &projection.native;
             LauncherCommandFields {
+                target_limits: projection.target_limits,
                 executable: program.namespace_executable()?,
                 argv0: projection.argv0.clone(),
                 arguments: projection.arguments.clone(),
@@ -186,7 +192,7 @@ impl ExternalCandidateLauncherSpec {
         }
         let command = command_fields(program)?;
         let spec = Self {
-            schema: 3,
+            schema: 4,
             binding,
             candidate_program: program.clone(),
             guest_inputs: guest_inputs.clone(),
@@ -210,13 +216,14 @@ impl ExternalCandidateLauncherSpec {
             contain_process_group: command.contain_process_group,
             nested_sandbox: command.nested_sandbox,
             stdin: command.stdin,
+            target_limits: command.target_limits,
         };
         spec.validate()?;
         Ok(spec)
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 3, "unsupported external launcher schema");
+        ensure!(self.schema == 4, "unsupported external launcher schema");
         self.binding.validate()?;
         ensure!(
             self.binding.execution_mode == self.candidate_program.execution_mode(),
@@ -268,7 +275,8 @@ impl ExternalCandidateLauncherSpec {
                 && self.proc_filesystem == command.proc_filesystem
                 && self.contain_process_group == command.contain_process_group
                 && self.nested_sandbox == command.nested_sandbox
-                && self.stdin == command.stdin,
+                && self.stdin == command.stdin
+                && self.target_limits == command.target_limits,
             "external launcher specification changed its admitted command projection"
         );
         ensure!(
@@ -757,7 +765,8 @@ mod tests {
 
     fn spec() -> ExternalCandidateLauncherSpec {
         ExternalCandidateLauncherSpec {
-            schema: 3,
+            target_limits: None,
+            schema: 4,
             binding: binding(),
             candidate_program: program().into(),
             guest_inputs: guest_inputs(),
@@ -806,7 +815,7 @@ mod tests {
             "projection":{"argv0":"/ryeos/realizations/runtime/bin/evaluate","arguments":["--check"],"cwd":"/workspace",
                 "environment":inputs.environment,"stdin":ExternalDirectSealedInput::from_bytes(b"one shot\n").unwrap(),
                 "endpoint_binding_id":"farm-direct","endpoint_binding_digest":binding.execution_binding_hash,
-                "execution_mode":binding.execution_mode,"timeout_seconds":3600,
+                "execution_mode":binding.execution_mode,"timeout_seconds":3600,"target_limits":null,
                 "native":{"kind":"linux_isolated_read_only","required_arch":"x86_64"}},
             "guest_input_identity":inputs.identity_digest().unwrap()
         })).unwrap();
@@ -820,6 +829,22 @@ mod tests {
             b"one shot\n"
         );
         exact.validate().unwrap();
+        let mut unsupported_schema = exact.clone();
+        unsupported_schema.schema = 3;
+        assert!(unsupported_schema.validate().is_err());
+        let mut changed_limits = exact.clone();
+        changed_limits.target_limits = Some(
+            ryeos_state::external_execution::admission::ExternalNativeProcessLimits {
+                max_open_files: Some(64),
+                max_address_space_bytes: None,
+                max_cpu_seconds: Some(3),
+                max_processes: None,
+                deny_process_creation: true,
+            },
+        );
+        // An independently changed launcher cannot add restrictions absent
+        // from the exact admitted program.
+        assert!(changed_limits.validate().is_err());
         // A structurally exact capsule is not evidence that this guest can
         // execute its architecture. Native validation is independently required
         // before the held launcher can produce Ready.

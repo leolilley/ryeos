@@ -109,7 +109,7 @@ pub(crate) fn retained_external_direct_endpoint(
     plan.validate_endpoint_for_sealing()?;
     ensure!(
         plan.subprocess_limits.is_none(),
-        "external direct projection cannot enforce authored native subprocess limits"
+        "external direct native subprocess limits require admitted current guest support before provider contact"
     );
     ensure!(
         matches!(
@@ -327,8 +327,12 @@ pub(super) fn validate_external_direct_plan(
     plan.validate_endpoint_for_sealing()?;
     ensure!(
         plan.subprocess_limits.is_none(),
-        "external direct projection cannot enforce authored native subprocess limits"
+        "external direct native subprocess limits require admitted current guest support before provider contact"
     );
+    if let Some(limits) = plan.subprocess_limits {
+        limits.validate()?;
+    }
+
     ensure!(
         matches!(
             plan.endpoint_requirement,
@@ -586,7 +590,32 @@ fn compile_external_direct_program_parts(
         .map(|value| value.materialize().map_err(anyhow::Error::msg))
         .transpose()?
         .unwrap_or_default();
+    let requested = plan.subprocess_limits;
+    let target_limits = requested
+        .filter(|limits| {
+            limits.max_open_files.is_some()
+                || limits.max_address_space_bytes.is_some()
+                || limits.max_cpu_seconds.is_some()
+                || limits.max_processes.is_some()
+                || limits.deny_process_creation
+        })
+        .map(
+            |limits| ryeos_state::external_execution::admission::ExternalNativeProcessLimits {
+                max_open_files: limits.max_open_files,
+                max_address_space_bytes: limits.max_address_space_bytes,
+                max_cpu_seconds: limits.max_cpu_seconds,
+                max_processes: limits.max_processes,
+                deny_process_creation: limits.deny_process_creation,
+            },
+        );
+    let stdout_max_bytes = requested
+        .and_then(|limits| limits.max_stdout_bytes)
+        .map_or(stdout_max_bytes, |limit| stdout_max_bytes.min(limit));
+    let stderr_max_bytes = requested
+        .and_then(|limits| limits.max_stderr_bytes)
+        .map_or(stderr_max_bytes, |limit| stderr_max_bytes.min(limit));
     let projection = ExternalDirectCommandProjection {
+        target_limits,
         argv0: AdmittedExternalDirectProgram::guest_executable_for_command(match closure {
             AdmittedExecutionClosure::DirectItemExecutor { command, .. } => command,
             _ => bail!("external direct projection lost its ordinary closure"),

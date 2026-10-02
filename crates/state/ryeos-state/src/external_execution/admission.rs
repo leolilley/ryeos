@@ -1070,6 +1070,59 @@ impl ExternalDirectNativeRequirements {
     }
 }
 
+/// Provider-neutral restrictions for the exact guest target. CPU is per
+/// process and address space is virtual memory, not aggregate allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalNativeProcessLimits {
+    pub max_open_files: Option<u64>,
+    pub max_address_space_bytes: Option<u64>,
+    pub max_cpu_seconds: Option<u64>,
+    /// Real-UID account limit; not a private process-tree counter.
+    pub max_processes: Option<u64>,
+    pub deny_process_creation: bool,
+}
+
+impl ExternalNativeProcessLimits {
+    pub fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("max_open_files", self.max_open_files),
+            ("max_address_space_bytes", self.max_address_space_bytes),
+            ("max_cpu_seconds", self.max_cpu_seconds),
+            ("max_processes", self.max_processes),
+        ] {
+            ensure!(
+                value != Some(0) && value != Some(u64::MAX),
+                "{name} must be positive and finite"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn to_native(self) -> Result<lillux::SubprocessLimits> {
+        self.validate()?;
+        Ok(lillux::SubprocessLimits {
+            max_open_files: self.max_open_files,
+            max_address_space_bytes: self.max_address_space_bytes,
+            max_cpu_seconds: self.max_cpu_seconds,
+            max_processes: self.max_processes,
+            deny_process_creation: self.deny_process_creation,
+            max_stdout_bytes: None,
+            max_stderr_bytes: None,
+        })
+    }
+}
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 pub const MAX_EXTERNAL_DIRECT_TIMEOUT_SECONDS: u64 = 3_600;
 
 /// Compiler output, not a second user-authored recipe. Only the trusted app
@@ -1077,6 +1130,8 @@ pub const MAX_EXTERNAL_DIRECT_TIMEOUT_SECONDS: u64 = 3_600;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalDirectCommandProjection {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_limits: Option<ExternalNativeProcessLimits>,
     pub argv0: String,
     pub arguments: Vec<String>,
     pub cwd: String,
@@ -1091,6 +1146,9 @@ pub struct ExternalDirectCommandProjection {
 
 impl ExternalDirectCommandProjection {
     fn validate(&self) -> Result<()> {
+        if let Some(limits) = self.target_limits {
+            limits.validate()?;
+        }
         ensure!(
             !self.argv0.is_empty()
                 && self.argv0.len() <= 4096
@@ -1380,7 +1438,7 @@ impl AdmittedExternalDirectProgram {
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         canonical_value_digest(
-            &serde_json::json!({"domain":"ryeos.external-direct-program.v1","program":self}),
+            &serde_json::json!({"domain":"ryeos.external-direct-program.v2","program":self}),
         )
     }
 }
@@ -1781,6 +1839,35 @@ pub mod test_support {
 mod tests {
     use super::*;
 
+    #[test]
+    fn direct_target_limits_are_closed_finite_and_required_nullable() {
+        let (_, _, projection, _) = direct_fixture();
+        let mut wire = serde_json::to_value(&projection).unwrap();
+        wire.as_object_mut().unwrap().remove("target_limits");
+        assert!(serde_json::from_value::<ExternalDirectCommandProjection>(wire).is_err());
+        let limits = ExternalNativeProcessLimits {
+            max_open_files: Some(64),
+            max_address_space_bytes: Some(134_217_728),
+            max_cpu_seconds: Some(3),
+            max_processes: None,
+            deny_process_creation: true,
+        };
+        limits.validate().unwrap();
+        for invalid in [0, u64::MAX] {
+            assert!(
+                ExternalNativeProcessLimits {
+                    max_cpu_seconds: Some(invalid),
+                    ..limits
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        let mut wire = serde_json::to_value(limits).unwrap();
+        wire["max_stdout_bytes"] = serde_json::json!(1024);
+        assert!(serde_json::from_value::<ExternalNativeProcessLimits>(wire).is_err());
+    }
+
     fn direct_fixture() -> (
         crate::objects::AdmittedExecutionClosure,
         crate::objects::AdmittedLaunchArtifactIdentity,
@@ -1860,6 +1947,7 @@ mod tests {
             environment: BTreeMap::new(),
         };
         let projection = ExternalDirectCommandProjection {
+            target_limits: None,
             argv0: "/ryeos/realizations/runtime/bin/evaluate".into(),
             arguments: vec!["--check".into()],
             cwd: "/workspace".into(),

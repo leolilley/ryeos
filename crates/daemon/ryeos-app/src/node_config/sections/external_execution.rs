@@ -1574,6 +1574,7 @@ mod workload_binding_tests {
         let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
         let retained = binding.retained_generation().unwrap();
         let projection = ExternalDirectCommandProjection {
+            target_limits: None,
             argv0: "/runtime/bin/check".into(),
             arguments: Vec::new(),
             cwd: "/workspace".into(),
