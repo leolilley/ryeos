@@ -25,7 +25,7 @@ session_resources:
 source:
   root: lib/local-tinygrad-gnu
   entry: bootstrap.py
-  digest: 067cc5f85ff41e3b0c4469b909247b29398b042101846d745f50ce617de4b864
+  digest: 9a055e820d232a4293d8b9d364cf11dd79bbd09a6db9befe6ab36c4f9b2897d1
 external_content:
 - id: runtime
   kind: tree
