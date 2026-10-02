@@ -824,7 +824,11 @@ impl PersistentSessionPooledStart {
             retained.original_funding = Some(funding);
             state
                 .state_store
-                .reserve_process_resource_launch_with_scratch(original, &scratch)?;
+                .reserve_process_resource_launch_with_scratch_until(
+                    original,
+                    &scratch,
+                    budget.contact_expiry(),
+                )?;
             retained
                 .original_funding
                 .as_mut()
