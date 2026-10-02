@@ -9,7 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -736,6 +736,8 @@ struct SessionGroup {
 /// public constructor, pool back-reference or alternate registry exists.
 pub struct PersistentSessionPooledStart {
     retained: Mutex<PooledStartRetention>,
+    // SAME actual callback owner; readable before selected retention locking.
+    original_callback_budget: OnceLock<crate::handler_context::OriginalExecutionBudget>,
     callback_in_flight: AtomicBool,
 }
 
@@ -760,7 +762,6 @@ struct PooledStartRetention {
     // EXISTING start slot, before first possible RuntimeDb/ledger write.
     trusted_inputs: Option<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
     original_funding: Option<crate::accounting_db::precontact::OriginalFundingOwner>,
-    original_callback_budget: Option<crate::handler_context::OriginalExecutionBudget>,
     original_contact_attempted: bool,
     original_spawn_permit:
         Option<crate::runtime_db::process_resource_launch::TrustedResourceSpawnPermit>,
@@ -778,10 +779,10 @@ impl PersistentSessionPooledStart {
                 admission_refused: false,
                 trusted_inputs: None,
                 original_funding: None,
-                original_callback_budget: None,
                 original_contact_attempted: false,
                 original_spawn_permit: None,
             }),
+            original_callback_budget: OnceLock::new(),
             callback_in_flight: AtomicBool::new(true),
         }
     }
@@ -796,13 +797,16 @@ impl PersistentSessionPooledStart {
         let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
         if retained.phase != PooledStartPhase::Preparing
             || retained.admission_refused
-            || retained.original_callback_budget.is_some()
+            || self.original_callback_budget.get().is_some()
         {
             retained.admission_refused = true;
             bail!("original pooled callback budget cannot be replaced or replayed");
         }
         // Keep the supplied original even if subsequent validation refuses.
-        retained.original_callback_budget = Some(budget.clone());
+        if self.original_callback_budget.set(budget.clone()).is_err() {
+            retained.admission_refused = true;
+            bail!("original pooled callback budget cannot replace its one-use retained owner");
+        }
         if budget.precontact_binding().scope != allocation_scope
             || budget.contact_expiry().has_elapsed()
         {
@@ -837,9 +841,9 @@ impl PersistentSessionPooledStart {
             bail!("original pooled owner no longer admits funding preparation");
         }
         let result = (|| {
-            let retained_budget = retained
+            let retained_budget = self
                 .original_callback_budget
-                .as_ref()
+                .get()
                 .context("original trusted funding lacks retained callback budget")?;
             let original_expiry = retained_budget.contact_expiry();
             let callback = retained_budget.precontact_binding();
@@ -877,6 +881,35 @@ impl PersistentSessionPooledStart {
         result
     }
 
+    /// Bound only BORROWED contact/attachment acquisition by the SAME budget.
+    /// Owned lifeline deposits keep their existing retention on every refusal.
+    fn lock_original_contact_retention(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, PooledStartRetention>> {
+        let deadline = self
+            .original_callback_budget
+            .get()
+            .context("original contact retention lacks actual callback budget")?
+            .contact_expiry();
+        loop {
+            if deadline.has_elapsed() {
+                bail!("original callback expired while acquiring contact retention");
+            }
+            let acquired = match self.retained.try_lock() {
+                Ok(retained) => Some(retained),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            };
+            if let Some(retained) = acquired {
+                if deadline.has_elapsed() {
+                    bail!("original callback expired after acquiring contact retention");
+                }
+                return Ok(retained);
+            }
+            lillux::time::sleep(Duration::from_millis(1).min(deadline.remaining()));
+        }
+    }
+
     /// Consume the same funded owner and journaled Runtime intent once.
     /// The actual permit remains rooted here on every later refusal.
     pub(crate) fn take_original_funded_contact(
@@ -890,7 +923,7 @@ impl PersistentSessionPooledStart {
         lillux::time::OriginalNamespaceOccupancyHandoff,
         crate::runtime_db::ProcessResourceReservationRecord,
     )> {
-        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        let mut retained = self.lock_original_contact_retention()?;
         if retained.phase != PooledStartPhase::Preparing
             || retained.admission_refused
             || retained.original_contact_attempted
@@ -938,7 +971,7 @@ impl PersistentSessionPooledStart {
         &self,
         held: &ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
     ) -> Result<crate::process::ExecutionProcessIdentity> {
-        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        let mut retained = self.lock_original_contact_retention()?;
         if retained.phase != PooledStartPhase::Preparing
             || retained.admission_refused
             || !retained.original_contact_attempted
@@ -4623,6 +4656,31 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actual_callback_budget_expires_under_held_contact_retention_lock_without_renewal() {
+        let root = tempfile::tempdir().unwrap();
+        let fixture =
+            crate::handler_context::budget_test_support::build(root.path(), Duration::from_secs(1))
+                .unwrap();
+        let original = fixture.context.original_execution_budget().unwrap();
+        let start = PersistentSessionPooledStart::new();
+        start
+            .retain_original_callback_budget(original, original.precontact_binding().scope)
+            .unwrap();
+        let held = start.retained.lock().unwrap();
+        assert!(start.lock_original_contact_retention().is_err());
+        assert!(original.contact_expiry().has_elapsed());
+        assert_eq!(start.original_callback_budget.get().unwrap(), original);
+        drop(held);
+        // Releasing actual contention cannot renew the expired original.
+        assert!(start.lock_original_contact_retention().is_err());
+        assert!(
+            start
+                .retain_original_callback_budget(original, original.precontact_binding().scope)
+                .is_err()
+        );
+    }
 
     #[test]
     fn absolute_contact_deadline_caps_existing_signed_io_deadline() {
