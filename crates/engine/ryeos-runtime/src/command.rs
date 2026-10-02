@@ -325,6 +325,16 @@ pub struct CommandControlFlag {
     pub aliases: Vec<String>,
 }
 
+/// A static authoring observation is distinct from complete execution validation.
+/// It never selects a product or supplies executable admission authority.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationScope {
+    #[default]
+    CompleteExecution,
+    SourceObservation,
+}
+
 /// Generic vocabulary for where a control flag routes — a request field or CLI
 /// display state. A closed set the dispatcher knows how to apply; command data
 /// chooses which flag maps to which, but never invents new destinations (the
@@ -332,6 +342,8 @@ pub struct CommandControlFlag {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlFlagBinding {
+    /// Presence → a non-executable source observation beneath validate-only.
+    SourceObservation,
     /// Presence → request `launch_mode = "accepted"`.
     LaunchModeAccepted,
     /// Presence → force the live stream on.

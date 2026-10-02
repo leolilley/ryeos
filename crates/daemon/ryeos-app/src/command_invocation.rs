@@ -65,6 +65,7 @@ pub enum CommandProjectPolicyError {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CommandInvocationControls {
+    pub validation_scope: ryeos_runtime::command::ValidationScope,
     pub async_launch: bool,
     pub pin_project_at_admission: bool,
     pub pin_current_head_at_admission: bool,
@@ -223,6 +224,22 @@ pub fn compile_command_invocation(
         (parameters, path)
     };
     // The signed descriptor is mandatory, not merely another argv default.
+    if controls.validation_scope == ryeos_runtime::command::ValidationScope::SourceObservation
+        && (!validate_only
+            || project_path.is_some()
+            || controls.async_launch
+            || controls.stream == Some(true)
+            || controls.call_method.is_some()
+            || controls.call_args.is_some()
+            || controls.state_root.is_some()
+            || !controls.ref_bindings.is_empty()
+            || controls.product_selections.is_some())
+    {
+        return Err(Invalid(
+            "source observation requires projectless buffered validation without execution controls"
+                .to_owned(),
+        ));
+    }
     controls.pin_project_at_admission |=
         command.project.as_ref().is_some_and(|p| p.pin_at_admission);
     for (requested, flag) in [
@@ -517,6 +534,10 @@ pub fn strip_declared_control_flags(
             continue;
         }
         match binding {
+            ControlFlagBinding::SourceObservation => {
+                controls.validation_scope =
+                    ryeos_runtime::command::ValidationScope::SourceObservation;
+            }
             ControlFlagBinding::LaunchModeAccepted => controls.async_launch = true,
             ControlFlagBinding::PinProjectAtAdmission => controls.pin_project_at_admission = true,
             ControlFlagBinding::PinCurrentHeadAtAdmission => {
@@ -829,6 +850,78 @@ mod tests {
             source_file: PathBuf::new(),
             provenance: Default::default(),
         }
+    }
+
+    #[test]
+    fn source_observation_is_typed_validate_control_not_worker_input() {
+        let mut definition = command();
+        definition.dispatch = CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg: "item_ref".into(),
+            validate_only: true,
+            availability: Default::default(),
+        };
+        let project = definition.project.as_mut().unwrap();
+        project.request_project_path = true;
+        project.bind_parameter = None;
+        definition.control_flags.push(CommandControlFlag {
+            flag: "source-only".into(),
+            help: String::new(),
+            binding: ControlFlagBinding::SourceObservation,
+            ref_binding_name: None,
+            aliases: vec![],
+        });
+        let arguments = vec![
+            "worker:example/author".into(),
+            "--source-only".into(),
+            "--no-project".into(),
+        ];
+        let observed = compile_command_invocation(
+            &definition,
+            &arguments,
+            &Value::Null,
+            None,
+            None,
+            |_| unreachable!(),
+        )
+        .unwrap();
+        assert!(observed.validate_only);
+        assert_eq!(
+            observed.controls.validation_scope,
+            ryeos_runtime::command::ValidationScope::SourceObservation
+        );
+        assert_eq!(observed.parameters, serde_json::json!({}));
+        assert!(observed.project_path.is_none());
+
+        let ordinary = compile_command_invocation(
+            &definition,
+            &["worker:example/author".into()],
+            &Value::Null,
+            None,
+            None,
+            |_| unreachable!(),
+        )
+        .unwrap();
+        assert_eq!(
+            ordinary.controls.validation_scope,
+            ryeos_runtime::command::ValidationScope::CompleteExecution
+        );
+
+        if let CommandDispatch::DirectExecuteItemRef { validate_only, .. } =
+            &mut definition.dispatch
+        {
+            *validate_only = false;
+        }
+        assert!(
+            compile_command_invocation(
+                &definition,
+                &arguments,
+                &Value::Null,
+                None,
+                None,
+                |_| unreachable!(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
