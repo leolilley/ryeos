@@ -201,6 +201,23 @@ pub struct VerifiedTrustedPooledSessionInputs {
     selected: crate::execution_resources::SelectedExecutionResources,
     cleanup_contract_digest: String,
     original_isolation: Option<OriginalIsolationExpectation>,
+    original_product_inputs: Option<OriginalProductInputs>,
+}
+
+// Retained static product inputs only. No materialization, current assignment,
+// startup UUID, driver-close or admission proof is constructed here. The SAME
+// actual materializations stay rooted by PreparedTrustedSessionCustody.
+struct OriginalProductInputs {
+    gnu: OriginalSelectedProductInputs,
+    driver: OriginalSelectedProductInputs,
+    devices: std::sync::Arc<lillux::CharacterDeviceSet>,
+}
+
+struct OriginalSelectedProductInputs {
+    selection:
+        ryeos_state::external_content::products::composition::ResolvedExternalProductSelection,
+    witness: ryeos_state::external_content::products::publication::VerifiedProductWitness,
+    manifest: ryeos_state::objects::ExternalLargeContentManifestObject,
 }
 
 /// Selected original expectation retained inside the existing input owner.
@@ -299,6 +316,7 @@ impl VerifiedTrustedPooledSessionInputs {
             selected,
             cleanup_contract_digest: product.clone(),
             original_isolation: None,
+            original_product_inputs: None,
         };
         inputs.require_same_state(state)?;
         Ok(inputs)
@@ -329,7 +347,20 @@ impl VerifiedTrustedPooledSessionInputs {
                 .original_isolation
                 .as_ref()
                 .expect("snapshot retained before checks");
-            verify_original_isolation_expectation(original)
+            let verified = verify_original_isolation_expectation(original)?;
+            let products = self.authenticate_original_product_inputs(state)?;
+            // Root the authenticated static inputs before any late refusal.
+            self.original_product_inputs = Some(products);
+            self.require_same_state_incarnation(state)?;
+            let original = self
+                .original_isolation
+                .as_ref()
+                .expect("original snapshot retained");
+            anyhow::ensure!(
+                verify_original_isolation_expectation(original)? == verified,
+                "original product preparation changed protected generation identity"
+            );
+            Ok(verified)
         })();
         let original = self
             .original_isolation
@@ -359,7 +390,9 @@ impl VerifiedTrustedPooledSessionInputs {
             .original_isolation
             .as_ref()
             .context("selected original funding lacks isolation expectation")?;
-        require_current_original_isolation_expectation(original, state)
+        require_current_original_isolation_expectation(original, state)?;
+        self.require_retained_original_product_inputs()?;
+        require_original_isolation_unexpired(original)
     }
 
     /// Borrow the independently selected original expectation after its current
@@ -393,6 +426,8 @@ impl VerifiedTrustedPooledSessionInputs {
         self.require_same_state_incarnation(state)?;
         if let Some(original) = self.original_isolation.as_ref() {
             require_current_original_isolation_expectation(original, state)?;
+            self.require_retained_original_product_inputs()?;
+            require_original_isolation_unexpired(original)?;
         }
         Ok(())
     }
@@ -412,6 +447,164 @@ impl VerifiedTrustedPooledSessionInputs {
         );
         Ok(())
     }
+
+    fn authenticate_original_product_inputs(
+        &self,
+        state: &crate::state::AppState,
+    ) -> Result<OriginalProductInputs> {
+        self.capsule.validate()?;
+        let original = self
+            .original_isolation
+            .as_ref()
+            .context("original product preparation lacks original expectation")?;
+        require_original_isolation_unexpired(original)?;
+        self.require_same_state_incarnation(state)?;
+        let selections = self
+            .capsule
+            .retained_product_selections
+            .as_ref()
+            .context("original product preparation lacks sealed product selections")?;
+        let devices = self
+            .selected
+            .devices()
+            .context("original product preparation lacks actual selected character-device owner")?;
+        let limits = state
+            .node_policy
+            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .closure_limits()?;
+        let guard = self.state_authority.acquire_shared_guard()?;
+        self.state_authority.ensure_guard(&guard)?;
+        let gnu = authenticate_original_selected_product(
+            state,
+            &self.state_authority,
+            &guard,
+            limits,
+            selections
+                .get("python-gnu")
+                .context("original GNU product selection missing")?,
+        )?;
+        require_original_isolation_unexpired(original)?;
+        let driver = authenticate_original_selected_product(
+            state,
+            &self.state_authority,
+            &guard,
+            limits,
+            selections
+                .get("driver")
+                .context("original driver product selection missing")?,
+        )?;
+        require_original_isolation_unexpired(original)?;
+        self.require_same_state_incarnation(state)?;
+        Ok(OriginalProductInputs {
+            gnu,
+            driver,
+            devices: std::sync::Arc::clone(devices),
+        })
+    }
+
+    fn require_retained_original_product_inputs(&self) -> Result<()> {
+        let retained = self
+            .original_product_inputs
+            .as_ref()
+            .context("original product inputs remain unprepared")?;
+        let devices = self
+            .selected
+            .devices()
+            .context("original product inputs lost selected device owner")?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(&retained.devices, devices),
+            "original product inputs differ from actual selected device owner"
+        );
+        let selections = self
+            .capsule
+            .retained_product_selections
+            .as_ref()
+            .context("original product inputs lost sealed selections")?;
+        for (id, product) in [("python-gnu", &retained.gnu), ("driver", &retained.driver)] {
+            anyhow::ensure!(
+                selections.get(id) == Some(&product.selection),
+                "original product inputs differ from sealed selection"
+            );
+            crate::operator_external_content::product_composition::verify_witness_projection(
+                &product.selection,
+                &product.witness,
+            )?;
+            // Immutable private factory output already passed the canonical
+            // product bounds verifier under the original pinned guard.
+            product.manifest.validate()?;
+        }
+        Ok(())
+    }
+}
+
+fn authenticate_original_selected_product(
+    state: &crate::state::AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    selection: &ryeos_state::external_content::products::composition::ResolvedExternalProductSelection,
+) -> Result<OriginalSelectedProductInputs> {
+    use crate::operator_external_content::{
+        product_composition, product_qualification, product_receipt,
+    };
+    selection.validate()?;
+    // Principal and source are the already-admitted capsule's selection, not
+    // caller-provided manifest metadata. Preserve recovery semantics; fresh
+    // eligibility was checked under genuine ingress before capsule sealing.
+    let witness = product_receipt::load_product_source(
+        state,
+        authority,
+        guard,
+        limits,
+        &selection.owner_principal,
+        &selection.witness_hash,
+        &selection.witness_source,
+        product_receipt::ProductSourceVerification::Retained,
+    )?;
+    product_composition::verify_witness_projection(selection, &witness)?;
+    let qualification = selection
+        .qualification
+        .as_ref()
+        .context("original selected product lacks admitted qualification")?;
+    product_qualification::verify_retained_qualification_guarded(
+        state,
+        authority,
+        guard,
+        limits,
+        qualification,
+        &selection.owner_principal,
+    )?;
+    anyhow::ensure!(
+        selection.manifest_kind == ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND
+            && selection.declaration.kind == ryeos_state::objects::ExternalContentKind::Tree,
+        "original selected product requires retained large-content manifest"
+    );
+    let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        &authority.cas_store()?,
+        &selection.manifest_hash,
+        limits
+            .max_object_bytes
+            .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64),
+    )?;
+    let manifest = ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&value)?;
+    anyhow::ensure!(
+        !manifest.is_file_shaped()
+            && manifest.entry_count == witness.evidence.entry_count
+            && manifest.total_bytes == witness.evidence.total_bytes,
+        "original product manifest contradicts retained tree witness"
+    );
+    ryeos_state::external_content::products::publication::verify_product_manifest_against_bounds(
+        authority,
+        &witness.evidence,
+        &selection.relationship.required_product.bounds,
+        limits,
+        guard,
+    )?;
+    Ok(OriginalSelectedProductInputs {
+        selection: selection.clone(),
+        witness,
+        manifest,
+    })
 }
 
 fn require_original_isolation_unexpired(original: &OriginalIsolationExpectation) -> Result<()> {
@@ -805,3 +998,114 @@ session:
 #[cfg(all(test, target_os = "linux"))]
 #[path = "persistent_session_admission/factory_controls.rs"]
 mod factory_controls;
+
+#[cfg(test)]
+mod original_product_bounds_controls {
+    use ryeos_state::external_content::products::*;
+
+    // Raw product evidence and actual temporary CAS only. No signed witness,
+    // qualification, original product input or startup proof is manufactured.
+    #[test]
+    fn canonical_original_product_directory_at_exact_depth_boundary_refuses() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = ryeos_state::StateDb::open(
+            temp.path(),
+            std::sync::Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let cas = authority.cas_store().unwrap();
+        let blob_hash = cas.store_blob(b"data").unwrap();
+        let manifest = ryeos_state::objects::ExternalLargeContentManifestObject::from_value(
+            &serde_json::json!({
+                "schema": ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA,
+                "kind": ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
+                "entry_count": 3, "total_bytes": 4,
+                "entries": [
+                    { "path": "lib", "kind": "dir" },
+                    { "path": "lib/sub", "kind": "dir" },
+                    { "path": "lib/sub/provider.so", "kind": "file", "mode": 420,
+                      "blob_hash": blob_hash, "size": 4 }
+                ]
+            }),
+        )
+        .unwrap();
+        let manifest_hash = cas.store_object(&manifest.to_value().unwrap()).unwrap();
+        let declaration = ProductDeclaration {
+            name: "runtime".into(),
+            source: ProductSource::RetainedProject {},
+            path: "products/runtime".into(),
+            shape: ProductShape::Tree,
+            storage: ProductStorage::LargeContent,
+            required: true,
+            bounds: ProductBounds {
+                maximum_entries: 8,
+                maximum_depth: 4,
+                maximum_file_bytes: 1024,
+                maximum_total_bytes: 4096,
+            },
+            expected_manifest_hash: None,
+        };
+        let declarations = ProductDeclarations {
+            schema: PRODUCT_DECLARATIONS_SCHEMA.into(),
+            output_roots: Vec::new(),
+            products: vec![declaration.clone()],
+        };
+        let producer = ProductProducerAdmission {
+            canonical_ref: "tool:test/build".into(),
+            effective_definition_digest: "1".repeat(64),
+            exact_program_hash: "2".repeat(64),
+            producer_project_snapshot_hash: "3".repeat(64),
+            launch_authority_digest: "4".repeat(64),
+            admitted_parameters_digest: "5".repeat(64),
+        };
+        let evidence = ProductCaptureEvidence {
+            schema: PRODUCT_CAPTURE_EVIDENCE_SCHEMA,
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            chain_root_id: "T-build-root".into(),
+            thread_id: "T-depth-boundary".into(),
+            admitted_launch_capsule_hash: "b".repeat(64),
+            root_producer: producer.clone(),
+            producer,
+            result_project_snapshot_hash: "c".repeat(64),
+            workspace_output_capture_hash: None,
+            producer_partition_identity: None,
+            recipe_binding: "build_recipe".into(),
+            recipe_purpose: ProductRecipePurpose::GeneralProductV1,
+            recipe_ref: "config:test/build".into(),
+            recipe_raw_content_digest: "d".repeat(64),
+            declarations_hash: declarations.content_hash().unwrap(),
+            declarations,
+            relationships: composition::ProductRelationships::empty(),
+            declaration,
+            capture_policy_digest: "e".repeat(64),
+            manifest_hash,
+            manifest_kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.into(),
+            entry_count: 3,
+            total_bytes: 4,
+        };
+        evidence.validate().unwrap();
+        let mut bounds = evidence.declaration.bounds.clone();
+        bounds.maximum_depth = 2;
+        let error = publication::verify_product_manifest_against_bounds(
+            &authority,
+            &evidence,
+            &bounds,
+            ryeos_state::object_closure::ObjectClosureLimits::default(),
+            &guard,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("relationship depth bound at lib/sub"));
+        // Same actual CAS, evidence and guard: depth three permits the tree.
+        bounds.maximum_depth = 3;
+        publication::verify_product_manifest_against_bounds(
+            &authority,
+            &evidence,
+            &bounds,
+            ryeos_state::object_closure::ObjectClosureLimits::default(),
+            &guard,
+        )
+        .unwrap();
+    }
+}

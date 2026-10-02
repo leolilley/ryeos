@@ -854,7 +854,7 @@ fn product_consumer_source(
     )
 }
 
-fn verify_witness_projection(
+pub(crate) fn verify_witness_projection(
     selection: &ResolvedExternalProductSelection,
     witness: &ryeos_state::external_content::products::publication::VerifiedProductWitness,
 ) -> anyhow::Result<()> {
