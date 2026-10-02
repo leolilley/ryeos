@@ -104,7 +104,7 @@ bound no larger than the tree total. The Python consumer returns a frozen typed
 record; the runtime requires its UUID and both typed bounds before path scan or
 provider contact. Shutdown and retired remain strict version 1 and repeat only
 the five original bindings; shutdown must exactly match init's five bindings.
-D derives every value from the retained original reservation, exact capsule CAS
+D must derive every value from the retained original reservation, exact capsule CAS
 key, cleanup agreement, held process owner, selected product manifests and
 independent physical-device observation. Matching JSON authenticates nothing.
 
