@@ -581,10 +581,23 @@ fn result_reports_failure(parsed: &Value) -> bool {
         .is_some_and(|a| !a.is_empty())
 }
 
+/// Independently compiled selected launch expectations retained with the same
+/// pending/running execution owner. Private metadata custody only: this is not
+/// an authenticated generation, applied receipt, or native settlement issuer.
+/// No public DTO can construct or replace this context.
+#[allow(dead_code)] // Consumed by later separately guarded same-owner joins.
+struct SelectedOriginalLaunchContext {
+    expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
+    expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
+    provenance: crate::isolation::IsolationLaunchProvenance,
+    original_deadline: lillux::time::MonotonicDeadline,
+}
+
 /// A spawned execution whose exact target exists but cannot execute user code
 /// until the daemon durably attaches it.
 pub struct SpawnedExecutionAwaitingAttachment {
     pending: lillux::ProcessAwaitingAttachment,
+    selected_launch_context: Option<SelectedOriginalLaunchContext>,
     /// Present only under `--debug-raw`; transferred to the running state and
     /// consumed when the attached process is waited.
     debug: Option<DebugCapture>,
@@ -630,6 +643,7 @@ impl SpawnedExecutionAwaitingAttachment {
         Ok(RunningExecution {
             running,
             debug: self.debug,
+            selected_launch_context: self.selected_launch_context,
         })
     }
 
@@ -645,6 +659,7 @@ impl SpawnedExecutionAwaitingAttachment {
         Ok(RunningExecution {
             running,
             debug: self.debug,
+            selected_launch_context: self.selected_launch_context,
         })
     }
 }
@@ -654,6 +669,7 @@ impl SpawnedExecutionAwaitingAttachment {
 pub struct RunningExecution {
     running: lillux::RunningProcess,
     debug: Option<DebugCapture>,
+    selected_launch_context: Option<SelectedOriginalLaunchContext>,
 }
 
 impl RunningExecution {
@@ -678,7 +694,11 @@ impl RunningExecution {
         self,
         timeout: std::time::Duration,
     ) -> Result<ExecutionCompletion, Self> {
-        let Self { running, debug } = self;
+        let Self {
+            running,
+            debug,
+            selected_launch_context,
+        } = self;
         match running.wait_for_natural_exit(timeout) {
             Ok(result) => {
                 let rendered_debug = debug.map(|capture| capture.into_block(&result));
@@ -688,7 +708,11 @@ impl RunningExecution {
                 }
                 Ok(completion)
             }
-            Err(running) => Err(Self { running, debug }),
+            Err(running) => Err(Self {
+                running,
+                debug,
+                selected_launch_context,
+            }),
         }
     }
 
@@ -921,7 +945,7 @@ fn spawn_subprocess(
     deadline: Option<lillux::time::MonotonicDeadline>,
     original_window: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
-    let request = isolation_plan_request_awaiting_attachment(
+    let (request, selected_launch_context) = isolation_plan_request_awaiting_attachment(
         spec,
         item_ref,
         filesystem_authority_ceiling,
@@ -933,11 +957,29 @@ fn spawn_subprocess(
     )?;
     let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
-    let pending = match deadline {
-        Some(expiry) => request.spawn_until(expiry)?,
-        None => request.spawn().map_err(subprocess_spawn_error)?,
+    // Refuse selected expiry immediately before actual process contact. The
+    // clock is the original handoff clock, never a relative replacement.
+    if selected_launch_context
+        .as_ref()
+        .is_some_and(|context| context.original_deadline.has_elapsed())
+    {
+        return Err(EngineError::Internal(
+            "selected compiled launch context expired before spawn".into(),
+        ));
+    }
+    let pending = if let Some(context) = selected_launch_context.as_ref() {
+        request.spawn_until(context.original_deadline)?
+    } else {
+        match deadline {
+            Some(expiry) => request.spawn_until(expiry)?,
+            None => request.spawn().map_err(subprocess_spawn_error)?,
+        }
     };
-    Ok(SpawnedExecutionAwaitingAttachment { pending, debug })
+    Ok(SpawnedExecutionAwaitingAttachment {
+        pending,
+        debug,
+        selected_launch_context,
+    })
 }
 
 pub(crate) fn subprocess_spawn_error(result: lillux::SubprocessResult) -> EngineError {
@@ -1023,7 +1065,13 @@ fn isolation_plan_request_awaiting_attachment(
     scope: Option<lillux::ProcessScope>,
     devices: Option<&lillux::CharacterDeviceSet>,
     original_window: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
-) -> Result<crate::isolation::IsolationRequestAwaitingAttachment, EngineError> {
+) -> Result<
+    (
+        crate::isolation::IsolationRequestAwaitingAttachment,
+        Option<SelectedOriginalLaunchContext>,
+    ),
+    EngineError,
+> {
     let (request, project_path, verified_code) = isolation_plan_request_parts(spec, ctx)?;
     let filesystem_authority_ceiling = ctx
         .isolation_filesystem_authority_ceiling
@@ -1086,15 +1134,41 @@ fn isolation_plan_request_awaiting_attachment(
                 "original namespace occupancy lacks selected device authority".into(),
             )
         })?;
-        return ctx
+        // Borrow the original expiry before moving its one-use handoff.
+        let original_deadline = original_window.original_deadline();
+        if original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "selected original launch context expired before compilation".into(),
+            ));
+        }
+        let applied = ctx
             .isolation
             .apply_awaiting_attachment_with_original_namespace_occupancy(
                 context.0,
                 context.1,
                 devices,
                 original_window,
-            )
-            .map(|applied| applied.request);
+            )?;
+        // Construct only here, from this actual selected compiler return.
+        // Public provenance/receipt DTOs are not authority constructors.
+        let expected_applied_launch = applied.expected_applied_launch.ok_or_else(|| {
+            EngineError::Internal("selected compiler omitted target commitments".into())
+        })?;
+        let expected_mount_preparation = applied.expected_mount_preparation.ok_or_else(|| {
+            EngineError::Internal("selected compiler omitted mount commitments".into())
+        })?;
+        if original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "selected original launch context expired during compilation".into(),
+            ));
+        }
+        let selected_launch_context = SelectedOriginalLaunchContext {
+            expected_applied_launch,
+            expected_mount_preparation,
+            provenance: applied.provenance,
+            original_deadline,
+        };
+        return Ok((applied.request, Some(selected_launch_context)));
     }
     match devices {
         Some(devices) => ctx
@@ -1104,7 +1178,7 @@ fn isolation_plan_request_awaiting_attachment(
             .isolation
             .apply_awaiting_attachment_in_scope_with_provenance(context.0, context.1, scope),
     }
-    .map(|applied| applied.request)
+    .map(|applied| (applied.request, None))
 }
 
 fn isolation_plan_request_parts<'a>(
