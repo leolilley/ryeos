@@ -23,6 +23,9 @@ use ryeos_state::objects::{
 
 use crate::state::AppState;
 
+mod observation;
+pub use observation::{StructuredSourceValidationObservation, observe_bundle_structured_source};
+
 pub struct AdmittedSourceClosure {
     proof: SourceClosureProof,
     store: RetainedSourceClosureStore,
@@ -127,16 +130,40 @@ fn compile_structured_worker_from_cas(
     binding: &ryeos_state::objects::EffectiveSourceBinding,
     manifest: &ryeos_state::objects::SourceClosureManifest,
 ) -> anyhow::Result<AdmittedStructuredSessionProfile> {
+    compile_structured_worker_from_blobs(binding, manifest, |hash, size| {
+        cas.get_blob_bounded(hash, size)?
+            .context("captured Worker source blob is absent")
+    })
+}
+
+/// Admission and source observation compile the same exact manifest-owned
+/// bytes. The loader supplies either retained CAS bytes or the original capture;
+/// it never resolves a profile path from the live filesystem.
+fn compile_structured_worker_from_blobs(
+    binding: &ryeos_state::objects::EffectiveSourceBinding,
+    manifest: &ryeos_state::objects::SourceClosureManifest,
+    load: impl FnMut(&str, u64) -> anyhow::Result<Vec<u8>>,
+) -> anyhow::Result<AdmittedStructuredSessionProfile> {
     binding.validate_content_manifest(manifest)?;
     let entry = match &binding.logical_binding {
         ryeos_state::objects::SourceLogicalBinding::Worker { entry, .. } => entry,
         _ => anyhow::bail!("structured-session source has a non-Worker logical binding"),
     };
+    let source_files = load_profile_source_files(manifest, load)?;
+    let profile_bytes = source_files.get(entry).ok_or_else(|| {
+        anyhow::anyhow!("structured-session entry is absent from captured source")
+    })?;
+    ryeos_engine::structured_session_profile::compile(profile_bytes, &source_files)
+}
+
+fn load_profile_source_files(
+    manifest: &ryeos_state::objects::SourceClosureManifest,
+    mut load: impl FnMut(&str, u64) -> anyhow::Result<Vec<u8>>,
+) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    manifest.validate()?;
     let mut source_files = std::collections::BTreeMap::new();
     for file in &manifest.entries {
-        let bytes = cas
-            .get_blob_bounded(&file.blob_hash, file.size)?
-            .ok_or_else(|| anyhow::anyhow!("captured Worker source blob is absent"))?;
+        let bytes = load(&file.blob_hash, file.size)?;
         ensure!(
             bytes.len() as u64 == file.size && lillux::sha256_hex(&bytes) == file.blob_hash,
             "retained Worker source blob differs from exact manifest"
@@ -146,10 +173,7 @@ fn compile_structured_worker_from_cas(
             "structured-session source has duplicate logical paths"
         );
     }
-    let profile_bytes = source_files.get(entry).ok_or_else(|| {
-        anyhow::anyhow!("structured-session entry is absent from captured source")
-    })?;
-    ryeos_engine::structured_session_profile::compile(profile_bytes, &source_files)
+    Ok(source_files)
 }
 
 /// One current signed Bundle Worker, captured before product selection. The
@@ -332,8 +356,109 @@ pub fn admit_source_closure_in_publication(
     project: Option<(&Path, &dyn AuthoritativeProjectContent, String)>,
     executor_policy: Option<&ExecutorSourcePolicyProjection>,
     publication: &mut Option<PendingCasPublication>,
-    mut preview: Option<&mut Option<SourceClosureValidationPreview>>,
+    preview: Option<&mut Option<SourceClosureValidationPreview>>,
 ) -> anyhow::Result<Option<AdmittedSourceClosure>> {
+    let Some(captured) = capture_source_closure(
+        state,
+        engine,
+        kind,
+        resolution,
+        roots,
+        project,
+        executor_policy,
+        preview,
+    )?
+    else {
+        return Ok(None);
+    };
+    let CapturedSourceClosure { candidate, binding } = captured;
+    let content_manifest_hash = binding.content_manifest_hash.clone();
+
+    if publication.is_none() {
+        let authority = state.state_store.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let staged = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(&guard, "launch-realization")?;
+        drop(guard);
+        *publication = Some(PendingCasPublication::new(authority, staged));
+    }
+    let authority = publication
+        .as_ref()
+        .expect("source admission initialized its publication")
+        .authority()
+        .try_clone()?;
+    let proof_authority = authority.try_clone()?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let _permit = state
+        .write_barrier
+        .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
+    let cas = authority.cas_store()?;
+    let staged = publication
+        .as_mut()
+        .expect("source admission initialized its publication")
+        .staged_roots_mut();
+    for blob in &candidate.blobs {
+        let outcome = cas.put_blob(&blob.bytes)?;
+        if outcome.hash != blob.blob_hash {
+            anyhow::bail!("stored source blob contradicts its captured identity");
+        }
+        staged.protect_blob_hash_admitted(&guard, &outcome.hash)?;
+    }
+    let stored_manifest_hash =
+        staged.store_object_admitted(&guard, &cas, &candidate.manifest.to_value()?)?;
+    if stored_manifest_hash != content_manifest_hash {
+        anyhow::bail!("stored source manifest contradicts its captured identity");
+    }
+    let binding_hash = staged.store_object_admitted(&guard, &cas, &binding.to_value()?)?;
+    let projection = ryeos_state::objects::EffectiveSourceClosureProjection {
+        schema: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+        binding_hash,
+        content_manifest_hash,
+        owner_key: binding.owner_key()?,
+        file_count: candidate.manifest.totals.file_count,
+        total_bytes: candidate.manifest.totals.total_bytes,
+    };
+    resolution.composed.derived.insert(
+        ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
+        projection.to_value()?,
+    );
+    let store = RetainedSourceClosureStore {
+        authority: proof_authority,
+    };
+    let proof = ryeos_engine::source_closure::prove_source_closure(projection, &store)?;
+    drop(_permit);
+    drop(guard);
+    Ok(Some(AdmittedSourceClosure {
+        proof,
+        store,
+        publication: None,
+        binding,
+        manifest: candidate.manifest,
+    }))
+}
+
+/// Original bounded bytes and their checked testimony. This private value has
+/// no CAS roots, publication, derived executable projection or launch authority.
+struct CapturedSourceClosure {
+    candidate: CapturedSourceCandidate,
+    binding: ryeos_state::objects::EffectiveSourceBinding,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_source_closure(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    project: Option<(&Path, &dyn AuthoritativeProjectContent, String)>,
+    executor_policy: Option<&ExecutorSourcePolicyProjection>,
+    mut preview: Option<&mut Option<SourceClosureValidationPreview>>,
+) -> anyhow::Result<Option<CapturedSourceClosure>> {
     if resolution
         .composed
         .derived
@@ -650,6 +775,11 @@ pub fn admit_source_closure_in_publication(
     };
     binding.validate()?;
     binding.validate_content_manifest(&candidate.manifest)?;
+    ensure!(
+        candidate.revalidate(source.as_ref(), &requests, contract)
+            == ryeos_engine::source_closure::SourceAuthorityStatus::Current,
+        "source authority changed during capture and testimony"
+    );
 
     if let Some(preview) = preview {
         let expected_digest = match &binding.testimony {
@@ -671,71 +801,7 @@ pub fn admit_source_closure_in_publication(
         return Ok(None);
     }
 
-    if publication.is_none() {
-        let authority = state.state_store.pinned_state_authority()?;
-        let guard = authority.acquire_shared_guard()?;
-        authority.ensure_guard(&guard)?;
-        let staged = authority
-            .require_recovery()?
-            .begin_staged_cas_roots_admitted(&guard, "launch-realization")?;
-        drop(guard);
-        *publication = Some(PendingCasPublication::new(authority, staged));
-    }
-    let authority = publication
-        .as_ref()
-        .expect("source admission initialized its publication")
-        .authority()
-        .try_clone()?;
-    let proof_authority = authority.try_clone()?;
-    let guard = authority.acquire_shared_guard()?;
-    authority.ensure_guard(&guard)?;
-    let _permit = state
-        .write_barrier
-        .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
-    let cas = authority.cas_store()?;
-    let staged = publication
-        .as_mut()
-        .expect("source admission initialized its publication")
-        .staged_roots_mut();
-    for blob in &candidate.blobs {
-        let outcome = cas.put_blob(&blob.bytes)?;
-        if outcome.hash != blob.blob_hash {
-            anyhow::bail!("stored source blob contradicts its captured identity");
-        }
-        staged.protect_blob_hash_admitted(&guard, &outcome.hash)?;
-    }
-    let stored_manifest_hash =
-        staged.store_object_admitted(&guard, &cas, &candidate.manifest.to_value()?)?;
-    if stored_manifest_hash != content_manifest_hash {
-        anyhow::bail!("stored source manifest contradicts its captured identity");
-    }
-    let binding_hash = staged.store_object_admitted(&guard, &cas, &binding.to_value()?)?;
-    let projection = ryeos_state::objects::EffectiveSourceClosureProjection {
-        schema: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
-        binding_hash,
-        content_manifest_hash,
-        owner_key: binding.owner_key()?,
-        file_count: candidate.manifest.totals.file_count,
-        total_bytes: candidate.manifest.totals.total_bytes,
-    };
-    resolution.composed.derived.insert(
-        ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
-        projection.to_value()?,
-    );
-    let store = RetainedSourceClosureStore {
-        authority: proof_authority,
-    };
-    let proof = ryeos_engine::source_closure::prove_source_closure(projection, &store)?;
-    drop(_permit);
-    drop(guard);
-    Ok(Some(AdmittedSourceClosure {
-        proof,
-        store,
-        publication: None,
-        binding,
-        manifest: candidate.manifest,
-    }))
+    Ok(Some(CapturedSourceClosure { candidate, binding }))
 }
 
 #[allow(clippy::too_many_arguments)]

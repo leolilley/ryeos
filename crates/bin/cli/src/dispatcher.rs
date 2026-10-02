@@ -278,6 +278,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
             resolved.exclude_operator_vault,
         ),
     });
+    insert_source_observation_scope(&mut body, resolved.validation_scope);
     if let Some(project_path) = &resolved.project_path {
         body["project_path"] = Value::String(
             project_path
@@ -561,6 +562,18 @@ fn should_stream_direct_execute(
     direct_execute && !async_launch && !validate_only && !has_state_root && want_stream
 }
 
+/// Keep the default field absent: the ordinary streaming ingress intentionally
+/// rejects source-observation controls rather than accepting that new scope.
+fn insert_source_observation_scope(
+    body: &mut Value,
+    scope: ryeos_runtime::command::ValidationScope,
+) {
+    if scope == ryeos_runtime::command::ValidationScope::SourceObservation {
+        body["validation_scope"] =
+            serde_json::to_value(scope).expect("closed validation scope serialization cannot fail");
+    }
+}
+
 fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
     stdout_is_tty && rest.is_empty()
 }
@@ -759,6 +772,7 @@ enum StreamTerminalFailure {
 }
 
 struct CliResolvedExecute {
+    validation_scope: ryeos_runtime::command::ValidationScope,
     item_ref: String,
     ref_bindings: BTreeMap<String, String>,
     product_selections: Value,
@@ -862,6 +876,7 @@ fn resolve_command_for_daemon_with_commands(
         retain_child_results: control.retain_child_results,
         exclude_operator_vault: control.exclude_operator_vault,
         validate_only: compiled.validate_only,
+        validation_scope: control.validation_scope,
         direct_execute: compiled.direct_execute,
         stream: control.stream,
         debug_raw: control.debug_raw,
@@ -1823,6 +1838,30 @@ mod tests {
                 aliases: vec![],
             },
         ]
+    }
+
+    #[test]
+    fn source_observation_wire_control_keeps_normal_stream_body_unchanged() {
+        let mut body =
+            serde_json::json!({"item_ref": "worker:example/session", "validate_only": false});
+        let ordinary = body.clone();
+        insert_source_observation_scope(
+            &mut body,
+            ryeos_runtime::command::ValidationScope::CompleteExecution,
+        );
+        assert_eq!(body, ordinary);
+        assert!(should_stream_direct_execute(
+            true, false, false, false, true
+        ));
+        body["validate_only"] = serde_json::json!(true);
+        insert_source_observation_scope(
+            &mut body,
+            ryeos_runtime::command::ValidationScope::SourceObservation,
+        );
+        assert_eq!(body["validation_scope"], "source_observation");
+        assert!(!should_stream_direct_execute(
+            true, false, true, false, true
+        ));
     }
 
     #[test]

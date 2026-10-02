@@ -22,6 +22,9 @@ parameter_binding:
   single_json_object_arg: true
   flag_key_normalization: hyphen_to_underscore
 control_flags:
+- flag: source-only
+  help: "Observe a trusted structured-session source and declared pins without executable admission"
+  binding: source_observation
 - flag: current-head
   help: "Validate the current immutable project HEAD and its exact target-local bindings"
   binding: pin_current_head_at_admission

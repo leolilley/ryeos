@@ -1065,6 +1065,26 @@ mod tests {
     }
 
     #[test]
+    fn source_observation_cannot_enter_streaming_launch() {
+        let body = serde_json::json!({
+            "item_ref": "worker:example/author",
+            "ref_bindings": {},
+            "parameters": {},
+            "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
+            "validate_only": true,
+            "validation_scope": "source_observation"
+        });
+        assert!(
+            ryeos_handler_protocol::from_json_slice_strict::<LaunchRequest>(
+                &serde_json::to_vec(&body).unwrap(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn launch_request_rejects_open_product_selector_values() {
         let result = serde_json::from_value::<LaunchRequest>(serde_json::json!({
             "item_ref": "directive:x",

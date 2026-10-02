@@ -72,6 +72,9 @@ pub struct ExecuteRequest {
     pub target_site_id: Option<String>,
     #[serde(default)]
     pub validate_only: bool,
+    /// Non-executable authoring observations use a separate typed control.
+    #[serde(default)]
+    pub validation_scope: ryeos_runtime::command::ValidationScope,
     /// Method call: `{ method, args }`. The method selector is control
     /// plane — it chooses daemon-owned projection/validation/trust before
     /// the runtime is spawned — while the args are data plane. Absent for
@@ -96,6 +99,39 @@ pub struct ExecuteRequest {
 }
 
 impl ExecuteRequest {
+    fn require_source_observation_shape(&self) -> Result<(), &'static str> {
+        if !self.validate_only
+            || self.execution_policy.response != ExecutionResponse::Wait
+            || !matches!(self.execution_policy.target, ExecutionTarget::Here)
+            || !matches!(
+                self.execution_policy.project,
+                ProjectExecutionPolicy::Projectless
+            )
+            || !matches!(
+                self.execution_policy.environment,
+                ExecutionEnvironmentPolicy::None
+            )
+            || self.project_path.is_some()
+            || self.launch_id.is_some()
+            || self.call.is_some()
+            || self.state_root.is_some()
+            || self.usage_subject.is_some()
+            || self.debug_raw
+            || !self.ref_bindings.is_empty()
+            || !self.product_selections.is_empty()
+            || !(self.parameters.is_null()
+                || self
+                    .parameters
+                    .as_object()
+                    .is_some_and(|value| value.is_empty()))
+        {
+            return Err(
+                "source observation requires local projectless buffered validation without execution inputs",
+            );
+        }
+        Ok(())
+    }
+
     /// The requested method name, if a `call.method` was provided.
     pub fn method(&self) -> Option<String> {
         self.call.as_ref().and_then(|c| c.method.clone())
@@ -1144,6 +1180,30 @@ pub(crate) async fn admit_execution(
         preauthorize_execution_policy(&request.execution_policy, &caller_scopes, &state)
     {
         return Err(RouteDispatchError::BadRequest(error.to_string()));
+    }
+
+    // This authenticated read-side control returns before project realization,
+    // product selection or any accepted-launch/CAS/thread owner is created.
+    if request.validation_scope == ryeos_runtime::command::ValidationScope::SourceObservation {
+        request
+            .require_source_observation_shape()
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_owned()))?;
+        let observation_state = state.clone();
+        let observation_ref = request.item_ref.clone();
+        let observation = tokio::task::spawn_blocking(move || {
+            ryeos_app::source_closure_admission::observe_bundle_structured_source(
+                &observation_state,
+                &observation_ref,
+            )
+        })
+        .await
+        .map_err(|error| {
+            RouteDispatchError::BadRequest(format!("source observation task failed: {error}"))
+        })?
+        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        let value = serde_json::to_value(observation)
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        return Ok(json!({"result": value}).into());
     }
 
     // The caller retained `launch_id` before sending the request. Reserve
@@ -2778,11 +2838,61 @@ mod tests {
             launch_mode: "wait".into(),
             target_site_id: target_site_id.map(String::from),
             validate_only: false,
+            validation_scope: Default::default(),
             call: None,
             usage_subject: None,
             debug_raw: false,
             state_root: None,
         }
+    }
+
+    #[test]
+    fn source_observation_scope_refuses_execution_and_project_controls() {
+        fn observation() -> ExecuteRequest {
+            let mut request = target_request(None);
+            request.execution_policy = ExecutionPolicy::projectless(ExecutionResponse::Wait);
+            request.project_path = None;
+            request.validate_only = true;
+            request.validation_scope = ryeos_runtime::command::ValidationScope::SourceObservation;
+            request
+        }
+        assert!(observation().require_source_observation_shape().is_ok());
+        let mutations: &[fn(&mut ExecuteRequest)] = &[
+            |r| r.validate_only = false,
+            |r| r.execution_policy.response = ExecutionResponse::Accepted,
+            |r| r.execution_policy = ExecutionPolicy::local_live(ExecutionResponse::Wait),
+            |r| {
+                r.execution_policy.target = ExecutionTarget::Site {
+                    site_id: "foreign".into(),
+                }
+            },
+            |r| r.project_path = Some("/tmp/project".into()),
+            |r| r.launch_id = Some("L-00000000000000000000000000000000".into()),
+            |r| r.state_root = Some("/tmp/state".into()),
+            |r| {
+                r.call = Some(ryeos_engine::method_call::MethodCall {
+                    method: Some("run".into()),
+                    args: None,
+                })
+            },
+            |r| {
+                r.ref_bindings
+                    .insert("extra".into(), "tool:example/run".into());
+            },
+            |r| r.parameters = json!({"source_only": true}),
+            |r| r.debug_raw = true,
+        ];
+        for change in mutations {
+            let mut request = observation();
+            change(&mut request);
+            assert!(request.require_source_observation_shape().is_err());
+        }
+        assert!(
+            serde_json::from_value::<ryeos_runtime::command::ValidationScope>(json!(
+                "admitted_source"
+            ))
+            .is_err()
+        );
     }
 
     fn make_remote(name: &str, site_id: &str) -> crate::remote::config::RemoteConfig {

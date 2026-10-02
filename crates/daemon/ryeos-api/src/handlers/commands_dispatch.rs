@@ -113,6 +113,7 @@ pub async fn handle(
         launch_mode: String::new(),
         target_site_id: None,
         validate_only: compiled.validate_only,
+        validation_scope: controls.validation_scope,
         call: if controls.call_method.is_some() || controls.call_args.is_some() {
             Some(ryeos_engine::method_call::MethodCall {
                 method: controls.call_method,

@@ -251,11 +251,39 @@ pub fn preview_external_content_pins(
         return Ok(None);
     };
 
+    Ok(Some(preview_external_content_declarations(
+        state,
+        engine,
+        kind,
+        resolution,
+        roots,
+        subject_resolution_authority,
+        &declarations,
+    )?))
+}
+
+/// Observe already checked declarations through the same bounded capture and
+/// retained-binding readers as ordinary validation. Selection of literal-only
+/// declarations grants no product selection or executable realization authority.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn preview_external_content_declarations(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    subject_resolution_authority: &ryeos_engine::contracts::SubjectResolutionAuthority,
+    declarations: &[ExternalContentDeclaration],
+) -> anyhow::Result<ExternalContentValidationPreview> {
+    let contract = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.external_content_contract());
     let mut budget = LaunchCaptureBudget::default();
     let mut sink = DigestOnlyExternalContentSink;
     let mut previews = Vec::with_capacity(declarations.len());
     let mut ready_for_admission = true;
-    for declaration in &declarations {
+    for declaration in declarations {
         let (observed_digest, binding_digest, status, ready) = if declaration
             .bundle_binary
             .is_some()
@@ -323,11 +351,11 @@ pub fn preview_external_content_pins(
             status: status.to_owned(),
         });
     }
-    validate_retained_declaration_totals(state, contract, &declarations)?;
-    Ok(Some(ExternalContentValidationPreview {
+    validate_retained_declaration_totals(state, contract, declarations)?;
+    Ok(ExternalContentValidationPreview {
         declarations: previews,
         ready_for_admission,
-    }))
+    })
 }
 
 /// Preview one preparer-selected portable content dependency through the same
