@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-07T09:01:08Z:bbaa46d6b780ff12eaa2dd4bbdc1f9072773d19e8f3d165dd34ae879b2a7047f:CkhNie+sh1OPFB9Az7CQI+IWF9vujVLZdR4dmCQSExpp8T3bh5NiheU70uqJzaHZoMrhRfkxdm5wj05cfwRlAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-02T08:09:26Z:63146169d3dc97304d477d4d7792e1c575af9464b2fb1af8ce4f8ec78645070c:9+vqwasR/Qy+/bgPOhHiYn4bk/oA+uyXVwD7kU1CVRebcOZlOluhsuq/cCesEQQy11vjpmlqnfzHDStKvxwYAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - validate
 description: "Resolve and validate an executable item through its complete threadless admission path without creating a thread or contacting its runtime."
