@@ -1237,6 +1237,9 @@ impl PreparedItemPlan {
             .transpose()?;
         let mut bound_entries = 0usize;
         for argument in &mut spec.args {
+            if matches!(argument, PlanArgument::AdmittedExecutionProjectFile { .. }) {
+                bail!("local execution cannot redeem candidate project file authority");
+            }
             if matches!(argument, PlanArgument::AdmittedSourceMember { .. }) {
                 bail!(
                     "persistent-session source member arguments are not supported by its source-entry contract"

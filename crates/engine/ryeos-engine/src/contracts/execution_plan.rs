@@ -414,12 +414,64 @@ pub struct PlanSubprocessSpec {
     pub execution: ExecutionDecorations,
 }
 
+/// Finite readonly input selected by the admitted evaluator definition. The
+/// declaration contains no host path or caller-controlled descriptor/hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanExecutionProjectFileInput {
+    pub relative_path: String,
+    pub destination: String,
+    pub max_bytes: u64,
+    pub normalized_mode: u32,
+    pub access: ryeos_external_execution_contract::GuestMountAccess,
+}
+
+impl PlanExecutionProjectFileInput {
+    pub const MAX_BYTES: u64 = 65_536;
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        ryeos_state::objects::validate_canonical_project_relative_path(&self.relative_path)?;
+        anyhow::ensure!(
+            self.relative_path.len() <= 4096,
+            "execution project file path exceeds bound"
+        );
+        ryeos_external_execution_contract::validate_absolute_normalized_path(
+            &self.destination,
+            "execution project file destination",
+        )?;
+        anyhow::ensure!(
+            !self.destination.chars().any(char::is_control),
+            "execution project file destination has control characters",
+        );
+        let destination = std::path::Path::new(&self.destination);
+        let workspace = std::path::Path::new("/workspace");
+        anyhow::ensure!(
+            !destination.starts_with(workspace) && !workspace.starts_with(destination),
+            "execution project file destination overlaps workspace",
+        );
+        anyhow::ensure!(
+            (1..=Self::MAX_BYTES).contains(&self.max_bytes)
+                && self.normalized_mode == ryeos_state::objects::ProjectFile::REGULAR_MODE
+                && self.access == ryeos_external_execution_contract::GuestMountAccess::ReadOnly,
+            "execution project file requires finite readonly nonexecutable authority",
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlanArgument {
-    Literal { value: String },
+    Literal {
+        value: String,
+    },
     AdmittedSourceEntry,
-    AdmittedSourceMember { relative_path: String },
+    AdmittedSourceMember {
+        relative_path: String,
+    },
+    AdmittedExecutionProjectFile {
+        declaration: PlanExecutionProjectFileInput,
+    },
 }
 
 impl PlanArgument {
@@ -432,7 +484,9 @@ impl PlanArgument {
     pub fn literal_value(&self) -> Option<&str> {
         match self {
             Self::Literal { value } => Some(value),
-            Self::AdmittedSourceEntry | Self::AdmittedSourceMember { .. } => None,
+            Self::AdmittedSourceEntry
+            | Self::AdmittedSourceMember { .. }
+            | Self::AdmittedExecutionProjectFile { .. } => None,
         }
     }
 }
@@ -566,6 +620,29 @@ impl ExecutionPlan {
     /// Structural sealed identity only; the app must independently retain and
     /// revalidate the installed signed generation before any provider contact.
     pub fn validate_endpoint_for_sealing(&self) -> anyhow::Result<()> {
+        let mut file_inputs = 0usize;
+        for node in &self.nodes {
+            if let PlanNode::DispatchSubprocess { spec, .. } = node {
+                for argument in &spec.args {
+                    if let PlanArgument::AdmittedExecutionProjectFile { declaration } = argument {
+                        declaration.validate()?;
+                        file_inputs += 1;
+                    }
+                }
+            }
+        }
+        anyhow::ensure!(
+            file_inputs <= 1,
+            "execution plan repeats execution project file input"
+        );
+        anyhow::ensure!(
+            file_inputs == 0
+                || matches!(
+                    self.endpoint_requirement,
+                    super::ExecutionEndpointRequirement::External { .. }
+                ),
+            "execution project file input requires explicit external execution",
+        );
         self.validate_endpoint_for_planning()?;
         anyhow::ensure!(
             matches!(
@@ -712,6 +789,58 @@ mod tests {
             }
             .validate_for_project_context(&snapshot_context)
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod execution_project_file_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sealed_selector_requires_one_input_and_an_external_endpoint() {
+        let input = json!({"kind":"admitted_execution_project_file", "declaration": {
+            "relative_path":"candidate/module.py", "destination":"/candidate-input",
+            "max_bytes":4096, "normalized_mode":420, "access":"read_only"
+        }});
+        let value = json!({
+            "plan_id":"signed-member-control", "root_executor_id":"tool:test/runtime",
+            "root_ref":"tool:test/evaluator", "item_kind":"tool",
+            "nodes":[{"node_type":"dispatch_subprocess","id":"spawn","spec":{
+                "cmd":"/runtime/python", "verified_command":null, "args":[input.clone()],
+                "cwd":null, "env":{}, "stdin":null, "timeout_secs":10
+            },"executor_chain":[]},{"node_type":"complete","id":"done"}],
+            "entrypoint":"spawn", "capabilities":{"requires_model":false,"requires_subprocess":true,
+                "requires_network":false,"custom":[]}, "materialization_requirements":[],
+            "network_authority_ceiling":"isolated", "filesystem_authority_ceiling":"captured_execution",
+            "target_requirement":null, "endpoint_requirement":{"kind":"external","binding_id":"test-binding",
+                "stdout_max_bytes":4096,"stderr_max_bytes":2048},
+            "external_endpoint_binding":{"binding_id":"test-binding","binding_digest":"a".repeat(64)},
+            "resource_authority_ceiling":"node_policy", "subprocess_limits":null,
+            "cache_key":"test", "executor_authorities":[]
+        });
+        let plan: ExecutionPlan = serde_json::from_value(value.clone()).unwrap();
+        plan.validate_endpoint_for_sealing().unwrap();
+        let mut repeated = value.clone();
+        repeated["nodes"][0]["spec"]["args"]
+            .as_array_mut()
+            .unwrap()
+            .push(input);
+        assert!(
+            serde_json::from_value::<ExecutionPlan>(repeated)
+                .unwrap()
+                .validate_endpoint_for_sealing()
+                .is_err()
+        );
+        let mut local = value;
+        local["endpoint_requirement"] = json!({"kind":"local"});
+        local["external_endpoint_binding"] = Value::Null;
+        assert!(
+            serde_json::from_value::<ExecutionPlan>(local)
+                .unwrap()
+                .validate_endpoint_for_sealing()
+                .is_err()
         );
     }
 }

@@ -21,9 +21,9 @@ pub use crate::scheduled_fire_context::ScheduledFireContext;
 pub use execution_endpoint::{ExecutionEndpointRequirement, ExternalEndpointBindingIdentity};
 pub use execution_plan::{
     EngineContext, ExecutionPlan, MaterializationRequirement, PlanArgument,
-    PlanBundleExecutorIdentity, PlanCapabilities, PlanContext, PlanNode, PlanNodeId,
-    PlanRuntimeIdentity, PlanStdin, PlanSubprocessSpec, PlanTrustAuthority, PlanVerifiedCommand,
-    SubjectResolutionAuthority,
+    PlanBundleExecutorIdentity, PlanCapabilities, PlanContext, PlanExecutionProjectFileInput,
+    PlanNode, PlanNodeId, PlanRuntimeIdentity, PlanStdin, PlanSubprocessSpec, PlanTrustAuthority,
+    PlanVerifiedCommand, SubjectResolutionAuthority,
 };
 pub use execution_target::{
     ExecutionResourceAccess, ExecutionResourceAdmissionPolicy, ExecutionResourceAllocation,

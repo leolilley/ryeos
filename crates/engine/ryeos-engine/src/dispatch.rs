@@ -234,6 +234,9 @@ impl DebugCapture {
                     PlanArgument::AdmittedSourceEntry => {
                         "<unbound-admitted-source-entry>".to_owned()
                     }
+                    PlanArgument::AdmittedExecutionProjectFile { .. } => {
+                        "<unbound-execution-project-file>".to_owned()
+                    }
                     PlanArgument::AdmittedSourceMember { .. } => {
                         "<unbound-admitted-source-member>".to_owned()
                     }
@@ -299,7 +302,9 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
         .iter()
         .map(|argument| match argument {
             PlanArgument::Literal { value } => Ok(value.clone()),
-            PlanArgument::AdmittedSourceEntry | PlanArgument::AdmittedSourceMember { .. } => {
+            PlanArgument::AdmittedSourceEntry
+            | PlanArgument::AdmittedSourceMember { .. }
+            | PlanArgument::AdmittedExecutionProjectFile { .. } => {
                 Err(EngineError::InvalidRuntimeConfig {
                     path: "config.args".to_owned(),
                     reason: "admitted source entry was not bound before subprocess dispatch"

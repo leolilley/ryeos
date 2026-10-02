@@ -176,9 +176,9 @@ pub fn import_dry_run(
         .into_iter()
         .map(|argument| match argument {
             PlanArgument::Literal { value } => Ok(value),
-            PlanArgument::AdmittedSourceEntry | PlanArgument::AdmittedSourceMember { .. } => {
-                Err(())
-            }
+            PlanArgument::AdmittedSourceEntry
+            | PlanArgument::AdmittedSourceMember { .. }
+            | PlanArgument::AdmittedExecutionProjectFile { .. } => Err(()),
         })
         .collect::<Result<Vec<_>, _>>()
     {

@@ -1815,7 +1815,8 @@ fn validate_executable_name(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_absolute_normalized_path(value: &str, label: &str) -> Result<()> {
+/// Validate a namespace destination without resolving a host filesystem path.
+pub fn validate_absolute_normalized_path(value: &str, label: &str) -> Result<()> {
     let path = Path::new(value);
     ensure!(
         path.is_absolute()

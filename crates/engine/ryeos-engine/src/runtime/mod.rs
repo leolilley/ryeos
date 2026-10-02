@@ -307,6 +307,17 @@ fn render_runtime_argument(
             expand_template(&template, ctx).map(PlanArgument::literal)
         }
         RuntimeArgument::Literal(literal) => Ok(PlanArgument::literal(literal.literal)),
+        RuntimeArgument::ExecutionProjectFile(input) => {
+            input.execution_project_file.validate().map_err(|error| {
+                EngineError::InvalidRuntimeConfig {
+                    path: "config.args.execution_project_file".to_owned(),
+                    reason: error.to_string(),
+                }
+            })?;
+            Ok(PlanArgument::AdmittedExecutionProjectFile {
+                declaration: input.execution_project_file,
+            })
+        }
         RuntimeArgument::SourceMember(member) => {
             validate_source_member_path(&member.source_member)?;
             Ok(PlanArgument::AdmittedSourceMember {
@@ -1201,6 +1212,84 @@ mod tests {
                 .literal_value(),
             Some(source)
         );
+    }
+
+    #[test]
+    fn execution_project_file_argument_retains_signed_data_without_templates() {
+        let value = serde_json::json!({"execution_project_file": {
+            "relative_path":"candidate/module.py", "destination":"/candidate-input",
+            "max_bytes":4096, "normalized_mode":420, "access":"read_only"
+        }});
+        let argument: RuntimeArgument = serde_json::from_value(value.clone()).unwrap();
+        let plan =
+            render_runtime_argument(argument, &TemplateContext::new(PathBuf::from("/tool.yaml")))
+                .unwrap();
+        let PlanArgument::AdmittedExecutionProjectFile { declaration } = &plan else {
+            panic!("project file became literal argv");
+        };
+        assert_eq!(declaration.relative_path, "candidate/module.py");
+        assert_eq!(declaration.max_bytes, 4096);
+        assert_eq!(
+            serde_json::from_value::<PlanArgument>(serde_json::to_value(&plan).unwrap()).unwrap(),
+            plan
+        );
+        for field in [
+            "relative_path",
+            "destination",
+            "max_bytes",
+            "normalized_mode",
+            "access",
+        ] {
+            let mut missing = value.clone();
+            missing["execution_project_file"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<RuntimeArgument>(missing).is_err(),
+                "missing {field}"
+            );
+            let mut null = value.clone();
+            null["execution_project_file"][field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<RuntimeArgument>(null).is_err(),
+                "null {field}"
+            );
+        }
+        for field in ["descriptor", "sha256", "host_path"] {
+            let mut changed = value.clone();
+            changed["execution_project_file"][field] = serde_json::json!("caller override");
+            assert!(serde_json::from_value::<RuntimeArgument>(changed).is_err());
+        }
+    }
+
+    #[test]
+    fn execution_project_file_argument_refuses_unsafe_signed_shapes() {
+        let base = serde_json::json!({"relative_path":"candidate/module.py", "destination":"/candidate-input",
+            "max_bytes":4096, "normalized_mode":420, "access":"read_only"});
+        for (field, value) in [
+            ("relative_path", serde_json::json!("../secret")),
+            ("destination", serde_json::json!("/workspace/private")),
+            ("destination", serde_json::json!("/")),
+            ("max_bytes", serde_json::json!(0)),
+            ("max_bytes", serde_json::json!(65537)),
+            ("normalized_mode", serde_json::json!(493)),
+            ("access", serde_json::json!("private_writable")),
+        ] {
+            let mut changed = base.clone();
+            changed[field] = value;
+            let argument: RuntimeArgument =
+                serde_json::from_value(serde_json::json!({"execution_project_file":changed}))
+                    .unwrap();
+            assert!(
+                render_runtime_argument(
+                    argument,
+                    &TemplateContext::new(PathBuf::from("/tool.yaml"))
+                )
+                .is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

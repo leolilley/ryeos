@@ -632,6 +632,9 @@ fn compile_external_direct_program_parts(
                 .to_str()
                 .context("external direct source entry is not UTF-8")?
                 .to_owned()),
+            PlanArgument::AdmittedExecutionProjectFile { .. } => {
+                bail!("external execution project file requires admitted candidate input binding")
+            }
             PlanArgument::AdmittedSourceMember { .. } => {
                 bail!("external direct source members require an admitted guest binding")
             }

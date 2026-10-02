@@ -29,6 +29,13 @@ pub enum RuntimeArgument {
     Template(String),
     Literal(LiteralRuntimeArgument),
     SourceMember(SourceMemberRuntimeArgument),
+    ExecutionProjectFile(ExecutionProjectFileRuntimeArgument),
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionProjectFileRuntimeArgument {
+    pub execution_project_file: crate::contracts::PlanExecutionProjectFileInput,
 }
 
 /// A member of this execution's admitted source closure, never a host path.
@@ -166,6 +173,23 @@ impl RuntimeHandler for RuntimeConfigHandler {
                 reason: format!("{e}"),
             }
         })?;
+        for argument in &config.args {
+            if let RuntimeArgument::ExecutionProjectFile(input) = argument {
+                if ctx.current_index != 0 {
+                    return Err(EngineError::InvalidRuntimeConfig {
+                        path: "config.args.execution_project_file".to_owned(),
+                        reason: "execution project file must be declared by the root definition"
+                            .to_owned(),
+                    });
+                }
+                input.execution_project_file.validate().map_err(|error| {
+                    EngineError::InvalidRuntimeConfig {
+                        path: "config.args.execution_project_file".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })?;
+            }
+        }
         let (timeout_secs, timeout_source) =
             timeout_secs_for_config(ctx, config.timeout_secs, &intermediate.source_path)?;
         tracing::info!(
@@ -266,5 +290,79 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("did not match"), "{error}");
+    }
+    #[test]
+    fn execution_project_file_is_owned_by_root_config_not_params_or_parent() {
+        use crate::item_resolution::ResolutionRoots;
+        use crate::kind_registry::KindRegistry;
+        use crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors;
+        use crate::runtime::{ChainIntermediate, HostEnvBindings, SpecOverrides, TemplateContext};
+        use crate::trust::TrustStore;
+        let block = json!({"command":"runtime", "args":[{"execution_project_file": {
+            "relative_path":"candidate/module.py", "destination":"/candidate-input",
+            "max_bytes":4096, "normalized_mode":420, "access":"read_only"
+        }}]});
+        let chain: Vec<_> = ["tool:test/root", "tool:test/parent"]
+            .into_iter()
+            .map(|reference| ChainIntermediate {
+                executor_id: reference.to_owned(),
+                resolved_ref: reference.to_owned(),
+                kind: "tool".into(),
+                source_path: PathBuf::from("/signed/config.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".into(),
+                },
+                parsed: json!({"config":block.clone()}),
+            })
+            .collect();
+        let parsers = dispatcher_with_canonical_bundle_descriptors();
+        let kinds = KindRegistry::empty();
+        let trust = TrustStore::empty();
+        let roots = ResolutionRoots { ordered: vec![] };
+        let host = HostEnvBindings::default();
+        let params =
+            json!({"execution_project_file":{"relative_path":"wrong.py","max_bytes":65536}});
+        for current_index in [0, 1] {
+            let mut ctx = CompileContext {
+                template_ctx: TemplateContext::new(PathBuf::from("/signed/config.yaml")),
+                env: HashMap::new(),
+                env_sources: HashMap::new(),
+                spec_overrides: SpecOverrides::default(),
+                params: params.clone(),
+                original_params: &params,
+                chain: &chain,
+                current_index,
+                roots: &roots,
+                parsers: &parsers,
+                kinds: &kinds,
+                trust_store: &trust,
+                node_trust_store: &trust,
+                project_root: None,
+                project_authority: None,
+                sealed_content: None,
+                root_trust_class: crate::resolution::TrustClass::TrustedBundle,
+                host_env: &host,
+            };
+            let result = RuntimeConfigHandler
+                .apply(chain[current_index].parsed.get("config").unwrap(), &mut ctx);
+            if current_index == 0 {
+                result.unwrap();
+                let args = ctx.spec_overrides.args.unwrap();
+                let RuntimeArgument::ExecutionProjectFile(input) = &args[0] else {
+                    panic!("root lost typed member authority");
+                };
+                assert_eq!(
+                    input.execution_project_file.relative_path,
+                    "candidate/module.py"
+                );
+                assert_eq!(input.execution_project_file.max_bytes, 4096);
+            } else {
+                assert!(
+                    matches!(result,Err(EngineError::InvalidRuntimeConfig { reason,.. }) if reason.contains("root definition"))
+                );
+                assert!(ctx.spec_overrides.command.is_none());
+            }
+        }
     }
 }
