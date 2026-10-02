@@ -62,7 +62,7 @@ pub(crate) struct PreparedMechanismProbeProgram {
 /// Exact signed fixture bytes beside their original B program and staged CAS
 /// owners. This is a private partial CAS, not project or execution authority.
 #[allow(dead_code)]
-pub(crate) struct PreparedMechanismFixtureTransfer {
+pub struct PreparedMechanismFixtureTransfer {
     selected_snapshot_hash: String,
     measurement: ryeos_project_capture::ProjectSnapshotTransferMeasurement,
     descriptor: lillux::InheritedDescriptorAuthority,
@@ -644,6 +644,146 @@ impl CapturedMechanismProbeSource {
                 transfer,
                 program,
             })
+        })
+    }
+
+    /// Lend only the actual finalized B resolution and its admitted source and
+    /// product owners for byte materialization. The fixture and staged program
+    /// remain opaque and owned by the caller; this grants no project, guest or
+    /// helper execution authority. The callback is trusted application code:
+    /// this guard authenticates its inputs and result window, but cannot
+    /// confine unrelated side effects it might perform.
+    pub fn with_original_fixture_byte_custody<T: 'static>(
+        &self,
+        state: &AppState,
+        purpose: &QualificationExecutionPurposeView<'_>,
+        selected: &CurrentBundleProducerRecipe,
+        fixture: &PreparedMechanismFixtureTransfer,
+        materialize: impl FnOnce(
+            &ResolutionOutput,
+            Option<&crate::source_closure_admission::AdmittedSourceClosure>,
+            &crate::external_content_admission::AdmittedExternalRealizations,
+            lillux::time::MonotonicDeadline,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        let program = &fixture.program;
+        ensure!(
+            program.root_key == self.root_key
+                && program.root_capsule_hash == self.root_capsule_hash
+                && program.scenario_id == self.scenario_id
+                && program.recipe_source == self.recipe_source
+                && !program.deadline.has_elapsed(),
+            "mechanism byte custody differs from its original prepared root"
+        );
+        let selected_snapshot_hash = self.selected_fixture_snapshot_hash()?;
+        ensure!(
+            fixture.selected_snapshot_hash == selected_snapshot_hash
+                && fixture.measurement.snapshot_hash == selected_snapshot_hash
+                && fixture.transfer.measurement() == fixture.measurement
+                && fixture.descriptor.directory_identity()?
+                    == fixture.transfer.descriptor().directory_identity()?,
+            "mechanism byte custody changed its original signed fixture transfer"
+        );
+        state.engine.with_checked_bundle_generation(|generation| {
+            self.require_original_root_in_generation(
+                state,
+                generation,
+                &program.root_key,
+                purpose,
+                &program.scenario_id,
+                selected,
+                &program.coordinate,
+                program.deadline,
+            )?;
+            self.require_current_signed_tool_source(state, generation, purpose)?;
+            let current = program.finalized.resolution();
+            let hooks = state
+                .engine
+                .kinds
+                .get(&self.verified.resolved.kind)
+                .and_then(|schema| schema.execution.as_ref())
+                .and_then(|execution| execution.hooks.as_ref());
+            self.require_finalized_captured_tool(
+                &program.finalized,
+                hooks
+                    .filter(|_| program.config_snapshots.is_some())
+                    .map(|hooks| hooks.plan_derived.as_str()),
+            )?;
+            let source_projection = current
+                .composed
+                .derived
+                .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+                .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
+                .transpose()?;
+            ensure!(
+                match (&program.source, source_projection.as_ref()) {
+                    (None, None) => true,
+                    (Some(source), Some(projection)) => {
+                        source.finalization_evidence().0.projection() == projection
+                    }
+                    _ => false,
+                },
+                "mechanism byte custody changed its admitted B source"
+            );
+            let realized =
+                ryeos_engine::external_realization::RealizedExternalContentSet::from_value(
+                    current
+                        .composed
+                        .derived
+                        .get(ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+                        .context("mechanism byte custody lost its admitted realization set")?,
+                )?;
+            ensure!(
+                program.external.finalization_evidence().0.realized() == &realized
+                    && program.plan.execution_plan().root_ref == current.root.resolved_ref
+                    && program.plan.realization_command().is_some(),
+                "mechanism byte custody changed its finalized member or product authority"
+            );
+            let authority = program.publication.authority();
+            let state_authority = state.state_store.pinned_state_authority()?;
+            ensure!(
+                authority.cas_directory().identity()?
+                    == state_authority.cas_directory().identity()?,
+                "mechanism byte custody CAS differs from its retained program"
+            );
+            ensure!(
+                !program.deadline.has_elapsed(),
+                "mechanism byte custody deadline elapsed before materialization"
+            );
+            // No CAS guard is held while Executor materializes its own exact
+            // product/source leases and descriptors. T is owned, so none of
+            // these borrowed proof references can escape this guarded call.
+            let bytes = materialize(
+                current,
+                program.source.as_ref(),
+                &program.external,
+                program.deadline,
+            )?;
+            ensure!(
+                fixture.selected_snapshot_hash == self.selected_fixture_snapshot_hash()?
+                    && fixture.transfer.measurement() == fixture.measurement
+                    && fixture.descriptor.directory_identity()?
+                        == fixture.transfer.descriptor().directory_identity()?
+                    && authority.cas_directory().identity()?
+                        == state_authority.cas_directory().identity()?,
+                "mechanism byte custody changed its retained fixture or CAS authority"
+            );
+            self.require_original_root_in_generation(
+                state,
+                generation,
+                &program.root_key,
+                purpose,
+                &program.scenario_id,
+                selected,
+                &program.coordinate,
+                program.deadline,
+            )?;
+            self.require_current_signed_tool_source(state, generation, purpose)?;
+            ensure!(
+                !program.deadline.has_elapsed(),
+                "mechanism byte custody deadline elapsed after final source recapture"
+            );
+            Ok(bytes)
         })
     }
 

@@ -26,6 +26,7 @@ pub mod launch_envelope;
 pub mod launch_preparation;
 pub mod lillux_bridge;
 pub mod limits;
+pub(crate) mod mechanism_input_custody;
 pub mod persistent_session;
 pub(crate) mod prepared_content_identity;
 pub(crate) mod prepared_launch_cache;
