@@ -1,12 +1,11 @@
 import ctypes
+from unittest.mock import patch
 import unittest
 
 from nvml_product_qualification import (
-    CLAIM,
-    EVIDENCE_SCHEMA,
     POLICY_SCHEMA,
     QualificationInputError,
-    qualify_raw_assignment,
+    observe_preflight_candidate,
 )
 
 
@@ -82,29 +81,39 @@ class NvmlProductQualificationTests(unittest.TestCase):
 
         return Bindings()
 
-    def test_returns_existing_product_qualification_shape_after_observer_success(self):
-        result = qualify_raw_assignment(
-            subject_manifest_hash="c" * 64,
-            verifier_parameters=self.parameters,
-            resource_selection=self.selection,
-            bindings=self._bindings(),
-        )
-        self.assertEqual(result["claims"], [CLAIM])
-        self.assertEqual(result["probe_evidence"]["schema"], EVIDENCE_SCHEMA)
-        assignment = result["probe_evidence"]["assignment"]
-        self.assertEqual(assignment["stable_resource_id"], "l4-primary")
-        self.assertEqual(assignment["primary_device"], self.selection["character_devices"][0])
-        self.assertEqual(assignment["uuid_v2_hex"], "0123456789abcdef0123456789abcdef")
+    def test_returns_only_existing_observer_dto_after_injected_driver_shutdown(self):
+        bindings = self._bindings()
+        calls = []
+        for name in ("nvmlInit_v2", "nvmlDeviceGetCount_v2", "nvmlDeviceGetHandleByIndex_v2",
+                     "nvmlDeviceIsMigDeviceHandle", "nvmlDeviceGetMigMode",
+                     "nvmlDeviceGetMinorNumber", "nvmlDeviceGetUUID", "nvmlShutdown"):
+            original = getattr(bindings, name)
+            def traced(*args, _original=original, _name=name):
+                calls.append(_name)
+                return _original(*args)
+            setattr(bindings, name, traced)
+        result = observe_preflight_candidate(self.parameters, self.selection, bindings)
+        self.assertEqual(set(result), {
+            "version", "stable_resource_id", "device_binding_digest",
+            "primary_device", "uuid_v2_hex", "nvml_shutdown",
+        })
+        self.assertEqual(result["version"], 1)
+        self.assertEqual(result["stable_resource_id"], "l4-primary")
+        self.assertEqual(result["primary_device"], self.selection["character_devices"][0])
+        self.assertEqual(result["uuid_v2_hex"], "0123456789abcdef0123456789abcdef")
+        self.assertEqual(calls[-1], "nvmlShutdown")
+        self.assertEqual(calls.count("nvmlShutdown"), 1)
+
+    def test_bool_version_is_not_accepted_as_v1(self):
+        from cuda_lifecycle import nvml_observer
+        with patch.object(nvml_observer, "observe_assignment", return_value=dict(self.observation, version=True)):
+            with self.assertRaises(QualificationInputError):
+                observe_preflight_candidate(self.parameters, self.selection, object())
 
     def test_unresolved_policy_refuses_before_native_bindings(self):
         unresolved = dict(self.parameters, primary_device_role=None)
         with self.assertRaises(QualificationInputError):
-            qualify_raw_assignment(
-                subject_manifest_hash="c" * 64,
-                verifier_parameters=unresolved,
-                resource_selection=self.selection,
-                bindings=None,
-            )
+            observe_preflight_candidate(unresolved, self.selection, None)
 
 
 if __name__ == "__main__":
