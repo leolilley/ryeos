@@ -1602,7 +1602,7 @@ fn persist_credential_profile_authority_locked(inner: &Inner, profile_id: &str) 
 struct StateStoreGuard<'a> {
     inner: std::sync::MutexGuard<'a, Inner>,
     _fork_sensitive_descriptors: lillux::ForkSensitiveDescriptorLease,
-    acquired_at: std::time::Instant,
+    acquired_at: lillux::time::MonotonicTimer,
     caller: &'static std::panic::Location<'static>,
 }
 
@@ -6921,6 +6921,28 @@ impl StateStore {
         g.runtime_db.reserve_process_resource_launch(reservation)
     }
 
+    /// SAME original scratch reservation under the original connection window.
+    /// Physical guard validation is still the existing separate unbounded seam.
+    pub(crate) fn reserve_process_resource_launch_with_scratch_until(
+        &self,
+        reservation: &runtime_db::ProcessResourceReservationRecord,
+        original: &crate::temp_dir_guard::TempDirGuard,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        if self.read_only || deadline.has_elapsed() {
+            bail!("original scratch reservation unavailable or expired");
+        }
+        let custody =
+            runtime_db::process_resource_custody::never_issued_scratch_custody(reservation)?;
+        custody.require_retained()?;
+        let parent = self.resource_scratch_parent(custody)?;
+        self.require_original_resource_scratch(custody, &parent, original)?;
+        original.preserve_for_explicit_cleanup();
+        self.with_runtime_original_deadline(deadline, |db| {
+            db.reserve_process_resource_launch(reservation)
+        })
+    }
+
     /// Only a stored NEVER-ISSUED reservation can use this finite first cut.
     /// The receipt records physical disposal; pins/capacity remain retained.
     pub fn remove_never_issued_resource_scratch(
@@ -7100,6 +7122,16 @@ impl StateStore {
             bail!("trusted resource spawn intent is closed for daemon shutdown");
         }
         g.runtime_db.begin_trusted_process_resource_spawn(expected)
+    }
+
+    pub(crate) fn begin_trusted_process_resource_spawn_until(
+        &self,
+        expected: &runtime_db::ProcessResourceReservationRecord,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<runtime_db::process_resource_launch::TrustedResourceSpawnPermit> {
+        self.with_runtime_original_deadline(deadline, |db| {
+            db.begin_trusted_process_resource_spawn(expected)
+        })
     }
 
     pub fn reserve_thread_process_scope(
@@ -8828,7 +8860,7 @@ impl StateStore {
 
     #[track_caller]
     fn lock(&self) -> Result<StateStoreGuard<'_>> {
-        let started = std::time::Instant::now();
+        let started = lillux::time::MonotonicTimer::start();
         let caller = std::panic::Location::caller();
         let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         let inner = cooperate_while_blocking(|| {
@@ -8843,9 +8875,72 @@ impl StateStore {
         Ok(StateStoreGuard {
             _fork_sensitive_descriptors: fork_sensitive_descriptors,
             inner,
-            acquired_at: std::time::Instant::now(),
+            acquired_at: lillux::time::MonotonicTimer::start(),
             caller,
         })
+    }
+
+    /// Bound BOTH original descriptor lease and StateStore mutex acquisition.
+    /// The returned guard preserves the original descriptor-before-store order.
+    #[track_caller]
+    fn lock_until(&self, deadline: lillux::time::MonotonicDeadline) -> Result<StateStoreGuard<'_>> {
+        let started = lillux::time::MonotonicTimer::start();
+        let caller = std::panic::Location::caller();
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)
+            .context("original StateStore deadline waiting for descriptor lease")?;
+        let inner = cooperate_while_blocking(|| {
+            loop {
+                if deadline.has_elapsed() {
+                    bail!("original StateStore deadline expired waiting for mutex");
+                }
+                match self.inner.try_lock() {
+                    Ok(inner) => {
+                        if deadline.has_elapsed() {
+                            bail!("original StateStore deadline expired at mutex acquisition");
+                        }
+                        break Ok(inner);
+                    }
+                    Err(std::sync::TryLockError::Poisoned(_)) => bail!("StateStore lock poisoned"),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        lillux::time::sleep(
+                            deadline
+                                .remaining()
+                                .min(lillux::time::Duration::from_millis(1)),
+                        );
+                    }
+                }
+            }
+        })?;
+        let waited = started.elapsed();
+        if waited >= std::time::Duration::from_millis(100) {
+            record_store_contention(StoreContentionKind::Wait, waited, caller);
+        }
+        Ok(StateStoreGuard {
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
+            inner,
+            acquired_at: lillux::time::MonotonicTimer::start(),
+            caller,
+        })
+    }
+
+    fn with_runtime_original_deadline<T>(
+        &self,
+        deadline: lillux::time::MonotonicDeadline,
+        operation: impl FnOnce(&runtime_db::RuntimeDb) -> Result<T>,
+    ) -> Result<T> {
+        let g = self.lock_until(deadline)?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("original RuntimeDb operation is fenced for process attachment");
+        }
+        g.runtime_db.with_original_deadline(
+            deadline,
+            &self.process_attachment_admission_open,
+            &self.process_attachment_admission_closed,
+            operation,
+        )
     }
 
     fn attached_process_registry(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
@@ -22758,6 +22853,45 @@ mod tests {
             !format!("{newer:#}")
                 .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
+    }
+
+    #[test]
+    fn original_state_store_mutex_deadline_refuses_while_actual_guard_remains_held() {
+        let store = Arc::new(test_store());
+        let original_guard = store.inner.lock().unwrap();
+        let original =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(40));
+        let waiting = Arc::clone(&store);
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sent.send(waiting.lock_until(original).map(|_| ())).unwrap();
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(2));
+        drop(original_guard); // always release actual original mutex before joining/assertion
+        worker.join().unwrap();
+        assert!(
+            result
+                .expect("actual StateStore waiter must stop before guard release")
+                .is_err()
+        );
+        assert!(original.has_elapsed());
+        assert!(store.lock().is_ok());
+    }
+
+    #[test]
+    fn original_state_store_expiry_cannot_enter_runtime_sql_operation() {
+        let store = test_store();
+        let entered = AtomicBool::new(false);
+        let result = store.with_runtime_original_deadline(
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO),
+            |db| {
+                entered.store(true, Ordering::Release);
+                db.process_resource_reservations()
+            },
+        );
+        assert!(result.is_err());
+        assert!(!entered.load(Ordering::Acquire));
+        assert!(store.lock().is_ok());
     }
 
     fn test_store() -> StateStore {

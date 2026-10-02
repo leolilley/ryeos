@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod external_execution;
+mod original_deadline;
 pub mod process_resource_custody;
 pub mod process_resource_launch;
 pub mod process_resource_settlement;
@@ -7292,6 +7293,8 @@ fn reset_owned_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
 
 pub struct RuntimeDb {
     conn: Connection,
+    // One scoped progress/busy owner on this SAME private connection.
+    original_deadline_active: std::cell::Cell<bool>,
     reset_required: bool,
     open_mode: RuntimeDbOpenMode,
     _directory: Option<lillux::PinnedDirectory>,
@@ -8554,6 +8557,7 @@ impl RuntimeDb {
         initialize_current_runtime_schema(&conn, Path::new(":memory:"))?;
         Ok(Self {
             conn,
+            original_deadline_active: std::cell::Cell::new(false),
             reset_required: false,
             open_mode: RuntimeDbOpenMode::Current,
             _directory: None,
@@ -16357,6 +16361,7 @@ impl RuntimeDb {
             }
             return Ok(Self {
                 conn,
+                original_deadline_active: std::cell::Cell::new(false),
                 reset_required: true,
                 open_mode: mode,
                 _directory: Some(directory),
@@ -16434,6 +16439,7 @@ impl RuntimeDb {
 
         Ok(Self {
             conn,
+            original_deadline_active: std::cell::Cell::new(false),
             reset_required: false,
             open_mode: mode,
             _directory: Some(directory),
