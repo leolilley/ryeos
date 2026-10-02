@@ -5510,30 +5510,123 @@ impl RunningProcess {
         // the receiver before any expiry, PID, or reader-failure return.
         self.applied_receipt_observation = Some(observation);
         self.applied_receipt_rx = None;
-        if original_deadline.remaining().is_zero() {
-            return self.fail_selected_applied_launch_receipt(
-                "native settlement original deadline expired after applied receipt".into(),
-            );
-        }
+        self.validate_selected_cached_applied_receipt(original_deadline)?;
         let receipt = match self.applied_receipt_observation.as_ref() {
             Some(Ok(receipt)) => receipt.clone(),
-            Some(Err(failure)) => {
-                return self.fail_selected_applied_launch_receipt(failure.clone());
-            }
-            None => unreachable!("selected receive was cached before validation"),
+            _ => unreachable!("cached selected receipt was validated above"),
         };
-        if receipt.owned_child_pid != self.pid {
-            return self.fail_selected_applied_launch_receipt(
-                "applied-launch receipt differs from exact running target".into(),
-            );
-        }
-        if original_deadline.remaining().is_zero() {
+        if original_deadline.has_elapsed() {
             return self.fail_selected_applied_launch_receipt(
                 "native settlement original deadline expired before applied receipt return".into(),
             );
         }
         self.applied_receipt_returned = true;
         Ok(receipt)
+    }
+
+    // Borrow the exact cached observation. Both existing public observation
+    // and selected collection use this validator; raw Ok is not acceptance.
+    fn validate_selected_cached_applied_receipt(
+        &mut self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let refusal = if original.has_elapsed() {
+            Some("native settlement original deadline expired after applied receipt".to_owned())
+        } else {
+            match self.applied_receipt_observation.as_ref() {
+                Some(Ok(receipt)) if receipt.owned_child_pid == self.pid => None,
+                Some(Ok(_)) => {
+                    Some("applied-launch receipt differs from exact running target".into())
+                }
+                Some(Err(failure)) => Some(failure.clone()),
+                None => Some("selected applied receipt lacks actual cached observation".into()),
+            }
+        };
+        if let Some(failure) = refusal {
+            return self
+                .fail_selected_applied_launch_receipt(failure)
+                .map(|_| ());
+        }
+        if original.has_elapsed() {
+            return self
+                .fail_selected_applied_launch_receipt(
+                    "native settlement original deadline expired before applied receipt return"
+                        .into(),
+                )
+                .map(|_| ());
+        }
+        Ok(())
+    }
+
+    // One nonblocking observation of the sole existing receiver per core loop.
+    // Empty preserves it for a later slice; no public DTO delivery or replay.
+    fn poll_selected_applied_receipt_for_collection(&mut self) -> Result<bool, String> {
+        if let Some(failure) = &self.applied_receipt_failure {
+            return Err(failure.clone());
+        }
+        let original = self
+            .native_settlement
+            .as_ref()
+            .ok_or("selected receipt collection lacks original channel")?
+            .original_deadline;
+        if original.has_elapsed() {
+            return self
+                .fail_selected_applied_launch_receipt(
+                    "native settlement original deadline expired before applied receipt".into(),
+                )
+                .map(|_| true);
+        }
+        if self.applied_receipt_returned {
+            if !matches!(self.applied_receipt_observation, Some(Ok(_))) {
+                return self
+                    .fail_selected_applied_launch_receipt(
+                        "successful selected receipt lacks cached Ok".into(),
+                    )
+                    .map(|_| true);
+            }
+            self.validate_selected_cached_applied_receipt(original)?;
+            return Ok(true);
+        }
+        if self.applied_receipt_observation.is_some() {
+            return self
+                .fail_selected_applied_launch_receipt(
+                    "unaccepted cached applied observation cannot be replayed".into(),
+                )
+                .map(|_| true);
+        }
+        let observation = match self.applied_receipt_rx.as_ref() {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(observation) => observation,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if original.has_elapsed() {
+                        return self.fail_selected_applied_launch_receipt(
+                            "native settlement original deadline expired awaiting applied receipt".into(),
+                        ).map(|_| true);
+                    }
+                    return Ok(false);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return self
+                        .fail_selected_applied_launch_receipt(
+                            "applied-launch status reader ended without a receipt".into(),
+                        )
+                        .map(|_| true);
+                }
+            },
+            None => {
+                return self
+                    .fail_selected_applied_launch_receipt(
+                        "running process has no required applied-launch receipt channel".into(),
+                    )
+                    .map(|_| true);
+            }
+        };
+        // Consuming a real item is irreversible; cache and disarm first.
+        self.applied_receipt_observation = Some(observation);
+        self.applied_receipt_rx = None;
+        self.validate_selected_cached_applied_receipt(original)?;
+        self.applied_receipt_returned = true;
+        Ok(true)
     }
 
     fn fail_selected_applied_launch_receipt(
@@ -5802,6 +5895,21 @@ impl RunningProcess {
             if let Some(channel) = self.native_settlement.as_ref() {
                 match channel.selected_wait_phase {
                     SelectedNativeTerminalWaitPhase::Collected => {
+                        // Historical timely collection is not invalidated by
+                        // later diagnostic expiry; never receive here again.
+                        if self.applied_receipt_failure.is_some()
+                            || !self.applied_receipt_returned
+                            || !matches!(self.applied_receipt_observation, Some(Ok(_)))
+                        {
+                            if let Some(channel) = self.native_settlement.as_mut() {
+                                channel.failure = Some(
+                                    "cached collected state lacks accepted applied receipt".into(),
+                                );
+                                channel.selected_wait_phase =
+                                    SelectedNativeTerminalWaitPhase::Failed;
+                            }
+                            return NaturalWaitCoreOutcome::Failed(self);
+                        }
                         return NaturalWaitCoreOutcome::Completed(self, None);
                     }
                     SelectedNativeTerminalWaitPhase::Failed => {
@@ -5815,6 +5923,42 @@ impl RunningProcess {
             return NaturalWaitCoreOutcome::Incomplete(self);
         };
         loop {
+            if retain_selected_result {
+                match self.poll_selected_applied_receipt_for_collection() {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let bound = self.natural_wait_poll_bound(deadline);
+                        if bound.is_zero() {
+                            // Recheck original expiry before declaring a slice
+                            // incomplete; retain the same receiver on Pending.
+                            if self
+                                .native_settlement
+                                .as_ref()
+                                .is_some_and(|channel| channel.original_deadline.has_elapsed())
+                            {
+                                let failure = "native settlement original deadline expired awaiting applied receipt".to_owned();
+                                let _ = self.fail_selected_applied_launch_receipt(failure.clone());
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    channel.failure = Some(failure);
+                                    channel.selected_wait_phase =
+                                        SelectedNativeTerminalWaitPhase::Failed;
+                                }
+                                return NaturalWaitCoreOutcome::Failed(self);
+                            }
+                            return NaturalWaitCoreOutcome::Incomplete(self);
+                        }
+                        thread::sleep(bound);
+                        continue;
+                    }
+                    Err(failure) => {
+                        if let Some(channel) = self.native_settlement.as_mut() {
+                            channel.failure = Some(failure);
+                            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
+                        }
+                        return NaturalWaitCoreOutcome::Failed(self);
+                    }
+                }
+            }
             let complete = match self.poll_native_terminal_testimony() {
                 Ok(complete) => complete,
                 Err(_) => return NaturalWaitCoreOutcome::Failed(self),
@@ -8557,6 +8701,85 @@ mod selected_applied_receipt_cache_tests {
     }
 
     #[test]
+    fn selected_receipt_empty_slice_retains_receiver_then_actual_delivery_resumes() {
+        let (running, sender, _writer) = selected_running(crate::time::MonotonicDeadline::after(
+            Duration::from_secs(2),
+        ));
+        let mut owner = match running.wait_for_natural_exit_retaining_native(Duration::ZERO) {
+            Ok(SelectedNativeTerminalWaitOutcome::Incomplete(owner)) => owner,
+            _ => panic!("empty live receipt must be Incomplete"),
+        };
+        assert!(owner.applied_receipt_rx.is_some());
+        assert!(owner.applied_receipt_failure.is_none());
+        let actual = receipt(owner.pid);
+        sender.send(Ok(actual.clone())).unwrap();
+        assert!(
+            owner
+                .poll_selected_applied_receipt_for_collection()
+                .unwrap()
+        );
+        assert_eq!(owner.applied_receipt_observation, Some(Ok(actual)));
+        assert!(owner.applied_receipt_returned);
+        assert!(owner.applied_receipt_rx.is_none());
+        assert!(
+            owner
+                .poll_selected_applied_receipt_for_collection()
+                .unwrap()
+        );
+        assert!(
+            owner
+                .wait_applied_launch_receipt(Duration::from_secs(1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn selected_collection_receipt_refusal_retains_item_and_sticks_without_replay() {
+        let (running, sender, _writer) = selected_running(crate::time::MonotonicDeadline::after(
+            Duration::from_secs(2),
+        ));
+        sender.send(Err("actual reader refusal".into())).unwrap();
+        let owner = match running.wait_for_natural_exit_retaining_native(Duration::ZERO) {
+            Ok(SelectedNativeTerminalWaitOutcome::Failed(owner)) => owner,
+            _ => panic!("actual reader refusal must fail collection"),
+        };
+        assert_eq!(
+            owner.applied_receipt_observation,
+            Some(Err("actual reader refusal".into()))
+        );
+        assert!(!owner.applied_receipt_returned);
+        assert!(owner.applied_receipt_rx.is_none());
+        let owner = match owner.wait_for_natural_exit_retaining_native(Duration::ZERO) {
+            Ok(SelectedNativeTerminalWaitOutcome::Failed(owner)) => owner,
+            _ => panic!("sticky refusal must remain Failed"),
+        };
+        assert!(owner.native_terminal_raw_view().unwrap().failure.is_some());
+        assert!(sender.send(Ok(receipt(owner.pid))).is_err());
+    }
+
+    #[test]
+    fn public_selected_receipt_then_collection_reuses_cached_actual_success() {
+        let (mut running, sender, _writer) = selected_running(
+            crate::time::MonotonicDeadline::after(Duration::from_secs(2)),
+        );
+        let actual = receipt(running.pid);
+        sender.send(Ok(actual.clone())).unwrap();
+        assert_eq!(
+            running
+                .wait_applied_launch_receipt(Duration::from_secs(1))
+                .unwrap(),
+            actual
+        );
+        assert!(
+            running
+                .poll_selected_applied_receipt_for_collection()
+                .unwrap()
+        );
+        assert!(running.applied_receipt_rx.is_none());
+        assert!(sender.send(Ok(receipt(running.pid))).is_err());
+    }
+
+    #[test]
     fn selected_pid_failure_retains_consumed_receipt_and_is_sticky() {
         let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
         let (mut running, sender, _writer) = selected_running(deadline);
@@ -11274,6 +11497,26 @@ mod native_terminal_existing_wait_tests {
         running.native_settlement = held.reader.native_settlement.take();
         running.mount_preparation = Some(mount.clone());
         running.attachment_target_lifetime = Some(Arc::new(open_pidfd(running.pid).unwrap()));
+        let (receipt_sender, receipt_receiver) = std::sync::mpsc::channel();
+        let applied = crate::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: running.pid,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: crate::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 0,
+                destination_access_sha256: [0; 32],
+            },
+        };
+        receipt_sender.send(Ok(applied.clone())).unwrap();
+        running.applied_receipt_rx = Some(receipt_receiver);
         running
             .native_settlement
             .as_mut()
@@ -11283,7 +11526,7 @@ mod native_terminal_existing_wait_tests {
             schema: crate::sandbox::native_terminal_wire::NATIVE_TERMINAL_SCHEMA.to_owned(),
             process_identity: identity,
             held_mount: mount,
-            applied_launch: None,
+            applied_launch: Some(applied),
             exit: crate::sandbox::native_terminal_wire::NativeTerminalExit::Code(0),
             owner_requested_termination: false,
             launch_failure: None,
@@ -11321,6 +11564,27 @@ mod native_terminal_existing_wait_tests {
         })
         .unwrap();
         running.native_settlement = held.reader.native_settlement.take();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(Ok(crate::LinuxSandboxAppliedLaunchReceipt {
+                owned_child_pid: running.pid,
+                namespace_pid: 1,
+                effective_uid: 1,
+                effective_gid: 1,
+                no_new_privs: true,
+                seccomp_mode: 2,
+                executable_sha256: [1; 32],
+                argv_sha256: [2; 32],
+                environment_sha256: [3; 32],
+                cwd_sha256: [4; 32],
+                post_release_mount_view: crate::LinuxSandboxMountPreparationCommitments {
+                    schema: 1,
+                    mount_count: 0,
+                    destination_access_sha256: [0; 32],
+                },
+            }))
+            .unwrap();
+        running.applied_receipt_rx = Some(receiver);
         (running, writer)
     }
 
