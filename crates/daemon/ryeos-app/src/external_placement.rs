@@ -1622,15 +1622,78 @@ fn require_current_runtime_content_qualification(
     Ok(Some(qualified))
 }
 
+/// A signed selection must demand the mechanisms this controller will send.
+/// Actual testimony, exact guest identity and probe are verified below through
+/// the existing qualification owner; this selection check grants nothing.
+fn require_guest_support_claim_selection(
+    contract: &ExternalPlacementBackendContract,
+    required: &[&str],
+) -> Result<()> {
+    let selected = contract
+        .runtime_qualification
+        .as_ref()
+        .context("ordinary external execution requires a selected guest runtime qualification")?;
+    for claim in required {
+        ensure!(
+            selected
+                .qualification
+                .required_claims
+                .iter()
+                .any(|selected| selected.as_str() == *claim),
+            "signed guest runtime qualification does not require mechanism claim {claim}"
+        );
+    }
+    Ok(())
+}
+
+fn require_ordinary_guest_wire_support_selection(
+    contract: &ExternalPlacementBackendContract,
+) -> Result<()> {
+    use crate::node_config::sections::external_execution::ExternalWorkloadBinding;
+    use ryeos_external_execution_contract::{
+        DIRECT_PROGRAM_SUPPORT_CLAIM, GUEST_WIRE_SUPPORT_CLAIM,
+    };
+    match &contract.workload {
+        ExternalWorkloadBinding::StructuredSession(_) => {
+            require_guest_support_claim_selection(contract, &[GUEST_WIRE_SUPPORT_CLAIM])
+        }
+        ExternalWorkloadBinding::DirectCommand {} => require_guest_support_claim_selection(
+            contract,
+            &[GUEST_WIRE_SUPPORT_CLAIM, DIRECT_PROGRAM_SUPPORT_CLAIM],
+        ),
+        ExternalWorkloadBinding::QualificationStructuredSession(_) => {
+            bail!("qualification-only measurement cannot use ordinary guest testimony admission")
+        }
+    }
+}
+
+fn require_direct_feature_support_selection(
+    contract: &ExternalPlacementBackendContract,
+    program: &ryeos_state::external_execution::admission::AdmittedExternalDirectProgram,
+) -> Result<()> {
+    use ryeos_external_execution_contract::{
+        CAPTURED_INPUTS_SUPPORT_CLAIM, GuestWorkspaceView, TARGET_LIMITS_SUPPORT_CLAIM,
+    };
+    if program.projection().workspace_view == GuestWorkspaceView::CapturedInputs {
+        require_guest_support_claim_selection(contract, &[CAPTURED_INPUTS_SUPPORT_CLAIM])?;
+    }
+    if program.projection().target_limits.is_some() {
+        require_guest_support_claim_selection(contract, &[TARGET_LIMITS_SUPPORT_CLAIM])?;
+    }
+    Ok(())
+}
+
 fn admit_current_runtime_qualification(
     state: &AppState,
     contract: &ExternalPlacementBackendContract,
     binding_hash: &str,
 ) -> Result<Option<ryeos_state::objects::RetainedExternalRuntimeQualification>> {
+    require_ordinary_guest_wire_support_selection(contract)?;
     require_current_runtime_content_qualification(state, contract)?;
-    let Some(qualification) = &contract.runtime_qualification else {
-        return Ok(None);
-    };
+    let qualification = contract
+        .runtime_qualification
+        .as_ref()
+        .context("ordinary external execution lost its selected guest qualification")?;
     let witness = crate::operator_external_content::product_qualification::verify_current_external_runtime_qualification(
         state,
         qualification,
@@ -3877,6 +3940,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             .reservation
             .validate_startup_budget(contract.direct_startup_budget_ms()?)?;
         if !cleanup_only && record.phase == ExternalAllocationPhase::Reserved {
+            require_direct_feature_support_selection(&contract, program)?;
             require_current_runtime_qualification_for_start(
                 self.state,
                 &contract,
@@ -4019,6 +4083,7 @@ impl<'a> ExternalPlacementOwner<'a> {
         binding.check_direct_program(&program)?;
         let contract = binding.backend_contract();
         if fresh {
+            require_direct_feature_support_selection(&contract, &program)?;
             require_current_runtime_qualification_for_start(
                 self.state,
                 &contract,
@@ -9459,6 +9524,47 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn ordinary_guest_wire_floor_refuses_absent_and_older_claim_selection() {
+        use ryeos_external_execution_contract::{
+            DIRECT_PROGRAM_SUPPORT_CLAIM, GUEST_WIRE_SUPPORT_CLAIM,
+        };
+        let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
+        let mut contract = binding.backend_contract();
+        contract.runtime_qualification = None;
+        assert!(require_ordinary_guest_wire_support_selection(&contract).is_err());
+        contract.runtime_qualification = Some(
+            crate::node_config::sections::external_execution::ExternalRuntimeQualificationBinding {
+                attestation_hash: "1".repeat(64),
+                owner_principal: format!("fp:{}", "2".repeat(64)),
+                qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                    policy_ref: Some("config:fixture/guest-mechanisms".into()),
+                    required_claims: vec!["render_snapshot_v1".into()],
+                },
+            },
+        );
+        assert!(require_ordinary_guest_wire_support_selection(&contract).is_err());
+        let selected = contract.runtime_qualification.as_mut().unwrap();
+        selected
+            .qualification
+            .required_claims
+            .push(GUEST_WIRE_SUPPORT_CLAIM.into());
+        assert!(require_ordinary_guest_wire_support_selection(&contract).is_err());
+        contract
+            .runtime_qualification
+            .as_mut()
+            .unwrap()
+            .qualification
+            .required_claims
+            .push(DIRECT_PROGRAM_SUPPORT_CLAIM.into());
+        let selected = contract.runtime_qualification.as_mut().unwrap();
+        selected.qualification.required_claims.sort();
+        selected.validate().unwrap();
+        // Selection alone is not evidence: current witness and probe remain
+        // mandatory in admit_current_runtime_qualification.
+        require_ordinary_guest_wire_support_selection(&contract).unwrap();
     }
 
     #[test]
