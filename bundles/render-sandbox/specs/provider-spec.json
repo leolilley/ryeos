@@ -129,9 +129,16 @@
       "observation_route": "sandbox_run_stream_token_by_id"
     },
     "reconcile_allocation": { "kind": "unsupported_pending" },
-    "activate_supervisor": { "kind": "unsupported_pending" },
+    "activate_supervisor": {
+      "kind": "upload_then_run_once_pending",
+      "precondition_profile": "render_qualified_guest_runtime_v1"
+    },
     "reconcile_supervisor_activation": { "kind": "unsupported_pending" },
-    "relay_file": { "kind": "unsupported_pending" },
+    "relay_file": {
+      "kind": "journal_claimed_file_relay",
+      "mutation_route": "sandbox_file_upload_token_by_id",
+      "observation_route": "sandbox_file_download_token_by_id"
+    },
     "terminate": {
       "kind": "terminate_once_then_observe_exact",
       "mutation_route": "sandbox_terminate_by_id",

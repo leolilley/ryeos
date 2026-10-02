@@ -1109,6 +1109,59 @@ mod tests {
     }
 
     #[test]
+    fn authored_render_profile_selects_only_pending_startup_and_exact_file_relay() {
+        let bytes = include_bytes!("../../../../bundles/render-sandbox/specs/provider-spec.json");
+        let spec = ProviderSpec::parse(bytes, SETTINGS_SCHEMA_DIGEST).unwrap();
+        assert!(spec.one_shot_activation_enabled());
+        assert!(spec.relay_file_enabled());
+        assert_eq!(
+            spec.relay_file_upload_route().unwrap(),
+            RouteName::SandboxFileUploadTokenById
+        );
+        assert_eq!(
+            spec.relay_file_download_route().unwrap(),
+            RouteName::SandboxFileDownloadTokenById
+        );
+        assert!(
+            spec.operations
+                .reconcile_supervisor_activation
+                .is_empty_pending()
+        );
+        assert!(spec.operations.reconcile_allocation.is_empty_pending());
+        assert_eq!(
+            spec.effective_capabilities(),
+            BTreeSet::from([
+                LifecycleCapability::SupervisorActivation,
+                LifecycleCapability::AuthoritativeNoOccurrence,
+                LifecycleCapability::ExactTerminalObservation,
+            ])
+        );
+
+        // A source/profile edit cannot turn a pending launch into reconciliation
+        // evidence or admit a different relay route through the closed parser.
+        let mut wrong_reconciliation: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        wrong_reconciliation["operations"]["reconcile_supervisor_activation"] =
+            serde_json::json!({"kind": "observe_exact_occurrence", "route": "sandbox_by_id"});
+        assert!(
+            ProviderSpec::parse(
+                &serde_json::to_vec(&wrong_reconciliation).unwrap(),
+                SETTINGS_SCHEMA_DIGEST,
+            )
+            .is_err()
+        );
+        let mut wrong_relay: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        wrong_relay["operations"]["relay_file"]["observation_route"] =
+            serde_json::json!("sandbox_run_stream_token_by_id");
+        assert!(
+            ProviderSpec::parse(
+                &serde_json::to_vec(&wrong_relay).unwrap(),
+                SETTINGS_SCHEMA_DIGEST,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn relay_file_requires_explicit_exact_signed_operation_and_activation_selection() {
         let mut value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
         let pending = ProviderSpec::parse(&fixture(), SETTINGS_SCHEMA_DIGEST).unwrap();
