@@ -50,6 +50,11 @@ pub struct Request {
     pub launch_id: Option<String>,
 }
 
+// Proposed only: a contact ceiling for one accepted submission.
+// All accepted contacts share this existing control-plane ceiling. A protected
+// caller also retains its original earlier budget; preparation cannot renew it.
+const ACCEPTED_CONTACT_MAX: lillux::time::Duration = lillux::time::Duration::from_secs(30);
+
 fn default_remote() -> String {
     "default".to_string()
 }
@@ -59,6 +64,7 @@ pub async fn handle(
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
+    let contact_deadline = remote_contact_deadline(&req, &ctx);
     authorize_execution_refs(&req.item_ref, &req.ref_bindings, &ctx, &state)?;
     req.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(req.product_selections)
         .map_err(|error| HandlerError::BadRequest(format!("invalid destination-local product_selections: {error}")))?;
@@ -168,23 +174,17 @@ pub async fn handle(
         }
         (false, None) => {}
     }
-    let remote_result = client
-        .execute(
-            &req.item_ref,
-            &req.ref_bindings,
-            &req.product_selections,
-            binding
-                .as_ref()
-                .map(|binding| binding.remote_project_path.as_str()),
-            &req.parameters,
-            &req.execution_policy,
-            req.launch_id.as_deref(),
-        )
+    let remote_result = submit_remote_request(
+        &client,
+        &req,
+        binding
+            .as_ref()
+            .map(|binding| binding.remote_project_path.as_str()),
+        contact_deadline,
+    )
         .await
         .map_err(|error| {
-            let coordinate = req
-                .launch_id
-                .as_deref()
+            let coordinate = remote_launch_coordinate(&req)
                 .map(|launch_id| {
                     format!(
                         "; retain remote launch coordinate {launch_id} and query that exact owner-bound launch before retrying"
@@ -205,6 +205,96 @@ pub async fn handle(
         "sync_scope": binding.as_ref().map(|value| value.sync_scope),
         "result": remote_result,
     }))
+}
+
+fn remote_contact_deadline(
+    req: &Request,
+    ctx: &crate::handler_context::HandlerContext,
+) -> Option<lillux::time::MonotonicDeadline> {
+    let original = ctx
+        .original_execution_budget()
+        .map(|budget| budget.contact_expiry());
+    let contact = (req.execution_policy.response
+        == ryeos_app::execution_policy::ExecutionResponse::Accepted)
+        .then(|| lillux::time::MonotonicDeadline::after(ACCEPTED_CONTACT_MAX));
+    match (original, contact) {
+        (Some(original), Some(contact)) => Some(original.min(contact)),
+        (original, contact) => original.or(contact),
+    }
+}
+
+// Diagnostic retention only. The target's existing owner-bound service
+// validates this coordinate; it is never local admission authority.
+fn remote_launch_coordinate(req: &Request) -> Option<&str> {
+    req.launch_id.as_deref().or_else(|| {
+        matches!(
+            req.item_ref.as_str(),
+            "service:launch/status" | "service:launch/cancel"
+        )
+        .then(|| req.parameters.get("launch_id").and_then(Value::as_str))
+        .flatten()
+        .filter(|id| ryeos_app::state_store::is_canonical_launch_id(id))
+    })
+}
+
+/// Use the normal signed request and its full result envelope. Timeouts and
+/// late acknowledgements retain uncertainty at the same launch coordinate;
+/// neither repeats contact nor settles the target's process or financial owner.
+async fn submit_remote_request(
+    client: &RemoteClient,
+    req: &Request,
+    project_path: Option<&str>,
+    contact_deadline: Option<lillux::time::MonotonicDeadline>,
+) -> anyhow::Result<Value> {
+    let remaining = contact_deadline.map(|deadline| deadline.remaining());
+    if remaining.is_some_and(|remaining| remaining.is_zero()) {
+        anyhow::bail!("remote contact deadline expired before submission");
+    }
+    let result = if req.execution_policy.response
+        == ryeos_app::execution_policy::ExecutionResponse::Accepted
+    {
+        let launch_id = req
+            .launch_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("accepted remote submission requires launch_id"))?;
+        let remaining = remaining
+            .ok_or_else(|| anyhow::anyhow!("accepted remote submission lost contact ceiling"))?;
+        client
+            .execute_accepted_with_total_timeout(
+                &req.item_ref,
+                &req.ref_bindings,
+                &req.product_selections,
+                project_path,
+                &req.parameters,
+                &req.execution_policy,
+                launch_id,
+                remaining,
+            )
+            .await?
+    } else {
+        let call = client.execute(
+            &req.item_ref,
+            &req.ref_bindings,
+            &req.product_selections,
+            project_path,
+            &req.parameters,
+            &req.execution_policy,
+            req.launch_id.as_deref(),
+        );
+        if let Some(remaining) = remaining {
+            tokio::time::timeout(remaining, call).await.map_err(|_| {
+                anyhow::anyhow!("protected remote wait exceeded original contact deadline")
+            })??
+        } else {
+            call.await?
+        }
+    };
+    if contact_deadline.is_some_and(|deadline| deadline.has_elapsed()) {
+        anyhow::bail!(
+            "remote response arrived after original contact deadline; retain launch uncertainty"
+        );
+    }
+    Ok(result)
 }
 
 fn authorize_execution_refs(
@@ -255,6 +345,366 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::Request;
+    use super::{remote_contact_deadline, remote_launch_coordinate, submit_remote_request};
+    use lillux::time::Duration;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Copy)]
+    enum PeerMode {
+        HeaderStall,
+        BodyTrickle,
+        EchoAfter(Duration),
+    }
+
+    #[derive(Clone)]
+    struct PeerState {
+        mode: PeerMode,
+        requests: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        stop: tokio::sync::watch::Receiver<bool>,
+        producers: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    }
+
+    struct Peer {
+        address: std::net::SocketAddr,
+        state: PeerState,
+        stop: tokio::sync::watch::Sender<bool>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl Peer {
+        async fn start(mode: PeerMode) -> Self {
+            async fn receive(
+                axum::extract::State(state): axum::extract::State<PeerState>,
+                headers: axum::http::HeaderMap,
+                axum::Json(body): axum::Json<serde_json::Value>,
+            ) -> axum::response::Response {
+                use axum::response::IntoResponse;
+                let key = headers
+                    .get("x-ryeos-key-id")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                state.requests.lock().unwrap().push((key, body.clone()));
+                let mut stop = state.stop.clone();
+                match state.mode {
+                    PeerMode::HeaderStall => {
+                        if !*stop.borrow() {
+                            let _ = stop.changed().await;
+                        }
+                    }
+                    PeerMode::EchoAfter(delay) => {
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {},
+                            _ = stop.changed() => {},
+                        }
+                    }
+                    PeerMode::BodyTrickle => {
+                        let (sender, receiver) =
+                            tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(2);
+                        let producer = tokio::spawn(async move {
+                            if sender.send(Ok(b"{".to_vec())).await.is_err() {
+                                return;
+                            }
+                            loop {
+                                if *stop.borrow() {
+                                    break;
+                                }
+                                tokio::select! {
+                                    _ = stop.changed() => break,
+                                    _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                                        if sender.send(Ok(b" ".to_vec())).await.is_err() { break; }
+                                    }
+                                }
+                            }
+                        });
+                        state.producers.lock().unwrap().push(producer);
+                        return axum::response::Response::builder()
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from_stream(
+                                tokio_stream::wrappers::ReceiverStream::new(receiver),
+                            ))
+                            .unwrap();
+                    }
+                }
+                axum::Json(serde_json::json!({
+                    "status":"accepted", "launch_id":body["launch_id"],
+                    "thread_id":"T-peer-fixture", "thread":{"thread_id":"T-peer-fixture"},
+                    "result":{"request":body}, "accounting":{"fixture":true}
+                }))
+                .into_response()
+            }
+            let (stop, mut shutdown) = tokio::sync::watch::channel(false);
+            let state = PeerState {
+                mode,
+                requests: Arc::new(Mutex::new(Vec::new())),
+                stop: shutdown.clone(),
+                producers: Arc::new(Mutex::new(Vec::new())),
+            };
+            let app = axum::Router::new()
+                .route("/execute", axum::routing::post(receive))
+                .route("/execute/launch", axum::routing::post(receive))
+                .with_state(state.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async move {
+                        if !*shutdown.borrow() {
+                            let _ = shutdown.changed().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+            });
+            Self {
+                address,
+                state,
+                stop,
+                server,
+            }
+        }
+
+        fn operator_client(
+            &self,
+            fixture: &ryeos_app::handler_context::budget_test_support::Fixture,
+        ) -> crate::remote::client::RemoteClient {
+            use base64::Engine as _;
+            let remote = crate::remote::config::RemoteConfig {
+                name: "fixture".into(),
+                url: format!("http://{}", self.address),
+                principal_id: fixture.state.identity.principal_id(),
+                signing_key: format!(
+                    "ed25519:{}",
+                    base64::engine::general_purpose::STANDARD
+                        .encode(fixture.state.identity.verifying_key().as_bytes())
+                ),
+                site_id: "site:fixture-peer".into(),
+                vault_fingerprint: "fixture-vault".into(),
+                ingest_ignore: ryeos_app::ignore::IgnoreConfig {
+                    patterns: Vec::new(),
+                },
+                project_bindings: std::collections::HashMap::new(),
+            };
+            crate::remote::client::RemoteClient::from_remote_cfg_as_configured_operator(
+                &fixture.state,
+                &remote,
+                &fixture.context,
+            )
+            .unwrap()
+        }
+
+        async fn settle(mut self) {
+            self.stop.send(true).unwrap();
+            if tokio::time::timeout(Duration::from_secs(1), &mut self.server)
+                .await
+                .is_err()
+            {
+                self.server.abort();
+                let _ = self.server.await;
+                panic!("finite mock peer failed to settle");
+            }
+            let producers = std::mem::take(&mut *self.state.producers.lock().unwrap());
+            for producer in producers {
+                producer.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn all_accepted_contacts_share_original_expiry_and_one_launch() {
+        for projectless in [true, false] {
+            for mode in [PeerMode::HeaderStall, PeerMode::BodyTrickle] {
+                let directory = tempfile::tempdir().unwrap();
+                let fixture = ryeos_app::handler_context::budget_test_support::build(
+                    directory.path(),
+                    Duration::from_millis(250),
+                )
+                .unwrap();
+                let peer = Peer::start(mode).await;
+                let client = peer.operator_client(&fixture);
+                let mut payload = retained_request();
+                if projectless {
+                    payload.as_object_mut().unwrap().remove("project");
+                    payload["execution_policy"]["project"] =
+                        serde_json::json!({"kind":"projectless"});
+                }
+                payload["product_selections"] = serde_json::json!([{
+                    "target":{"kind":"content_dependency","binding":"model"},
+                    "selection":{"declaration_id":"fixture-model","witness_hash":"ab".repeat(32),
+                        "witness_source":{"kind":"local_capture"},"qualification_hash":null}
+                }]);
+                payload["outbound_principal"] = serde_json::json!("configured_operator");
+                let request: Request = serde_json::from_value(payload).unwrap();
+                let unscoped = crate::handler_context::HandlerContext::new(
+                    "session:test".into(),
+                    Vec::new(),
+                    true,
+                );
+                assert!(
+                    remote_contact_deadline(&request, &unscoped)
+                        .unwrap()
+                        .remaining()
+                        <= Duration::from_secs(30)
+                );
+                let deadline = remote_contact_deadline(&request, &fixture.context).unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                assert!(deadline.remaining() < Duration::from_millis(250));
+                let project = (!projectless).then_some("/target-project");
+                let error = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    submit_remote_request(&client, &request, project, Some(deadline)),
+                )
+                .await
+                .unwrap()
+                .unwrap_err();
+                assert!(error.to_string().contains("timeout"));
+                let sent = peer.state.requests.lock().unwrap().clone();
+                assert_eq!(sent.len(), 1);
+                assert_eq!(sent[0].0, fixture.context.fingerprint);
+                assert_eq!(
+                    sent[0].1["required_origin_site_id"],
+                    fixture.state.threads.site_id()
+                );
+                assert_eq!(
+                    sent[0].1["launch_id"],
+                    request.launch_id.as_deref().unwrap()
+                );
+                assert_eq!(sent[0].1["parameters"], request.parameters);
+                assert_eq!(
+                    sent[0].1["product_selections"],
+                    serde_json::to_value(&request.product_selections).unwrap()
+                );
+                assert_eq!(
+                    sent[0].1["project_path"],
+                    serde_json::to_value(project).unwrap()
+                );
+                assert_eq!(
+                    sent[0].1["execution_policy"],
+                    serde_json::to_value(&request.execution_policy).unwrap()
+                );
+                assert!(
+                    submit_remote_request(&client, &request, project, Some(deadline))
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    peer.state.requests.lock().unwrap().len(),
+                    1,
+                    "expired owner permits no second POST"
+                );
+                peer.settle().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_status_cancel_wait_preserves_original_owner_and_envelope() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = ryeos_app::handler_context::budget_test_support::build(
+            directory.path(),
+            Duration::from_millis(500),
+        )
+        .unwrap();
+        let mut payload = retained_request();
+        payload.as_object_mut().unwrap().remove("project");
+        let original_launch = payload
+            .as_object_mut()
+            .unwrap()
+            .remove("launch_id")
+            .unwrap();
+        payload["outbound_principal"] = serde_json::json!("configured_operator");
+        payload["execution_policy"]["response"] = serde_json::json!("wait");
+        payload["execution_policy"]["project"] = serde_json::json!({"kind":"projectless"});
+        payload["item_ref"] = serde_json::json!("service:launch/status");
+        payload["parameters"] = serde_json::json!({"launch_id":original_launch});
+        let mut request: Request = serde_json::from_value(payload.clone()).unwrap();
+        let peer = Peer::start(PeerMode::EchoAfter(Duration::from_millis(60))).await;
+        let internal = crate::handler_context::HandlerContext::new(
+            fixture.context.fingerprint.clone(),
+            Vec::new(),
+            false,
+        );
+        assert!(
+            super::handle(
+                serde_json::from_value(payload).unwrap(),
+                internal,
+                Arc::new(fixture.state.clone())
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            peer.state.requests.lock().unwrap().len(),
+            0,
+            "internal unverified service authority permits no target contact"
+        );
+        let client = peer.operator_client(&fixture);
+        let original = fixture.context.original_execution_budget().unwrap().clone();
+        let deadline = remote_contact_deadline(&request, &fixture.context).unwrap();
+        let envelope = submit_remote_request(&client, &request, None, Some(deadline))
+            .await
+            .unwrap();
+        assert_eq!(envelope["thread"]["thread_id"], "T-peer-fixture");
+        assert_eq!(envelope["accounting"]["fixture"], true);
+        assert_eq!(
+            envelope["result"]["request"]["parameters"],
+            request.parameters
+        );
+        assert_eq!(remote_launch_coordinate(&request), original_launch.as_str());
+        let foreign =
+            crate::handler_context::HandlerContext::new("session:other".into(), Vec::new(), true);
+        assert!(
+            foreign
+                .with_original_execution_budget(Some(original.clone()))
+                .is_err()
+        );
+        assert_eq!(peer.state.requests.lock().unwrap().len(), 1);
+        peer.settle().await;
+
+        request.item_ref = "service:launch/cancel".into();
+        let stalled = Peer::start(PeerMode::HeaderStall).await;
+        let client = stalled.operator_client(&fixture);
+        let before_cancel = deadline.remaining();
+        let cancel_deadline = remote_contact_deadline(&request, &fixture.context).unwrap();
+        assert!(cancel_deadline.remaining() <= before_cancel);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                submit_remote_request(&client, &request, None, Some(cancel_deadline))
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        assert_eq!(fixture.context.original_execution_budget(), Some(&original));
+        assert!(original.remaining().is_zero());
+        assert_eq!(stalled.state.requests.lock().unwrap().len(), 1);
+        assert!(
+            submit_remote_request(&client, &request, None, Some(cancel_deadline))
+                .await
+                .is_err()
+        );
+        assert_eq!(stalled.state.requests.lock().unwrap().len(), 1);
+        stalled.settle().await;
+
+        // An independently authorized ordinary Wait keeps its existing
+        // contract and can inspect the same launch; it cannot renew old work.
+        let unscoped =
+            crate::handler_context::HandlerContext::new("session:test".into(), Vec::new(), true);
+        assert!(remote_contact_deadline(&request, &unscoped).is_none());
+        let peer = Peer::start(PeerMode::EchoAfter(Duration::from_millis(60))).await;
+        let result = submit_remote_request(&peer.operator_client(&fixture), &request, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            result["result"]["request"]["parameters"],
+            request.parameters
+        );
+        assert_eq!(peer.state.requests.lock().unwrap().len(), 1);
+        peer.settle().await;
+        assert!(original.remaining().is_zero());
+    }
 
     fn signed_remote_run_command() -> ryeos_runtime::CommandDef {
         let path = ryeos_engine::test_support::workspace_root()

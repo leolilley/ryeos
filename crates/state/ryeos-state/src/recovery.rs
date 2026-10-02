@@ -1479,6 +1479,86 @@ impl CasMutationGuard {
         })
     }
 
+    /// The existing pinned shared authority, bounded by one original caller
+    /// deadline. No path-based anchor, lock-content mutation or Send guard.
+    #[track_caller]
+    pub(crate) fn acquire_existing_shared_in_pinned_runtime_until(
+        runtime: &lillux::PinnedDirectory,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Self> {
+        let check_deadline = || -> Result<()> {
+            if deadline.has_elapsed() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "pinned CAS shared guard deadline elapsed",
+                )
+                .into());
+            }
+            Ok(())
+        };
+        check_deadline()?;
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)
+            .context("retain pinned CAS guard descriptors before deadline")?;
+        check_deadline()?;
+        let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
+        if exclusive_depth != 0 {
+            let file = current_guard_file_for_pinned_runtime(runtime)?;
+            check_deadline()?;
+            EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
+            let guard = Self {
+                _file: file,
+                _fork_sensitive_descriptors: fork_sensitive_descriptors,
+                exclusive: false,
+                depth: GuardDepth::Exclusive,
+                _not_send: std::marker::PhantomData,
+            };
+            check_deadline()?;
+            return Ok(guard);
+        }
+        let shared_depth = SHARED_CAS_GUARD_DEPTH.with(Cell::get);
+        if shared_depth != 0 {
+            let file = current_guard_file_for_pinned_runtime(runtime)?;
+            check_deadline()?;
+            SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(shared_depth + 1));
+            let guard = Self {
+                _file: file,
+                _fork_sensitive_descriptors: fork_sensitive_descriptors,
+                exclusive: false,
+                depth: GuardDepth::Shared,
+                _not_send: std::marker::PhantomData,
+            };
+            check_deadline()?;
+            return Ok(guard);
+        }
+
+        let recovery = runtime
+            .open_child_directory(std::ffi::OsStr::new("recovery"))?
+            .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
+        check_deadline()?;
+        let file = recovery
+            .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), true)?
+            .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
+        check_deadline()?;
+        let file = lillux::locks::acquire_existing_shared_file_until(file, deadline)
+            .context("acquire pinned CAS mutation/sweep lock before deadline")?;
+        check_deadline()?;
+        let file = Rc::new(file);
+        CAS_GUARD_FILE.with(|current| {
+            let previous = current.borrow_mut().replace(Rc::clone(&file));
+            debug_assert!(previous.is_none());
+        });
+        SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(1));
+        let guard = Self {
+            _file: file,
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
+            exclusive: false,
+            depth: GuardDepth::Shared,
+            _not_send: std::marker::PhantomData,
+        };
+        check_deadline()?;
+        Ok(guard)
+    }
+
     #[track_caller]
     pub(crate) fn acquire_exclusive_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
@@ -4074,6 +4154,128 @@ mod tests {
         drop(nested_shared);
         drop(nested_exclusive);
         drop(exclusive);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_pinned_shared_guard_preserves_nested_original_file() {
+        let temp = tempfile::tempdir().unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let runtime = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(1));
+        let outer =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(&runtime, deadline)
+                .unwrap();
+        let nested =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(&runtime, deadline)
+                .unwrap();
+        assert!(Rc::ptr_eq(&outer._file, &nested._file));
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 2);
+        drop(outer);
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 1);
+        nested.ensure_protects_pinned_runtime(&runtime).unwrap();
+        drop(nested);
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 0);
+        assert!(CAS_GUARD_FILE.with(|file| file.borrow().is_none()));
+
+        let exclusive =
+            CasMutationGuard::acquire_existing_exclusive_in_pinned_runtime(&runtime).unwrap();
+        let nested =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(&runtime, deadline)
+                .unwrap();
+        assert!(Rc::ptr_eq(&exclusive._file, &nested._file));
+        assert_eq!(EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get), 2);
+        assert!(!nested.is_exclusive());
+        drop(exclusive);
+        nested.ensure_protects_pinned_runtime(&runtime).unwrap();
+        drop(nested);
+        assert_eq!(EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get), 0);
+        assert!(CAS_GUARD_FILE.with(|file| file.borrow().is_none()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_pinned_shared_guard_refuses_expired_reentry_without_depth_change() {
+        let temp = tempfile::tempdir().unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let runtime = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let original =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(&runtime).unwrap();
+        let error = match CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(
+            &runtime,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO),
+        ) {
+            Ok(_) => panic!("expired nested CAS guard unexpectedly acquired"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 1);
+        assert!(
+            CAS_GUARD_FILE
+                .with(|file| Rc::ptr_eq(file.borrow().as_ref().unwrap(), &original._file))
+        );
+        original.ensure_protects_pinned_runtime(&runtime).unwrap();
+        drop(original);
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_pinned_shared_guard_refuses_foreign_runtime_without_depth_change() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        CasMutationGuard::ensure_anchor(first.path()).unwrap();
+        CasMutationGuard::ensure_anchor(second.path()).unwrap();
+        let runtime = lillux::PinnedDirectory::open(first.path())
+            .unwrap()
+            .unwrap();
+        let foreign = lillux::PinnedDirectory::open(second.path())
+            .unwrap()
+            .unwrap();
+        let original =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(&runtime).unwrap();
+        let error = match CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(
+            &foreign,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(1)),
+        ) {
+            Ok(_) => panic!("foreign nested CAS guard unexpectedly acquired"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}")
+                .contains("held CAS mutation guard does not protect pinned runtime")
+        );
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 1);
+        original.ensure_protects_pinned_runtime(&runtime).unwrap();
+        drop(original);
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_pinned_shared_guard_does_not_create_missing_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(1));
+        assert!(
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(&runtime, deadline)
+                .is_err()
+        );
+        assert!(!temp.path().join("recovery").exists());
+        fs::create_dir(temp.path().join("recovery")).unwrap();
+        assert!(
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(&runtime, deadline)
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_dir(temp.path().join("recovery")).unwrap().count(),
+            0
+        );
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 0);
+        assert!(CAS_GUARD_FILE.with(|file| file.borrow().is_none()));
     }
 
     #[test]

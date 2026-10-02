@@ -32,6 +32,7 @@ execution:
         - protocol:ryeos/core/persistent_session
         - protocol:ryeos/core/structured_session
         - protocol:ryeos/core/trusted_structured_session
+        - protocol:local-inference/gnu_cuda_persistent_session
   aliases:
     "@subprocess": "tool:ryeos/core/subprocess/execute"
   target:

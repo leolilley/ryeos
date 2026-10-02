@@ -45,6 +45,61 @@ impl ResourceScratchPhysicalReceipt {
     }
 }
 
+/// Authoritative original no-birth + physical removal join. No Clone/serde,
+/// decoded-record constructor, process proof or driver retirement authority.
+pub(crate) struct NeverBornResourceFundingReceipt {
+    state_store: Arc<StateStore>,
+    removed: runtime_db::ProcessResourceReservationRecord,
+}
+
+impl NeverBornResourceFundingReceipt {
+    pub(crate) fn matches_original(
+        self,
+        state: &Arc<StateStore>,
+        original: &runtime_db::ProcessResourceReservationRecord,
+    ) -> Result<()> {
+        if !Arc::ptr_eq(&self.state_store, state) {
+            bail!("no-birth funding receipt belongs to another StateStore owner");
+        }
+        let custody =
+            runtime_db::process_resource_custody::never_issued_scratch_custody(&self.removed)?;
+        if custody.physical_state
+            != runtime_db::process_resource_custody::ProcessCustodyPhysicalState::PhysicallyRemoved
+        {
+            bail!("no-birth funding receipt lacks actual original physical removal");
+        }
+        let mut expected = original.clone();
+        expected
+            .runtime_custody
+            .as_mut()
+            .context("original funding lacks physical custody")?
+            .physical_state =
+            runtime_db::process_resource_custody::ProcessCustodyPhysicalState::PhysicallyRemoved;
+        if self.removed != expected {
+            bail!("no-birth funding receipt differs from exact original reservation");
+        }
+        Ok(())
+    }
+}
+
+impl StateStore {
+    /// Wrap the existing winning never-issued Reserved/CleanupIntent physical
+    /// owner, rather than accepting a raw receipt JSON or PID absence. The
+    /// existing physical removal path's finite acquisition/SQL/traversal join
+    /// is still required before enabling the trusted executable route.
+    pub(crate) fn remove_never_born_scratch_for_funding(
+        self: &Arc<Self>,
+        original: &runtime_db::ProcessResourceReservationRecord,
+        scratch: &crate::temp_dir_guard::TempDirGuard,
+    ) -> Result<NeverBornResourceFundingReceipt> {
+        let removed = self.remove_never_issued_resource_scratch(original, scratch)?;
+        Ok(NeverBornResourceFundingReceipt {
+            state_store: Arc::clone(self),
+            removed,
+        })
+    }
+}
+
 mod projection_access;
 mod scoped_child;
 
@@ -29774,6 +29829,83 @@ mod tests {
         assert_eq!(
             events.events[1].event_type,
             ryeos_state::event_types::EDGE_RECORDED
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn j4_no_birth_funding_receipt_requires_same_actual_original_scratch_owner() {
+        let store = Arc::new(test_store());
+        let (scratch, original) = scratch_reservation_fixture(&store, "j4-no-birth-funding");
+        store
+            .reserve_process_resource_launch_with_scratch(&original, &scratch)
+            .unwrap();
+        let receipt = store
+            .remove_never_born_scratch_for_funding(&original, &scratch)
+            .unwrap();
+        assert!(
+            store
+                .begin_trusted_process_resource_spawn(&original)
+                .is_err()
+        );
+        receipt
+            .matches_original(&Arc::clone(&store), &original)
+            .unwrap();
+        assert!(
+            store
+                .process_resource_reservation(&original.owner_kind, &original.owner_coordinate)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn j4_no_birth_funding_receipt_refuses_other_state_and_changed_original() {
+        for foreign_state in [false, true] {
+            let store = Arc::new(test_store());
+            let other = Arc::new(test_store());
+            let (scratch, original) = scratch_reservation_fixture(&store, "j4-no-birth-foreign");
+            store
+                .reserve_process_resource_launch_with_scratch(&original, &scratch)
+                .unwrap();
+            let receipt = store
+                .remove_never_born_scratch_for_funding(&original, &scratch)
+                .unwrap();
+            let mut changed = original.clone();
+            if !foreign_state {
+                changed.owner_coordinate.push_str("-changed");
+            }
+            assert!(
+                receipt
+                    .matches_original(if foreign_state { &other } else { &store }, &changed)
+                    .is_err()
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn j4_spawn_intent_cannot_mint_no_birth_funding_receipt() {
+        let store = Arc::new(test_store());
+        let (scratch, original) = scratch_reservation_fixture(&store, "j4-contacted-no-refund");
+        store
+            .reserve_process_resource_launch_with_scratch(&original, &scratch)
+            .unwrap();
+        let permit = store
+            .begin_trusted_process_resource_spawn(&original)
+            .unwrap();
+        assert!(
+            store
+                .remove_never_born_scratch_for_funding(permit.reservation(), &scratch)
+                .is_err()
+        );
+        assert!(scratch.path().unwrap().exists());
+        assert_eq!(
+            store
+                .process_resource_reservation(&original.owner_kind, &original.owner_coordinate)
+                .unwrap()
+                .as_ref(),
+            Some(permit.reservation())
         );
     }
 }

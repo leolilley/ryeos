@@ -403,6 +403,69 @@ pub struct ResourceBudgetTransitionV1 {
     pub occurred_at_ms: i64,
 }
 
+/// Financial audit of one original uncreated process reservation. This is
+/// not a process owner, issue/cleanup proof or executable capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourcePrecontactBudgetTransitionV1 {
+    pub version: u32,
+    pub transition_id: String,
+    pub transition_sequence: u32,
+    pub operation_id: String,
+    pub budget_authority_site_id: String,
+    pub ledger_epoch: u64,
+    pub execution_budget_id: String,
+    pub root_chain_id: String,
+    pub audit_chain_root_id: String,
+    pub thread_id: String,
+    pub launch_generation: String,
+    pub owner_gate_id: HexDigest,
+    pub original_reservation_id: HexDigest,
+    pub envelope_digest: HexDigest,
+    pub capsule_hash: HexDigest,
+    pub stable_resource_id: String,
+    pub authority_digest: HexDigest,
+    pub transition: ResourceBudgetState,
+    pub reserved_usd_nanos: u64,
+    pub occurred_at_ms: i64,
+}
+
+impl ResourcePrecontactBudgetTransitionV1 {
+    pub fn transition_id(operation_id: &str, sequence: u32) -> String {
+        crate::event::transition_id(&format!("resource_precontact:{operation_id}"), sequence)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != 1
+            || !matches!(
+                (self.transition_sequence, self.transition),
+                (
+                    1,
+                    ResourceBudgetState::Reserved | ResourceBudgetState::ReservationDenied
+                ) | (2, ResourceBudgetState::ReleasedUnissued)
+            )
+            || self.reserved_usd_nanos == 0
+            || self.transition_id
+                != Self::transition_id(&self.operation_id, self.transition_sequence)
+        {
+            return Err("precontact resource audit version/transition/identity is invalid".into());
+        }
+        HexDigest::new(self.operation_id.clone())?;
+        for (label, value) in [
+            ("budget_authority_site_id", &self.budget_authority_site_id),
+            ("execution_budget_id", &self.execution_budget_id),
+            ("root_chain_id", &self.root_chain_id),
+            ("audit_chain_root_id", &self.audit_chain_root_id),
+            ("thread_id", &self.thread_id),
+            ("launch_generation", &self.launch_generation),
+            ("stable_resource_id", &self.stable_resource_id),
+        ] {
+            validate_token(label, value)?;
+        }
+        Ok(())
+    }
+}
+
 impl ResourceBudgetTransitionV1 {
     pub fn validate(&self) -> Result<(), String> {
         if self.version != RESOURCE_BUDGET_TRANSITION_VERSION || self.transition_sequence == 0 {

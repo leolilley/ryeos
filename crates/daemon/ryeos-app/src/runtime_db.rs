@@ -201,6 +201,18 @@ impl ThreadProcessScopeReservationRecord {
 }
 
 impl ProcessResourceReservationRecord {
+    /// Compare a captured attachment-pending identity with exact launch intent.
+    /// This comparison alone is not a process/contact/release proof.
+    pub(crate) fn matches_held_process(&self, identity: &ExecutionProcessIdentity) -> Result<bool> {
+        self.validate()?;
+        self.launch_authority.matches_held_process(identity)
+    }
+
+    /// Read-only canonical original reservation identity; no launch authority.
+    pub(crate) fn reservation_id(&self) -> Result<String> {
+        process_resource_reservation_id(self)
+    }
+
     fn validate(&self) -> Result<()> {
         validate_bounded_runtime_text(
             "resource reservation owner coordinate",
