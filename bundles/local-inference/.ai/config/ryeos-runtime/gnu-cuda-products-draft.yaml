@@ -1,4 +1,4 @@
-# UNSIGNED DRAFT: qualification policy/claims unresolved; not safe for admission.
+# UNSIGNED DRAFT: private-origin GNU policy is authored but not run; CUDA driver/device claims remain unresolved; not safe for admission.
 category: ryeos-runtime
 version: 1.0.0
 product_relationships:
@@ -6,9 +6,9 @@ product_relationships:
   relationships:
   - name: gnu_runtime_to_private_worker
     producer:
-      canonical_ref: graph:ryeos/development/gnu-python-production
+      canonical_ref: graph:ryeos/development/gnu-python-private-production
       recipe_binding: product_recipe
-      product_name: runtime
+      product_name: runtime_private
       parameters: {}
     consumer:
       canonical_ref: worker:local-inference/qwen3-0.6b-gnu-cuda-graph-free-2048-draft
@@ -22,5 +22,7 @@ product_relationships:
         maximum_file_bytes: 134217728
         maximum_total_bytes: 268435456
     qualification:
-      policy_ref: null
-      required_claims: []
+      policy_ref: config:ryeos/environments/qualification/gnu-python-private
+      required_claims:
+      - gnu_python_private_origin_startup_providers_v1
+      - gnu_python_zlib_1_3_2

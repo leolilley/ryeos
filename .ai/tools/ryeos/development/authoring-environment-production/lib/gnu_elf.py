@@ -1,4 +1,3 @@
-# ryeos:signed:2026-09-17T06:36:51Z:1dc367a947028e9ffb5e01e30a535b9301c300adb651810b318977c7b99c072f:b3gOia8ktRPAMJ3hJYl3LsOXcdKtgC7fcPsPw8xemjjTFYV8qpN54/UhTeMmn2hjBE8Bpt+pGlRtfvPupj/WBQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 """Finite GNU CPython ELF relocation and closure inspection.
 
 The caller supplies an already selected ``python/`` tree and the admitted
@@ -22,6 +21,7 @@ from production import (MAX_FILE_BYTES, MAX_TOTAL_BYTES, canonical_json, relativ
 
 
 INVENTORY_SCHEMA = "ryeos.gnu-python-elf-inventory.v2"
+PRIVATE_INVENTORY_SCHEMA = "ryeos.gnu-python-elf-inventory.v3"
 EVIDENCE_SCHEMA = "ryeos.gnu-python-elf-inventory-evidence.v1"
 DEFAULT_PYTHON_VERSION = "3.14"
 DEFAULT_SOABI = "cpython-314-x86_64-linux-gnu"
@@ -36,6 +36,8 @@ MAX_INVENTORY_BYTES = 4 * 1024 * 1024
 MAX_LINK_HOPS = 128
 SONAME = re.compile(r"[A-Za-z0-9_+.-]+")
 VERSION_NAME = re.compile(r"[A-Za-z0-9_+.-]+")
+FIXED_PROFILE = "fixed_absolute_v1"
+PRIVATE_PROFILE = "private_origin_v1"
 
 
 def _runtime_root(value: str) -> str:
@@ -59,6 +61,21 @@ def _python_contract(python_version: str, soabi: str) -> tuple[str, str, str]:
     return (f"bin/python{python_version}",
             f"lib/libpython{python_version}.so.1.0",
             f"lib/python{python_version}/lib-dynload")
+
+
+def _runpath_for(member: str, entrypoint: str, extension_root: str,
+                 profile: str, runtime_root: str) -> str:
+    if profile == FIXED_PROFILE:
+        return runtime_root + "/lib"
+    if profile != PRIVATE_PROFILE:
+        raise ValueError("unsupported GNU Python ELF search profile")
+    if member == entrypoint:
+        return "$ORIGIN/../lib"
+    if member.startswith(extension_root + "/"):
+        return "$ORIGIN/../.."
+    if member.startswith("lib/") and member.count("/") == 1:
+        return "$ORIGIN"
+    raise ValueError(f"private-origin ELF has an unsupported layout: {member}")
 
 
 def _validate_raw_link(member: str, target: str) -> None:
@@ -249,12 +266,16 @@ def relocate_python_runtime(python_root: Path, tools, *, runtime_root: str,
                             needed_replacements: dict[str, dict[str, str]],
                             needed_additions: dict[str, list[str]],
                             python_version: str = DEFAULT_PYTHON_VERSION,
-                            soabi: str = DEFAULT_SOABI) -> dict:
+                            soabi: str = DEFAULT_SOABI,
+                            search_profile: str = FIXED_PROFILE) -> dict:
     """Relocate every dynamic Python ELF with an external runtime edge."""
     runtime_root = _runtime_root(runtime_root)
     regulars, links, directories = _scan(Path(python_root))
     nodes = _resolution_nodes(regulars, links, directories)
-    _validate_layout(regulars, links, directories, nodes, python_version, soabi)
+    entrypoint, _, extension_root = _validate_layout(
+        regulars, links, directories, nodes, python_version, soabi)
+    if search_profile not in (FIXED_PROFILE, PRIVATE_PROFILE):
+        raise ValueError("unsupported GNU Python ELF search profile")
     if not isinstance(needed_replacements, dict):
         raise ValueError("GNU Python relocation requires an exact replacement map")
     facts_by_member = {}
@@ -323,7 +344,12 @@ def relocate_python_runtime(python_root: Path, tools, *, runtime_root: str,
             if sorted(edited_facts["needed"]) != expected_needed:
                 raise ValueError(
                     f"GNU Python dependency edits differ from their declaration: {member}")
-            relocated = relocate_elf(path, tools, runtime_root)
+            runpath = _runpath_for(member, entrypoint, extension_root,
+                                   search_profile, runtime_root)
+            if search_profile == FIXED_PROFILE:
+                relocated = relocate_elf(path, tools, runtime_root)
+            else:
+                relocated = relocate_elf(path, tools, runtime_root, runpath=runpath)
             after_facts = tools.facts(path)
             if (sorted(after_facts["needed"]) != expected_needed or
                     tools.symbols(path) != symbols):
@@ -340,7 +366,8 @@ def relocate_python_runtime(python_root: Path, tools, *, runtime_root: str,
 
 def inspect_python_runtime(python_root: Path, tools, *, runtime_root: str,
                            python_version: str = DEFAULT_PYTHON_VERSION,
-                           soabi: str = DEFAULT_SOABI) -> dict:
+                           soabi: str = DEFAULT_SOABI,
+                           search_profile: str = FIXED_PROFILE) -> dict:
     """Prove the finite relocated GNU CPython ELF and symbol-version closure."""
     runtime_root = _runtime_root(runtime_root)
     python_root = Path(python_root)
@@ -348,6 +375,9 @@ def inspect_python_runtime(python_root: Path, tools, *, runtime_root: str,
     nodes = _resolution_nodes(regulars, links, directories)
     entrypoint, libpython, _ = _validate_layout(
         regulars, links, directories, nodes, python_version, soabi)
+    if search_profile not in (FIXED_PROFILE, PRIVATE_PROFILE):
+        raise ValueError("unsupported GNU Python ELF search profile")
+    extension_root = _python_contract(python_version, soabi)[2]
     loader = runtime_root + "/" + LOADER_MEMBER
     objects = []
     by_member = {}
@@ -386,7 +416,9 @@ def inspect_python_runtime(python_root: Path, tools, *, runtime_root: str,
                     facts["rpath"] or facts["nodeflib"]):
                 raise ValueError("GNU loader must be independently loadable")
         elif needs_runtime:
-            if (not facts["dynamic"] or facts["runpath"] != [runtime_root + "/lib"] or
+            expected_runpath = _runpath_for(member, entrypoint, extension_root,
+                                            search_profile, runtime_root)
+            if (not facts["dynamic"] or facts["runpath"] != [expected_runpath] or
                     facts["rpath"] or not facts["nodeflib"]):
                 raise ValueError(f"ELF library search is not closed: {member}")
         elif facts["runpath"] or facts["rpath"]:
@@ -440,7 +472,7 @@ def inspect_python_runtime(python_root: Path, tools, *, runtime_root: str,
         link_inventory.append({"path": member, "target": target,
                                "resolved": resolved})
     inventory = {
-        "schema": INVENTORY_SCHEMA,
+        "schema": PRIVATE_INVENTORY_SCHEMA if search_profile == PRIVATE_PROFILE else INVENTORY_SCHEMA,
         "runtime_root": runtime_root,
         "python": {"version": python_version, "soabi": soabi,
                    "entrypoint": entrypoint, "libpython": libpython},
@@ -448,14 +480,21 @@ def inspect_python_runtime(python_root: Path, tools, *, runtime_root: str,
         "objects": objects,
         "links": link_inventory,
     }
+    if search_profile == PRIVATE_PROFILE:
+        inventory["search_profile"] = search_profile
     canonical_inventory(inventory)
     return inventory
 
 
 def canonical_inventory(inventory: dict) -> bytes:
+    private = isinstance(inventory, dict) and inventory.get("schema") == PRIVATE_INVENTORY_SCHEMA
     if (not isinstance(inventory, dict) or
-            set(inventory) != {"schema", "runtime_root", "python", "loader", "objects", "links"} or
-            inventory["schema"] != INVENTORY_SCHEMA or inventory["loader"] != LOADER_MEMBER or
+            set(inventory) != ({"schema", "runtime_root", "python", "loader", "objects", "links",
+                                "search_profile"} if private else
+                               {"schema", "runtime_root", "python", "loader", "objects", "links"}) or
+            inventory["schema"] not in (INVENTORY_SCHEMA, PRIVATE_INVENTORY_SCHEMA) or
+            (private and inventory.get("search_profile") != PRIVATE_PROFILE) or
+            inventory["loader"] != LOADER_MEMBER or
             not isinstance(inventory["objects"], list) or
             not isinstance(inventory["links"], list) or
             len(inventory["objects"]) > MAX_ELF_OBJECTS or len(inventory["links"]) > MAX_LINKS):
@@ -533,7 +572,11 @@ def canonical_inventory(inventory: dict) -> bytes:
         elif record["path"] != entrypoint and record["elf_type"] != "DYN":
             raise ValueError("GNU Python inventory has a non-DYN library")
         elif needs_runtime:
-            if (not record["dynamic"] or record["runpath"] != [runtime_root + "/lib"] or
+            extension_root = _python_contract(python["version"], python["soabi"])[2]
+            expected_runpath = _runpath_for(record["path"], entrypoint, extension_root,
+                                            PRIVATE_PROFILE if private else FIXED_PROFILE,
+                                            runtime_root)
+            if (not record["dynamic"] or record["runpath"] != [expected_runpath] or
                     record["rpath"] or not record["nodeflib"]):
                 raise ValueError("GNU Python inventory has an unclosed library search")
         elif record["runpath"] or record["rpath"]:

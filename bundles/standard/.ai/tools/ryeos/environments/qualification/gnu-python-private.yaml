@@ -1,0 +1,403 @@
+category: ryeos/environments/qualification
+name: gnu-python-private
+version: "1.0.0"
+description: UNSIGNED verifier draft for the private-origin GNU CPython startup closure
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content:
+  - id: producer-python
+    kind: tree
+    mode: pinned
+    digest: 800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf
+    mount_root: execution_runtime
+    mount: producer-python
+external_product_slots:
+  - id: subject
+    relationship_ref: config:development/ryeos/gnu-python-private-products
+    relationship: runtime_private_to_qualification
+    kind: tree
+    mount_root: execution_runtime
+    mount: python-gnu-private
+  - id: fixed_control
+    relationship_ref: config:development/ryeos/gnu-python-products
+    relationship: runtime_to_private_qualification_control
+    kind: tree
+    mount_root: execution_runtime
+    mount: python-gnu
+  - id: gnu-python-support
+    relationship_ref: config:development/ryeos/authoring-prepared-input-products
+    relationship: prepared_inputs_to_gnu_python_private_qualification
+    kind: tree
+    mount_root: execution_runtime
+    mount: gnu-python-support
+env_config:
+  interpreter:
+    type: realization_member
+    realization_id: producer-python
+    relative_path: lib/ld-musl-x86_64.so.1
+config:
+  command: "${interpreter}"
+  args:
+    - /ryeos/realizations/producer-python/python/bin/python3.14
+    - -I
+    - -S
+    - -B
+    - -X
+    - utf8
+    - -c
+    - literal: |
+        import json, os, re, subprocess, sys
+
+        producer_manifest = "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf"
+        keys = {"id", "kind", "mode", "manifest_hash", "entry_count", "total_bytes", "mount_root", "mount"}
+        sealed = json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS", "null"))
+        if not isinstance(sealed, list) or len(sealed) != 4 or any(not isinstance(x, dict) or set(x) != keys for x in sealed):
+            raise SystemExit("private GNU qualification requires its exact four realizations")
+        by_id = {x["id"]: x for x in sealed}
+        if set(by_id) != {"producer-python", "subject", "fixed_control", "gnu-python-support"}:
+            raise SystemExit("private GNU qualification has an unexpected realization set")
+        bootstrap, subject, fixed = by_id["producer-python"], by_id["subject"], by_id["fixed_control"]
+        support_selection = by_id["gnu-python-support"]
+        if (bootstrap["manifest_hash"] != producer_manifest or bootstrap["mount"] != "producer-python" or
+                bootstrap["kind"] != "tree" or bootstrap["mode"] != "pinned" or
+                bootstrap["mount_root"] != "execution_runtime"):
+            raise SystemExit("private GNU verifier bootstrap changed")
+        for item, mount in ((subject, "python-gnu-private"), (fixed, "python-gnu")):
+            if (item["kind"] != "tree" or item["mode"] != "pinned" or
+                    item["mount_root"] != "execution_runtime" or item["mount"] != mount or
+                    not isinstance(item["manifest_hash"], str) or
+                    re.fullmatch(r"[0-9a-f]{64}", item["manifest_hash"]) is None or
+                    type(item["entry_count"]) is not int or not 1 <= item["entry_count"] <= 10000 or
+                    type(item["total_bytes"]) is not int or not 1 <= item["total_bytes"] <= 268435456):
+                raise SystemExit("private GNU selected product identity is incomplete")
+        if subject["manifest_hash"] in (producer_manifest, fixed["manifest_hash"]):
+            raise SystemExit("private GNU subject is not a distinct retained product")
+        if (support_selection["kind"] != "tree" or support_selection["mode"] != "pinned" or
+                support_selection["mount_root"] != "execution_runtime" or
+                support_selection["mount"] != "gnu-python-support" or
+                not isinstance(support_selection["manifest_hash"], str) or
+                re.fullmatch(r"[0-9a-f]{64}", support_selection["manifest_hash"]) is None):
+            raise SystemExit("private GNU verifier ELF-inspection support changed")
+
+        root = "/ryeos/realizations/python-gnu-private/python"
+        command = [root + "/lib/ld-linux-x86-64.so.2", "--inhibit-cache",
+                   "--library-path", root + "/lib", root + "/bin/python3.14",
+                   "-I", "-S", "-B", "-X", "utf8", "-c", sys.argv[1]]
+        environment = {k: v for k, v in os.environ.items()
+                       if k in {"RYE_THREAD_ID", "RYEOS_EXTERNAL_REALIZATIONS"}}
+        environment.update({"LANG": "C", "LC_ALL": "C", "PATH": "",
+                            "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1",
+                            "PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1"})
+        completed = subprocess.run(command, input=b"", stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, env=environment,
+                                   timeout=180, check=False)
+        if len(completed.stdout) > 262144 or completed.returncode != 0:
+            raise SystemExit("private GNU subject probe failed or exceeded its output bound")
+        try:
+            result = json.loads(completed.stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SystemExit("private GNU subject returned invalid evidence") from error
+        claims = ["gnu_python_private_origin_startup_providers_v1", "gnu_python_zlib_1_3_2"]
+        if (not isinstance(result, dict) or
+                result.get("schema") != "ryeos.product_qualification_result.v1" or
+                result.get("subject_manifest_hash") != subject["manifest_hash"] or
+                result.get("claims") != claims):
+            raise SystemExit("private GNU evidence is not bound to the selected product")
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    - literal: |
+        import _ctypes, ctypes, hashlib, json, os, shutil, stat, subprocess, sys, sysconfig, tempfile, zlib
+
+        root = "/ryeos/realizations/python-gnu-private/python"
+        fixed = "/ryeos/realizations/python-gnu/python"
+        sealed = json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS", "null"))
+        keys = {"id", "kind", "mode", "manifest_hash", "entry_count", "total_bytes", "mount_root", "mount"}
+        if not isinstance(sealed, list) or len(sealed) != 4 or any(not isinstance(x, dict) or set(x) != keys for x in sealed):
+            raise SystemExit("private GNU probe lost its sealed realizations")
+        by_id = {x["id"]: x for x in sealed}
+        subject, fixed_control = by_id.get("subject"), by_id.get("fixed_control")
+        support_selection = by_id.get("gnu-python-support")
+        if (not isinstance(subject, dict) or subject["mount"] != "python-gnu-private" or
+                not isinstance(fixed_control, dict) or fixed_control["mount"] != "python-gnu" or
+                not isinstance(support_selection, dict) or
+                support_selection["mount"] != "gnu-python-support"):
+            raise SystemExit("private GNU probe has a wrong subject or rescue control")
+
+        support = "/ryeos/realizations/gnu-python-support"
+
+        def read_regular(path, limit, expected_bytes=None, expected_sha256=None):
+            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            try:
+                before = os.fstat(fd)
+                if not stat.S_ISREG(before.st_mode):
+                    raise SystemExit("private GNU evidence is not a regular file")
+                chunks, total = [], 0
+                while True:
+                    chunk = os.read(fd, min(65536, limit + 1 - total))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > limit:
+                        raise SystemExit("private GNU evidence exceeds its bound")
+                after = os.fstat(fd)
+            finally:
+                os.close(fd)
+            identity = (before.st_dev, before.st_ino, before.st_mode, before.st_size,
+                        before.st_mtime_ns, before.st_ctime_ns)
+            if identity != (after.st_dev, after.st_ino, after.st_mode, after.st_size,
+                            after.st_mtime_ns, after.st_ctime_ns):
+                raise SystemExit("private GNU evidence changed while being read")
+            data = b"".join(chunks)
+            digest = hashlib.sha256(data).hexdigest()
+            if expected_bytes is not None and len(data) != expected_bytes:
+                raise SystemExit("private GNU evidence size differs")
+            if expected_sha256 is not None and digest != expected_sha256:
+                raise SystemExit("private GNU evidence digest differs")
+            return data, digest
+
+        def readelf(member, *options):
+            command = [support + "/elf/lib/ld-linux-x86-64.so.2", "--inhibit-cache",
+                       "--library-path", support + "/elf/lib",
+                       support + "/elf/bin/readelf", "-W", *options, root + "/" + member]
+            completed = subprocess.run(command, stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT,
+                                       env={"LANG": "C", "LC_ALL": "C", "PATH": ""},
+                                       timeout=15, check=False)
+            if completed.returncode != 0 or len(completed.stdout) > 1048576:
+                raise SystemExit("selected GNU readelf refused the private ELF member")
+            try:
+                return completed.stdout.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise SystemExit("selected GNU readelf output is not UTF-8") from error
+
+        def expected_runpath(member):
+            if (not isinstance(member, str) or not 1 <= len(member) <= 1024 or
+                    member.startswith("/") or "\\" in member or "\x00" in member or
+                    any(part in ("", ".", "..") or
+                        re.fullmatch(r"[A-Za-z0-9_.+-]+", part) is None
+                        for part in member.split("/"))):
+                raise SystemExit("private GNU inventory contains an unsafe member path")
+            if member == "bin/python3.14":
+                return "$ORIGIN/../lib"
+            if member.startswith("lib/python3.14/lib-dynload/"):
+                return "$ORIGIN/../.."
+            if member.startswith("lib/") and member.count("/") == 1:
+                return "$ORIGIN"
+            raise SystemExit("private GNU ELF has an unsupported relative layout")
+
+        raw_inventory, inventory_sha256 = read_regular(root + "/elf-inventory.json", 4194304)
+        try:
+            inventory = json.loads(raw_inventory)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SystemExit("private GNU ELF inventory is malformed") from error
+        canonical = (json.dumps(inventory, sort_keys=True, separators=(",", ":"),
+                                ensure_ascii=True) + "\n").encode()
+        if (raw_inventory != canonical or inventory.get("schema") != "ryeos.gnu-python-elf-inventory.v3" or
+                inventory.get("search_profile") != "private_origin_v1" or
+                inventory.get("runtime_root") != root or inventory.get("loader") != "lib/ld-linux-x86-64.so.2"):
+            raise SystemExit("private GNU inventory has the wrong profile or canonical identity")
+        if (sys.version_info[:3] != (3, 14, 7) or
+                sysconfig.get_config_var("SOABI") != "cpython-314-x86_64-linux-gnu" or
+                inventory.get("python") != {
+                    "version": "3.14", "soabi": "cpython-314-x86_64-linux-gnu",
+                    "entrypoint": "bin/python3.14", "libpython": "lib/libpython3.14.so.1.0"}):
+            raise SystemExit("private GNU Python version, ABI, or inventory differs")
+        objects = inventory.get("objects")
+        if not isinstance(objects, list) or not objects:
+            raise SystemExit("private GNU inventory has no ELF objects")
+        by_path = {item.get("path"): item for item in objects if isinstance(item, dict)}
+        if len(by_path) != len(objects) or list(by_path) != sorted(by_path):
+            raise SystemExit("private GNU inventory paths are duplicate or noncanonical")
+        if len(objects) > 1024 or sum(item.get("bytes", 0) for item in objects) > subject["total_bytes"]:
+            raise SystemExit("private GNU ELF inventory exceeds the selected product bounds")
+        for item in objects:
+            member = item["path"]
+            if member != "lib/ld-linux-x86-64.so.2":
+                expected_runpath(member)
+            if (type(item.get("bytes")) is not int or
+                    not 0 <= item["bytes"] <= 134217728 or
+                    type(item.get("mode")) is not int or
+                    not isinstance(item.get("sha256"), str) or
+                    re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None):
+                raise SystemExit("private GNU ELF identity is malformed")
+            if (not isinstance(item.get("needed"), list) or
+                    any(not isinstance(name, str) or
+                        re.fullmatch(r"[A-Za-z0-9_+.-]+", name) is None
+                        for name in item["needed"])):
+                raise SystemExit("private GNU ELF has an unsafe DT_NEEDED edge")
+            parts = member.split("/")
+            for index in range(1, len(parts)):
+                parent = root + "/" + "/".join(parts[:index])
+                if not stat.S_ISDIR(os.lstat(parent).st_mode):
+                    raise SystemExit("private GNU ELF member has a symlink parent")
+            read_regular(root + "/" + member, item["bytes"],
+                         item["bytes"], item["sha256"])
+            dynamic = readelf(member, "-d")
+            actual_needed = sorted(re.findall(r"Shared library: \[([^\]]+)\]", dynamic))
+            actual_soname = re.findall(r"Library soname: \[([^\]]+)\]", dynamic)
+            actual_runpath = re.findall(r"Library runpath: \[([^\]]*)\]", dynamic)
+            actual_rpath = "(RPATH)" in dynamic
+            actual_nodeflib = "NODEFLIB" in dynamic
+            program = readelf(member, "-l")
+            actual_interpreter = re.findall(r"Requesting program interpreter: ([^\]]+)\]", program)
+            if (actual_needed != item["needed"] or actual_soname !=
+                    ([] if item["soname"] is None else [item["soname"]]) or
+                    actual_runpath != item["runpath"] or actual_rpath != item["rpath"] or
+                    actual_nodeflib != item["nodeflib"] or
+                    actual_interpreter != item["interpreter"]):
+                raise SystemExit("private GNU inventory differs from selected ELF dynamic tables")
+            if member == "lib/ld-linux-x86-64.so.2":
+                if item["runpath"] or item["rpath"] or item["nodeflib"]:
+                    raise SystemExit("private GNU loader must be independently loadable")
+                continue
+            if item["needed"] or item["interpreter"]:
+                if (item["runpath"] != [expected_runpath(member)] or item["rpath"] or
+                        item["nodeflib"] is not True):
+                    raise SystemExit("private GNU inventory has a rescuing or default search path")
+            elif item["runpath"] or item["rpath"]:
+                raise SystemExit("self-contained private GNU ELF has an unexpected search path")
+            if item["interpreter"] not in ([], [root + "/lib/ld-linux-x86-64.so.2"]):
+                raise SystemExit("private GNU ELF interpreter differs from the selected loader")
+            if set(item["resolved_needed"]) != set(item["needed"]):
+                raise SystemExit("private GNU inventory omits a dependency provider")
+            for needed, provider in item["resolved_needed"].items():
+                if provider not in by_path or not provider.startswith("lib/"):
+                    raise SystemExit("private GNU dependency leaves its admitted runtime/lib")
+
+        expected_providers = {"libgcc_s.so.1", "libpthread.so.0"}
+        mapped = {name: set() for name in expected_providers}
+        maps_bytes, _ = read_regular("/proc/self/maps", 2097152)
+        try:
+            maps_text = maps_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise SystemExit("private GNU process map is not UTF-8") from error
+        for line in maps_text.splitlines():
+            fields = line.split(maxsplit=5)
+            if len(fields) != 6:
+                continue
+            path = fields[5].removesuffix(" (deleted)")
+            name = path.rsplit("/", 1)[-1]
+            if name in mapped:
+                if fields[5].endswith(" (deleted)"):
+                    raise SystemExit("private GNU mapped a deleted provider")
+                mapped[name].add(path)
+        expected_mappings = {name: {root + "/lib/" + name} for name in expected_providers}
+        if mapped != expected_mappings:
+            raise SystemExit("private GNU startup mapped a provider outside its selected product")
+        if "LD_LIBRARY_PATH" in os.environ or "LD_PRELOAD" in os.environ:
+            raise SystemExit("private GNU startup has ambient loader overrides")
+        provider_hashes = {}
+        for name in sorted(expected_providers):
+            record = by_path.get("lib/" + name)
+            if not isinstance(record, dict):
+                raise SystemExit("private GNU inventory omits a mapped startup provider")
+            _, digest = read_regular(root + "/lib/" + name, 2097152,
+                                     record["bytes"], record["sha256"])
+            provider_hashes[name] = digest
+
+        no_load = getattr(os, "RTLD_NOLOAD", None)
+        if type(no_load) is not int:
+            raise SystemExit("runtime cannot prove already-loaded startup providers")
+        process = ctypes.CDLL(None)
+        dlvsym = process.dlvsym
+        dlvsym.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+        dlvsym.restype = ctypes.c_void_p
+        symbol_contracts = {
+            "libgcc_s.so.1": [("_Unwind_RaiseException", "GCC_3.0"),
+                              ("_Unwind_Backtrace", "GCC_3.3"),
+                              ("_Unwind_GetIPInfo", "GCC_4.2.0")],
+            "libpthread.so.0": [("pthread_key_create", "GLIBC_2.2.5"),
+                                ("pthread_key_delete", "GLIBC_2.2.5"),
+                                ("pthread_setspecific", "GLIBC_2.2.5")],
+        }
+        symbol_probes = []
+        for provider, probes in symbol_contracts.items():
+            exact = ctypes.CDLL(root + "/lib/" + provider,
+                                mode=no_load | os.RTLD_NOW | os.RTLD_LOCAL)
+            by_name = ctypes.CDLL(provider,
+                                 mode=no_load | os.RTLD_NOW | os.RTLD_LOCAL)
+            if exact._handle != by_name._handle:
+                raise SystemExit("private GNU SONAME selects another startup provider")
+            for symbol, version in probes:
+                if not dlvsym(exact._handle, symbol.encode("ascii"), version.encode("ascii")):
+                    raise SystemExit("private GNU provider lacks a required versioned symbol")
+                symbol_probes.append({"provider": provider, "symbol": symbol, "version": version})
+
+        fixed_provider = "/ryeos/realizations/python-gnu/python/lib/libgcc_s.so.1"
+        _, fixed_provider_sha256 = read_regular(
+            fixed_provider, 2097152, 182856,
+            "30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af")
+        if fixed_provider_sha256 != provider_hashes["libgcc_s.so.1"]:
+            raise SystemExit("fixed rescue control is not the exact provider fixture")
+
+        negative = {}
+        with tempfile.TemporaryDirectory(prefix="ryeos-gnu-private-omit-") as temporary:
+            probe_root = os.path.join(temporary, "probe")
+            probe_bin, probe_lib = os.path.join(probe_root, "bin"), os.path.join(probe_root, "lib")
+            os.makedirs(probe_bin, mode=0o700)
+            os.makedirs(probe_lib, mode=0o700)
+            probe_python = os.path.join(probe_bin, "python3.14")
+            shutil.copyfile(root + "/bin/python3.14", probe_python)
+            os.chmod(probe_python, 0o755)
+            for name in sorted(os.listdir(root + "/lib")):
+                if name == "libgcc_s.so.1":
+                    continue
+                os.symlink(root + "/lib/" + name, os.path.join(probe_lib, name))
+            if os.path.lexists(os.path.join(probe_lib, "libgcc_s.so.1")):
+                raise SystemExit("private GNU omission fixture retained the selected libgcc")
+            sentinel = os.path.join(temporary, "python-started")
+            failed = subprocess.run([
+                root + "/lib/ld-linux-x86-64.so.2", "--inhibit-cache", "--library-path", probe_lib,
+                probe_python, "-I", "-S", "-B", "-c",
+                "open(" + repr(sentinel) + ", 'w').close()"],
+                input=b"", stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env={"LANG": "C", "LC_ALL": "C", "PATH": ""},
+                timeout=30, check=False)
+            if (failed.returncode == 0 or b"libgcc_s.so.1" not in failed.stdout or
+                    os.path.exists(sentinel)):
+                raise SystemExit("private GNU omitted-provider fixture did not fail in the loader")
+            negative = {"missing_provider": "libgcc_s.so.1", "fixed_rescue_control_mounted": True,
+                        "failure_before_python": True, "probe_exit_code": failed.returncode,
+                        "provider_absent_from_selected_copy": True}
+
+        if (zlib.ZLIB_RUNTIME_VERSION != "1.3.2" or zlib.__spec__.origin != "built-in" or
+                _ctypes.__spec__.origin != "built-in"):
+            raise SystemExit("private GNU zlib or ctypes topology differs")
+        metadata_path = root + "/notices/python-build-standalone/PYTHON.json"
+        metadata_bytes, _ = read_regular(
+            metadata_path, 128346, 128346,
+            "e4596127ee78428301bfc9beac06547a14ab7ead983c4c390d5256ecde061fa9")
+        metadata = json.loads(metadata_bytes)
+        extensions = metadata.get("build_info", {}).get("extensions", {})
+        zlib_build, ctypes_build = extensions.get("zlib"), extensions.get("_ctypes")
+        if (not isinstance(zlib_build, list) or len(zlib_build) != 1 or
+                zlib_build[0].get("init_fn") != "PyInit_zlib" or
+                zlib_build[0].get("links") != [{"name": "z", "path_static": "build/lib/libz.a"}] or
+                "shared_lib" in zlib_build[0] or not isinstance(ctypes_build, list) or
+                len(ctypes_build) != 1 or ctypes_build[0].get("init_fn") != "PyInit__ctypes" or
+                ctypes_build[0].get("links") != [{"name": "dl", "system": True},
+                                                  {"name": "ffi", "path_static": "build/lib/libffi.a"}] or
+                "shared_lib" in ctypes_build[0]):
+            raise SystemExit("private GNU built-in extension topology differs")
+        evidence = {
+            "schema": "ryeos.gnu_python_private_origin_probe.v1",
+            "subject_manifest_hash": subject["manifest_hash"],
+            "inventory_sha256": inventory_sha256,
+            "runtime_root": root,
+            "provider_hashes": provider_hashes,
+            "versioned_symbols": symbol_probes,
+            "negative_omission": negative,
+            "fixed_rescue_provider_sha256": fixed_provider_sha256,
+            "zlib_runtime_version": zlib.ZLIB_RUNTIME_VERSION,
+            "zlib_origin": zlib.__spec__.origin,
+            "ctypes_origin": _ctypes.__spec__.origin,
+        }
+        print(json.dumps({
+            "schema": "ryeos.product_qualification_result.v1",
+            "subject_manifest_hash": subject["manifest_hash"],
+            "claims": ["gnu_python_private_origin_startup_providers_v1", "gnu_python_zlib_1_3_2"],
+            "probe_evidence": evidence,
+        }, sort_keys=True, separators=(",", ":")))

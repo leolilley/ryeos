@@ -16,6 +16,7 @@ import gnu_elf as owner
 
 
 RUNTIME_ROOT = "/ryeos/realizations/python-gnu/python"
+PRIVATE_ROOT = "/ryeos/realizations/python-gnu-private/python"
 ENTRY = "bin/python3.14"
 LOADER = "lib/ld-linux-x86-64.so.2"
 LIBPYTHON = "lib/libpython3.14.so.1.0"
@@ -165,6 +166,64 @@ class GnuElfTests(unittest.TestCase):
                 needed_replacements={}, needed_additions={})
         self.assertEqual(transformed, sorted([ENTRY, LIBPYTHON, EXTENSION]))
         self.assertEqual(set(result), set(transformed))
+
+    def test_private_origin_profile_commits_member_paths_and_refuses_unsupported_elf_layout(self):
+        private_search = {
+            ENTRY: ["$ORIGIN/../lib"],
+            LIBPYTHON: ["$ORIGIN"],
+            LIBC: [],
+            EXTENSION: ["$ORIGIN/../.."],
+            LOADER: [],
+        }
+        for member, value in private_search.items():
+            self.tools.records[member]["runpath"] = value
+        self.tools.records[ENTRY]["interpreter"] = [PRIVATE_ROOT + "/" + LOADER]
+
+        inventory = owner.inspect_python_runtime(
+            self.root, self.tools, runtime_root=PRIVATE_ROOT,
+            search_profile=owner.PRIVATE_PROFILE)
+        self.assertEqual(inventory["schema"], owner.PRIVATE_INVENTORY_SCHEMA)
+        self.assertEqual(inventory["search_profile"], owner.PRIVATE_PROFILE)
+        self.assertEqual(owner.canonical_inventory(inventory),
+                         owner.canonical_inventory(copy.deepcopy(inventory)))
+
+        relocated = {}
+
+        def record_relocation(path, _tools, runtime_root, *, runpath=None):
+            relocated[self.tools.member(path)] = (runtime_root, runpath)
+            return {"before": "0" * 64, "after": "1" * 64}
+
+        with mock.patch.object(owner, "relocate_elf", side_effect=record_relocation):
+            owner.relocate_python_runtime(
+                self.root, self.tools, runtime_root=PRIVATE_ROOT,
+                needed_replacements={}, needed_additions={},
+                search_profile=owner.PRIVATE_PROFILE)
+        self.assertEqual(relocated, {
+            ENTRY: (PRIVATE_ROOT, "$ORIGIN/../lib"),
+            LIBPYTHON: (PRIVATE_ROOT, "$ORIGIN"),
+            EXTENSION: (PRIVATE_ROOT, "$ORIGIN/../.."),
+        })
+
+        original = self.tools.records[EXTENSION]["runpath"]
+        self.tools.records[EXTENSION]["runpath"] = [RUNTIME_ROOT + "/lib"]
+        with self.assertRaisesRegex(ValueError, "search is not closed"):
+            owner.inspect_python_runtime(
+                self.root, self.tools, runtime_root=PRIVATE_ROOT,
+                search_profile=owner.PRIVATE_PROFILE)
+        self.tools.records[EXTENSION]["runpath"] = original
+
+        self.root.joinpath("other").mkdir()
+        unsupported = "other/module.so"
+        path = self.root / unsupported
+        path.write_bytes(b"\x7fELF" + unsupported.encode())
+        path.chmod(0o644)
+        self.tools.records[unsupported] = copy.deepcopy(self.tools.records[LIBPYTHON])
+        self.tools.records[unsupported]["runpath"] = ["$ORIGIN"]
+        self.tools.headers[unsupported] = copy.deepcopy(self.tools.headers[LIBPYTHON])
+        with self.assertRaisesRegex(ValueError, "unsupported layout"):
+            owner.inspect_python_runtime(
+                self.root, self.tools, runtime_root=PRIVATE_ROOT,
+                search_profile=owner.PRIVATE_PROFILE)
 
     def test_relocation_replaces_only_the_exact_declared_slash_needed_edge(self):
         old = "$ORIGIN/../lib/libpython3.14.so.1.0"

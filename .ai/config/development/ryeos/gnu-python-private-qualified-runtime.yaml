@@ -1,0 +1,11 @@
+category: development/ryeos
+version: "1.0.0"
+description: UNSIGNED selected private-origin GNU CPython runtime qualification target
+external_content: []
+external_product_slots:
+  - id: runtime
+    relationship_ref: config:development/ryeos/gnu-python-private-products
+    relationship: runtime_private_to_qualified_runtime
+    kind: tree
+    mount_root: execution_runtime
+    mount: python-gnu-private

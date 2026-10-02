@@ -27,11 +27,14 @@ from gnu_python_archives import (Limits, checked_archive, extract_install,
 from production import ElfTools, canonical_json, ordinary_member, relative, sha256
 
 
-SCHEMA = "ryeos.gnu_python_production_inputs.v2"
+SCHEMA = "ryeos.gnu_python_production_inputs.v3"
 CONFIG_REF = "development/ryeos/gnu-python-production-inputs.yaml"
 ARCHIVE_ROOT = Path("/ryeos/realizations/gnu-python-archives")
 SUPPORT_ROOT = Path("/ryeos/realizations/gnu-python-support")
 OUTPUT = PurePosixPath("products/gnu-python-distribution")
+PRIVATE_OUTPUT = PurePosixPath("products/gnu-python-relocatable-distribution")
+FIXED_PROFILE = "fixed_absolute_v1"
+PRIVATE_PROFILE = "private_origin_v1"
 MAX_CONFIG_BYTES = 256 * 1024
 MAX_ARCHIVE_ENTRIES = 8
 MAX_METADATA_FILES = 256
@@ -67,7 +70,7 @@ def validate_contract(config: object) -> dict:
         "category", "version", "description", "schema", "source_date_epoch",
         "runtime", "archives", "metadata_files", "compatibility_files",
         "retained_gnu_sources", "needed_replacements", "needed_additions", "license_supplements",
-        "qualification_requirements",
+        "qualification_requirements", "private_profile",
     }
     if (not isinstance(config, dict) or set(config) != required or
             config["category"] != "development/ryeos" or config["version"] != "1.0.0" or
@@ -85,6 +88,15 @@ def validate_contract(config: object) -> dict:
     }
     if config["runtime"] != expected_runtime:
         raise ValueError("GNU Python runtime metadata differs from the admitted build")
+    private_profile = config["private_profile"]
+    if (not isinstance(private_profile, dict) or
+            set(private_profile) != {"id", "runtime_root", "runpath_policy"} or
+            private_profile != {
+                "id": PRIVATE_PROFILE,
+                "runtime_root": "/ryeos/realizations/python-gnu-private/python",
+                "runpath_policy": "member-relative-origin-v1",
+            }):
+        raise ValueError("private GNU Python profile differs from its admitted variant")
     archives = config["archives"]
     if not isinstance(archives, dict) or set(archives) != {"manifest", "install", "metadata"}:
         raise ValueError("exact GNU Python archive set is missing")
@@ -229,13 +241,24 @@ def _copy_support(support: Path, destination: Path, selections: dict) -> None:
             raise ValueError("copied support file changed")
 
 
-def produce(project: Path, config: dict) -> dict:
+def _legacy_config_digest(config: dict) -> str:
+    """Keep the fixed product evidence identity byte-compatible with v2."""
+    legacy = dict(config)
+    legacy.pop("private_profile")
+    legacy["schema"] = "ryeos.gnu_python_production_inputs.v2"
+    return hashlib.sha256(canonical_json(legacy)).hexdigest()
+
+
+def produce(project: Path, config: dict, profile: str = FIXED_PROFILE) -> dict:
     validate_contract(config)
+    if profile not in (FIXED_PROFILE, PRIVATE_PROFILE):
+        raise ValueError("unsupported GNU Python output profile")
     archive_files = _check_archive_tree(ARCHIVE_ROOT, config)
     ordinary_member(SUPPORT_ROOT, "elf", directory=True)
     parent = project / "products"
     parent.mkdir(mode=0o700, exist_ok=True)
-    destination = project.joinpath(*OUTPUT.parts)
+    output_root = PRIVATE_OUTPUT if profile == PRIVATE_PROFILE else OUTPUT
+    destination = project.joinpath(*output_root.parts)
     # The process workspace is private until terminal capture, so the exact
     # admitted output root is also the staging root. Keeping every transient
     # mutation below it prevents a failed build from escaping the declared
@@ -258,6 +281,8 @@ def produce(project: Path, config: dict) -> dict:
     if _metadata_inventory(metadata_root) != config["metadata_files"]:
         raise ValueError("GNU Python upstream metadata/license inventory differs")
     runtime = config["runtime"]
+    runtime_root = (config["private_profile"]["runtime_root"]
+                    if profile == PRIVATE_PROFILE else runtime["runtime_root"])
     expected_python = {
         "python_version": runtime["version"],
         "python_major_minor_version": runtime["major_minor"],
@@ -305,13 +330,15 @@ def produce(project: Path, config: dict) -> dict:
     _copy_support(SUPPORT_ROOT, notices / "gnu-runtime", config["retained_gnu_sources"])
     tools = ElfTools(SUPPORT_ROOT)
     relocations = relocate_python_runtime(
-        runtime_output, tools, runtime_root=runtime["runtime_root"],
+        runtime_output, tools, runtime_root=runtime_root,
         needed_replacements=config["needed_replacements"],
         needed_additions=config["needed_additions"],
-        python_version=runtime["major_minor"], soabi=runtime["soabi"])
+        python_version=runtime["major_minor"], soabi=runtime["soabi"],
+        search_profile=profile)
     elf_inventory = inspect_python_runtime(
-        runtime_output, tools, runtime_root=runtime["runtime_root"],
-        python_version=runtime["major_minor"], soabi=runtime["soabi"])
+        runtime_output, tools, runtime_root=runtime_root,
+        python_version=runtime["major_minor"], soabi=runtime["soabi"],
+        search_profile=profile)
     inventory_bytes = canonical_inventory(elf_inventory)
     inventory_path = staging / "elf-inventory.json"
     inventory_path.write_bytes(inventory_bytes)
@@ -322,7 +349,7 @@ def produce(project: Path, config: dict) -> dict:
     relocations_path.chmod(0o644)
     evidence = {
         "schema": "ryeos.gnu-python-production-evidence.v1",
-        "config_sha256": hashlib.sha256(canonical_json(config)).hexdigest(),
+        "config_sha256": _legacy_config_digest(config),
         "archive_manifest_digest": config["archives"]["manifest"]["digest"],
         "install_receipt": install_receipt,
         "metadata_receipt": metadata_receipt,
@@ -330,6 +357,12 @@ def produce(project: Path, config: dict) -> dict:
         "relocations_sha256": hashlib.sha256(relocation_bytes).hexdigest(),
         "runtime_executed": False,
     }
+    if profile == PRIVATE_PROFILE:
+        evidence.update({
+            "schema": "ryeos.gnu-python-production-evidence.v2",
+            "runtime_profile": profile,
+            "runtime_root": runtime_root,
+        })
     evidence_path = staging / "production-evidence.json"
     evidence_path.write_bytes(canonical_json(evidence))
     evidence_path.chmod(0o644)
@@ -340,7 +373,7 @@ def produce(project: Path, config: dict) -> dict:
             if not path.is_symlink():
                 os.utime(path, (epoch, epoch), follow_symlinks=False)
         os.utime(directory, (epoch, epoch), follow_symlinks=False)
-    return {"output_path": OUTPUT.as_posix(), "evidence": evidence,
+    return {"output_path": output_root.as_posix(), "evidence": evidence,
             "binding_published": False}
 
 
@@ -360,5 +393,7 @@ def run_production() -> None:
     # The signed declaration uses ConfigResolveSpec::Single. Its exact runtime
     # contract injects the resolved Config body directly; only `multi` produces
     # a path-keyed map. validate_contract closes the admitted body below.
-    result = produce(project, resolved)
+    profile = request.get("profile", FIXED_PROFILE)
+    result = (produce(project, resolved) if profile == FIXED_PROFILE else
+              produce(project, resolved, profile))
     print(json.dumps({"ok": True, **result}, sort_keys=True))
