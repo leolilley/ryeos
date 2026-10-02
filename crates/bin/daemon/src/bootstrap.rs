@@ -724,13 +724,22 @@ fn load_node_config_two_phase_with_socket(
             .context("Phase 2: failed to load full node config")
     })?);
 
-    let isolation_backend = generation
+    let (isolation_backend, verified_backend_capture) = generation
         .checked(&bootstrap_trust_store, || {
-            ryeos_app::engine_init::resolve_isolation_backend(
-                &generation,
-                &bootstrap_trust_store,
-                node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
-            )
+            if daemon_socket.is_some() {
+                ryeos_app::engine_init::resolve_isolation_backend_with_verified_captures(
+                    &generation,
+                    &bootstrap_trust_store,
+                    node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
+                )
+            } else {
+                ryeos_app::engine_init::resolve_isolation_backend(
+                    &generation,
+                    &bootstrap_trust_store,
+                    node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
+                )
+                .map(|backend| (backend, None))
+            }
         })
         .context("Phase 1: resolve selected isolation backend")?;
     // A stopped-node snapshot validates the signed contract only. It must not
@@ -793,6 +802,14 @@ fn load_node_config_two_phase_with_socket(
         ),
     }
     .context("Phase 1: load node isolation policy")?;
+    // Same actual runtime/backend and checked node-generation captures.
+    // Retention alone grants no native launch or settlement evidence.
+    let isolation = match verified_backend_capture {
+        Some(capture) => isolation
+            .retain_verified_backend_capture(capture)
+            .context("Phase 1: retain actual isolation executable captures")?,
+        None => isolation,
+    };
     let isolation = Arc::new(ryeos_app::engine_init::retain_daemon_generation(
         isolation,
         app_root.to_path_buf(),

@@ -222,6 +222,7 @@ pub fn load_registered_isolation(
     load_registered_generation_under_lock(
         app_root,
         ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy,
+        true,
     )
     .map(|generation| generation.0)
 }
@@ -238,6 +239,7 @@ pub fn load_locked_registered_isolation(
     load_locked_registered_isolation_with(
         app_root,
         ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy,
+        true,
     )
 }
 
@@ -252,6 +254,7 @@ pub fn load_locked_registered_definition_isolation(
     load_locked_registered_isolation_with(
         app_root,
         ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_definition_validation,
+        false,
     )
 }
 
@@ -269,12 +272,13 @@ type RegisteredIsolationResolver = fn(
 fn load_locked_registered_isolation_with(
     app_root: &std::path::Path,
     resolve: RegisteredIsolationResolver,
+    retain_captures: bool,
 ) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
     let generation_lock =
         crate::bundle_transaction::BundleRegistryReadLock::acquire_for_composition(app_root)
             .context("acquire bundle-generation read lock for isolation composition")?;
     let (runtime, node_trust, generation) =
-        load_registered_generation_under_lock(app_root, resolve)?;
+        load_registered_generation_under_lock(app_root, resolve, retain_captures)?;
     let bundle_roots = generation.registered_roots();
     let lifeline = Arc::new(RetainedRegisteredGeneration {
         app_root: app_root.to_path_buf(),
@@ -292,6 +296,7 @@ fn load_locked_registered_isolation_with(
 fn load_registered_generation_under_lock(
     app_root: &std::path::Path,
     resolve: RegisteredIsolationResolver,
+    retain_captures: bool,
 ) -> Result<(
     Arc<ryeos_engine::isolation::IsolationRuntime>,
     TrustStore,
@@ -327,8 +332,13 @@ fn load_registered_generation_under_lock(
     let policy = policy_snapshot
         .require::<ryeos_engine::isolation::IsolationPolicy>()?
         .clone();
-    let backend = generation.checked(&trust_store, || {
-        resolve_isolation_backend(&generation, &trust_store, &policy)
+    let (backend, verified_backend_capture) = generation.checked(&trust_store, || {
+        if retain_captures {
+            resolve_isolation_backend_with_verified_captures(&generation, &trust_store, &policy)
+        } else {
+            resolve_isolation_backend(&generation, &trust_store, &policy)
+                .map(|backend| (backend, None))
+        }
     })?;
     let runtime = resolve(
         app_root,
@@ -337,10 +347,13 @@ fn load_registered_generation_under_lock(
         format!("sha256:{}", policy_generation.digest()),
         backend,
     )
-    .map(Arc::new)
     .map_err(anyhow::Error::from)?;
+    let runtime = match verified_backend_capture {
+        Some(capture) => runtime.retain_verified_backend_capture(capture)?,
+        None => runtime,
+    };
     generation.ensure_current(&trust_store)?;
-    Ok((runtime, trust_store, generation))
+    Ok((Arc::new(runtime), trust_store, generation))
 }
 
 pub fn resolve_isolation_backend(
@@ -348,8 +361,35 @@ pub fn resolve_isolation_backend(
     node_trust_store: &TrustStore,
     policy: &ryeos_engine::isolation::IsolationPolicy,
 ) -> Result<Option<Arc<ryeos_engine::isolation::ResolvedIsolationBackend>>> {
+    resolve_isolation_backend_with_capture_retention(generation, node_trust_store, policy, false)
+        .map(|(backend, _)| backend)
+}
+
+/// Retain actual selected executable captures as content facts alongside the
+/// same resolved backend. The protected caller independently owns node trust,
+/// registered generation and policy; this return does not mint that authority.
+pub fn resolve_isolation_backend_with_verified_captures(
+    generation: &VerifiedBundleGeneration,
+    node_trust_store: &TrustStore,
+    policy: &ryeos_engine::isolation::IsolationPolicy,
+) -> Result<(
+    Option<Arc<ryeos_engine::isolation::ResolvedIsolationBackend>>,
+    Option<Arc<ryeos_engine::isolation::VerifiedIsolationBackendCapture>>,
+)> {
+    resolve_isolation_backend_with_capture_retention(generation, node_trust_store, policy, true)
+}
+
+fn resolve_isolation_backend_with_capture_retention(
+    generation: &VerifiedBundleGeneration,
+    node_trust_store: &TrustStore,
+    policy: &ryeos_engine::isolation::IsolationPolicy,
+    retain_captures: bool,
+) -> Result<(
+    Option<Arc<ryeos_engine::isolation::ResolvedIsolationBackend>>,
+    Option<Arc<ryeos_engine::isolation::VerifiedIsolationBackendCapture>>,
+)> {
     if policy.mode == ryeos_engine::isolation::IsolationMode::Disabled {
-        return Ok(None);
+        return Ok((None, None));
     }
     let selection = policy.backend.clone().context(
         "enforced isolation policy requires an explicit signed bundle backend selection",
@@ -365,8 +405,15 @@ pub fn resolve_isolation_backend(
         node_trust_store,
     )
     .context("verify selected isolation bundle manifest")?;
-    resolve_verified_isolation_backend(selection, &record.path, verified, node_trust_store, "")
-        .map(Some)
+    let (backend, capture) = resolve_verified_isolation_backend_with_capture_retention(
+        selection,
+        &record.path,
+        verified,
+        node_trust_store,
+        "",
+        retain_captures,
+    )?;
+    Ok((Some(backend), capture))
 }
 
 /// Compose the exact isolation generation that would be selected from a
@@ -508,6 +555,28 @@ fn resolve_verified_isolation_backend(
     node_trust_store: &TrustStore,
     diagnostic_prefix: &str,
 ) -> Result<Arc<ryeos_engine::isolation::ResolvedIsolationBackend>> {
+    resolve_verified_isolation_backend_with_capture_retention(
+        selection,
+        root,
+        verified,
+        node_trust_store,
+        diagnostic_prefix,
+        false,
+    )
+    .map(|(backend, _)| backend)
+}
+
+fn resolve_verified_isolation_backend_with_capture_retention(
+    selection: ryeos_isolation_protocol::IsolationBackendSelection,
+    root: &std::path::Path,
+    verified: ryeos_bundle::manifest::VerifiedBundleManifest,
+    node_trust_store: &TrustStore,
+    diagnostic_prefix: &str,
+    retain_captures: bool,
+) -> Result<(
+    Arc<ryeos_engine::isolation::ResolvedIsolationBackend>,
+    Option<Arc<ryeos_engine::isolation::VerifiedIsolationBackendCapture>>,
+)> {
     let declaration = verified
         .manifest
         .isolation_backends
@@ -525,38 +594,40 @@ fn resolve_verified_isolation_backend(
         anyhow::bail!("{diagnostic_prefix}isolation implementation omits the host target");
     }
     let adapter_ref = format!("bin:{}", declaration.adapter);
-    let adapter = ryeos_engine::binary_resolver::capture_bundle_binary_ref(
+    let adapter = ryeos_engine::binary_resolver::capture_verified_bundle_binary_ref(
         &adapter_ref,
         root,
         node_trust_store,
     )
     .with_context(|| format!("capture {diagnostic_prefix}isolation adapter"))?;
-    if adapter.identity.signer_fingerprint != verified.signer_fingerprint {
+    if adapter.captured().identity.signer_fingerprint != verified.signer_fingerprint {
         anyhow::bail!(
             "{diagnostic_prefix}isolation adapter signer does not match its bundle manifest signer"
         );
     }
-    let adapter_digest = adapter.identity.content_hash.clone();
+    let adapter_digest = adapter.captured().identity.content_hash.clone();
+    let mut artifact_captures = std::collections::BTreeMap::new();
     let mut artifact_handles = std::collections::BTreeMap::new();
     let mut artifact_digests = std::collections::BTreeMap::new();
     for (role, executable) in &declaration.artifacts {
         let executable_ref = format!("bin:{executable}");
-        let artifact = ryeos_engine::binary_resolver::capture_bundle_binary_ref(
+        let artifact = ryeos_engine::binary_resolver::capture_verified_bundle_binary_ref(
             &executable_ref,
             root,
             node_trust_store,
         )
         .with_context(|| format!("capture {diagnostic_prefix}isolation artifact `{executable}`"))?;
-        if artifact.identity.signer_fingerprint != verified.signer_fingerprint {
+        if artifact.captured().identity.signer_fingerprint != verified.signer_fingerprint {
             anyhow::bail!(
                 "{diagnostic_prefix}isolation artifact `{executable}` signer does not match its bundle manifest signer"
             );
         }
-        artifact_digests.insert(*role, artifact.identity.content_hash);
-        artifact_handles.insert(*role, artifact.handle);
+        artifact_digests.insert(*role, artifact.captured().identity.content_hash.clone());
+        artifact_handles.insert(*role, artifact.captured().handle.clone());
+        artifact_captures.insert(*role, artifact);
     }
     let inspection_response = inspect_isolation_backend(
-        &adapter.handle,
+        &adapter.captured().handle,
         &artifact_handles,
         &artifact_digests,
         &declaration,
@@ -569,7 +640,7 @@ fn resolve_verified_isolation_backend(
         bundle_manifest_digest: verified.body_digest,
         signer_fingerprint: verified.signer_fingerprint,
         adapter_digest,
-        adapter_handle: adapter.handle,
+        adapter_handle: adapter.captured().handle.clone(),
         artifact_handles,
         adapter_build: inspection_response.adapter_build,
         effective_capabilities: inspection_response.effective_capabilities,
@@ -578,7 +649,19 @@ fn resolve_verified_isolation_backend(
     backend
         .validate()
         .context("validate resolved isolation backend")?;
-    Ok(Arc::new(backend))
+    let backend = Arc::new(backend);
+    let capture = if retain_captures {
+        Some(Arc::new(
+            ryeos_engine::isolation::VerifiedIsolationBackendCapture::from_captures(
+                Arc::clone(&backend),
+                adapter,
+                artifact_captures,
+            )?,
+        ))
+    } else {
+        None
+    };
+    Ok((backend, capture))
 }
 
 fn host_isolation_target() -> Result<ryeos_isolation_protocol::IsolationTargetTriple> {

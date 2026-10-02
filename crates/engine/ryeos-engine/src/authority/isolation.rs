@@ -42,7 +42,7 @@ pub use authority::{
     IsolationTargetChannelAuthority, IsolationVerifiedCode,
     IsolationWritableRuntimeViewMountAuthority,
 };
-pub use backend::ResolvedIsolationBackend;
+pub use backend::{ResolvedIsolationBackend, VerifiedIsolationBackendCapture};
 pub use inspection::{
     IsolationBackendInspection, IsolationBackendStatus, IsolationInspection,
     ProcessControlReadinessReason, ProcessScopeAuthorityStatus, ProcessScopeReadiness,
@@ -231,6 +231,7 @@ pub struct IsolationRuntime {
     /// Exact daemon-lifetime backend capture used by enforced execution.
     /// Disabled snapshots always carry `None`.
     backend_capture: Option<Arc<ResolvedIsolationBackend>>,
+    verified_backend_capture: Option<Arc<VerifiedIsolationBackendCapture>>,
     network_runtime_files: Vec<network_inputs::CapturedNetworkFile>,
     process_scope_provider: Option<Arc<lillux::ProcessScopeProvider>>,
     /// Optional higher-level generation guard retained by standalone
@@ -1838,6 +1839,31 @@ impl IsolationRuntime {
         let provenance = self.launch_provenance(None);
         self.ensure_registered_generation_current()?;
         Ok(provenance)
+    }
+
+    /// Retain same-backend actual executable capture facts exactly once.
+    /// This is not node admission, a generation witness or native evidence.
+    pub fn retain_verified_backend_capture(
+        mut self,
+        capture: Arc<VerifiedIsolationBackendCapture>,
+    ) -> Result<Self, EngineError> {
+        if self.verified_backend_capture.is_some() {
+            return Err(refused(
+                "verified backend captures cannot be replaced".into(),
+            ));
+        }
+        let backend = self.backend_capture.as_ref().ok_or_else(|| {
+            refused("verified backend capture requires this runtime's retained backend".into())
+        })?;
+        capture.require_same_backend(backend)?;
+        self.verified_backend_capture = Some(capture);
+        Ok(self)
+    }
+
+    /// Borrow retained capture facts only. Protected consumers must separately
+    /// bind actual node trust/generation and their original selected launch.
+    pub fn verified_backend_capture(&self) -> Option<&Arc<VerifiedIsolationBackendCapture>> {
+        self.verified_backend_capture.as_ref()
     }
 
     pub fn retain_registered_generation(
@@ -5122,6 +5148,7 @@ impl IsolationRuntime {
             daemon_socket,
             verified_artifacts,
             backend_capture: captured_backend,
+            verified_backend_capture: None,
             network_runtime_files,
             process_scope_provider,
             _generation_lifeline: None,
