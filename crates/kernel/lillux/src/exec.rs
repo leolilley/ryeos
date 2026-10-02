@@ -4576,6 +4576,13 @@ pub struct RunningProcess {
     status_thread: Option<thread::JoinHandle<()>>,
     applied_receipt_rx:
         Option<std::sync::mpsc::Receiver<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>>,
+    /// Exact selected-channel receive outcome retained before later PID or
+    /// deadline checks. This is raw reader output, not admitted launch proof.
+    applied_receipt_observation: Option<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
+    /// A selected receive failure is sticky; this owner never renews its
+    /// original channel wait or retries a consumed observation.
+    applied_receipt_failure: Option<String>,
+    applied_receipt_returned: bool,
     stdout_capture: SharedCapture,
     stderr_capture: SharedCapture,
     stdout_reader_taken: bool,
@@ -5232,6 +5239,9 @@ impl RunningProcess {
         &mut self,
         timeout: Duration,
     ) -> Result<crate::LinuxSandboxAppliedLaunchReceipt, String> {
+        if self.native_settlement.is_some() {
+            return self.wait_selected_applied_launch_receipt(timeout);
+        }
         if timeout.is_zero() {
             return Err("applied-launch receipt deadline elapsed".into());
         }
@@ -5254,6 +5264,102 @@ impl RunningProcess {
         }
         self.applied_receipt_rx = None;
         Ok(receipt)
+    }
+
+    fn wait_selected_applied_launch_receipt(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<crate::LinuxSandboxAppliedLaunchReceipt, String> {
+        if let Some(failure) = &self.applied_receipt_failure {
+            return Err(failure.clone());
+        }
+        if self.applied_receipt_returned {
+            return Err("applied-launch receipt was already returned".into());
+        }
+        if self.applied_receipt_observation.is_some() {
+            return Err("applied-launch receipt observation was already consumed".into());
+        }
+
+        let Some(original_deadline) = self
+            .native_settlement
+            .as_ref()
+            .map(|channel| channel.original_deadline)
+        else {
+            return self.fail_selected_applied_launch_receipt(
+                "selected native receipt channel is missing".into(),
+            );
+        };
+        let remaining = original_deadline.remaining();
+        if remaining.is_zero() {
+            return self.fail_selected_applied_launch_receipt(
+                "native settlement original deadline expired before applied receipt".into(),
+            );
+        }
+        if timeout.is_zero() {
+            return self.fail_selected_applied_launch_receipt(
+                "applied-launch receipt deadline elapsed".into(),
+            );
+        }
+        let receive_timeout = timeout.min(remaining);
+        let received = match self.applied_receipt_rx.as_ref() {
+            Some(receiver) => receiver.recv_timeout(receive_timeout),
+            None => {
+                return self.fail_selected_applied_launch_receipt(
+                    "running process has no required applied-launch receipt channel".into(),
+                );
+            }
+        };
+        let observation = match received {
+            Ok(observation) => observation,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return self.fail_selected_applied_launch_receipt(
+                    "timed out awaiting applied-launch receipt".into(),
+                );
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return self.fail_selected_applied_launch_receipt(
+                    "applied-launch status reader ended without a receipt".into(),
+                );
+            }
+        };
+
+        // recv_timeout consumed this exact channel item. Retain it and disarm
+        // the receiver before any expiry, PID, or reader-failure return.
+        self.applied_receipt_observation = Some(observation);
+        self.applied_receipt_rx = None;
+        if original_deadline.remaining().is_zero() {
+            return self.fail_selected_applied_launch_receipt(
+                "native settlement original deadline expired after applied receipt".into(),
+            );
+        }
+        let receipt = match self.applied_receipt_observation.as_ref() {
+            Some(Ok(receipt)) => receipt.clone(),
+            Some(Err(failure)) => {
+                return self.fail_selected_applied_launch_receipt(failure.clone());
+            }
+            None => unreachable!("selected receive was cached before validation"),
+        };
+        if receipt.owned_child_pid != self.pid {
+            return self.fail_selected_applied_launch_receipt(
+                "applied-launch receipt differs from exact running target".into(),
+            );
+        }
+        if original_deadline.remaining().is_zero() {
+            return self.fail_selected_applied_launch_receipt(
+                "native settlement original deadline expired before applied receipt return".into(),
+            );
+        }
+        self.applied_receipt_returned = true;
+        Ok(receipt)
+    }
+
+    fn fail_selected_applied_launch_receipt(
+        &mut self,
+        failure: String,
+    ) -> Result<crate::LinuxSandboxAppliedLaunchReceipt, String> {
+        self.applied_receipt_rx = None;
+        self.applied_receipt_failure = Some(failure.clone());
+        Err(failure)
     }
 
     pub fn scope_recovery(&self) -> Option<&crate::ProcessScopeRecovery> {
@@ -7335,6 +7441,9 @@ fn lib_spawn_with_stdio(
         stderr_thread: None,
         status_thread: None,
         applied_receipt_rx: None,
+        applied_receipt_observation: None,
+        applied_receipt_failure: None,
+        applied_receipt_returned: false,
         stdout_capture,
         stderr_capture,
         stdout_reader_taken: false,
@@ -7985,6 +8094,164 @@ mod applied_status_tests {
         )
         .into_bytes();
         assert!(run(&[pid, missing_echo]).1.is_err());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod selected_applied_receipt_cache_tests {
+    use super::*;
+
+    fn receipt(pid: u32) -> crate::LinuxSandboxAppliedLaunchReceipt {
+        crate::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: pid,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: crate::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 0,
+                destination_access_sha256: [0; 32],
+            },
+        }
+    }
+
+    fn selected_running(
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> (
+        RunningProcess,
+        std::sync::mpsc::Sender<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
+        InheritedDescriptorAuthority,
+    ) {
+        let mut running = lib_spawn(SubprocessRequest {
+            cmd: "/bin/sleep".into(),
+            argv0: None,
+            args: vec!["30".into()],
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 30.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        })
+        .unwrap();
+        let mut status = supervised_launcher_attachment_status_pipe().unwrap();
+        status.reader.require_mount_preparation_receipt().unwrap();
+        status
+            .reader
+            .require_applied_launch_receipt("test.applied-launch/v2")
+            .unwrap();
+        let writer = status
+            .prepare_native_settlement_channel(original_deadline)
+            .unwrap();
+        running.native_settlement = status.reader.native_settlement.take();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        running.applied_receipt_rx = Some(receiver);
+        (running, sender, writer)
+    }
+
+    #[test]
+    fn selected_pid_failure_retains_consumed_receipt_and_is_sticky() {
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let (mut running, sender, _writer) = selected_running(deadline);
+        let observed = receipt(running.pid.wrapping_add(1));
+        sender.send(Ok(observed.clone())).unwrap();
+
+        let failure = running
+            .wait_applied_launch_receipt(Duration::from_secs(1))
+            .unwrap_err();
+        assert!(failure.contains("differs from exact running target"));
+        assert_eq!(running.applied_receipt_observation, Some(Ok(observed)));
+        assert_eq!(
+            running.applied_receipt_failure.as_deref(),
+            Some(failure.as_str())
+        );
+        assert!(running.applied_receipt_rx.is_none());
+        assert_eq!(
+            running.wait_applied_launch_receipt(Duration::from_secs(1)),
+            Err(failure)
+        );
+        assert!(sender.send(Ok(receipt(running.pid))).is_err());
+    }
+
+    #[test]
+    fn selected_reader_failure_is_cached_before_return_and_never_retried() {
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let (mut running, sender, _writer) = selected_running(deadline);
+        let observed_failure = "status reader rejected applied-launch document".to_owned();
+        sender.send(Err(observed_failure.clone())).unwrap();
+
+        assert_eq!(
+            running.wait_applied_launch_receipt(Duration::from_secs(1)),
+            Err(observed_failure.clone())
+        );
+        assert_eq!(
+            running.applied_receipt_observation,
+            Some(Err(observed_failure.clone()))
+        );
+        assert_eq!(
+            running.applied_receipt_failure.as_deref(),
+            Some(observed_failure.as_str())
+        );
+        assert!(running.applied_receipt_rx.is_none());
+        assert_eq!(
+            running.wait_applied_launch_receipt(Duration::from_secs(1)),
+            Err(observed_failure)
+        );
+        assert!(sender.send(Ok(receipt(running.pid))).is_err());
+    }
+
+    #[test]
+    fn selected_timeout_is_sticky_and_never_receives_a_later_item() {
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let (mut running, sender, _writer) = selected_running(deadline);
+        let failure = running
+            .wait_applied_launch_receipt(Duration::from_millis(1))
+            .unwrap_err();
+        assert!(failure.contains("timed out awaiting"));
+        assert!(running.applied_receipt_observation.is_none());
+        assert_eq!(
+            running.applied_receipt_failure.as_deref(),
+            Some(failure.as_str())
+        );
+        assert!(running.applied_receipt_rx.is_none());
+        assert!(sender.send(Ok(receipt(running.pid))).is_err());
+        assert_eq!(
+            running.wait_applied_launch_receipt(Duration::from_secs(1)),
+            Err(failure)
+        );
+    }
+
+    #[test]
+    fn selected_valid_receipt_is_returned_once_and_remains_cached() {
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let (mut running, sender, _writer) = selected_running(deadline);
+        let observed = receipt(running.pid);
+        sender.send(Ok(observed.clone())).unwrap();
+
+        assert_eq!(
+            running
+                .wait_applied_launch_receipt(Duration::from_secs(1))
+                .unwrap(),
+            observed
+        );
+        assert_eq!(running.applied_receipt_observation, Some(Ok(observed)));
+        assert!(running.applied_receipt_returned);
+        assert!(running.applied_receipt_rx.is_none());
+        assert!(
+            running
+                .wait_applied_launch_receipt(Duration::from_secs(1))
+                .unwrap_err()
+                .contains("already returned")
+        );
+        assert!(sender.send(Ok(receipt(running.pid))).is_err());
     }
 }
 
