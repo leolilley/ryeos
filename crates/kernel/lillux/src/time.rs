@@ -442,11 +442,18 @@ mod tests {
 /// release or physical-retirement authority. No raw/serde/default constructor.
 /// The selected adapter must inherit BOTH exact descriptor roles once.
 pub struct OriginalNamespaceOccupancyHandoff {
+    original_deadline: MonotonicDeadline,
     window: crate::InheritedDescriptorAuthority,
     clock_namespace: crate::InheritedDescriptorAuthority,
 }
 
 impl OriginalNamespaceOccupancyHandoff {
+    /// The original local deadline retained by the exporting owner.
+    /// This is never reconstructed from remaining duration or wire data.
+    pub fn original_deadline(&self) -> MonotonicDeadline {
+        self.original_deadline
+    }
+
     #[cfg(target_os = "linux")]
     pub fn pin_original_clock_namespace(
         original_deadline: MonotonicDeadline,
@@ -536,6 +543,7 @@ impl OriginalNamespaceOccupancyHandoff {
         original_window::require_same_clock_namespace(clock_namespace.file())?;
         original_window::require_window(limit, cleanup, original_deadline)?;
         Ok(Self {
+            original_deadline,
             window,
             clock_namespace,
         })

@@ -4080,6 +4080,27 @@ impl Engine {
         })
     }
 
+    /// Carry the original funded window through the existing plan owner.
+    /// This does not mint admission, a financial debit or settlement authority.
+    pub fn spawn_plan_with_original_namespace_occupancy(
+        &self,
+        ctx: &EngineContext,
+        plan: &ExecutionPlan,
+        selections: &[crate::contracts::ExecutionResourceSelection],
+        devices: &lillux::CharacterDeviceSet,
+        original_window: lillux::time::OriginalNamespaceOccupancyHandoff,
+    ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
+        self.checked_bundle_generation(|| {
+            crate::dispatch::spawn_plan_with_original_namespace_occupancy(
+                plan,
+                ctx,
+                selections,
+                devices,
+                original_window,
+            )
+        })
+    }
+
     /// Spawn through a scope already retained by the caller's durable launch
     /// owner. It is not selected by
     /// executable name, kind, or a fallback after ordinary spawn fails.

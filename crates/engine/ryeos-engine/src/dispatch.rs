@@ -784,7 +784,7 @@ pub(crate) fn spawn_plan_with_scope(
     scope: Option<lillux::ProcessScope>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
     validate_plan_target_without_selection(plan)?;
-    spawn_first_plan_node(plan, ctx, scope, None, None)
+    spawn_first_plan_node(plan, ctx, scope, None, None, None)
 }
 
 pub(crate) fn spawn_plan_with_scope_and_resources(
@@ -794,7 +794,7 @@ pub(crate) fn spawn_plan_with_scope_and_resources(
     selections: &[crate::contracts::ExecutionResourceSelection],
     devices: Option<&lillux::CharacterDeviceSet>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
-    spawn_plan_with_scope_and_resources_until(plan, ctx, scope, selections, devices, None)
+    spawn_plan_with_scope_and_resources_until(plan, ctx, scope, selections, devices, None, None)
 }
 
 /// Original expiry is carried through plan/isolation preparation and native birth.
@@ -806,7 +806,36 @@ pub fn spawn_plan_with_resources_until(
     devices: Option<&lillux::CharacterDeviceSet>,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
-    spawn_plan_with_scope_and_resources_until(plan, ctx, None, selections, devices, Some(deadline))
+    spawn_plan_with_scope_and_resources_until(
+        plan,
+        ctx,
+        None,
+        selections,
+        devices,
+        Some(deadline),
+        None,
+    )
+}
+
+/// Forward an owned original window through the existing admitted plan path.
+/// The caller retains its original funding, Runtime intent and settlement owner.
+pub fn spawn_plan_with_original_namespace_occupancy(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+    selections: &[crate::contracts::ExecutionResourceSelection],
+    devices: &lillux::CharacterDeviceSet,
+    original_window: lillux::time::OriginalNamespaceOccupancyHandoff,
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    let deadline = original_window.original_deadline();
+    spawn_plan_with_scope_and_resources_until(
+        plan,
+        ctx,
+        None,
+        selections,
+        Some(devices),
+        Some(deadline),
+        Some(original_window),
+    )
 }
 
 fn spawn_plan_with_scope_and_resources_until(
@@ -816,7 +845,11 @@ fn spawn_plan_with_scope_and_resources_until(
     selections: &[crate::contracts::ExecutionResourceSelection],
     devices: Option<&lillux::CharacterDeviceSet>,
     deadline: Option<lillux::time::MonotonicDeadline>,
+    original_window: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    if original_window.is_some() && (scope.is_some() || devices.is_none() || deadline.is_none()) {
+        return Err(EngineError::Internal("original namespace occupancy requires its exact device authority, original deadline and no local process scope".into()));
+    }
     if deadline.is_some_and(|expiry| expiry.has_elapsed()) {
         return Err(EngineError::Internal(
             "original held-spawn deadline expired".into(),
@@ -832,7 +865,7 @@ fn spawn_plan_with_scope_and_resources_until(
         ));
     }
     validate_plan_target_with_selection(plan, selections, devices)?;
-    spawn_first_plan_node(plan, ctx, scope, devices, deadline)
+    spawn_first_plan_node(plan, ctx, scope, devices, deadline, original_window)
 }
 
 fn spawn_first_plan_node(
@@ -841,6 +874,7 @@ fn spawn_first_plan_node(
     scope: Option<lillux::ProcessScope>,
     devices: Option<&lillux::CharacterDeviceSet>,
     deadline: Option<lillux::time::MonotonicDeadline>,
+    original_window: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
     let effective_ctx = context_with_plan_limits(plan, ctx)?;
     let ctx = &effective_ctx;
@@ -857,6 +891,7 @@ fn spawn_first_plan_node(
                     scope,
                     devices,
                     deadline,
+                    original_window,
                 );
             }
             PlanNode::Complete { .. } => {
@@ -879,6 +914,7 @@ fn spawn_subprocess(
     scope: Option<lillux::ProcessScope>,
     devices: Option<&lillux::CharacterDeviceSet>,
     deadline: Option<lillux::time::MonotonicDeadline>,
+    original_window: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
     let request = isolation_plan_request_awaiting_attachment(
         spec,
@@ -888,6 +924,7 @@ fn spawn_subprocess(
         ctx,
         scope,
         devices,
+        original_window,
     )?;
     let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
@@ -980,6 +1017,7 @@ fn isolation_plan_request_awaiting_attachment(
     ctx: &EngineContext,
     scope: Option<lillux::ProcessScope>,
     devices: Option<&lillux::CharacterDeviceSet>,
+    original_window: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
 ) -> Result<crate::isolation::IsolationRequestAwaitingAttachment, EngineError> {
     let (request, project_path, verified_code) = isolation_plan_request_parts(spec, ctx)?;
     let filesystem_authority_ceiling = ctx
@@ -1032,6 +1070,27 @@ fn isolation_plan_request_awaiting_attachment(
             thread_id: &ctx.thread_id,
         },
     );
+    if let Some(original_window) = original_window {
+        if scope.is_some() {
+            return Err(EngineError::Internal(
+                "original namespace occupancy cannot use a local process scope".into(),
+            ));
+        }
+        let devices = devices.ok_or_else(|| {
+            EngineError::Internal(
+                "original namespace occupancy lacks selected device authority".into(),
+            )
+        })?;
+        return ctx
+            .isolation
+            .apply_awaiting_attachment_with_original_namespace_occupancy(
+                context.0,
+                context.1,
+                devices,
+                original_window,
+            )
+            .map(|applied| applied.request);
+    }
     match devices {
         Some(devices) => ctx
             .isolation
