@@ -146,6 +146,7 @@ pub struct AppliedIsolationLaunch {
 pub struct IsolationRequestAwaitingAttachment {
     request: lillux::SubprocessRequest,
     scope: Option<lillux::ProcessScope>,
+    original_backend_capture: Option<std::sync::Arc<super::VerifiedIsolationBackendCapture>>,
 }
 
 impl IsolationRequestAwaitingAttachment {
@@ -153,7 +154,30 @@ impl IsolationRequestAwaitingAttachment {
         request: lillux::SubprocessRequest,
         scope: Option<lillux::ProcessScope>,
     ) -> Self {
-        Self { request, scope }
+        Self {
+            request,
+            scope,
+            original_backend_capture: None,
+        }
+    }
+
+    /// Only the actual selected runtime compiler can populate this private
+    /// request custody. It carries capture facts, not native authority.
+    pub(super) fn new_with_original_backend_capture(
+        request: lillux::SubprocessRequest,
+        capture: std::sync::Arc<super::VerifiedIsolationBackendCapture>,
+    ) -> Self {
+        Self {
+            request,
+            scope: None,
+            original_backend_capture: Some(capture),
+        }
+    }
+
+    pub(crate) fn take_original_backend_capture(
+        &mut self,
+    ) -> Option<std::sync::Arc<super::VerifiedIsolationBackendCapture>> {
+        self.original_backend_capture.take()
     }
 
     /// Require exact post-release applied-launch testimony on this held

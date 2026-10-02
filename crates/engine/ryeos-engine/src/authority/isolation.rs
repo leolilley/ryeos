@@ -2467,7 +2467,25 @@ impl IsolationRuntime {
         devices: &lillux::CharacterDeviceSet,
         original_window: lillux::time::OriginalNamespaceOccupancyHandoff,
     ) -> Result<AppliedIsolationLaunchAwaitingAttachment, EngineError> {
+        let original_deadline = original_window.original_deadline();
+        if original_deadline.has_elapsed() {
+            return Err(refused(
+                "original backend capture deadline expired before compilation".into(),
+            ));
+        }
         self.ensure_registered_generation_current()?;
+        let capture = self.verified_backend_capture.as_ref().ok_or_else(|| {
+            refused("selected original compiler lacks actual retained backend captures".into())
+        })?;
+        let backend = self.backend_capture.as_ref().ok_or_else(|| {
+            refused("selected original compiler lacks its same retained backend".into())
+        })?;
+        capture.require_same_backend(backend)?;
+        if original_deadline.has_elapsed() {
+            return Err(refused(
+                "original backend capture deadline expired before selected translation".into(),
+            ));
+        }
         let applied = self.apply_with_provenance_current(
             request,
             context,
@@ -2478,8 +2496,17 @@ impl IsolationRuntime {
             Some(original_window),
         )?;
         self.ensure_registered_generation_current()?;
+        capture.require_same_backend(backend)?;
+        if original_deadline.has_elapsed() {
+            return Err(refused(
+                "original backend capture deadline expired during compilation".into(),
+            ));
+        }
         Ok(AppliedIsolationLaunchAwaitingAttachment {
-            request: IsolationRequestAwaitingAttachment::new(applied.request, None),
+            request: IsolationRequestAwaitingAttachment::new_with_original_backend_capture(
+                applied.request,
+                Arc::clone(capture),
+            ),
             provenance: applied.provenance,
             expected_applied_launch: applied.expected_applied_launch,
             expected_mount_preparation: applied.expected_mount_preparation,

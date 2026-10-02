@@ -847,6 +847,11 @@ impl PersistentSessionPooledStart {
                 .context("original trusted funding lacks retained callback budget")?;
             let original_expiry = retained_budget.contact_expiry();
             let callback = retained_budget.precontact_binding();
+            retained
+                .trusted_inputs
+                .as_mut()
+                .expect("inputs retained before original expectation binding")
+                .bind_original_isolation_expectation(state, retained_budget)?;
             let funding = crate::accounting_db::precontact::OriginalFundingOwner::prepare(
                 state,
                 retained
@@ -937,7 +942,7 @@ impl PersistentSessionPooledStart {
                 .trusted_inputs
                 .as_ref()
                 .context("original contact lacks retained verified inputs")?
-                .require_same_state(state)?;
+                .require_original_isolation_expectation(state)?;
             let funding = retained
                 .original_funding
                 .as_mut()

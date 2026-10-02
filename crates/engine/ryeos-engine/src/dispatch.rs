@@ -591,6 +591,7 @@ struct SelectedOriginalLaunchContext {
     expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
     provenance: crate::isolation::IsolationLaunchProvenance,
     original_deadline: lillux::time::MonotonicDeadline,
+    backend_capture: std::sync::Arc<crate::isolation::VerifiedIsolationBackendCapture>,
 }
 
 /// A spawned execution whose exact target exists but cannot execute user code
@@ -679,6 +680,38 @@ impl RunningExecution {
     /// frames from the ordinary human-readable completion string.
     pub fn take_stdout_reader(&mut self) -> Option<lillux::ProcessStdoutReader> {
         self.running.take_stdout_reader()
+    }
+
+    /// Borrowed correspondence with an independently selected protected App
+    /// expectation. This consumes no owner and issues no native/device proof.
+    pub fn require_original_backend_capture(
+        &self,
+        expected: &std::sync::Arc<crate::isolation::VerifiedIsolationBackendCapture>,
+    ) -> Result<(), EngineError> {
+        let context = self.selected_launch_context.as_ref().ok_or_else(|| {
+            EngineError::Internal(
+                "running execution has no selected original launch context".into(),
+            )
+        })?;
+        if context.original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "original launch context expired before capture check".into(),
+            ));
+        }
+        if !std::sync::Arc::ptr_eq(&context.backend_capture, expected) {
+            return Err(EngineError::Internal(
+                "running original capture differs from protected expectation".into(),
+            ));
+        }
+        context
+            .backend_capture
+            .require_same_backend(expected.backend())?;
+        if context.original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "original launch context expired during capture check".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Read the fixed-size diagnostic tail already captured by Lillux without
@@ -1141,7 +1174,7 @@ fn isolation_plan_request_awaiting_attachment(
                 "selected original launch context expired before compilation".into(),
             ));
         }
-        let applied = ctx
+        let mut applied = ctx
             .isolation
             .apply_awaiting_attachment_with_original_namespace_occupancy(
                 context.0,
@@ -1151,6 +1184,14 @@ fn isolation_plan_request_awaiting_attachment(
             )?;
         // Construct only here, from this actual selected compiler return.
         // Public provenance/receipt DTOs are not authority constructors.
+        let backend_capture = applied
+            .request
+            .take_original_backend_capture()
+            .ok_or_else(|| {
+                EngineError::Internal(
+                    "selected compiler omitted actual backend capture custody".into(),
+                )
+            })?;
         let expected_applied_launch = applied.expected_applied_launch.ok_or_else(|| {
             EngineError::Internal("selected compiler omitted target commitments".into())
         })?;
@@ -1167,6 +1208,7 @@ fn isolation_plan_request_awaiting_attachment(
             expected_mount_preparation,
             provenance: applied.provenance,
             original_deadline,
+            backend_capture,
         };
         return Ok((applied.request, Some(selected_launch_context)));
     }

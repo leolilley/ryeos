@@ -200,6 +200,25 @@ pub struct VerifiedTrustedPooledSessionInputs {
     exact: PersistentSessionExactProgram,
     selected: crate::execution_resources::SelectedExecutionResources,
     cleanup_contract_digest: String,
+    original_isolation: Option<OriginalIsolationExpectation>,
+}
+
+/// Selected original expectation retained inside the existing input owner.
+/// Generic readonly input verification does not require or create this value.
+struct OriginalIsolationExpectation {
+    runtime: std::sync::Arc<ryeos_engine::isolation::IsolationRuntime>,
+    capture: Option<std::sync::Arc<ryeos_engine::isolation::VerifiedIsolationBackendCapture>>,
+    original_deadline: lillux::time::MonotonicDeadline,
+    state: OriginalIsolationExpectationState,
+}
+
+enum OriginalIsolationExpectationState {
+    Pending,
+    Verified {
+        registered_root: std::path::PathBuf,
+        current_executor: ryeos_engine::binary_resolver::BundleExecutorManifestIdentity,
+    },
+    Refused(String),
 }
 
 impl VerifiedTrustedPooledSessionInputs {
@@ -279,9 +298,81 @@ impl VerifiedTrustedPooledSessionInputs {
             exact,
             selected,
             cleanup_contract_digest: product.clone(),
+            original_isolation: None,
         };
         inputs.require_same_state(state)?;
         Ok(inputs)
+    }
+
+    /// One-use binding for the original trusted funding path only. The pool
+    /// roots these SAME inputs before calling; failed validation preserves the
+    /// actual snapshot and sticky refusal before any financial write/contact.
+    pub(crate) fn bind_original_isolation_expectation(
+        &mut self,
+        state: &crate::state::AppState,
+        budget: &crate::handler_context::OriginalExecutionBudget,
+    ) -> Result<()> {
+        if let Some(original) = self.original_isolation.as_mut() {
+            let failure = "original isolation expectation cannot be replaced or retried".to_owned();
+            original.state = OriginalIsolationExpectationState::Refused(failure.clone());
+            bail!(failure);
+        }
+        self.original_isolation = Some(OriginalIsolationExpectation {
+            runtime: std::sync::Arc::clone(&state.isolation),
+            capture: state.isolation.verified_backend_capture().cloned(),
+            original_deadline: budget.contact_expiry(),
+            state: OriginalIsolationExpectationState::Pending,
+        });
+        let result = (|| {
+            self.require_same_state_incarnation(state)?;
+            let original = self
+                .original_isolation
+                .as_ref()
+                .expect("snapshot retained before checks");
+            verify_original_isolation_expectation(original)
+        })();
+        let original = self
+            .original_isolation
+            .as_mut()
+            .expect("original snapshot remains retained");
+        match result {
+            Ok((registered_root, current_executor)) => {
+                original.state = OriginalIsolationExpectationState::Verified {
+                    registered_root,
+                    current_executor,
+                };
+                Ok(())
+            }
+            Err(error) => {
+                original.state = OriginalIsolationExpectationState::Refused(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn require_original_isolation_expectation(
+        &self,
+        state: &crate::state::AppState,
+    ) -> Result<()> {
+        self.require_same_state_incarnation(state)?;
+        let original = self
+            .original_isolation
+            .as_ref()
+            .context("selected original funding lacks isolation expectation")?;
+        require_current_original_isolation_expectation(original, state)
+    }
+
+    /// Borrow the independently selected original expectation after its current
+    /// protected-state checks. This is metadata custody, not native evidence.
+    pub(crate) fn original_isolation_capture(
+        &self,
+        state: &crate::state::AppState,
+    ) -> Result<&std::sync::Arc<ryeos_engine::isolation::VerifiedIsolationBackendCapture>> {
+        self.require_original_isolation_expectation(state)?;
+        self.original_isolation
+            .as_ref()
+            .and_then(|original| original.capture.as_ref())
+            .context("verified original isolation capture disappeared")
     }
 
     /// Read-only retained inputs; none of these borrows grants execution.
@@ -299,6 +390,14 @@ impl VerifiedTrustedPooledSessionInputs {
     }
 
     pub fn require_same_state(&self, state: &crate::state::AppState) -> Result<()> {
+        self.require_same_state_incarnation(state)?;
+        if let Some(original) = self.original_isolation.as_ref() {
+            require_current_original_isolation_expectation(original, state)?;
+        }
+        Ok(())
+    }
+
+    fn require_same_state_incarnation(&self, state: &crate::state::AppState) -> Result<()> {
         anyhow::ensure!(
             std::sync::Arc::ptr_eq(&self.state_store, &state.state_store),
             "verified trusted pooled inputs belong to another StateStore owner"
@@ -313,6 +412,193 @@ impl VerifiedTrustedPooledSessionInputs {
         );
         Ok(())
     }
+}
+
+fn require_original_isolation_unexpired(original: &OriginalIsolationExpectation) -> Result<()> {
+    anyhow::ensure!(
+        !original.original_deadline.has_elapsed(),
+        "original isolation expectation deadline expired"
+    );
+    Ok(())
+}
+
+fn verify_original_isolation_expectation(
+    original: &OriginalIsolationExpectation,
+) -> Result<(
+    std::path::PathBuf,
+    ryeos_engine::binary_resolver::BundleExecutorManifestIdentity,
+)> {
+    require_original_isolation_unexpired(original)?;
+    anyhow::ensure!(
+        original.runtime.is_enforced(),
+        "original isolation expectation requires enforced runtime"
+    );
+    let capture = original
+        .capture
+        .as_ref()
+        .context("original isolation expectation lacks actual executable captures")?;
+    let _operation = original
+        .runtime
+        .begin_registered_generation_operation()?
+        .context(
+            "original isolation expectation requires actual registered generation operation",
+        )?;
+    require_original_isolation_unexpired(original)?;
+    original.runtime.ensure_registered_generation_current()?;
+    let node_trust = original
+        .runtime
+        .registered_generation_node_trust()
+        .context("original isolation expectation lacks independent retained node trust")?;
+    let roots = original
+        .runtime
+        .registered_generation_roots()
+        .context("original isolation expectation lacks registered bundle roots")?;
+    let backend = capture.backend();
+    capture.require_same_backend(backend)?;
+    let mut selected_roots = roots
+        .iter()
+        .filter(|root| root.name == backend.selection.bundle);
+    let root = selected_roots
+        .next()
+        .context("original isolation backend bundle is not registered")?;
+    anyhow::ensure!(
+        selected_roots.next().is_none(),
+        "original isolation backend registration is ambiguous"
+    );
+    require_original_isolation_unexpired(original)?;
+    let verified = ryeos_bundle::manifest::load_verified_manifest(
+        &root.canonical_root.join(ryeos_engine::AI_DIR),
+        &root.name,
+        node_trust,
+    )?;
+    require_original_isolation_unexpired(original)?;
+    anyhow::ensure!(
+        verified.body_digest == backend.bundle_manifest_digest
+            && verified.signer_fingerprint == backend.signer_fingerprint,
+        "original isolation current Bundle identity differs from retained backend"
+    );
+    let mut declarations = verified
+        .manifest
+        .isolation_backends
+        .iter()
+        .filter(|declaration| declaration.id == backend.selection.implementation);
+    let declaration = declarations
+        .next()
+        .context("original isolation selected declaration is missing")?;
+    anyhow::ensure!(
+        declarations.next().is_none() && declaration == &backend.declaration,
+        "original isolation current signed declaration differs from retained backend"
+    );
+    // The current executor manifest reference is a DIFFERENT signed identity
+    // from the Bundle YAML body. Old still-trusted executor proofs are not fresh.
+    require_original_isolation_unexpired(original)?;
+    let current_executor =
+        ryeos_engine::binary_resolver::verify_bundle_executor_manifest_ref_identity(
+            &root.canonical_root,
+            node_trust,
+        )?
+        .context("original isolation current signed executor manifest reference is missing")?;
+    require_original_isolation_unexpired(original)?;
+    anyhow::ensure!(
+        current_executor.signer_fingerprint == verified.signer_fingerprint,
+        "original isolation current executor signer differs from Bundle signer"
+    );
+    for captured in std::iter::once(capture.adapter()).chain(capture.artifacts().values()) {
+        require_original_isolation_unexpired(original)?;
+        let executable = captured.captured();
+        anyhow::ensure!(
+            executable.identity.manifest_hash == current_executor.manifest_hash
+                && executable.identity.signer_fingerprint == current_executor.signer_fingerprint,
+            "original isolation retained executor differs from current signed executor reference"
+        );
+        let signer = node_trust
+            .get(&executable.identity.signer_fingerprint)
+            .context("original isolation executor signer is not independently node trusted")?;
+        let identity = ryeos_engine::binary_resolver::BundlePayloadIdentity {
+            content_hash: executable.identity.content_hash.clone(),
+            manifest_hash: executable.identity.manifest_hash.clone(),
+            item_source_hash: executable.identity.item_source_hash.clone(),
+            signer_fingerprint: executable.identity.signer_fingerprint.clone(),
+            target_triple: executable.identity.target_triple.clone(),
+        };
+        // Preserve the actual signed mode; it is source data, not a new grant.
+        let (_, signed_mode) = ryeos_engine::executor_resolution::verify_executor_item_source(
+            &executable.source_proof.item_source_object,
+            &identity.item_source_hash,
+            &executable.source_proof.selected_item_ref,
+        )?;
+        ryeos_engine::binary_resolver::verify_retained_bundle_payload_proof(
+            &executable.source_proof,
+            &identity,
+            signed_mode,
+            &signer.verifying_key,
+        )?;
+        require_original_isolation_unexpired(original)?;
+    }
+    capture.require_same_backend(backend)?;
+    original.runtime.ensure_registered_generation_current()?;
+    require_original_isolation_unexpired(original)?;
+    Ok((root.canonical_root.clone(), current_executor))
+}
+
+fn require_current_original_isolation_expectation(
+    original: &OriginalIsolationExpectation,
+    state: &crate::state::AppState,
+) -> Result<()> {
+    require_original_isolation_unexpired(original)?;
+    let (root, expected_executor) = match &original.state {
+        OriginalIsolationExpectationState::Verified {
+            registered_root,
+            current_executor,
+        } => (registered_root, current_executor),
+        OriginalIsolationExpectationState::Pending => {
+            bail!("original isolation expectation remains unverified")
+        }
+        OriginalIsolationExpectationState::Refused(failure) => {
+            bail!("original isolation expectation was refused: {failure}")
+        }
+    };
+    anyhow::ensure!(
+        std::sync::Arc::ptr_eq(&original.runtime, &state.isolation),
+        "original isolation expectation belongs to another protected runtime"
+    );
+    let expected = original
+        .capture
+        .as_ref()
+        .context("original isolation retained capture disappeared")?;
+    let actual = state
+        .isolation
+        .verified_backend_capture()
+        .context("current original isolation runtime has no captures")?;
+    anyhow::ensure!(
+        std::sync::Arc::ptr_eq(expected, actual),
+        "original isolation capture was replaced"
+    );
+    let _operation = original
+        .runtime
+        .begin_registered_generation_operation()?
+        .context("original isolation contact requires actual generation operation")?;
+    require_original_isolation_unexpired(original)?;
+    original.runtime.ensure_registered_generation_current()?;
+    require_original_isolation_unexpired(original)?;
+    let node_trust = original
+        .runtime
+        .registered_generation_node_trust()
+        .context("original isolation contact has no retained node trust")?;
+    let actual_executor =
+        ryeos_engine::binary_resolver::verify_bundle_executor_manifest_ref_identity(
+            root, node_trust,
+        )?
+        .context("original isolation contact current executor reference disappeared")?;
+    require_original_isolation_unexpired(original)?;
+    anyhow::ensure!(
+        &actual_executor == expected_executor,
+        "original isolation current executor reference changed"
+    );
+    expected.require_same_backend(expected.backend())?;
+    original.runtime.ensure_registered_generation_current()?;
+    require_original_isolation_unexpired(original)?;
+    Ok(())
 }
 
 #[cfg(test)]
