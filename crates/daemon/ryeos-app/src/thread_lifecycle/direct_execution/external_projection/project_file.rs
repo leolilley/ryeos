@@ -390,8 +390,10 @@ mod tests {
         let error = proof
             .require_input(&declaration, &projected_input)
             .expect_err("a private 0600 descriptor cannot satisfy the 0644 C mode");
-        assert!(error.to_string().contains(
-            "execution project file sealed descriptor changed content or observation"
-        ));
+        assert!(
+            error.to_string().contains(
+                "execution project file sealed descriptor changed content or observation"
+            )
+        );
     }
 }
