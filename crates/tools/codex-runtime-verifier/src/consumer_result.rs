@@ -61,6 +61,7 @@ pub(crate) fn checked_result(
     evidence_sha256: &str,
     terminal: &ConsumerProviderTerminalReference,
     transcript: &VerifiedConsumerWorkerTranscript,
+    checked_q: &crate::consumer_worker_semantics::VerifiedQConversation,
 ) -> Result<ProductQualificationResult> {
     record.validate_attempt(&challenge.intent)?;
     challenge.validate()?;
@@ -72,6 +73,7 @@ pub(crate) fn checked_result(
         &transcript.reference,
         record,
     )?;
+    checked_q.require_for(record, transcript)?;
     let claims = selected_claims(
         &record.purpose.policy_source.policy.allowed_claims,
         &record.purpose.required_claims,

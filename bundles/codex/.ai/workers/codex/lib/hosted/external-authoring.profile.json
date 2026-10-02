@@ -472,7 +472,7 @@
       "id": "session.start",
       "method": "thread/start",
       "effect_class": "external_effect",
-      "request_schema": "schema/ThreadStartParams.experimental.json",
+      "request_schema": "schema/ExternalThreadStartParams.json",
       "response_schema": "schema/ThreadStartResponse.json",
       "fixed_params": {
         "approvalsReviewer": "user",
@@ -580,7 +580,7 @@
       "method": "thread/resume",
       "audience": "runtime",
       "effect_class": "session_mutation",
-      "request_schema": "schema/ThreadResumeParams.json",
+      "request_schema": "schema/ExternalThreadResumeParams.json",
       "response_schema": "schema/ThreadResumeResponse.json",
       "fixed_params": {
         "approvalsReviewer": "user"
@@ -783,7 +783,7 @@
         "turn/started"
       ],
       "effect_class": "external_effect",
-      "request_schema": "schema/TurnStartParams.json",
+      "request_schema": "schema/ExternalTurnStartParams.json",
       "response_schema": "schema/TurnStartResponse.json",
       "fixed_params": {
         "approvalsReviewer": "user"
@@ -838,7 +838,7 @@
       "id": "turn.steer",
       "method": "turn/steer",
       "effect_class": "external_effect",
-      "request_schema": "schema/TurnSteerParams.json",
+      "request_schema": "schema/ExternalTurnSteerParams.json",
       "response_schema": "schema/TurnSteerResponse.json",
       "fixed_params": {},
       "workspace_fields": [],

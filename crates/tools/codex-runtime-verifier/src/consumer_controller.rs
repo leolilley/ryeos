@@ -30,7 +30,7 @@ pub struct SettledConsumerObservation {
     pub evidence: ConsumerRetainedEvidence,
     pub provider_terminal: crate::consumer_termination::ConsumerProviderTerminalReference,
     pub qualification_worker: crate::consumer_worker_transcript::VerifiedConsumerWorkerTranscript,
-    pub checked_q: crate::consumer_worker_semantics::CheckedQConversation,
+    pub checked_q: crate::consumer_worker_semantics::VerifiedQConversation,
 }
 
 pub enum ConsumerControllerOutcome {
@@ -250,6 +250,7 @@ pub async fn run_controller_beat(
                 &evidence_sha256,
                 &provider_terminal,
                 &qualification_worker,
+                &checked_q,
             )?;
             ensure!(
                 !deadline.has_elapsed(),

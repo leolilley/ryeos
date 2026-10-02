@@ -197,6 +197,38 @@ pub struct CheckedQConversation {
     pub notification_count: usize,
 }
 
+/// Constructed only after the full protected-record, fixture, setup, lifecycle
+/// and three-role interpretation. Notification-only unit checks cannot supply
+/// this result input. It is product meaning, not native or issuer authority.
+#[derive(Debug, Serialize)]
+pub struct VerifiedQConversation {
+    #[serde(flatten)]
+    conversation: CheckedQConversation,
+    #[serde(skip)]
+    original_record_sha256: String,
+    #[serde(skip)]
+    transcript_manifest_hash: String,
+    #[serde(skip)]
+    transcript_stream_digest: String,
+}
+
+impl VerifiedQConversation {
+    pub(crate) fn require_for(
+        &self,
+        original: &ConsumerInputRecord,
+        transcript: &VerifiedConsumerWorkerTranscript,
+    ) -> Result<()> {
+        ensure!(
+            self.original_record_sha256 == lillux::cas::sha256_hex(&original.canonical_bytes()?)
+                && self.transcript_manifest_hash == transcript.reference.manifest_hash
+                && self.transcript_stream_digest
+                    == canonical_value_digest(&serde_json::to_value(&transcript.stream)?)?,
+            "checked Q conversation differs from result record or transcript"
+        );
+        Ok(())
+    }
+}
+
 /// Interpret the transcript returned by the protected bounded reader. That
 /// reader authenticates the complete chunk/batch stream; this function joins
 /// product meaning to its retained frames and original signed expectations.
@@ -204,7 +236,7 @@ pub struct CheckedQConversation {
 pub fn check_q_conversation(
     original: &ConsumerInputRecord,
     transcript: &VerifiedConsumerWorkerTranscript,
-) -> Result<CheckedQConversation> {
+) -> Result<VerifiedQConversation> {
     crate::consumer_worker_transcript::validate_reference_for_record(
         &transcript.reference,
         original,
@@ -284,14 +316,22 @@ pub fn check_q_conversation(
         "Q lifecycle differs from the journaled turn"
     );
     let notifications = collect_notifications(&transcript.stream)?;
-    check_notifications(
+    let conversation = check_notifications(
         expected,
         &manifest.provider_configuration,
         canary,
         &thread,
         &manifest.turn_id,
         &notifications,
-    )
+    )?;
+    Ok(VerifiedQConversation {
+        conversation,
+        original_record_sha256: lillux::cas::sha256_hex(&original.canonical_bytes()?),
+        transcript_manifest_hash: transcript.reference.manifest_hash.clone(),
+        transcript_stream_digest: canonical_value_digest(&serde_json::to_value(
+            &transcript.stream,
+        )?)?,
+    })
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {

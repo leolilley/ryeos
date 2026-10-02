@@ -4466,6 +4466,290 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt as _;
 
+    fn external_request_contract(route_id: &str) -> (RouteRule, HashMap<String, Value>) {
+        let profile: Value = serde_json::from_str(include_str!(
+            "../../../../bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json"
+        ))
+        .unwrap();
+        let route = serde_json::from_value(
+            profile["routes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|route| route["id"] == route_id)
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let schemas = [
+            (
+                "schema/ExternalThreadStartParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalThreadStartParams.json"),
+            ),
+            (
+                "schema/ExternalThreadResumeParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalThreadResumeParams.json"),
+            ),
+            (
+                "schema/ExternalTurnStartParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalTurnStartParams.json"),
+            ),
+            (
+                "schema/ExternalTurnSteerParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalTurnSteerParams.json"),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name.to_owned(), serde_json::from_str(bytes).unwrap()))
+        .collect();
+        (route, schemas)
+    }
+
+    /// The real stdio route order immediately before call_raw; no process or
+    /// upstream request is created by these contract tests.
+    fn admit_external_request(
+        route_id: &str,
+        mut payload: Value,
+        bound_thread: Option<&str>,
+    ) -> Result<Value> {
+        let (route, schemas) = external_request_contract(route_id);
+        prepare_session_binding(
+            route.session_binding.as_ref(),
+            &bound_thread.map(str::to_owned),
+            &mut payload,
+            true,
+        )?;
+        // A local startup workspace is not the fixed external environment cwd.
+        apply_route_parameters(&route, &mut payload, "/owner/project")?;
+        validate_schema_from_map(&schemas, &route.request_schema, &payload)?;
+        Ok(payload)
+    }
+
+    #[test]
+    fn external_request_language_preserves_owner_injection_and_bound_plain_text() {
+        for payload in [
+            json!({}),
+            json!({"experimentalRawEvents":true}),
+            json!({"experimentalRawEvents":false,"model":null}),
+            json!({"experimentalRawEvents":true,"model":"gpt-5.3-codex"}),
+        ] {
+            let admitted = admit_external_request("session.start", payload, None).unwrap();
+            let (route, _) = external_request_contract("session.start");
+            assert_eq!(admitted["environments"], route.fixed_params["environments"]);
+            assert_eq!(admitted["cwd"], "/owner/project");
+            assert_eq!(admitted["approvalsReviewer"], "user");
+        }
+        let resumed =
+            admit_external_request("session.resume", json!({"threadId":"original"}), None).unwrap();
+        assert_eq!(resumed["threadId"], "original");
+        assert_eq!(resumed["cwd"], "/owner/project");
+        assert_eq!(resumed["approvalsReviewer"], "user");
+        for input in [
+            json!([{"type":"text","text":"Solve the retained task."}]),
+            json!([{"type":"text","text":"first","text_elements":[]},
+                   {"type":"text","text":"second"}]),
+        ] {
+            for (route, mut payload) in [
+                ("turn.start", json!({"input":input})),
+                (
+                    "turn.steer",
+                    json!({"input":input,"expectedTurnId":"active-turn"}),
+                ),
+            ] {
+                let admitted =
+                    admit_external_request(route, payload.clone(), Some("original")).unwrap();
+                assert_eq!(admitted["threadId"], "original");
+                assert_eq!(admitted["input"], input);
+                payload["threadId"] = json!("original");
+                assert!(admit_external_request(route, payload.clone(), Some("original")).is_ok());
+                payload["threadId"] = json!("different");
+                assert!(admit_external_request(route, payload, Some("original")).is_err());
+            }
+        }
+        assert!(admit_external_request("session.start", json!({}), Some("original")).is_err());
+        assert!(admit_external_request("session.resume", json!({}), None).is_err());
+        assert!(
+            admit_external_request(
+                "session.resume",
+                json!({"threadId":"original"}),
+                Some("original")
+            )
+            .is_err()
+        );
+        assert!(admit_external_request("turn.start", json!({"input":[]}), None).is_err());
+        assert!(
+            admit_external_request(
+                "turn.steer",
+                json!({"input":[{"type":"text","text":"x"}]}),
+                Some("original")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn external_request_language_refuses_unknown_null_and_sticky_overrides() {
+        for (route, baseline, bound) in [
+            ("session.start", json!({}), None),
+            ("session.resume", json!({"threadId":"original"}), None),
+            (
+                "turn.start",
+                json!({"input":[{"type":"text","text":"x"}]}),
+                Some("original"),
+            ),
+            (
+                "turn.steer",
+                json!({"input":[{"type":"text","text":"x"}],"expectedTurnId":"active"}),
+                Some("original"),
+            ),
+        ] {
+            assert!(admit_external_request(route, baseline.clone(), bound).is_ok());
+            for field in [
+                "config",
+                "baseInstructions",
+                "developerInstructions",
+                "permissions",
+                "collaborationMode",
+                "environments",
+                "runtimeWorkspaceRoots",
+                "cwd",
+                "approvalPolicy",
+                "approvalsReviewer",
+                "sandbox",
+                "sandboxPolicy",
+                "modelProvider",
+                "dynamicTools",
+                "selectedCapabilityRoots",
+                "serviceName",
+                "ephemeral",
+                "allowProviderModelFallback",
+                "historyMode",
+                "multiAgentMode",
+                "personality",
+                "serviceTier",
+                "sessionStartSource",
+                "threadSource",
+                "effort",
+                "summary",
+                "outputSchema",
+                "clientUserMessageId",
+                "responsesapiClientMetadata",
+                "additionalContext",
+                "mockExperimentalField",
+                "unknownFutureField",
+            ] {
+                for value in [Value::Null, json!({"enabled":true})] {
+                    let mut payload = baseline.clone();
+                    payload[field] = value;
+                    assert!(
+                        admit_external_request(route, payload, bound).is_err(),
+                        "{route}/{field}"
+                    );
+                }
+            }
+            if route != "session.start" {
+                for field in ["model", "experimentalRawEvents"] {
+                    for value in [Value::Null, json!("changed")] {
+                        let mut payload = baseline.clone();
+                        payload[field] = value;
+                        assert!(
+                            admit_external_request(route, payload, bound).is_err(),
+                            "{route}/{field}"
+                        );
+                    }
+                }
+            }
+        }
+        for model in [
+            json!(""),
+            json!(" spaced"),
+            json!("two models"),
+            json!("line\n"),
+            json!("é"),
+            json!("x".repeat(257)),
+            json!({}),
+        ] {
+            assert!(admit_external_request("session.start", json!({"model":model}), None).is_err());
+        }
+        assert!(
+            admit_external_request("session.start", json!({"model":"x".repeat(256)}), None).is_ok()
+        );
+        assert!(
+            admit_external_request("session.start", json!({"experimentalRawEvents":null}), None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn external_request_language_refuses_nested_inputs_and_injected_environment_drift() {
+        let plain = json!({"type":"text","text":"retained task"});
+        let mut refused = vec![Value::Null, json!([]), json!([null]), json!([{}])];
+        for field in [
+            "path",
+            "url",
+            "permissions",
+            "environments",
+            "runtimeWorkspaceRoots",
+            "model",
+            "unknown",
+        ] {
+            for value in [Value::Null, json!({"enabled":true})] {
+                let mut item = plain.clone();
+                item[field] = value;
+                refused.push(json!([item]));
+            }
+        }
+        for spans in [
+            Value::Null,
+            json!([{}]),
+            json!([{"byteRange":{"start":0,"end":1},"placeholder":"x"}]),
+        ] {
+            let mut item = plain.clone();
+            item["text_elements"] = spans;
+            refused.push(json!([item]));
+        }
+        for kind in [
+            "image",
+            "localImage",
+            "audio",
+            "localAudio",
+            "skill",
+            "mention",
+        ] {
+            let mut item = plain.clone();
+            item["type"] = json!(kind);
+            refused.push(json!([item]));
+        }
+        for input in refused {
+            for (route, payload) in [
+                ("turn.start", json!({"input":input})),
+                (
+                    "turn.steer",
+                    json!({"input":input,"expectedTurnId":"active"}),
+                ),
+            ] {
+                assert!(
+                    admit_external_request(route, payload, Some("original")).is_err(),
+                    "{route}"
+                );
+            }
+        }
+        let admitted = admit_external_request("session.start", json!({}), None).unwrap();
+        let (route, schemas) = external_request_contract("session.start");
+        for (pointer, value) in [
+            ("/environments/0/environmentId", json!("local")),
+            ("/environments/0/cwd", json!("/controller")),
+            ("/environments/0/runtimeWorkspaceRoots", json!(["/"])),
+        ] {
+            let mut changed = admitted.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(validate_schema_from_map(&schemas, &route.request_schema, &changed).is_err());
+        }
+        let mut changed = admitted;
+        changed["environments"][0]["unknown"] = Value::Null;
+        assert!(validate_schema_from_map(&schemas, &route.request_schema, &changed).is_err());
+    }
+
     fn original_configuration_schema_fixtures() -> (HashMap<String, Value>, Value) {
         let schemas = HashMap::from([
             (

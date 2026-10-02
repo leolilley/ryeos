@@ -42,7 +42,10 @@ struct FiniteProductTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FiniteInputRestrictions {
+    /// Q's closed canary language remains distinct from the audited ordinary
+    /// Worker routes. This signed selection is not an applied-route witness.
     pub request_language: String,
+    pub ordinary_request_language: String,
     pub environment: String,
     pub cwd: String,
     pub include_local: bool,
@@ -108,7 +111,7 @@ impl FiniteProductContract {
             "unsupported finite product schema"
         );
         ensure!(
-            self.audit_edition == "codex-0.147.0-remote-environment-v1",
+            self.audit_edition == "codex-0.147.0-closed-remote-environment-v2",
             "unsupported finite product audit_edition"
         );
         ensure!(
@@ -130,6 +133,11 @@ impl FiniteProductContract {
         ensure!(
             self.inputs.request_language == "closed-session-start-and-input-only-canary-turn",
             "unsupported finite product inputs.request_language"
+        );
+        ensure!(
+            self.inputs.ordinary_request_language
+                == "closed-start-resume-and-owner-bound-plain-text-turns-v1",
+            "unsupported finite product inputs.ordinary_request_language"
         );
         ensure!(
             self.inputs.environment == "sole-default-command-connector",
@@ -327,7 +335,7 @@ mod tests {
         json!(
         {
           "schema": "ryeos.codex.finite_product_contract.v1",
-          "audit_edition": "codex-0.147.0-remote-environment-v1",
+          "audit_edition": "codex-0.147.0-closed-remote-environment-v2",
           "permitted_controller_services": [
             "auth-model-config",
             "git-attribution-provider-metadata",
@@ -350,6 +358,7 @@ mod tests {
           },
           "inputs": {
             "request_language": "closed-session-start-and-input-only-canary-turn",
+            "ordinary_request_language": "closed-start-resume-and-owner-bound-plain-text-turns-v1",
             "environment": "sole-default-command-connector",
             "cwd": "/workspace",
             "include_local": false,
