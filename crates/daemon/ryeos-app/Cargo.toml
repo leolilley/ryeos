@@ -41,6 +41,7 @@ ryeos-scheduler = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-tracing = { workspace = true }
 ryeos-provider-contract = { workspace = true }
+ryeos-project-capture = { workspace = true }
 ryeos-vault = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }

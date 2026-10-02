@@ -2662,6 +2662,7 @@ dependencies = [
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
  "ryeos-provider-contract",
+ "ryeos-project-capture",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",

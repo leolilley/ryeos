@@ -59,7 +59,37 @@ pub(crate) struct PreparedMechanismProbeProgram {
     config_snapshots: Option<LaunchConfigSnapshotSet>,
 }
 
+/// Exact signed fixture bytes beside their original B program and staged CAS
+/// owners. This is a private partial CAS, not project or execution authority.
+#[allow(dead_code)]
+pub(crate) struct PreparedMechanismFixtureTransfer {
+    selected_snapshot_hash: String,
+    measurement: ryeos_project_capture::ProjectSnapshotTransferMeasurement,
+    descriptor: lillux::InheritedDescriptorAuthority,
+    // Drop the private copy before the program's staged source/product roots.
+    transfer: ryeos_project_capture::PreparedProjectSnapshotTransfer,
+    program: PreparedMechanismProbeProgram,
+}
+
 impl CapturedMechanismProbeSource {
+    fn selected_fixture_snapshot_hash(&self) -> Result<&str> {
+        let fixture = self
+            .parameters
+            .get("mechanism_fixture")
+            .and_then(Value::as_object)
+            .context("mechanism probe has no strict signed fixture object")?;
+        ensure!(
+            fixture.len() == 1 && fixture.contains_key("project_snapshot_hash"),
+            "mechanism fixture has unknown or missing fields"
+        );
+        let snapshot_hash = fixture
+            .get("project_snapshot_hash")
+            .and_then(Value::as_str)
+            .context("mechanism fixture has no project snapshot hash")?;
+        super::require_canonical_hash("mechanism fixture project snapshot", snapshot_hash)?;
+        Ok(snapshot_hash)
+    }
+
     pub fn require_root_key(&self, key: &ScopedProducerAuthorityKey) -> Result<()> {
         ensure!(
             &self.root_key == key,
@@ -439,6 +469,180 @@ impl CapturedMechanismProbeSource {
                 external,
                 publication,
                 config_snapshots,
+            })
+        })
+    }
+
+    /// Copy only the actual signed fixture snapshot CAS closure. The original
+    /// program, source, product, config and publication lifelines remain owned
+    /// together with the measured descriptor; no project authority is minted.
+    pub(crate) fn prepare_original_fixture_transfer(
+        &self,
+        state: &AppState,
+        purpose: &QualificationExecutionPurposeView<'_>,
+        selected: &CurrentBundleProducerRecipe,
+        program: PreparedMechanismProbeProgram,
+    ) -> Result<PreparedMechanismFixtureTransfer> {
+        // Validate the exact signed shape and original owner before allocating
+        // a private CAS transfer or reading a selected object.
+        let selected_snapshot_hash = self.selected_fixture_snapshot_hash()?.to_owned();
+        ensure!(
+            program.root_key == self.root_key
+                && program.root_capsule_hash == self.root_capsule_hash
+                && program.scenario_id == self.scenario_id
+                && program.recipe_source == self.recipe_source
+                && !program.deadline.has_elapsed(),
+            "mechanism fixture differs from its original prepared root"
+        );
+        state.engine.with_checked_bundle_generation(|generation| {
+            self.require_original_root_in_generation(
+                state,
+                generation,
+                &program.root_key,
+                purpose,
+                &program.scenario_id,
+                selected,
+                &program.coordinate,
+                program.deadline,
+            )?;
+            self.require_current_signed_tool_source(state, generation, purpose)?;
+            let current = program.finalized.resolution();
+            let hooks = state
+                .engine
+                .kinds
+                .get(&self.verified.resolved.kind)
+                .and_then(|schema| schema.execution.as_ref())
+                .and_then(|execution| execution.hooks.as_ref());
+            self.require_finalized_captured_tool(
+                &program.finalized,
+                hooks
+                    .filter(|_| program.config_snapshots.is_some())
+                    .map(|hooks| hooks.plan_derived.as_str()),
+            )?;
+            let source_projection = current
+                .composed
+                .derived
+                .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+                .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
+                .transpose()?;
+            ensure!(
+                match (&program.source, source_projection.as_ref()) {
+                    (None, None) => true,
+                    (Some(source), Some(projection)) => {
+                        source.finalization_evidence().0.projection() == projection
+                    }
+                    _ => false,
+                },
+                "mechanism fixture changed its admitted B source"
+            );
+            let realized =
+                ryeos_engine::external_realization::RealizedExternalContentSet::from_value(
+                    current
+                        .composed
+                        .derived
+                        .get(ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+                        .context("mechanism fixture lost its admitted realization set")?,
+                )?;
+            ensure!(
+                program.external.finalization_evidence().0.realized() == &realized
+                    && program.plan.execution_plan().root_ref == current.root.resolved_ref
+                    && program.plan.realization_command().is_some(),
+                "mechanism fixture changed its finalized member or product authority"
+            );
+            let authority = program.publication.authority().try_clone()?;
+            let state_authority = state.state_store.pinned_state_authority()?;
+            ensure!(
+                authority.cas_directory().identity()?
+                    == state_authority.cas_directory().identity()?,
+                "mechanism fixture CAS differs from its prepared program authority"
+            );
+            self.require_original_root_in_generation(
+                state,
+                generation,
+                &program.root_key,
+                purpose,
+                &program.scenario_id,
+                selected,
+                &program.coordinate,
+                program.deadline,
+            )?;
+            let (transfer, measurement, descriptor) = {
+                let guard = authority.acquire_shared_guard()?;
+                authority.ensure_guard(&guard)?;
+                let cas = authority.cas_store()?;
+                let limits = state
+                    .node_policy
+                    .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+                    .closure_limits()?;
+                let snapshot_value =
+                    ryeos_state::object_closure::load_exact_cas_object_with_cas(
+                        &cas,
+                        &selected_snapshot_hash,
+                        limits.max_object_bytes,
+                    )
+                    .context("signed mechanism fixture ProjectSnapshot is absent or invalid")?;
+                ensure!(
+                    lillux::sha256_hex(lillux::canonical_json(&snapshot_value)?.as_bytes())
+                        == selected_snapshot_hash,
+                    "signed mechanism fixture ProjectSnapshot changed its CAS address"
+                );
+                ryeos_state::objects::ProjectSnapshot::from_value(&snapshot_value)?;
+                let closure =
+                    ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+                        &cas,
+                        [selected_snapshot_hash.clone()],
+                        limits,
+                    )?;
+                ensure!(
+                    closure.is_complete() && closure.large_object_hashes.is_empty(),
+                    "signed mechanism fixture CAS closure is incomplete or non-CAS"
+                );
+                ensure!(
+                    !program.deadline.has_elapsed(),
+                    "mechanism fixture deadline elapsed after closure preflight"
+                );
+                let transfer = ryeos_project_capture::prepare_project_snapshot_transfer(
+                    &authority,
+                    &guard,
+                    &selected_snapshot_hash,
+                )?;
+                let measurement = transfer.measurement();
+                ensure!(
+                    measurement.snapshot_hash == selected_snapshot_hash
+                        && measurement.object_count == u64::try_from(closure.object_hashes.len())?
+                        && measurement.blob_count == u64::try_from(closure.blob_hashes.len())?
+                        && measurement.total_bytes
+                            <= limits
+                                .max_total_object_bytes
+                                .saturating_add(limits.max_total_blob_bytes),
+                    "mechanism fixture transfer changed its signed bounded closure"
+                );
+                let descriptor = transfer.descriptor();
+                descriptor.directory_identity()?;
+                authority.ensure_guard(&guard)?;
+                (transfer, measurement, descriptor)
+            };
+            self.require_original_root_in_generation(
+                state,
+                generation,
+                &program.root_key,
+                purpose,
+                &program.scenario_id,
+                selected,
+                &program.coordinate,
+                program.deadline,
+            )?;
+            self.require_current_signed_tool_source(state, generation, purpose)?;
+            ensure!(
+                !program.deadline.has_elapsed(),
+                "mechanism fixture deadline elapsed after final source recapture"
+            );
+            Ok(PreparedMechanismFixtureTransfer {
+                selected_snapshot_hash,
+                measurement,
+                descriptor,
+                transfer,
+                program,
             })
         })
     }
