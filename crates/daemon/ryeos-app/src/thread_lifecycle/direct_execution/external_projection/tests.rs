@@ -195,6 +195,7 @@ fn ordinary_direct_preflight_two_node_plan_reaches_endpoint_admission() {
     assert!(state.node_config.external_execution.is_empty());
     let prepared = super::super::PreparedItemPlan {
         resource_policy: super::super::PersistentSessionResourcePolicy::Ordinary,
+        persistent_session_capsule_hash: None,
         timeout_secs: 30,
         plan: fixture.plan,
         root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity::Project,
@@ -775,6 +776,7 @@ fn external_closure_capture_is_portable_and_rechecks_final_authority() {
         let mut project = immutable_project_authority("1".repeat(64));
         let mut prepared = super::super::PreparedItemPlan {
             resource_policy: super::super::PersistentSessionResourcePolicy::Ordinary,
+            persistent_session_capsule_hash: None,
             timeout_secs: 30,
             plan: fixture.plan,
             root_subject_source_identity: DirectRootSourceIdentity::Project,
@@ -1222,7 +1224,7 @@ fn feature_claims_follow_sealed_view_and_target_limits_not_output_only_caps() {
 
 #[test]
 fn external_direct_projection_refuses_semantics_it_cannot_preserve() {
-    for (name, mutate) in [
+    let cases: [(&str, fn(&mut Fixture)); 15] = [
         ("native limits", |f: &mut Fixture| {
             f.plan.subprocess_limits = Some(ryeos_engine::contracts::ExecutionSubprocessLimits {
                 max_open_files: None,
@@ -1285,7 +1287,8 @@ fn external_direct_projection_refuses_semantics_it_cannot_preserve() {
         ("network-ceiling", |f: &mut Fixture| {
             f.plan.network_authority_ceiling = IsolationNetworkAuthorityCeiling::NodePolicy
         }),
-    ] {
+    ];
+    for (name, mutate) in cases {
         let mut fixture = Fixture::new();
         mutate(&mut fixture);
         if name != "source-entry" {

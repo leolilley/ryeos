@@ -415,7 +415,7 @@ impl CapturedMechanismProbeSource {
                 .metadata
                 .executor_id
                 .as_ref()
-                .filter(|value| !value.is_empty() && value.trim() == value)
+                .filter(|value| !value.is_empty() && value.trim() == value.as_str())
                 .context("mechanism Tool has no signed root executor identity")?
                 .clone();
             let request = crate::thread_lifecycle::ResolvedExecutionRequest {
