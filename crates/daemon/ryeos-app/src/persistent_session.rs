@@ -443,7 +443,50 @@ impl SessionProcess {
             .running
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let selected_original = self
+            .pooled_start
+            .as_ref()
+            .is_some_and(|start| start.has_original_trusted_obligation());
         let owned = running.take()?;
+        if selected_original || owned.has_selected_original_launch_context() {
+            use ryeos_engine::dispatch::SelectedNativeExecutionWaitOutcome;
+            let owner =
+                match owned.wait_for_natural_exit_retaining_native(Duration::from_millis(200)) {
+                    Ok(SelectedNativeExecutionWaitOutcome::Collected(owner))
+                    | Ok(SelectedNativeExecutionWaitOutcome::Incomplete(owner))
+                    | Ok(SelectedNativeExecutionWaitOutcome::Failed(owner))
+                    | Err(owner) => owner,
+                };
+            // Reinstall before borrowing or formatting any diagnostics.
+            *running = Some(owner);
+            return running.as_ref().and_then(|owner| {
+                // The collector may have consumed the live capture into its
+                // retained drains/result. Borrow those bytes from the rooted
+                // owner, bounding BEFORE allocating a lossy diagnostic string.
+                let retained = owner.native_terminal_raw_view().and_then(|view| {
+                    view.failure
+                        .filter(|failure| !failure.is_empty())
+                        .map(str::as_bytes)
+                        .or_else(|| {
+                            view.terminal_result
+                                .filter(|result| !result.stderr.is_empty())
+                                .map(|result| result.stderr.as_bytes())
+                        })
+                        .or_else(|| {
+                            view.retained_drains
+                                .map(|(_, _, stderr, _)| stderr)
+                                .filter(|stderr| !stderr.is_empty())
+                        })
+                });
+                if let Some(bytes) = retained {
+                    const MAX_DIAGNOSTIC_BYTES: usize = 2_048;
+                    let tail = &bytes[bytes.len().saturating_sub(MAX_DIAGNOSTIC_BYTES)..];
+                    Some(String::from_utf8_lossy(tail).into_owned())
+                } else {
+                    owner.stderr_diagnostic_tail()
+                }
+            });
+        }
         match owned.wait_for_natural_exit(Duration::from_millis(200)) {
             Ok(completion) => Some(process_completion_diagnostic(&completion)),
             Err(still_running) => {
@@ -522,6 +565,14 @@ impl Drop for SessionProcess {
     fn drop(&mut self) {
         if let Some(start) = &self.pooled_start {
             if start.has_original_trusted_obligation() {
+                if let Some(running) = self
+                    .running
+                    .get_mut()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
+                {
+                    start.retain_running_unsettled(running);
+                }
                 start.retain_unsettled();
                 return; // descriptor Drop is not driver/financial settlement
             }
@@ -750,6 +801,9 @@ enum PooledStartPhase {
 }
 
 struct PooledStartRetention {
+    // Destroy ALL best-effort process owners before scratch/capture lifelines.
+    // Group/pool destruction is never native or financial settlement proof.
+    retained_running: Vec<ryeos_engine::dispatch::RunningExecution>,
     phase: PooledStartPhase,
     lifelines: Vec<Box<dyn Send + Sync>>,
     resource_observer: Option<PersistentSessionCleanupObserver>,
@@ -771,6 +825,7 @@ impl PersistentSessionPooledStart {
     fn new() -> Self {
         Self {
             retained: Mutex::new(PooledStartRetention {
+                retained_running: Vec::new(),
                 phase: PooledStartPhase::Preparing,
                 lifelines: Vec::new(),
                 resource_observer: None,
@@ -1081,7 +1136,8 @@ impl PersistentSessionPooledStart {
 
     fn has_retained_custody(&self) -> bool {
         let retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
-        !retained.lifelines.is_empty()
+        !retained.retained_running.is_empty()
+            || !retained.lifelines.is_empty()
             || retained.resource_observer.is_some()
             || retained.retirement_observer.is_some()
             || !retained.obligation_owners.is_empty()
@@ -1094,6 +1150,17 @@ impl PersistentSessionPooledStart {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .phase = PooledStartPhase::Registered;
+    }
+
+    // Only the one-use pooled-ready refusal and SessionProcess::drop deposit.
+    // Root every actual owner before checking multiplicity; never evict one.
+    fn retain_running_unsettled(&self, running: ryeos_engine::dispatch::RunningExecution) {
+        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        retained.retained_running.push(running);
+        retained.phase = PooledStartPhase::Unsettled;
+        if retained.retained_running.len() > 1 {
+            retained.admission_refused = true;
+        }
     }
 
     fn retain_unsettled(&self) {
@@ -1114,6 +1181,11 @@ impl PersistentSessionPooledStart {
         }
         let (lifelines, resource, retirement, supplied_owners) = {
             let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+            if !retained.retained_running.is_empty() {
+                retained.phase = PooledStartPhase::Unsettled;
+                retained.admission_refused = true;
+                bail!("retained original running custody cannot be settled by ordinary cleanup");
+            }
             retained.phase = PooledStartPhase::Settled;
             (
                 std::mem::take(&mut retained.lifelines),
@@ -3632,6 +3704,32 @@ fn ready_pooled_process(
     lifecycle: &PersistentSessionLifecycleContract,
     backlog: Arc<BacklogBudget>,
 ) -> std::result::Result<SessionProcess, PooledReadyFailure> {
+    if original_start.has_original_trusted_obligation() {
+        // Keep the original refusal: no held/runtime/driver readiness join exists.
+        // Deposit BEFORE validation, diagnostics, callbacks or ordinary abort.
+        original_start.retain_running_unsettled(started.running);
+        {
+            let mut retained = original_start
+                .retained
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            retained.lifelines.append(&mut started.lifelines);
+            stage_pooled_obligation_owners(
+                &mut retained,
+                &started.cleanup_observer,
+                &started.retirement_observer,
+            );
+            retained.admission_refused = true;
+            retained.phase = PooledStartPhase::Unsettled;
+        }
+        return Err(PooledReadyFailure {
+            error: anyhow!(
+                "trusted pooled ready publication requires original held/runtime/driver ownership join"
+            ),
+            cleanup_unproved: true,
+            original_start,
+        });
+    }
     if let Err(error) = original_start.retain_ready_parts(&mut started) {
         let cleanup = started.running.abort_and_reap_checked();
         return Err(PooledReadyFailure {

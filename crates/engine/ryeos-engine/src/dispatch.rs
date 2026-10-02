@@ -673,6 +673,14 @@ pub struct RunningExecution {
     selected_launch_context: Option<SelectedOriginalLaunchContext>,
 }
 
+/// Raw selected collection outcomes retaining the exact execution owner.
+/// These variants grant no native, device or financial qualification.
+pub enum SelectedNativeExecutionWaitOutcome {
+    Collected(RunningExecution),
+    Incomplete(RunningExecution),
+    Failed(RunningExecution),
+}
+
 impl RunningExecution {
     /// Observe the existing bounded raw-byte capture. This grants no process
     /// lifecycle authority: the caller must keep the normal wait/abort owner
@@ -712,6 +720,48 @@ impl RunningExecution {
             ));
         }
         Ok(())
+    }
+
+    /// Route selected diagnostics without granting qualification authority.
+    pub fn has_selected_original_launch_context(&self) -> bool {
+        self.selected_launch_context.is_some()
+    }
+
+    /// Borrow retained raw diagnostics without consuming the actual result.
+    pub fn native_terminal_raw_view(&self) -> Option<lillux::exec::NativeTerminalRawView<'_>> {
+        self.running.native_terminal_raw_view()
+    }
+
+    /// Keep running, debug and the private original context on every outcome.
+    pub fn wait_for_natural_exit_retaining_native(
+        self,
+        timeout: std::time::Duration,
+    ) -> Result<SelectedNativeExecutionWaitOutcome, Self> {
+        if self.selected_launch_context.is_none() {
+            return Err(self);
+        }
+        let Self {
+            running,
+            debug,
+            selected_launch_context,
+        } = self;
+        let rebuild = |running| Self {
+            running,
+            debug,
+            selected_launch_context,
+        };
+        match running.wait_for_natural_exit_retaining_native(timeout) {
+            Ok(lillux::exec::SelectedNativeTerminalWaitOutcome::Collected(running)) => Ok(
+                SelectedNativeExecutionWaitOutcome::Collected(rebuild(running)),
+            ),
+            Ok(lillux::exec::SelectedNativeTerminalWaitOutcome::Incomplete(running)) => Ok(
+                SelectedNativeExecutionWaitOutcome::Incomplete(rebuild(running)),
+            ),
+            Ok(lillux::exec::SelectedNativeTerminalWaitOutcome::Failed(running)) => {
+                Ok(SelectedNativeExecutionWaitOutcome::Failed(rebuild(running)))
+            }
+            Err(running) => Err(rebuild(running)),
+        }
     }
 
     /// Read the fixed-size diagnostic tail already captured by Lillux without
