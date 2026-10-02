@@ -5316,6 +5316,104 @@ impl RunningProcess {
         })
     }
 
+    /// Compare cached raw facts only; never receive, decode, wait or mint proof.
+    /// An upstream protected-context refusal is retained in the same channel.
+    /// Actual private constructor lineage supplies the same original deadline;
+    /// arbitrary caller-supplied expectations do not grant admission authority.
+    pub fn require_cached_native_terminal_correspondence(
+        &mut self,
+        expected: Result<
+            (
+                &crate::LinuxSandboxAppliedLaunchCommitments,
+                &crate::LinuxSandboxMountPreparationCommitments,
+                crate::time::MonotonicDeadline,
+            ),
+            String,
+        >,
+    ) -> Result<(), String> {
+        let Some(channel) = self.native_settlement.as_mut() else {
+            return Err("native terminal correspondence lacks selected channel".into());
+        };
+        if let Some(failure) = &channel.failure {
+            return Err(failure.clone());
+        }
+        let result = (|| {
+            let (target, mounts, original) = expected?;
+            if original.has_elapsed() || channel.original_deadline.has_elapsed() {
+                return Err("original native correspondence expired before comparison".into());
+            }
+            if channel.selected_wait_phase != SelectedNativeTerminalWaitPhase::Collected
+                || !channel.exact_eof
+                || !channel.pin_timely
+                || !matches!(
+                    channel.pin_observation,
+                    NativeTerminalPinObservation::Exited
+                )
+                || channel.retained_terminal_result.is_none()
+                || channel.retained_drains.is_none()
+            {
+                return Err(
+                    "native terminal collection lacks complete timely retained facts".into(),
+                );
+            }
+            let testimony = channel
+                .testimony
+                .as_ref()
+                .ok_or("native terminal collection lacks cached canonical testimony")?;
+            if channel.held_target_identity.as_ref() != Some(&testimony.process_identity)
+                || self.mount_preparation.as_ref() != Some(&testimony.held_mount)
+                || !testimony.held_mount.matches_commitments(mounts)
+            {
+                return Err(
+                    "native terminal held context differs from independent mount expectations"
+                        .into(),
+                );
+            }
+            if testimony.launch_failure.is_some() {
+                return Err(
+                    "born native pre-exec refusal is not successful launch correspondence".into(),
+                );
+            }
+            // Raw Ok was cached before PID/expiry validation. Only an actual
+            // successful selected observer return with no sticky refusal may
+            // supply accepted receipt correspondence; never rehabilitate it.
+            if self.applied_receipt_failure.is_some() || !self.applied_receipt_returned {
+                return Err(
+                    "actual applied-launch observation was refused or never returned successfully"
+                        .into(),
+                );
+            }
+            let actual = match self.applied_receipt_observation.as_ref() {
+                Some(Ok(receipt)) => receipt,
+                Some(Err(_)) => {
+                    return Err("actual applied-launch observer retained a refusal".into());
+                }
+                None => {
+                    return Err(
+                        "native terminal correspondence lacks actual cached applied receipt".into(),
+                    );
+                }
+            };
+            if testimony.applied_launch.as_ref() != Some(actual)
+                || actual.owned_child_pid != testimony.process_identity.target_pid
+                || !actual.matches_commitments(target)
+                || !actual.matches_post_release_mounts(mounts)
+            {
+                return Err("native testimony and actual receipt differ from independent target/mount expectations".into());
+            }
+            if original.has_elapsed() || channel.original_deadline.has_elapsed() {
+                return Err("original native correspondence expired during comparison".into());
+            }
+            Ok(())
+        })();
+        if let Err(failure) = &result {
+            // Retain every irreversible raw observation, drain and actual result.
+            channel.failure = Some(failure.clone());
+            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
+        }
+        result
+    }
+
     /// Await the second, exact trusted-launcher status after attachment and
     /// release. The reader reports success only after the status writer closes
     /// cleanly, so extra or partial documents cannot be laundered by a first

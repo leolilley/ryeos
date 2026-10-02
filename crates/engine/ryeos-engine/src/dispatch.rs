@@ -722,6 +722,43 @@ impl RunningExecution {
         Ok(())
     }
 
+    /// Compare retained raw facts with this execution's private compiler context.
+    /// The actual protected App caller is a separate required join; success here
+    /// grants no native admission, readiness, driver or financial authority.
+    pub fn require_cached_original_native_correspondence(
+        &mut self,
+        expected_capture: &std::sync::Arc<crate::isolation::VerifiedIsolationBackendCapture>,
+    ) -> Result<(), EngineError> {
+        if let Err(error) = self.require_original_backend_capture(expected_capture) {
+            let failure = self
+                .running
+                .require_cached_native_terminal_correspondence(Err(error.to_string()));
+            return Err(EngineError::Internal(
+                failure.err().expect("upstream refusal stays refused"),
+            ));
+        }
+        let context = self
+            .selected_launch_context
+            .as_ref()
+            .expect("protected capture check requires selected context");
+        self.running
+            .require_cached_native_terminal_correspondence(Ok((
+                &context.expected_applied_launch,
+                &context.expected_mount_preparation,
+                context.original_deadline,
+            )))
+            .map_err(EngineError::Internal)?;
+        if let Err(error) = self.require_original_backend_capture(expected_capture) {
+            let failure = self
+                .running
+                .require_cached_native_terminal_correspondence(Err(error.to_string()));
+            return Err(EngineError::Internal(
+                failure.err().expect("late refusal stays refused"),
+            ));
+        }
+        Ok(())
+    }
+
     /// Route selected diagnostics without granting qualification authority.
     pub fn has_selected_original_launch_context(&self) -> bool {
         self.selected_launch_context.is_some()
