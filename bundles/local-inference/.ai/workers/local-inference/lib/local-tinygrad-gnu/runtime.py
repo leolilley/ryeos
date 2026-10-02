@@ -5,7 +5,6 @@ must retain qualified inputs and the original scratch owner before release.
 """
 from __future__ import annotations
 
-import ctypes
 import os
 import sys
 from pathlib import Path
@@ -66,31 +65,6 @@ def _retained_device_uuid(value: object) -> str:
             or value == '0' * 32):
         raise ValueError('missing D-retained canonical UUID-v2 comparison')
     return value
-
-
-def _require_one_visible_device(bindings) -> None:
-    if getattr(bindings, '_ryeos_lifecycle', False):
-        raise RuntimeError('device count check must precede lifecycle installation')
-    try:
-        initialize = bindings.cuInit
-        get_count = bindings.cuDeviceGetCount
-    except AttributeError as error:
-        raise RuntimeError('selected CUDA binding lacks device-count qualification') from error
-    try:
-        status = initialize(0)
-    except Exception as error:
-        raise RuntimeError('selected CUDA driver initialization failed') from error
-    if type(status) is not int or status != 0:
-        raise RuntimeError('selected CUDA driver initialization failed')
-    count = ctypes.c_int(-1)
-    try:
-        status = get_count(ctypes.byref(count))
-    except Exception as error:
-        raise RuntimeError('selected CUDA device-count query failed') from error
-    if type(status) is not int or status != 0:
-        raise RuntimeError('selected CUDA device-count query failed')
-    if count.value != 1:
-        raise RuntimeError('selected product requires exactly one visible CUDA device')
 
 
 def closed_environment(layout: dict[str, Path], supplied: dict[str, str]) -> dict[str, str]:
@@ -189,13 +163,16 @@ def run_product(
     if bindings is None:
         bindings = importlib.import_module("tinygrad.runtime.autogen.cuda")
     verify_origins((gnu / "python", worker, tinygrad))
-    _require_one_visible_device(bindings)
     lifecycle = install(
         selected_device=0, observe=observe, bindings=bindings,
         expected_uuid_v2_hex=retained_uuid_v2_hex,
+        require_single_visible_device=True,
     )
 
     def load_session():
+        # Keep this selected-product gate before compiler/session/model imports
+        # without changing ordinary run_with_lifecycle callers.
+        lifecycle.qualify_single_visible_device()
         from compiler import install_admitted_compiler
         install_admitted_compiler(workspace)
         from cpu_support import install_cpu_support

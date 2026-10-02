@@ -53,7 +53,7 @@ _RELEASE = {
     "cuEventDestroy_v2": "event",
 }
 _ALLOW = frozenset(_ACQUIRE) | frozenset(_RELEASE) | {
-    "cuInit", "cuDeviceGet", "cuDeviceComputeCapability", "cuCtxSetCurrent",
+    "cuInit", "cuDeviceGetCount", "cuDeviceGet", "cuDeviceComputeCapability", "cuCtxSetCurrent",
     "cuCtxSynchronize", "cuModuleGetFunction", "cuFuncSetAttribute",
     "cuLaunchKernel", "cuMemcpyHtoDAsync_v2", "cuMemcpyDtoH_v2",
     "cuEventRecord", "cuEventSynchronize", "cuEventElapsedTime",
@@ -76,9 +76,14 @@ class _Resource:
 
 class Lifecycle:
     def __init__(self, bindings, selected_device: int, observe: Callable | None,
-                 expected_uuid_v2_hex: str | None = None):
+                 expected_uuid_v2_hex: str | None = None,
+                 require_single_visible_device: bool = False):
         self.selected_device, self._observe = selected_device, observe
         self._expected_uuid_v2_hex = expected_uuid_v2_hex  # comparison only, never authority
+        self._require_single_visible_device = require_single_visible_device
+        self._device_count_attempted = False
+        self._device_count_in_progress = False
+        self._device_count_qualified = not require_single_visible_device
         self._bindings = bindings
         self._lock = threading.RLock()  # in-memory serialization, no thread owner
         self._local = threading.local()
@@ -91,7 +96,10 @@ class Lifecycle:
         self._context_created = False
         self._device_handle: int | None = None
         self._hooks: list[tuple[object, str, object]] = []
-        self._native = {name: getattr(bindings, name) for name in _ALLOW}
+        self._native = {
+            name: getattr(bindings, name) for name in _ALLOW
+            if name != "cuDeviceGetCount" or require_single_visible_device
+        }
         self._uuid_type = self._native_uuid = None
         if expected_uuid_v2_hex is not None:
             try:
@@ -151,7 +159,14 @@ class Lifecycle:
 
     def _validate_call(self, name, args):
         if name == "cuInit" and args[0] != 0: self._fail("unselected driver initialization")
-        if name == "cuDeviceGet" and args[1] != self.selected_device: self._fail("extra device")
+        if name == "cuDeviceGet":
+            if self._require_single_visible_device and not self._device_count_qualified:
+                self._fail("visible-device count qualification required")
+            if args[1] != self.selected_device: self._fail("extra device")
+        if name == "cuDeviceGetCount":
+            if (not self._require_single_visible_device or not self._device_count_in_progress
+                    or self._device_count_qualified):
+                self._fail("unselected or repeated visible-device count query")
         if name == "cuDeviceComputeCapability":
             if self._device_handle is None or _value(args[2]) != self.selected_device:
                 self._fail("extra device")
@@ -159,7 +174,7 @@ class Lifecycle:
             if self._context_created or args[1] != 0 or _value(args[2]) != self._device_handle:
                 self._fail("extra or shared context")
         elif name == "cuCtxSetCurrent": self._owned("context", args[0])
-        elif name not in {"cuInit", "cuDeviceGet", "cuDeviceComputeCapability"}:
+        elif name not in {"cuInit", "cuDeviceGetCount", "cuDeviceGet", "cuDeviceComputeCapability"}:
             if len([r for r in self._resources.values() if r.kind == "context"]) != 1:
                 self._fail("operation without owned context")
         if name == "cuMemHostAlloc" and args[2] != 1: self._fail("unselected host allocator")
@@ -191,6 +206,8 @@ class Lifecycle:
         except BaseException:
             self._poison = self._poison or f"uncertain native {name}"
             raise
+        if name in {"cuInit", "cuDeviceGetCount"} and type(status) is not int:
+            self._fail(f"native {name} returned a noninteger status")
         # Track the output of a successful native acquisition BEFORE returning
         # to init_c_var, a constructor, cache insertion or any Python hook.
         if name in _ACQUIRE and status == 0:
@@ -241,6 +258,31 @@ class Lifecycle:
                     self._poison = self._poison or f"uncertain native operation {name}"
                     raise
         return call
+
+    def qualify_single_visible_device(self) -> None:
+        """One opt-in, guarded pre-context check for the selected product."""
+        with self.submission():
+            with self._lock:
+                if not self._require_single_visible_device:
+                    self._fail("visible-device count qualification is not selected")
+                if self._device_count_attempted:
+                    self._fail("visible-device count qualification already attempted")
+                # Sticky before either native entry: exceptions cannot be retried
+                # into a positive result on this lifecycle owner.
+                self._device_count_attempted = True
+                self._device_count_in_progress = True
+                count = ctypes.c_int(-1)
+                try:
+                    self._guarded("cuInit")(0)
+                    self._guarded("cuDeviceGetCount")(ctypes.byref(count))
+                    if count.value != 1:
+                        self._fail("selected product requires exactly one visible CUDA device")
+                    self._device_count_qualified = True
+                except BaseException:
+                    self._poison = self._poison or "visible-device count qualification failed"
+                    raise
+                finally:
+                    self._device_count_in_progress = False
 
     def _hook(self, owner, name, function):
         setattr(owner, name, function)
@@ -293,7 +335,8 @@ class Lifecycle:
 
 
 def install(*, bindings=None, selected_device: int = 0, observe: Callable | None = None,
-            expected_uuid_v2_hex: str | None = None) -> Lifecycle:
+            expected_uuid_v2_hex: str | None = None,
+            require_single_visible_device: bool = False) -> Lifecycle:
     """Install once after the exact DLL resolver, before any CUDA consumer.
 
     observe is optional for offline/source preparation ONLY. Production runtime
@@ -305,6 +348,8 @@ def install(*, bindings=None, selected_device: int = 0, observe: Callable | None
     if isinstance(selected_device, bool) or selected_device != 0:
         raise LifecycleError("first product selects only device ordinal zero")
     if observe is not None and not callable(observe): raise LifecycleError("invalid observer")
+    if type(require_single_visible_device) is not bool:
+        raise LifecycleError("invalid visible-device qualification selector")
     if expected_uuid_v2_hex is not None and (type(expected_uuid_v2_hex) is not str
             or re.fullmatch(r"[0-9a-f]{32}", expected_uuid_v2_hex) is None
             or expected_uuid_v2_hex == "0" * 32):
@@ -321,7 +366,10 @@ def install(*, bindings=None, selected_device: int = 0, observe: Callable | None
         if helpers.getenv(name, 0): raise LifecycleError(f"unselected switch {name}")
     bindings = bindings or importlib.import_module("tinygrad.runtime.autogen.cuda")
     if getattr(bindings, "_ryeos_lifecycle", False): raise LifecycleError("lifecycle already installed")
-    lifecycle = Lifecycle(bindings, selected_device, observe, expected_uuid_v2_hex)
+    if require_single_visible_device and not callable(getattr(bindings, "cuDeviceGetCount", None)):
+        raise LifecycleError("selected driver lacks visible-device count binding")
+    lifecycle = Lifecycle(bindings, selected_device, observe, expected_uuid_v2_hex,
+                          require_single_visible_device)
     def policy():
         if (repr(helpers.DEV) != "CUDA:PTX" or helpers.JIT.value != 0 or helpers.PROFILE.value != 0
                 or helpers.DEBUG.value != 0 or helpers.BEAM.value != 0 or helpers.VALIDATE_WITH_CPU.value != 0):

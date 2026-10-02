@@ -31,8 +31,12 @@ class DeviceDriver(Driver):
         self.capability_handle = None
         self.uuid_handle = None
         self.context_handle = None
+        self.status_overrides = {}
 
     def call(self, name, argtypes, args):
+        if name == 'cuInit' and name in self.status_overrides:
+            self.calls.append(name)
+            return self.status_overrides[name]
         if name in {'cuDeviceGetCount', 'cuDeviceGet', 'cuDeviceGetUuid_v2', 'cuDeviceComputeCapability'}:
             self.calls.append(name)
             if self.fail == name: return 999
@@ -50,7 +54,7 @@ class DeviceDriver(Driver):
                 if self.capability_handle != self.device_handle: return 999
                 ctypes.cast(args[0], ctypes.POINTER(ctypes.c_int))[0] = 8
                 ctypes.cast(args[1], ctypes.POINTER(ctypes.c_int))[0] = 0
-            return 0
+            return self.status_overrides.get(name, 0)
         if name == 'cuCtxCreate_v2':
             self.context_handle = args[2].value
             if self.context_handle != self.device_handle: return 999
@@ -181,6 +185,82 @@ class DeviceBindingTests(unittest.TestCase):
             self.bindings.cuDeviceGetUuid_v2(None, self.bindings.CUdevice(37))
         self.assertFalse(self.driver.calls)
         self.assertEqual(lifecycle.shutdown().status, 'failed')
+
+    def test_opt_in_count_qualification_is_guarded_before_device_and_preserves_tinygrad_cuinit(self):
+        observations = []
+        lifecycle = install(bindings=self.bindings, observe=observations.append,
+                            expected_uuid_v2_hex=UUID.hex(), require_single_visible_device=True)
+        self.assertFalse(self.driver.calls)
+        lifecycle.qualify_single_visible_device()
+        self.assertEqual(self.driver.calls, ['cuInit', 'cuDeviceGetCount'])
+        from tinygrad.device import Device
+        device = Device['CUDA']
+        self.assertEqual(device.cu_device.value, 37)
+        self.assertEqual(self.driver.calls.count('cuDeviceGetCount'), 1)
+        self.assertEqual(self.driver.calls.count('cuInit'), 2)
+        self.assertLess(self.driver.calls.index('cuDeviceGetCount'), self.driver.calls.index('cuDeviceGet'))
+        self.assertLess(self.driver.calls.index('cuDeviceGetUuid_v2'), self.driver.calls.index('cuCtxCreate_v2'))
+        self.assertEqual(lifecycle.shutdown().status, 'closed')
+        self.assertEqual(len(observations), 1)
+        calls_at_close = list(self.driver.calls)
+        with self.assertRaises(LifecycleError): lifecycle.qualify_single_visible_device()
+        self.assertEqual(self.driver.calls, calls_at_close)
+
+    def test_opt_in_count_gate_blocks_device_acquisition_until_success(self):
+        observations = []
+        lifecycle = install(bindings=self.bindings, observe=observations.append,
+                            expected_uuid_v2_hex=UUID.hex(), require_single_visible_device=True)
+        from tinygrad.device import Device
+        with self.assertRaises(LifecycleError): Device['CUDA']
+        self.assertIn('cuInit', self.driver.calls)
+        self.assertNotIn('cuDeviceGet', self.driver.calls)
+        self.assertNotIn('cuCtxCreate_v2', self.driver.calls)
+        self.assertEqual(lifecycle.shutdown().status, 'failed')
+        self.assertFalse(observations)
+
+    def test_opt_in_count_mismatch_is_sticky_and_never_reaches_device_or_retired(self):
+        self.driver.visible_count = 2
+        observations = []
+        lifecycle = install(bindings=self.bindings, observe=observations.append,
+                            expected_uuid_v2_hex=UUID.hex(), require_single_visible_device=True)
+        with self.assertRaises(LifecycleError): lifecycle.qualify_single_visible_device()
+        calls_at_failure = list(self.driver.calls)
+        self.assertEqual(calls_at_failure, ['cuInit', 'cuDeviceGetCount'])
+        with self.assertRaises(LifecycleError): lifecycle.qualify_single_visible_device()
+        self.assertEqual(self.driver.calls, calls_at_failure)
+        self.assertNotIn('cuDeviceGet', self.driver.calls)
+        self.assertNotIn('cuCtxCreate_v2', self.driver.calls)
+        self.assertEqual(lifecycle.shutdown().status, 'failed')
+        self.assertFalse(observations)
+
+    def assert_count_qualification_failure(self, failure, override=None):
+        observations = []
+        if override is None:
+            self.driver.fail = failure
+        else:
+            self.driver.status_overrides[failure] = override
+        lifecycle = install(bindings=self.bindings, observe=observations.append,
+                            expected_uuid_v2_hex=UUID.hex(), require_single_visible_device=True)
+        with self.assertRaises(LifecycleError): lifecycle.qualify_single_visible_device()
+        calls_at_failure = list(self.driver.calls)
+        with self.assertRaises(LifecycleError): lifecycle.qualify_single_visible_device()
+        self.assertEqual(self.driver.calls, calls_at_failure)
+        self.assertNotIn('cuDeviceGet', self.driver.calls)
+        self.assertNotIn('cuCtxCreate_v2', self.driver.calls)
+        self.assertEqual(lifecycle.shutdown().status, 'failed')
+        self.assertFalse(observations)
+
+    def test_opt_in_count_init_error_is_sticky(self):
+        self.assert_count_qualification_failure('cuInit')
+
+    def test_opt_in_count_query_error_is_sticky(self):
+        self.assert_count_qualification_failure('cuDeviceGetCount')
+
+    def test_opt_in_count_noninteger_status_is_sticky(self):
+        self.assert_count_qualification_failure('cuInit', False)
+
+    def test_opt_in_count_query_noninteger_status_is_sticky(self):
+        self.assert_count_qualification_failure('cuDeviceGetCount', False)
 
     def test_qualifier_never_escapes_installed_lifecycle_or_enables_extra_queries(self):
         lifecycle = install(bindings=self.bindings)
