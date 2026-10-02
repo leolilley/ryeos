@@ -165,6 +165,38 @@ struct NativeSettlementChannel {
     /// Captured from the held target pin before release/death. A later native
     /// record cannot supply its own expected incarnation or reopen procfs.
     held_target_identity: Option<crate::ExactProcessIdentity>,
+    // Bounded raw testimony and irreversible observations stay in this owner.
+    frame: Vec<u8>,
+    exact_eof: bool,
+    testimony: Option<crate::sandbox::native_terminal_wire::NativeTerminalTestimony>,
+    failure: Option<String>,
+    // Drainer joins are irreversible too. Preserve exact bounded bytes/flags
+    // when natural wait returns this owner after a late terminal failure.
+    retained_drains: Option<(BoundedCapture, BoundedCapture)>,
+    retained_terminal_result: Option<SubprocessResult>,
+}
+
+#[cfg(target_os = "linux")]
+fn native_terminal_pin_has_exited(pin: &OwnedFd) -> Result<bool, String> {
+    let mut readiness = libc::pollfd {
+        fd: pin.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut readiness, 1, 0) };
+    if ready < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(format!("observe native terminal target pin: {error}"));
+    }
+    if readiness.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+        return Err("native terminal target pin observation failed".into());
+    }
+    // Linux reports HUP after the exact child has been reaped. Neither case
+    // reopens procfs or transfers ownership from another process wrapper.
+    Ok(ready > 0 && readiness.revents & (libc::POLLIN | libc::POLLHUP) != 0)
 }
 
 impl SupervisedProcessStatus {
@@ -323,6 +355,12 @@ impl SupervisedLauncherAttachmentStatusPipe {
             reader,
             original_deadline,
             held_target_identity: None,
+            frame: Vec::new(),
+            exact_eof: false,
+            testimony: None,
+            failure: None,
+            retained_drains: None,
+            retained_terminal_result: None,
         });
         Ok(writer)
     }
@@ -5156,6 +5194,110 @@ impl RunningProcess {
         }
     }
 
+    /// Raw adapter testimony correlation only. This does not authenticate a
+    /// native generation, admit launch context, or issue retirement evidence.
+    /// One nonblocking read per existing wait iteration; no second waiter.
+    fn poll_native_terminal_testimony(&mut self) -> Result<bool, String> {
+        let Some(channel) = self.native_settlement.as_mut() else {
+            return Ok(true);
+        };
+        if let Some(failure) = &channel.failure {
+            return Err(failure.clone());
+        }
+        let observation = (|| {
+            if channel.original_deadline.remaining().is_zero() {
+                return Err("native terminal original deadline expired".to_string());
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err("native terminal collection requires Linux".to_string());
+            #[cfg(target_os = "linux")]
+            {
+                use crate::sandbox::native_terminal_wire::{
+                    MAX_NATIVE_TERMINAL_FRAME_BYTES, decode_testimony,
+                };
+                if !channel.exact_eof {
+                    // One extra byte detects overflow even for an exact-cap frame.
+                    let mut bytes = [0u8; MAX_NATIVE_TERMINAL_FRAME_BYTES + 1];
+                    let capacity = bytes.len() - channel.frame.len();
+                    let count = unsafe {
+                        libc::read(
+                            channel.reader.file().as_raw_fd(),
+                            bytes.as_mut_ptr().cast(),
+                            capacity,
+                        )
+                    };
+                    if count < 0 {
+                        let error = std::io::Error::last_os_error();
+                        if !matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) {
+                            return Err(format!("read native terminal testimony: {error}"));
+                        }
+                    } else if count == 0 {
+                        // EOF is an actual descriptor observation, never inferred
+                        // from a newline or the wrapper's exit.
+                        channel.exact_eof = true;
+                        channel.testimony = Some(decode_testimony(&channel.frame)?);
+                    } else {
+                        channel.frame.extend_from_slice(&bytes[..count as usize]);
+                        if channel.frame.len() > MAX_NATIVE_TERMINAL_FRAME_BYTES {
+                            return Err("native terminal frame exceeds atomic cap".into());
+                        }
+                    }
+                }
+                if channel.original_deadline.remaining().is_zero() {
+                    return Err(
+                        "native terminal original deadline expired during collection".into(),
+                    );
+                }
+                let Some(testimony) = &channel.testimony else {
+                    return Ok(false);
+                };
+                if channel.held_target_identity.as_ref() != Some(&testimony.process_identity)
+                    || self.mount_preparation.as_ref() != Some(&testimony.held_mount)
+                {
+                    return Err(
+                        "native terminal testimony differs from retained held context".into(),
+                    );
+                }
+                let pin = self
+                    .attachment_target_lifetime
+                    .as_ref()
+                    .ok_or("native terminal target lifetime pin is missing")?;
+                let exited = native_terminal_pin_has_exited(pin)?;
+                if channel.original_deadline.remaining().is_zero() {
+                    return Err(
+                        "native terminal original deadline expired after pin observation".into(),
+                    );
+                }
+                Ok(exited)
+            }
+        })();
+        if let Err(failure) = &observation {
+            // Parse/context/EOF/expiry failures cannot be rehabilitated by
+            // cleanup-induced EOF or a later read of an emptied pipe.
+            channel.failure = Some(failure.clone());
+        }
+        observation
+    }
+
+    fn native_terminal_wait_bound(&self, ordinary: Duration) -> Duration {
+        self.native_settlement.as_ref().map_or(ordinary, |channel| {
+            ordinary.min(channel.original_deadline.remaining())
+        })
+    }
+
+    fn natural_wait_poll_bound(&self, deadline: Instant) -> Duration {
+        if self.native_settlement.is_none() {
+            PROCESS_POLL_INTERVAL
+        } else {
+            self.native_terminal_wait_bound(
+                PROCESS_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+            )
+        }
+    }
+
     /// Wait up to `timeout` for a natural process exit without terminating a
     /// still-running process. Ownership is returned on timeout, failed
     /// observation, or unproved cleanup. For a dedicated process scope, an Ok
@@ -5172,7 +5314,17 @@ impl RunningProcess {
             return Err(self);
         };
         loop {
+            let complete = match self.poll_native_terminal_testimony() {
+                Ok(complete) => complete,
+                Err(_) => return Err(self),
+            };
+            if !complete && Instant::now() >= deadline {
+                return Err(self);
+            }
             match poll_wrapper(&mut self.child) {
+                Ok(WrapperPoll::ExitedUnreaped) if !complete => {
+                    thread::sleep(self.natural_wait_poll_bound(deadline));
+                }
                 Ok(WrapperPoll::ExitedUnreaped) => {
                     // WNOWAIT retains the exact wrapper identity while the
                     // scope's kernel populated bit proves every descendant
@@ -5181,7 +5333,9 @@ impl RunningProcess {
                     // misreport forced cleanup as natural completion.
                     if let Some(scope) = self.process_scope.as_ref()
                         && scope
-                            .wait_empty(deadline.saturating_duration_since(Instant::now()))
+                            .wait_empty(self.native_terminal_wait_bound(
+                                deadline.saturating_duration_since(Instant::now()),
+                            ))
                             .is_err()
                     {
                         return Err(self);
@@ -5190,13 +5344,28 @@ impl RunningProcess {
                     // not turn a failed scope/group barrier into that proof
                     // merely by attaching a diagnostic to an exit result.
                     // Keep the typed owner available for checked abort/retry.
+                    if !matches!(self.poll_native_terminal_testimony(), Ok(true)) {
+                        return Err(self);
+                    }
                     if self.settle_processes_before_drains().is_err() {
                         return Err(self);
                     }
                     // Child retains its reaped status; this does not reap a
                     // second process or reopen a numeric PID.
                     return match self.child.wait() {
-                        Ok(status) => Ok(self.completed_result(status)),
+                        Ok(status) => {
+                            let result = self.completed_result(status);
+                            // A late drain cannot make Ok mean settled. The
+                            // exact Child cached status remains in Err(owner).
+                            if !matches!(self.poll_native_terminal_testimony(), Ok(true)) {
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    channel.retained_terminal_result = Some(result);
+                                }
+                                Err(self)
+                            } else {
+                                Ok(result)
+                            }
+                        }
                         Err(_) => Err(self),
                     };
                 }
@@ -5212,7 +5381,7 @@ impl RunningProcess {
                     if Instant::now() >= deadline {
                         return Err(self);
                     }
-                    thread::sleep(PROCESS_POLL_INTERVAL);
+                    thread::sleep(self.natural_wait_poll_bound(deadline));
                 }
                 Err(_) => return Err(self),
             }
@@ -5413,7 +5582,43 @@ impl RunningProcess {
         let timeout = request_timeout_duration(self.timeout);
 
         loop {
+            let complete = match self.poll_native_terminal_testimony() {
+                Ok(complete) => complete,
+                Err(error) => return self.wait_error_result(std::io::Error::other(error)),
+            };
+            // Keep the publisher alive until the protected record and actual
+            // EOF arrive. Existing cancellation/overflow/deadline policy still
+            // applies while an exited wrapper is retained unreaped.
+            if !complete {
+                if interrupted() {
+                    return self.wait_error_result(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "process observation failed",
+                    ));
+                }
+                if self.output_overflow_rx.try_recv().is_ok() {
+                    self.kill_supervised_processes();
+                    self.reap_wrapper();
+                    let (out, err) = self.finish_drains();
+                    let exceeded = output_limit_exceeded(&out, &err)
+                        .expect("overflow notification requires a truncated capture");
+                    return self.output_limit_result(out, err, exceeded);
+                }
+                if self
+                    .absolute_deadline
+                    .is_some_and(|deadline| deadline.has_elapsed())
+                    || timeout.is_some_and(|limit| self.start.elapsed() >= limit)
+                {
+                    self.kill_supervised_processes();
+                    self.reap_wrapper();
+                    let (out, err) = self.finish_drains();
+                    return self.timeout_result(out, err);
+                }
+            }
             match poll_wrapper(&mut self.child) {
+                Ok(WrapperPoll::ExitedUnreaped) if !complete => {
+                    thread::sleep(self.native_terminal_wait_bound(PROCESS_POLL_INTERVAL));
+                }
                 Ok(WrapperPoll::ExitedUnreaped) => {
                     // Preserve the wrapper as an unreaped zombie until every
                     // owned group has been revalidated and signalled. Its PID
@@ -5460,7 +5665,7 @@ impl RunningProcess {
                         let (out, err) = self.finish_drains();
                         return self.timeout_result(out, err);
                     }
-                    thread::sleep(PROCESS_POLL_INTERVAL);
+                    thread::sleep(self.native_terminal_wait_bound(PROCESS_POLL_INTERVAL));
                 }
                 Err(error) => return self.wait_error_result(error),
             }
@@ -5469,6 +5674,17 @@ impl RunningProcess {
 
     fn completed_result(&mut self, status: process::ExitStatus) -> SubprocessResult {
         let (out, err) = self.finish_drains();
+        let native_terminal_failure = match self.poll_native_terminal_testimony() {
+            Ok(true) => None,
+            Ok(false) => {
+                let failure = "native terminal testimony is incomplete after drains".to_string();
+                if let Some(channel) = self.native_settlement.as_mut() {
+                    channel.failure = Some(failure.clone());
+                }
+                Some(failure)
+            }
+            Err(error) => Some(error),
+        };
         let code = status.code().unwrap_or(-1);
         if let Some(exceeded) = output_limit_exceeded(&out, &err) {
             return self.output_limit_result(out, err, exceeded);
@@ -5481,9 +5697,20 @@ impl RunningProcess {
             .absolute_deadline
             .is_some_and(|deadline| deadline.has_elapsed());
         SubprocessResult {
-            success: code == 0 && self.scope_cleanup_error.is_none() && !timed_out,
+            success: code == 0
+                && self.scope_cleanup_error.is_none()
+                && !timed_out
+                && native_terminal_failure.is_none(),
             stdout: String::from_utf8_lossy(&out.bytes).into_owned(),
-            stderr: self.with_scope_cleanup_diagnostic(&String::from_utf8_lossy(&err.bytes)),
+            stderr: {
+                let diagnostic =
+                    self.with_scope_cleanup_diagnostic(&String::from_utf8_lossy(&err.bytes));
+                native_terminal_failure
+                    .as_ref()
+                    .map_or(diagnostic.clone(), |failure| {
+                        append_diagnostic(&diagnostic, failure)
+                    })
+            },
             exit_code: code,
             duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
             pid: self.pid,
@@ -5683,7 +5910,7 @@ impl RunningProcess {
         if let Some(handle) = self.status_thread.take() {
             let _ = handle.join();
         }
-        (
+        let captures = (
             if settle_stdout {
                 take_capture(&self.stdout_capture)
             } else {
@@ -5694,7 +5921,13 @@ impl RunningProcess {
             } else {
                 BoundedCapture::default()
             },
-        )
+        );
+        if let Some(channel) = self.native_settlement.as_mut()
+            && (settle_stdout || settle_stderr)
+        {
+            channel.retained_drains = Some((captures.0.clone(), captures.1.clone()));
+        }
+        captures
     }
 
     fn timeout_result(&self, out: BoundedCapture, err: BoundedCapture) -> SubprocessResult {
@@ -10204,5 +10437,122 @@ mod pinned_attachment_cwd_tests {
         };
         assert!(result.success);
         assert_eq!(result.stdout.trim(), moved.to_str().unwrap());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_terminal_existing_wait_tests {
+    use super::*;
+
+    // Negative collection controls only: this ordinary child supplies no
+    // native identity/admitted context and can never qualify testimony.
+    fn negative_owner() -> (RunningProcess, InheritedDescriptorAuthority) {
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let writer = held
+            .prepare_native_settlement_channel(crate::time::MonotonicDeadline::after(
+                Duration::from_secs(5),
+            ))
+            .unwrap();
+        let mut running = lib_spawn(SubprocessRequest {
+            cmd: "/bin/true".into(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        })
+        .unwrap();
+        running.native_settlement = held.reader.native_settlement.take();
+        (running, writer)
+    }
+
+    #[test]
+    fn retained_actual_pidfd_reports_death_after_owned_child_reap() {
+        let mut child = process::Command::new("/bin/true").spawn().unwrap();
+        let pin = open_pidfd(child.id()).unwrap();
+        child.wait().unwrap();
+        assert!(native_terminal_pin_has_exited(&pin).unwrap());
+    }
+
+    #[test]
+    fn partial_record_requires_actual_eof_and_parse_failure_is_sticky() {
+        let (mut running, writer) = negative_owner();
+        let mut file = writer.file();
+        file.write_all(b"{\"schema\":").unwrap();
+        assert_eq!(running.poll_native_terminal_testimony().unwrap(), false);
+        assert_eq!(running.poll_native_terminal_testimony().unwrap(), false);
+        assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
+        drop(writer);
+        let failure = running.poll_native_terminal_testimony().unwrap_err();
+        let channel = running.native_settlement.as_ref().unwrap();
+        assert!(channel.exact_eof);
+        assert_eq!(channel.frame, b"{\"schema\":");
+        assert_eq!(
+            running.poll_native_terminal_testimony().unwrap_err(),
+            failure
+        );
+        running.abort();
+    }
+
+    #[test]
+    fn another_write_alias_prevents_eof_after_original_writer_closes() {
+        let (mut running, writer) = negative_owner();
+        let alias = writer.duplicate_at_or_above(64).unwrap();
+        drop(writer);
+        assert_eq!(running.poll_native_terminal_testimony().unwrap(), false);
+        assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
+        drop(alias);
+        assert!(running.poll_native_terminal_testimony().is_err());
+        assert!(running.native_settlement.as_ref().unwrap().exact_eof);
+        running.abort();
+    }
+
+    #[test]
+    fn natural_wait_returns_same_pending_channel_and_expiry_stays_failed() {
+        let (running, writer) = negative_owner();
+        let reader_fd = running
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .reader
+            .file()
+            .as_raw_fd();
+        let mut running = match running.wait_for_natural_exit(Duration::ZERO) {
+            Err(owner) => owner,
+            Ok(_) => panic!("missing native EOF was reported settled"),
+        };
+        assert_eq!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .reader
+                .file()
+                .as_raw_fd(),
+            reader_fd
+        );
+        // A deterministic already-expired negative fixture, never renewal.
+        running
+            .native_settlement
+            .as_mut()
+            .unwrap()
+            .original_deadline = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let failure = running.poll_native_terminal_testimony().unwrap_err();
+        drop(writer);
+        assert_eq!(
+            running.poll_native_terminal_testimony().unwrap_err(),
+            failure
+        );
+        assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
+        running.abort();
     }
 }
