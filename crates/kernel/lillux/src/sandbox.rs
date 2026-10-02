@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+pub(crate) mod native_terminal_wire;
+
 /// Access granted to one exact descriptor-backed mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinuxSandboxMountAccess {
@@ -595,6 +597,13 @@ struct NativeTerminalReap {
 }
 
 impl LinuxSandboxNativeTerminalObservation {
+    /// Encode complete private testimony within the atomic pipe frame cap.
+    /// Borrowing preserves this observation on error/oversize. Bytes alone
+    /// are not accepted namespace, launch, driver or financial evidence.
+    pub fn encode_native_terminal_record(&self) -> Result<Vec<u8>, String> {
+        native_terminal_wire::encode_observation(self)
+    }
+
     pub fn process_identity(&self) -> &crate::ExactProcessIdentity {
         &self.context.identity
     }
