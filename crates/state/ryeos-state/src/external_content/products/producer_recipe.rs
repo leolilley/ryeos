@@ -555,23 +555,38 @@ mod tests {
         ] {
             let mut changed = value.clone();
             changed["stdin_source"][field] = supplied;
-            assert!(ProductProducerRecipe::from_value(changed).is_err(), "{field}");
+            assert!(
+                ProductProducerRecipe::from_value(changed).is_err(),
+                "{field}"
+            );
         }
 
         for (field, added) in [
             ("argv", json!(["--assignment-b64"])),
-            ("cwd_source", json!({"kind":"prepared_directory","id":"activation"})),
+            (
+                "cwd_source",
+                json!({"kind":"prepared_directory","id":"activation"}),
+            ),
             ("environment_sources", json!(["admitted_realizations"])),
-            ("environment_bindings", json!({"HOME":{"kind":"verifier_private_workspace"}})),
-            ("prepared_immutable_files", json!([{
-                "prepared_directory_id":"activation","leaf_name":"assignment.json",
-                "maximum_bytes":1024,"expected_sha256":"e".repeat(64)
-            }])),
+            (
+                "environment_bindings",
+                json!({"HOME":{"kind":"verifier_private_workspace"}}),
+            ),
+            (
+                "prepared_immutable_files",
+                json!([{
+                    "prepared_directory_id":"activation","leaf_name":"assignment.json",
+                    "maximum_bytes":1024,"expected_sha256":"e".repeat(64)
+                }]),
+            ),
             ("loopback_ingress", json!({"address":"127.0.0.1:18765"})),
         ] {
             let mut changed = value.clone();
             changed[field] = added;
-            assert!(ProductProducerRecipe::from_value(changed).is_err(), "{field}");
+            assert!(
+                ProductProducerRecipe::from_value(changed).is_err(),
+                "{field}"
+            );
         }
         for role in ["supervisor", "launcher"] {
             for (field, invalid) in [
@@ -582,7 +597,10 @@ mod tests {
             ] {
                 let mut changed = value.clone();
                 changed["executable_source"][role][field] = invalid;
-                assert!(ProductProducerRecipe::from_value(changed).is_err(), "{role}.{field}");
+                assert!(
+                    ProductProducerRecipe::from_value(changed).is_err(),
+                    "{role}.{field}"
+                );
             }
         }
         let mut extra = value;
