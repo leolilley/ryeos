@@ -3961,6 +3961,11 @@ pub struct RunningProcess {
     pub pid: u32,
     pub pgid: i64,
     mount_preparation: Option<crate::LinuxSandboxMountPreparationReceipt>,
+    /// Same exact target descriptor validated by the attachment-pending owner.
+    /// Retain it through running-owner cleanup; it is not namespace or driver
+    /// retirement evidence and creates no new signalling authority.
+    #[cfg(target_os = "linux")]
+    attachment_target_lifetime: Option<Arc<OwnedFd>>,
     /// The outer process is retained separately so timeout/overflow cleanup
     /// always reaps the launcher as well as the target process group.
     wrapper_pid: u32,
@@ -4007,7 +4012,7 @@ pub struct ProcessAwaitingAttachment {
     mount_preparation: Option<crate::LinuxSandboxMountPreparationReceipt>,
     owner: Option<AttachmentPendingOwner>,
     #[cfg(target_os = "linux")]
-    pidfd: OwnedFd,
+    pidfd: Arc<OwnedFd>,
     request_deadline: Option<Instant>,
 }
 
@@ -4376,7 +4381,7 @@ impl ProcessAwaitingAttachment {
     /// Late completion is an attempted birth with exact cleanup obligations.
     fn finish_release_before_original_expiry(
         &self,
-        running: RunningProcess,
+        mut running: RunningProcess,
     ) -> Result<RunningProcess, AttachmentReleaseError> {
         if self
             .request_deadline
@@ -4396,6 +4401,12 @@ impl ProcessAwaitingAttachment {
                     ),
                 ),
             });
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // Share the same descriptor, never reopen or duplicate the PID.
+            // Once this held owner drops, the running owner retains the pin.
+            running.attachment_target_lifetime = Some(Arc::clone(&self.pidfd));
         }
         Ok(running)
     }
@@ -5577,7 +5588,7 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
                 owner: Some(AttachmentPendingOwner::Supervised {
                     running: Box::new(running),
                 }),
-                pidfd,
+                pidfd: Arc::new(pidfd),
                 request_deadline: narrow_expiry(
                     request_timeout_duration(timeout)
                         .and_then(|duration| start.checked_add(duration)),
@@ -5797,7 +5808,7 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
                 worker,
                 release_registration,
             }),
-            pidfd,
+            pidfd: Arc::new(pidfd),
             request_deadline: narrow_expiry(
                 request_timeout_duration(timeout).and_then(|duration| start.checked_add(duration)),
             ),
@@ -6473,6 +6484,8 @@ fn lib_spawn_with_stdio(
         pid: wrapper_pid,
         pgid: wrapper_pgid,
         mount_preparation: None,
+        #[cfg(target_os = "linux")]
+        attachment_target_lifetime: None,
         wrapper_pid,
         wrapper_pgid,
         child,
