@@ -34,11 +34,12 @@ def source_module(name: str, member: str):
     return module
 
 
-@unittest.skipUnless(all((RUNTIME_SOURCE / member).is_file()
-                         for member in ('runtime.py', 'session.py', 'cleanup_channel.py', 'bootstrap_support.py')),
-                     'requires combined GNU runtime closure or explicit RYEOS_JOIN_RUNTIME_SOURCE')
 class WorkerFaultJoinTests(unittest.TestCase):
     def setUp(self):
+        required = ('runtime.py', 'session.py', 'cleanup_channel.py', 'bootstrap_support.py')
+        missing = [member for member in required if not (RUNTIME_SOURCE / member).is_file()]
+        if missing:
+            self.fail(f'selected runtime source is incomplete at {RUNTIME_SOURCE}: {", ".join(missing)}')
         pinned.PinnedIntegrationTests.setUpClass()  # verify exact selected vendor source pin
         fixture = pinned.PinnedIntegrationTests('test_real_tensor_ptx_compile_realize_and_runtime_cache_path')
         fixture.setUp()
