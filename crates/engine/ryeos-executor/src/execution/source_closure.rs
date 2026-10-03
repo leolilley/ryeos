@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 
 pub(crate) struct BoundSourceClosure {
+    binding_mode: BindingMode,
     mounts: Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     sealed_identity_env: String,
     execution_entry_path: PathBuf,
@@ -22,6 +23,130 @@ pub(crate) struct BoundSourceClosure {
     private_workspace_identity: Option<lillux::secure_fs::PinnedDirectoryIdentity>,
     records: ryeos_state::source_verification::VerifiedAdmittedSourceRecords,
     _leases: Vec<std::fs::File>,
+}
+
+/// Unused local data custody exported from one already-retained source owner.
+/// This is neither launch admission nor a local adapter transport contract.
+/// The SAME Arc keeps its directory, verified records and generation lease;
+/// sealed documents do not prove immutable source-tree contents.
+#[cfg(target_os = "linux")]
+pub(crate) struct LocalSourceRecordCustody {
+    source: std::sync::Arc<BoundSourceClosure>,
+    binding: lillux::InheritedDescriptorAuthority,
+    manifest: lillux::InheritedDescriptorAuthority,
+    binding_bytes: u64,
+    manifest_bytes: u64,
+}
+
+/// Borrow one fixed document's immutable data and independently retained hash.
+/// No constructor, owned descriptor extraction or numeric-FD export is supplied
+/// by this data API. The source custodian must outlive any future delivery.
+#[cfg(target_os = "linux")]
+pub(crate) struct LocalSourceRecordObservation<'a> {
+    descriptor: &'a lillux::InheritedDescriptorAuthority,
+    raw_sha256: &'a str,
+    bytes: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl LocalSourceRecordObservation<'_> {
+    pub(crate) fn descriptor(&self) -> &lillux::InheritedDescriptorAuthority {
+        self.descriptor
+    }
+
+    pub(crate) fn raw_sha256(&self) -> &str {
+        self.raw_sha256
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl LocalSourceRecordCustody {
+    /// Consume only the caller's SAME retained Arc, without another redemption
+    /// or an unchecked record/descriptor constructor. All checks precede any
+    /// returned data custody; failure never grants a launch or transport role.
+    pub(crate) fn from_bound_source(
+        source: std::sync::Arc<BoundSourceClosure>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            matches!(
+                source.binding_mode,
+                BindingMode::IsolationMount(SourceMountPlacement::ExecutionRuntime)
+            ) && source.private_workspace_identity().is_none()
+                && source.mounts().len() == 1,
+            "local source records require isolation-mounted runtime source"
+        );
+        anyhow::ensure!(
+            source.execution_root == source.records.runtime_destination(),
+            "local source records require exact runtime destination"
+        );
+        anyhow::ensure!(
+            source.execution_entry_path() == source.records.runtime_entry_path(),
+            "local source records require exact runtime entry"
+        );
+        let binding_bytes = lillux::canonical_json(&source.records.binding().to_value()?)?;
+        let manifest_bytes = lillux::canonical_json(&source.records.manifest().to_value()?)?;
+        anyhow::ensure!(
+            !binding_bytes.is_empty()
+                && binding_bytes.len() <= ryeos_state::objects::MAX_SOURCE_BINDING_BYTES,
+            "local source binding exceeds unchanged record byte bound"
+        );
+        anyhow::ensure!(
+            !manifest_bytes.is_empty()
+                && manifest_bytes.len() <= ryeos_state::objects::MAX_SOURCE_MANIFEST_BYTES,
+            "local source manifest exceeds unchanged record byte bound"
+        );
+        anyhow::ensure!(
+            lillux::sha256_hex(binding_bytes.as_bytes()) == source.records.binding_hash()
+                && lillux::sha256_hex(manifest_bytes.as_bytes())
+                    == source.records.content_manifest_hash(),
+            "local source records differ from independently retained identities"
+        );
+        let binding = lillux::sealed_memfd(c"local-source-binding", binding_bytes.as_bytes())
+            .map_err(anyhow::Error::msg)?;
+        let manifest = lillux::sealed_memfd(c"local-source-manifest", manifest_bytes.as_bytes())
+            .map_err(anyhow::Error::msg)?;
+        binding.require_write_sealed_regular()?;
+        manifest.require_write_sealed_regular()?;
+        Ok(Self {
+            source,
+            binding,
+            manifest,
+            binding_bytes: binding_bytes.len() as u64,
+            manifest_bytes: manifest_bytes.len() as u64,
+        })
+    }
+
+    pub(crate) fn binding(&self) -> LocalSourceRecordObservation<'_> {
+        LocalSourceRecordObservation {
+            descriptor: &self.binding,
+            raw_sha256: self.source.records.binding_hash(),
+            bytes: self.binding_bytes,
+        }
+    }
+
+    pub(crate) fn manifest(&self) -> LocalSourceRecordObservation<'_> {
+        LocalSourceRecordObservation {
+            descriptor: &self.manifest,
+            raw_sha256: self.source.records.content_manifest_hash(),
+            bytes: self.manifest_bytes,
+        }
+    }
+
+    pub(crate) fn runtime_destination(&self) -> &Path {
+        &self.source.execution_root
+    }
+
+    pub(crate) fn execution_entry_path(&self) -> &Path {
+        self.source.execution_entry_path()
+    }
+
+    pub(crate) fn source_directory(&self) -> &lillux::PinnedDirectory {
+        self.source.source_directory()
+    }
 }
 
 /// Descriptor-bound delivery of the existing B-owned source closure. The
@@ -613,6 +738,7 @@ fn bind_source_projection_with(
     };
     authority.ensure_guard(&guard)?;
     Ok(BoundSourceClosure {
+        binding_mode: mode,
         mounts,
         sealed_identity_env,
         execution_entry_path: destination.join(entry),
@@ -984,6 +1110,7 @@ pub(crate) mod tests {
         std::fs::create_dir(cache.path().join("directory")).unwrap();
         std::os::unix::fs::symlink("baseline.toml", cache.path().join("alias")).unwrap();
         let bound = BoundSourceClosure {
+            binding_mode: BindingMode::IsolationMount(SourceMountPlacement::Project),
             mounts: Vec::new(),
             sealed_identity_env: "{}".to_owned(),
             execution_entry_path: workspace.path().join("not-mounted/profile.json"),

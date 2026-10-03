@@ -383,3 +383,173 @@ fn external_source_delivery_retains_original_generation_lease_until_drop() {
     assert!(cache._evict(records.content_manifest_hash()).unwrap());
     assert!(!cache.cache_dir(records.content_manifest_hash()).exists());
 }
+
+
+// Local export controls reuse actual signed source records and State/CAS
+// redemption. They prove neither a born capsule nor local launch admission.
+#[cfg(target_os = "linux")]
+fn retained_runtime_source(
+    state: &ryeos_app::state::AppState,
+    records: &VerifiedAdmittedSourceRecords,
+) -> std::sync::Arc<BoundSourceClosure> {
+    let (_, resolution) = capsule(records);
+    std::sync::Arc::new(
+        bind_source(
+            state,
+            &resolution,
+            Path::new("/workspace"),
+            SourceMountPlacement::ExecutionRuntime,
+        )
+            .unwrap()
+            .unwrap(),
+    )
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn local_source_records_preserve_canonical_identity_seals_and_same_arc() {
+    let (_root, state, records, source_bytes) = state_and_source();
+    let original = retained_runtime_source(&state, &records);
+    let weak = std::sync::Arc::downgrade(&original);
+    let exported = LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&original))
+        .unwrap();
+    assert!(std::sync::Arc::ptr_eq(&original, &exported.source));
+    drop(original);
+    assert!(weak.upgrade().is_some());
+    assert_eq!(exported.runtime_destination(), records.runtime_destination());
+    assert_eq!(exported.execution_entry_path(), records.runtime_entry_path());
+    for (observed, expected, independently_retained_hash, maximum) in [
+        (
+            exported.binding(),
+            records.binding().to_value().unwrap(),
+            records.binding_hash(),
+            MAX_SOURCE_BINDING_BYTES,
+        ),
+        (
+            exported.manifest(),
+            records.manifest().to_value().unwrap(),
+            records.content_manifest_hash(),
+            MAX_SOURCE_MANIFEST_BYTES,
+        ),
+    ] {
+        let canonical = lillux::canonical_json(&expected).unwrap();
+        assert!(observed.bytes() > 0 && observed.bytes() <= maximum as u64);
+        assert_eq!(observed.raw_sha256(), independently_retained_hash);
+        observed.descriptor().require_write_sealed_regular().unwrap();
+        let (bytes, _) = observed.descriptor()
+            .read_regular_file_stable_bounded(maximum as u64)
+            .unwrap();
+        assert_eq!(bytes, canonical.as_bytes());
+        assert_eq!(bytes.len() as u64, observed.bytes());
+        assert_eq!(lillux::sha256_hex(&bytes), independently_retained_hash);
+    }
+    let member = exported.source_directory()
+        .open_pinned_regular_descendant(Path::new("runtime.yaml"), false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        member.read_bounded(source_bytes.len() as u64).unwrap(),
+        source_bytes
+    );
+    records.verify_tree(exported.source_directory()).unwrap();
+    drop(exported);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn local_source_records_keep_actual_generation_lease_after_original_arc_drop() {
+    let (_root, state, records, _) = state_and_source();
+    let original = retained_runtime_source(&state, &records);
+    let exported = LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&original))
+        .unwrap();
+    let cache = super::super::super::cache::MaterializationCache::new(
+        state.config.runtime_state_dir().join("cache/source-closures"),
+    );
+    drop(original);
+    assert!(!cache._evict(records.content_manifest_hash()).unwrap());
+    records.verify_tree(exported.source_directory()).unwrap();
+    drop(exported);
+    assert!(cache._evict(records.content_manifest_hash()).unwrap());
+    assert!(!cache.cache_dir(records.content_manifest_hash()).exists());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn local_source_records_refuse_changed_runtime_destination_or_entry() {
+    for changed in ["destination", "entry"] {
+        let (_root, state, records, _) = state_and_source();
+        let mut original = retained_runtime_source(&state, &records);
+        // Mutate only coordinates on an actual redeemed owner. No verified
+        // records or directory/lease authority are fabricated by this control.
+        let actual = std::sync::Arc::get_mut(&mut original).unwrap();
+        let diagnostic = if changed == "destination" {
+            actual.execution_root = records.runtime_destination().join("foreign");
+            "exact runtime destination"
+        } else {
+            actual.execution_entry_path = records.runtime_destination().join("other.yaml");
+            "exact runtime entry"
+        };
+        let refusal = LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&original))
+            .err().unwrap();
+        assert!(refusal.to_string().contains(diagnostic), "{refusal}");
+        assert_eq!(std::sync::Arc::strong_count(&original), 1);
+        records.verify_tree(original.source_directory()).unwrap();
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn local_source_records_refuse_actual_project_placement() {
+    let (_root, state, records, _) = state_and_source();
+    let (_, resolution) = capsule(&records);
+    let project = std::sync::Arc::new(
+        bind_source(
+            &state,
+            &resolution,
+            Path::new("/workspace"),
+            SourceMountPlacement::Project,
+        )
+        .unwrap()
+        .unwrap(),
+    );
+    assert!(project.private_workspace_identity().is_none());
+    let refusal = LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&project))
+        .err().unwrap();
+    assert!(
+        refusal.to_string().contains("isolation-mounted runtime source"),
+        "{refusal}"
+    );
+    records.verify_tree(project.source_directory()).unwrap();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn local_source_records_refuse_actual_private_workspace_delivery() {
+    let (root, state, records, _) = state_and_source();
+    let workspace = root.path().join("private-local-source-export-control");
+    std::fs::create_dir(&workspace).unwrap();
+    let (_, resolution) = capsule(&records);
+    let budget = super::super::super::external_content::PrivateMaterializationBudget::new(
+        records.manifest().totals.total_bytes,
+    );
+    let private = std::sync::Arc::new(
+        bind_source_in_private_workspace_with_budget(&state, &resolution, &workspace, &budget)
+            .unwrap()
+            .unwrap(),
+    );
+    assert!(private.private_workspace_identity().is_some());
+    assert!(private.mounts().is_empty());
+    let refusal = LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&private))
+        .err().unwrap();
+    assert!(
+        refusal.to_string().contains("isolation-mounted runtime source"),
+        "{refusal}"
+    );
+    records.verify_tree(private.source_directory()).unwrap();
+    assert!(
+        workspace.join(private.records.logical_project_mount())
+            .join("runtime.yaml")
+            .is_file()
+    );
+}
