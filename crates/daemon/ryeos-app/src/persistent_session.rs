@@ -870,6 +870,18 @@ struct OriginalStartupRetainedOwners {
 }
 
 impl OriginalStartupCheckGuard<'_> {
+    fn retain_original_manifest_documents(&mut self, state: &crate::state::AppState) -> Result<()> {
+        self.require_exclusive()?;
+        // These SAME mutable inputs are guard-owned, not in the locked slot.
+        // CAS reads/sealing/re-read run with NO pool retention mutex held.
+        self.inputs
+            .as_mut()
+            .context("actual original inputs checked out")?
+            .retain_original_manifest_documents(state)?;
+        self.require_exclusive()?;
+        // No descriptor export/acceptance/Init, and Drop always restores owners.
+        Ok(())
+    }
     fn require_exclusive(&self) -> Result<()> {
         // Ownership checks only. Never hold this mutex during source/CAS/live
         // or FD4 operations. Poison retains originals but cannot admit a join.

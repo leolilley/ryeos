@@ -205,6 +205,96 @@ pub struct VerifiedTrustedPooledSessionInputs {
     original_startup_contract: Option<OriginalStartupContract>,
     startup_contract_selection:
         Option<ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection>,
+    original_manifest_custody: Option<OriginalManifestPairCustody>,
+}
+
+// Exact canonical CAS bytes and sealed copies stay in the SAME actual input
+// owner. No getters/export, Clone/serde constructor or accepted inventory.
+struct OriginalManifestPairCustody {
+    gnu: OriginalManifestDocument,
+    driver: OriginalManifestDocument,
+    refused: bool,
+    verified: bool,
+}
+
+struct OriginalManifestDocument {
+    object_hash: String,
+    bytes: Option<Vec<u8>>,
+    sealed: Option<lillux::InheritedDescriptorAuthority>,
+}
+
+impl OriginalManifestDocument {
+    fn retain_cas_bytes(&mut self, cas: &lillux::CasStore, maximum: u64) -> Result<()> {
+        use std::io::Read;
+        anyhow::ensure!(
+            self.bytes.is_none() && self.sealed.is_none(),
+            "manifest bytes cannot be replaced"
+        );
+        let (file, size) = cas
+            .open_object(&self.object_hash)?
+            .context("original manifest CAS object is absent")?;
+        anyhow::ensure!(
+            size > 0 && size <= maximum,
+            "original manifest exceeds bounded object size"
+        );
+        let mut bytes = Vec::new();
+        // Deposit even partial bytes before reporting a read or late failure.
+        let read = file.take(maximum + 1).read_to_end(&mut bytes);
+        self.bytes = Some(bytes);
+        read.context("read original bounded manifest bytes")?;
+        let bytes = self
+            .bytes
+            .as_ref()
+            .expect("actual bytes deposited before checks");
+        anyhow::ensure!(
+            bytes.len() as u64 == size && bytes.len() as u64 <= maximum,
+            "original manifest changed size while reading"
+        );
+        Ok(())
+    }
+
+    fn verify_and_seal(&mut self, expected: &serde_json::Value, maximum: u64) -> Result<()> {
+        let bytes = self
+            .bytes
+            .as_ref()
+            .context("original manifest bytes not retained")?;
+        anyhow::ensure!(
+            !bytes.is_empty() && bytes.len() as u64 <= maximum,
+            "original retained manifest exceeds bound"
+        );
+        anyhow::ensure!(
+            lillux::sha256_hex(bytes) == self.object_hash,
+            "original retained manifest bytes differ from actual CAS identity"
+        );
+        let value: serde_json::Value = serde_json::from_slice(bytes)?;
+        anyhow::ensure!(
+            lillux::canonical_json(&value)
+                .map_err(anyhow::Error::msg)?
+                .as_bytes()
+                == bytes
+                && &value == expected,
+            "original manifest differs from authenticated retained product"
+        );
+        anyhow::ensure!(
+            self.sealed.is_none(),
+            "original sealed manifest cannot be replaced"
+        );
+        self.sealed = Some(
+            lillux::sealed_memfd(c"ryeos-original-product-manifest", bytes)
+                .map_err(anyhow::Error::msg)?,
+        );
+        // Retain the descriptor FIRST, then re-read the actual immutable copy.
+        let (sealed_bytes, _) = self
+            .sealed
+            .as_ref()
+            .expect("actual descriptor retained")
+            .read_regular_file_stable_bounded(maximum)?;
+        anyhow::ensure!(
+            &sealed_bytes == bytes,
+            "original sealed manifest copy differs"
+        );
+        Ok(())
+    }
 }
 
 /// Borrow of the actual original static owners. This can prepare a request,
@@ -375,6 +465,112 @@ enum OriginalIsolationExpectationState {
 }
 
 impl VerifiedTrustedPooledSessionInputs {
+    /// Inert original data preparation: no FD export/env/Executor caller.
+    /// Caller owns these SAME mutable inputs outside the pool retention mutex.
+    pub(crate) fn retain_original_manifest_documents(
+        &mut self,
+        state: &crate::state::AppState,
+    ) -> Result<()> {
+        if let Some(pair) = self.original_manifest_custody.as_mut() {
+            pair.refused = true;
+            pair.verified = false;
+            bail!("original manifest custody cannot be replaced or retried");
+        }
+        self.require_original_isolation_expectation(state)?;
+        let products = self
+            .original_product_inputs
+            .as_ref()
+            .context("manifest custody lacks actual authenticated original products")?;
+        self.original_manifest_custody = Some(OriginalManifestPairCustody {
+            gnu: OriginalManifestDocument {
+                object_hash: products.gnu.selection.manifest_hash.clone(),
+                bytes: None,
+                sealed: None,
+            },
+            driver: OriginalManifestDocument {
+                object_hash: products.driver.selection.manifest_hash.clone(),
+                bytes: None,
+                sealed: None,
+            },
+            refused: false,
+            verified: false,
+        });
+        let result = (|| {
+            let limits = state
+                .node_policy
+                .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+                .closure_limits()?;
+            let maximum = limits
+                .max_object_bytes
+                .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64);
+            anyhow::ensure!(maximum > 0, "original manifest object byte cap is zero");
+            let deadline = self
+                .original_isolation
+                .as_ref()
+                .expect("actual original expectation")
+                .original_deadline;
+            let guard = self.state_authority.acquire_shared_guard_until(deadline)?;
+            self.require_original_isolation_expectation(state)?;
+            self.state_authority.ensure_guard(&guard)?;
+            let cas = self.state_authority.cas_store()?;
+            let pair = self
+                .original_manifest_custody
+                .as_mut()
+                .expect("pair retained before reads");
+            anyhow::ensure!(
+                !deadline.has_elapsed(),
+                "original manifest deadline expired before read"
+            );
+            pair.gnu.retain_cas_bytes(&cas, maximum)?;
+            anyhow::ensure!(
+                !deadline.has_elapsed(),
+                "original manifest deadline expired after GNU read"
+            );
+            pair.driver.retain_cas_bytes(&cas, maximum)?;
+            anyhow::ensure!(
+                !deadline.has_elapsed(),
+                "original manifest deadline expired after driver read"
+            );
+            let total = pair
+                .gnu
+                .bytes
+                .as_ref()
+                .expect("gnu retained")
+                .len()
+                .checked_add(pair.driver.bytes.as_ref().expect("driver retained").len())
+                .context("original manifest pair size overflow")?;
+            anyhow::ensure!(
+                total <= 2 * ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES,
+                "original manifest pair exceeds sixteen MiB"
+            );
+            let products = self
+                .original_product_inputs
+                .as_ref()
+                .expect("actual products retained");
+            pair.gnu
+                .verify_and_seal(&products.gnu.manifest.to_value()?, maximum)?;
+            anyhow::ensure!(
+                !deadline.has_elapsed(),
+                "original manifest deadline expired after GNU seal"
+            );
+            pair.driver
+                .verify_and_seal(&products.driver.manifest.to_value()?, maximum)?;
+            anyhow::ensure!(
+                !deadline.has_elapsed(),
+                "original manifest deadline expired after driver seal"
+            );
+            self.state_authority.ensure_guard(&guard)?;
+            self.require_original_isolation_expectation(state)?;
+            Ok(())
+        })();
+        let pair = self
+            .original_manifest_custody
+            .as_mut()
+            .expect("actual pair stays retained");
+        pair.refused = result.is_err();
+        pair.verified = result.is_ok();
+        result
+    }
     pub(crate) fn has_selected_startup_contract(&self) -> bool {
         self.startup_contract_selection.is_some()
     }
@@ -477,6 +673,7 @@ impl VerifiedTrustedPooledSessionInputs {
             original_product_inputs: None,
             original_startup_contract: None,
             startup_contract_selection: session.startup_contract.clone(),
+            original_manifest_custody: None,
         };
         inputs.require_same_state(state)?;
         Ok(inputs)
@@ -667,6 +864,13 @@ impl VerifiedTrustedPooledSessionInputs {
     }
 
     fn require_retained_original_product_inputs(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self
+                .original_manifest_custody
+                .as_ref()
+                .is_some_and(|pair| pair.refused),
+            "original manifest custody remains refused"
+        );
         let retained = self
             .original_product_inputs
             .as_ref()
@@ -1565,6 +1769,137 @@ fn require_original_terminal_reporter_contract(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Genuine temporary CAS and actual sealed descriptors; these are data
+    // boundary controls, NOT manufactured qualified product/original owners.
+    fn manifest_data_fixture() -> (
+        tempfile::TempDir,
+        crate::state::AppState,
+        serde_json::Value,
+        String,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::state::test_support::build(root.path()).unwrap();
+        let value = serde_json::json!({"kind":"original_manifest_data_control","schema":1});
+        let authority = state.state_store.pinned_state_authority().unwrap();
+        let hash = authority.cas_store().unwrap().store_object(&value).unwrap();
+        (root, state, value, hash)
+    }
+
+    #[test]
+    fn actual_manifest_cas_bytes_and_sealed_copy_preserve_original_identity() {
+        let (_root, state, value, hash) = manifest_data_fixture();
+        let cas = state
+            .state_store
+            .pinned_state_authority()
+            .unwrap()
+            .cas_store()
+            .unwrap();
+        let mut document = OriginalManifestDocument {
+            object_hash: hash.clone(),
+            bytes: None,
+            sealed: None,
+        };
+        document.retain_cas_bytes(&cas, 1024).unwrap();
+        assert_eq!(lillux::sha256_hex(document.bytes.as_ref().unwrap()), hash);
+        document.verify_and_seal(&value, 1024).unwrap();
+        let (copy, _) = document
+            .sealed
+            .as_ref()
+            .unwrap()
+            .read_regular_file_stable_bounded(1024)
+            .unwrap();
+        assert_eq!(&copy, document.bytes.as_ref().unwrap());
+        assert!(document.retain_cas_bytes(&cas, 1024).is_err());
+        assert_eq!(&copy, document.bytes.as_ref().unwrap());
+    }
+
+    #[test]
+    fn actual_manifest_missing_cas_and_cap_refuse_before_sealing() {
+        let (_root, state, _value, hash) = manifest_data_fixture();
+        let cas = state
+            .state_store
+            .pinned_state_authority()
+            .unwrap()
+            .cas_store()
+            .unwrap();
+        let mut missing = OriginalManifestDocument {
+            object_hash: lillux::sha256_hex(b"missing original manifest"),
+            bytes: None,
+            sealed: None,
+        };
+        assert!(missing.retain_cas_bytes(&cas, 1024).is_err());
+        assert!(missing.bytes.is_none() && missing.sealed.is_none());
+        let mut oversized = OriginalManifestDocument {
+            object_hash: hash,
+            bytes: None,
+            sealed: None,
+        };
+        assert!(oversized.retain_cas_bytes(&cas, 1).is_err());
+        assert!(oversized.bytes.is_none() && oversized.sealed.is_none());
+    }
+
+    #[test]
+    fn actual_manifest_substitution_keeps_deposited_bytes_and_refuses_seal() {
+        let (_root, state, value, hash) = manifest_data_fixture();
+        let cas = state
+            .state_store
+            .pinned_state_authority()
+            .unwrap()
+            .cas_store()
+            .unwrap();
+        let mut document = OriginalManifestDocument {
+            object_hash: hash,
+            bytes: None,
+            sealed: None,
+        };
+        document.retain_cas_bytes(&cas, 1024).unwrap();
+        let original = document.bytes.as_ref().unwrap().clone();
+        assert!(
+            document
+                .verify_and_seal(&serde_json::json!({"kind":"substituted"}), 1024)
+                .is_err()
+        );
+        assert_eq!(document.bytes.as_ref().unwrap(), &original);
+        assert!(document.sealed.is_none());
+        // A contradictory raw data control is never an admitted product owner.
+        document.object_hash = lillux::sha256_hex(b"foreign object address");
+        assert!(document.verify_and_seal(&value, 1024).is_err());
+        assert_eq!(document.bytes.as_ref().unwrap(), &original);
+    }
+
+    #[test]
+    fn actual_manifest_late_validation_failure_preserves_original_sealed_owner() {
+        let (_root, state, value, hash) = manifest_data_fixture();
+        let cas = state
+            .state_store
+            .pinned_state_authority()
+            .unwrap()
+            .cas_store()
+            .unwrap();
+        let mut document = OriginalManifestDocument {
+            object_hash: hash,
+            bytes: None,
+            sealed: None,
+        };
+        document.retain_cas_bytes(&cas, 1024).unwrap();
+        document.verify_and_seal(&value, 1024).unwrap();
+        assert!(
+            document
+                .verify_and_seal(&serde_json::json!({"late":"contradiction"}), 1024)
+                .is_err()
+        );
+        let (copy, _) = document
+            .sealed
+            .as_ref()
+            .unwrap()
+            .read_regular_file_stable_bounded(1024)
+            .unwrap();
+        assert_eq!(&copy, document.bytes.as_ref().unwrap());
+        assert!(document.verify_and_seal(&value, 1024).is_err());
+        // Full protected binder/late clock/generation/slot restoration controls
+        // still require genuine qualified owners and remain separate/unrun.
+    }
     use ryeos_engine::protocols::descriptor::PersistentSessionCleanupAuthority;
 
     #[test]
