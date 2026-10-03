@@ -815,6 +815,13 @@ struct PooledStartRetention {
     // Only the unique inert checkout guard writes this reserved restoration
     // slot. Competing deposits use existing running/input/channel quarantine.
     original_startup_restored: Option<OriginalStartupRetainedOwners>,
+    manifest_prepare_attempted: bool,
+    manifest_prepare_in_flight: bool,
+    manifest_prepare_refused: bool,
+    // Only the unique inert precontact guard writes this reserved owner slot.
+    // Its original inputs stay rooted through funding/physical settlement.
+    original_manifest_restored:
+        Option<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
     // Checked-out originals are never replaced by another supplied input.
     quarantined_inputs:
         Vec<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
@@ -869,6 +876,91 @@ struct OriginalStartupRetainedOwners {
     _channel: Option<crate::persistent_session_admission::cleanup_channel::TrustedCleanupChannel>,
 }
 
+/// Private inert precontact checkout. No successful completion, export or
+/// caller; every Drop restores SAME inputs and leaves settlement unproved.
+struct OriginalManifestPrecontactGuard<'a> {
+    inputs: Option<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
+    original: &'a PersistentSessionPooledStart,
+    cancelled: &'a dyn Fn() -> bool,
+    deadline: lillux::time::MonotonicDeadline,
+}
+
+impl OriginalManifestPrecontactGuard<'_> {
+    fn require_exclusive(&self) -> Result<()> {
+        // A predicate is operation-owned, never called under retention lock.
+        anyhow::ensure!(
+            !(self.cancelled)(),
+            "original manifest preparation cancelled"
+        );
+        anyhow::ensure!(
+            !self.deadline.has_elapsed(),
+            "original manifest preparation expired"
+        );
+        let retained = self.original.lock_original_contact_retention()?;
+        let exclusive = !self.original.retained.is_poisoned()
+            && retained.manifest_prepare_attempted
+            && retained.manifest_prepare_in_flight
+            && !retained.manifest_prepare_refused
+            && retained.original_manifest_restored.is_none()
+            && retained.trusted_inputs.is_none()
+            && !retained.admission_refused
+            && retained.phase == PooledStartPhase::Preparing
+            && retained.original_funding.is_some()
+            && !retained.original_contact_attempted
+            && retained.original_spawn_permit.is_none()
+            && !retained.original_held_attached
+            && retained.retained_running.is_empty()
+            && !retained.native_check_attempted
+            && !retained.native_check_in_flight
+            && !retained.native_check_refused
+            && !retained.startup_check_attempted
+            && !retained.startup_check_in_flight
+            && !retained.startup_check_refused
+            && retained.original_startup_restored.is_none()
+            && retained.quarantined_inputs.is_empty()
+            && retained.quarantined_startup_channels.is_empty()
+            && self.original.is_in_flight();
+        drop(retained);
+        anyhow::ensure!(
+            exclusive,
+            "original manifest checkout lost exclusive precontact owners"
+        );
+        anyhow::ensure!(
+            !(self.cancelled)() && !self.deadline.has_elapsed(),
+            "original manifest preparation cancelled or expired after ownership check"
+        );
+        Ok(())
+    }
+
+    fn retain_original_manifest_documents(&mut self, state: &crate::state::AppState) -> Result<()> {
+        self.require_exclusive()?;
+        // SAME mutable input holds every partial document/seal. No pool lock
+        // across CAS, descriptor operations or original state revalidation.
+        self.inputs
+            .as_mut()
+            .context("original manifest inputs checked out")?
+            .retain_original_manifest_documents(state)?;
+        self.require_exclusive()
+    }
+}
+
+impl Drop for OriginalManifestPrecontactGuard<'_> {
+    fn drop(&mut self) {
+        let mut retained = self
+            .original
+            .retained
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // Unique one-shot checkout is the ONLY writer; all other supplied
+        // inputs are quarantined before refusal and cannot occupy this slot.
+        retained.original_manifest_restored = self.inputs.take();
+        retained.manifest_prepare_in_flight = false;
+        retained.manifest_prepare_refused = true;
+        retained.admission_refused = true;
+        retained.phase = PooledStartPhase::Unsettled;
+    }
+}
+
 impl OriginalStartupCheckGuard<'_> {
     fn retain_original_manifest_documents(&mut self, state: &crate::state::AppState) -> Result<()> {
         self.require_exclusive()?;
@@ -891,6 +983,10 @@ impl OriginalStartupCheckGuard<'_> {
             && retained.startup_check_in_flight
             && !retained.startup_check_refused
             && !retained.admission_refused
+            && !retained.manifest_prepare_attempted
+            && !retained.manifest_prepare_in_flight
+            && !retained.manifest_prepare_refused
+            && retained.original_manifest_restored.is_none()
             && !retained.native_check_attempted
             && !retained.native_check_in_flight
             && !retained.native_check_refused
@@ -981,6 +1077,10 @@ struct OriginalNativeCheckGuard<'a> {
 impl OriginalNativeCheckGuard<'_> {
     fn has_exclusive_retention(&self, retained: &PooledStartRetention) -> bool {
         retained.native_check_attempted
+            && !retained.manifest_prepare_attempted
+            && !retained.manifest_prepare_in_flight
+            && !retained.manifest_prepare_refused
+            && retained.original_manifest_restored.is_none()
             && retained.native_check_in_flight
             && !retained.native_check_refused
             && !retained.admission_refused
@@ -1105,6 +1205,50 @@ enum OriginalNativeCheckOutcome {
 }
 
 impl PersistentSessionPooledStart {
+    /// Inert: no production caller or signed-support/export/acceptance API.
+    fn checkout_original_manifest_precontact<'a>(
+        &'a self,
+        cancelled: &'a dyn Fn() -> bool,
+    ) -> Result<OriginalManifestPrecontactGuard<'a>> {
+        let cancellation_observed = cancelled();
+        let deadline = self
+            .original_callback_budget
+            .get()
+            .map(|budget| budget.contact_expiry());
+        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        let eligible = !cancellation_observed
+            && !self.retained.is_poisoned()
+            && deadline.is_some_and(|deadline| !deadline.has_elapsed())
+            && !Self::native_check_blocks_mutation(&retained)
+            && !retained.admission_refused
+            && retained.phase == PooledStartPhase::Preparing
+            && retained.original_funding.is_some()
+            && retained.trusted_inputs.is_some()
+            && !retained.original_contact_attempted
+            && retained.original_spawn_permit.is_none()
+            && !retained.original_held_attached
+            && retained.retained_running.is_empty()
+            && retained.original_startup_restored.is_none()
+            && retained.original_manifest_restored.is_none()
+            && self.is_in_flight();
+        retained.manifest_prepare_attempted = true;
+        if !eligible {
+            retained.manifest_prepare_refused = true;
+            retained.admission_refused = true;
+            retained.phase = PooledStartPhase::Unsettled;
+            bail!("original manifest checkout requires exclusive funded precontact inputs");
+        }
+        retained.manifest_prepare_in_flight = true;
+        let guard = OriginalManifestPrecontactGuard {
+            inputs: retained.trusted_inputs.take(),
+            original: self,
+            cancelled,
+            deadline: deadline.expect("actual original deadline checked before checkout"),
+        };
+        drop(retained);
+        guard.require_exclusive()?;
+        Ok(guard)
+    }
     /// Inert N1 preparation seam; no caller until separate N2 authorization.
     /// Pair creation is outside the retention mutex. No queue/release/Init.
     fn prepare_original_startup_channel(
@@ -1222,7 +1366,11 @@ impl PersistentSessionPooledStart {
     }
 
     fn native_check_blocks_mutation(retained: &PooledStartRetention) -> bool {
-        retained.native_check_attempted
+        retained.manifest_prepare_attempted
+            || retained.manifest_prepare_in_flight
+            || retained.manifest_prepare_refused
+            || retained.original_manifest_restored.is_some()
+            || retained.native_check_attempted
             || retained.native_check_in_flight
             || retained.native_check_refused
             || !retained.quarantined_inputs.is_empty()
@@ -1243,6 +1391,10 @@ impl PersistentSessionPooledStart {
                 startup_check_in_flight: false,
                 startup_check_refused: false,
                 original_startup_restored: None,
+                manifest_prepare_attempted: false,
+                manifest_prepare_in_flight: false,
+                manifest_prepare_refused: false,
+                original_manifest_restored: None,
                 quarantined_inputs: Vec::new(),
                 native_check_attempted: false,
                 native_check_in_flight: false,
@@ -1682,6 +1834,10 @@ impl PersistentSessionPooledStart {
     fn has_original_trusted_obligation(&self) -> bool {
         let retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
         retained.trusted_inputs.is_some()
+            || retained.original_manifest_restored.is_some()
+            || retained.manifest_prepare_attempted
+            || retained.manifest_prepare_in_flight
+            || retained.manifest_prepare_refused
             || retained.original_funding.is_some()
             || retained.native_check_attempted
             || retained.native_check_in_flight
@@ -1767,6 +1923,15 @@ impl PersistentSessionPooledStart {
 
     fn complete_callback(&self) {
         // Called only with PoolState held AFTER final admission/failure state.
+        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+        if retained.manifest_prepare_attempted
+            || retained.manifest_prepare_in_flight
+            || retained.original_manifest_restored.is_some()
+        {
+            retained.manifest_prepare_refused = true;
+            retained.admission_refused = true;
+            retained.phase = PooledStartPhase::Unsettled;
+        }
         self.callback_in_flight.store(false, Ordering::Release);
     }
 
@@ -5410,6 +5575,65 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inert_manifest_checkout_calls_actual_cancellation_outside_retention_lock() {
+        let original = super::PersistentSessionPooledStart::new();
+        let cancelled = || {
+            assert!(original.retained.try_lock().is_ok());
+            true
+        };
+        assert!(
+            original
+                .checkout_original_manifest_precontact(&cancelled)
+                .is_err()
+        );
+        let retained = original.retained.lock().unwrap();
+        assert!(retained.manifest_prepare_attempted && retained.manifest_prepare_refused);
+        assert!(!retained.manifest_prepare_in_flight);
+        assert!(retained.trusted_inputs.is_none() && retained.original_manifest_restored.is_none());
+        assert!(retained.phase == super::PooledStartPhase::Unsettled);
+        assert!(super::PersistentSessionPooledStart::native_check_blocks_mutation(&retained));
+    }
+
+    #[test]
+    fn inert_manifest_checkout_refuses_missing_actual_budget_funding_and_inputs_once() {
+        let original = super::PersistentSessionPooledStart::new();
+        let cancelled = || false;
+        assert!(
+            original
+                .checkout_original_manifest_precontact(&cancelled)
+                .is_err()
+        );
+        assert!(
+            original
+                .checkout_original_manifest_precontact(&cancelled)
+                .is_err()
+        );
+        assert!(original.has_original_trusted_obligation());
+        assert!(original.has_retained_custody());
+        assert!(!original.publish());
+        assert!(original.prove_cleanup().is_err());
+        assert!(original.retained.lock().unwrap().original_funding.is_none());
+    }
+
+    #[test]
+    fn inert_manifest_checkout_poison_preserves_refusal_without_owner_fabrication() {
+        let original = super::PersistentSessionPooledStart::new();
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _retained = original.retained.lock().unwrap();
+            panic!("actual metadata-lock poison control");
+        }));
+        assert!(poisoned.is_err());
+        assert!(
+            original
+                .checkout_original_manifest_precontact(&|| false)
+                .is_err()
+        );
+        let retained = original.retained.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(retained.manifest_prepare_refused && retained.admission_refused);
+        assert!(retained.original_manifest_restored.is_none());
+        assert!(retained.phase == super::PooledStartPhase::Unsettled);
+    }
     use super::*;
 
     #[test]
