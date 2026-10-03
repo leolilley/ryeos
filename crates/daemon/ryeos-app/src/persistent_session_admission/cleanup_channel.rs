@@ -253,6 +253,7 @@ impl PreflightInputs {
             .contract
             .as_ref()
             .context("original request lacks decoded retained contract")?;
+        let contract = contract.common();
         let selected = owner.selected.selections();
         ensure!(
             selected.len() == 1,
