@@ -310,7 +310,7 @@ struct OriginalStartupContract {
     source: crate::source_closure_admission::AdmittedSourceClosure,
     member: Option<crate::source_closure_admission::LoadedStartupContractMember>,
     realizations: Option<ryeos_engine::external_realization::RealizedExternalContentSet>,
-    contract: Option<StartupContract>,
+    contract: Option<DecodedStartupContract>,
     verified: bool,
 }
 
@@ -333,6 +333,173 @@ struct StartupContract {
     products: StartupProducts,
     policy: StartupPolicy,
     wire: StartupWire,
+}
+
+// Separate closed raw document: no flatten/default/optional support flag on
+// the legacy schema. Original selected bytes remain in the retained owner.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupContractV2 {
+    schema: String,
+    role: String,
+    entry: StartupSourceMember,
+    bootstrap_members: Vec<StartupSourceMember>,
+    launch: StartupLaunch,
+    products: StartupProducts,
+    policy: StartupPolicy,
+    wire: StartupWire,
+    manifest_delivery: StartupManifestDelivery,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupManifestDelivery {
+    abi: StartupManifestDeliveryAbi,
+    gnu: StartupManifestDataRole,
+    driver: StartupManifestDataRole,
+    consumer: StartupManifestConsumer,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(try_from = "String")]
+enum StartupManifestDeliveryAbi {
+    FixedNamespaceV1,
+}
+
+impl TryFrom<String> for StartupManifestDeliveryAbi {
+    type Error = &'static str;
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        match value.as_str() {
+            "fixed_namespace_v1" => Ok(Self::FixedNamespaceV1),
+            _ => Err("startup manifest ABI must be the exact fixed_namespace_v1 string"),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupManifestDataRole {
+    destination: String,
+    access: StartupManifestAccess,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(try_from = "String")]
+enum StartupManifestAccess {
+    ReadOnly,
+}
+
+impl TryFrom<String> for StartupManifestAccess {
+    type Error = &'static str;
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        match value.as_str() {
+            "read_only" => Ok(Self::ReadOnly),
+            _ => Err("startup manifest access must be the exact read_only string"),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupManifestConsumer {
+    root: String,
+    path: String,
+}
+
+enum DecodedStartupContract {
+    Legacy(StartupContract),
+    V2 {
+        common: StartupContract,
+        delivery: StartupManifestDelivery,
+    },
+}
+
+impl DecodedStartupContract {
+    fn common(&self) -> &StartupContract {
+        match self {
+            Self::Legacy(common) | Self::V2 { common, .. } => common,
+        }
+    }
+
+    fn require_closed_schema_delivery(&self) -> Result<()> {
+        let common = self.common();
+        match self {
+            Self::Legacy(_) => anyhow::ensure!(
+                common.schema == "ryeos.local_tinygrad_current_assignment_startup.v1"
+                    && common.role == "current_assignment_nvml_preflight_v1",
+                "legacy startup role/schema unsupported"
+            ),
+            Self::V2 { delivery, .. } => {
+                anyhow::ensure!(
+                    common.schema == "ryeos.local_tinygrad_current_assignment_startup.v2"
+                        && common.role == "current_assignment_nvml_preflight_v2",
+                    "v2 startup role/schema unsupported"
+                );
+                let StartupManifestDeliveryAbi::FixedNamespaceV1 = delivery.abi;
+                let StartupManifestAccess::ReadOnly = delivery.gnu.access;
+                let StartupManifestAccess::ReadOnly = delivery.driver.access;
+                anyhow::ensure!(
+                    Some(delivery.gnu.destination.as_str())
+                        == ryeos_engine::isolation::OriginalProductManifestRole::Gnu
+                            .destination()
+                            .to_str()
+                        && Some(delivery.driver.destination.as_str())
+                            == ryeos_engine::isolation::OriginalProductManifestRole::Driver
+                                .destination()
+                                .to_str(),
+                    "startup manifest role destination differs from finite ABI"
+                );
+                anyhow::ensure!(
+                    !delivery.consumer.root.is_empty()
+                        && !delivery.consumer.path.is_empty()
+                        && common
+                            .bootstrap_members
+                            .iter()
+                            .filter(|member| member.root == delivery.consumer.root
+                                && member.path == delivery.consumer.path)
+                            .count()
+                            == 1,
+                    "startup manifest consumer lacks unique original bootstrap member"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn decode_startup_contract(bytes: &[u8]) -> Result<DecodedStartupContract> {
+    #[derive(Deserialize)]
+    struct Schema {
+        schema: String,
+    }
+    // Probe only selects a version; the FINAL closed struct is independently
+    // decoded from the SAME original bytes, preserving all duplicate keys.
+    let schema: Schema = serde_json::from_slice(bytes).context("decode startup schema selector")?;
+    let decoded = match schema.schema.as_str() {
+        "ryeos.local_tinygrad_current_assignment_startup.v1" => DecodedStartupContract::Legacy(
+            serde_json::from_slice(bytes).context("decode closed legacy startup")?,
+        ),
+        "ryeos.local_tinygrad_current_assignment_startup.v2" => {
+            let value: StartupContractV2 =
+                serde_json::from_slice(bytes).context("decode closed v2 startup")?;
+            DecodedStartupContract::V2 {
+                common: StartupContract {
+                    schema: value.schema,
+                    role: value.role,
+                    entry: value.entry,
+                    bootstrap_members: value.bootstrap_members,
+                    launch: value.launch,
+                    products: value.products,
+                    policy: value.policy,
+                    wire: value.wire,
+                },
+                delivery: value.manifest_delivery,
+            }
+        }
+        _ => bail!("startup schema unsupported"),
+    };
+    decoded.require_closed_schema_delivery()?;
+    Ok(decoded)
 }
 
 #[derive(Debug, Deserialize)]
@@ -969,8 +1136,7 @@ impl VerifiedTrustedPooledSessionInputs {
                 && lillux::sha256_hex(&member.bytes) == owner.selection.sha256,
             "startup contract bytes differ from signed source member"
         );
-        owner.contract =
-            Some(serde_json::from_slice(&member.bytes).context("decode closed startup contract")?);
+        owner.contract = Some(decode_startup_contract(&member.bytes)?);
         let value = resolution
             .composed
             .derived
@@ -1050,15 +1216,12 @@ impl VerifiedTrustedPooledSessionInputs {
             .original_startup_contract
             .as_ref()
             .context("startup source owner absent")?;
-        let contract = owner
+        let decoded = owner
             .contract
             .as_ref()
             .context("startup contract remains unparsed")?;
-        anyhow::ensure!(
-            contract.schema == "ryeos.local_tinygrad_current_assignment_startup.v1"
-                && contract.role == "current_assignment_nvml_preflight_v1",
-            "startup role/schema unsupported"
-        );
+        decoded.require_closed_schema_delivery()?;
+        let contract = decoded.common();
         anyhow::ensure!(
             self.startup_contract_selection.as_ref() == Some(&owner.selection),
             "startup signed selector differs from verified capsule"
@@ -2095,6 +2258,180 @@ mod tests {
                 "driver_manifest_sha256":"e".repeat(64),"tinygrad_manifest_sha256":"f".repeat(64)},
             "policy":{"schema":"ryeos.local_tinygrad_nvml_assignment_policy.v1","primary_device_role":"primary","l4_query_policy":null},
             "wire":{"target_fd":4,"preflight_version":3,"result_version":3,"init_version":2,"maximum_frame_bytes":4096}})
+    }
+
+    // Syntax-only raw documents. These do not supply signed original source,
+    // products, funding or a bootstrap behavior proof.
+    fn startup_v2_contract_syntax() -> serde_json::Value {
+        let mut value = startup_contract_syntax();
+        value["schema"] = "ryeos.local_tinygrad_current_assignment_startup.v2".into();
+        value["role"] = "current_assignment_nvml_preflight_v2".into();
+        value["manifest_delivery"] = serde_json::json!({
+            "abi":"fixed_namespace_v1",
+            "gnu":{"destination":"/opt/ryeos-original-manifests/gnu.json","access":"read_only"},
+            "driver":{"destination":"/opt/ryeos-original-manifests/driver.json","access":"read_only"},
+            "consumer":{"root":"source","path":"bootstrap.py"}
+        });
+        value
+    }
+
+    #[test]
+    fn startup_raw_closed_versions_preserve_legacy_and_require_v2_delivery() {
+        let legacy = startup_contract_syntax();
+        assert!(matches!(
+            decode_startup_contract(&serde_json::to_vec(&legacy).unwrap()).unwrap(),
+            DecodedStartupContract::Legacy(_)
+        ));
+        let v2 = startup_v2_contract_syntax();
+        assert!(matches!(
+            decode_startup_contract(&serde_json::to_vec(&v2).unwrap()).unwrap(),
+            DecodedStartupContract::V2 { .. }
+        ));
+        let mut extended_legacy = legacy;
+        extended_legacy["manifest_delivery"] = v2["manifest_delivery"].clone();
+        assert!(decode_startup_contract(&serde_json::to_vec(&extended_legacy).unwrap()).is_err());
+        let mut missing = v2;
+        missing.as_object_mut().unwrap().remove("manifest_delivery");
+        assert!(decode_startup_contract(&serde_json::to_vec(&missing).unwrap()).is_err());
+    }
+
+    #[test]
+    fn startup_v2_raw_contract_refuses_duplicate_keys_at_every_new_boundary() {
+        let value = startup_v2_contract_syntax();
+        let raw = serde_json::to_string(&value).unwrap();
+        let consumer = serde_json::to_string(&value["manifest_delivery"]["consumer"]).unwrap();
+        let duplicate_consumer = consumer.replacen("\"root\":", "\"root\":\"source\",\"root\":", 1);
+        let consumer_duplicate_raw = raw.replacen(
+            &format!("\"consumer\":{consumer}"),
+            &format!("\"consumer\":{duplicate_consumer}"),
+            1,
+        );
+        assert_ne!(consumer_duplicate_raw, raw);
+        assert!(decode_startup_contract(consumer_duplicate_raw.as_bytes()).is_err());
+        for (needle, replacement) in [
+            (
+                "\"schema\":",
+                "\"schema\":\"ryeos.local_tinygrad_current_assignment_startup.v2\",\"schema\":",
+            ),
+            (
+                "\"manifest_delivery\":",
+                "\"manifest_delivery\":null,\"manifest_delivery\":",
+            ),
+            (
+                "\"abi\":\"fixed_namespace_v1\"",
+                "\"abi\":\"fixed_namespace_v1\",\"abi\":\"fixed_namespace_v1\"",
+            ),
+            (
+                "\"access\":\"read_only\"",
+                "\"access\":\"read_only\",\"access\":\"read_only\"",
+            ),
+            (
+                "\"root\":\"source\"",
+                "\"root\":\"source\",\"root\":\"source\"",
+            ),
+        ] {
+            let duplicate = raw.replacen(needle, replacement, 1);
+            assert_ne!(duplicate, raw);
+            assert!(decode_startup_contract(duplicate.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn startup_v2_closed_finite_roles_refuse_unknown_missing_and_nonexact_paths() {
+        let original = startup_v2_contract_syntax();
+        for pointer in [
+            "",
+            "/manifest_delivery",
+            "/manifest_delivery/gnu",
+            "/manifest_delivery/driver",
+            "/manifest_delivery/consumer",
+        ] {
+            let mut value = original.clone();
+            value
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("unexpected".into(), serde_json::Value::Null);
+            assert!(decode_startup_contract(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+        for key in ["abi", "gnu", "driver", "consumer"] {
+            let mut value = original.clone();
+            value["manifest_delivery"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(decode_startup_contract(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+        for (pointer, invalid) in [
+            ("/schema", "unknown"),
+            ("/role", "current_assignment_nvml_preflight_v1"),
+            ("/manifest_delivery/abi", "other"),
+            ("/manifest_delivery/gnu/access", "writable"),
+            (
+                "/manifest_delivery/driver/destination",
+                "/opt/ryeos-original-manifests/gnu.json",
+            ),
+            (
+                "/manifest_delivery/gnu/destination",
+                "/opt//ryeos-original-manifests/gnu.json",
+            ),
+            (
+                "/manifest_delivery/gnu/destination",
+                "/opt/ryeos-original-manifests/./gnu.json",
+            ),
+            ("/manifest_delivery/consumer/path", "absent.py"),
+        ] {
+            let mut value = original.clone();
+            *value.pointer_mut(pointer).unwrap() = invalid.into();
+            assert!(decode_startup_contract(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn startup_v2_consumer_refuses_duplicate_member_and_preserves_existing_closed_fields() {
+        let original = startup_v2_contract_syntax();
+        let mut duplicate_member = original.clone();
+        duplicate_member["bootstrap_members"]
+            .as_array_mut()
+            .unwrap()
+            .push(original["bootstrap_members"][0].clone());
+        assert!(decode_startup_contract(&serde_json::to_vec(&duplicate_member).unwrap()).is_err());
+        for pointer in ["/launch", "/products", "/policy", "/wire", "/entry"] {
+            let mut value = original.clone();
+            value
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("unexpected".into(), serde_json::Value::Null);
+            assert!(decode_startup_contract(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn startup_v2_abi_and_access_require_literal_strings_not_enum_map_encoding() {
+        let original = startup_v2_contract_syntax();
+        for (pointer, literal) in [
+            ("/manifest_delivery/abi", "fixed_namespace_v1"),
+            ("/manifest_delivery/gnu/access", "read_only"),
+            ("/manifest_delivery/driver/access", "read_only"),
+        ] {
+            let mut enum_map = serde_json::Map::new();
+            enum_map.insert(literal.into(), serde_json::Value::Null);
+            for invalid in [
+                serde_json::Value::Object(enum_map),
+                serde_json::json!([literal]),
+                serde_json::Value::Null,
+                serde_json::json!(true),
+                serde_json::json!(1),
+            ] {
+                let mut value = original.clone();
+                *value.pointer_mut(pointer).unwrap() = invalid;
+                let raw = serde_json::to_vec(&value).unwrap();
+                assert!(decode_startup_contract(&raw).is_err());
+            }
+        }
     }
 
     #[test]
