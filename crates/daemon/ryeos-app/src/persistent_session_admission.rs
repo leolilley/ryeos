@@ -1226,16 +1226,7 @@ impl VerifiedTrustedPooledSessionInputs {
             self.startup_contract_selection.as_ref() == Some(&owner.selection),
             "startup signed selector differs from verified capsule"
         );
-        let ryeos_state::objects::SourceLogicalBinding::Worker { root, entry } =
-            &owner.source.binding().logical_binding
-        else {
-            bail!("startup source is not an ordinary typed-source Worker");
-        };
-        anyhow::ensure!(
-            &contract.entry.root == root && &contract.entry.path == entry,
-            "startup entry differs from actual Worker binding"
-        );
-        require_startup_source_member(&owner.source, &contract.entry)?;
+        require_startup_worker_entry(&owner.source, &contract.entry)?;
         anyhow::ensure!(
             (1..=64).contains(&contract.bootstrap_members.len()),
             "startup bootstrap member count invalid"
@@ -1474,6 +1465,33 @@ impl VerifiedTrustedPooledSessionInputs {
         }
         Ok(())
     }
+}
+
+fn require_startup_worker_entry(
+    source: &crate::source_closure_admission::AdmittedSourceClosure,
+    member: &StartupSourceMember,
+) -> Result<()> {
+    source
+        .binding()
+        .validate_content_manifest(source.manifest())?;
+    let ryeos_state::objects::SourceLogicalBinding::Worker { entry, .. } =
+        &source.binding().logical_binding
+    else {
+        bail!("startup source is not an ordinary typed-source Worker");
+    };
+    // The signed Worker directory remains authenticated by capture/binding.
+    // Member roots identify the manifest, never that logical directory.
+    let primary = source
+        .manifest()
+        .roots
+        .iter()
+        .find(|root| root.id == "source")
+        .context("startup source lacks its admitted primary manifest root")?;
+    anyhow::ensure!(
+        member.root == primary.id && &member.path == entry,
+        "startup entry differs from actual Worker manifest coordinate"
+    );
+    require_startup_source_member(source, member)
 }
 
 fn require_startup_source_member(

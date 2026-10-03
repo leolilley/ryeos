@@ -1505,6 +1505,17 @@ pub(crate) mod temporary_source_fixture {
     }
 
     pub(crate) fn admit(state: &mut AppState, member: &[u8]) -> anyhow::Result<Fixture> {
+        admit_with_logical_root(state, member, "source")
+    }
+
+    pub(crate) fn admit_with_logical_root(
+        state: &mut AppState,
+        member: &[u8],
+        logical_root: &str,
+    ) -> anyhow::Result<Fixture> {
+        // Same canonical path rule as WorkerSourceDeclaration::validate,
+        // before acquiring or writing any temporary filesystem content.
+        ryeos_state::objects::validate_canonical_project_relative_path(logical_root)?;
         let bundle = tempfile::tempdir()?;
         let kinds = bundle.path().join("fixture-kinds");
         std::fs::create_dir_all(kinds.join("worker"))?;
@@ -1557,14 +1568,14 @@ composer: handler:ryeos/core/identity
             .and_then(|kind| kind.execution.as_ref())
             .and_then(|execution| execution.source_closure.as_ref())
             .context("temporary signed kind has no source contract")?;
-        let prefix = Path::new(".ai/workers/test/source");
-        std::fs::create_dir_all(bundle.path().join(prefix))?;
+        let prefix = Path::new(".ai/workers/test").join(logical_root);
+        std::fs::create_dir_all(bundle.path().join(&prefix))?;
         // An inert test entry, never executed and never a production consumer.
         std::fs::write(
-            bundle.path().join(prefix).join("bootstrap.py"),
+            bundle.path().join(&prefix).join("bootstrap.py"),
             b"# C2 source only\n",
         )?;
-        std::fs::write(bundle.path().join(prefix).join("startup.json"), member)?;
+        std::fs::write(bundle.path().join(&prefix).join("startup.json"), member)?;
         let source = DirectorySourceContent::new(
             bundle.path(),
             "bundle:factory-fixture".into(),
@@ -1574,16 +1585,20 @@ composer: handler:ryeos/core/identity
             &source,
             &[SourceRootRequest {
                 id: "source".into(),
-                selection: SourceRootSelection::Tree {
-                    prefix: prefix.into(),
-                },
+                selection: SourceRootSelection::Tree { prefix },
             }],
             contract,
         )?;
-        let body = format!(
-            "kind: worker\nname: factory\ncategory: test\nsource:\n  root: source\n  entry: bootstrap.py\n  digest: {}\n",
-            candidate.manifest.digest()?
-        );
+        let declaration = ryeos_engine::source_closure::WorkerSourceDeclaration {
+            root: logical_root.into(),
+            entry: "bootstrap.py".into(),
+            digest: candidate.manifest.digest()?,
+        };
+        declaration.validate()?;
+        let body = serde_yaml::to_string(&serde_json::json!({
+            "kind": "worker", "name": "factory", "category": "test",
+            "source": declaration,
+        }))?;
         let document = lillux::signature::sign_content(&body, &key, "#", None);
         let header = lillux::signature::parse_signature_line(
             document

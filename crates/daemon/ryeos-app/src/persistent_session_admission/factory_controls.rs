@@ -662,3 +662,168 @@ fn temporary_c2_actual_source_recovery_refuses_revoked_temporary_signer() {
         .is_err()
     );
 }
+
+fn temporary_c2_nondefault_source() -> (
+    tempfile::TempDir,
+    crate::state::AppState,
+    crate::source_closure_admission::temporary_source_fixture::Fixture,
+    StartupSourceMember,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = crate::state::test_support::build(root.path()).unwrap();
+    let source =
+        crate::source_closure_admission::temporary_source_fixture::admit_with_logical_root(
+            &mut state,
+            C2_RAW_MEMBER,
+            "lib/local-tinygrad-gnu",
+        )
+        .unwrap();
+    let file = source
+        .recovered
+        .manifest()
+        .entries
+        .iter()
+        .find(|file| file.root == "source" && file.path == "bootstrap.py")
+        .unwrap();
+    let member = StartupSourceMember {
+        root: file.root.clone(),
+        path: file.path.clone(),
+        sha256: file.blob_hash.clone(),
+    };
+    (root, state, source, member)
+}
+
+#[test]
+fn temporary_c2_nondefault_worker_directory_accepts_actual_manifest_entry_coordinate() {
+    let (_root, _state, source, member) = temporary_c2_nondefault_source();
+    assert!(matches!(
+        &source.recovered.binding().logical_binding,
+        SourceLogicalBinding::Worker { root, entry }
+            if root == "lib/local-tinygrad-gnu" && entry == "bootstrap.py"
+    ));
+    assert_eq!(source.recovered.manifest().roots[0].id, "source");
+    require_startup_worker_entry(&source.recovered, &member).unwrap();
+    // Also authenticate the actual raw selected member under SAME publication
+    // guard. This is not a full original startup/binder or funded-owner test.
+    let guard = source
+        .publication
+        .authority()
+        .acquire_shared_guard()
+        .unwrap();
+    let selection =
+        ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+            source_root: "source".into(),
+            member: "startup.json".into(),
+            sha256: lillux::sha256_hex(C2_RAW_MEMBER),
+        };
+    let raw = crate::source_closure_admission::load_selected_startup_contract_member(
+        &source.recovered,
+        &selection,
+        &guard,
+    )
+    .unwrap();
+    assert_eq!(raw.bytes, C2_RAW_MEMBER);
+}
+
+#[test]
+fn temporary_c2_nondefault_worker_entry_refuses_directory_foreign_root_path_and_hash() {
+    let (_root, _state, source, member) = temporary_c2_nondefault_source();
+    let other = source
+        .recovered
+        .manifest()
+        .entries
+        .iter()
+        .find(|file| file.path == "startup.json")
+        .unwrap();
+    for altered in [
+        StartupSourceMember {
+            root: "lib/local-tinygrad-gnu".into(),
+            path: member.path.clone(),
+            sha256: member.sha256.clone(),
+        },
+        StartupSourceMember {
+            root: "foreign".into(),
+            path: member.path.clone(),
+            sha256: member.sha256.clone(),
+        },
+        // This is an actual admitted member/hash, but not the Worker entry.
+        StartupSourceMember {
+            root: other.root.clone(),
+            path: other.path.clone(),
+            sha256: other.blob_hash.clone(),
+        },
+        StartupSourceMember {
+            root: member.root.clone(),
+            path: member.path.clone(),
+            sha256: lillux::sha256_hex(b"substituted entry bytes"),
+        },
+    ] {
+        assert!(require_startup_worker_entry(&source.recovered, &altered).is_err());
+    }
+}
+
+#[test]
+fn temporary_c2_nondefault_worker_recovery_refuses_changed_logical_source_declaration() {
+    let (_root, state, mut source, _member) = temporary_c2_nondefault_source();
+    source.resolution.composed.composed["source"]["root"] =
+        serde_json::Value::String("lib/foreign-worker".into());
+    // Negative resolution data is not resigned or promoted into a binding.
+    assert!(
+        crate::source_closure_admission::recover_source_closure(
+            &state,
+            &state.engine,
+            &source.resolution,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn temporary_c2_logical_root_builder_refuses_noncanonical_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = crate::state::test_support::build(root.path()).unwrap();
+    let engine = Arc::clone(&state.engine);
+    for logical in [
+        "",
+        "/outside",
+        "../outside",
+        "lib/../outside",
+        "lib//worker",
+        "lib/",
+        "lib\\worker",
+        "lib/worker\nsource: injected",
+    ] {
+        assert!(
+            crate::source_closure_admission::temporary_source_fixture::admit_with_logical_root(
+                &mut state,
+                C2_RAW_MEMBER,
+                logical,
+            )
+            .is_err()
+        );
+        assert!(Arc::ptr_eq(&engine, &state.engine));
+    }
+}
+
+#[test]
+fn temporary_c2_logical_root_yaml_metacharacters_preserve_signed_declaration() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = crate::state::test_support::build(root.path()).unwrap();
+    let logical = "lib/worker: quoted";
+    let source =
+        crate::source_closure_admission::temporary_source_fixture::admit_with_logical_root(
+            &mut state,
+            C2_RAW_MEMBER,
+            logical,
+        )
+        .unwrap();
+    assert_eq!(
+        source.resolution.composed.composed["source"]["root"],
+        logical
+    );
+    assert!(matches!(
+        &source.recovered.binding().logical_binding,
+        SourceLogicalBinding::Worker { root, .. } if root == logical
+    ));
+    assert_eq!(source.recovered.manifest().roots[0].id, "source");
+}
