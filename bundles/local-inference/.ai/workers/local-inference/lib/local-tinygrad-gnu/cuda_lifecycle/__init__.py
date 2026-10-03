@@ -158,7 +158,11 @@ class Lifecycle:
             self._fail(f"unowned {kind} range")
 
     def _validate_call(self, name, args):
-        if name == "cuInit" and args[0] != 0: self._fail("unselected driver initialization")
+        if name == "cuInit":
+            if args[0] != 0: self._fail("unselected driver initialization")
+            if (self._require_single_visible_device and not self._device_count_in_progress
+                    and not self._device_count_qualified):
+                self._fail("visible-device count qualification must initialize CUDA")
         if name == "cuDeviceGet":
             if self._require_single_visible_device and not self._device_count_qualified:
                 self._fail("visible-device count qualification required")
@@ -197,6 +201,12 @@ class Lifecycle:
 
     def _call(self, name, args):
         self._validate_call(name, args)
+        # Pinned CUDADevice.__init__ calls cuInit(0) after the product's
+        # pre-context qualification. CUDA has already been initialized by that
+        # qualification, so preserve the API result without a second native call.
+        if (name == "cuInit" and self._require_single_visible_device
+                and self._device_count_qualified and not self._device_count_in_progress):
+            return 0
         # Pinned CUDADevice supplies its ordinal integer here, whereas the
         # generated binding consumes CUdevice. Forward the actual handle returned
         # by the selected cuDeviceGet instead of assuming handle == ordinal.
@@ -259,16 +269,19 @@ class Lifecycle:
                     raise
         return call
 
+    def _hook(self, owner, name, function):
+        setattr(owner, name, function)
+        self._hooks.append((owner, name, function))
+
     def qualify_single_visible_device(self) -> None:
-        """One opt-in, guarded pre-context check for the selected product."""
+        """One opt-in, guarded cardinality check before selected CUDA use."""
         with self.submission():
             with self._lock:
                 if not self._require_single_visible_device:
                     self._fail("visible-device count qualification is not selected")
                 if self._device_count_attempted:
                     self._fail("visible-device count qualification already attempted")
-                # Sticky before either native entry: exceptions cannot be retried
-                # into a positive result on this lifecycle owner.
+                # Sticky before either native entry: unknown results cannot be retried.
                 self._device_count_attempted = True
                 self._device_count_in_progress = True
                 count = ctypes.c_int(-1)
@@ -283,10 +296,6 @@ class Lifecycle:
                     raise
                 finally:
                     self._device_count_in_progress = False
-
-    def _hook(self, owner, name, function):
-        setattr(owner, name, function)
-        self._hooks.append((owner, name, function))
 
     def _validate_inventory(self):
         if any(getattr(owner, name) is not function for owner, name, function in self._hooks):
@@ -350,6 +359,8 @@ def install(*, bindings=None, selected_device: int = 0, observe: Callable | None
     if observe is not None and not callable(observe): raise LifecycleError("invalid observer")
     if type(require_single_visible_device) is not bool:
         raise LifecycleError("invalid visible-device qualification selector")
+    if require_single_visible_device and expected_uuid_v2_hex is None:
+        raise LifecycleError("selected single-device product requires UUID-v2 comparison")
     if expected_uuid_v2_hex is not None and (type(expected_uuid_v2_hex) is not str
             or re.fullmatch(r"[0-9a-f]{32}", expected_uuid_v2_hex) is None
             or expected_uuid_v2_hex == "0" * 32):

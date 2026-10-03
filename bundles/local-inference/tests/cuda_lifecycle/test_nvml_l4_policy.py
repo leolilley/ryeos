@@ -9,7 +9,9 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / '.ai/workers/local-inference/lib/local-tinygrad-gnu'))
-from cuda_lifecycle.nvml_observer import L4QueryPolicy, NvmlObservationError, observe_assignment, _PROTOTYPES
+from cuda_lifecycle.nvml_observer import (
+    L4QueryPolicy, NvmlObservationError, observe_assignment, required_symbols, _PROTOTYPES,
+)
 from test_nvml_observer import FakeNvml, request
 
 
@@ -51,6 +53,16 @@ class L4PolicyTests(unittest.TestCase):
 
     def observe(self, policy=L4QueryPolicy.IS_MIG_SUCCESS_ZERO):
         return observe_assignment(request=self.input, bindings=self.driver, l4_query_policy=policy)
+
+    def test_required_symbols_are_exact_for_only_the_selected_policy(self):
+        base = tuple(_PROTOTYPES)
+        self.assertEqual(required_symbols(None), base)
+        for policy in (L4QueryPolicy.IS_MIG_SUCCESS_ZERO, L4QueryPolicy.IS_MIG_NOT_SUPPORTED):
+            self.assertEqual(required_symbols(policy), base + ('nvmlDeviceGetName',))
+        for invalid in (True, 'NVIDIA L4', L4QueryPolicy.IS_MIG_SUCCESS_ZERO.value, {}):
+            with self.subTest(invalid=invalid), self.assertRaises(NvmlObservationError):
+                required_symbols(invalid)
+        self.assertFalse(self.driver.calls)
 
     def test_exact_success_zero_and_mode_unsupported_profile_keeps_same_handle_join(self):
         result = self.observe()

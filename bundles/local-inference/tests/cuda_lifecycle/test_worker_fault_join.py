@@ -25,10 +25,6 @@ sys.path.insert(0, str(SOURCE))
 import test_pinned_integration as pinned
 from cuda_lifecycle import LifecycleError
 
-BOUNDS = dict(maximum_entries=100, maximum_depth=10,
-              maximum_file_bytes=1024, maximum_total_bytes=4096)
-UUID_V2 = '00112233445566778899aabbccddeeff'
-
 
 def source_module(name: str, member: str):
     spec = importlib.util.spec_from_file_location(name, RUNTIME_SOURCE / member)
@@ -50,6 +46,7 @@ class WorkerFaultJoinTests(unittest.TestCase):
             self.fail(f'selected runtime source is incomplete at {RUNTIME_SOURCE}: {", ".join(missing)}')
         pinned.PinnedIntegrationTests.setUpClass()  # verify exact selected vendor source pin
         fixture = pinned.PinnedIntegrationTests('test_real_tensor_ptx_compile_realize_and_runtime_cache_path')
+        fixture.require_single_visible_device = True
         fixture.setUp()
         self.fixture = fixture
         self.addCleanup(fixture.doCleanups)
@@ -87,21 +84,49 @@ class WorkerFaultJoinTests(unittest.TestCase):
                           separators=(',', ':')).encode('utf-8')
         return struct.pack('>I', len(body)) + body
 
-    def init_frame(self):
-        body = json.dumps(dict(self.bindings, version=2, kind='init',
-                              uuid_v2_hex=UUID_V2, gnu_bounds=BOUNDS,
-                              driver_bounds=BOUNDS), separators=(',', ':')).encode('utf-8')
+    def preflight_frame(self):
+        device = dict(role='primary', destination='/dev/nvidia0', access='read_write', major=195, minor=0)
+        bounds = dict(maximum_entries=4, maximum_depth=2,
+                      maximum_file_bytes=4096, maximum_total_bytes=16384)
+        value = dict(version=3, kind='preflight', bindings=self.bindings, challenge='8' * 64,
+            inputs=dict(resource_selection=dict(stable_id='selected-gpu', **{'class': 'gpu'},
+                matched_facts={}, observation_contract_digest='6' * 64, device_binding_digest='7' * 64,
+                access='execution_restricted', enforcement='character_device_grant',
+                character_devices=[device]),
+                policy=dict(schema='ryeos.local_tinygrad_nvml_assignment_policy.v1',
+                            primary_device_role='primary', l4_query_policy=None),
+                handler_source_sha256='9' * 64, provider_manifest_sha256='a' * 64,
+                gnu_bounds=bounds, driver_bounds=bounds))
+        body = json.dumps(value, separators=(',', ':')).encode()
+        return struct.pack('>I', len(body)) + body
+
+    def object_frame(self, value):
+        body = json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
         return struct.pack('>I', len(body)) + body
 
     def channel(self, shutdown_frame):
-        # Fixture supplies bounded inherited bytes; D's durable held-process
-        # attachment and financial settlement are not simulated by this test.
-        frames = self.init_frame() + shutdown_frame
-        self.assertEqual(os.write(self.cleanup_parent.fileno(), frames), len(frames))
-        channel = self.wire.CleanupChannel(self.cleanup_fd, self.session_fd)
-        self.assertEqual(channel.init.uuid_v2_hex, UUID_V2)
-        self.assertEqual(channel.init.gnu_bounds.maximum_total_bytes, BOUNDS['maximum_total_bytes'])
+        # The same inherited socket carries preflight, its candidate, matching
+        # init-v2 and shutdown. This does not simulate D's held-process/finance.
+        channel = self.wire.CleanupChannel.preflight(self.cleanup_fd, self.session_fd)
+        self.cleanup_parent.sendall(self.preflight_frame())
+        request = channel.read_preflight()
+        inputs = request.values['inputs']
+        primary = inputs['resource_selection']['character_devices'][0]
+        candidate = dict(version=1, stable_resource_id='selected-gpu',
+                         device_binding_digest='7' * 64, primary_device=primary,
+                         uuid_v2_hex=self.fixture.expected_uuid_v2_hex, nvml_shutdown='closed')
+        channel.report_preflight(candidate)
+        result = self.wire.decode_preflight_result(self.wire._read_body(self.cleanup_parent.fileno()), request)
+        init = dict(self.bindings, version=2, kind='init', uuid_v2_hex=result['uuid_v2_hex'],
+                    gnu_bounds=inputs['gnu_bounds'], driver_bounds=inputs['driver_bounds'])
+        self.assertFalse(self.fixture.driver.calls, 'CUDA calls preceded matching cleanup init')
+        self.cleanup_parent.sendall(self.object_frame(init) + shutdown_frame)
+        channel.accept_init()
+        self.assertEqual(channel.uuid_v2_hex, self.fixture.expected_uuid_v2_hex,
+                         'accepted D UUID comparison differs from lifecycle expectation')
+        self.assertFalse(self.fixture.driver.calls, 'CUDA calls occurred before accepted cleanup init')
         self.fixture.lifecycle._observe = channel.observe
+        self.fixture.lifecycle.qualify_single_visible_device()
         return channel
 
     def assert_no_retired(self):

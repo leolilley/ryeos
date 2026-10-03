@@ -11,7 +11,9 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / '.ai/workers/local-inference/lib/local-tinygrad-gnu'))
-from cuda_lifecycle.nvml_observer import NvmlObservationError, observe_assignment, _PROTOTYPES
+from cuda_lifecycle.nvml_observer import (
+    NvmlObservationError, observe_assignment, required_symbols, _PROTOTYPES,
+)
 
 
 def request():
@@ -82,6 +84,14 @@ class NvmlObserverTests(unittest.TestCase):
 
     def observe(self):
         return observe_assignment(request=self.input, bindings=self.driver)
+
+    def test_finite_required_symbol_api_matches_observer_prototype_table(self):
+        self.assertEqual(required_symbols(), tuple(_PROTOTYPES))
+        self.assertEqual(required_symbols(None), tuple(_PROTOTYPES))
+        for invalid in (True, 'NVIDIA L4', 'l4-is-mig-success-zero-mode-not-supported-v1', {}, 1):
+            with self.subTest(invalid=invalid), self.assertRaises(NvmlObservationError):
+                required_symbols(invalid)
+        self.assertFalse(self.driver.calls)
 
     def test_join_same_physical_handle_uuid_and_retained_primary_minor(self):
         result = self.observe()

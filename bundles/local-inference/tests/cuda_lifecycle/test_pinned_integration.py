@@ -30,19 +30,37 @@ class Driver:
     def __init__(self):
         self.calls = []
         self.fail = None
+        self.failures = {}
         self.objects = []
         self.allocations = {}
         self.next_handle = 100
         self.after = None
+        self.visible_devices = 1
+        self.device_handle = 7
+        self.device_uuid = bytes.fromhex('00112233445566778899aabbccddeeff')
+        self.uuid_query_handles = []
+        self.context_device_handles = []
 
     def call(self, name, argtypes, args):
         self.calls.append(name)
+        failure = self.failures.get(name)
+        if isinstance(failure, BaseException): raise failure
+        if failure is not None: return failure
         if self.fail == name: return 999
-        if name == 'cuDeviceGet': ctypes.cast(args[0], ctypes.POINTER(ctypes.c_int))[0] = args[1]
+        if name == 'cuDeviceGetCount':
+            ctypes.cast(args[0], ctypes.POINTER(ctypes.c_int))[0] = self.visible_devices
+        elif name == 'cuDeviceGet': ctypes.cast(args[0], ctypes.POINTER(ctypes.c_int))[0] = self.device_handle
+        elif name == 'cuDeviceGetUuid_v2':
+            handle = getattr(args[1], 'value', args[1])
+            self.uuid_query_handles.append(handle)
+            ctypes.memmove(args[0], self.device_uuid, 16)
         elif name == 'cuDeviceComputeCapability':
+            self.context_device_handles.append(getattr(args[2], 'value', args[2]))
             ctypes.cast(args[0], ctypes.POINTER(ctypes.c_int))[0] = 8
             ctypes.cast(args[1], ctypes.POINTER(ctypes.c_int))[0] = 0
         elif name in ('cuCtxCreate_v2', 'cuModuleLoadData', 'cuModuleGetFunction', 'cuEventCreate'):
+            if name == 'cuCtxCreate_v2':
+                self.context_device_handles.append(getattr(args[2], 'value', args[2]))
             self.next_handle += 1
             ctypes.cast(args[0], ctypes.POINTER(ctypes.c_void_p))[0] = self.next_handle
         elif name in ('cuMemAlloc_v2', 'cuMemHostAlloc'):
@@ -109,7 +127,13 @@ class PinnedIntegrationTests(unittest.TestCase):
         self.dll.start(); self.addCleanup(self.dll.stop)
         self.no_native.start(); self.addCleanup(self.no_native.stop)
         self.observations = []
-        self.lifecycle = install(observe=self.observations.append)
+        self.require_single_visible_device = bool(getattr(self, 'require_single_visible_device', False))
+        self.expected_uuid_v2_hex = '00112233445566778899aabbccddeeff'
+        self.lifecycle = install(
+            observe=self.observations.append,
+            expected_uuid_v2_hex=self.expected_uuid_v2_hex if self.require_single_visible_device else None,
+            require_single_visible_device=self.require_single_visible_device,
+        )
         from tinygrad.runtime import ops_cuda
         from tinygrad.device import Buffer, BufferSpec, Device, TinyELF
         from tinygrad.dtype import dtypes
@@ -409,6 +433,95 @@ class PinnedIntegrationTests(unittest.TestCase):
         n = len(self.driver.calls)
         runtime_cache.clear(); del tensor; gc.collect()
         self.assertEqual(len(self.driver.calls), n)
+
+
+class LifecycleDeviceQualificationTests(unittest.TestCase):
+    """Strict count/UUID gates around the real pinned Tinygrad CUDADevice path."""
+
+    cleanup = PinnedIntegrationTests.cleanup
+    device = PinnedIntegrationTests.device
+
+    def setUp(self):
+        PinnedIntegrationTests.setUpClass()
+        self.require_single_visible_device = True
+        PinnedIntegrationTests.setUp(self)
+
+    def test_count_and_same_handle_uuid_precede_context_creation(self):
+        self.lifecycle.qualify_single_visible_device()
+        self.assertEqual(self.driver.calls, ['cuInit', 'cuDeviceGetCount'])
+        self.device()
+        # Tinygrad calls cuInit(0) again in CUDADevice.__init__; the lifecycle
+        # acknowledges it without repeating native initialization or counting.
+        self.assertEqual(self.driver.calls.count('cuInit'), 1)
+        self.assertEqual(self.driver.calls.count('cuDeviceGetCount'), 1)
+        self.assertEqual(self.driver.uuid_query_handles, [self.driver.device_handle])
+        self.assertEqual(self.driver.context_device_handles, [self.driver.device_handle] * 2)
+        self.assertLess(self.driver.calls.index('cuDeviceGetCount'), self.driver.calls.index('cuDeviceGet'))
+        self.assertLess(self.driver.calls.index('cuDeviceGetUuid_v2'), self.driver.calls.index('cuCtxCreate_v2'))
+        self.assertEqual(self.lifecycle.shutdown().status, 'closed')
+        self.assertEqual(self.observations[0].contexts_destroyed, 1)
+
+    def test_unqualified_driver_initialization_is_refused(self):
+        with self.assertRaisesRegex(LifecycleError, 'count qualification must initialize'):
+            self.cuda.cuInit(0)
+        self.assertFalse(self.driver.calls)
+        self.assertEqual(self.lifecycle.shutdown().status, 'failed')
+        self.assertFalse(self.observations)
+
+    def test_missing_count_binding_refuses_qualified_install(self):
+        with self.assertRaisesRegex(LifecycleError, 'requires UUID-v2 comparison'):
+            install(bindings=object(), require_single_visible_device=True)
+        names = ('tinygrad.runtime.ops_cuda', 'tinygrad.runtime.graph.cuda')
+        saved = {name: sys.modules.pop(name) for name in names if name in sys.modules}
+        try:
+            with self.assertRaisesRegex(LifecycleError, 'lacks visible-device count'):
+                install(bindings=type('Bindings', (), {'cuDeviceGetCount': None})(),
+                        expected_uuid_v2_hex=self.expected_uuid_v2_hex,
+                        require_single_visible_device=True)
+        finally:
+            sys.modules.update(saved)
+
+    def test_zero_visible_devices_fail_stickily_before_device_context(self):
+        self.driver.visible_devices = 0
+        with self.assertRaises(LifecycleError): self.lifecycle.qualify_single_visible_device()
+        self.assertNotIn('cuDeviceGet', self.driver.calls)
+        with self.assertRaises(LifecycleError): self.lifecycle.qualify_single_visible_device()
+        self.assertEqual(self.driver.calls.count('cuDeviceGetCount'), 1)
+        self.assertEqual(self.lifecycle.shutdown().status, 'failed')
+        self.assertFalse(self.observations)
+
+    def test_multiple_visible_devices_fail_stickily_before_device_context(self):
+        self.driver.visible_devices = 2
+        with self.assertRaises(LifecycleError): self.lifecycle.qualify_single_visible_device()
+        self.assertNotIn('cuDeviceGet', self.driver.calls)
+        self.assertEqual(self.lifecycle.shutdown().status, 'failed')
+        self.assertFalse(self.observations)
+
+    def test_failed_count_is_not_retried_or_treated_as_one_device(self):
+        self.driver.fail = 'cuDeviceGetCount'
+        with self.assertRaises(LifecycleError): self.lifecycle.qualify_single_visible_device()
+        with self.assertRaises(LifecycleError): self.lifecycle.qualify_single_visible_device()
+        self.assertEqual(self.driver.calls.count('cuDeviceGetCount'), 1)
+        self.assertNotIn('cuDeviceGet', self.driver.calls)
+        self.assertEqual(self.lifecycle.shutdown().status, 'failed')
+        self.assertFalse(self.observations)
+
+    def test_repeated_successful_count_query_poisoned_without_second_native_call(self):
+        self.lifecycle.qualify_single_visible_device()
+        with self.assertRaises(LifecycleError): self.lifecycle.qualify_single_visible_device()
+        self.assertEqual(self.driver.calls.count('cuDeviceGetCount'), 1)
+        self.assertNotIn('cuDeviceGet', self.driver.calls)
+        self.assertEqual(self.lifecycle.shutdown().status, 'failed')
+        self.assertFalse(self.observations)
+
+    def test_uuid_mismatch_uses_context_handle_and_refuses_context_creation(self):
+        self.lifecycle.qualify_single_visible_device()
+        self.driver.device_uuid = bytes.fromhex('ffeeddccbbaa99887766554433221100')
+        with self.assertRaises(LifecycleError): self.device()
+        self.assertEqual(self.driver.uuid_query_handles, [self.driver.device_handle])
+        self.assertNotIn('cuCtxCreate_v2', self.driver.calls)
+        self.assertEqual(self.lifecycle.shutdown().status, 'failed')
+        self.assertFalse(self.observations)
 
 
 if __name__ == '__main__': unittest.main()

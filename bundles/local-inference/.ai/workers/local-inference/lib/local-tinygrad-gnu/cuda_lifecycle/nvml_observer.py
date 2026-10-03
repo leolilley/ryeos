@@ -50,10 +50,10 @@ _L4_NAME_SYMBOL = "nvmlDeviceGetName"
 
 
 def required_symbols(l4_query_policy: L4QueryPolicy | None = None) -> tuple[str, ...]:
-    """Return the finite native symbol set required by this observer profile.
+    """Return the finite ABI inventory for one explicitly selected profile.
 
     This is source metadata only: it performs no provider lookup or native call.
-    Runtime provenance checks and observation share this exact symbol list.
+    Runtime provenance checks and observation derive from the same prototype table.
     """
     if l4_query_policy is not None and type(l4_query_policy) is not L4QueryPolicy:
         raise NvmlObservationError("unselected product-local L4 query policy")
@@ -131,6 +131,8 @@ def observe_assignment(*, request: dict, bindings, l4_query_policy: L4QueryPolic
     name nor NOT_SUPPORTED selects it. NVML index is not CUDA ordinal; UUID
     equivalence and same-handle CUDA verification are separate gates.
     """
+    if l4_query_policy is not None and type(l4_query_policy) is not L4QueryPolicy:
+        raise NvmlObservationError("unselected product-local L4 query policy")
     stable_id, binding_digest, primary = _assignment(request)
     symbols = required_symbols(l4_query_policy)
     prototypes = {name: _PROTOTYPES[name] for name in symbols if name in _PROTOTYPES}
