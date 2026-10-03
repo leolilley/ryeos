@@ -16117,6 +16117,23 @@ impl StateStore {
             .external_direct_normal_settlement_output(placement)
     }
 
+    /// Read exact retained direct owner/program and authenticated raw terminal
+    /// output only after normal occurrence settlement, under one DB transaction.
+    /// Historical data only; no native limit/view or evaluator authority issued.
+    pub(crate) fn external_direct_settled_owner_output(
+        &self,
+        placement: &str,
+    ) -> Result<
+        Option<(
+            runtime_db::external_execution::ExternalAllocationRecord,
+            runtime_db::external_execution::ExternalDirectOutput,
+        )>,
+    > {
+        self.lock()?
+            .runtime_db
+            .external_direct_settled_owner_output(placement)
+    }
+
     pub(crate) fn external_connector_capability_generation(
         &self,
         placement: &str,

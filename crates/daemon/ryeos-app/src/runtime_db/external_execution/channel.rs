@@ -404,6 +404,44 @@ impl RuntimeDb {
         Ok(output)
     }
 
+    /// Historical joined data from the SAME allocation/journal transaction.
+    /// Unlike normal-settlement recovery data, this requires observed occurrence
+    /// death. The retained program contains requested view/limits only: these
+    /// are not effective native receipts or B/C evaluation acceptance.
+    pub(crate) fn external_direct_settled_owner_output(
+        &self,
+        placement: &str,
+    ) -> Result<Option<(ExternalAllocationRecord, ExternalDirectOutput)>> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let Some(output) = normal_settlement_output_tx(&tx, placement)? else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let record = read(&tx, placement)?
+            .context("settled external direct output lost its retained allocation")?;
+        let ExternalAllocationOwner::DirectThread { chain_root_id, .. } = &record.reservation.owner
+        else {
+            bail!("settled external direct output changed its retained owner kind");
+        };
+        let unstopped: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM thread_runtime
+             WHERE thread_id=?1 AND chain_root_id=?2 AND stop_requested_at_ms IS NULL)",
+            params![placement, chain_root_id],
+            |row| row.get(0),
+        )?;
+        if record.phase != ExternalAllocationPhase::Terminated || !unstopped {
+            tx.commit()?;
+            return Ok(None);
+        }
+        // The normal reader already joins its DirectThread owner, exact intent,
+        // applied Release and raw terminal streams. Revalidate lifecycle death
+        // beside that same immutable program/capsule/occurrence, never separately
+        // sampled allocation facts or caller-supplied receipt JSON.
+        validate_lifecycle_evidence(&tx, &record)?;
+        tx.commit()?;
+        Ok(Some((record, output)))
+    }
+
     /// Read exact settled output for the ordinary terminal writer. The caller
     /// must hold its StateStore writer exclusion through signed terminal commit:
     /// the returned data are not a transferable success or cleanup capability.
@@ -3748,6 +3786,13 @@ pub(super) mod tests {
                     .unwrap(),
                 Some(output.clone())
             );
+            // Complete target output and a termination intent do not prove
+            // occurrence death. The owner-bound reader remains unavailable.
+            assert!(
+                db.external_direct_settled_owner_output(placement)
+                    .unwrap()
+                    .is_none()
+            );
             assert!(!revoked(&db.conn, &binding.digest().unwrap()).unwrap());
             let tx = Transaction::new_unchecked(&db.conn, TransactionBehavior::Immediate).unwrap();
             journal::require_direct_command_complete_observation(
@@ -3818,6 +3863,22 @@ pub(super) mod tests {
                     .is_err()
             );
             settle_direct_occurrence(&db, placement, &intent);
+            let (settled, joined) = db
+                .external_direct_settled_owner_output(placement)
+                .unwrap()
+                .unwrap();
+            assert_eq!(joined, output);
+            assert_eq!(settled, db.external_allocation(placement).unwrap().unwrap());
+            assert_eq!(settled.phase, ExternalAllocationPhase::Terminated);
+            assert!(matches!(
+                &settled.reservation.owner,
+                ExternalAllocationOwner::DirectThread { .. }
+            ));
+            assert!(
+                db.external_direct_settled_owner_output("absent-placement")
+                    .unwrap()
+                    .is_none()
+            );
             assert_eq!(
                 db.external_direct_finalization_output(placement, &recovery)
                     .unwrap(),
@@ -3834,6 +3895,34 @@ pub(super) mod tests {
             );
             drop(db);
             let db = RuntimeDb::open(&path).unwrap();
+            let (recovered_owner, recovered_output) = db
+                .external_direct_settled_owner_output(placement)
+                .unwrap()
+                .unwrap();
+            assert_eq!(recovered_owner, settled);
+            assert_eq!(recovered_output, output);
+            let ExternalAllocationOwner::DirectThread { chain_root_id, .. } =
+                &settled.reservation.owner
+            else {
+                unreachable!();
+            };
+            db.conn
+                .execute(
+                    "UPDATE thread_runtime SET chain_root_id='foreign-chain' WHERE thread_id=?1",
+                    [placement],
+                )
+                .unwrap();
+            assert!(
+                db.external_direct_settled_owner_output(placement)
+                    .unwrap()
+                    .is_none()
+            );
+            db.conn
+                .execute(
+                    "UPDATE thread_runtime SET chain_root_id=?2 WHERE thread_id=?1",
+                    params![placement, chain_root_id],
+                )
+                .unwrap();
             assert_eq!(
                 db.external_direct_normal_settlement_output(placement)
                     .unwrap(),
@@ -3846,6 +3935,11 @@ pub(super) mod tests {
             );
             db.request_thread_stop(placement, StopIntent::Cancel)
                 .unwrap();
+            assert!(
+                db.external_direct_settled_owner_output(placement)
+                    .unwrap()
+                    .is_none()
+            );
             assert!(
                 db.external_direct_finalization_output(placement, &recovery)
                     .is_err()
