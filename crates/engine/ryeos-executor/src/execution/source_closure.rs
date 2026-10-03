@@ -149,6 +149,40 @@ impl LocalSourceRecordCustody {
     }
 }
 
+/// Unused checked metadata borrow of the SAME retained runtime source Arc.
+/// This view exposes no directory, descriptor, mount, Arc or record owner.
+/// Validation is a point-in-time association, not continuing path/State,
+/// immutable-content, applied-copy or original launch authority.
+pub(crate) struct SourceRuntimeAssociation<'a> {
+    source: &'a std::sync::Arc<BoundSourceClosure>,
+}
+
+impl SourceRuntimeAssociation<'_> {
+    pub(crate) fn binding_hash(&self) -> &str {
+        self.source.records.binding_hash()
+    }
+
+    pub(crate) fn content_manifest_hash(&self) -> &str {
+        self.source.records.content_manifest_hash()
+    }
+
+    pub(crate) fn runtime_destination(&self) -> &Path {
+        &self.source.execution_root
+    }
+
+    pub(crate) fn execution_entry_path(&self) -> &Path {
+        self.source.execution_entry_path()
+    }
+
+    pub(crate) fn file_count(&self) -> usize {
+        self.source.records.manifest().totals.file_count
+    }
+
+    pub(crate) fn total_bytes(&self) -> u64 {
+        self.source.records.manifest().totals.total_bytes
+    }
+}
+
 /// Descriptor-bound delivery of the existing B-owned source closure. The
 /// source materialization lease must outlive execution or an acknowledged exact
 /// private copy into the guest. Merely adopting its directory descriptor does
@@ -302,6 +336,50 @@ fn bind_external_source_bytes(
 }
 
 impl BoundSourceClosure {
+    /// Borrow only the actual retained Arc, without export serialization,
+    /// new seals, tree hashing or another source redemption. Transient path
+    /// strings/descriptor checks are bounded; this is not zero-allocation.
+    pub(crate) fn runtime_association(
+        source: &std::sync::Arc<Self>,
+    ) -> anyhow::Result<SourceRuntimeAssociation<'_>> {
+        anyhow::ensure!(
+            matches!(
+                source.binding_mode,
+                BindingMode::IsolationMount(SourceMountPlacement::ExecutionRuntime)
+            ) && source.private_workspace_identity().is_none()
+                && source.mounts().len() == 1,
+            "source runtime association requires isolation-mounted runtime source"
+        );
+        anyhow::ensure!(
+            source.execution_root == source.records.runtime_destination(),
+            "source runtime association requires exact runtime destination"
+        );
+        anyhow::ensure!(
+            source.execution_entry_path() == source.records.runtime_entry_path(),
+            "source runtime association requires exact runtime entry"
+        );
+        source.custody_cache_root.ensure_path_binding()
+            .context("source runtime association cache path binding changed")?;
+        source.source_directory.ensure_path_binding()
+            .context("source runtime association original source path binding changed")?;
+        // A descriptor-only pin may have no path-binding obligation. Always
+        // join the named generation under the actual retained cache FD, too.
+        let named = source.custody_cache_root.open_child_directory(
+            OsStr::new(source.records.content_manifest_hash()),
+        )?.context("source runtime association named generation is missing")?;
+        anyhow::ensure!(
+            named.is_same_directory(&source.source_directory)?,
+            "source runtime association named generation identity differs"
+        );
+        // Recheck path obligations after the named-child identity observation.
+        // A future runtime/cache/State parent-chain proof remains separate.
+        source.custody_cache_root.ensure_path_binding()
+            .context("source runtime association cache path binding changed")?;
+        source.source_directory.ensure_path_binding()
+            .context("source runtime association original source path binding changed")?;
+        Ok(SourceRuntimeAssociation { source })
+    }
+
     fn member_path(&self, relative: &str) -> anyhow::Result<String> {
         ryeos_engine::runtime::validate_source_member_path(relative)?;
         anyhow::ensure!(
