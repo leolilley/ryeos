@@ -202,6 +202,136 @@ pub struct VerifiedTrustedPooledSessionInputs {
     cleanup_contract_digest: String,
     original_isolation: Option<OriginalIsolationExpectation>,
     original_product_inputs: Option<OriginalProductInputs>,
+    original_startup_contract: Option<OriginalStartupContract>,
+    startup_contract_selection:
+        Option<ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection>,
+}
+
+// Static source custody, not a startup factory/accepted observation. Retain raw
+// actual source/member owners before parsing and all later fallible checks.
+struct OriginalStartupContract {
+    selection: ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection,
+    source: crate::source_closure_admission::AdmittedSourceClosure,
+    member: Option<crate::source_closure_admission::LoadedStartupContractMember>,
+    realizations: Option<ryeos_engine::external_realization::RealizedExternalContentSet>,
+    contract: Option<StartupContract>,
+    verified: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupSourceMember {
+    root: String,
+    path: String,
+    sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupContract {
+    schema: String,
+    role: String,
+    entry: StartupSourceMember,
+    bootstrap_members: Vec<StartupSourceMember>,
+    launch: StartupLaunch,
+    products: StartupProducts,
+    policy: StartupPolicy,
+    wire: StartupWire,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupLaunch {
+    command_sha256: String,
+    args: Vec<ryeos_engine::contracts::PlanArgument>,
+    #[serde(deserialize_with = "deserialize_startup_environment")]
+    env: std::collections::BTreeMap<String, String>,
+    process_environment_sha256: String,
+    dynamic_channels: Vec<StartupDynamicChannel>,
+}
+
+fn deserialize_startup_environment<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<std::collections::BTreeMap<String, String>, D::Error> {
+    struct Environment;
+    impl<'de> serde::de::Visitor<'de> for Environment {
+        type Value = std::collections::BTreeMap<String, String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a closed bounded startup environment without duplicate names")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> std::result::Result<Self::Value, M::Error> {
+            let mut result = std::collections::BTreeMap::new();
+            while let Some((key, value)) = map.next_entry::<String, String>()? {
+                if result.len() >= 32
+                    || key.is_empty()
+                    || key.len() > 128
+                    || value.len() > 4096
+                    || result.insert(key, value).is_some()
+                {
+                    return Err(serde::de::Error::custom(
+                        "startup environment duplicate/unbounded name/value",
+                    ));
+                }
+            }
+            Ok(result)
+        }
+    }
+    deserializer.deserialize_map(Environment)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupDynamicChannel {
+    env: String,
+    target_fd: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupProducts {
+    gnu_slot: String,
+    driver_slot: String,
+    nvml_member: String,
+    provider_checks: String,
+    gnu_manifest_sha256: String,
+    driver_manifest_sha256: String,
+    tinygrad_manifest_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupPolicy {
+    schema: String,
+    primary_device_role: String,
+    #[serde(deserialize_with = "required_startup_nullable_policy")]
+    l4_query_policy: Option<StartupL4Policy>,
+}
+
+#[derive(Debug, Deserialize)]
+enum StartupL4Policy {
+    #[serde(rename = "l4-is-mig-success-zero-mode-not-supported-v1")]
+    SuccessZero,
+    #[serde(rename = "l4-is-mig-not-supported-mode-not-supported-v1")]
+    NotSupported,
+}
+
+fn required_startup_nullable_policy<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<StartupL4Policy>, D::Error> {
+    Option::<StartupL4Policy>::deserialize(deserializer)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupWire {
+    target_fd: u32,
+    preflight_version: u32,
+    result_version: u32,
+    init_version: u32,
+    maximum_frame_bytes: u32,
 }
 
 // Retained static product inputs only. No materialization, current assignment,
@@ -317,6 +447,8 @@ impl VerifiedTrustedPooledSessionInputs {
             cleanup_contract_digest: product.clone(),
             original_isolation: None,
             original_product_inputs: None,
+            original_startup_contract: None,
+            startup_contract_selection: session.startup_contract.clone(),
         };
         inputs.require_same_state(state)?;
         Ok(inputs)
@@ -351,6 +483,7 @@ impl VerifiedTrustedPooledSessionInputs {
             let products = self.authenticate_original_product_inputs(state)?;
             // Root the authenticated static inputs before any late refusal.
             self.original_product_inputs = Some(products);
+            self.prepare_original_startup_contract(state)?;
             self.require_same_state_incarnation(state)?;
             let original = self
                 .original_isolation
@@ -472,7 +605,10 @@ impl VerifiedTrustedPooledSessionInputs {
             .node_policy
             .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
-        let guard = self.state_authority.acquire_shared_guard()?;
+        let guard = self
+            .state_authority
+            .acquire_shared_guard_until(original.original_deadline)?;
+        require_original_isolation_unexpired(original)?;
         self.state_authority.ensure_guard(&guard)?;
         let gnu = authenticate_original_selected_product(
             state,
@@ -533,8 +669,581 @@ impl VerifiedTrustedPooledSessionInputs {
             // product bounds verifier under the original pinned guard.
             product.manifest.validate()?;
         }
+        self.require_retained_original_startup_contract()?;
         Ok(())
     }
+
+    fn prepare_original_startup_contract(&mut self, state: &crate::state::AppState) -> Result<()> {
+        let session = retained_session_protocol(&state.engine, &self.capsule)?;
+        anyhow::ensure!(
+            session.startup_contract == self.startup_contract_selection,
+            "startup selector changed from exact verified signed protocol"
+        );
+        let Some(selection) = session.startup_contract else {
+            return Ok(());
+        };
+        let original = self
+            .original_isolation
+            .as_ref()
+            .context("startup contract lacks original clock")?;
+        require_original_isolation_unexpired(original)?;
+        self.require_same_state_incarnation(state)?;
+        let resolution = self.exact.resolution_output.restore();
+        let source = crate::source_closure_admission::recover_source_closure(
+            state,
+            &state.engine,
+            &resolution,
+        )?
+        .context("signed startup contract lacks admitted Worker source")?;
+        self.original_startup_contract = Some(OriginalStartupContract {
+            selection,
+            source,
+            member: None,
+            realizations: None,
+            contract: None,
+            verified: false,
+        });
+        // Deposit actual recovered source first. Recovery's returned authority
+        // is independently joined to SAME original guard inside the blob loader.
+        let deadline = self
+            .original_isolation
+            .as_ref()
+            .expect("same original budget")
+            .original_deadline;
+        let guard = self.state_authority.acquire_shared_guard_until(deadline)?;
+        require_original_isolation_unexpired(
+            self.original_isolation
+                .as_ref()
+                .expect("same original budget"),
+        )?;
+        self.state_authority.ensure_guard(&guard)?;
+        let owner = self
+            .original_startup_contract
+            .as_mut()
+            .expect("source retained before checks");
+        owner.member = Some(
+            crate::source_closure_admission::load_selected_startup_contract_member(
+                &owner.source,
+                &owner.selection,
+                &guard,
+            )?,
+        );
+        let member = owner
+            .member
+            .as_ref()
+            .expect("bytes retained before hash/parse");
+        anyhow::ensure!(
+            member.bytes.len() as u64 == member.file.size
+                && lillux::sha256_hex(&member.bytes) == owner.selection.sha256,
+            "startup contract bytes differ from signed source member"
+        );
+        owner.contract =
+            Some(serde_json::from_slice(&member.bytes).context("decode closed startup contract")?);
+        let value = resolution
+            .composed
+            .derived
+            .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+            .context("startup contract lacks sealed external realization envelope")?;
+        owner.realizations = Some(
+            ryeos_engine::external_realization::RealizedExternalContentSet::from_value(value)?,
+        );
+        let limits = state
+            .node_policy
+            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .closure_limits()?;
+        let tinygrad = owner
+            .realizations
+            .as_ref()
+            .expect("actual set retained before verification")
+            .iter()
+            .find(|entry| entry.id == "tinygrad")
+            .context("startup contract lacks actual tinygrad realization")?;
+        anyhow::ensure!(
+            tinygrad.kind == ryeos_state::objects::ExternalContentKind::Tree
+                && tinygrad.mount == "tinygrad"
+                && tinygrad.mount_root == ryeos_state::objects::ExternalContentMountRoot::Project,
+            "startup tinygrad realization has wrong shape/mount"
+        );
+        let cas = self.state_authority.cas_store()?;
+        let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+            &cas,
+            [tinygrad.manifest_hash.clone()],
+            limits,
+        )?;
+        anyhow::ensure!(
+            closure.is_complete(),
+            "startup tinygrad actual CAS closure incomplete"
+        );
+        if let Some(manifest) =
+            ryeos_state::objects::load_if_large_content_manifest(&cas, &tinygrad.manifest_hash)?
+        {
+            anyhow::ensure!(
+                !manifest.is_file_shaped()
+                    && manifest.entry_count == tinygrad.entry_count
+                    && manifest.total_bytes == tinygrad.total_bytes,
+                "startup tinygrad large manifest differs from sealed tree realization"
+            );
+            let store = self.state_authority.large_object_store()?;
+            for entry in &manifest.entries {
+                if entry.file_sha256.is_some() {
+                    store.verify_manifest_commitment(entry)?;
+                }
+            }
+        } else {
+            let verified =
+                ryeos_state::VerifiedExternalContentClosure::load(&cas, &tinygrad.manifest_hash)?;
+            anyhow::ensure!(
+                verified.manifest().entry_count == tinygrad.entry_count
+                    && verified.manifest().total_bytes == tinygrad.total_bytes,
+                "startup tinygrad manifest differs from sealed realization"
+            );
+        }
+        self.state_authority.ensure_guard(&guard)?;
+        self.validate_original_startup_contract()?;
+        self.require_same_state_incarnation(state)?;
+        require_original_isolation_unexpired(
+            self.original_isolation
+                .as_ref()
+                .expect("same original clock"),
+        )?;
+        self.original_startup_contract
+            .as_mut()
+            .expect("actual owner retained")
+            .verified = true;
+        Ok(())
+    }
+
+    fn validate_original_startup_contract(&self) -> Result<()> {
+        let owner = self
+            .original_startup_contract
+            .as_ref()
+            .context("startup source owner absent")?;
+        let contract = owner
+            .contract
+            .as_ref()
+            .context("startup contract remains unparsed")?;
+        anyhow::ensure!(
+            contract.schema == "ryeos.local_tinygrad_current_assignment_startup.v1"
+                && contract.role == "current_assignment_nvml_preflight_v1",
+            "startup role/schema unsupported"
+        );
+        anyhow::ensure!(
+            self.startup_contract_selection.as_ref() == Some(&owner.selection),
+            "startup signed selector differs from verified capsule"
+        );
+        let ryeos_state::objects::SourceLogicalBinding::Worker { root, entry } =
+            &owner.source.binding().logical_binding
+        else {
+            bail!("startup source is not an ordinary typed-source Worker");
+        };
+        anyhow::ensure!(
+            &contract.entry.root == root && &contract.entry.path == entry,
+            "startup entry differs from actual Worker binding"
+        );
+        require_startup_source_member(&owner.source, &contract.entry)?;
+        anyhow::ensure!(
+            (1..=64).contains(&contract.bootstrap_members.len()),
+            "startup bootstrap member count invalid"
+        );
+        let mut previous: Option<(&str, &str)> = None;
+        let mut has_entry = false;
+        for member in &contract.bootstrap_members {
+            let key = (member.root.as_str(), member.path.as_str());
+            anyhow::ensure!(
+                previous.is_none_or(|old| old < key),
+                "startup bootstrap members duplicate/unsorted"
+            );
+            previous = Some(key);
+            require_startup_source_member(&owner.source, member)?;
+            has_entry |= member.root == contract.entry.root
+                && member.path == contract.entry.path
+                && member.sha256 == contract.entry.sha256;
+        }
+        anyhow::ensure!(has_entry, "startup bootstrap omits actual entry");
+        let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
+            execution_plan,
+            ..
+        } = &self.capsule.execution_closure
+        else {
+            bail!("startup contract lacks exact direct launch plan");
+        };
+        let plan: ryeos_engine::contracts::ExecutionPlan =
+            serde_json::from_value(execution_plan.clone())?;
+        anyhow::ensure!(
+            matches!(
+                plan.endpoint_requirement,
+                ryeos_engine::contracts::ExecutionEndpointRequirement::Local {}
+            ) && plan.external_endpoint_binding.is_none()
+                && self.capsule.external_candidate.is_none(),
+            "startup role requires actual local placement"
+        );
+        let mut subprocesses = plan.nodes.iter().filter_map(|node| match node {
+            ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } => {
+                Some(spec.as_ref())
+            }
+            _ => None,
+        });
+        let spec = subprocesses
+            .next()
+            .context("startup launch lacks subprocess")?;
+        anyhow::ensure!(
+            subprocesses.next().is_none(),
+            "startup launch has alternate subprocess"
+        );
+        let code = spec
+            .verified_command
+            .as_ref()
+            .context("startup command lacks actual admitted executable")?
+            .code();
+        anyhow::ensure!(
+            contract.launch.command_sha256 == code.content_hash
+                && contract.launch.args == spec.args
+                && (1..=32).contains(&contract.launch.args.len()),
+            "startup command/typed args differ from retained plan"
+        );
+        let mut entry_args = 0;
+        for arg in &contract.launch.args {
+            match arg {
+                ryeos_engine::contracts::PlanArgument::AdmittedSourceEntry => entry_args += 1,
+                ryeos_engine::contracts::PlanArgument::Literal { value }
+                    if value.len() <= 1024 && !value.chars().any(char::is_control) => {}
+                _ => bail!("startup argument authorizes alternate/unbounded source"),
+            }
+        }
+        let retained_env: std::collections::BTreeMap<String, String> = spec
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        anyhow::ensure!(
+            entry_args == 1
+                && contract.launch.env.len() <= 32
+                && contract.launch.env == retained_env,
+            "startup static environment differs from retained plan"
+        );
+        anyhow::ensure!(
+            lillux::canonical_json(&serde_json::to_value(&contract.launch.env)?)
+                .map_err(anyhow::Error::msg)?
+                .len()
+                <= 4096
+                && contract.launch.env.iter().all(|(k, v)| !k.is_empty()
+                    && k.len() <= 128
+                    && v.len() <= 4096
+                    && !k.chars().any(char::is_control)
+                    && !v.chars().any(char::is_control)),
+            "startup environment unbounded"
+        );
+        let dynamic = &contract.launch.dynamic_channels;
+        anyhow::ensure!(
+            dynamic.len() == 2
+                && dynamic[0].env == self.capsule.wire.channel_env
+                && dynamic[0].target_fd == 0
+                && dynamic[1].env == cleanup_channel::CHANNEL_ENV
+                && dynamic[1].target_fd == cleanup_channel::TARGET_FD
+                && dynamic[0].env != dynamic[1].env
+                && dynamic
+                    .iter()
+                    .all(|item| !contract.launch.env.contains_key(&item.env)),
+            "startup dynamic FD/env declaration differs"
+        );
+        let environment =
+            lillux::canonical_json(&serde_json::to_value(&self.capsule.process_environment)?)
+                .map_err(anyhow::Error::msg)?;
+        require_startup_dynamic_environment_keys(
+            self.capsule.process_environment.keys().map(String::as_str),
+            &retained_env,
+            &dynamic[0].env,
+            &dynamic[1].env,
+        )?;
+        anyhow::ensure!(
+            contract.launch.process_environment_sha256
+                == lillux::sha256_hex(environment.as_bytes()),
+            "startup declared dynamic realization environment differs from capsule"
+        );
+        let products = self
+            .original_product_inputs
+            .as_ref()
+            .context("startup role lacks actual retained products/device")?;
+        let declared = &contract.products;
+        anyhow::ensure!(
+            declared.gnu_slot == "python-gnu"
+                && declared.driver_slot == "driver"
+                && declared.nvml_member == "lib/libnvidia-ml.so.1"
+                && declared.provider_checks == "trusted-gnu-loader-provider-and-function-origin-v1"
+                && declared.gnu_manifest_sha256 == products.gnu.selection.manifest_hash
+                && declared.driver_manifest_sha256 == products.driver.selection.manifest_hash,
+            "startup selected GNU/driver provider envelope differs"
+        );
+        let tinygrad = owner
+            .realizations
+            .as_ref()
+            .context("startup external envelope missing")?
+            .iter()
+            .find(|entry| entry.id == "tinygrad")
+            .context("startup tinygrad realization missing")?;
+        anyhow::ensure!(
+            declared.tinygrad_manifest_sha256 == tinygrad.manifest_hash,
+            "startup tinygrad envelope differs"
+        );
+        let realizations = owner
+            .realizations
+            .as_ref()
+            .expect("actual envelope retained");
+        for (id, product) in [("python-gnu", &products.gnu), ("driver", &products.driver)] {
+            let actual = realizations
+                .iter()
+                .find(|entry| entry.id == id)
+                .context("startup product realization missing")?;
+            require_startup_realization_coordinates(
+                actual,
+                &product.selection.declaration,
+                &product.selection.manifest_hash,
+                product.witness.evidence.entry_count,
+                product.witness.evidence.total_bytes,
+            )?;
+        }
+        require_startup_gnu_launch_coordinates(
+            &spec.args,
+            &retained_env,
+            products.gnu.selection.declaration.mount_root,
+            &products.gnu.selection.declaration.mount,
+            products.driver.selection.declaration.mount_root,
+            &products.driver.selection.declaration.mount,
+            tinygrad.mount_root,
+            &tinygrad.mount,
+        )?;
+        // These are actual authenticated selected manifests, not merely matching
+        // declared hashes. Canonical internal symlinks remain qualified-product
+        // semantics; the independently admitted bootstrap still checks origins.
+        for path in [
+            "python/bin/python3.14",
+            "python/lib/ld-linux-x86-64.so.2",
+            "python/lib/libc.so.6",
+        ] {
+            require_startup_executable_manifest_member(&products.gnu.manifest, path)?;
+        }
+        require_startup_executable_manifest_member(
+            &products.driver.manifest,
+            &declared.nvml_member,
+        )?;
+        anyhow::ensure!(
+            products
+                .gnu
+                .manifest
+                .entries
+                .iter()
+                .any(|entry| entry.path == "python/lib"
+                    && entry.kind == ryeos_state::objects::ExternalContentManifestEntryKind::Dir),
+            "startup GNU library namespace absent from actual manifest"
+        );
+        anyhow::ensure!(
+            contract.policy.schema == "ryeos.local_tinygrad_nvml_assignment_policy.v1"
+                && !contract.policy.primary_device_role.is_empty()
+                && contract.policy.primary_device_role.len() <= 64
+                && contract
+                    .policy
+                    .primary_device_role
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                && products
+                    .devices
+                    .identities()
+                    .iter()
+                    .any(|device| device.role == contract.policy.primary_device_role),
+            "startup finite policy differs from actual selected device roles"
+        );
+        let wire = &contract.wire;
+        anyhow::ensure!(
+            wire.target_fd == 4
+                && wire.preflight_version == 3
+                && wire.result_version == 3
+                && wire.init_version == 2
+                && wire.maximum_frame_bytes == 4096,
+            "startup wire contract differs"
+        );
+        Ok(())
+    }
+
+    fn require_retained_original_startup_contract(&self) -> Result<()> {
+        if let Some(owner) = &self.original_startup_contract {
+            anyhow::ensure!(
+                owner.verified,
+                "startup source/member validation remains refused"
+            );
+            self.validate_original_startup_contract()?;
+        } else {
+            anyhow::ensure!(
+                self.startup_contract_selection.is_none(),
+                "selected startup contract remains unprepared"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn require_startup_source_member(
+    source: &crate::source_closure_admission::AdmittedSourceClosure,
+    member: &StartupSourceMember,
+) -> Result<()> {
+    let selection =
+        ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+            source_root: member.root.clone(),
+            member: member.path.clone(),
+            sha256: member.sha256.clone(),
+        };
+    selection.validate().map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        source
+            .manifest()
+            .entries
+            .iter()
+            .any(|entry| entry.root == member.root
+                && entry.path == member.path
+                && entry.blob_hash == member.sha256),
+        "startup bootstrap member differs from actual source manifest"
+    );
+    Ok(())
+}
+
+fn require_startup_realization_coordinates(
+    actual: &ryeos_state::objects::ExternalContentRealization,
+    declaration: &ryeos_state::external_content::products::composition::ExternalProductSlotDeclaration,
+    manifest_hash: &str,
+    entry_count: usize,
+    total_bytes: u64,
+) -> Result<()> {
+    anyhow::ensure!(
+        actual.id == declaration.id
+            && actual.kind == declaration.kind
+            && actual.mode == ryeos_state::objects::ExternalContentMode::Pinned
+            && actual.manifest_hash == manifest_hash
+            && actual.mount_root == declaration.mount_root
+            && actual.mount == declaration.mount
+            && actual.entry_count == entry_count
+            && actual.total_bytes == total_bytes,
+        "startup actual product realization contradicts selected coordinates"
+    );
+    Ok(())
+}
+
+// Finite grammar for this exact GNU Python compatibility product, not a second
+// plan compiler or a constructor of executable/qualified owner authority.
+fn require_startup_gnu_launch_coordinates(
+    args: &[ryeos_engine::contracts::PlanArgument],
+    env: &std::collections::BTreeMap<String, String>,
+    gnu_root: ryeos_state::objects::ExternalContentMountRoot,
+    gnu_mount: &str,
+    driver_root: ryeos_state::objects::ExternalContentMountRoot,
+    driver_mount: &str,
+    tinygrad_root: ryeos_state::objects::ExternalContentMountRoot,
+    tinygrad_mount: &str,
+) -> Result<()> {
+    use ryeos_state::objects::ExternalContentMountRoot::Project;
+    anyhow::ensure!(
+        gnu_root == Project
+            && driver_root == Project
+            && tinygrad_root == Project
+            && gnu_mount == "python-gnu"
+            && driver_mount == "driver"
+            && tinygrad_mount == "tinygrad",
+        "startup product roots/mounts differ from the finite GNU workspace layout"
+    );
+    let mut expected: Vec<_> = [
+        format!("{gnu_mount}/python/lib/ld-linux-x86-64.so.2"),
+        "--inhibit-cache".into(),
+        "--library-path".into(),
+        format!("{gnu_mount}/python/lib"),
+        format!("{gnu_mount}/python/bin/python3.14"),
+        "-P".into(),
+        "-S".into(),
+        "-B".into(),
+        "-X".into(),
+        "utf8".into(),
+    ]
+    .into_iter()
+    .map(ryeos_engine::contracts::PlanArgument::literal)
+    .collect();
+    expected.push(ryeos_engine::contracts::PlanArgument::AdmittedSourceEntry);
+    anyhow::ensure!(
+        args == expected.as_slice(),
+        "startup interpreter/loader argv is not the selected GNU recipe"
+    );
+    for (key, value) in [
+        ("PYTHONHOME", format!("{gnu_mount}/python")),
+        ("PYTHONHASHSEED", "0".into()),
+        ("PYTHONDONTWRITEBYTECODE", "1".into()),
+        ("PYTHONNOUSERSITE", "1".into()),
+        ("PYTHONSAFEPATH", "1".into()),
+        ("PYTHONUNBUFFERED", "1".into()),
+        ("PATH", "".into()),
+    ] {
+        anyhow::ensure!(
+            env.get(key) == Some(&value),
+            "startup selected GNU environment coordinate differs: {key}"
+        );
+    }
+    for key in env.keys() {
+        let selected_python = [
+            "PYTHONHOME",
+            "PYTHONHASHSEED",
+            "PYTHONDONTWRITEBYTECODE",
+            "PYTHONNOUSERSITE",
+            "PYTHONSAFEPATH",
+            "PYTHONUNBUFFERED",
+        ]
+        .contains(&key.as_str());
+        anyhow::ensure!(
+            !startup_environment_override_name(key) || selected_python,
+            "startup ambient loader/interpreter override refused: {key}"
+        );
+    }
+    Ok(())
+}
+
+fn startup_environment_override_name(key: &str) -> bool {
+    key.starts_with("LD_")
+        || key.starts_with("PYTHON")
+        || [
+            "GLIBC_TUNABLES",
+            "GCONV_PATH",
+            "LOCPATH",
+            "__PYVENV_LAUNCHER__",
+        ]
+        .contains(&key)
+}
+
+fn require_startup_dynamic_environment_keys<'a>(
+    keys: impl IntoIterator<Item = &'a str>,
+    retained_env: &std::collections::BTreeMap<String, String>,
+    session_env: &str,
+    cleanup_env: &str,
+) -> Result<()> {
+    for key in keys {
+        anyhow::ensure!(
+            !retained_env.contains_key(key)
+                && key != session_env
+                && key != cleanup_env
+                && !startup_environment_override_name(key),
+            "startup late environment overrides selected bootstrap/FD identity: {key}"
+        );
+    }
+    Ok(())
+}
+
+fn require_startup_executable_manifest_member(
+    manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
+    path: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        manifest.entries.iter().any(|entry| entry.path == path
+            && matches!(
+                entry.kind,
+                ryeos_state::objects::ExternalContentManifestEntryKind::File
+                    | ryeos_state::objects::ExternalContentManifestEntryKind::Symlink
+            )),
+        "startup selected provider executable/library member missing: {path}"
+    );
+    Ok(())
 }
 
 fn authenticate_original_selected_product(
@@ -829,6 +1538,266 @@ fn require_original_terminal_reporter_contract(
 mod tests {
     use super::*;
     use ryeos_engine::protocols::descriptor::PersistentSessionCleanupAuthority;
+
+    #[test]
+    fn startup_gnu_recipe_refuses_alternate_interpreter_loader_and_late_env_shadowing() {
+        use ryeos_engine::contracts::PlanArgument;
+        use ryeos_state::objects::ExternalContentMountRoot::{ExecutionRuntime, Project};
+        // Raw comparison data only, not an admitted executable/source owner.
+        let mut args: Vec<_> = [
+            "python-gnu/python/lib/ld-linux-x86-64.so.2",
+            "--inhibit-cache",
+            "--library-path",
+            "python-gnu/python/lib",
+            "python-gnu/python/bin/python3.14",
+            "-P",
+            "-S",
+            "-B",
+            "-X",
+            "utf8",
+        ]
+        .into_iter()
+        .map(PlanArgument::literal)
+        .collect();
+        args.push(PlanArgument::AdmittedSourceEntry);
+        let env: std::collections::BTreeMap<String, String> = [
+            ("PYTHONHOME", "python-gnu/python"),
+            ("PYTHONHASHSEED", "0"),
+            ("PYTHONDONTWRITEBYTECODE", "1"),
+            ("PYTHONNOUSERSITE", "1"),
+            ("PYTHONSAFEPATH", "1"),
+            ("PYTHONUNBUFFERED", "1"),
+            ("PATH", ""),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+        require_startup_gnu_launch_coordinates(
+            &args,
+            &env,
+            Project,
+            "python-gnu",
+            Project,
+            "driver",
+            Project,
+            "tinygrad",
+        )
+        .unwrap();
+        for (index, alternate) in [
+            (0, "/lib64/ld-linux-x86-64.so.2"),
+            (3, "/usr/lib"),
+            (4, "/usr/bin/python3.14"),
+        ] {
+            let mut altered = args.clone();
+            altered[index] = PlanArgument::literal(alternate);
+            assert!(
+                require_startup_gnu_launch_coordinates(
+                    &altered,
+                    &env,
+                    Project,
+                    "python-gnu",
+                    Project,
+                    "driver",
+                    Project,
+                    "tinygrad"
+                )
+                .is_err()
+            );
+        }
+        for roots in [
+            (ExecutionRuntime, Project, Project),
+            (Project, ExecutionRuntime, Project),
+            (Project, Project, ExecutionRuntime),
+        ] {
+            assert!(
+                require_startup_gnu_launch_coordinates(
+                    &args,
+                    &env,
+                    roots.0,
+                    "python-gnu",
+                    roots.1,
+                    "driver",
+                    roots.2,
+                    "tinygrad"
+                )
+                .is_err()
+            );
+        }
+        let mut audit = env.clone();
+        audit.insert("LD_AUDIT".into(), "foreign.so".into());
+        assert!(
+            require_startup_gnu_launch_coordinates(
+                &args,
+                &audit,
+                Project,
+                "python-gnu",
+                Project,
+                "driver",
+                Project,
+                "tinygrad"
+            )
+            .is_err()
+        );
+        for key in [
+            "PYTHONSAFEPATH",
+            "PYTHONHASHSEED",
+            "PYTHONNOUSERSITE",
+            "PYTHONDONTWRITEBYTECODE",
+            "LD_AUDIT",
+            "RYEOS_SESSION_FD",
+            "RYEOS_RESOURCE_CLEANUP_FD",
+        ] {
+            assert!(
+                require_startup_dynamic_environment_keys(
+                    [key],
+                    &env,
+                    "RYEOS_SESSION_FD",
+                    "RYEOS_RESOURCE_CLEANUP_FD"
+                )
+                .is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_actual_realization_comparison_refuses_wrong_mount_root_and_identity() {
+        use ryeos_state::objects::{
+            ExternalContentKind::Tree,
+            ExternalContentMode::Pinned,
+            ExternalContentMountRoot::{ExecutionRuntime, Project},
+        };
+        // Plain declared/realized DTO comparisons, no qualified witness fixture.
+        let declaration =
+            ryeos_state::external_content::products::composition::ExternalProductSlotDeclaration {
+                id: "python-gnu".into(),
+                relationship_ref: "config:fixture/relationship".into(),
+                relationship: "gnu".into(),
+                kind: Tree,
+                mount_root: Project,
+                mount: "python-gnu".into(),
+            };
+        let actual = ryeos_state::objects::ExternalContentRealization {
+            id: "python-gnu".into(),
+            kind: Tree,
+            mode: Pinned,
+            manifest_hash: "a".repeat(64),
+            entry_count: 1,
+            total_bytes: 1,
+            mount_root: Project,
+            mount: "python-gnu".into(),
+        };
+        require_startup_realization_coordinates(&actual, &declaration, &actual.manifest_hash, 1, 1)
+            .unwrap();
+        let mut wrong = actual.clone();
+        wrong.mount_root = ExecutionRuntime;
+        assert!(
+            require_startup_realization_coordinates(
+                &wrong,
+                &declaration,
+                &actual.manifest_hash,
+                1,
+                1
+            )
+            .is_err()
+        );
+        let mut wrong = actual.clone();
+        wrong.mount = "alternate-gnu".into();
+        assert!(
+            require_startup_realization_coordinates(
+                &wrong,
+                &declaration,
+                &actual.manifest_hash,
+                1,
+                1
+            )
+            .is_err()
+        );
+        assert!(
+            require_startup_realization_coordinates(&actual, &declaration, &"b".repeat(64), 1, 1)
+                .is_err()
+        );
+    }
+
+    // Closed syntax fixtures only, never admitted source/device/provider owners.
+    fn startup_contract_syntax() -> serde_json::Value {
+        let member =
+            serde_json::json!({"root":"source","path":"bootstrap.py","sha256":"a".repeat(64)});
+        serde_json::json!({
+            "schema":"ryeos.local_tinygrad_current_assignment_startup.v1", "role":"current_assignment_nvml_preflight_v1",
+            "entry":member.clone(), "bootstrap_members":[member],
+            "launch":{"command_sha256":"b".repeat(64),"args":[{"kind":"admitted_source_entry"}],"env":{},
+                "process_environment_sha256":"c".repeat(64),"dynamic_channels":[{"env":"RYEOS_SESSION_FD","target_fd":0},{"env":"RYEOS_RESOURCE_CLEANUP_FD","target_fd":4}]},
+            "products":{"gnu_slot":"python-gnu","driver_slot":"driver","nvml_member":"lib/libnvidia-ml.so.1",
+                "provider_checks":"trusted-gnu-loader-provider-and-function-origin-v1","gnu_manifest_sha256":"d".repeat(64),
+                "driver_manifest_sha256":"e".repeat(64),"tinygrad_manifest_sha256":"f".repeat(64)},
+            "policy":{"schema":"ryeos.local_tinygrad_nvml_assignment_policy.v1","primary_device_role":"primary","l4_query_policy":null},
+            "wire":{"target_fd":4,"preflight_version":3,"result_version":3,"init_version":2,"maximum_frame_bytes":4096}})
+    }
+
+    #[test]
+    fn startup_contract_nested_objects_and_nullable_policy_are_closed() {
+        let original = startup_contract_syntax();
+        let parsed: StartupContract = serde_json::from_value(original.clone()).unwrap();
+        assert!(parsed.policy.l4_query_policy.is_none());
+        for path in [
+            "",
+            "/entry",
+            "/bootstrap_members/0",
+            "/launch",
+            "/launch/dynamic_channels/0",
+            "/products",
+            "/policy",
+            "/wire",
+        ] {
+            let mut value = original.clone();
+            value
+                .pointer_mut(path)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("unknown".into(), serde_json::json!(true));
+            assert!(
+                serde_json::from_value::<StartupContract>(value).is_err(),
+                "{path}"
+            );
+        }
+        let mut value = original.clone();
+        value["policy"]
+            .as_object_mut()
+            .unwrap()
+            .remove("l4_query_policy");
+        assert!(serde_json::from_value::<StartupContract>(value).is_err());
+        for policy in [
+            serde_json::json!(false),
+            serde_json::json!("automatic"),
+            serde_json::json!([]),
+        ] {
+            let mut value = original.clone();
+            value["policy"]["l4_query_policy"] = policy;
+            assert!(serde_json::from_value::<StartupContract>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn startup_contract_environment_refuses_duplicate_and_oversized_names() {
+        let original = serde_json::to_string(&startup_contract_syntax()).unwrap();
+        let duplicate = original.replace(
+            "\"env\":{}",
+            "\"env\":{\"DEV\":\"CUDA:PTX\",\"DEV\":\"CPU\"}",
+        );
+        assert!(serde_json::from_str::<StartupContract>(&duplicate).is_err());
+        let mut value = startup_contract_syntax();
+        value["launch"]["env"] = serde_json::json!({"DEV":true});
+        assert!(serde_json::from_value::<StartupContract>(value).is_err());
+        let mut value = startup_contract_syntax();
+        value["launch"]["env"] = serde_json::Value::Object(
+            (0..33)
+                .map(|i| (format!("KEY{i}"), serde_json::json!("x")))
+                .collect(),
+        );
+        assert!(serde_json::from_value::<StartupContract>(value).is_err());
+    }
 
     #[test]
     fn original_reporter_contract_requires_declaration_and_inspection() {

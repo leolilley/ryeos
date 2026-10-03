@@ -4792,6 +4792,7 @@ mod tests {
         ryeos_engine::protocols::descriptor::PersistentSessionProtocol {
             process_mode,
             cleanup_authority,
+            startup_contract: None,
             resource_cleanup_contract: (process_mode
                 == PersistentSessionProcessMode::PooledRequests
                 && cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup)

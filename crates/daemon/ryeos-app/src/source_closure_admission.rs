@@ -70,6 +70,48 @@ impl AdmittedSourceClosure {
     }
 }
 
+/// Raw owned bytes beneath an ACTUAL recovered source. The original input owner
+/// must retain this value before content validation/parsing or late checks.
+pub(crate) struct LoadedStartupContractMember {
+    pub(crate) file: ryeos_state::objects::SourceClosureFile,
+    pub(crate) bytes: Vec<u8>,
+}
+
+pub(crate) fn load_selected_startup_contract_member(
+    captured: &AdmittedSourceClosure,
+    selection: &ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection,
+    guard: &ryeos_state::CasMutationGuard,
+) -> anyhow::Result<LoadedStartupContractMember> {
+    selection.validate().map_err(anyhow::Error::msg)?;
+    let authority = captured.source_authority()?;
+    // Recovery acquired its own authority: join that ACTUAL authority to the
+    // original owner's SAME guard BEFORE any selected blob read.
+    authority.ensure_guard(guard)?;
+    captured
+        .binding()
+        .validate_content_manifest(captured.manifest())?;
+    let file = captured
+        .manifest()
+        .entries
+        .iter()
+        .find(|file| file.root == selection.source_root && file.path == selection.member)
+        .context("signed startup contract member absent from actual source")?;
+    ensure!(
+        file.blob_hash == selection.sha256 && file.size > 0 && file.size <= 16 * 1024,
+        "signed startup contract member identity/size mismatch"
+    );
+    let cas = authority.cas_store()?;
+    let bytes = cas
+        .get_blob_bounded(&file.blob_hash, file.size)?
+        .context("signed startup contract blob absent")?;
+    // Raw bytes are returned for deposit before validation. This helper cannot
+    // issue accepted startup authority or a qualified device/provider value.
+    Ok(LoadedStartupContractMember {
+        file: file.clone(),
+        bytes,
+    })
+}
+
 /// Compile a structured-session Worker only from its admitted source blobs.
 /// The supplied guard must belong to the capture's retained CAS authority.
 /// This helper never reopens the live Bundle or treats a profile path as authority.
