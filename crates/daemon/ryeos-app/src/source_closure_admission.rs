@@ -1513,9 +1513,22 @@ pub(crate) mod temporary_source_fixture {
         member: &[u8],
         logical_root: &str,
     ) -> anyhow::Result<Fixture> {
-        // Same canonical path rule as WorkerSourceDeclaration::validate,
-        // before acquiring or writing any temporary filesystem content.
+        admit_with_logical_root_and_member(state, member, logical_root, "startup.json")
+    }
+
+    pub(crate) fn admit_with_logical_root_and_member(
+        state: &mut AppState,
+        member: &[u8],
+        logical_root: &str,
+        member_path: &str,
+    ) -> anyhow::Result<Fixture> {
+        // Validate both relative coordinates before allocation or writes.
         ryeos_state::objects::validate_canonical_project_relative_path(logical_root)?;
+        ryeos_state::objects::validate_canonical_project_relative_path(member_path)?;
+        anyhow::ensure!(
+            member_path != "bootstrap.py",
+            "temporary member replaces entry"
+        );
         let bundle = tempfile::tempdir()?;
         let kinds = bundle.path().join("fixture-kinds");
         std::fs::create_dir_all(kinds.join("worker"))?;
@@ -1575,7 +1588,13 @@ composer: handler:ryeos/core/identity
             bundle.path().join(&prefix).join("bootstrap.py"),
             b"# C2 source only\n",
         )?;
-        std::fs::write(bundle.path().join(&prefix).join("startup.json"), member)?;
+        let member_file = bundle.path().join(&prefix).join(member_path);
+        std::fs::create_dir_all(
+            member_file
+                .parent()
+                .context("temporary member parent absent")?,
+        )?;
+        std::fs::write(member_file, member)?;
         let source = DirectorySourceContent::new(
             bundle.path(),
             "bundle:factory-fixture".into(),

@@ -1226,6 +1226,7 @@ impl VerifiedTrustedPooledSessionInputs {
             self.startup_contract_selection.as_ref() == Some(&owner.selection),
             "startup signed selector differs from verified capsule"
         );
+        require_current_v2_startup_selector(&owner.selection, decoded)?;
         require_startup_worker_entry(&owner.source, &contract.entry)?;
         anyhow::ensure!(
             (1..=64).contains(&contract.bootstrap_members.len()),
@@ -1465,6 +1466,28 @@ impl VerifiedTrustedPooledSessionInputs {
         }
         Ok(())
     }
+}
+
+// Finite current-role source coordinates, rechecked by the full retained
+// validator. This constrains an authenticated selection, never creates one.
+fn require_current_v2_startup_selector(
+    selection: &ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection,
+    decoded: &DecodedStartupContract,
+) -> Result<()> {
+    selection.validate().map_err(anyhow::Error::msg)?;
+    decoded.require_closed_schema_delivery()?;
+    if let DecodedStartupContract::V2 { delivery, .. } = decoded {
+        anyhow::ensure!(
+            selection.source_root == "source"
+                && selection.member == "contracts/current-assignment-startup-v2.json",
+            "current v2 startup selector differs from fixed source member"
+        );
+        anyhow::ensure!(
+            delivery.consumer.root == "source" && delivery.consumer.path == "bootstrap_support.py",
+            "current v2 startup consumer differs from fixed source member"
+        );
+    }
+    Ok(())
 }
 
 fn require_startup_worker_entry(

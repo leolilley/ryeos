@@ -827,3 +827,198 @@ fn temporary_c2_logical_root_yaml_metacharacters_preserve_signed_declaration() {
     ));
     assert_eq!(source.recovered.manifest().roots[0].id, "source");
 }
+
+// Closed syntax data only: product/launch hashes below are placeholders. The
+// nested-source control authenticates actual source bytes, not a full original
+// binder, bootstrap execution, qualified product pair or funded held child.
+fn fixed_v2_syntax() -> serde_json::Value {
+    let entry = serde_json::json!({"root":"source","path":"bootstrap.py","sha256":"a".repeat(64)});
+    let consumer =
+        serde_json::json!({"root":"source","path":"bootstrap_support.py","sha256":"b".repeat(64)});
+    serde_json::json!({
+        "schema":"ryeos.local_tinygrad_current_assignment_startup.v2",
+        "role":"current_assignment_nvml_preflight_v2",
+        "entry":entry.clone(), "bootstrap_members":[entry,consumer],
+        "launch":{"command_sha256":"b".repeat(64),"args":[{"kind":"admitted_source_entry"}],"env":{},
+            "process_environment_sha256":"c".repeat(64),"dynamic_channels":[{"env":"RYEOS_SESSION_FD","target_fd":0},{"env":"RYEOS_RESOURCE_CLEANUP_FD","target_fd":4}]},
+        "products":{"gnu_slot":"python-gnu","driver_slot":"driver","nvml_member":"lib/libnvidia-ml.so.1",
+            "provider_checks":"trusted-gnu-loader-provider-and-function-origin-v1","gnu_manifest_sha256":"d".repeat(64),
+            "driver_manifest_sha256":"e".repeat(64),"tinygrad_manifest_sha256":"f".repeat(64)},
+        "policy":{"schema":"ryeos.local_tinygrad_nvml_assignment_policy.v1","primary_device_role":"primary","l4_query_policy":null},
+        "wire":{"target_fd":4,"preflight_version":3,"result_version":3,"init_version":2,"maximum_frame_bytes":4096},
+        "manifest_delivery":{"abi":"fixed_namespace_v1",
+            "gnu":{"destination":"/opt/ryeos-original-manifests/gnu.json","access":"read_only"},
+            "driver":{"destination":"/opt/ryeos-original-manifests/driver.json","access":"read_only"},
+            "consumer":{"root":"source","path":"bootstrap_support.py"}}
+    })
+}
+
+fn fixed_v2_selection(
+    bytes: &[u8],
+) -> ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+    ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+        source_root: "source".into(),
+        member: "contracts/current-assignment-startup-v2.json".into(),
+        sha256: lillux::sha256_hex(bytes),
+    }
+}
+
+#[test]
+fn current_v2_fixed_selector_reads_actual_nested_recovered_member_under_same_guard() {
+    let raw = serde_json::to_vec(&fixed_v2_syntax()).unwrap();
+    let selected = fixed_v2_selection(&raw);
+    let (root, mut state, capsule_hash) = fixture_with_startup(Some(selected.clone()));
+    let inputs = VerifiedTrustedPooledSessionInputs::verify(&state, &capsule_hash).unwrap();
+    assert_eq!(inputs.startup_contract_selection.as_ref(), Some(&selected));
+    assert!(inputs.original_startup_contract.is_none());
+    let source = crate::source_closure_admission::temporary_source_fixture::admit_with_logical_root_and_member(
+        &mut state, &raw, "lib/local-tinygrad-gnu", &selected.member,
+    ).unwrap();
+    assert!(matches!(&source.recovered.binding().logical_binding,
+        SourceLogicalBinding::Worker { root, entry } if root == "lib/local-tinygrad-gnu" && entry == "bootstrap.py"));
+    let guard = source
+        .publication
+        .authority()
+        .acquire_shared_guard()
+        .unwrap();
+    let loaded = crate::source_closure_admission::load_selected_startup_contract_member(
+        &source.recovered,
+        inputs.startup_contract_selection.as_ref().unwrap(),
+        &guard,
+    )
+    .unwrap();
+    assert_eq!(loaded.bytes, raw);
+    assert_eq!(loaded.file.root, "source");
+    assert_eq!(loaded.file.path, selected.member);
+    assert_eq!(loaded.file.blob_hash, lillux::sha256_hex(&loaded.bytes));
+    let decoded = decode_startup_contract(&loaded.bytes).unwrap();
+    require_current_v2_startup_selector(&selected, &decoded).unwrap();
+    let mut substituted = selected.clone();
+    substituted.sha256 = lillux::sha256_hex(b"different raw member");
+    assert!(
+        crate::source_closure_admission::load_selected_startup_contract_member(
+            &source.recovered,
+            &substituted,
+            &guard,
+        )
+        .is_err()
+    );
+    // No legacy filename fallback exists in either selector or actual CAS read.
+    let mut legacy = selected.clone();
+    legacy.member = "startup.json".into();
+    assert!(require_current_v2_startup_selector(&legacy, &decoded).is_err());
+    assert!(
+        crate::source_closure_admission::load_selected_startup_contract_member(
+            &source.recovered,
+            &legacy,
+            &guard,
+        )
+        .is_err()
+    );
+    assert!(inputs.original_startup_request_inputs(&state).is_err());
+    drop(guard);
+    drop(source);
+    drop(root);
+}
+
+#[test]
+fn current_v2_fixed_selector_refuses_canonical_alternates_and_invalid_selection() {
+    let raw = serde_json::to_vec(&fixed_v2_syntax()).unwrap();
+    let selection = fixed_v2_selection(&raw);
+    let decoded = decode_startup_contract(&raw).unwrap();
+    require_current_v2_startup_selector(&selection, &decoded).unwrap();
+    for (root, member, hash) in [
+        (
+            "foreign",
+            selection.member.as_str(),
+            selection.sha256.as_str(),
+        ),
+        ("source", "contracts/other.json", selection.sha256.as_str()),
+        ("source", "startup.json", selection.sha256.as_str()),
+        (
+            "source",
+            "contracts/../current-assignment-startup-v2.json",
+            selection.sha256.as_str(),
+        ),
+        ("source", selection.member.as_str(), "invalid-sha"),
+    ] {
+        let alternate =
+            ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+                source_root: root.into(),
+                member: member.into(),
+                sha256: hash.into(),
+            };
+        assert!(require_current_v2_startup_selector(&alternate, &decoded).is_err());
+    }
+    // Change the unique membership together with the consumer so these remain
+    // closed-schema-valid documents; refusal must be the finite predicate.
+    for (root, path) in [("foreign", "bootstrap_support.py"), ("source", "other.py")] {
+        let mut value = fixed_v2_syntax();
+        value["manifest_delivery"]["consumer"]["root"] = root.into();
+        value["manifest_delivery"]["consumer"]["path"] = path.into();
+        value["bootstrap_members"][1]["root"] = root.into();
+        value["bootstrap_members"][1]["path"] = path.into();
+        let changed = decode_startup_contract(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(require_current_v2_startup_selector(&selection, &changed).is_err());
+    }
+}
+
+#[test]
+fn current_v2_fixed_selector_preserves_separate_legacy_role() {
+    let mut value = fixed_v2_syntax();
+    value["schema"] = "ryeos.local_tinygrad_current_assignment_startup.v1".into();
+    value["role"] = "current_assignment_nvml_preflight_v1".into();
+    value.as_object_mut().unwrap().remove("manifest_delivery");
+    let raw = serde_json::to_vec(&value).unwrap();
+    let decoded = decode_startup_contract(&raw).unwrap();
+    let legacy = ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+        source_root: "source".into(),
+        member: "startup.json".into(),
+        sha256: lillux::sha256_hex(&raw),
+    };
+    require_current_v2_startup_selector(&legacy, &decoded).unwrap();
+    value["role"] = "current_assignment_nvml_preflight_v2".into();
+    assert!(decode_startup_contract(&serde_json::to_vec(&value).unwrap()).is_err());
+}
+
+#[test]
+fn current_v2_missing_nested_member_refuses_actual_source_read() {
+    let (_root, _state, _inputs, source) = temporary_c2_fixture();
+    let guard = source
+        .publication
+        .authority()
+        .acquire_shared_guard()
+        .unwrap();
+    let selected = fixed_v2_selection(C2_RAW_MEMBER);
+    let error = crate::source_closure_admission::load_selected_startup_contract_member(
+        &source.recovered,
+        &selected,
+        &guard,
+    )
+    .err()
+    .expect("missing nested member must refuse");
+    assert!(
+        error
+            .to_string()
+            .contains("member absent from actual source")
+    );
+}
+
+#[test]
+fn current_v2_member_builder_refuses_noncanonical_and_entry_collision_paths() {
+    for member in [
+        "",
+        "/contracts/x.json",
+        "../x.json",
+        "contracts/../x.json",
+        "contracts//x.json",
+        "contracts/./x.json",
+        "bootstrap.py",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::state::test_support::build(root.path()).unwrap();
+        assert!(crate::source_closure_admission::temporary_source_fixture::admit_with_logical_root_and_member(
+            &mut state, b"inert syntax", "lib/local-tinygrad-gnu", member,
+        ).is_err());
+    }
+}
