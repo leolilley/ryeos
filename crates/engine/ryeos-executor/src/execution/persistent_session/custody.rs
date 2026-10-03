@@ -191,6 +191,7 @@ impl PreparedTrustedSessionCustody {
         original_start: &ryeos_app::persistent_session::PersistentSessionPooledStart,
         allocation_scope: &ryeos_state::objects::AdmittedAccountingScope,
         owner_coordinate: &str,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<()> {
         // Preserve all original physical and pinned owners before validation or
         // the first RuntimeDb/ledger write. No replacement materialization.
@@ -267,6 +268,7 @@ impl PreparedTrustedSessionCustody {
             allocation_scope,
             &original,
             self.workspace,
+            cancelled,
         )? {
             bail!("original trusted pooled funding was denied; same custody remains retained");
         }

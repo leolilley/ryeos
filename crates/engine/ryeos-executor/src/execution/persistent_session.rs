@@ -2634,9 +2634,10 @@ where
                 accounting_scope,
                 original_budget,
                 &pool_key,
+                &cancelled,
             )
         },
-        cancelled,
+        &cancelled,
         on_delta,
     )
 }
@@ -2812,6 +2813,7 @@ fn start_capsule_process(
     accounting_scope: Option<&ryeos_state::objects::AdmittedAccountingScope>,
     original_budget: Option<&ryeos_app::handler_context::OriginalExecutionBudget>,
     funding_owner: &str,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<StartedPersistentSession> {
     let session_protocol = retained_session_protocol(&state.engine, capsule)?;
     if session_protocol.cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup
@@ -2868,7 +2870,7 @@ fn start_capsule_process(
         None,
         None,
         None,
-        Some((original_start, Arc::clone(&workspace_lifeline))),
+        Some((original_start, Arc::clone(&workspace_lifeline), cancelled)),
     )?;
     let pooled_owner_coordinate = workspace_name;
     let cleanup_observer = resource_cleanup_observer(
@@ -3657,6 +3659,7 @@ fn spawn_capsule_process_held(
     pooled_start: Option<(
         &ryeos_app::persistent_session::PersistentSessionPooledStart,
         Arc<ryeos_app::temp_dir_guard::TempDirGuard>,
+        &dyn Fn() -> bool,
     )>,
 ) -> Result<HeldPersistentSession> {
     let resolution = exact.resolution_output.restore();
@@ -3902,7 +3905,7 @@ fn spawn_capsule_process_held(
             .map(|lease| Box::new(lease) as Box<dyn Send + Sync>),
     );
     match pooled_start.as_ref() {
-        Some((original_start, original_workspace))
+        Some((original_start, original_workspace, cancelled))
             if session_protocol.cleanup_authority
                 == PersistentSessionCleanupAuthority::TrustedProcessGroup =>
         {
@@ -3935,9 +3938,10 @@ fn spawn_capsule_process_held(
                 original_start,
                 allocation_scope,
                 resource_owner_coordinate,
+                *cancelled,
             )?;
         }
-        Some((original_start, _)) => {
+        Some((original_start, _, _)) => {
             if let Some(bound) = bound {
                 lifelines.push(Box::new(bound));
             }
@@ -3956,12 +3960,12 @@ fn spawn_capsule_process_held(
             }
         }
     }
-    if let Some((original_start, _)) = pooled_start.as_ref() {
+    if let Some((original_start, _, _)) = pooled_start.as_ref() {
         original_start.retain_before_contact(external_lifelines)?;
     } else {
         lifelines.extend(external_lifelines);
     }
-    if let Some((original_start, _)) = pooled_start.as_ref() {
+    if let Some((original_start, _, _)) = pooled_start.as_ref() {
         original_start.retain_cleanup_obligations(None, retirement_observer.clone())?;
     }
     let process = (|| {
@@ -4027,7 +4031,7 @@ fn spawn_capsule_process_held(
             resource_owner_coordinate,
             process_scope_allocation,
             process_scope,
-            pooled_start.as_ref().and_then(|(original, _)| {
+            pooled_start.as_ref().and_then(|(original, _, _)| {
                 (session_protocol.cleanup_authority
                     == PersistentSessionCleanupAuthority::TrustedProcessGroup)
                     .then_some(*original)

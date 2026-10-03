@@ -333,7 +333,7 @@ impl OriginalManifestDocument {
 
 /// App-private data view tied to the SAME mutable original input owner.
 /// No transport/admission role or independently owning pair is constructed.
-struct OriginalManifestDocuments<'a> {
+pub(crate) struct OriginalManifestDocuments<'a> {
     _owner: &'a VerifiedTrustedPooledSessionInputs,
     gnu: OriginalManifestDocumentObservation<'a>,
     driver: OriginalManifestDocumentObservation<'a>,
@@ -709,10 +709,10 @@ enum OriginalIsolationExpectationState {
 }
 
 impl VerifiedTrustedPooledSessionInputs {
-    /// Unused App-private borrow of an already-prepared original pair. ALL
+    /// App-private borrow of an already-prepared original pair. ALL
     /// initial and late fallible checks belong to the sticky refusal phase.
-    /// No redemption, resealing, new owner, renewed clock or caller is added.
-    fn original_manifest_documents(
+    /// No redemption, resealing, new owner or renewed clock is supplied.
+    pub(crate) fn original_manifest_documents(
         &mut self,
         state: &crate::state::AppState,
     ) -> Result<OriginalManifestDocuments<'_>> {
@@ -2987,7 +2987,7 @@ session:
 
 #[cfg(all(test, target_os = "linux"))]
 #[path = "persistent_session_admission/factory_controls.rs"]
-mod factory_controls;
+pub(crate) mod factory_controls;
 
 #[cfg(test)]
 mod original_product_bounds_controls {

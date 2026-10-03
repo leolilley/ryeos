@@ -15,6 +15,16 @@ fn fixture_with_startup(
 ) -> (tempfile::TempDir, crate::state::AppState, String) {
     let root = tempfile::tempdir().unwrap();
     let mut state = crate::state::test_support::build(root.path()).unwrap();
+    let hash = populate_fixture(&mut state, startup);
+    (root, state, hash)
+}
+
+// Existing genuine factory on the SAME budget fixture State; Linux cfg(test)
+// visibility only. No raw proof/original binder constructor.
+pub(crate) fn populate_fixture(
+    state: &mut crate::state::AppState,
+    startup: Option<ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection>,
+) -> String {
     let key = lillux::crypto::SigningKey::from_bytes(&[113; 32]);
     let fp = lillux::signature::compute_fingerprint(&key.verifying_key());
     let mut engine = (*state.engine).clone();
@@ -329,7 +339,7 @@ session:
         execution_closure_digest: authority.execution_closure_digest().unwrap(),
         contract_ref: "protocol:test/factory_session".into(),
         contract_digest: protocol_hash,
-        components: crate::execution_realization::execution_components(&state, &resolution)
+        components: crate::execution_realization::execution_components(state, &resolution)
             .unwrap(),
         properties: crate::execution_realization::execution_properties(
             &state,
@@ -344,7 +354,7 @@ session:
     capsule.execution_realization_hash =
         cas.store_object(&realization.to_value().unwrap()).unwrap();
     let hash = cas.store_object(&capsule.to_value().unwrap()).unwrap();
-    (root, state, hash)
+    hash
 }
 
 #[test]
