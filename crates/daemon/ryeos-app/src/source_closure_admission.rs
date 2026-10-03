@@ -1492,6 +1492,23 @@ mod directory_source_tests {
     use super::*;
 
     #[test]
+    fn actual_source_cas_authority_refuses_foreign_original_guard() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_state = crate::state::test_support::build(first.path()).unwrap();
+        let second_state = crate::state::test_support::build(second.path()).unwrap();
+        let actual = first_state.state_store.pinned_state_authority().unwrap();
+        let foreign = second_state.state_store.pinned_state_authority().unwrap();
+        let same_guard = actual.acquire_shared_guard().unwrap();
+        actual.ensure_guard(&same_guard).unwrap();
+        let foreign_guard = foreign.acquire_shared_guard().unwrap();
+        assert!(actual.ensure_guard(&foreign_guard).is_err());
+        // Actual state/CAS authority control for the helper's pre-read gate.
+        // No recovered source or protected original input owner is fabricated;
+        // full recovered-member/binder custody controls are still required.
+    }
+
+    #[test]
     fn item_directory_selection_is_exactly_the_owner_directory() {
         let selected = Path::new(".ai/tools/ryeos/development/runtime/runtime.yaml");
         let (prefix, entry) = item_directory_selection(selected).unwrap();

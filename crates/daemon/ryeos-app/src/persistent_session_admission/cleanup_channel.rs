@@ -235,6 +235,73 @@ pub(crate) struct PreflightInputs {
 }
 
 impl PreflightInputs {
+    /// Static request preparation from a borrow minted only by the actual
+    /// original input owner. This does not authenticate provider execution.
+    pub(crate) fn from_original(
+        original: &super::OriginalStartupRequestInputs<'_>,
+    ) -> Result<Self> {
+        let owner = original.owner;
+        let products = owner
+            .original_product_inputs
+            .as_ref()
+            .context("original request lacks retained actual products")?;
+        let source = owner
+            .original_startup_contract
+            .as_ref()
+            .context("original request lacks retained actual source")?;
+        let contract = source
+            .contract
+            .as_ref()
+            .context("original request lacks decoded retained contract")?;
+        let selected = owner.selected.selections();
+        ensure!(
+            selected.len() == 1,
+            "original request resource multiplicity changed"
+        );
+        let actual = &selected[0];
+        ensure!(
+            actual.character_devices.as_slice() == products.devices.identities()
+                && actual.device_binding_digest == products.devices.binding_digest(),
+            "original request actual descriptor/device owner correspondence differs"
+        );
+        let resource_selection = serde_json::from_value(serde_json::to_value(actual)?)
+            .context("selected original resource is outside closed preflight lane")?;
+        let policy =
+            PreflightPolicy {
+                schema: contract.policy.schema.clone(),
+                primary_device_role: contract.policy.primary_device_role.clone(),
+                l4_query_policy: contract.policy.l4_query_policy.as_ref().map(
+                    |policy| match policy {
+                        super::StartupL4Policy::SuccessZero => PreflightL4Policy::SuccessZero,
+                        super::StartupL4Policy::NotSupported => PreflightL4Policy::NotSupported,
+                    },
+                ),
+            };
+        let inputs = Self {
+            resource_selection,
+            policy,
+            // Actual selected entry bytes, not the contract document digest.
+            handler_source_sha256: contract.entry.sha256.clone(),
+            provider_manifest_sha256: products.driver.selection.manifest_hash.clone(),
+            gnu_bounds: products
+                .gnu
+                .selection
+                .relationship
+                .required_product
+                .bounds
+                .clone(),
+            driver_bounds: products
+                .driver
+                .selection
+                .relationship
+                .required_product
+                .bounds
+                .clone(),
+        };
+        inputs.validate()?;
+        Ok(inputs)
+    }
+
     fn validate(&self) -> Result<&PreflightDevice> {
         let selected = &self.resource_selection;
         ensure!(

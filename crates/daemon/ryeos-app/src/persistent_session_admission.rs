@@ -207,6 +207,12 @@ pub struct VerifiedTrustedPooledSessionInputs {
         Option<ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection>,
 }
 
+/// Borrow of the actual original static owners. This can prepare a request,
+/// never accept a candidate or issue Init/Ready. No raw/serde constructor.
+pub(crate) struct OriginalStartupRequestInputs<'a> {
+    owner: &'a VerifiedTrustedPooledSessionInputs,
+}
+
 // Static source custody, not a startup factory/accepted observation. Retain raw
 // actual source/member owners before parsing and all later fallible checks.
 struct OriginalStartupContract {
@@ -369,6 +375,28 @@ enum OriginalIsolationExpectationState {
 }
 
 impl VerifiedTrustedPooledSessionInputs {
+    pub(crate) fn has_selected_startup_contract(&self) -> bool {
+        self.startup_contract_selection.is_some()
+    }
+    pub(crate) fn original_startup_request_inputs(
+        &self,
+        state: &crate::state::AppState,
+    ) -> Result<OriginalStartupRequestInputs<'_>> {
+        self.require_original_isolation_expectation(state)?;
+        anyhow::ensure!(
+            self.startup_contract_selection.is_some()
+                && self
+                    .original_startup_contract
+                    .as_ref()
+                    .is_some_and(|v| v.verified),
+            "original startup request requires actual signed retained source contract"
+        );
+        anyhow::ensure!(
+            self.selected.selections().len() == 1,
+            "original startup request requires exactly one actual selected resource"
+        );
+        Ok(OriginalStartupRequestInputs { owner: self })
+    }
     /// Verify current retained bytes and independent node/product agreement.
     /// Existing executable prerequisite refusals remain authoritative.
     pub fn verify(state: &crate::state::AppState, capsule_hash: &str) -> Result<Self> {

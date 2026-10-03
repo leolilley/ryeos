@@ -7,6 +7,12 @@ use ryeos_state::objects::*;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 fn fixture() -> (tempfile::TempDir, crate::state::AppState, String) {
+    fixture_with_startup(None)
+}
+
+fn fixture_with_startup(
+    startup: Option<ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection>,
+) -> (tempfile::TempDir, crate::state::AppState, String) {
     let root = tempfile::tempdir().unwrap();
     let mut state = crate::state::test_support::build(root.path()).unwrap();
     let key = lillux::crypto::SigningKey::from_bytes(&[113; 32]);
@@ -125,7 +131,7 @@ fn fixture() -> (tempfile::TempDir, crate::state::AppState, String) {
             minimum_facts: Default::default(),
         }],
     };
-    let protocol_body = format!(
+    let mut protocol_body = format!(
         r#"kind: protocol
 name: factory_session
 category: test
@@ -151,6 +157,14 @@ session:
   max_frame_bytes: 4096
 "#
     );
+    if let Some(startup) = startup {
+        protocol_body.push_str("  startup_contract:\n");
+        for line in serde_yaml::to_string(&startup).unwrap().lines() {
+            protocol_body.push_str("    ");
+            protocol_body.push_str(line);
+            protocol_body.push('\n');
+        }
+    }
     let protocol_document = lillux::signature::sign_content(&protocol_body, &key, "#", None);
     let protocol_hash = lillux::signature::content_hash(&protocol_body);
     let subject_body = "kind: worker\nname: factory\ncategory: test\n";
@@ -416,4 +430,97 @@ fn genuine_j1_factory_refuses_tampered_retained_protocol_bytes_before_selection_
             .to_string()
             .contains("verify retained session protocol")
     );
+}
+
+#[test]
+fn genuine_signed_startup_selection_remains_static_without_original_binder() {
+    let selected = ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+        source_root: "fixture".into(),
+        member: "startup.json".into(),
+        sha256: lillux::sha256_hex(b"fixture contract bytes not admitted here"),
+    };
+    let (_root, mut state, hash) = fixture_with_startup(Some(selected.clone()));
+    let inputs = VerifiedTrustedPooledSessionInputs::verify(&state, &hash).unwrap();
+    assert!(inputs.has_selected_startup_contract());
+    assert_eq!(inputs.startup_contract_selection.as_ref(), Some(&selected));
+    // Actual signed static admission is NOT the original protected binder or
+    // current GPU/device/provider result; the genuine fixture uses /dev/null.
+    assert!(inputs.original_isolation.is_none());
+    assert!(inputs.original_startup_contract.is_none());
+    assert!(inputs.original_startup_request_inputs(&state).is_err());
+    let mut engine = (*state.engine).clone();
+    engine.node_trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![]);
+    state.engine = Arc::new(engine);
+    assert!(VerifiedTrustedPooledSessionInputs::verify(&state, &hash).is_err());
+}
+
+#[test]
+fn genuine_signed_resolution_refuses_absent_source_binding_in_actual_cas() {
+    let (_root, state, hash) = fixture();
+    let inputs = VerifiedTrustedPooledSessionInputs::verify(&state, &hash).unwrap();
+    let mut resolution = inputs.exact().resolution_output.restore();
+    let missing = lillux::sha256_hex(b"absent source binding test object");
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    assert!(
+        authority
+            .cas_store()
+            .unwrap()
+            .get_object(&missing)
+            .unwrap()
+            .is_none()
+    );
+    let projection = EffectiveSourceClosureProjection {
+        schema: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+        binding_hash: missing,
+        content_manifest_hash: lillux::sha256_hex(b"absent source manifest"),
+        owner_key: lillux::sha256_hex(b"unadmitted projection address"),
+        file_count: 1,
+        total_bytes: 1,
+    };
+    resolution.composed.derived.insert(
+        ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.into(),
+        projection.to_value().unwrap(),
+    );
+    // A genuine signed-resolution/CAS negative: the altered projection is NOT
+    // admitted source authority, and no AdmittedSourceClosure is fabricated.
+    let error =
+        crate::source_closure_admission::recover_source_closure(&state, &state.engine, &resolution)
+            .err()
+            .unwrap();
+    assert_eq!(error.to_string(), "retained source binding is absent");
+}
+
+#[test]
+fn genuine_retained_signed_startup_selector_refuses_tampered_member() {
+    let selected = ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+        source_root: "fixture".into(),
+        member: "startup.json".into(),
+        sha256: lillux::sha256_hex(b"retained signed selector fixture"),
+    };
+    let (_root, state, hash) = fixture_with_startup(Some(selected));
+    VerifiedTrustedPooledSessionInputs::verify(&state, &hash).unwrap();
+    let mut capsule = state
+        .state_store
+        .admitted_persistent_session_capsule(&hash)
+        .unwrap();
+    let AdmittedExecutionClosure::DirectItemExecutor {
+        protocol_descriptor_document,
+        ..
+    } = &mut capsule.execution_closure
+    else {
+        unreachable!()
+    };
+    assert!(protocol_descriptor_document.contains("startup.json"));
+    *protocol_descriptor_document =
+        protocol_descriptor_document.replace("startup.json", "foreign.json");
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let altered = authority
+        .cas_store()
+        .unwrap()
+        .store_object(&serde_json::to_value(&capsule).unwrap())
+        .unwrap();
+    assert_ne!(altered, hash);
+    assert!(VerifiedTrustedPooledSessionInputs::verify(&state, &altered).is_err());
+    // Actual signed descriptor/CAS verification refuses modified original
+    // bytes; no signature refresh, admitted source or original budget forged.
 }
