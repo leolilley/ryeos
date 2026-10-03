@@ -586,3 +586,273 @@ mod tests {
         assert!(plural.validate_against_limits(limits).is_err());
     }
 }
+
+
+// Unused finite data leaf. These structural bounds grant no admission,
+// physical allocation, heap fit, funding or process-lifetime authority.
+const ORIGINAL_PHYSICAL_BOUNDS_SCHEMA: &str = "ryeos.original_physical_resource_bounds.v1";
+const MAX_ORIGINAL_PHYSICAL_BOUNDS_DOCUMENT_BYTES: usize = 1024;
+const MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MAX_ORIGINAL_PHYSICAL_PROCESSES: u32 = 256;
+const MAX_ORIGINAL_PRIVATE_SOURCE_INODES: u64 = 2_000_000;
+const MAX_ORIGINAL_RETAINED_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ORIGINAL_SINGLE_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_ORIGINAL_CONSTRUCTOR_BUFFER_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OriginalPhysicalResourceBoundsV1 {
+    schema: String,
+    maximum_memory_bytes: u64,
+    maximum_processes: u32,
+    maximum_private_source_bytes: u64,
+    maximum_private_source_inodes: u64,
+    maximum_retained_export_bytes: u64,
+    maximum_single_document_bytes: u64,
+    maximum_constructor_buffer_bytes: u64,
+}
+
+impl OriginalPhysicalResourceBoundsV1 {
+    /// Decode directly into the closed type so duplicate known fields are
+    /// rejected before any generic JSON map could collapse them.
+    fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !bytes.is_empty() && bytes.len() <= MAX_ORIGINAL_PHYSICAL_BOUNDS_DOCUMENT_BYTES,
+            "original physical bounds document exceeds decode bound"
+        );
+        let bounds: Self = serde_json::from_slice(bytes)?;
+        bounds.validate()?;
+        Ok(bounds)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.schema == ORIGINAL_PHYSICAL_BOUNDS_SCHEMA,
+            "unsupported original physical bounds schema"
+        );
+        for (name, value, ceiling) in [
+            ("memory", self.maximum_memory_bytes, MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES),
+            ("processes", u64::from(self.maximum_processes), u64::from(MAX_ORIGINAL_PHYSICAL_PROCESSES)),
+            ("private source", self.maximum_private_source_bytes, MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES),
+            ("private source inodes", self.maximum_private_source_inodes, MAX_ORIGINAL_PRIVATE_SOURCE_INODES),
+            ("retained exports", self.maximum_retained_export_bytes, MAX_ORIGINAL_RETAINED_EXPORT_BYTES),
+            ("single document", self.maximum_single_document_bytes, MAX_ORIGINAL_SINGLE_DOCUMENT_BYTES),
+            ("constructor buffer", self.maximum_constructor_buffer_bytes, MAX_ORIGINAL_CONSTRUCTOR_BUFFER_BYTES),
+        ] {
+            anyhow::ensure!(value > 0 && value <= ceiling, "original physical {name} exceeds finite structural bounds");
+        }
+        anyhow::ensure!(
+            self.maximum_single_document_bytes <= self.maximum_retained_export_bytes,
+            "original physical document exceeds retained export bound"
+        );
+        let known_bytes = self.maximum_private_source_bytes
+            .checked_add(self.maximum_retained_export_bytes)
+            .and_then(|bytes| bytes.checked_add(self.maximum_constructor_buffer_bytes))
+            .ok_or_else(|| anyhow::anyhow!("original physical byte sum overflow"))?;
+        anyhow::ensure!(
+            known_bytes < self.maximum_memory_bytes,
+            "original physical byte bounds leave no memory headroom"
+        );
+        // Positive numerical headroom does not prove retained typed heaps,
+        // helper/kernel/allocator peaks fit it. That needs later admission.
+        Ok(())
+    }
+
+    /// Argument roles are data labels only; a future admitted caller must
+    /// supply their independently authenticated request/resource/node owners.
+    fn intersect(request: &Self, descriptor: &Self, node: &Self) -> anyhow::Result<Self> {
+        request.validate()?;
+        descriptor.validate()?;
+        node.validate()?;
+        let effective = Self {
+            schema: ORIGINAL_PHYSICAL_BOUNDS_SCHEMA.to_owned(),
+            maximum_memory_bytes: request.maximum_memory_bytes.min(descriptor.maximum_memory_bytes).min(node.maximum_memory_bytes),
+            maximum_processes: request.maximum_processes.min(descriptor.maximum_processes).min(node.maximum_processes),
+            maximum_private_source_bytes: request.maximum_private_source_bytes.min(descriptor.maximum_private_source_bytes).min(node.maximum_private_source_bytes),
+            maximum_private_source_inodes: request.maximum_private_source_inodes.min(descriptor.maximum_private_source_inodes).min(node.maximum_private_source_inodes),
+            maximum_retained_export_bytes: request.maximum_retained_export_bytes.min(descriptor.maximum_retained_export_bytes).min(node.maximum_retained_export_bytes),
+            maximum_single_document_bytes: request.maximum_single_document_bytes.min(descriptor.maximum_single_document_bytes).min(node.maximum_single_document_bytes),
+            maximum_constructor_buffer_bytes: request.maximum_constructor_buffer_bytes.min(descriptor.maximum_constructor_buffer_bytes).min(node.maximum_constructor_buffer_bytes),
+        };
+        effective.validate()?;
+        Ok(effective)
+    }
+
+    /// The sole RyeOS canonical JSON encoding, explicitly not JCS. Hash the
+    /// same returned bytes; no provenance fields or self-referential digest.
+    fn canonical_commitment(&self) -> anyhow::Result<(Vec<u8>, String)> {
+        self.validate()?;
+        let value = serde_json::to_value(self)?;
+        let bytes = lillux::canonical_json(&value)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .into_bytes();
+        anyhow::ensure!(
+            bytes.len() <= MAX_ORIGINAL_PHYSICAL_BOUNDS_DOCUMENT_BYTES,
+            "original physical canonical document exceeds decode bound"
+        );
+        let digest = lillux::sha256_hex(&bytes);
+        Ok((bytes, digest))
+    }
+}
+
+#[cfg(test)]
+mod original_physical_bounds_tests {
+    use super::*;
+
+    // Pure data controls only; never admitted or verified runtime owners.
+    fn bounds() -> OriginalPhysicalResourceBoundsV1 {
+        OriginalPhysicalResourceBoundsV1 {
+            schema: ORIGINAL_PHYSICAL_BOUNDS_SCHEMA.to_owned(),
+            maximum_memory_bytes: 1000,
+            maximum_processes: 2,
+            maximum_private_source_bytes: 100,
+            maximum_private_source_inodes: 10,
+            maximum_retained_export_bytes: 80,
+            maximum_single_document_bytes: 40,
+            maximum_constructor_buffer_bytes: 50,
+        }
+    }
+
+    #[test]
+    fn exact_canonical_wire_and_same_byte_commitment() {
+        let actual = bounds();
+        let expected = br#"{"maximum_constructor_buffer_bytes":50,"maximum_memory_bytes":1000,"maximum_private_source_bytes":100,"maximum_private_source_inodes":10,"maximum_processes":2,"maximum_retained_export_bytes":80,"maximum_single_document_bytes":40,"schema":"ryeos.original_physical_resource_bounds.v1"}"#;
+        let (bytes, digest) = actual.canonical_commitment().unwrap();
+        assert_eq!(bytes.as_slice(), expected);
+        assert_eq!(digest, lillux::sha256_hex(expected));
+        assert_eq!(OriginalPhysicalResourceBoundsV1::decode(expected).unwrap(), actual);
+        let mut changed = bounds();
+        changed.maximum_private_source_inodes += 1;
+        let (changed_bytes, changed_digest) = changed.canonical_commitment().unwrap();
+        assert_ne!(changed_bytes, bytes);
+        assert_ne!(changed_digest, digest);
+    }
+
+    #[test]
+    fn conflicting_component_minima_and_permutations_preserve_constraints() {
+        let mut request = bounds();
+        request.maximum_memory_bytes = 500;
+        request.maximum_processes = 1;
+        request.maximum_constructor_buffer_bytes = 20;
+        let mut descriptor = bounds();
+        descriptor.maximum_private_source_bytes = 90;
+        descriptor.maximum_private_source_inodes = 5;
+        descriptor.maximum_single_document_bytes = 30;
+        let mut node = bounds();
+        node.maximum_retained_export_bytes = 60;
+        let mut expected = bounds();
+        expected.maximum_memory_bytes = 500;
+        expected.maximum_processes = 1;
+        expected.maximum_constructor_buffer_bytes = 20;
+        expected.maximum_private_source_bytes = 90;
+        expected.maximum_private_source_inodes = 5;
+        expected.maximum_single_document_bytes = 30;
+        expected.maximum_retained_export_bytes = 60;
+        let expected_commitment = expected.canonical_commitment().unwrap();
+        for (r, d, c) in [
+            (&request, &descriptor, &node), (&request, &node, &descriptor),
+            (&descriptor, &request, &node), (&descriptor, &node, &request),
+            (&node, &request, &descriptor), (&node, &descriptor, &request),
+        ] {
+            let effective = OriginalPhysicalResourceBoundsV1::intersect(r, d, c).unwrap();
+            assert_eq!(effective, expected);
+            assert_eq!(effective.canonical_commitment().unwrap(), expected_commitment);
+        }
+    }
+
+    #[test]
+    fn invalid_inputs_refuse_before_component_clipping_in_every_role() {
+        let valid = bounds();
+        let mut invalid = bounds();
+        invalid.maximum_processes = MAX_ORIGINAL_PHYSICAL_PROCESSES + 1;
+        for (r, d, c) in [
+            (&invalid, &valid, &valid), (&valid, &invalid, &valid),
+            (&valid, &valid, &invalid),
+        ] {
+            let error = OriginalPhysicalResourceBoundsV1::intersect(r, d, c).unwrap_err();
+            assert!(error.to_string().contains("processes exceeds finite structural bounds"));
+        }
+        assert!(invalid.canonical_commitment().is_err());
+    }
+
+    #[test]
+    fn closed_typed_wire_refuses_malformed_values_without_a_map_decoder() {
+        let wire = String::from_utf8(bounds().canonical_commitment().unwrap().0).unwrap();
+        let field = "\"maximum_processes\":2";
+        for malformed in [
+            wire.replace(field, "\"maximum_processes\":null"),
+            wire.replace(field, "\"maximum_processes\":-1"),
+            wire.replace(field, "\"maximum_processes\":1.0"),
+            wire.replace(field, "\"maximum_processes\":\"2\""),
+            wire.replace(field, "\"maximum_processes\":4294967296"),
+            wire.replace(field, "\"maximum_processes\":2,\"maximum_processes\":2"),
+            wire.replace("\"maximum_processes\":2,", ""),
+            wire.replace(field, "\"maximum_processes\":2,\"unknown\":1"),
+            wire.replace(ORIGINAL_PHYSICAL_BOUNDS_SCHEMA, "ryeos.original_physical_resource_bounds.v2"),
+            wire.replace("\"maximum_memory_bytes\":1000", "\"maximum_memory_bytes\":18446744073709551616"),
+        ] {
+            assert!(OriginalPhysicalResourceBoundsV1::decode(malformed.as_bytes()).is_err(), "{malformed}");
+        }
+        assert!(OriginalPhysicalResourceBoundsV1::decode(b"").is_err());
+        assert!(OriginalPhysicalResourceBoundsV1::decode(b"{}").is_err());
+        let mut padded = wire.clone();
+        padded.extend(std::iter::repeat_n(' ', MAX_ORIGINAL_PHYSICAL_BOUNDS_DOCUMENT_BYTES - wire.len()));
+        assert_eq!(OriginalPhysicalResourceBoundsV1::decode(padded.as_bytes()).unwrap(), bounds());
+        padded.push(' ');
+        let error = OriginalPhysicalResourceBoundsV1::decode(padded.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("exceeds decode bound"));
+    }
+
+    #[test]
+    fn all_numeric_fields_refuse_zero_and_structural_maximum_plus_one() {
+        let wire = String::from_utf8(bounds().canonical_commitment().unwrap().0).unwrap();
+        for (key, old, maximum) in [
+            ("maximum_memory_bytes", 1000, MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES),
+            ("maximum_processes", 2, u64::from(MAX_ORIGINAL_PHYSICAL_PROCESSES)),
+            ("maximum_private_source_bytes", 100, MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES),
+            ("maximum_private_source_inodes", 10, MAX_ORIGINAL_PRIVATE_SOURCE_INODES),
+            ("maximum_retained_export_bytes", 80, MAX_ORIGINAL_RETAINED_EXPORT_BYTES),
+            ("maximum_single_document_bytes", 40, MAX_ORIGINAL_SINGLE_DOCUMENT_BYTES),
+            ("maximum_constructor_buffer_bytes", 50, MAX_ORIGINAL_CONSTRUCTOR_BUFFER_BYTES),
+        ] {
+            for invalid in [0, maximum + 1] {
+                let changed = wire.replace(&format!("\"{key}\":{old}"), &format!("\"{key}\":{invalid}"));
+                let error = OriginalPhysicalResourceBoundsV1::decode(changed.as_bytes()).unwrap_err();
+                assert!(error.to_string().contains("finite structural bounds"), "{key}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn inclusive_reachable_maxima_and_strict_relationship_boundaries() {
+        let mut maximum = bounds();
+        maximum.maximum_memory_bytes = MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES;
+        maximum.maximum_processes = MAX_ORIGINAL_PHYSICAL_PROCESSES;
+        maximum.maximum_private_source_inodes = MAX_ORIGINAL_PRIVATE_SOURCE_INODES;
+        maximum.maximum_retained_export_bytes = MAX_ORIGINAL_RETAINED_EXPORT_BYTES;
+        maximum.maximum_single_document_bytes = MAX_ORIGINAL_SINGLE_DOCUMENT_BYTES;
+        maximum.maximum_constructor_buffer_bytes = MAX_ORIGINAL_CONSTRUCTOR_BUFFER_BYTES;
+        maximum.validate().unwrap();
+        let wire = maximum.canonical_commitment().unwrap().0;
+        assert_eq!(OriginalPhysicalResourceBoundsV1::decode(&wire).unwrap(), maximum);
+        // Source's absolute ceiling cannot be reached with positive other
+        // bounds and memory<=16GiB. Test its greatest feasible value instead.
+        maximum.maximum_retained_export_bytes = 1;
+        maximum.maximum_single_document_bytes = 1;
+        maximum.maximum_constructor_buffer_bytes = 1;
+        maximum.maximum_private_source_bytes = MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES - 3;
+        maximum.validate().unwrap();
+        maximum.maximum_private_source_bytes += 1;
+        assert!(maximum.validate().unwrap_err().to_string().contains("no memory headroom"));
+        let mut relationship = bounds();
+        relationship.maximum_single_document_bytes = relationship.maximum_retained_export_bytes;
+        relationship.validate().unwrap();
+        relationship.maximum_single_document_bytes += 1;
+        assert!(relationship.validate().unwrap_err().to_string().contains("document exceeds retained export"));
+        let mut sum = bounds();
+        sum.maximum_memory_bytes = 230;
+        assert!(sum.validate().unwrap_err().to_string().contains("no memory headroom"));
+        sum.maximum_memory_bytes += 1;
+        sum.validate().unwrap();
+    }
+}
