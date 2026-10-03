@@ -1844,6 +1844,28 @@ impl InheritedDescriptorAuthority {
         anyhow::bail!("sealed executable measurement requires Linux")
     }
 
+    /// Inspect this retained data descriptor without exporting a numeric FD
+    /// or reopening its diagnostic path. This grants no executable authority.
+    pub fn require_write_sealed_regular(&self) -> anyhow::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            self.require_owned_regular()?;
+            let required =
+                libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+            // SAFETY: the registered owner keeps this descriptor live; this
+            // query neither mutates the file nor transfers ownership.
+            let observed = unsafe { libc::fcntl(self.file().as_raw_fd(), libc::F_GET_SEALS) };
+            anyhow::ensure!(
+                observed >= 0 && observed & required == required,
+                "retained regular file is not sealed against content mutation"
+            );
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("sealed regular-file inspection requires Linux")
+    }
+
     #[cfg(unix)]
     pub fn require_owned_regular(&self) -> anyhow::Result<crate::secure_fs::OpenFileIdentity> {
         crate::secure_fs::require_effective_user_owned_regular(self.file())
@@ -2418,6 +2440,79 @@ impl InheritedDescriptorAuthority {
         _maximum_bytes: u64,
     ) -> anyhow::Result<crate::secure_fs::StableInheritedRegularReader<'_>> {
         anyhow::bail!("inherited descriptor streams are unavailable on this platform")
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod write_sealed_regular_tests {
+    use super::*;
+    use std::io::{Seek as _, SeekFrom, Write as _};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+    #[test]
+    fn opaque_sealed_data_query_preserves_owner_cursor_and_nonexecutable_role() {
+        let authority = sealed_memfd(c"sealed-data-query", b"original bytes").unwrap();
+        let original = authority.clone();
+        let mut cursor = authority.file().try_clone().unwrap();
+        cursor.seek(SeekFrom::Start(3)).unwrap();
+        authority.require_write_sealed_regular().unwrap();
+        assert_eq!(cursor.stream_position().unwrap(), 3);
+        assert!(authority.same_file_identity(&original).unwrap());
+        assert!(authority.require_owned_executable().is_err());
+        drop(authority);
+        original.require_write_sealed_regular().unwrap();
+    }
+
+    #[test]
+    fn opaque_sealed_data_query_refuses_mutable_regular_and_retains_original() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"mutable bytes").unwrap();
+        let authority = inherited_descriptor_path(file).unwrap();
+        let original = authority.clone();
+        assert!(authority.require_write_sealed_regular().is_err());
+        assert!(authority.same_file_identity(&original).unwrap());
+        let (bytes, _) = original.read_regular_file_stable_bounded(64).unwrap();
+        assert_eq!(bytes, b"mutable bytes");
+    }
+
+    #[test]
+    fn opaque_sealed_data_query_refuses_partial_seals() {
+        // Native setup is confined to Lillux. Each missing seal must refuse.
+        let all = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+        for missing in [
+            libc::F_SEAL_SEAL,
+            libc::F_SEAL_SHRINK,
+            libc::F_SEAL_GROW,
+            libc::F_SEAL_WRITE,
+        ] {
+            let fd = unsafe {
+                libc::memfd_create(
+                    c"partial-data-seals".as_ptr(),
+                    libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+                )
+            };
+            assert!(fd >= 0);
+            // SAFETY: successful memfd_create returned this unique owner.
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+            assert_eq!(unsafe { libc::fchmod(file.as_raw_fd(), 0o600) }, 0);
+            file.write_all(b"partial immutable bytes").unwrap();
+            assert_eq!(
+                unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, all & !missing) },
+                0
+            );
+            let authority = inherited_descriptor_path(file).unwrap();
+            assert!(authority.require_write_sealed_regular().is_err());
+            assert!(authority.require_owned_regular().is_ok());
+        }
+    }
+
+    #[test]
+    fn opaque_sealed_data_query_refuses_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let authority =
+            inherited_descriptor_path(std::fs::File::open(directory.path()).unwrap()).unwrap();
+        assert!(authority.require_write_sealed_regular().is_err());
+        assert!(authority.directory_identity().is_ok());
     }
 }
 

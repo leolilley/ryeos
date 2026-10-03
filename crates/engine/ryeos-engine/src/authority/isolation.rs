@@ -40,7 +40,7 @@ pub use authority::{
     IsolationProducerPreparedImmutableFileAuthority, IsolationProjectAuthority,
     IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
     IsolationTargetChannelAuthority, IsolationVerifiedCode,
-    IsolationWritableRuntimeViewMountAuthority,
+    IsolationWritableRuntimeViewMountAuthority, OriginalProductManifestRole,
 };
 pub use backend::{ResolvedIsolationBackend, VerifiedIsolationBackendCapture};
 pub use inspection::{
@@ -3869,11 +3869,25 @@ impl IsolationRuntime {
         // pinned-workspace mode, leaving live or absent bytes where identity
         // claims the realization.
         let mut external_destinations = Vec::with_capacity(context.external_read_only_mounts.len());
+        IsolationReadOnlyMountAuthority::require_complete_original_manifest_pair(
+            context.external_read_only_mounts,
+        )
+        .map_err(|error| refused(error.to_string()))?;
         for external in context.external_read_only_mounts {
             let destination = external.destination();
             validate_namespace_destination("external realization mount", destination)?;
             match external.scope() {
-                IsolationReadOnlyMountScope::RuntimeConfiguration => {
+                IsolationReadOnlyMountScope::RuntimeConfiguration
+                | IsolationReadOnlyMountScope::OriginalProductManifest(_) => {
+                    if let IsolationReadOnlyMountScope::OriginalProductManifest(role) =
+                        external.scope()
+                    {
+                        if destination != role.destination() {
+                            return Err(refused(
+                                "original product manifest has a non-role destination".into(),
+                            ));
+                        }
+                    }
                     ryeos_state::objects::validate_session_runtime_configuration_destination(
                         destination.to_str().ok_or_else(|| {
                             refused("runtime configuration destination is not UTF-8".into())
@@ -5325,6 +5339,7 @@ impl IsolationRuntime {
             IsolationReadOnlyMountScope::StateOverlay
                 | IsolationReadOnlyMountScope::RuntimeConfiguration
                 | IsolationReadOnlyMountScope::RuntimeEndpoint
+                | IsolationReadOnlyMountScope::OriginalProductManifest(_)
         ) {
             return Err(refused(format!(
                 "verified code {} is covered by an ineligible configuration mount",
