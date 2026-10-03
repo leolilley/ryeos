@@ -1205,20 +1205,53 @@ enum OriginalNativeCheckOutcome {
 }
 
 impl PersistentSessionPooledStart {
+    /// Refusal metadata is best effort; never wait merely to record it.
+    /// Actual owned inputs/funding stay in their existing retention locations.
+    fn refuse_manifest_precontact_without_waiting(&self) {
+        let mut retained = match self.retained.try_lock() {
+            Ok(retained) => retained,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
+        retained.manifest_prepare_attempted = true;
+        retained.manifest_prepare_refused = true;
+        retained.admission_refused = true;
+        retained.phase = PooledStartPhase::Unsettled;
+    }
+
     /// Inert: no production caller or signed-support/export/acceptance API.
     fn checkout_original_manifest_precontact<'a>(
         &'a self,
         cancelled: &'a dyn Fn() -> bool,
     ) -> Result<OriginalManifestPrecontactGuard<'a>> {
-        let cancellation_observed = cancelled();
-        let deadline = self
-            .original_callback_budget
-            .get()
-            .map(|budget| budget.contact_expiry());
-        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
-        let eligible = !cancellation_observed
-            && !self.retained.is_poisoned()
-            && deadline.is_some_and(|deadline| !deadline.has_elapsed())
+        if cancelled() {
+            self.refuse_manifest_precontact_without_waiting();
+            bail!("original manifest checkout cancelled before retention");
+        }
+        let Some(budget) = self.original_callback_budget.get() else {
+            self.refuse_manifest_precontact_without_waiting();
+            bail!("original manifest checkout lacks actual retained callback budget");
+        };
+        let deadline = budget.contact_expiry();
+        let mut retained = loop {
+            // SAME predicate and original expiry. No retention lock held
+            // between failed acquisition attempts, including this callback.
+            if cancelled() || deadline.has_elapsed() {
+                self.refuse_manifest_precontact_without_waiting();
+                bail!("original manifest checkout cancelled or expired acquiring retention");
+            }
+            let acquired = match self.retained.try_lock() {
+                Ok(retained) => Some(retained),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            };
+            if let Some(retained) = acquired {
+                break retained;
+            }
+            lillux::time::sleep(Duration::from_millis(1).min(deadline.remaining()));
+        };
+        let eligible = !self.retained.is_poisoned()
+            && !deadline.has_elapsed()
             && !Self::native_check_blocks_mutation(&retained)
             && !retained.admission_refused
             && retained.phase == PooledStartPhase::Preparing
@@ -1243,7 +1276,7 @@ impl PersistentSessionPooledStart {
             inputs: retained.trusted_inputs.take(),
             original: self,
             cancelled,
-            deadline: deadline.expect("actual original deadline checked before checkout"),
+            deadline,
         };
         drop(retained);
         guard.require_exclusive()?;
@@ -5575,6 +5608,87 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manifest_initial_missing_budget_and_cancel_refuse_with_actual_mutex_held() {
+        let original = super::PersistentSessionPooledStart::new();
+        let held = original.retained.lock().unwrap();
+        assert!(
+            original
+                .checkout_original_manifest_precontact(&|| false)
+                .is_err()
+        );
+        assert!(
+            original
+                .checkout_original_manifest_precontact(&|| true)
+                .is_err()
+        );
+        // Best-effort refusal does not reacquire a contended lock to record
+        // bits. No actual owned inputs/funding were moved or manufactured.
+        assert!(!held.manifest_prepare_attempted);
+        assert!(held.trusted_inputs.is_none() && held.original_funding.is_none());
+    }
+
+    #[test]
+    fn manifest_initial_acquisition_obeys_actual_original_budget_under_contention() {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = crate::handler_context::budget_test_support::build(
+            root.path(),
+            lillux::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let budget = fixture.context.original_execution_budget().unwrap();
+        let original = super::PersistentSessionPooledStart::new();
+        original
+            .retain_original_callback_budget(budget, budget.precontact_binding().scope)
+            .unwrap();
+        let held = original.retained.lock().unwrap();
+        assert!(
+            original
+                .checkout_original_manifest_precontact(&|| false)
+                .is_err()
+        );
+        assert!(budget.contact_expiry().has_elapsed());
+        assert_eq!(original.original_callback_budget.get().unwrap(), budget);
+        assert!(held.trusted_inputs.is_none() && held.original_funding.is_none());
+        assert!(!held.manifest_prepare_in_flight);
+        drop(held);
+        assert!(
+            original
+                .checkout_original_manifest_precontact(&|| false)
+                .is_err()
+        );
+        assert_eq!(original.original_callback_budget.get().unwrap(), budget);
+    }
+
+    #[test]
+    fn manifest_initial_contention_rechecks_same_actual_cancellation_predicate() {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = crate::handler_context::budget_test_support::build(
+            root.path(),
+            lillux::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        let budget = fixture.context.original_execution_budget().unwrap();
+        let original = super::PersistentSessionPooledStart::new();
+        original
+            .retain_original_callback_budget(budget, budget.precontact_binding().scope)
+            .unwrap();
+        let held = original.retained.lock().unwrap();
+        let observations = std::cell::Cell::new(0);
+        let cancelled = || {
+            observations.set(observations.get() + 1);
+            observations.get() >= 3
+        };
+        assert!(
+            original
+                .checkout_original_manifest_precontact(&cancelled)
+                .is_err()
+        );
+        assert!(observations.get() >= 3);
+        assert_eq!(original.original_callback_budget.get().unwrap(), budget);
+        assert!(held.trusted_inputs.is_none() && held.original_funding.is_none());
+        assert!(!held.manifest_prepare_in_flight);
+    }
     #[test]
     fn inert_manifest_checkout_calls_actual_cancellation_outside_retention_lock() {
         let original = super::PersistentSessionPooledStart::new();
