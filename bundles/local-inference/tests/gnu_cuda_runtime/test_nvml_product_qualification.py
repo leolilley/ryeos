@@ -6,6 +6,8 @@ from nvml_product_qualification import (
     POLICY_SCHEMA,
     QualificationInputError,
     observe_preflight_candidate,
+    required_preflight_symbols,
+    resolve_query_policy,
 )
 
 
@@ -114,6 +116,34 @@ class NvmlProductQualificationTests(unittest.TestCase):
         unresolved = dict(self.parameters, primary_device_role=None)
         with self.assertRaises(QualificationInputError):
             observe_preflight_candidate(unresolved, self.selection, None)
+
+    def test_resolver_and_symbol_list_are_single_finite_source(self):
+        from cuda_lifecycle import nvml_observer
+
+        role, policy = resolve_query_policy(self.parameters)
+        self.assertEqual(role, "gpu-primary")
+        self.assertIsNone(policy)
+        base = nvml_observer.required_symbols()
+        self.assertEqual(required_preflight_symbols(self.parameters), base)
+        self.assertIs(type(base), tuple)
+        self.assertIn("nvmlInit_v2", base)
+        self.assertIn("nvmlShutdown", base)
+        self.assertNotIn("nvmlDeviceGetName", base)
+
+        l4 = dict(self.parameters, l4_query_policy="l4-is-mig-success-zero-mode-not-supported-v1")
+        _, selected = resolve_query_policy(l4)
+        symbols = required_preflight_symbols(l4)
+        self.assertIs(selected, nvml_observer.L4QueryPolicy.IS_MIG_SUCCESS_ZERO)
+        self.assertEqual(symbols, base + ("nvmlDeviceGetName",))
+
+    def test_invalid_or_ambiguous_policy_has_no_symbol_profile(self):
+        from cuda_lifecycle import nvml_observer
+
+        invalid = dict(self.parameters, l4_query_policy="not-a-qualified-profile")
+        with self.assertRaises(QualificationInputError):
+            required_preflight_symbols(invalid)
+        with self.assertRaises(nvml_observer.NvmlObservationError):
+            nvml_observer.required_symbols("not-an-enum")
 
 
 if __name__ == "__main__":

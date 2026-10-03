@@ -46,6 +46,19 @@ _PROTOTYPES = {
     "nvmlDeviceGetUUID": (_HANDLE, ctypes.POINTER(ctypes.c_char), ctypes.c_uint),
     "nvmlShutdown": (),
 }
+_L4_NAME_SYMBOL = "nvmlDeviceGetName"
+
+
+def required_symbols(l4_query_policy: L4QueryPolicy | None = None) -> tuple[str, ...]:
+    """Return the finite native symbol set required by this observer profile.
+
+    This is source metadata only: it performs no provider lookup or native call.
+    Runtime provenance checks and observation share this exact symbol list.
+    """
+    if l4_query_policy is not None and type(l4_query_policy) is not L4QueryPolicy:
+        raise NvmlObservationError("unselected product-local L4 query policy")
+    symbols = tuple(_PROTOTYPES)
+    return symbols if l4_query_policy is None else symbols + (_L4_NAME_SYMBOL,)
 
 
 def _token(value, limit):
@@ -119,11 +132,10 @@ def observe_assignment(*, request: dict, bindings, l4_query_policy: L4QueryPolic
     equivalence and same-handle CUDA verification are separate gates.
     """
     stable_id, binding_digest, primary = _assignment(request)
-    if l4_query_policy is not None and type(l4_query_policy) is not L4QueryPolicy:
-        raise NvmlObservationError("unselected product-local L4 query policy")
-    prototypes = dict(_PROTOTYPES)
+    symbols = required_symbols(l4_query_policy)
+    prototypes = {name: _PROTOTYPES[name] for name in symbols if name in _PROTOTYPES}
     if l4_query_policy is not None:
-        prototypes["nvmlDeviceGetName"] = (_HANDLE, ctypes.POINTER(ctypes.c_char), ctypes.c_uint)
+        prototypes[_L4_NAME_SYMBOL] = (_HANDLE, ctypes.POINTER(ctypes.c_char), ctypes.c_uint)
     functions = {}
     try:
         for name, arguments in prototypes.items():

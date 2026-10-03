@@ -24,7 +24,10 @@ class QualificationInputError(ValueError):
     pass
 
 
-def _selected_query_policy(parameters: Any, observer_api: Any):
+def resolve_query_policy(parameters: Any):
+    """Resolve the signed finite policy to the observer's exact profile."""
+    from cuda_lifecycle import nvml_observer
+
     if type(parameters) is not dict or set(parameters) != _POLICY_KEYS:
         raise QualificationInputError("NVML verifier parameters are not the signed finite policy")
     if parameters["schema"] != POLICY_SCHEMA:
@@ -37,7 +40,7 @@ def _selected_query_policy(parameters: Any, observer_api: Any):
     selected = parameters["l4_query_policy"]
     if selected is None:
         return role, None
-    policy_type = getattr(observer_api, "L4QueryPolicy", None)
+    policy_type = nvml_observer.L4QueryPolicy
     if policy_type is None:
         raise QualificationInputError("selected NVML observer has no product-local query policy")
     try:
@@ -48,6 +51,14 @@ def _selected_query_policy(parameters: Any, observer_api: Any):
     if type(selected) is not str or len(matches) != 1:
         raise QualificationInputError("signed NVML query policy is not one exact observer profile")
     return role, matches[0]
+
+
+def required_preflight_symbols(verifier_parameters: Any) -> tuple[str, ...]:
+    """Return the exact finite observer symbols for the signed policy."""
+    from cuda_lifecycle import nvml_observer
+
+    _, query_policy = resolve_query_policy(verifier_parameters)
+    return nvml_observer.required_symbols(query_policy)
 
 
 def observe_preflight_candidate(
@@ -68,7 +79,7 @@ def observe_preflight_candidate(
     # observer module itself accepts already-selected bindings and loads none.
     from cuda_lifecycle import nvml_observer
 
-    role, query_policy = _selected_query_policy(verifier_parameters, nvml_observer)
+    role, query_policy = resolve_query_policy(verifier_parameters)
     # Give the observer a detached DTO and retain only immutable comparison
     # values before native calls. A mutable caller cannot rewrite the expected
     # assignment while observation is in progress.
