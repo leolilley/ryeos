@@ -856,3 +856,522 @@ mod original_physical_bounds_tests {
         sum.validate().unwrap();
     }
 }
+
+
+// Unused raw data decoder. It supplies neither signed-request provenance nor
+// original admission, physical coverage, allocation or funding authority.
+const ORIGINAL_TARGET_REQUEST_SCHEMA: &str = "ryeos.execution_target.v1";
+const MAX_ORIGINAL_TARGET_RAW_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ORIGINAL_TARGET_RAW_DEPTH: usize = 64;
+const MAX_ORIGINAL_TARGET_RAW_VALUES: usize = 16_384;
+const MAX_ORIGINAL_TARGET_RAW_MEMBERS: usize = 128;
+// Conservative canonical semantic envelope: 64*64*(6*(64+256)+8)
+// +64*2048+2*(6*256+16)+512+1024 = 8,032,800 <16MiB. This is
+// a formatting/decode bound, not a serde or parent-daemon heap bound.
+
+#[derive(Debug)]
+enum DecodedOriginalTargetRequest {
+    LegacyOrdinary(ExecutionTargetRequirement),
+    CurrentV1(CurrentOriginalTargetRequestV1),
+}
+
+#[derive(Debug)]
+struct CurrentOriginalTargetRequestV1 {
+    schema: String,
+    ordinary: ExecutionTargetRequirement,
+    original_physical_bounds: Option<OriginalPhysicalResourceBoundsV1>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurrentOriginalTargetRequestWireV1 {
+    schema: String,
+    os: String,
+    arch: String,
+    resources: Vec<ExecutionResourceRequirement>,
+    #[serde(deserialize_with = "decode_required_original_physical_request")]
+    original_physical_bounds: Option<OriginalPhysicalResourceBoundsV1>,
+}
+
+fn decode_required_original_physical_request<'de, D>(
+    deserializer: D,
+) -> Result<Option<OriginalPhysicalResourceBoundsV1>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<OriginalPhysicalResourceBoundsV1>::deserialize(deserializer)
+}
+
+#[derive(Serialize)]
+struct CurrentOriginalTargetRequestSerialization<'a> {
+    schema: &'a str,
+    os: &'a str,
+    arch: &'a str,
+    resources: &'a [ExecutionResourceRequirement],
+    original_physical_bounds: &'a Option<OriginalPhysicalResourceBoundsV1>,
+}
+
+impl DecodedOriginalTargetRequest {
+    fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        use serde::de::DeserializeSeed as _;
+        anyhow::ensure!(
+            !bytes.is_empty() && bytes.len() <= MAX_ORIGINAL_TARGET_RAW_BYTES,
+            "original target raw document exceeds decode bound"
+        );
+        // Visit all raw object keys before a BTreeMap can overwrite facts.
+        // The same borrowed input is used throughout; no Value-tree preparse.
+        let mut scan = serde_json::Deserializer::from_slice(bytes);
+        let mut budget = RawOriginalTargetScanBudget { values: 0 };
+        RawOriginalTargetScanSeed { budget: &mut budget, depth: 1 }
+            .deserialize(&mut scan)?;
+        scan.end()?;
+        let presence: RawOriginalTargetPresence = serde_json::from_slice(bytes)?;
+        match presence.schema {
+            RawOriginalTargetSchema::Absent => {
+                anyhow::ensure!(
+                    !presence.physical_request_present,
+                    "unversioned target cannot carry original physical request"
+                );
+                let ordinary: ExecutionTargetRequirement = serde_json::from_slice(bytes)?;
+                ordinary.validate()?;
+                Ok(Self::LegacyOrdinary(ordinary))
+            }
+            RawOriginalTargetSchema::Null => {
+                anyhow::bail!("original target schema is explicitly null")
+            }
+            RawOriginalTargetSchema::Text(schema) => {
+                anyhow::ensure!(
+                    schema == ORIGINAL_TARGET_REQUEST_SCHEMA,
+                    "unsupported original target request schema"
+                );
+                // Authoritative absence gate before any required-nullable
+                // typed parse. Missing is never repaired to an ordinary null.
+                anyhow::ensure!(
+                    presence.physical_request_present,
+                    "current target is missing original physical request field"
+                );
+                let wire: CurrentOriginalTargetRequestWireV1 = serde_json::from_slice(bytes)?;
+                let ordinary = ExecutionTargetRequirement {
+                    os: wire.os,
+                    arch: wire.arch,
+                    resources: wire.resources,
+                };
+                ordinary.validate()?;
+                if let Some(request) = wire.original_physical_bounds.as_ref() {
+                    request.validate()?;
+                }
+                Ok(Self::CurrentV1(CurrentOriginalTargetRequestV1 {
+                    schema: wire.schema,
+                    ordinary,
+                    original_physical_bounds: wire.original_physical_bounds,
+                }))
+            }
+        }
+    }
+
+    fn require_original_physical_request(&self) -> anyhow::Result<&OriginalPhysicalResourceBoundsV1> {
+        match self {
+            Self::LegacyOrdinary(_) => anyhow::bail!("legacy ordinary target has no original physical request"),
+            Self::CurrentV1(current) => {
+                anyhow::ensure!(current.schema == ORIGINAL_TARGET_REQUEST_SCHEMA, "unsupported original target request schema");
+                current.ordinary.validate()?;
+                let request = current.original_physical_bounds.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("current ordinary target has null original physical request"))?;
+                request.validate()?;
+                Ok(request)
+            }
+        }
+    }
+
+    fn canonical_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let value = match self {
+            Self::LegacyOrdinary(ordinary) => {
+                ordinary.validate()?;
+                serde_json::to_value(ordinary)?
+            }
+            Self::CurrentV1(current) => {
+                anyhow::ensure!(current.schema == ORIGINAL_TARGET_REQUEST_SCHEMA, "unsupported original target request schema");
+                current.ordinary.validate()?;
+                if let Some(request) = current.original_physical_bounds.as_ref() {
+                    request.validate()?;
+                }
+                serde_json::to_value(CurrentOriginalTargetRequestSerialization {
+                    schema: &current.schema,
+                    os: &current.ordinary.os,
+                    arch: &current.ordinary.arch,
+                    resources: &current.ordinary.resources,
+                    original_physical_bounds: &current.original_physical_bounds,
+                })?
+            }
+        };
+        let bytes = lillux::canonical_json(&value)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .into_bytes();
+        anyhow::ensure!(bytes.len() <= MAX_ORIGINAL_TARGET_RAW_BYTES, "original target canonical bytes exceed decode bound");
+        Ok(bytes)
+    }
+}
+
+struct RawOriginalTargetScanBudget {
+    values: usize,
+}
+
+struct RawOriginalTargetScanSeed<'a> {
+    budget: &'a mut RawOriginalTargetScanBudget,
+    depth: usize,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for RawOriginalTargetScanSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        if self.depth > MAX_ORIGINAL_TARGET_RAW_DEPTH {
+            return Err(D::Error::custom("original target raw depth exceeds bound"));
+        }
+        self.budget.values = self.budget.values.checked_add(1)
+            .ok_or_else(|| D::Error::custom("original target raw value count overflow"))?;
+        if self.budget.values > MAX_ORIGINAL_TARGET_RAW_VALUES {
+            return Err(D::Error::custom("original target raw value count exceeds bound"));
+        }
+        deserializer.deserialize_any(RawOriginalTargetScanVisitor {
+            budget: self.budget,
+            depth: self.depth,
+        })
+    }
+}
+
+struct RawOriginalTargetScanVisitor<'a> {
+    budget: &'a mut RawOriginalTargetScanBudget,
+    depth: usize,
+}
+
+impl<'de> serde::de::Visitor<'de> for RawOriginalTargetScanVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("bounded original target JSON data without duplicate object keys")
+    }
+
+    fn visit_unit<E>(self) -> Result<(), E> { Ok(()) }
+    fn visit_bool<E>(self, _: bool) -> Result<(), E> { Ok(()) }
+    fn visit_i64<E>(self, _: i64) -> Result<(), E> { Ok(()) }
+    fn visit_u64<E>(self, _: u64) -> Result<(), E> { Ok(()) }
+    fn visit_f64<E>(self, _: f64) -> Result<(), E> { Ok(()) }
+    fn visit_str<E>(self, _: &str) -> Result<(), E> { Ok(()) }
+    fn visit_string<E>(self, _: String) -> Result<(), E> { Ok(()) }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<(), A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        use serde::de::Error as _;
+        let child_depth = self.depth.checked_add(1)
+            .ok_or_else(|| A::Error::custom("original target raw depth overflow"))?;
+        while sequence.next_element_seed(RawOriginalTargetScanSeed {
+            budget: &mut *self.budget,
+            depth: child_depth,
+        })?.is_some() {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        use serde::de::Error as _;
+        let mut keys = BTreeSet::new();
+        let child_depth = self.depth.checked_add(1)
+            .ok_or_else(|| A::Error::custom("original target raw depth overflow"))?;
+        while let Some(key) = map.next_key::<String>()? {
+            if keys.len() >= MAX_ORIGINAL_TARGET_RAW_MEMBERS {
+                return Err(A::Error::custom("original target raw object member count exceeds bound"));
+            }
+            if !keys.insert(key) {
+                return Err(A::Error::custom("original target raw duplicate object key"));
+            }
+            map.next_value_seed(RawOriginalTargetScanSeed {
+                budget: &mut *self.budget,
+                depth: child_depth,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+enum RawOriginalTargetSchema {
+    Absent,
+    Null,
+    Text(String),
+}
+
+impl<'de> Deserialize<'de> for RawOriginalTargetSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SchemaVisitor;
+        impl<'de> serde::de::Visitor<'de> for SchemaVisitor {
+            type Value = RawOriginalTargetSchema;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an explicitly present target schema string or null")
+            }
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(RawOriginalTargetSchema::Null)
+            }
+            fn visit_str<E>(self, text: &str) -> Result<Self::Value, E> {
+                Ok(RawOriginalTargetSchema::Text(text.to_owned()))
+            }
+            fn visit_string<E>(self, text: String) -> Result<Self::Value, E> {
+                Ok(RawOriginalTargetSchema::Text(text))
+            }
+        }
+        deserializer.deserialize_any(SchemaVisitor)
+    }
+}
+
+struct RawOriginalTargetPresence {
+    schema: RawOriginalTargetSchema,
+    physical_request_present: bool,
+}
+
+impl<'de> Deserialize<'de> for RawOriginalTargetPresence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct PresenceVisitor;
+        impl<'de> serde::de::Visitor<'de> for PresenceVisitor {
+            type Value = RawOriginalTargetPresence;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an original target object with explicit schema/request presence")
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut presence = RawOriginalTargetPresence {
+                    schema: RawOriginalTargetSchema::Absent,
+                    physical_request_present: false,
+                };
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "schema" => presence.schema = map.next_value()?,
+                        "original_physical_bounds" => {
+                            presence.physical_request_present = true;
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                        _ => { let _: serde::de::IgnoredAny = map.next_value()?; }
+                    }
+                }
+                Ok(presence)
+            }
+        }
+        deserializer.deserialize_map(PresenceVisitor)
+    }
+}
+
+
+#[cfg(test)]
+mod original_target_decoder_tests {
+    use super::*;
+
+    const LEGACY: &[u8] = br#"{"arch":"x86_64","os":"linux","resources":[]}"#;
+    // The existing ordinary serializer omits an empty resources vector.
+    const LEGACY_CANONICAL: &[u8] = br#"{"arch":"x86_64","os":"linux"}"#;
+    const CURRENT_NULL: &[u8] = br#"{"arch":"x86_64","original_physical_bounds":null,"os":"linux","resources":[],"schema":"ryeos.execution_target.v1"}"#;
+
+    fn request() -> OriginalPhysicalResourceBoundsV1 {
+        OriginalPhysicalResourceBoundsV1 {
+            schema: ORIGINAL_PHYSICAL_BOUNDS_SCHEMA.to_owned(),
+            maximum_memory_bytes: 1000,
+            maximum_processes: 2,
+            maximum_private_source_bytes: 100,
+            maximum_private_source_inodes: 10,
+            maximum_retained_export_bytes: 80,
+            maximum_single_document_bytes: 40,
+            maximum_constructor_buffer_bytes: 50,
+        }
+    }
+
+    fn current_request_wire() -> Vec<u8> {
+        let (bytes, _) = request().canonical_commitment().unwrap();
+        String::from_utf8(CURRENT_NULL.to_vec()).unwrap()
+            .replace("\"original_physical_bounds\":null", &format!(
+                "\"original_physical_bounds\":{}", String::from_utf8(bytes).unwrap(),
+            )).into_bytes()
+    }
+
+    // Raw scan guard fixtures are JSON DATA only, not valid target/owner proof.
+    fn scan_data(bytes: &[u8]) -> anyhow::Result<()> {
+        use serde::de::DeserializeSeed as _;
+        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+        let mut budget = RawOriginalTargetScanBudget { values: 0 };
+        RawOriginalTargetScanSeed { budget: &mut budget, depth: 1 }
+            .deserialize(&mut deserializer)?;
+        deserializer.end()?;
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_and_explicit_current_null_preserve_ordinary_data_only() {
+        let legacy = DecodedOriginalTargetRequest::decode(LEGACY).unwrap();
+        assert!(matches!(&legacy, DecodedOriginalTargetRequest::LegacyOrdinary(_)));
+        assert_eq!(legacy.canonical_bytes().unwrap(), LEGACY_CANONICAL);
+        let canonical_legacy = DecodedOriginalTargetRequest::decode(LEGACY_CANONICAL).unwrap();
+        assert!(matches!(&canonical_legacy, DecodedOriginalTargetRequest::LegacyOrdinary(_)));
+        assert_eq!(canonical_legacy.canonical_bytes().unwrap(), LEGACY_CANONICAL);
+        assert!(legacy.require_original_physical_request().unwrap_err().to_string().contains("legacy ordinary"));
+        let omitted = DecodedOriginalTargetRequest::decode(br#"{"os":"linux","arch":"x86_64"}"#).unwrap();
+        assert_eq!(omitted.canonical_bytes().unwrap(), LEGACY_CANONICAL);
+        let current = DecodedOriginalTargetRequest::decode(CURRENT_NULL).unwrap();
+        assert!(matches!(&current, DecodedOriginalTargetRequest::CurrentV1(_)));
+        assert_eq!(current.canonical_bytes().unwrap(), CURRENT_NULL);
+        assert!(current.require_original_physical_request().unwrap_err().to_string().contains("null original physical"));
+    }
+
+    #[test]
+    fn current_request_retains_same_nested_bounds_and_canonical_commitment() {
+        let wire = current_request_wire();
+        let decoded = DecodedOriginalTargetRequest::decode(&wire).unwrap();
+        let borrowed = decoded.require_original_physical_request().unwrap();
+        let DecodedOriginalTargetRequest::CurrentV1(current) = &decoded else { panic!("current branch required") };
+        assert!(std::ptr::eq(borrowed, current.original_physical_bounds.as_ref().unwrap()));
+        assert_eq!(borrowed, &request());
+        assert_eq!(borrowed.canonical_commitment().unwrap(), request().canonical_commitment().unwrap());
+        let canonical = decoded.canonical_bytes().unwrap();
+        assert_eq!(canonical, wire);
+        let roundtrip = DecodedOriginalTargetRequest::decode(&canonical).unwrap();
+        assert_eq!(roundtrip.require_original_physical_request().unwrap(), borrowed);
+        let changed = String::from_utf8(wire).unwrap().replace("\"maximum_private_source_inodes\":10", "\"maximum_private_source_inodes\":11");
+        assert_ne!(DecodedOriginalTargetRequest::decode(changed.as_bytes()).unwrap().canonical_bytes().unwrap(), canonical);
+    }
+
+    #[test]
+    fn schema_and_request_presence_are_authoritative_without_legacy_fallback() {
+        for raw in [
+            br#"{"os":"linux","arch":"x86_64","schema":null}"#.as_slice(),
+            br#"{"os":"linux","arch":"x86_64","schema":1}"#.as_slice(),
+            br#"{"os":"linux","arch":"x86_64","schema":false}"#.as_slice(),
+            br#"{"os":"linux","arch":"x86_64","schema":"unknown"}"#.as_slice(),
+            br#"{"os":"linux","arch":"x86_64","original_physical_bounds":null}"#.as_slice(),
+            br#"{"os":"linux","arch":"x86_64","original_physical_bounds":{}}"#.as_slice(),
+        ] {
+            assert!(DecodedOriginalTargetRequest::decode(raw).is_err());
+        }
+        let current = String::from_utf8(CURRENT_NULL.to_vec()).unwrap();
+        let absent = current.replace("\"original_physical_bounds\":null,", "");
+        let error = DecodedOriginalTargetRequest::decode(absent.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("missing original physical request field"));
+        for malformed in [
+            current.replace("\"resources\":[],", ""),
+            current.replace("\"resources\":[]", "\"resources\":null"),
+            current.replace("\"original_physical_bounds\":null", "\"original_physical_bounds\":{}"),
+            current.replace("\"os\":\"linux\"", "\"os\":1"),
+            current.replace("\"os\":\"linux\"", "\"os\":\"linux\",\"unknown\":1"),
+        ] {
+            assert!(DecodedOriginalTargetRequest::decode(malformed.as_bytes()).is_err(), "{malformed}");
+        }
+    }
+
+    #[test]
+    fn nested_invalid_request_uses_existing_finite_validator() {
+        let wire = String::from_utf8(current_request_wire()).unwrap();
+        for (old, new, diagnostic) in [
+            ("\"maximum_processes\":2", "\"maximum_processes\":0", "finite structural bounds"),
+            ("\"maximum_processes\":2", "\"maximum_processes\":257", "finite structural bounds"),
+            ("\"maximum_memory_bytes\":1000", "\"maximum_memory_bytes\":230", "no memory headroom"),
+            ("\"maximum_single_document_bytes\":40", "\"maximum_single_document_bytes\":81", "document exceeds retained export"),
+            (ORIGINAL_PHYSICAL_BOUNDS_SCHEMA, "ryeos.original_physical_resource_bounds.v2", "unsupported original physical"),
+        ] {
+            let changed = wire.replace(old, new);
+            let error = DecodedOriginalTargetRequest::decode(changed.as_bytes()).unwrap_err();
+            assert!(error.to_string().contains(diagnostic), "{error}");
+        }
+        for changed in [
+            wire.replace("\"maximum_processes\":2,", ""),
+            wire.replace("\"maximum_processes\":2", "\"maximum_processes\":null"),
+            wire.replace("\"maximum_processes\":2", "\"maximum_processes\":1.0"),
+            wire.replace("\"maximum_memory_bytes\":1000", "\"maximum_memory_bytes\":\"1000\""),
+        ] {
+            assert!(DecodedOriginalTargetRequest::decode(changed.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn recursive_raw_duplicates_refuse_before_fact_maps_overwrite() {
+        for raw in [
+            br#"{"os":"linux","os":"linux","arch":"x86_64"}"#.as_slice(),
+            br#"{"schema":"ryeos.execution_target.v1","schema":"ryeos.execution_target.v1"}"#.as_slice(),
+            br#"{"os":"linux","arch":"x86_64","resources":[{"exact_facts":{"gpu":"a","gpu":"b"}}]}"#.as_slice(),
+            br#"{"os":"linux","arch":"x86_64","resources":[{"minimum_facts":{"gpu":1,"gpu":2}}]}"#.as_slice(),
+            br#"{"os":"linux","arch":"x86_64","resources":[{"exact_facts":{"gpu":"a","\u0067pu":"b"}}]}"#.as_slice(),
+            br#"{"schema":"ryeos.execution_target.v1","original_physical_bounds":null,"original_physical_bounds":null}"#.as_slice(),
+            br#"{"schema":"ryeos.execution_target.v1","original_physical_bounds":{"maximum_processes":2,"maximum_processes":2}}"#.as_slice(),
+            br#"{"unknown":[{"nested":1,"nested":2}]}"#.as_slice(),
+        ] {
+            let error = DecodedOriginalTargetRequest::decode(raw).unwrap_err();
+            assert!(error.to_string().contains("raw duplicate object key"), "{error}");
+        }
+    }
+
+    #[test]
+    fn raw_decode_bound_and_trailing_tokens_refuse_before_admission() {
+        assert!(DecodedOriginalTargetRequest::decode(b"").is_err());
+        assert!(DecodedOriginalTargetRequest::decode(b"{}").is_err());
+        let mut trailing = LEGACY.to_vec();
+        trailing.extend_from_slice(b" {}");
+        assert!(DecodedOriginalTargetRequest::decode(&trailing).is_err());
+        let mut padded = LEGACY.to_vec();
+        padded.resize(MAX_ORIGINAL_TARGET_RAW_BYTES, b' ');
+        assert_eq!(DecodedOriginalTargetRequest::decode(&padded).unwrap().canonical_bytes().unwrap(), LEGACY_CANONICAL);
+        padded.push(b' ');
+        let error = DecodedOriginalTargetRequest::decode(&padded).unwrap_err();
+        assert!(error.to_string().contains("raw document exceeds decode bound"));
+    }
+
+    #[test]
+    fn raw_depth_node_and_object_guards_have_exact_data_boundaries() {
+        let nested = |arrays: usize| format!("{}null{}", "[".repeat(arrays), "]".repeat(arrays));
+        scan_data(nested(MAX_ORIGINAL_TARGET_RAW_DEPTH - 1).as_bytes()).unwrap();
+        let error = scan_data(nested(MAX_ORIGINAL_TARGET_RAW_DEPTH).as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("raw depth exceeds bound"));
+        let nodes = |values: usize| format!("[{}]", vec!["null"; values].join(","));
+        scan_data(nodes(MAX_ORIGINAL_TARGET_RAW_VALUES - 1).as_bytes()).unwrap();
+        let error = scan_data(nodes(MAX_ORIGINAL_TARGET_RAW_VALUES).as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("raw value count exceeds bound"));
+        let members = |count: usize| format!("{{{}}}", (0..count)
+            .map(|index| format!("\"key{index}\":null")).collect::<Vec<_>>().join(","));
+        scan_data(members(MAX_ORIGINAL_TARGET_RAW_MEMBERS).as_bytes()).unwrap();
+        let error = scan_data(members(MAX_ORIGINAL_TARGET_RAW_MEMBERS + 1).as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("raw object member count exceeds bound"));
+        // Successful raw scans are NOT successful target decoding.
+        assert!(DecodedOriginalTargetRequest::decode(nodes(2).as_bytes()).is_err());
+        assert!(DecodedOriginalTargetRequest::decode(members(2).as_bytes()).is_err());
+    }
+
+    #[test]
+    fn portable_ordinary_resource_semantics_remain_separate_from_physical_request() {
+        let target = br#"{"os":"windows","arch":"x86_64","resources":[{"class":"gpu","count":1,"allocation":"exclusive","access":"deployment_visible","exact_facts":{"model":"example"},"minimum_facts":{"memory":1}}]}"#;
+        let decoded = DecodedOriginalTargetRequest::decode(target).unwrap();
+        assert!(decoded.require_original_physical_request().is_err());
+        // Pure decoding deliberately does not match this host's platform.
+        let target = String::from_utf8(target.to_vec()).unwrap();
+        for invalid in [
+            target.replace("\"count\":1", "\"count\":0"),
+            target.replace("\"count\":1", "\"count\":1025"),
+            target.replace("\"count\":1", "\"count\":-1"),
+            target.replace("\"count\":1", "\"count\":1.0"),
+            target.replace("\"count\":1", "\"count\":\"1\""),
+            target.replace("\"memory\":1", "\"memory\":18446744073709551616"),
+            target.replace("\"memory\":1", "\"model\":1"),
+            target.replace("\"gpu\"", "\"bad class\""),
+        ] {
+            assert!(DecodedOriginalTargetRequest::decode(invalid.as_bytes()).is_err(), "{invalid}");
+        }
+    }
+}
