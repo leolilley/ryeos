@@ -1107,7 +1107,7 @@ fn require_startup_source_member(
 
 fn require_startup_realization_coordinates(
     actual: &ryeos_state::objects::ExternalContentRealization,
-    declaration: &ryeos_state::external_content::products::composition::ExternalProductSlotDeclaration,
+    declaration: &ryeos_state::external_content::products::composition::ResolvedProductDeclaration,
     manifest_hash: &str,
     entry_count: usize,
     total_bytes: u64,
@@ -1669,10 +1669,9 @@ mod tests {
         };
         // Plain declared/realized DTO comparisons, no qualified witness fixture.
         let declaration =
-            ryeos_state::external_content::products::composition::ExternalProductSlotDeclaration {
+            ryeos_state::external_content::products::composition::ResolvedProductDeclaration {
                 id: "python-gnu".into(),
-                relationship_ref: "config:fixture/relationship".into(),
-                relationship: "gnu".into(),
+                manifest_hash: "a".repeat(64),
                 kind: Tree,
                 mount_root: Project,
                 mount: "python-gnu".into(),
