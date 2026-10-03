@@ -1,4 +1,4 @@
-# GNU/CUDA NVML product-qualification source seam
+# GNU/CUDA current-assignment NVML preflight source seam
 
 Status: **unsigned consumer preparation; no NVML provider, producer output,
 node occurrence, or qualification policy is selected.** This note and
@@ -6,9 +6,9 @@ node occurrence, or qualification policy is selected.** This note and
 they do not create a daemon workflow, a verifier grant, or an admitted device
 fact.
 
-## Current immutable identities and missing bytes
+## Historical preparation identities and missing runtime proof
 
-The current source pins are GNU producer input manifest
+The preparation checkpoint source pins are GNU producer input manifest
 `ec7d4a2a749b0b709dabca0a7919c3a897a9b671be56332b67a659b6bd82cac6`, tinygrad
 tree `e468f263924eb44fc21405dafba8ea27a7cd9e70dd6847822905a652549be21c` at
 revision `4c206a52b1a72a98db8c97576959b54fa2a38232`, musl compiler-support tree
@@ -21,10 +21,11 @@ runtime hashes are immutable references, not proof of destination-local bytes.
 
 The GNU output is not yet available as a retained product: the producer's
 `chain_root_id`, `thread_id`, output receipt, receive/bind result, and destination
-witness are absent. The input manifest is not the output manifest. The Worker
-draft's driver digest remains `null`; there is no selected immutable NVML/driver
-tree, `libnvidia-ml.so.1` hash, recursive dependency closure, or destination
-lease. No driver or NVML digest is supplied here.
+witness were absent at that preparation checkpoint. The input manifest is not
+the output manifest. The current unsigned Worker selects GNU and driver product
+slots through `config:ryeos-runtime/gnu-cuda-products-draft`; slot declarations
+are not destination receipts or admitted native providers. No destination-local
+NVML provider, process occurrence or assignment qualification is proved here.
 
 The cleanup owner has prepared
 `cuda_lifecycle/nvml_observer.py::observe_assignment` at combined integration
@@ -38,22 +39,26 @@ checkpoint `073cd6332894cc5988d4643f9ea255507ae24d64`. The existing source-manif
 helper in `bundles/local-inference/test_contract.py` computes the complete worker
 closure after the version-neutral policy wording correction as
 `fa780c36fc49e442fea873c11f5eefa9be559366460b81e73269a939f3b894ee`; this value
-is now recorded in the unsigned worker draft. The preceding NVML-helper closure
+was recorded in the unsigned worker draft at that checkpoint. Later preflight
+source changes invalidate that value as a claim about the current enlarged tree.
+The preceding NVML-helper closure
 `56beb472b9d714b781b094e67b3aac72c69f8e1c2243d33f8890326747ed8f9d`
 is historical metadata, as is the earlier digest
 `febc08b1ee73799546ee27c12d1b6c434c5b788fd2fa7f1c1261b7aa5274c743`.
 No signature or activation was produced.
 
-## Product-qualification edge
+## Current comparison-only preflight edge
 
-`nvml_product_qualification.qualify_raw_assignment` consumes the existing
-signed product-qualification policy's static `verifier_parameters`, D's raw
-retained selection, and the exact observer/provider API injected by the accepted
-qualification owner. It delegates native query interpretation to the cleanup
-owner's helper and returns the existing
-`ryeos.product_qualification_result.v1` envelope, binding its candidate to the
-selected subject manifest. A verifier policy can use this exact finite parameter
-shape:
+`nvml_product_qualification.observe_preflight_candidate` consumes finite policy
+parameters, the whole retained raw resource selection, and the selected observer
+bindings. It snapshots the selection before native calls, delegates query and
+shutdown sequencing to the existing observer, and returns only its strict six
+fields: version, stable_resource_id, device_binding_digest, primary_device,
+uuid_v2_hex and nvml_shutdown. It emits no subject manifest, qualification
+claims or ProductQualificationResult envelope. This is a copyable comparison
+interface, not a provider loader, admitted owner or device-fact issuer.
+
+The finite policy shape is:
 
 ```yaml
 schema: ryeos.local_tinygrad_nvml_assignment_policy.v1
@@ -64,30 +69,32 @@ l4_query_policy: null # or one exact qualified L4QueryPolicy value
 The role and query profile are unresolved until D supplies the signed raw role
 and an exact native qualification chooses one L4 interpretation. `null` means
 the helper's strict success-only MIG queries; it is not fallback behavior. The
-result claim `nvidia_nvml_primary_assignment_v1` is only a verifier output shape
-until a selected signed ProductQualificationPolicy allows it and a real native
-attempt passes.
+returned UUID is only a candidate until the original funded owner accepts the
+observation on its authenticated one-shot channel. No result shape authorizes
+the policy or chooses an L4 interpretation.
 
-The current GNU private verifier/policy covers only GNU startup providers and
-zlib. It is not modified or extended with GPU claims. The existing qualification
-launch and result owners remain the path for recording a selected verifier's
-`probe_evidence`; the caller must deliver the raw selection and exact injected
-provider from D's same accepted owner. The product helper itself cannot convert
-candidate JSON into `ExecutionResourceSelection` facts or construct D's
-init-v2 startup issuer.
+Static GNU/driver qualification remains separate and resource-empty. Its claims
+cover the selected static closure and applicable GNU Python ABI, not a current
+GPU assignment or a native provider measurement. Do not route the current
+assignment through that verifier or infer a qualification subject from the
+startup provider-manifest comparison. The helper cannot convert candidate JSON
+into resource facts or construct D's private init-v2 startup comparisons.
 
-This source cut does not declare a new Tool item or verifier relationship: no
-driver/NVML product producer or source-closure binding for reusing the worker
-helper from a ProductQualification Tool has been selected. The API is ready for
-the existing qualification owner to call once that exact signed verifier source
-closure is chosen. Keep use on the existing `launch-product-qualification`
-policy path;
-do not add a second endpoint or let the verifier discover a helper from the
-installed host tree.
+The reviewed intended authority is an explicit finite startup contract within
+the immutable Worker source closure, selected by the exact signed protocol's
+canonical source-member path and expected member digest. App authenticates that
+member through the existing source binding/manifest/CAS and retains the whole
+entry, launch, interpreter/import/provider and policy envelope. Cleanup-digest
+equality alone does not authorize observer semantics. This selection/admission
+extension is not implemented by the Python helper or the inert FD4 parser.
+Actual Attached funding, held pin, applied launch, selected products/devices,
+materializations, source trust and original deadline must all join before the
+private accepting factory can issue startup comparisons.
 
 ## Exact provider closure requirements
 
-The verifier must use one selected, absolute `libnvidia-ml.so.1` member from an
+The trusted pre-response bootstrap must use one selected, absolute
+`libnvidia-ml.so.1` member from an
 admitted driver/NVML product and pass its exact bindings to the observer. It
 must not use `find_library`, `pynvml`, a bare soname, ambient `LD_LIBRARY_PATH`,
 or a host-site package. The selected provider tree must include and qualify all
@@ -108,5 +115,13 @@ creation. No source change here adds an alternate channel or second owner.
 Adding this consumer module changes the private Worker source tree. Its previous
 draft digest is not carried forward as a claim about the enlarged tree; the
 coordinator regenerates the digest and complete manifest from the final joined
-source before signing. No tests, builds, native library loads, GPU/provider
-operations, production, signing, or activation were performed for this slice.
+source before signing. No native library loads, GPU/provider operations,
+production, signing or activation are established by these source changes and
+component controls.
+
+At private integration94cf6a892, the comparison-only helper759bda7ad has two
+independent SOURCE CLEAR reviews. Three focused injected-binding controls passed:
+shutdown/DTO shape, bool-version refusal and unresolved-policy refusal. Six new
+FD4 controls plus ten existing v2/v1 controls also passed. These do not load
+NVML/CUDA or qualify a runtime. Actual provider loading, source-contract admission,
+original-owner response acceptance and numerical/settlement proof remain open.
