@@ -1356,7 +1356,7 @@ fn build_plan_with_execution_root(
         .project_filesystem_authority_ceiling(root_value)?
         .intersect(admitted_filesystem_ceiling);
     let network_authority_ceiling = execution.project_network_authority_ceiling(root_value)?;
-    let target_requirement = execution.project_target_requirement(root_value)?;
+    let (target_requirement, current_target_request) = execution.project_target_data(root_value)?;
     let endpoint_requirement = execution.project_endpoint_requirement(root_value)?;
     let resource_authority_ceiling = execution.project_resource_authority_ceiling(root_value)?;
     let subprocess_limits = execution.project_subprocess_limits(root_value)?;
@@ -1467,6 +1467,7 @@ fn build_plan_with_execution_root(
         network_authority_ceiling,
         filesystem_authority_ceiling,
         target_requirement,
+        current_target_request,
         endpoint_requirement,
         external_endpoint_binding: None,
         resource_authority_ceiling,

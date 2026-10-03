@@ -1570,6 +1570,7 @@ mod tests {
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             target_requirement: None,
+            current_target_request: None,
             endpoint_requirement: crate::contracts::ExecutionEndpointRequirement::Local {},
             external_endpoint_binding: None,
             subprocess_limits: None,

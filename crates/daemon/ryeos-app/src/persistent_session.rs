@@ -6312,6 +6312,7 @@ while True:
             filesystem_authority_ceiling:
                 ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             target_requirement: None,
+            current_target_request: None,
             endpoint_requirement: ryeos_engine::contracts::ExecutionEndpointRequirement::Local {},
             external_endpoint_binding: None,
             subprocess_limits: None,

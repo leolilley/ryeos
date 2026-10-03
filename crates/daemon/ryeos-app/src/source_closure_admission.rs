@@ -47,6 +47,43 @@ pub struct SourceClosureValidationPreview {
 }
 
 impl AdmittedSourceClosure {
+    /// Reproduce request DATA from this exact recovered signed source, never
+    /// from a mutable registry or the caller's current request carrier.
+    pub(crate) fn verify_retained_worker_target_data(
+        &self,
+        engine: &ryeos_engine::engine::Engine,
+        resolution: &ryeos_engine::resolution::ResolutionOutput,
+        plan: &ryeos_engine::contracts::ExecutionPlan,
+    ) -> anyhow::Result<()> {
+        plan.validate_current_target_data()?;
+        let schema = require_current_kind_testimony(
+            &engine.node_trust_store, &engine.trust_store, &self.binding)?;
+        let opted = schema.execution.as_ref().and_then(|e| e.target.as_ref())
+            .is_some_and(|t| t.request_format.is_some());
+        if !opted && plan.current_target_request.is_none() { return Ok(()); }
+        ensure!(self.binding.owner == source_owner_identity(resolution)?,
+            "current request source owner contradicts exact retained resolution");
+        ensure!(self.binding.owner.item_kind == "worker"
+            && self.binding.owner.canonical_ref == plan.root_ref
+            && plan.root_ref == resolution.root.resolved_ref && plan.item_kind == "worker",
+            "current request lacks SAME signed Worker root");
+        ensure!(matches!(&self.binding.execution_policy,
+            ryeos_state::objects::SourceExecutionPolicyIdentity::Worker { .. }),
+            "current request source is not a Worker source policy");
+        require_current_source_policy(&engine.node_trust_store, &engine.trust_store,
+            resolution, &self.binding, &schema)?;
+        let execution = schema.execution.as_ref()
+            .context("retained Worker lacks execution schema")?;
+        let (expected_ordinary, expected_current) = execution.project_target_data(&resolution.composed.composed)?;
+        ensure!(expected_ordinary == plan.target_requirement,
+            "retained signed Worker target contradicts admitted ordinary target");
+        let expected = expected_current.as_ref().map(|v| v.canonical_bytes()).transpose()?;
+        let observed = plan.current_target_request.as_ref().map(|v| v.canonical_bytes()).transpose()?;
+        ensure!(expected == observed,
+            "retained signed Worker current request differs or was dropped");
+        Ok(())
+    }
+
     pub fn finalization_evidence(&self) -> (&SourceClosureProof, &dyn SourceClosureStore) {
         (&self.proof, &self.store)
     }
@@ -1522,6 +1559,15 @@ pub(crate) mod temporary_source_fixture {
         logical_root: &str,
         member_path: &str,
     ) -> anyhow::Result<Fixture> {
+        admit_variant(state, member, logical_root, member_path, false)
+    }
+
+    pub(crate) fn admit_current_target(state: &mut AppState, member: &[u8]) -> anyhow::Result<Fixture> {
+        admit_variant(state, member, "source", "startup.json", true)
+    }
+
+    fn admit_variant(state: &mut AppState, member: &[u8], logical_root: &str,
+        member_path: &str, current: bool) -> anyhow::Result<Fixture> {
         // Validate both relative coordinates before allocation or writes.
         ryeos_state::objects::validate_canonical_project_relative_path(logical_root)?;
         ryeos_state::objects::validate_canonical_project_relative_path(member_path)?;
@@ -1571,9 +1617,12 @@ effective_trust:
 resolution: []
 composer: handler:ryeos/core/identity
 "##;
+        let schema = if current {
+            schema.replace("execution:\n", "execution:\n  target:\n    path: [supported_target]\n    required: true\n    request_format: ryeos.execution_target.v1\n    limits: {max_requirements: 1, max_resource_count: 1, max_facts_per_requirement: 16}\n")
+        } else { schema.to_owned() };
         std::fs::write(
             kinds.join("worker/worker.kind-schema.yaml"),
-            lillux::signature::sign_content(schema, &key, "#", None),
+            lillux::signature::sign_content(&schema, &key, "#", None),
         )?;
         let registry = ryeos_engine::kind_registry::KindRegistry::load_base(&[kinds], &trust)?;
         let contract = registry
@@ -1614,10 +1663,14 @@ composer: handler:ryeos/core/identity
             digest: candidate.manifest.digest()?,
         };
         declaration.validate()?;
-        let body = serde_yaml::to_string(&serde_json::json!({
-            "kind": "worker", "name": "factory", "category": "test",
-            "source": declaration,
-        }))?;
+        let mut definition = serde_json::json!({
+            "kind": "worker", "name": "factory", "category": "test", "source": declaration,
+        });
+        if current {
+            definition["supported_target"] = serde_json::json!({"schema":"ryeos.execution_target.v1",
+                "os":"linux","arch":"x86_64","resources":[],"original_physical_bounds":null});
+        }
+        let body = serde_yaml::to_string(&definition)?;
         let document = lillux::signature::sign_content(&body, &key, "#", None);
         let header = lillux::signature::parse_signature_line(
             document
@@ -1816,5 +1869,47 @@ impl SourceClosureStore for RetainedSourceClosureStore {
             ryeos_state::object_closure::ObjectClosureLimits::default(),
         )?;
         Ok(closure.is_complete())
+    }
+}
+
+#[cfg(test)]
+mod retained_current_worker_source_controls {
+    use super::*;
+    fn plan(resolution: &ryeos_engine::resolution::ResolutionOutput,
+        engine: &ryeos_engine::engine::Engine) -> ryeos_engine::contracts::ExecutionPlan {
+        let (ordinary, current) = engine.kinds.get("worker").unwrap().execution.as_ref().unwrap()
+            .project_target_data(&resolution.composed.composed).unwrap();
+        let value = serde_json::json!({"plan_id":"source-data-only", "root_executor_id":"tool:test/runtime",
+            "root_ref":resolution.root.resolved_ref,"item_kind":"worker", "nodes":[],"entrypoint":"entry",
+            "capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
+            "materialization_requirements":[], "network_authority_ceiling":"node_policy","filesystem_authority_ceiling":"node_policy",
+            "target_requirement":ordinary,"current_target_request":current,"endpoint_requirement":{"kind":"local"},
+            "external_endpoint_binding":null,"resource_authority_ceiling":"node_policy","subprocess_limits":null,
+            "cache_key":"data","executor_authorities":[]});
+        serde_json::from_value(value).unwrap()
+    }
+    #[test]
+    fn genuine_signed_source_reproduction_detects_dropped_carrier_owner_and_schema_substitution() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::state::test_support::build(root.path()).unwrap();
+        let mut fixture = super::temporary_source_fixture::admit_current_target(&mut state, b"{}").unwrap();
+        let current = plan(&fixture.resolution, &state.engine);
+        // Real signed kind/subject and actual CAS admission/recovery; plan is
+        // DATA only, not an actual verified original/native session owner.
+        fixture.recovered.verify_retained_worker_target_data(&state.engine, &fixture.resolution, &current).unwrap();
+        assert!(current.validate_endpoint_for_sealing().is_err());
+        let mut dropped = current.clone(); dropped.current_target_request = None;
+        assert!(fixture.recovered.verify_retained_worker_target_data(&state.engine, &fixture.resolution, &dropped).is_err());
+        let mut foreign = fixture.resolution.clone(); foreign.root.resolved_ref = "worker:test/foreign".into();
+        assert!(fixture.recovered.verify_retained_worker_target_data(&state.engine, &foreign, &current).is_err());
+        let old = fixture.recovered.binding.kind_ceiling.schema_body.clone();
+        fixture.recovered.binding.kind_ceiling.schema_body = old.replace("ryeos.execution_target.v1", "unknown");
+        assert!(fixture.recovered.verify_retained_worker_target_data(&state.engine, &fixture.resolution, &current).is_err());
+        fixture.recovered.binding.kind_ceiling.schema_body = old;
+        let mut revoked = (*state.engine).clone();
+        revoked.node_trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![]);
+        assert!(fixture.recovered.verify_retained_worker_target_data(&revoked, &fixture.resolution, &current).is_err());
+        // Fixture constructs resolution from signature-verified real document;
+        // it does not execute an actual composer handler or native factory.
     }
 }

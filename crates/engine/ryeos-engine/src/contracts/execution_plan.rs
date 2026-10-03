@@ -546,7 +546,7 @@ impl PlanNode {
 
 /// Normalized execution plan — the engine's output from `build_plan`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, try_from = "ExecutionPlanWire")]
 pub struct ExecutionPlan {
     pub plan_id: String,
     pub root_executor_id: String,
@@ -568,6 +568,9 @@ pub struct ExecutionPlan {
     /// plan that predates the current execution contract.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub target_requirement: Option<super::ExecutionTargetRequirement>,
+    /// Current signed request DATA; absent preserves ordinary plan identity.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_present_current_request")]
+    pub current_target_request: Option<super::CurrentExecutionTargetRequest>,
     /// Signed placement intent, separate from platform/resource suitability.
     /// Required even for local plans; predecessor plans are not reinterpreted.
     pub endpoint_requirement: super::ExecutionEndpointRequirement,
@@ -601,8 +604,112 @@ pub struct ExecutionPlan {
     pub debug_raw: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionPlanWire {
+    pub plan_id: String,
+    pub root_executor_id: String,
+    pub root_ref: String,
+    pub item_kind: String,
+    pub nodes: Vec<PlanNode>,
+    pub entrypoint: PlanNodeId,
+    pub capabilities: PlanCapabilities,
+    pub materialization_requirements: Vec<MaterializationRequirement>,
+    /// Kind-schema-projected ceiling captured from the complete composed
+    /// subject. Launch intersects this with its independently admitted parent
+    /// ceiling; neither side can widen the other.
+    pub network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
+    /// Signed filesystem projection, frozen alongside networking. This is
+    /// required in serialized authority; predecessor plans are not reinterpreted.
+    pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    /// Signed process suitability/resource request. Required explicit null
+    /// distinguishes a workload with no target requirement from a predecessor
+    /// plan that predates the current execution contract.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_requirement: Option<super::ExecutionTargetRequirement>,
+    /// Current signed request DATA; absent preserves ordinary plan identity.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_present_current_request")]
+    pub current_target_request: Option<super::CurrentExecutionTargetRequest>,
+    /// Signed placement intent, separate from platform/resource suitability.
+    /// Required even for local plans; predecessor plans are not reinterpreted.
+    pub endpoint_requirement: super::ExecutionEndpointRequirement,
+    /// Exact node binding selected before sealing. Planning may leave an
+    /// external endpoint unresolved; sealing and execution must not.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub external_endpoint_binding: Option<super::ExternalEndpointBindingIdentity>,
+    pub resource_authority_ceiling: super::ExecutionResourceAuthorityCeiling,
+    /// Required explicit null prevents predecessor plans from silently losing limits.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub subprocess_limits: Option<super::ExecutionSubprocessLimits>,
+    pub cache_key: String,
+    /// Daemon supervision profile hint, derived from the root item's kind.
+    #[serde(default)]
+    pub thread_kind: Option<String>,
+    /// Executor IDs traversed during chain resolution.
+    #[serde(default)]
+    pub executor_chain: Vec<String>,
+    /// Exact source authorities for every non-root executor-chain hop that
+    /// contributed to this plan.
+    pub executor_authorities: Vec<PlanTrustAuthority>,
+    /// Verified identity of the first executor-chain hop (the runtime
+    /// descriptor) selected by this exact plan build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_identity: Option<PlanRuntimeIdentity>,
+    /// When set (from `--debug-raw` via `execution_hints`), the dispatcher
+    /// attaches a `debug` block (resolved cmd/args/cwd/env keys + exit code and
+    /// size-limited raw stdout/stderr) to the completion. Default `false` —
+    /// the normal execution path is unaffected.
+    #[serde(default)]
+    pub debug_raw: bool,
+}
+
+fn deserialize_present_current_request<'de, D: serde::Deserializer<'de>>(d: D)
+    -> Result<Option<super::CurrentExecutionTargetRequest>, D::Error> {
+    super::CurrentExecutionTargetRequest::deserialize(d).map(Some)
+}
+impl TryFrom<ExecutionPlanWire> for ExecutionPlan {
+    type Error = String;
+    fn try_from(wire: ExecutionPlanWire) -> Result<Self, Self::Error> {
+        let plan = Self {
+            plan_id: wire.plan_id,
+            root_executor_id: wire.root_executor_id,
+            root_ref: wire.root_ref,
+            item_kind: wire.item_kind,
+            nodes: wire.nodes,
+            entrypoint: wire.entrypoint,
+            capabilities: wire.capabilities,
+            materialization_requirements: wire.materialization_requirements,
+            network_authority_ceiling: wire.network_authority_ceiling,
+            filesystem_authority_ceiling: wire.filesystem_authority_ceiling,
+            target_requirement: wire.target_requirement,
+            current_target_request: wire.current_target_request,
+            endpoint_requirement: wire.endpoint_requirement,
+            external_endpoint_binding: wire.external_endpoint_binding,
+            resource_authority_ceiling: wire.resource_authority_ceiling,
+            subprocess_limits: wire.subprocess_limits,
+            cache_key: wire.cache_key,
+            thread_kind: wire.thread_kind,
+            executor_chain: wire.executor_chain,
+            executor_authorities: wire.executor_authorities,
+            runtime_identity: wire.runtime_identity,
+            debug_raw: wire.debug_raw,
+        };
+        plan.validate_current_target_data().map_err(|e| e.to_string())?;
+        Ok(plan)
+    }
+}
+
 impl ExecutionPlan {
+    pub fn validate_current_target_data(&self) -> anyhow::Result<()> {
+        if let Some(current) = self.current_target_request.as_ref() {
+            anyhow::ensure!(self.item_kind == "worker", "current target DATA requires Worker structural identity");
+            anyhow::ensure!(self.target_requirement.as_ref() == Some(current.ordinary()),
+                "current target DATA contradicts ordinary target requirement");
+        }
+        Ok(())
+    }
     pub fn validate_endpoint_for_planning(&self) -> anyhow::Result<()> {
+        self.validate_current_target_data()?;
         self.endpoint_requirement.validate()?;
         match (&self.endpoint_requirement, &self.external_endpoint_binding) {
             (super::ExecutionEndpointRequirement::Local {}, None)
@@ -624,6 +731,9 @@ impl ExecutionPlan {
     /// Structural sealed identity only; the app must independently retain and
     /// revalidate the installed signed generation before any provider contact.
     pub fn validate_endpoint_for_sealing(&self) -> anyhow::Result<()> {
+        self.validate_current_target_data()?;
+        anyhow::ensure!(self.current_target_request.is_none(),
+            "current target request DATA has no admitted physical execution authority");
         let mut file_inputs = 0usize;
         for node in &self.nodes {
             if let PlanNode::DispatchSubprocess { spec, .. } = node {
@@ -846,5 +956,43 @@ mod execution_project_file_tests {
                 .validate_endpoint_for_sealing()
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod current_plan_data_controls {
+    use super::*;
+    fn wire() -> Value {
+        serde_json::json!({"plan_id":"data", "root_executor_id":"tool:test/runtime", "root_ref":"worker:test/root",
+            "item_kind":"worker", "nodes":[], "entrypoint":"entry",
+            "capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
+            "materialization_requirements":[],"network_authority_ceiling":"node_policy","filesystem_authority_ceiling":"node_policy",
+            "target_requirement":{"os":"linux","arch":"x86_64"}, "endpoint_requirement":{"kind":"local"},
+            "external_endpoint_binding":null,"resource_authority_ceiling":"node_policy","subprocess_limits":null,
+            "cache_key":"data","executor_authorities":[]})
+    }
+    #[test]
+    fn absent_extension_keeps_bytes_outer_null_refuses_and_current_sealing_refuses() {
+        let ordinary: ExecutionPlan = serde_json::from_value(wire()).unwrap();
+        let before = serde_json::to_value(&ordinary).unwrap();
+        assert!(before.get("current_target_request").is_none());
+        let mut null = wire(); null["current_target_request"] = Value::Null;
+        assert!(serde_json::from_value::<ExecutionPlan>(null).is_err());
+        let mut current = wire();
+        current["current_target_request"] = serde_json::json!({"schema":"ryeos.execution_target.v1",
+            "os":"linux","arch":"x86_64","resources":[],"original_physical_bounds":null});
+        let plan: ExecutionPlan = serde_json::from_value(current.clone()).unwrap();
+        plan.validate_endpoint_for_planning().unwrap();
+        assert!(plan.validate_endpoint_for_sealing().is_err());
+        assert!(plan.require_local_endpoint_for_dispatch().is_err());
+        current["target_requirement"]["arch"] = Value::String("aarch64".into());
+        assert!(serde_json::from_value::<ExecutionPlan>(current.clone()).is_err());
+        current["target_requirement"]["arch"] = Value::String("x86_64".into());
+        current["item_kind"] = Value::String("tool".into());
+        assert!(serde_json::from_value::<ExecutionPlan>(current).is_err());
+        let mut mutated = plan; mutated.target_requirement = None;
+        assert!(mutated.validate_endpoint_for_planning().is_err());
+        let restored: ExecutionPlan = serde_json::from_value(before.clone()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), before);
     }
 }

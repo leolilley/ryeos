@@ -969,6 +969,21 @@ impl VerifiedTrustedPooledSessionInputs {
                 == exact.effective_definition_digest,
             "verified trusted pooled exact program digest does not reproduce"
         );
+        // Independently derive expected request even if its plan carrier was
+        // removed. Current DATA never upgrades this owner to physical authority.
+        let resolution = exact.resolution_output.restore();
+        let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. }
+            = &capsule.execution_closure else { bail!("trusted pooled inputs lack direct plan"); };
+        let plan: ryeos_engine::contracts::ExecutionPlan = serde_json::from_value(execution_plan.clone())?;
+        if resolution.composed.derived.contains_key(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+            || plan.current_target_request.is_some() {
+            let source = crate::source_closure_admission::recover_source_closure(state, &state.engine, &resolution)?
+                .context("current target DATA lacks retained signed Worker source")?;
+            source.verify_retained_worker_target_data(&state.engine, &resolution, &plan)?;
+        }
+        // All current execution is held, including this original owner. A
+        // successful data comparison is not a verified physical launch input.
+        plan.validate_endpoint_for_sealing()?;
         let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             protocol_ref,
             protocol_content_hash,

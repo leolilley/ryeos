@@ -392,6 +392,14 @@ pub(crate) fn field_requirements_for_schema(schema: &KindSchema) -> Vec<Composer
         ComposerFieldSemantics::RootVerbatim
     };
     let mut requirements = Vec::new();
+    if let Some(target) = schema.execution.as_ref().and_then(|e| e.target.as_ref()) {
+        if target.request_format.is_some() {
+            requirements.push(ComposerFieldRequirement {
+                path: target.path.clone(),
+                semantics: ComposerFieldSemantics::RootVerbatim,
+            });
+        }
+    }
     if let Some(declaration) = schema
         .execution
         .as_ref()
@@ -778,5 +786,23 @@ composer: {composer}
             &json!({"policy": null}),
         )
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod current_target_verbatim_controls {
+    use super::*;
+    #[test]
+    fn whole_target_presence_null_and_nested_replacement_are_enforced() {
+        let requirements = vec![ComposerFieldRequirement { path: vec!["supported_target".into()],
+            semantics: ComposerFieldSemantics::RootVerbatim }];
+        let root = serde_json::json!({"supported_target":{"schema":"ryeos.execution_target.v1",
+            "os":"linux","arch":"x86_64","resources":[],"original_physical_bounds":null}});
+        validate_composed_field_requirements("control", &requirements, &root, &[], &root).unwrap();
+        for bad in [serde_json::json!({}), serde_json::json!({"supported_target":null}),
+            serde_json::json!({"supported_target":{"os":"linux","arch":"x86_64"}})] {
+            assert!(validate_composed_field_requirements("control", &requirements, &root, &[], &bad).is_err());
+        }
+        assert!(validate_composed_field_requirements("control", &requirements, &serde_json::json!({}), &[], &root).is_err());
     }
 }

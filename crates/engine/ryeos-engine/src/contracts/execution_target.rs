@@ -599,7 +599,7 @@ const MAX_ORIGINAL_RETAINED_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ORIGINAL_SINGLE_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ORIGINAL_CONSTRUCTOR_BUFFER_BYTES: u64 = 16 * 1024 * 1024;
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OriginalPhysicalResourceBoundsV1 {
     schema: String,
@@ -858,7 +858,7 @@ mod original_physical_bounds_tests {
 }
 
 
-// Unused raw data decoder. It supplies neither signed-request provenance nor
+// Bounded request DATA decoder. It supplies neither signed-request provenance nor
 // original admission, physical coverage, allocation or funding authority.
 const ORIGINAL_TARGET_REQUEST_SCHEMA: &str = "ryeos.execution_target.v1";
 const MAX_ORIGINAL_TARGET_RAW_BYTES: usize = 16 * 1024 * 1024;
@@ -875,7 +875,7 @@ enum DecodedOriginalTargetRequest {
     CurrentV1(CurrentOriginalTargetRequestV1),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CurrentOriginalTargetRequestV1 {
     schema: String,
     ordinary: ExecutionTargetRequirement,
@@ -921,8 +921,8 @@ impl DecodedOriginalTargetRequest {
         // Visit all raw object keys before a BTreeMap can overwrite facts.
         // The same borrowed input is used throughout; no Value-tree preparse.
         let mut scan = serde_json::Deserializer::from_slice(bytes);
-        let mut budget = RawOriginalTargetScanBudget { values: 0 };
-        RawOriginalTargetScanSeed { budget: &mut budget, depth: 1 }
+        let mut budget = RawOriginalTargetScanBudget { values: 0, output: None };
+        RawOriginalTargetScanSeed { budget: &mut budget, depth: 1, comma: false }
             .deserialize(&mut scan)?;
         scan.end()?;
         let presence: RawOriginalTargetPresence = serde_json::from_slice(bytes)?;
@@ -1012,22 +1012,46 @@ impl DecodedOriginalTargetRequest {
     }
 }
 
+// A capped buffer is data storage, not a parent-heap/physical guarantee.
+struct OriginalTargetWriter(Vec<u8>);
+impl std::io::Write for OriginalTargetWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > MAX_ORIGINAL_TARGET_RAW_BYTES.saturating_sub(self.0.len()) {
+            return Err(std::io::Error::other("original target encoded bytes exceed bound"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
 struct RawOriginalTargetScanBudget {
     values: usize,
+    output: Option<OriginalTargetWriter>,
 }
-
+impl RawOriginalTargetScanBudget {
+    fn token<E: serde::de::Error>(&mut self, bytes: &[u8]) -> Result<(), E> {
+        use std::io::Write as _;
+        if let Some(writer) = self.output.as_mut() {
+            writer.write_all(bytes).map_err(E::custom)?;
+        }
+        Ok(())
+    }
+    fn scalar<E: serde::de::Error, T: serde::Serialize + ?Sized>(&mut self, value: &T) -> Result<(), E> {
+        if let Some(writer) = self.output.as_mut() {
+            serde_json::to_writer(writer, value).map_err(E::custom)?;
+        }
+        Ok(())
+    }
+}
 struct RawOriginalTargetScanSeed<'a> {
     budget: &'a mut RawOriginalTargetScanBudget,
     depth: usize,
+    comma: bool,
 }
-
 impl<'de> serde::de::DeserializeSeed<'de> for RawOriginalTargetScanSeed<'_> {
     type Value = ();
-
     fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
+    where D: serde::Deserializer<'de> {
         use serde::de::Error as _;
         if self.depth > MAX_ORIGINAL_TARGET_RAW_DEPTH {
             return Err(D::Error::custom("original target raw depth exceeds bound"));
@@ -1037,68 +1061,114 @@ impl<'de> serde::de::DeserializeSeed<'de> for RawOriginalTargetScanSeed<'_> {
         if self.budget.values > MAX_ORIGINAL_TARGET_RAW_VALUES {
             return Err(D::Error::custom("original target raw value count exceeds bound"));
         }
-        deserializer.deserialize_any(RawOriginalTargetScanVisitor {
-            budget: self.budget,
-            depth: self.depth,
-        })
+        if self.comma { self.budget.token::<D::Error>(b",")?; }
+        deserializer.deserialize_any(RawOriginalTargetScanVisitor { budget: self.budget, depth: self.depth })
     }
 }
-
 struct RawOriginalTargetScanVisitor<'a> {
     budget: &'a mut RawOriginalTargetScanBudget,
     depth: usize,
 }
-
 impl<'de> serde::de::Visitor<'de> for RawOriginalTargetScanVisitor<'_> {
     type Value = ();
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("bounded original target JSON data without duplicate object keys")
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("bounded original target JSON data without duplicate object keys")
     }
-
-    fn visit_unit<E>(self) -> Result<(), E> { Ok(()) }
-    fn visit_bool<E>(self, _: bool) -> Result<(), E> { Ok(()) }
-    fn visit_i64<E>(self, _: i64) -> Result<(), E> { Ok(()) }
-    fn visit_u64<E>(self, _: u64) -> Result<(), E> { Ok(()) }
-    fn visit_f64<E>(self, _: f64) -> Result<(), E> { Ok(()) }
-    fn visit_str<E>(self, _: &str) -> Result<(), E> { Ok(()) }
-    fn visit_string<E>(self, _: String) -> Result<(), E> { Ok(()) }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<(), A::Error>
-    where
-        A: serde::de::SeqAccess<'de>,
-    {
-        use serde::de::Error as _;
-        let child_depth = self.depth.checked_add(1)
-            .ok_or_else(|| A::Error::custom("original target raw depth overflow"))?;
-        while sequence.next_element_seed(RawOriginalTargetScanSeed {
-            budget: &mut *self.budget,
-            depth: child_depth,
-        })?.is_some() {}
-        Ok(())
+    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> { self.budget.token(b"null") }
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<(), E> { self.budget.scalar(&v) }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<(), E> { self.budget.scalar(&v) }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<(), E> { self.budget.scalar(&v) }
+    fn visit_i128<E: serde::de::Error>(self, v: i128) -> Result<(), E> {
+        if let Ok(signed) = i64::try_from(v) { self.budget.scalar(&signed) }
+        else { let unsigned = u64::try_from(v).map_err(E::custom)?; self.budget.scalar(&unsigned) }
     }
-
-    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
-    where
-        A: serde::de::MapAccess<'de>,
-    {
+    fn visit_u128<E: serde::de::Error>(self, v: u128) -> Result<(), E> {
+        let v = u64::try_from(v).map_err(E::custom)?; self.budget.scalar(&v)
+    }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<(), E> {
+        if !v.is_finite() { return Err(E::custom("nonfinite target scalar")); }
+        self.budget.scalar(&v)
+    }
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<(), E> {
+        if v.len() > MAX_ORIGINAL_TARGET_RAW_BYTES { return Err(E::custom("target string exceeds bound")); }
+        self.budget.scalar(v)
+    }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<(), E> { self.visit_str(&v) }
+    fn visit_seq<A>(self, mut seq: A) -> Result<(), A::Error> where A: serde::de::SeqAccess<'de> {
         use serde::de::Error as _;
+        let depth = self.depth.checked_add(1).ok_or_else(|| A::Error::custom("target depth overflow"))?;
+        self.budget.token::<A::Error>(b"[")?;
+        let mut comma = false;
+        while seq.next_element_seed(RawOriginalTargetScanSeed { budget: &mut *self.budget, depth, comma })?.is_some() {
+            comma = true;
+        }
+        self.budget.token(b"]")
+    }
+    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error> where A: serde::de::MapAccess<'de> {
+        use serde::de::Error as _;
+        let depth = self.depth.checked_add(1).ok_or_else(|| A::Error::custom("target depth overflow"))?;
+        self.budget.token::<A::Error>(b"{")?;
         let mut keys = BTreeSet::new();
-        let child_depth = self.depth.checked_add(1)
-            .ok_or_else(|| A::Error::custom("original target raw depth overflow"))?;
         while let Some(key) = map.next_key::<String>()? {
-            if keys.len() >= MAX_ORIGINAL_TARGET_RAW_MEMBERS {
+            if keys.len() >= MAX_ORIGINAL_TARGET_RAW_MEMBERS || key.len() > MAX_ORIGINAL_TARGET_RAW_BYTES {
                 return Err(A::Error::custom("original target raw object member count exceeds bound"));
             }
-            if !keys.insert(key) {
-                return Err(A::Error::custom("original target raw duplicate object key"));
-            }
-            map.next_value_seed(RawOriginalTargetScanSeed {
-                budget: &mut *self.budget,
-                depth: child_depth,
-            })?;
+            if keys.contains(&key) { return Err(A::Error::custom("original target raw duplicate object key")); }
+            if !keys.is_empty() { self.budget.token::<A::Error>(b",")?; }
+            self.budget.scalar::<A::Error, _>(&key)?;
+            self.budget.token::<A::Error>(b":")?;
+            keys.insert(key);
+            map.next_value_seed(RawOriginalTargetScanSeed { budget: &mut *self.budget, depth, comma: false })?;
         }
-        Ok(())
+        self.budget.token(b"}")
+    }
+}
+
+/// Validated current request DATA. Deserialization conveys no launch authority.
+#[derive(Debug, Clone)]
+pub struct CurrentExecutionTargetRequest(CurrentOriginalTargetRequestV1);
+impl CurrentExecutionTargetRequest {
+    pub fn ordinary(&self) -> &ExecutionTargetRequirement { &self.0.ordinary }
+    pub fn canonical_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let value = serde_json::to_value(self)?;
+        let bytes = lillux::canonical_json(&value)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?.into_bytes();
+        anyhow::ensure!(bytes.len() <= MAX_ORIGINAL_TARGET_RAW_BYTES,
+            "current target canonical bytes exceed decode bound");
+        Ok(bytes)
+    }
+}
+impl serde::Serialize for CurrentExecutionTargetRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        CurrentOriginalTargetRequestSerialization {
+            schema: &self.0.schema, os: &self.0.ordinary.os, arch: &self.0.ordinary.arch,
+            resources: &self.0.ordinary.resources, original_physical_bounds: &self.0.original_physical_bounds,
+        }.serialize(serializer)
+    }
+}
+fn transcode_original_target<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+    use serde::de::DeserializeSeed as _;
+    let mut budget = RawOriginalTargetScanBudget { values: 0, output: Some(OriginalTargetWriter(Vec::new())) };
+    RawOriginalTargetScanSeed { budget: &mut budget, depth: 1, comma: false }.deserialize(deserializer)?;
+    Ok(budget.output.expect("emission mode retained").0)
+}
+impl<'de> serde::Deserialize<'de> for CurrentExecutionTargetRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let bytes = transcode_original_target(deserializer)?;
+        match DecodedOriginalTargetRequest::decode(&bytes).map_err(D::Error::custom)? {
+            DecodedOriginalTargetRequest::CurrentV1(v) => Ok(Self(v)),
+            DecodedOriginalTargetRequest::LegacyOrdinary(_) => Err(D::Error::custom("current wrapper refuses ordinary target")),
+        }
+    }
+}
+// Borrowed composed input still has upstream allocation/duplicate limitations.
+pub(crate) fn project_current_target_data(value: &serde_json::Value)
+    -> anyhow::Result<(ExecutionTargetRequirement, Option<CurrentExecutionTargetRequest>)> {
+    let bytes = transcode_original_target(value)?;
+    match DecodedOriginalTargetRequest::decode(&bytes)? {
+        DecodedOriginalTargetRequest::LegacyOrdinary(v) => Ok((v, None)),
+        DecodedOriginalTargetRequest::CurrentV1(v) => Ok((v.ordinary.clone(), Some(CurrentExecutionTargetRequest(v)))),
     }
 }
 
@@ -1210,8 +1280,8 @@ mod original_target_decoder_tests {
     fn scan_data(bytes: &[u8]) -> anyhow::Result<()> {
         use serde::de::DeserializeSeed as _;
         let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-        let mut budget = RawOriginalTargetScanBudget { values: 0 };
-        RawOriginalTargetScanSeed { budget: &mut budget, depth: 1 }
+        let mut budget = RawOriginalTargetScanBudget { values: 0, output: None };
+        RawOriginalTargetScanSeed { budget: &mut budget, depth: 1, comma: false }
             .deserialize(&mut deserializer)?;
         deserializer.end()?;
         Ok(())
@@ -1373,5 +1443,47 @@ mod original_target_decoder_tests {
         ] {
             assert!(DecodedOriginalTargetRequest::decode(invalid.as_bytes()).is_err(), "{invalid}");
         }
+    }
+}
+
+#[cfg(test)]
+mod current_request_codec_controls {
+    use super::*;
+    const CURRENT: &str = r#"{"schema":"ryeos.execution_target.v1","os":"linux","arch":"x86_64","resources":[],"original_physical_bounds":null}"#;
+    #[test]
+    fn current_wrapper_stream_roundtrip_and_required_presence() {
+        let current: CurrentExecutionTargetRequest = serde_json::from_str(CURRENT).unwrap();
+        let canonical = current.canonical_bytes().unwrap();
+        let round: CurrentExecutionTargetRequest = serde_json::from_slice(&canonical).unwrap();
+        assert_eq!(round.canonical_bytes().unwrap(), canonical);
+        for bad in [CURRENT.replace(",\"original_physical_bounds\":null", ""),
+            CURRENT.replace(",\"resources\":[]", ""),
+            CURRENT.replace("ryeos.execution_target.v1", "unknown"),
+            CURRENT.replace("\"resources\":[]", "\"resources\":[],\"resources\":[]") ] {
+            assert!(serde_json::from_str::<CurrentExecutionTargetRequest>(&bad).is_err());
+        }
+        assert!(serde_json::from_str::<CurrentExecutionTargetRequest>(r#"{"os":"linux","arch":"x86_64"}"#).is_err());
+        assert!(serde_json::from_str::<CurrentExecutionTargetRequest>("null").is_err());
+    }
+    #[test]
+    fn transcode_keeps_lossless_integer_and_caps_escaped_output_before_growth() {
+        let mut de = serde_json::Deserializer::from_str("18446744073709551615");
+        assert_eq!(transcode_original_target(&mut de).unwrap(), b"18446744073709551615");
+        // Quoted control bytes expand sixfold; no unbounded Value tree.
+        let value = serde_json::Value::String("\u{0001}".repeat(MAX_ORIGINAL_TARGET_RAW_BYTES / 6 + 1));
+        assert!(transcode_original_target(&value).is_err());
+        let mut writer = OriginalTargetWriter(Vec::new());
+        use std::io::Write as _;
+        writer.write_all(&vec![b'x'; MAX_ORIGINAL_TARGET_RAW_BYTES]).unwrap();
+        assert!(writer.write_all(b"x").is_err());
+        assert_eq!(writer.0.len(), MAX_ORIGINAL_TARGET_RAW_BYTES);
+    }
+    #[test]
+    fn borrowed_projection_preserves_legacy_and_current_without_value_clone() {
+        let legacy = serde_json::json!({"os":"linux","arch":"x86_64"});
+        assert!(project_current_target_data(&legacy).unwrap().1.is_none());
+        let current: serde_json::Value = serde_json::from_str(CURRENT).unwrap();
+        let (ordinary, request) = project_current_target_data(&current).unwrap();
+        assert_eq!(&ordinary, request.as_ref().unwrap().ordinary());
     }
 }

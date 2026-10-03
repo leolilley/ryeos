@@ -26,6 +26,7 @@ pub use execution_plan::{
     PlanVerifiedCommand, SubjectResolutionAuthority,
 };
 pub use execution_target::{
+    CurrentExecutionTargetRequest,
     ExecutionResourceAccess, ExecutionResourceAdmissionPolicy, ExecutionResourceAllocation,
     ExecutionResourceAuthorityCeiling, ExecutionResourceEnforcement, ExecutionResourceFactValue,
     ExecutionResourceRequirement, ExecutionResourceSelection, ExecutionTargetLimits,
@@ -3425,3 +3426,5 @@ pub struct EventEnvelope {
     pub timestamp: String,
     pub sequence: i64,
 }
+
+pub(crate) use execution_target::project_current_target_data;
