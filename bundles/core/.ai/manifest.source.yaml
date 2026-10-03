@@ -28,6 +28,7 @@ isolation_backends:
       - network.host
       - network.isolated
       - process.isolated_pid_namespace
+      - process.original_namespace_terminal_reporting
       - process.target_pid_reporting
       - lifecycle.shared_process_group
       - process.target_limits
