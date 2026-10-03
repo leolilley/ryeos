@@ -524,3 +524,141 @@ fn genuine_retained_signed_startup_selector_refuses_tampered_member() {
     // Actual signed descriptor/CAS verification refuses modified original
     // bytes; no signature refresh, admitted source or original budget forged.
 }
+
+// This is a raw-member C2 fixture, not an accepted startup contract. The static
+// signed protocol selects these exact bytes; its existing capsule has no
+// original source binder. A separate genuine temporary source admission below
+// exercises the production member reader without claiming that missing join.
+const C2_RAW_MEMBER: &[u8] = b"{\"fixture\":\"C2 raw source member only\"}\n";
+
+fn temporary_c2_fixture() -> (
+    tempfile::TempDir,
+    crate::state::AppState,
+    VerifiedTrustedPooledSessionInputs,
+    crate::source_closure_admission::temporary_source_fixture::Fixture,
+) {
+    let selected = ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+        source_root: "source".into(),
+        member: "startup.json".into(),
+        sha256: lillux::sha256_hex(C2_RAW_MEMBER),
+    };
+    let (root, mut state, hash) = fixture_with_startup(Some(selected.clone()));
+    let inputs = VerifiedTrustedPooledSessionInputs::verify(&state, &hash).unwrap();
+    assert_eq!(inputs.startup_contract_selection.as_ref(), Some(&selected));
+    assert!(inputs.original_isolation.is_none());
+    assert!(inputs.original_startup_contract.is_none());
+    let source =
+        crate::source_closure_admission::temporary_source_fixture::admit(&mut state, C2_RAW_MEMBER)
+            .unwrap();
+    (root, state, inputs, source)
+}
+
+#[test]
+fn temporary_c2_actual_admission_publication_recovery_reads_signed_selected_raw_member() {
+    let (_root, state, inputs, source) = temporary_c2_fixture();
+    let authority = source.publication.authority();
+    let guard = authority.acquire_shared_guard().unwrap();
+    let selection = inputs.startup_contract_selection.as_ref().unwrap();
+    let loaded = crate::source_closure_admission::load_selected_startup_contract_member(
+        &source.recovered,
+        selection,
+        &guard,
+    )
+    .unwrap();
+    assert_eq!(loaded.bytes, C2_RAW_MEMBER);
+    assert_eq!(loaded.file.root, selection.source_root);
+    assert_eq!(loaded.file.path, selection.member);
+    assert_eq!(loaded.file.blob_hash, lillux::sha256_hex(&loaded.bytes));
+    // Recovery/member reads use immutable retained CAS, not reopened Bundle
+    // bytes. Changing the live test member cannot substitute the retained one.
+    std::fs::write(
+        source
+            .bundle
+            .path()
+            .join(".ai/workers/test/source/startup.json"),
+        b"changed live temporary member",
+    )
+    .unwrap();
+    let recovered = crate::source_closure_admission::recover_source_closure(
+        &state,
+        &state.engine,
+        &source.resolution,
+    )
+    .unwrap()
+    .unwrap();
+    let retained = crate::source_closure_admission::load_selected_startup_contract_member(
+        &recovered, selection, &guard,
+    )
+    .unwrap();
+    assert_eq!(retained.bytes, C2_RAW_MEMBER);
+    assert!(inputs.original_startup_request_inputs(&state).is_err());
+}
+
+#[test]
+fn temporary_c2_actual_recovered_source_refuses_foreign_guard_before_member_read() {
+    let (_root, _state, inputs, source) = temporary_c2_fixture();
+    let foreign_root = tempfile::tempdir().unwrap();
+    let foreign_state = crate::state::test_support::build(foreign_root.path()).unwrap();
+    let foreign = foreign_state.state_store.pinned_state_authority().unwrap();
+    let foreign_guard = foreign.acquire_shared_guard().unwrap();
+    assert!(
+        crate::source_closure_admission::load_selected_startup_contract_member(
+            &source.recovered,
+            inputs.startup_contract_selection.as_ref().unwrap(),
+            &foreign_guard,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn temporary_c2_actual_recovered_source_refuses_substituted_member_root_and_hash() {
+    let (_root, _state, inputs, source) = temporary_c2_fixture();
+    let guard = source
+        .publication
+        .authority()
+        .acquire_shared_guard()
+        .unwrap();
+    let selected = inputs.startup_contract_selection.as_ref().unwrap();
+    for altered in [
+        ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+            member: "missing.json".into(),
+            ..selected.clone()
+        },
+        ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+            source_root: "foreign".into(),
+            ..selected.clone()
+        },
+        ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+            sha256: lillux::sha256_hex(b"substituted raw bytes"),
+            ..selected.clone()
+        },
+    ] {
+        // Altered selectors are negative test data, never signed authority.
+        assert!(
+            crate::source_closure_admission::load_selected_startup_contract_member(
+                &source.recovered,
+                &altered,
+                &guard,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn temporary_c2_actual_source_recovery_refuses_revoked_temporary_signer() {
+    let (_root, mut state, _inputs, source) = temporary_c2_fixture();
+    let mut engine = (*state.engine).clone();
+    engine.node_trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![]);
+    engine.trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![]);
+    state.engine = Arc::new(engine);
+    assert!(
+        crate::source_closure_admission::recover_source_closure(
+            &state,
+            &state.engine,
+            &source.resolution,
+        )
+        .is_err()
+    );
+}

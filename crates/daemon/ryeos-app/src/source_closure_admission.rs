@@ -1487,6 +1487,188 @@ fn engine_internal(error: anyhow::Error) -> ryeos_engine::error::EngineError {
     ryeos_engine::error::EngineError::Internal(error.to_string())
 }
 
+/// Temporary C2 source-only fixture. It uses production admission/publication
+/// and recovery; it supplies no protected backend, product or funded owner.
+#[cfg(test)]
+pub(crate) mod temporary_source_fixture {
+    use super::*;
+    use ryeos_engine::resolution::{
+        KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
+    };
+
+    pub(crate) struct Fixture {
+        pub(crate) resolution: ResolutionOutput,
+        pub(crate) recovered: AdmittedSourceClosure,
+        // Keep the actual staged CAS roots alive through every member read.
+        pub(crate) publication: PendingCasPublication,
+        pub(crate) bundle: tempfile::TempDir,
+    }
+
+    pub(crate) fn admit(state: &mut AppState, member: &[u8]) -> anyhow::Result<Fixture> {
+        let bundle = tempfile::tempdir()?;
+        let kinds = bundle.path().join("fixture-kinds");
+        std::fs::create_dir_all(kinds.join("worker"))?;
+        let key = lillux::crypto::SigningKey::from_bytes(&[113; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
+        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: fingerprint.clone(),
+                verifying_key: key.verifying_key(),
+                label: None,
+            },
+        ]);
+        let schema = r##"location:
+  directory: workers
+execution:
+  aliases:
+    "@base": "tool:ryeos/base/base"
+  source_closure:
+    derived: effective_source_closure
+    location: {type: owner_relative_source, path: [source]}
+    testimony: owner_signed_digest
+    max_files: 8
+    max_total_bytes: 65536
+    max_file_bytes: 32768
+    max_depth: 8
+formats:
+  - extensions: [".yaml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+metadata:
+  rules:
+    name:
+      from: filename
+composed_value_contract:
+  root_type: mapping
+  required: {}
+effective_trust:
+  include_references: false
+resolution: []
+composer: handler:ryeos/core/identity
+"##;
+        std::fs::write(
+            kinds.join("worker/worker.kind-schema.yaml"),
+            lillux::signature::sign_content(schema, &key, "#", None),
+        )?;
+        let registry = ryeos_engine::kind_registry::KindRegistry::load_base(&[kinds], &trust)?;
+        let contract = registry
+            .get("worker")
+            .and_then(|kind| kind.execution.as_ref())
+            .and_then(|execution| execution.source_closure.as_ref())
+            .context("temporary signed kind has no source contract")?;
+        let prefix = Path::new(".ai/workers/test/source");
+        std::fs::create_dir_all(bundle.path().join(prefix))?;
+        // An inert test entry, never executed and never a production consumer.
+        std::fs::write(
+            bundle.path().join(prefix).join("bootstrap.py"),
+            b"# C2 source only\n",
+        )?;
+        std::fs::write(bundle.path().join(prefix).join("startup.json"), member)?;
+        let source = DirectorySourceContent::new(
+            bundle.path(),
+            "bundle:factory-fixture".into(),
+            state.ignore_matcher.as_ref(),
+        )?;
+        let candidate = ryeos_engine::source_closure::capture_source_candidate(
+            &source,
+            &[SourceRootRequest {
+                id: "source".into(),
+                selection: SourceRootSelection::Tree {
+                    prefix: prefix.into(),
+                },
+            }],
+            contract,
+        )?;
+        let body = format!(
+            "kind: worker\nname: factory\ncategory: test\nsource:\n  root: source\n  entry: bootstrap.py\n  digest: {}\n",
+            candidate.manifest.digest()?
+        );
+        let document = lillux::signature::sign_content(&body, &key, "#", None);
+        let header = lillux::signature::parse_signature_line(
+            document
+                .lines()
+                .next()
+                .context("temporary signature absent")?,
+            "#",
+            None,
+        )
+        .context("temporary signature malformed")?;
+        ensure!(
+            lillux::signature::is_valid_signature_for(
+                &header.content_hash,
+                &header.signature_b64,
+                &header.signer_fingerprint,
+                &body,
+                &key.verifying_key(),
+                &fingerprint,
+            ),
+            "temporary Worker signature invalid"
+        );
+        let descriptor = bundle.path().join(".ai/workers/test/factory.yaml");
+        std::fs::write(&descriptor, &document)?;
+        // Resolution is test input derived from the verified actual document;
+        // no admitted source/proof owner is constructed here.
+        let mut resolution = ResolutionOutput {
+            root: ResolvedAncestor {
+                requested_id: "worker:test/factory".into(),
+                resolved_ref: "worker:test/factory".into(),
+                source_path: descriptor,
+                source_space: ItemSpace::Bundle,
+                source_root: ItemSourceRoot::Bundle {
+                    name: "factory-fixture".into(),
+                },
+                trust_class: TrustClass::TrustedBundle,
+                signer_fingerprint: Some(fingerprint),
+                alias_resolution: None,
+                added_by: ResolutionStepName::PipelineInit,
+                raw_content: body.clone(),
+                source_content_digest: lillux::sha256_hex(document.as_bytes()),
+                raw_content_digest: lillux::sha256_hex(body.as_bytes()),
+            },
+            ancestors: vec![],
+            references_edges: vec![],
+            referenced_items: vec![],
+            step_outputs: Default::default(),
+            effective_trust_class: TrustClass::TrustedBundle,
+            composed: KindComposedView::identity(serde_yaml::from_str(&body)?),
+        };
+        let mut engine = (*state.engine).clone();
+        engine.kinds = registry;
+        engine.node_trust_store = trust.clone();
+        engine.trust_store = trust;
+        state.engine = std::sync::Arc::new(engine);
+        let roots = ryeos_engine::item_resolution::ResolutionRoots::from_registered(
+            None,
+            &[ryeos_engine::item_resolution::RegisteredBundleRoot {
+                name: "factory-fixture".into(),
+                canonical_root: bundle.path().canonicalize()?,
+            }],
+        );
+        let admitted = admit_source_closure(
+            state,
+            &state.engine,
+            "worker",
+            &mut resolution,
+            &roots,
+            None,
+            None,
+        )?
+        .context("actual temporary source admission returned None")?;
+        let publication = admitted
+            .into_publication()
+            .context("actual admission did not retain its CAS publication")?;
+        let recovered = recover_source_closure(state, &state.engine, &resolution)?
+            .context("actual temporary source recovery returned None")?;
+        Ok(Fixture {
+            resolution,
+            recovered,
+            publication,
+            bundle,
+        })
+    }
+}
+
 #[cfg(test)]
 mod directory_source_tests {
     use super::*;
