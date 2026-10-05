@@ -7,9 +7,9 @@
 use lillux::time::{Duration, MonotonicDeadline};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,7 @@ const TERMINAL_STREAM_RETENTION_MS: u64 = 5 * 60 * 1_000;
 const ABANDONED_STREAM_RETENTION_MS: u64 = 2 * 60 * 60 * 1_000;
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static STREAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static RETIREMENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Node-wide admission budgets for trusted, bundle-signed persistent workers.
 /// Signed kind contracts can narrow them but cannot raise them. The per-tree
@@ -192,6 +193,12 @@ pub struct StartedPersistentSession {
     /// Descriptor-backed workspace/content leases owned for exactly the
     /// process lifetime. Their concrete types remain outside pool semantics.
     pub lifelines: Vec<Box<dyn Send + Sync>>,
+    /// Lock-free health snapshot shared with the ordinary relay pump.
+    pub relay_health: Option<PersistentSessionRelayHealthCell>,
+    /// Optional typed owner for an ordinary external relay pump. Its health
+    /// participates in request admission and idle retirement; it is joined
+    /// before process reap or cleanup lifeline release.
+    pub relay_owner: Option<Arc<dyn PersistentSessionRelayOwner>>,
     /// When present, readiness must echo this exact daemon-minted identity in
     /// `{ "boot_identity": ... }`. Pooled request workers omit it.
     pub expected_boot_identity: Option<String>,
@@ -220,6 +227,88 @@ pub struct StartedPersistentSession {
 pub type PersistentSessionObservationSink =
     Arc<dyn Fn(Value) -> Result<Value> + Send + Sync + 'static>;
 pub type PersistentSessionCleanupObserver = Arc<dyn Fn() -> Result<()> + Send + Sync + 'static>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistentSessionRelayFailure {
+    ContactFailed,
+    PumpPanicked,
+    SignedFrameBudgetExhausted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistentSessionRelayHealth {
+    Live,
+    Failed(PersistentSessionRelayFailure),
+    Stopped,
+}
+
+const RELAY_HEALTH_LIVE: u8 = 0;
+const RELAY_HEALTH_CONTACT_FAILED: u8 = 1;
+const RELAY_HEALTH_PUMP_PANICKED: u8 = 2;
+const RELAY_HEALTH_FRAME_BUDGET_EXHAUSTED: u8 = 3;
+const RELAY_HEALTH_STOPPED: u8 = 4;
+
+#[derive(Clone)]
+pub struct PersistentSessionRelayHealthCell(Arc<AtomicU8>);
+
+impl PersistentSessionRelayHealthCell {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicU8::new(RELAY_HEALTH_LIVE)))
+    }
+
+    pub fn snapshot(&self) -> PersistentSessionRelayHealth {
+        match self.0.load(Ordering::Acquire) {
+            RELAY_HEALTH_CONTACT_FAILED => {
+                PersistentSessionRelayHealth::Failed(PersistentSessionRelayFailure::ContactFailed)
+            }
+            RELAY_HEALTH_PUMP_PANICKED => {
+                PersistentSessionRelayHealth::Failed(PersistentSessionRelayFailure::PumpPanicked)
+            }
+            RELAY_HEALTH_FRAME_BUDGET_EXHAUSTED => PersistentSessionRelayHealth::Failed(
+                PersistentSessionRelayFailure::SignedFrameBudgetExhausted,
+            ),
+            RELAY_HEALTH_STOPPED => PersistentSessionRelayHealth::Stopped,
+            _ => PersistentSessionRelayHealth::Live,
+        }
+    }
+
+    pub fn fail(&self, failure: PersistentSessionRelayFailure) {
+        let failed = match failure {
+            PersistentSessionRelayFailure::ContactFailed => RELAY_HEALTH_CONTACT_FAILED,
+            PersistentSessionRelayFailure::PumpPanicked => RELAY_HEALTH_PUMP_PANICKED,
+            PersistentSessionRelayFailure::SignedFrameBudgetExhausted => {
+                RELAY_HEALTH_FRAME_BUDGET_EXHAUSTED
+            }
+        };
+        let mut current = self.0.load(Ordering::Acquire);
+        while current == RELAY_HEALTH_LIVE || current == RELAY_HEALTH_STOPPED {
+            match self
+                .0
+                .compare_exchange_weak(current, failed, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    pub fn stop(&self) {
+        let _ = self.0.compare_exchange(
+            RELAY_HEALTH_LIVE,
+            RELAY_HEALTH_STOPPED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+/// Typed supervision edge for the one ordinary external relay owned by a
+/// persistent session. Implementations must make health reads nonblocking and
+/// stop/join without holding an owner or pool lock.
+pub trait PersistentSessionRelayOwner: Send + Sync + 'static {
+    fn stop_and_join(&self) -> Result<()>;
+}
+
 pub struct PersistentSessionResourceRequestLease {
     finish: Option<Box<dyn FnOnce() -> Result<()> + Send + 'static>>,
 }
@@ -272,6 +361,105 @@ struct BudgetedSessionFrame {
     _budget: BacklogBytePermit,
 }
 
+enum RetirementState {
+    Open,
+    InProgress(u64),
+    Reaped,
+    Unproved(String),
+}
+
+struct RetirementCoordinator {
+    state: Mutex<RetirementState>,
+    changed: Condvar,
+}
+
+impl RetirementCoordinator {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(RetirementState::Open),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn poison_guard(
+        &self,
+        process: &SessionProcess,
+        mut state: MutexGuard<'_, RetirementState>,
+    ) -> String {
+        let reason = "persistent-session retirement coordinator was poisoned".to_owned();
+        *state = RetirementState::Unproved(reason.clone());
+        process.closed.store(true, Ordering::Release);
+        drop(state);
+        process.record_cleanup_unproved(&reason);
+        self.changed.notify_all();
+        reason
+    }
+}
+
+struct RetirementAttempt<'a> {
+    process: &'a SessionProcess,
+    token: u64,
+    complete: bool,
+}
+
+impl RetirementAttempt<'_> {
+    fn finish(mut self, outcome: std::result::Result<(), String>) -> Result<()> {
+        let mut state = match self.process.retirement.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                let reason = "persistent-session retirement coordinator was poisoned".to_owned();
+                *state = RetirementState::Unproved(reason.clone());
+                drop(state);
+                self.process.record_cleanup_unproved(&reason);
+                self.process.retirement.changed.notify_all();
+                self.complete = true;
+                return Err(anyhow!(reason));
+            }
+        };
+        match &*state {
+            RetirementState::InProgress(token) if *token == self.token => {}
+            _ => bail!("persistent-session retirement token lost ownership"),
+        }
+        let failure = outcome.err();
+        *state = failure
+            .as_ref()
+            .map_or(RetirementState::Reaped, |reason| {
+                RetirementState::Unproved(reason.clone())
+            });
+        drop(state);
+        if let Some(reason) = &failure {
+            self.process.record_cleanup_unproved(reason);
+        }
+        self.complete = true;
+        self.process.retirement.changed.notify_all();
+        match failure {
+            Some(reason) => Err(anyhow!(reason)),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for RetirementAttempt<'_> {
+    fn drop(&mut self) {
+        if self.complete {
+            return;
+        }
+        let reason = "persistent-session retirement unwound before proof".to_owned();
+        self.process.record_cleanup_unproved(&reason);
+        let (mut state, poisoned) = match self.process.retirement.state.lock() {
+            Ok(state) => (state, false),
+            Err(poisoned) => (poisoned.into_inner(), true),
+        };
+        if poisoned
+            || matches!(&*state, RetirementState::InProgress(token) if *token == self.token)
+        {
+            *state = RetirementState::Unproved(reason);
+        }
+        self.process.retirement.changed.notify_all();
+    }
+}
+
 struct SessionProcess {
     wire: PersistentSessionWireContract,
     /// The exact identity already validated by exclusive readiness, retained
@@ -288,6 +476,9 @@ struct SessionProcess {
     /// failed, absence of `running` must never be reinterpreted as proof.
     cleanup_unproved: Mutex<Option<String>>,
     cleanup_observer: Mutex<Option<PersistentSessionCleanupObserver>>,
+    relay_owner: Mutex<Option<Arc<dyn PersistentSessionRelayOwner>>>,
+    relay_health: Option<PersistentSessionRelayHealthCell>,
+    retirement: RetirementCoordinator,
     resource_occupancy_limit: Option<lillux::time::OccupancyLimit>,
     resource_cleanup_allowance_ms: Option<u64>,
     resource_attribution_sink: Option<PersistentSessionResourceAttributionSink>,
@@ -322,6 +513,103 @@ struct FrameReader {
 }
 
 impl SessionProcess {
+    fn begin_retirement(&self) -> Result<Option<RetirementAttempt<'_>>> {
+        loop {
+            let mut state = match self.retirement.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => {
+                    let reason = self.retirement.poison_guard(self, poisoned.into_inner());
+                    bail!("{reason}");
+                }
+            };
+            match &*state {
+                RetirementState::Open => {
+                    let token = RETIREMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                    *state = RetirementState::InProgress(token);
+                    self.closed.store(true, Ordering::Release);
+                    self.backlog.changed.notify_all();
+                    drop(state);
+                    return Ok(Some(RetirementAttempt {
+                        process: self,
+                        token,
+                        complete: false,
+                    }));
+                }
+                RetirementState::InProgress(_) => {
+                    state = match self.retirement.changed.wait(state) {
+                        Ok(state) => state,
+                        Err(poisoned) => {
+                            let reason = self
+                                .retirement
+                                .poison_guard(self, poisoned.into_inner());
+                            bail!("{reason}");
+                        }
+                    };
+                    drop(state);
+                }
+                RetirementState::Reaped => return Ok(None),
+                RetirementState::Unproved(reason) => {
+                    bail!("persistent-session cleanup remains unproved: {reason}")
+                }
+            }
+        }
+    }
+
+    fn record_cleanup_unproved(&self, reason: &str) {
+        let mut slot = self
+            .cleanup_unproved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot.get_or_insert_with(|| reason.to_owned());
+    }
+
+    fn relay_health(&self) -> PersistentSessionRelayHealth {
+        self.relay_health
+            .as_ref()
+            .map_or(PersistentSessionRelayHealth::Live, |health| health.snapshot())
+    }
+
+    fn relay_failed(&self) -> bool {
+        matches!(self.relay_health(), PersistentSessionRelayHealth::Failed(_))
+    }
+
+    fn release_lifelines_after_proof(&self) -> Result<()> {
+        let lifelines = std::mem::take(
+            &mut *self
+                .lifelines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        let mut lifelines = lifelines.into_iter();
+        while let Some(lifeline) = lifelines.next() {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(lifeline))).is_err() {
+                let remaining = lifelines.collect::<Vec<_>>();
+                self.lifelines
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .extend(remaining);
+                bail!("persistent-session lifeline destructor unwound after checked reap")
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_relay_live(&self) -> Result<()> {
+        ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "persistent-session owner is closed for retirement"
+        );
+        match self.relay_health() {
+            PersistentSessionRelayHealth::Live => Ok(()),
+            PersistentSessionRelayHealth::Failed(cause) => {
+                bail!("persistent-session ordinary relay failed: {cause:?}")
+            }
+            PersistentSessionRelayHealth::Stopped => {
+                bail!("persistent-session ordinary relay stopped before owner retirement")
+            }
+        }
+    }
+
     fn start_reader(self: &Arc<Self>, wire: PersistentSessionWireContract) -> Result<()> {
         if let Some(sink) = self
             .initial_observation_sink
@@ -498,66 +786,116 @@ impl SessionProcess {
     }
 
     fn retire(&self) -> Result<()> {
+        let Some(attempt) = self.begin_retirement()? else {
+            return Ok(());
+        };
         if let Some(start) = &self.pooled_start {
             if start.has_original_trusted_obligation() {
                 start.retain_unsettled();
-                bail!("ordinary session retirement cannot settle original trusted driver funding");
+                return attempt.finish(Err(
+                    "ordinary session retirement cannot settle original trusted driver funding"
+                        .to_owned(),
+                ));
             }
         }
-        // Serialize retirement and retain all execution lifelines until the
-        // process owner has established cleanup. Arc destruction is not the
-        // retirement boundary.
-        let mut lifelines = self.lifelines.lock().unwrap_or_else(|p| p.into_inner());
-        self.closed.store(true, Ordering::Release);
-        self.backlog.changed.notify_all();
         self.observation_sender
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        if let Some(reason) = self
-            .cleanup_unproved
+
+        let prior_unproved = {
+            self.cleanup_unproved
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        };
+        if let Some(reason) = prior_unproved {
+            return attempt.finish(Err(format!(
+                "persistent-session cleanup remains unproved: {reason}"
+            )));
+        }
+
+        // Clone the typed owner under its slot lock, then stop and join with
+        // every SessionProcess and registry lock released.
+        let relay_owner = self
+            .relay_owner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_deref()
-        {
-            bail!("persistent-session cleanup remains unproved: {reason}");
+            .as_ref()
+            .cloned();
+        if let Err(error) = safe_relay_join(relay_owner.as_ref()) {
+            return attempt.finish(Err(format!("ordinary relay stop/join failed: {error:#}")));
         }
-        if let Some(running) = self
+        drop(relay_owner);
+
+        let running = self
             .running
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            if let Err(error) = running.abort_and_reap_checked() {
-                let reason = format!("persistent-session cleanup could not be proved: {error}");
-                *self
-                    .cleanup_unproved
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason.clone());
-                bail!("{reason}");
-            }
+            .take();
+        let Some(running) = running else {
+            return attempt.finish(Err(
+                "persistent-session running owner was absent before checked reap proof".to_owned(),
+            ));
+        };
+        if let Err(error) = safe_checked_reap(running) {
+            let reason = format!("persistent-session cleanup could not be proved: {error}");
+            return attempt.finish(Err(reason));
         }
-        if let Some(observer) = self
+
+        let cleanup_observer = self
             .cleanup_observer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            if let Err(error) = observer() {
-                let reason =
-                    format!("persistent-session resource settlement remains unproved: {error:#}");
-                *self
-                    .cleanup_unproved
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) = Some(reason.clone());
-                bail!("{reason}");
+            .as_ref()
+            .cloned();
+        if let Some(observer) = cleanup_observer {
+            let settlement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer()));
+            match settlement {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    return attempt.finish(Err(format!(
+                        "persistent-session resource settlement remains unproved: {error:#}"
+                    )));
+                }
+                Err(_) => {
+                    return attempt.finish(Err(
+                        "persistent-session resource settlement observer panicked".to_owned(),
+                    ));
+                }
             }
+            self.cleanup_observer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
         }
         if let Some(start) = &self.pooled_start {
-            start.prove_cleanup()?;
+            if let Err(error) = start.prove_cleanup() {
+                return attempt.finish(Err(format!(
+                    "pooled persistent-session cleanup remains unproved: {error:#}"
+                )));
+            }
         }
-        lifelines.clear();
-        Ok(())
+
+        // Owner destructors run outside the slot lock. If one unwinds, all
+        // later owners are restored to this registered process for quarantine.
+        if let Err(error) = self.release_lifelines_after_proof() {
+            return attempt.finish(Err(format!("{error:#}")));
+        }
+
+        // The joined relay object is dropped outside its slot mutex and only
+        // after checked process and cleanup settlement.
+        let relay_owner = self
+            .relay_owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(relay_owner))).is_err() {
+            return attempt.finish(Err(
+                "ordinary relay owner final drop panicked after checked reap; owner consumed".to_owned(),
+            ));
+        }
+        attempt.finish(Ok(()))
     }
 }
 
@@ -2145,6 +2483,9 @@ impl PersistentSessionPooledStart {
     fn retain_ready_parts(&self, started: &mut StartedPersistentSession) -> Result<()> {
         let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
         retained.lifelines.append(&mut started.lifelines);
+        if let Some(relay_owner) = started.relay_owner.as_ref() {
+            retained.lifelines.push(Box::new(Arc::clone(relay_owner)));
+        }
         stage_pooled_obligation_owners(
             &mut retained,
             &started.cleanup_observer,
@@ -2258,7 +2599,6 @@ impl PersistentSessionPooledStart {
                 retained.admission_refused = true;
                 bail!("retained original running custody cannot be settled by ordinary cleanup");
             }
-            retained.phase = PooledStartPhase::Settled;
             (
                 std::mem::take(&mut retained.lifelines),
                 retained.resource_observer.take(),
@@ -2270,7 +2610,21 @@ impl PersistentSessionPooledStart {
         drop(resource);
         drop(retirement);
         drop(supplied_owners);
-        drop(lifelines);
+        let mut lifelines = lifelines.into_iter();
+        while let Some(lifeline) = lifelines.next() {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(lifeline))).is_err() {
+                let remaining = lifelines.collect::<Vec<_>>();
+                let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
+                retained.lifelines.extend(remaining);
+                retained.phase = PooledStartPhase::Unsettled;
+                retained.admission_refused = true;
+                bail!("pooled persistent-session lifeline destructor unwound after checked reap");
+            }
+        }
+        self.retained
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .phase = PooledStartPhase::Settled;
         Ok(())
     }
 }
@@ -2381,10 +2735,132 @@ struct PooledReadyFailure {
     original_start: Arc<PersistentSessionPooledStart>,
 }
 
+/// Values that must remain reachable when an exclusive start cannot establish
+/// relay, reap, or settlement proof. Kept in the reservation entry so capacity
+/// and owner custody stay in the same registry lane.
+struct ExclusiveUnprovedStartCustody {
+    relay_health: Option<PersistentSessionRelayHealthCell>,
+    relay_owner: Option<Arc<dyn PersistentSessionRelayOwner>>,
+    lifelines: Vec<Box<dyn Send + Sync>>,
+    observer: Option<PersistentSessionCleanupObserver>,
+}
+
+enum ExclusiveQuarantinedOwner {
+    Start(ExclusiveUnprovedStartCustody),
+    ReadyProcess(Arc<SessionProcess>),
+}
+
+struct ExclusiveReservationEntry {
+    contract: GroupContract,
+    quarantined: Vec<ExclusiveQuarantinedOwner>,
+}
+
+#[derive(Clone)]
+struct ExclusiveCustodyRegistration {
+    inner: Arc<PoolInner>,
+    session_id: String,
+}
+
+struct ExclusiveReadyCustodyGuard {
+    custody: Option<ExclusiveUnprovedStartCustody>,
+    registration: Option<ExclusiveCustodyRegistration>,
+}
+
+struct ExclusiveReadyProcessGuard {
+    process: Option<Arc<SessionProcess>>,
+    registration: ExclusiveCustodyRegistration,
+}
+
+impl ExclusiveReadyProcessGuard {
+    fn new(process: Arc<SessionProcess>, registration: ExclusiveCustodyRegistration) -> Self {
+        Self {
+            process: Some(process),
+            registration,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.process.take();
+    }
+}
+
+impl Drop for ExclusiveReadyProcessGuard {
+    fn drop(&mut self) {
+        let Some(process) = self.process.take() else { return };
+        let mut state = self
+            .registration
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(reservation) = state
+            .exclusive_reservations
+            .get_mut(&self.registration.session_id)
+        else {
+            state.cleanup_unproved.get_or_insert_with(|| {
+                "exclusive process retirement unwound after its reservation disappeared".to_owned()
+            });
+            return;
+        };
+        reservation
+            .quarantined
+            .push(ExclusiveQuarantinedOwner::ReadyProcess(process));
+        state
+            .cleanup_unproved
+            .get_or_insert_with(|| "exclusive process retirement unwound before registry publication".to_owned());
+        self.registration.inner.changed.notify_all();
+    }
+}
+
+impl ExclusiveReadyCustodyGuard {
+    fn take(&mut self) -> ExclusiveUnprovedStartCustody {
+        self.custody
+            .take()
+            .expect("readiness custody guard owns its exact start values")
+    }
+}
+
+impl std::ops::Deref for ExclusiveReadyCustodyGuard {
+    type Target = ExclusiveUnprovedStartCustody;
+
+    fn deref(&self) -> &Self::Target {
+        self.custody
+            .as_ref()
+            .expect("readiness custody remains armed until transfer")
+    }
+}
+
+impl Drop for ExclusiveReadyCustodyGuard {
+    fn drop(&mut self) {
+        let (Some(custody), Some(registration)) = (self.custody.take(), self.registration.take())
+        else {
+            return;
+        };
+        let mut state = registration
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(reservation) = state.exclusive_reservations.get_mut(&registration.session_id) else {
+            state.cleanup_unproved.get_or_insert_with(|| {
+                "exclusive readiness unwound after its reservation disappeared".to_owned()
+            });
+            return;
+        };
+        reservation
+            .quarantined
+            .push(ExclusiveQuarantinedOwner::Start(custody));
+        state
+            .cleanup_unproved
+            .get_or_insert_with(|| "exclusive readiness unwound before ownership publication".to_owned());
+        registration.inner.changed.notify_all();
+    }
+}
+
 struct PoolState {
     groups: HashMap<String, SessionGroup>,
     exclusive: HashMap<String, ExclusiveSessionEntry>,
-    exclusive_reservations: HashMap<String, GroupContract>,
+    exclusive_reservations: HashMap<String, ExclusiveReservationEntry>,
     exclusive_failure_cleanup: HashMap<String, &'static str>,
     /// Starts admitted by `reserve_exclusive` that have not yet completed the
     /// caller's durable binding publication. Shutdown waits for these exact
@@ -2427,6 +2903,7 @@ struct PoolInner {
 struct ReadyProcessFailure {
     error: anyhow::Error,
     cleanup_unproved: bool,
+    custody: Option<ExclusiveUnprovedStartCustody>,
 }
 
 /// Typed evidence that an exclusive bind failure consumed process ownership
@@ -2809,7 +3286,13 @@ impl PersistentSessionPool {
             .ok_or_else(|| anyhow!("exclusive persistent-session start counter overflow"))?;
         state
             .exclusive_reservations
-            .insert(session_id.to_owned(), contract.clone());
+            .insert(
+                session_id.to_owned(),
+                ExclusiveReservationEntry {
+                    contract: contract.clone(),
+                    quarantined: Vec::new(),
+                },
+            );
         state.exclusive_starts_in_flight = exclusive_starts_in_flight;
         Ok(ExclusivePersistentSessionReservation {
             inner: Arc::clone(&self.inner),
@@ -4103,7 +4586,15 @@ impl PersistentSessionPool {
                 }
             }
             if !state.exclusive_reservations.is_empty() {
-                bail!("persistent-session shutdown found an ownerless exclusive reservation");
+                let retained = state
+                    .exclusive_reservations
+                    .values()
+                    .map(ExclusiveReservationEntry::quarantined_owner_count)
+                    .sum::<usize>();
+                if retained > 0 {
+                    bail!("persistent-session shutdown retains {retained} unproved exclusive custody owners in their charged reservations");
+                }
+                bail!("persistent-session shutdown found an exclusive reservation without a bound owner");
             }
             let pooled = state
                 .groups
@@ -4200,99 +4691,112 @@ impl ExclusivePersistentSessionReservation {
         started: StartedPersistentSession,
     ) -> Result<ExclusivePersistentSessionStartGuard> {
         if self.inner.shutdown.load(Ordering::Acquire) {
-            self.release_reservation();
             let StartedPersistentSession {
                 running,
+                relay_owner,
+                relay_health,
                 cleanup_observer,
                 retirement_observer,
-                lifelines: _lifelines,
+                lifelines,
                 ..
             } = started;
-            let observer = combine_retirement_observers(cleanup_observer, retirement_observer);
-            return match running
-                .abort_and_reap_checked()
-                .map_err(anyhow::Error::from)
-                .and_then(|()| observer.map(|observer| observer()).unwrap_or(Ok(())))
-            {
-                Ok(()) => Err(anyhow!(
-                    "persistent-session admission is closed for daemon shutdown"
-                )),
-                Err(cleanup) => {
-                    let reason = format!(
-                        "exclusive process crossed daemon shutdown and cleanup could not be proved: {cleanup}"
-                    );
-                    let mut state = self
-                        .inner
-                        .state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.cleanup_unproved.get_or_insert_with(|| reason.clone());
-                    Err(anyhow!(reason).context(PersistentSessionCleanupUnproved))
-                }
+            let custody = ExclusiveUnprovedStartCustody {
+                relay_health,
+                relay_owner,
+                lifelines,
+                observer: combine_retirement_observers(cleanup_observer, retirement_observer),
             };
+            let relay_join_error = safe_relay_join(custody.relay_owner.as_ref()).err();
+            let reap_error = safe_checked_reap(running).err();
+            if relay_join_error.is_some() || reap_error.is_some() {
+                let reason = format!(
+                    "exclusive process crossed daemon shutdown without join/reap proof: relay={relay_join_error:?}; reap={reap_error:?}"
+                );
+                self.quarantine_start_custody(custody, reason.clone());
+                return Err(anyhow!(
+                    "exclusive process crossed daemon shutdown and cleanup could not be proved: {reason}"
+                )
+                .context(PersistentSessionCleanupUnproved));
+            }
+            let settlement = settle_ready_cleanup(
+                anyhow!("persistent-session admission is closed for daemon shutdown"),
+                custody,
+            );
+            if settlement.cleanup_unproved {
+                let reason = settlement.error.to_string();
+                if let Some(custody) = settlement.custody {
+                    self.quarantine_start_custody(custody, reason.clone());
+                }
+                return Err(settlement.error.context(PersistentSessionCleanupUnproved));
+            }
+            self.release_reservation();
+            return Err(anyhow!(
+                "persistent-session admission is closed for daemon shutdown"
+            ));
         }
-        let ready = match ready_process(
+        let registration = ExclusiveCustodyRegistration {
+            inner: Arc::clone(&self.inner),
+            session_id: self.session_id.clone(),
+        };
+        let (ready, mut ready_process_guard) = match ready_process_registered(
             started,
             &self.contract.wire,
             &self.contract.lifecycle,
             Arc::clone(&self.backlog),
+            Some(registration.clone()),
         ) {
             Ok(process) => {
                 let process = Arc::new(process);
+                let mut process_guard =
+                    ExclusiveReadyProcessGuard::new(Arc::clone(&process), registration);
                 if self.inner.shutdown.load(Ordering::Acquire) {
-                    self.release_reservation();
                     let cleanup = process.retire().err();
                     return Err(match cleanup {
                         Some(cleanup) => {
                             let reason = format!(
                                 "exclusive process crossed daemon shutdown and cleanup could not be proved: {cleanup}"
                             );
-                            let mut state = self
-                                .inner
-                                .state
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                            self.quarantine_ready_process(Arc::clone(&process), reason.clone());
+                            process_guard.disarm();
                             anyhow!(reason).context(PersistentSessionCleanupUnproved)
                         }
                         None => {
+                            self.release_reservation();
+                            process_guard.disarm();
                             anyhow!("persistent-session admission is closed for daemon shutdown")
                         }
                     });
                 }
                 if let Err(error) = process.start_reader(self.contract.wire.clone()) {
-                    self.release_reservation();
                     let cleanup = process.retire().err();
                     return Err(match cleanup {
                         Some(cleanup) => {
                             let reason =
                                 format!("exclusive reader start cleanup failed: {cleanup}");
-                            let mut state = self
-                                .inner
-                                .state
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                            self.quarantine_ready_process(Arc::clone(&process), reason.clone());
+                            process_guard.disarm();
                             error
                                 .context(reason)
                                 .context(PersistentSessionCleanupUnproved)
                         }
-                        None => error,
+                        None => {
+                            self.release_reservation();
+                            process_guard.disarm();
+                            error
+                        }
                     });
                 }
-                process
+                (process, process_guard)
             }
             Err(failure) => {
-                self.release_reservation();
                 if failure.cleanup_unproved {
-                    let mut state = self
-                        .inner
-                        .state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state
-                        .cleanup_unproved
-                        .get_or_insert_with(|| failure.error.to_string());
+                    if let Some(custody) = failure.custody {
+                        self.quarantine_start_custody(custody, failure.error.to_string());
+                    } else {
+                        self.release_reservation();
+                    }
+                } else {
+                    self.release_reservation();
                 }
                 return Err(if failure.cleanup_unproved {
                     failure.error.context(PersistentSessionCleanupUnproved)
@@ -4307,7 +4811,6 @@ impl ExclusivePersistentSessionReservation {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.inner.shutdown.load(Ordering::Acquire) {
-            state.exclusive_reservations.remove(&self.session_id);
             drop(state);
             let cleanup = ready.retire().err();
             return Err(match cleanup {
@@ -4315,18 +4818,18 @@ impl ExclusivePersistentSessionReservation {
                     let reason = format!(
                         "exclusive process crossed daemon shutdown and cleanup could not be proved: {cleanup}"
                     );
-                    let mut state = self
-                        .inner
-                        .state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                    self.quarantine_ready_process(Arc::clone(&ready), reason.clone());
+                    ready_process_guard.disarm();
                     anyhow!(reason).context(PersistentSessionCleanupUnproved)
                 }
-                None => anyhow!("persistent-session admission is closed for daemon shutdown"),
+                None => {
+                    self.release_reservation();
+                    ready_process_guard.disarm();
+                    anyhow!("persistent-session admission is closed for daemon shutdown")
+                }
             });
         }
-        let Some(reserved) = state.exclusive_reservations.remove(&self.session_id) else {
+        let Some(reserved) = state.exclusive_reservations.get(&self.session_id) else {
             drop(state);
             let cleanup = ready.retire().err();
             return Err(match cleanup {
@@ -4334,18 +4837,31 @@ impl ExclusivePersistentSessionReservation {
                     let reason = format!(
                         "exclusive persistent-session reservation was lost; cleanup failed: {cleanup}"
                     );
-                    let mut state = self
-                        .inner
-                        .state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    // A missing reservation violates the ownership invariant;
+                    // retain the process in the existing exclusive owner map
+                    // when possible before returning the quarantine marker.
+                    let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
                     state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                    state.exclusive.entry(self.session_id.clone()).or_insert_with(|| ExclusiveSessionEntry {
+                        contract: self.contract.clone(),
+                        process: Arc::clone(&ready),
+                    });
+                    self.active = false;
+                    drop(state);
+                    self.start_guard.take();
+                    ready_process_guard.disarm();
                     anyhow!(reason).context(PersistentSessionCleanupUnproved)
                 }
-                None => anyhow!("exclusive persistent-session reservation was lost"),
+                None => {
+                    self.release_reservation();
+                    ready_process_guard.disarm();
+                    anyhow!("exclusive persistent-session reservation was lost")
+                }
             });
         };
-        if reserved.lifecycle != self.contract.lifecycle || reserved.wire != self.contract.wire {
+        if reserved.contract.lifecycle != self.contract.lifecycle
+            || reserved.contract.wire != self.contract.wire
+        {
             drop(state);
             let cleanup = ready.retire().err();
             return Err(match cleanup {
@@ -4353,15 +4869,15 @@ impl ExclusivePersistentSessionReservation {
                     let reason = format!(
                         "exclusive persistent-session reservation changed; cleanup failed: {cleanup}"
                     );
-                    let mut state = self
-                        .inner
-                        .state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                    self.quarantine_ready_process(Arc::clone(&ready), reason.clone());
+                    ready_process_guard.disarm();
                     anyhow!(reason).context(PersistentSessionCleanupUnproved)
                 }
-                None => anyhow!("exclusive persistent-session reservation changed"),
+                None => {
+                    self.release_reservation();
+                    ready_process_guard.disarm();
+                    anyhow!("exclusive persistent-session reservation changed")
+                }
             });
         }
         match state.exclusive.entry(self.session_id.clone()) {
@@ -4379,18 +4895,20 @@ impl ExclusivePersistentSessionReservation {
                         let reason = format!(
                             "exclusive session was concurrently attached; cleanup failed: {cleanup}"
                         );
-                        let mut state = self
-                            .inner
-                            .state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                        self.quarantine_ready_process(Arc::clone(&ready), reason.clone());
+                        ready_process_guard.disarm();
                         anyhow!(reason).context(PersistentSessionCleanupUnproved)
                     }
-                    None => anyhow!("exclusive persistent session was concurrently attached"),
+                    None => {
+                        self.release_reservation();
+                        ready_process_guard.disarm();
+                        anyhow!("exclusive persistent session was concurrently attached")
+                    }
                 });
             }
         }
+        state.exclusive_reservations.remove(&self.session_id);
+        ready_process_guard.disarm();
         self.active = false;
         let start_guard = self
             .start_guard
@@ -4412,6 +4930,50 @@ impl ExclusivePersistentSessionReservation {
         state.exclusive_reservations.remove(&self.session_id);
         self.active = false;
         self.inner.changed.notify_all();
+    }
+
+    fn quarantine_start_custody(
+        &mut self,
+        custody: ExclusiveUnprovedStartCustody,
+        reason: String,
+    ) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let reservation = state
+            .exclusive_reservations
+            .get_mut(&self.session_id)
+            .expect("active exclusive reservation remains registered during custody transfer");
+        reservation
+            .quarantined
+            .push(ExclusiveQuarantinedOwner::Start(custody));
+        state.cleanup_unproved.get_or_insert(reason);
+        self.active = false;
+        self.inner.changed.notify_all();
+        drop(state);
+        self.start_guard.take();
+    }
+
+    fn quarantine_ready_process(&mut self, process: Arc<SessionProcess>, reason: String) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let reservation = state
+            .exclusive_reservations
+            .get_mut(&self.session_id)
+            .expect("active exclusive reservation remains registered during process custody transfer");
+        reservation
+            .quarantined
+            .push(ExclusiveQuarantinedOwner::ReadyProcess(process));
+        state.cleanup_unproved.get_or_insert(reason);
+        self.active = false;
+        self.inner.changed.notify_all();
+        drop(state);
+        self.start_guard.take();
     }
 }
 
@@ -4439,7 +5001,48 @@ impl Drop for ExclusivePersistentSessionStartGuard {
 
 impl Drop for ExclusivePersistentSessionReservation {
     fn drop(&mut self) {
-        self.release_reservation();
+        if !self.active {
+            return;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let retained = state
+            .exclusive_reservations
+            .get(&self.session_id)
+            .is_some_and(|reservation| !reservation.quarantined.is_empty());
+        if retained {
+            state.cleanup_unproved.get_or_insert_with(|| {
+                "exclusive reservation retained custody during bind unwind".to_owned()
+            });
+        } else {
+            state.exclusive_reservations.remove(&self.session_id);
+        }
+        self.active = false;
+        self.inner.changed.notify_all();
+        drop(state);
+        self.start_guard.take();
+    }
+}
+
+impl ExclusiveReservationEntry {
+    fn quarantined_owner_count(&self) -> usize {
+        self.quarantined
+            .iter()
+            .map(|owner| match owner {
+                ExclusiveQuarantinedOwner::Start(custody) => {
+                    (if custody.relay_health.is_some() { 1 } else { 0 })
+                        + (if custody.relay_owner.is_some() { 1 } else { 0 })
+                        + custody.lifelines.len()
+                        + (if custody.observer.is_some() { 1 } else { 0 })
+                }
+                ExclusiveQuarantinedOwner::ReadyProcess(process) => {
+                    if Arc::strong_count(process) > 0 { 1 } else { 0 }
+                }
+            })
+            .sum()
     }
 }
 
@@ -4472,7 +5075,12 @@ fn aggregate_process_capacity(state: &PoolState) -> (usize, u64, u64) {
         .exclusive
         .values()
         .map(|entry| &entry.contract)
-        .chain(state.exclusive_reservations.values())
+        .chain(
+            state
+                .exclusive_reservations
+                .values()
+                .map(|reservation| &reservation.contract),
+        )
         .fold(pooled, |totals, contract| {
             (
                 totals.0.saturating_add(1),
@@ -4788,6 +5396,9 @@ fn ready_pooled_process(
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
             retained.lifelines.append(&mut started.lifelines);
+            if let Some(relay_owner) = started.relay_owner.as_ref() {
+                retained.lifelines.push(Box::new(Arc::clone(relay_owner)));
+            }
             stage_pooled_obligation_owners(
                 &mut retained,
                 &started.cleanup_observer,
@@ -4805,13 +5416,23 @@ fn ready_pooled_process(
         });
     }
     if let Err(error) = original_start.retain_ready_parts(&mut started) {
+        let relay_join = started
+            .relay_owner
+            .as_ref()
+            .and_then(|owner| owner.stop_and_join().err());
         let cleanup = started.running.abort_and_reap_checked();
         return Err(PooledReadyFailure {
-            error: match cleanup {
-                Ok(()) => error,
-                Err(cleanup) => error.context(format!(
+            error: match (relay_join, cleanup) {
+                (None, Ok(())) => error,
+                (Some(join), Ok(())) => error.context(format!(
+                    "ordinary relay join before pooled readiness refusal failed: {join:#}"
+                )),
+                (None, Err(cleanup)) => error.context(format!(
                     "readiness obligation mismatch reap unproved: {cleanup}"
                 )),
+                (Some(join), Err(cleanup)) => error
+                    .context(format!("ordinary relay join failed: {join:#}"))
+                    .context(format!("readiness obligation mismatch reap unproved: {cleanup}")),
             },
             cleanup_unproved: true,
             original_start,
@@ -4825,7 +5446,27 @@ fn ready_pooled_process(
         Err(failure) => Err(PooledReadyFailure {
             error: failure.error,
             cleanup_unproved: failure.cleanup_unproved,
-            original_start,
+            original_start: {
+                if let Some(mut custody) = failure.custody {
+                    let mut retained = original_start
+                        .retained
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    retained.lifelines.append(&mut custody.lifelines);
+                    if let Some(health) = custody.relay_health.take() {
+                        retained.lifelines.push(Box::new(health));
+                    }
+                    if let Some(owner) = custody.relay_owner.take() {
+                        retained.lifelines.push(Box::new(owner));
+                    }
+                    if let Some(observer) = custody.observer.take() {
+                        retained.obligation_owners.push(observer);
+                    }
+                    retained.admission_refused = true;
+                    retained.phase = PooledStartPhase::Unsettled;
+                }
+                original_start
+            },
         }),
     }
 }
@@ -4836,10 +5477,22 @@ fn ready_process(
     lifecycle: &PersistentSessionLifecycleContract,
     backlog: Arc<BacklogBudget>,
 ) -> std::result::Result<SessionProcess, ReadyProcessFailure> {
+    ready_process_registered(started, wire, lifecycle, backlog, None)
+}
+
+fn ready_process_registered(
+    started: StartedPersistentSession,
+    wire: &PersistentSessionWireContract,
+    lifecycle: &PersistentSessionLifecycleContract,
+    backlog: Arc<BacklogBudget>,
+    registration: Option<ExclusiveCustodyRegistration>,
+) -> std::result::Result<SessionProcess, ReadyProcessFailure> {
     let StartedPersistentSession {
         running,
         mut socket,
         lifelines,
+        relay_health,
+        relay_owner,
         expected_boot_identity,
         observation_sink,
         cleanup_observer,
@@ -4850,7 +5503,35 @@ fn ready_process(
         resource_eligibility,
     } = started;
     let resource_cleanup_present = cleanup_observer.is_some();
-    let cleanup_observer = combine_retirement_observers(cleanup_observer, retirement_observer);
+    let mut custody = ExclusiveReadyCustodyGuard {
+        custody: Some(ExclusiveUnprovedStartCustody {
+            relay_health,
+            relay_owner,
+            lifelines,
+            observer: combine_retirement_observers(cleanup_observer, retirement_observer),
+        }),
+        registration,
+    };
+    macro_rules! reject_ready {
+        ($running:expr, $error:expr $(,)?) => {
+            refuse_ready_process($running, $error, custody.take())
+        };
+    }
+    if custody.relay_health.is_some() != custody.relay_owner.is_some() {
+        return Err(reject_ready!(
+            running,
+            anyhow!("persistent-session relay health and owner were not transferred together"),
+        ));
+    }
+    if let Some(health) = &custody.relay_health {
+        let snapshot = health.snapshot();
+        if snapshot != PersistentSessionRelayHealth::Live {
+            return Err(reject_ready!(
+                running,
+                anyhow!("ordinary relay was terminal before persistent-session readiness: {snapshot:?}"),
+            ));
+        }
+    }
     if resource_cleanup_present
         && (resource_occupancy_limit.is_none()
             || resource_attribution_sink.is_none()
@@ -4858,15 +5539,7 @@ fn ready_process(
     {
         let error =
             anyhow!("resource-bearing persistent session has no bounded occupancy authority");
-        return match running.abort_and_reap_checked() {
-            Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
-            Err(cleanup) => Err(ReadyProcessFailure {
-                error: error.context(format!(
-                    "unbounded persistent-session refusal cleanup could not be proved: {cleanup}"
-                )),
-                cleanup_unproved: true,
-            }),
-        };
+        return Err(reject_ready!(running, error));
     }
     if !resource_cleanup_present
         && (resource_occupancy_limit.is_some()
@@ -4874,22 +5547,13 @@ fn ready_process(
             || resource_eligibility.is_some())
     {
         let error = anyhow!("persistent-session resource evidence is incomplete");
-        return match running.abort_and_reap_checked() {
-            Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
-            Err(cleanup) => Err(ReadyProcessFailure {
-                error: error.context(format!(
-                    "incomplete resource-evidence cleanup could not be proved: {cleanup}"
-                )),
-                cleanup_unproved: true,
-            }),
-        };
+        return Err(reject_ready!(running, error));
     }
     if let Some(limit) = &resource_occupancy_limit {
         let Some(cleanup_ms) = resource_cleanup_allowance_ms else {
-            return Err(refuse_ready_process(
+            return Err(reject_ready!(
                 running,
                 anyhow!("bounded persistent-session resource lacks a cleanup reserve"),
-                cleanup_observer.as_ref(),
             ));
         };
         let cleanup = Duration::from_millis(cleanup_ms);
@@ -4901,26 +5565,10 @@ fn ready_process(
                 let error = anyhow!(
                     "persistent-session resource lifetime cannot admit one complete request"
                 );
-                return match running.abort_and_reap_checked() {
-                    Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
-                    Err(cleanup) => Err(ReadyProcessFailure {
-                        error: error.context(format!(
-                            "persistent-session lifetime refusal cleanup could not be proved: {cleanup}"
-                        )),
-                        cleanup_unproved: true,
-                    }),
-                };
+                return Err(reject_ready!(running, error));
             }
             Err(error) => {
-                return match running.abort_and_reap_checked() {
-                    Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
-                    Err(cleanup) => Err(ReadyProcessFailure {
-                        error: error.context(format!(
-                            "persistent-session occupancy-clock refusal cleanup could not be proved: {cleanup}"
-                        )),
-                        cleanup_unproved: true,
-                    }),
-                };
+                return Err(reject_ready!(running, error));
             }
         }
     }
@@ -4930,23 +5578,14 @@ fn ready_process(
             Ok(budget) => budget,
             Err(error) => {
                 let error = attach_running_diagnostic(&running, error);
-                return match running.abort_and_reap_checked() {
-                    Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
-                    Err(cleanup) => Err(ReadyProcessFailure {
-                        error: error.context(format!(
-                            "persistent-session IPC-budget cleanup could not be proved: {cleanup}"
-                        )),
-                        cleanup_unproved: true,
-                    }),
-                };
+                return Err(reject_ready!(running, error));
             }
         };
     let timeout = Duration::from_millis(lifecycle.ready_timeout_ms);
     if let Err(error) = socket.set_nonblocking(true) {
-        return Err(refuse_ready_process(
+        return Err(reject_ready!(
             running,
             anyhow!(error).context("configure persistent-session channel as nonblocking"),
-            cleanup_observer.as_ref(),
         ));
     }
     let deadline = MonotonicDeadline::after(timeout);
@@ -4964,23 +5603,32 @@ fn ready_process(
     } {
         Ok(frame) => frame,
         Err(error) => {
-            return match running.wait_for_natural_exit(Duration::from_millis(200)) {
-                Ok(completion) => Err(settle_ready_cleanup(
-                    attach_completion_diagnostic(&completion, error),
-                    cleanup_observer.as_ref(),
-                )),
-                Err(running) => {
-                    let error = attach_running_diagnostic(&running, error);
-                    match running.abort_and_reap_checked() {
-                        Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
-                        Err(cleanup) => Err(ReadyProcessFailure {
-                            error: error.context(format!(
-                                "persistent-session readiness cleanup could not be proved: {cleanup}"
-                            )),
+            let natural_exit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                running.wait_for_natural_exit(Duration::from_millis(200))
+            }));
+            return match natural_exit {
+                Ok(Ok(completion)) => {
+                    let error = attach_completion_diagnostic(&completion, error);
+                    let relay_join_error = safe_relay_join(custody.relay_owner.as_ref()).err();
+                    if let Some(join) = relay_join_error {
+                        Err(ReadyProcessFailure {
+                            error: error.context(format!("ordinary relay join before readiness settlement failed: {join:#}")),
                             cleanup_unproved: true,
-                        }),
+                            custody: Some(custody.take()),
+                        })
+                    } else {
+                        Err(settle_ready_cleanup(error, custody.take()))
                     }
                 }
+                Ok(Err(running)) => {
+                    let error = attach_running_diagnostic(&running, error);
+                    Err(reject_ready!(running, error))
+                }
+                Err(_) => Err(ReadyProcessFailure {
+                    error: error.context("natural-exit wait panicked after consuming the process owner"),
+                    cleanup_unproved: true,
+                    custody: Some(custody.take()),
+                }),
             };
         }
     };
@@ -4997,15 +5645,7 @@ fn ready_process(
         });
     if let Err(error) = readiness {
         let error = attach_running_diagnostic(&running, error);
-        return match running.abort_and_reap_checked() {
-            Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
-            Err(cleanup) => Err(ReadyProcessFailure {
-                error: error.context(format!(
-                    "persistent-session readiness cleanup could not be proved: {cleanup}"
-                )),
-                cleanup_unproved: true,
-            }),
-        };
+        return Err(reject_ready!(running, error));
     }
     let writer = match socket.try_clone() {
         Ok(writer) => writer,
@@ -5014,17 +5654,19 @@ fn ready_process(
                 &running,
                 anyhow!(error).context("clone persistent-session writer descriptor"),
             );
-            return match running.abort_and_reap_checked() {
-                Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
-                Err(cleanup) => Err(ReadyProcessFailure {
-                    error: error.context(format!(
-                        "persistent-session descriptor-clone cleanup could not be proved: {cleanup}"
-                    )),
-                    cleanup_unproved: true,
-                }),
-            };
+            return Err(reject_ready!(running, error));
         }
     };
+    if let Some(health) = &custody.relay_health {
+        let snapshot = health.snapshot();
+        if snapshot != PersistentSessionRelayHealth::Live {
+            return Err(reject_ready!(
+                running,
+                anyhow!("ordinary relay became terminal before owner publication: {snapshot:?}"),
+            ));
+        }
+    }
+    let mut custody = custody.take();
     Ok(SessionProcess {
         wire: wire.clone(),
         expected_boot_identity,
@@ -5036,7 +5678,10 @@ fn ready_process(
         reader_failure: Mutex::new(None),
         running: Mutex::new(Some(running)),
         cleanup_unproved: Mutex::new(None),
-        cleanup_observer: Mutex::new(cleanup_observer),
+        cleanup_observer: Mutex::new(custody.observer.take()),
+        relay_owner: Mutex::new(custody.relay_owner.take()),
+        relay_health: custody.relay_health.take(),
+        retirement: RetirementCoordinator::new(),
         resource_occupancy_limit,
         resource_cleanup_allowance_ms,
         resource_attribution_sink,
@@ -5046,43 +5691,98 @@ fn ready_process(
         closed: Arc::new(AtomicBool::new(false)),
         backlog,
         _reader_budget: reader_budget,
-        lifelines: Mutex::new(lifelines),
+        lifelines: Mutex::new(std::mem::take(&mut custody.lifelines)),
         pooled_start: None,
     })
 }
 
 fn settle_ready_cleanup(
     error: anyhow::Error,
-    observer: Option<&PersistentSessionCleanupObserver>,
+    mut custody: ExclusiveUnprovedStartCustody,
 ) -> ReadyProcessFailure {
-    match observer.map(|observer| observer()).unwrap_or(Ok(())) {
-        Ok(()) => ReadyProcessFailure {
-            error,
-            cleanup_unproved: false,
-        },
-        Err(settlement) => ReadyProcessFailure {
-            error: error.context(format!(
-                "persistent-session settlement after reap failed: {settlement:#}"
-            )),
+    let settlement = custody.observer.as_ref().map(|observer| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer()))
+    });
+    let settlement_error = match settlement {
+        Some(Ok(Ok(()))) | None => None,
+        Some(Ok(Err(error))) => Some(format!("{error:#}")),
+        Some(Err(_)) => Some("cleanup observer panicked".to_owned()),
+    };
+    if let Some(settlement_error) = settlement_error {
+        return ReadyProcessFailure {
+            error: error.context(format!("persistent-session settlement after reap failed: {settlement_error}")),
             cleanup_unproved: true,
-        },
+            custody: Some(custody),
+        };
+    }
+    custody.observer = None;
+    while !custody.lifelines.is_empty() {
+        let lifeline = custody.lifelines.remove(0);
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(lifeline))).is_err() {
+            return ReadyProcessFailure {
+                error: error.context("persistent-session lifeline destructor panicked after checked reap"),
+                cleanup_unproved: true,
+                custody: Some(custody),
+            };
+        }
+    }
+    if let Some(owner) = custody.relay_owner.take() {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(owner))).is_err() {
+            return ReadyProcessFailure {
+                error: error.context("ordinary relay owner destructor panicked after checked reap"),
+                cleanup_unproved: true,
+                custody: Some(custody),
+            };
+        }
+    }
+    ReadyProcessFailure {
+        error,
+        cleanup_unproved: false,
+        custody: None,
+    }
+}
+
+fn safe_relay_join(owner: Option<&Arc<dyn PersistentSessionRelayOwner>>) -> Result<()> {
+    let Some(owner) = owner else { return Ok(()) };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| owner.stop_and_join())) {
+        Ok(result) => result,
+        Err(_) => bail!("ordinary relay stop/join panicked"),
+    }
+}
+
+fn safe_checked_reap(
+    running: ryeos_engine::dispatch::RunningExecution,
+) -> std::result::Result<(), String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        running.abort_and_reap_checked()
+    })) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("{error}")),
+        Err(_) => Err("checked process reap panicked after consuming its execution owner".to_owned()),
     }
 }
 
 fn refuse_ready_process(
     running: ryeos_engine::dispatch::RunningExecution,
-    error: anyhow::Error,
-    observer: Option<&PersistentSessionCleanupObserver>,
+    mut error: anyhow::Error,
+    mut custody: ExclusiveUnprovedStartCustody,
 ) -> ReadyProcessFailure {
-    match running.abort_and_reap_checked() {
-        Ok(()) => settle_ready_cleanup(error, observer),
-        Err(cleanup) => ReadyProcessFailure {
-            error: error.context(format!(
-                "persistent-session refusal cleanup unproved: {cleanup}"
-            )),
-            cleanup_unproved: true,
-        },
+    let relay_join = safe_relay_join(custody.relay_owner.as_ref()).err();
+    if let Some(join) = relay_join.as_ref() {
+        error = error.context(format!("ordinary relay join before readiness cleanup failed: {join:#}"));
     }
+    let cleanup_error = safe_checked_reap(running).err();
+    if let Some(cleanup) = cleanup_error.as_ref() {
+        error = error.context(format!("persistent-session refusal cleanup unproved: {cleanup}"));
+    }
+    if relay_join.is_some() || cleanup_error.is_some() {
+        return ReadyProcessFailure {
+            error,
+            cleanup_unproved: true,
+            custody: Some(custody),
+        };
+    }
+    settle_ready_cleanup(error, custody)
 }
 
 /// Retain both original settlement obligations in one observer, attempting
@@ -5181,6 +5881,7 @@ where
         if cancelled() || deadline.has_elapsed() || resource_expired() {
             bail!("persistent-session request ended before worker contact");
         }
+        process.ensure_relay_live()?;
         process
             .write(
                 wire,
@@ -5196,6 +5897,7 @@ where
             .context("send persistent-session request frame")?;
         let mut cancel_sent = false;
         loop {
+            process.ensure_relay_live()?;
             if resource_expired() {
                 bail!("persistent-session resource occupancy authority expired");
             }
@@ -5231,6 +5933,7 @@ where
                 frame,
                 _budget: _frame_budget,
             } = budgeted;
+            process.ensure_relay_live()?;
             match frame.kind {
                 PersistentSessionFrameKind::Delta => {
                     if let Some(acknowledgement) =
@@ -5250,10 +5953,11 @@ where
                     }
                 }
                 PersistentSessionFrameKind::Final => {
-                    if cancel_sent {
-                        bail!("persistent-session request was cancelled");
-                    }
-                    return Ok(frame.body.expect("final body validated"));
+                    return accept_final_response(
+                        process,
+                        frame.body.expect("final body validated"),
+                        cancel_sent,
+                    );
                 }
                 PersistentSessionFrameKind::Error => {
                     let detail = frame
@@ -5270,6 +5974,20 @@ where
     })();
     process.unregister_request(&request_id);
     outcome
+}
+
+fn accept_final_response(
+    process: &SessionProcess,
+    body: Value,
+    cancel_sent: bool,
+) -> Result<Value> {
+    // This lock-free health snapshot is the final-acceptance linearization
+    // point. A failure published first wins over a queued Final.
+    process.ensure_relay_live()?;
+    if cancel_sent {
+        bail!("persistent-session request was cancelled");
+    }
+    Ok(body)
 }
 
 fn begin_resource_request_evidence(
@@ -5706,7 +6424,8 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
                     let idle = group.contract.lifecycle.idle_timeout_ms;
                     for process in &group.processes {
                         let expired = !process.leased.load(Ordering::Acquire)
-                            && (now.saturating_sub(process.last_used_ms.load(Ordering::Acquire))
+                            && (process.relay_failed()
+                                || now.saturating_sub(process.last_used_ms.load(Ordering::Acquire))
                                 >= idle
                                 || !resource_service_window_is_sufficient(
                                     process,
@@ -5728,21 +6447,22 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
                     }
                 }
                 for (session_id, entry) in &state.exclusive {
-                    let expired = entry
-                        .process
-                        .resource_occupancy_limit
-                        .as_ref()
-                        .is_some_and(|limit| {
-                            !matches!(
-                                limit.window(Duration::from_millis(
-                                    entry
-                                        .process
-                                        .resource_cleanup_allowance_ms
-                                        .unwrap_or(u64::MAX),
-                                )),
-                                Ok(lillux::time::OccupancyWindowState::Service { .. })
-                            )
-                        });
+                    let expired = entry.process.relay_failed()
+                        || entry
+                            .process
+                            .resource_occupancy_limit
+                            .as_ref()
+                            .is_some_and(|limit| {
+                                !matches!(
+                                    limit.window(Duration::from_millis(
+                                        entry
+                                            .process
+                                            .resource_cleanup_allowance_ms
+                                            .unwrap_or(u64::MAX),
+                                    )),
+                                    Ok(lillux::time::OccupancyWindowState::Service { .. })
+                                )
+                            });
                     if expired
                         && entry
                             .process
@@ -5832,6 +6552,8 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn manifest_initial_missing_budget_and_cancel_refuse_with_actual_mutex_held() {
         for cancelled in [false, true] {
@@ -7064,6 +7786,8 @@ while True:
             running,
             socket: daemon_socket,
             lifelines: vec![Box::new(app_root)],
+            relay_health: None,
+            relay_owner: None,
             expected_boot_identity: None,
             observation_sink,
             cleanup_observer: None,
@@ -7138,6 +7862,297 @@ while True:
         lifecycle.request_timeout_ms = 2_000;
         lifecycle.idle_timeout_ms = 60_000;
         lifecycle
+    }
+
+    struct TestRelayOwner(std::sync::atomic::AtomicU64);
+
+    impl PersistentSessionRelayOwner for TestRelayOwner {
+        fn stop_and_join(&self) -> Result<()> {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    struct PanickingRelayOwner;
+
+    impl PersistentSessionRelayOwner for PanickingRelayOwner {
+        fn stop_and_join(&self) -> Result<()> {
+            panic!("injected relay join panic")
+        }
+    }
+
+    struct PanickingDropRelayOwner;
+
+    impl PersistentSessionRelayOwner for PanickingDropRelayOwner {
+        fn stop_and_join(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for PanickingDropRelayOwner {
+        fn drop(&mut self) {
+            panic!("injected final relay owner drop panic")
+        }
+    }
+
+    #[test]
+    fn exclusive_join_panic_is_an_unproved_result_with_owner_still_reachable() {
+        let owner: Arc<dyn PersistentSessionRelayOwner> = Arc::new(PanickingRelayOwner);
+        let result = safe_relay_join(Some(&owner));
+        assert!(result.is_err());
+        assert_eq!(Arc::strong_count(&owner), 1);
+    }
+
+    #[test]
+    fn readiness_refusal_join_panic_keeps_custody_and_skips_settlement() {
+        let started = fake_framed_session().unwrap();
+        let settlement_calls = Arc::new(AtomicU64::new(0));
+        let observed_calls = Arc::clone(&settlement_calls);
+        let failure = refuse_ready_process(
+            started.running,
+            anyhow!("injected readiness refusal"),
+            ExclusiveUnprovedStartCustody {
+                relay_health: Some(PersistentSessionRelayHealthCell::new()),
+                relay_owner: Some(Arc::new(PanickingRelayOwner)),
+                lifelines: started.lifelines,
+                observer: Some(Arc::new(move || {
+                    observed_calls.fetch_add(1, Ordering::AcqRel);
+                    Ok(())
+                })),
+            },
+        );
+        assert!(failure.cleanup_unproved);
+        assert!(failure.custody.is_some());
+        assert_eq!(settlement_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn runtime_retirement_catches_consumed_final_relay_owner_drop() {
+        let owner: Arc<dyn PersistentSessionRelayOwner> = Arc::new(PanickingDropRelayOwner);
+        let process = ready_test_process(PersistentSessionRelayHealthCell::new(), Arc::clone(&owner))
+            .unwrap();
+        drop(owner);
+        assert!(process.retire().is_err());
+        assert!(process.cleanup_unproved.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn exclusive_unproved_start_custody_stays_in_its_charged_reservation() {
+        let pool = PersistentSessionPool::new();
+        let session_id = "q".repeat(64);
+        let mut reservation = pool
+            .reserve_exclusive(&session_id, &test_lifecycle(), &test_wire())
+            .unwrap();
+        let owner: Arc<dyn PersistentSessionRelayOwner> =
+            Arc::new(TestRelayOwner(std::sync::atomic::AtomicU64::new(0)));
+        reservation.quarantine_start_custody(
+            ExclusiveUnprovedStartCustody {
+                relay_health: Some(PersistentSessionRelayHealthCell::new()),
+                relay_owner: Some(Arc::clone(&owner)),
+                lifelines: vec![Box::new(Arc::new(AtomicU64::new(0)))],
+                observer: Some(Arc::new(|| Ok(()))),
+            },
+            "injected unproved reap".to_owned(),
+        );
+        let state = pool.inner.state.lock().unwrap();
+        let retained = state.exclusive_reservations.get(&session_id).unwrap();
+        assert_eq!(retained.quarantined.len(), 1);
+        assert!(retained.quarantined_owner_count() >= 4);
+        assert!(state.cleanup_unproved.is_some());
+        assert_eq!(aggregate_process_capacity(&state).0, 1);
+        assert_eq!(Arc::strong_count(&owner), 2);
+    }
+
+    #[test]
+    fn readiness_unwind_guard_deposits_custody_before_reservation_drop() {
+        let pool = PersistentSessionPool::new();
+        let session_id = "u".repeat(64);
+        let reservation = pool
+            .reserve_exclusive(&session_id, &test_lifecycle(), &test_wire())
+            .unwrap();
+        let guard = ExclusiveReadyCustodyGuard {
+            custody: Some(ExclusiveUnprovedStartCustody {
+                relay_health: None,
+                relay_owner: None,
+                lifelines: vec![Box::new(Arc::new(AtomicU64::new(0)))],
+                observer: None,
+            }),
+            registration: Some(ExclusiveCustodyRegistration {
+                inner: Arc::clone(&pool.inner),
+                session_id: session_id.clone(),
+            }),
+        };
+        drop(guard);
+        drop(reservation);
+        let state = pool.inner.state.lock().unwrap();
+        assert_eq!(state.exclusive_reservations.len(), 1);
+        assert_eq!(
+            state.exclusive_reservations[&session_id].quarantined_owner_count(),
+            1
+        );
+        assert!(state.cleanup_unproved.is_some());
+    }
+
+    fn ready_test_process(
+        health: PersistentSessionRelayHealthCell,
+        relay_owner: Arc<dyn PersistentSessionRelayOwner>,
+    ) -> Result<SessionProcess> {
+        let mut started = fake_framed_session()?;
+        started.relay_health = Some(health);
+        started.relay_owner = Some(relay_owner);
+        let pool = PersistentSessionPool::new();
+        ready_process(
+            started,
+            &test_wire(),
+            &owned_start_lifecycle(),
+            Arc::clone(&pool.streams.backlog),
+        )
+        .map_err(|failure| failure.error)
+    }
+
+    #[test]
+    fn ordinary_relay_health_failure_is_sticky_over_stop() {
+        let health = PersistentSessionRelayHealthCell::new();
+        health.stop();
+        assert_eq!(health.snapshot(), PersistentSessionRelayHealth::Stopped);
+        health.fail(PersistentSessionRelayFailure::PumpPanicked);
+        assert_eq!(
+            health.snapshot(),
+            PersistentSessionRelayHealth::Failed(PersistentSessionRelayFailure::PumpPanicked)
+        );
+        health.stop();
+        assert_eq!(
+            health.snapshot(),
+            PersistentSessionRelayHealth::Failed(PersistentSessionRelayFailure::PumpPanicked)
+        );
+    }
+
+    #[test]
+    fn terminal_relay_health_refuses_ready_before_owner_publication() {
+        let health = PersistentSessionRelayHealthCell::new();
+        health.fail(PersistentSessionRelayFailure::SignedFrameBudgetExhausted);
+        let owner = Arc::new(TestRelayOwner(std::sync::atomic::AtomicU64::new(0)));
+        let mut started = fake_framed_session().unwrap();
+        started.relay_health = Some(health);
+        started.relay_owner = Some(owner.clone());
+        let pool = PersistentSessionPool::new();
+        let failure = match ready_process(
+            started,
+            &test_wire(),
+            &owned_start_lifecycle(),
+            Arc::clone(&pool.streams.backlog),
+        ) {
+            Ok(process) => {
+                let _ = process.retire();
+                panic!("terminal relay owner was published as Ready");
+            }
+            Err(failure) => failure,
+        };
+        assert!(!failure.cleanup_unproved);
+        assert_eq!(owner.0.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn failed_relay_refuses_first_worker_contact_and_retires_exact_owner() {
+        let health = PersistentSessionRelayHealthCell::new();
+        let owner = Arc::new(TestRelayOwner(std::sync::atomic::AtomicU64::new(0)));
+        let process = ready_test_process(health.clone(), owner.clone()).unwrap();
+        health.fail(PersistentSessionRelayFailure::ContactFailed);
+        let error = execute_on_process(
+            &process,
+            &test_wire(),
+            PersistentSessionFrameKind::Request,
+            serde_json::json!({"probe":true}),
+            &|| false,
+            MonotonicDeadline::after(Duration::from_secs(1)),
+            &mut |_| Ok(None),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("ordinary relay failed"));
+        process.retire().unwrap();
+        assert_eq!(owner.0.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn terminal_relay_failure_wins_before_final_acceptance_snapshot() {
+        let health = PersistentSessionRelayHealthCell::new();
+        let owner = Arc::new(TestRelayOwner(std::sync::atomic::AtomicU64::new(0)));
+        let process = ready_test_process(health.clone(), owner.clone()).unwrap();
+        let accepted_before_failure = accept_final_response(
+            &process,
+            serde_json::json!({"ok":true}),
+            false,
+        )
+        .unwrap();
+        health.fail(PersistentSessionRelayFailure::ContactFailed);
+        assert_eq!(accepted_before_failure, serde_json::json!({"ok":true}));
+        assert!(
+            accept_final_response(&process, serde_json::json!({"ok":false}), false).is_err()
+        );
+        process.retire().unwrap();
+    }
+
+    #[test]
+    fn retirement_unwind_publishes_sticky_unproved_and_wakes_waiters() {
+        let health = PersistentSessionRelayHealthCell::new();
+        let owner = Arc::new(TestRelayOwner(std::sync::atomic::AtomicU64::new(0)));
+        let process = Arc::new(
+            ready_test_process(health, owner.clone()).unwrap(),
+        );
+        let attempt = process.begin_retirement().unwrap().unwrap();
+        let waiter_process = Arc::clone(&process);
+        let waiter = std::thread::spawn(move || waiter_process.begin_retirement().is_err());
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(attempt);
+            panic!("injected retirement unwind");
+        }));
+        assert!(unwind.is_err());
+        assert!(waiter.join().unwrap());
+        assert!(matches!(
+            *process.retirement.state.lock().unwrap(),
+            RetirementState::Unproved(_)
+        ));
+        assert!(process.cleanup_unproved.lock().unwrap().is_some());
+        let running = process.running.lock().unwrap().take().unwrap();
+        running.abort_and_reap_checked().unwrap();
+    }
+
+    #[test]
+    fn retirement_with_preexisting_cleanup_failure_returns_without_mutex_reentry() {
+        let health = PersistentSessionRelayHealthCell::new();
+        let owner = Arc::new(TestRelayOwner(std::sync::atomic::AtomicU64::new(0)));
+        let process = ready_test_process(health, owner.clone()).unwrap();
+        *process.cleanup_unproved.lock().unwrap() = Some("injected prior failure".to_owned());
+        assert!(process.retire().is_err());
+        assert!(matches!(
+            *process.retirement.state.lock().unwrap(),
+            RetirementState::Unproved(_)
+        ));
+        assert_eq!(owner.0.load(Ordering::Acquire), 0);
+        let running = process.running.lock().unwrap().take().unwrap();
+        running.abort_and_reap_checked().unwrap();
+    }
+
+    #[test]
+    fn poisoned_retirement_coordinator_publishes_unproved_not_reaped() {
+        let health = PersistentSessionRelayHealthCell::new();
+        let owner = Arc::new(TestRelayOwner(std::sync::atomic::AtomicU64::new(0)));
+        let process = Arc::new(ready_test_process(health, owner.clone()).unwrap());
+        let poisoner_process = Arc::clone(&process);
+        assert!(std::thread::spawn(move || {
+            let _state = poisoner_process.retirement.state.lock().unwrap();
+            panic!("inject coordinator poison");
+        })
+        .join()
+        .is_err());
+        assert!(process.begin_retirement().is_err());
+        assert!(matches!(
+            *process.retirement.state.lock().unwrap_or_else(|p| p.into_inner()),
+            RetirementState::Unproved(_)
+        ));
+        assert!(process.cleanup_unproved.lock().unwrap().is_some());
+        let running = process.running.lock().unwrap().take().unwrap();
+        running.abort_and_reap_checked().unwrap();
     }
 
     #[test]

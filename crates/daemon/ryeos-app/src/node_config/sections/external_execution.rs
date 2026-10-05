@@ -344,7 +344,11 @@ impl BindingDocument {
                 && self.schema
                     == match &self.controller_transport {
                         ExternalControllerTransportSelection::HttpJson(_) => 17,
-                        ExternalControllerTransportSelection::ControllerFileRelay(_) => 18,
+                        ExternalControllerTransportSelection::ControllerFileRelay(_) => match &self.workload {
+                            ExternalWorkloadBinding::QualificationStructuredSession(_) => 18,
+                            ExternalWorkloadBinding::StructuredSession(_) => 19,
+                            ExternalWorkloadBinding::DirectCommand {} => 0,
+                        },
                     },
             "unsupported external placement binding schema for selected transport"
         );
@@ -453,6 +457,7 @@ impl BindingDocument {
                 matches!(
                     &self.workload,
                     ExternalWorkloadBinding::QualificationStructuredSession(_)
+                        | ExternalWorkloadBinding::StructuredSession(_)
                 ) && self.network_policy == "controller_file_relay_guest_deny_all_v1"
                     && self.backend == "render-sandbox-early-access"
                     && self.controller_tls_root_certificates_der_base64.is_empty()
@@ -1345,6 +1350,49 @@ mod workload_binding_tests {
 
     fn document() -> BindingDocument {
         RetainedExternalExecutionBinding::test_fixture().document
+    }
+
+    fn ordinary_relay_document() -> BindingDocument {
+        let mut document = document();
+        document.schema = 19;
+        document.backend = "render-sandbox-early-access".into();
+        document.settings = serde_json::json!({"owner_id":"render-owner"});
+        document.settings_digest = adapter_settings_digest(&document.settings).unwrap();
+        document.network_policy = "controller_file_relay_guest_deny_all_v1".into();
+        document.controller_tls_root_certificates_der_base64.clear();
+        document.controller_transport = ExternalControllerTransportSelection::ControllerFileRelay(
+            ryeos_state::external_execution::transport::ExternalControllerFileRelayContract {
+                schema: 3,
+                route_contract: ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
+                owner_workspace_id: "render-owner".into(),
+                private_mailbox_parent: "/run/ryeos/private-relay".into(),
+                maximum_file_bytes: 1024 * 1024,
+                maximum_frames: 1024,
+                poll_interval_ms: 1000,
+                poll_deadline_ms: 30_000,
+            },
+        );
+        document
+    }
+
+    #[test]
+    fn ordinary_relay_binding_uses_schema_19_and_refuses_cross_pairs() {
+        let document = ordinary_relay_document();
+        document.validate().unwrap();
+        assert!(document.workload.structured_session().is_ok());
+
+        let mut q_schema = document.clone();
+        q_schema.schema = 18;
+        assert!(q_schema.validate().is_err());
+
+        let mut http_schema_19 = document.clone();
+        let mut http = RetainedExternalExecutionBinding::test_fixture().document;
+        http.schema = 19;
+        http_schema_19.controller_transport = http.controller_transport;
+        http_schema_19.controller_tls_root_certificates_der_base64 =
+            http.controller_tls_root_certificates_der_base64;
+        http_schema_19.network_policy = "supervisor_pinned_owner_only_candidate_denied_v1".into();
+        assert!(http_schema_19.validate().is_err());
     }
 
     #[test]

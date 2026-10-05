@@ -22,6 +22,7 @@ pub const EXTERNAL_CHANNEL_ROUTE_CONTRACT: &str = "ryeos.external-channel.http-j
 pub const EXTERNAL_CHANNEL_RELAY_CONTRACT: &str = "ryeos.external-channel.controller-file-relay.v1";
 pub const EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA: u32 = 1;
 pub const EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA: u32 = 8;
+pub const EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA: u32 = 9;
 pub const EXTERNAL_CHANNEL_ATTACH_PATH: &str = "/external-execution/channel/attach";
 pub const EXTERNAL_CHANNEL_EXCHANGE_PATH: &str = "/external-execution/channel/exchange";
 pub const MAX_TLS_ROOT_CERTIFICATES: usize = 8;
@@ -443,9 +444,14 @@ impl ExternalSupervisorBootstrap {
             self.schema
                 == match &self.controller {
                     ExternalControllerTransportSelection::HttpJson(_) => 7,
-                    ExternalControllerTransportSelection::ControllerFileRelay(_) => {
-                        EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA
-                    }
+                    ExternalControllerTransportSelection::ControllerFileRelay(_) => match self
+                        .candidate_program
+                        .execution_mode()
+                    {
+                        ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {} => EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA,
+                        ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {} => EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA,
+                        ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand { .. } => 0,
+                    },
                 },
             "unsupported external supervisor bootstrap schema for selected transport"
         );
@@ -461,8 +467,9 @@ impl ExternalSupervisorBootstrap {
                     && matches!(
                         self.candidate_program.execution_mode(),
                         ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {}
+                            | ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {}
                     ),
-                "external controller file relay requires a zero-export qualification guest without TLS roots"
+                "external controller file relay requires a structured-session guest without TLS roots"
             ),
         }
         bounded_text(
@@ -1288,6 +1295,26 @@ mod tests {
         value
     }
 
+    fn ordinary_relay_bootstrap() -> ExternalSupervisorBootstrap {
+        let mut value = bootstrap();
+        value.schema = EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA;
+        value.controller = ExternalControllerTransportSelection::ControllerFileRelay(
+            ExternalControllerFileRelayContract {
+                schema: 3,
+                route_contract: EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
+                owner_workspace_id: "render-owner".into(),
+                private_mailbox_parent: "/run/ryeos/private-relay".into(),
+                maximum_file_bytes: 1024 * 1024,
+                maximum_frames: 1024,
+                poll_interval_ms: 1000,
+                poll_deadline_ms: 30_000,
+            },
+        );
+        value.tls_root_certificates_der_base64.clear();
+        value.validate().unwrap();
+        value
+    }
+
     #[test]
     fn q_bootstrap_refuses_channel_without_reserved_settlement_capacity() {
         let mut bootstrap = relay_bootstrap();
@@ -1499,6 +1526,28 @@ mod tests {
             ordinary.validate().is_err(),
             "ordinary guest cannot select Q file relay"
         );
+    }
+
+    #[test]
+    fn relay_bootstrap_schema_is_paired_to_the_execution_mode() {
+        let q = relay_bootstrap();
+        assert_eq!(q.schema, EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA);
+        q.validate().unwrap();
+
+        let ordinary = ordinary_relay_bootstrap();
+        assert!(matches!(
+            ordinary.candidate_program.execution_mode(),
+            ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {}
+        ));
+        ordinary.validate().unwrap();
+
+        let mut q_with_ordinary_schema = q.clone();
+        q_with_ordinary_schema.schema = EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA;
+        assert!(q_with_ordinary_schema.validate().is_err());
+
+        let mut ordinary_with_q_schema = ordinary;
+        ordinary_with_q_schema.schema = EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA;
+        assert!(ordinary_with_q_schema.validate().is_err());
     }
 
     #[test]

@@ -1383,6 +1383,32 @@ impl ExternalPlacementBackendRegistry {
         self.qualify(contract, credential, program)
     }
 
+    fn qualify_for_ordinary_relay(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        credential: &PlacementCredential,
+        program: &AdmittedExternalExecutionProgram,
+    ) -> Result<Arc<dyn ExternalPlacementBackend>> {
+        contract.controller_transport.relay()?;
+        let ordinary = contract.workload.structured_session()?;
+        let AdmittedExternalExecutionProgram::StructuredSession(program) = program else {
+            bail!("ordinary relay requires an admitted ordinary structured session");
+        };
+        ensure!(
+            program.runtime_manifest_hash == ordinary.runtime_manifest_hash
+                && program.selection_identity_digest == ordinary.runtime_selection_identity,
+            "ordinary relay changed its retained structured-session runtime selection"
+        );
+        // This is the full current provider/runtime capability qualification.
+        // An authored ordinary binding does not upgrade unsupported adapter
+        // capability evidence.
+        self.qualify(
+            contract,
+            credential,
+            &AdmittedExternalExecutionProgram::StructuredSession(program.clone()),
+        )
+    }
+
     fn qualify_for_purpose(
         &self,
         contract: &ExternalPlacementBackendContract,
@@ -2865,6 +2891,27 @@ pub(crate) fn recover_original_external_relay_bootstrap(
     state: &AppState,
     placement: &str,
 ) -> Result<crate::vault::external_relay_bootstrap::ProtectedExternalRelayBootstrap> {
+    recover_external_relay_bootstrap(state, placement, ExternalRelayOwnerLane::Qualification)
+}
+
+pub(crate) fn recover_ordinary_external_relay_bootstrap(
+    state: &AppState,
+    placement: &str,
+) -> Result<crate::vault::external_relay_bootstrap::ProtectedExternalRelayBootstrap> {
+    recover_external_relay_bootstrap(state, placement, ExternalRelayOwnerLane::OrdinarySession)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExternalRelayOwnerLane {
+    Qualification,
+    OrdinarySession,
+}
+
+fn recover_external_relay_bootstrap(
+    state: &AppState,
+    placement: &str,
+    lane: ExternalRelayOwnerLane,
+) -> Result<crate::vault::external_relay_bootstrap::ProtectedExternalRelayBootstrap> {
     state
         .controller_lifetime
         .ensure_protects_app_root(&state.config.app_root)?;
@@ -2874,11 +2921,17 @@ pub(crate) fn recover_original_external_relay_bootstrap(
         .context("original relay bootstrap has no allocation")?;
     ensure!(
         allocation.phase == ExternalAllocationPhase::Bound
-            && matches!(
-                &allocation.reservation.owner,
-                ExternalAllocationOwner::QualificationCandidate(_)
-            ),
-        "original relay bootstrap requires its live Q owner"
+            && match lane {
+                ExternalRelayOwnerLane::Qualification => matches!(
+                    &allocation.reservation.owner,
+                    ExternalAllocationOwner::QualificationCandidate(_)
+                ),
+                ExternalRelayOwnerLane::OrdinarySession => matches!(
+                    &allocation.reservation.owner,
+                    ExternalAllocationOwner::DedicatedSession(_)
+                ),
+            },
+        "original relay bootstrap requires its exact live owner lane"
     );
     let occurrence = allocation
         .occurrence
@@ -2890,6 +2943,29 @@ pub(crate) fn recover_original_external_relay_bootstrap(
         .context("original relay bootstrap lost its signed binding")?;
     let contract = retained.backend_contract();
     contract.controller_transport.relay()?;
+    ensure!(
+        match lane {
+            ExternalRelayOwnerLane::Qualification => matches!(
+                &contract.workload,
+                crate::node_config::sections::external_execution::ExternalWorkloadBinding::QualificationStructuredSession(_)
+            ),
+            ExternalRelayOwnerLane::OrdinarySession => matches!(
+                &contract.workload,
+                crate::node_config::sections::external_execution::ExternalWorkloadBinding::StructuredSession(_)
+            ),
+        },
+        "original relay bootstrap binding changed its workload lane"
+    );
+    if lane == ExternalRelayOwnerLane::OrdinarySession {
+        ensure!(
+            state
+                .node_config
+                .external_execution
+                .iter()
+                .any(|installed| installed.digest() == retained.digest()),
+            "ordinary relay recovery requires its exact currently installed signed binding"
+        );
+    }
     let program = retained_external_channel_program(state, &allocation.reservation, &retained)?;
     let activation = state
         .state_store
@@ -2970,7 +3046,16 @@ pub(crate) fn recover_original_external_relay_bootstrap(
             && bootstrap.post_execution_timeout_seconds
                 == activation.intent.post_execution_timeout_seconds
             && bootstrap.channel_max_bytes == activation.intent.channel_max_bytes
-            && bootstrap.candidate_export_max_bytes == 0,
+            && bootstrap.candidate_export_max_bytes
+                == match program.execution_mode() {
+                    ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {} => {
+                        contract.max_export_bytes.min(activation.intent.channel_max_bytes)
+                    }
+                    ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {} => 0,
+                    ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand { .. } => {
+                        bail!("direct command cannot recover a structured-session relay bootstrap")
+                    }
+                },
         "sealed original relay bootstrap contradicts its signed activation"
     );
     ensure!(
@@ -3008,6 +3093,177 @@ pub enum ExternalQualificationControllerTransport {
         poll_deadline_ms: u32,
         maximum_frames: u32,
     },
+}
+
+/// Read-only transport choice for the exact retained ordinary session. Relay
+/// parameters are returned only after its signed schema-19 binding and schema-9
+/// bootstrap commitment have been rejoined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalSessionControllerTransport {
+    Http,
+    Relay {
+        poll_interval_ms: u32,
+        poll_deadline_ms: u32,
+        maximum_frames: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalSessionRelayStep {
+    Attach,
+    Exchange { sequence: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalSessionRelayPending {
+    pub read_attempts: u32,
+    pub deadline_ms: i64,
+    pub poll_interval_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalSessionRelayStepProgress {
+    GuestRequestPending(ExternalSessionRelayPending),
+    ControllerResponsePending(ExternalSessionRelayPending),
+    ControllerResponseAccepted,
+}
+
+pub fn inspect_external_session_controller_transport(
+    state: &AppState,
+    placement: &str,
+) -> Result<Option<ExternalSessionControllerTransport>> {
+    let Some(allocation) = state.state_store.external_allocation(placement)? else {
+        return Ok(None);
+    };
+    ensure!(
+        allocation.phase == ExternalAllocationPhase::Bound
+            && matches!(
+                &allocation.reservation.owner,
+                ExternalAllocationOwner::DedicatedSession(_)
+            ),
+        "ordinary session transport inspection requires its bound dedicated-session owner"
+    );
+    let retained = state
+        .state_store
+        .retained_external_binding(&allocation.reservation.binding_hash)?
+        .context("ordinary session transport lost its retained signed binding")?;
+    ensure!(
+        state
+            .node_config
+            .external_execution
+            .iter()
+            .any(|installed| installed.digest() == retained.digest()),
+        "ordinary session transport requires its exact currently installed signed binding"
+    );
+    let contract = retained.backend_contract();
+    contract.workload.structured_session()?;
+    let Some(activation) = state
+        .state_store
+        .external_supervisor_activation(placement)?
+    else {
+        return Ok(None);
+    };
+    let occurrence = allocation
+        .occurrence
+        .as_ref()
+        .context("ordinary session transport lost its exact occurrence")?;
+    activation
+        .intent
+        .validate_contract(&allocation.reservation, occurrence, &contract)?;
+    ensure!(
+        activation
+            .observation
+            .as_ref()
+            .is_none_or(|observation| observation.activation_state == "started"),
+        "ordinary session transport has supervisor non-start evidence"
+    );
+    match &contract.controller_transport {
+        ExternalControllerTransportSelection::HttpJson(_) => {
+            ensure!(
+                activation.relay_bootstrap.is_none(),
+                "ordinary HTTP activation changed relay bootstrap custody"
+            );
+            Ok(Some(ExternalSessionControllerTransport::Http))
+        }
+        ExternalControllerTransportSelection::ControllerFileRelay(relay) => {
+            recover_ordinary_external_relay_bootstrap(state, placement)?;
+            ensure!(
+                activation.relay_bootstrap.is_some(),
+                "ordinary relay activation has no original bootstrap commitment"
+            );
+            Ok(Some(ExternalSessionControllerTransport::Relay {
+                poll_interval_ms: relay.poll_interval_ms,
+                poll_deadline_ms: relay.poll_deadline_ms,
+                maximum_frames: relay.maximum_frames,
+            }))
+        }
+    }
+}
+
+pub fn advance_external_session_relay_step(
+    state: &AppState,
+    placement: &str,
+    step: ExternalSessionRelayStep,
+) -> Result<ExternalSessionRelayStepProgress> {
+    use crate::runtime_db::external_execution::{RelayDirection, RelayKind, RelayTransferPhase};
+    let protected = recover_ordinary_external_relay_bootstrap(state, placement)?;
+    let poll_interval_ms = protected.bootstrap().controller.relay()?.poll_interval_ms;
+    let (kind, sequence) = match step {
+        ExternalSessionRelayStep::Attach => (RelayKind::Attach, 0),
+        ExternalSessionRelayStep::Exchange { sequence } => (RelayKind::Exchange, sequence),
+    };
+    match contact_ordinary_external_relay_transfer(
+        state,
+        placement,
+        kind,
+        sequence,
+        RelayDirection::GuestToController,
+        None,
+    )? {
+        ExternalRelayFileContactProgress::PendingHttpNotFound(record) => {
+            ensure!(
+                record.phase == RelayTransferPhase::Reading,
+                "ordinary relay missing request lost its bounded read claim"
+            );
+            Ok(ExternalSessionRelayStepProgress::GuestRequestPending(
+                ExternalSessionRelayPending {
+                    read_attempts: record.read_attempts,
+                    deadline_ms: record.intent.deadline_ms,
+                    poll_interval_ms,
+                },
+            ))
+        }
+        ExternalRelayFileContactProgress::Accepted(record) => {
+            ensure!(
+                record.phase == RelayTransferPhase::Accepted,
+                "ordinary relay accepted request has an invalid durable phase"
+            );
+            match apply_and_contact_ordinary_external_relay_request(
+                state, placement, kind, sequence,
+            )? {
+                ExternalRelayFileContactProgress::PendingHttpNotFound(response) => {
+                    ensure!(
+                        response.phase == RelayTransferPhase::UploadPossible,
+                        "ordinary relay response ambiguity lost its one-shot upload claim"
+                    );
+                    Ok(ExternalSessionRelayStepProgress::ControllerResponsePending(
+                        ExternalSessionRelayPending {
+                            read_attempts: response.read_attempts,
+                            deadline_ms: response.intent.deadline_ms,
+                            poll_interval_ms,
+                        },
+                    ))
+                }
+                ExternalRelayFileContactProgress::Accepted(response) => {
+                    ensure!(
+                        response.phase == RelayTransferPhase::Accepted,
+                        "ordinary relay accepted response has an invalid durable phase"
+                    );
+                    Ok(ExternalSessionRelayStepProgress::ControllerResponseAccepted)
+                }
+            }
+        }
+    }
 }
 
 /// Inspect only the original bound Q occurrence and its currently installed
@@ -3218,6 +3474,37 @@ pub(crate) fn apply_and_contact_original_external_relay_request(
     kind: crate::runtime_db::external_execution::RelayKind,
     sequence: u32,
 ) -> Result<ExternalRelayFileContactProgress> {
+    apply_and_contact_external_relay_request(
+        state,
+        placement,
+        kind,
+        sequence,
+        ExternalRelayOwnerLane::Qualification,
+    )
+}
+
+pub(crate) fn apply_and_contact_ordinary_external_relay_request(
+    state: &AppState,
+    placement: &str,
+    kind: crate::runtime_db::external_execution::RelayKind,
+    sequence: u32,
+) -> Result<ExternalRelayFileContactProgress> {
+    apply_and_contact_external_relay_request(
+        state,
+        placement,
+        kind,
+        sequence,
+        ExternalRelayOwnerLane::OrdinarySession,
+    )
+}
+
+fn apply_and_contact_external_relay_request(
+    state: &AppState,
+    placement: &str,
+    kind: crate::runtime_db::external_execution::RelayKind,
+    sequence: u32,
+    lane: ExternalRelayOwnerLane,
+) -> Result<ExternalRelayFileContactProgress> {
     use crate::runtime_db::external_execution::{
         RelayApplicationDecision, RelayDirection, RelayTransferIntent,
     };
@@ -3228,7 +3515,7 @@ pub(crate) fn apply_and_contact_original_external_relay_request(
         ExternalRelayResponseEnvelope, ExternalRelayResponseKind,
     };
 
-    let protected = recover_original_external_relay_bootstrap(state, placement)?;
+    let protected = recover_external_relay_bootstrap(state, placement, lane)?;
     let bootstrap = protected.bootstrap();
     let intent = RelayTransferIntent::from_bootstrap(
         bootstrap,
@@ -3395,13 +3682,14 @@ pub(crate) fn apply_and_contact_original_external_relay_request(
             envelope
         }
     };
-    contact_original_external_relay_transfer(
+    contact_external_relay_transfer(
         state,
         placement,
         kind,
         sequence,
         RelayDirection::ControllerToGuest,
         Some(&envelope),
+        lane,
     )
 }
 
@@ -3416,6 +3704,45 @@ pub(crate) fn contact_original_external_relay_transfer(
     sequence: u32,
     direction: crate::runtime_db::external_execution::RelayDirection,
     outbound: Option<&ryeos_state::external_execution::transport::ExternalRelayResponseEnvelope>,
+) -> Result<ExternalRelayFileContactProgress> {
+    contact_external_relay_transfer(
+        state,
+        placement,
+        kind,
+        sequence,
+        direction,
+        outbound,
+        ExternalRelayOwnerLane::Qualification,
+    )
+}
+
+pub(crate) fn contact_ordinary_external_relay_transfer(
+    state: &AppState,
+    placement: &str,
+    kind: crate::runtime_db::external_execution::RelayKind,
+    sequence: u32,
+    direction: crate::runtime_db::external_execution::RelayDirection,
+    outbound: Option<&ryeos_state::external_execution::transport::ExternalRelayResponseEnvelope>,
+) -> Result<ExternalRelayFileContactProgress> {
+    contact_external_relay_transfer(
+        state,
+        placement,
+        kind,
+        sequence,
+        direction,
+        outbound,
+        ExternalRelayOwnerLane::OrdinarySession,
+    )
+}
+
+fn contact_external_relay_transfer(
+    state: &AppState,
+    placement: &str,
+    kind: crate::runtime_db::external_execution::RelayKind,
+    sequence: u32,
+    direction: crate::runtime_db::external_execution::RelayDirection,
+    outbound: Option<&ryeos_state::external_execution::transport::ExternalRelayResponseEnvelope>,
+    lane: ExternalRelayOwnerLane,
 ) -> Result<ExternalRelayFileContactProgress> {
     use crate::runtime_db::external_execution::{
         RelayDirection, RelayTransferIntent, RelayTransferPhase,
@@ -3434,7 +3761,7 @@ pub(crate) fn contact_original_external_relay_transfer(
         "external relay file contact is already in progress"
     );
     let _lease = ExternalContactLease { gate };
-    let protected = recover_original_external_relay_bootstrap(state, placement)?;
+    let protected = recover_external_relay_bootstrap(state, placement, lane)?;
     let bootstrap = protected.bootstrap();
     let outbound_bytes = match direction {
         RelayDirection::GuestToController => {
@@ -3528,10 +3855,14 @@ pub(crate) fn contact_original_external_relay_transfer(
         credential_access.decode(state.vault.placement_credential(&credential_access)?)?;
     // Live file contact requires the current signed relay selection; terminal
     // cleanup uses a separate recovery path after this permission is withdrawn.
-    let backend =
-        state
+    let backend = match lane {
+        ExternalRelayOwnerLane::Qualification => state
             .external_placement_backends
-            .qualify_for_relay(&contract, &credential, &program)?;
+            .qualify_for_relay(&contract, &credential, &program)?,
+        ExternalRelayOwnerLane::OrdinarySession => state
+            .external_placement_backends
+            .qualify_for_ordinary_relay(&contract, &credential, &program)?,
+    };
     let reserved = state.state_store.reserve_external_relay_transfer(
         bootstrap,
         &intent,
@@ -7057,7 +7388,11 @@ fn supervisor_activation(
     let bootstrap = ryeos_state::external_execution::transport::ExternalSupervisorBootstrap {
         schema: match &contract.controller_transport {
             ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_) => 7,
-            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_) => ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA,
+            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_) => match program.execution_mode() {
+                ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {} => ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA,
+                ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {} => ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA,
+                ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand { .. } => 0,
+            },
         },
         controller: contract.controller_transport.clone(),
         tls_root_certificates_der_base64: contract

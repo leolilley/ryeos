@@ -48,17 +48,25 @@ impl ExternalRelayBootstrapCommitment {
         contract: &crate::node_config::sections::external_execution::ExternalPlacementBackendContract,
     ) -> Result<()> {
         contract.controller_transport.relay()?;
+        let owner_matches_workload = matches!(
+            (&reservation.owner, &contract.workload),
+            (
+                ExternalAllocationOwner::QualificationCandidate(_),
+                crate::node_config::sections::external_execution::ExternalWorkloadBinding::QualificationStructuredSession(_)
+            ) | (
+                ExternalAllocationOwner::DedicatedSession(_),
+                crate::node_config::sections::external_execution::ExternalWorkloadBinding::StructuredSession(_)
+            )
+        );
         ensure!(
-            matches!(
-                &reservation.owner,
-                ExternalAllocationOwner::QualificationCandidate(_)
-            ) && self.schema == 1
+            owner_matches_workload
+                && self.schema == 1
                 && self.placement_thread_id == reservation.placement_thread_id
                 && self.allocation_request_digest == reservation.request_digest
                 && self.occurrence_id == occurrence.occurrence_id
                 && self.activation_request_digest == activation.activation_request_digest
                 && self.guest_input_identity == activation.guest_input_identity,
-            "relay bootstrap commitment changed its original Q activation"
+            "relay bootstrap commitment changed its original workload activation"
         );
         validate_sha256("original relay bootstrap", &self.bootstrap_sha256)?;
         validate_sha256("original signed guest import", &self.signed_import_sha256)

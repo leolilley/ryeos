@@ -38,6 +38,9 @@ use super::launch_preparation::{
     PreparedContentDependency, PreparedEvidenceAttachment, PreparedExecutionDependency,
     PreparedRuntimeLaunch, RefBindingLaunchRecord,
 };
+use super::external_structured_session_relay::{
+    ExternalStructuredSessionRelayCursor, ExternalStructuredSessionRelayPump,
+};
 
 /// Closed, secret-free recovery diagnostic vocabulary for persistent-session
 /// capsule verification. The wrapped error remains available to local tracing,
@@ -242,6 +245,10 @@ struct HeldPersistentSession {
     process: ryeos_app::thread_lifecycle::SpawnedPersistentSessionAwaitingAttachment,
     socket: lillux::InheritedDuplexChannel,
     lifelines: Vec<Box<dyn Send + Sync>>,
+    relay_health: Option<ryeos_app::persistent_session::PersistentSessionRelayHealthCell>,
+    relay_owner: Option<
+        std::sync::Arc<dyn ryeos_app::persistent_session::PersistentSessionRelayOwner>,
+    >,
     retirement_observer: Option<ryeos_app::persistent_session::PersistentSessionCleanupObserver>,
 }
 
@@ -3068,6 +3075,8 @@ fn start_capsule_process(
         running,
         socket: held.socket,
         lifelines: held.lifelines,
+        relay_health: held.relay_health,
+        relay_owner: held.relay_owner,
         retirement_observer: held.retirement_observer,
         expected_boot_identity: None,
         observation_sink: None,
@@ -3431,10 +3440,10 @@ fn await_external_candidate_ready(
     state: &AppState,
     placement: &str,
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
-) -> Result<()> {
+) -> Result<Option<ExternalStructuredSessionRelayPump>> {
     let result = await_external_candidate_ready_inner(state, placement, guest_inputs);
     match result {
-        Ok(()) => Ok(()),
+        Ok(relay) => Ok(relay),
         Err(error) => Err(fence_external_candidate_start_failure(
             state,
             placement,
@@ -3470,11 +3479,13 @@ fn await_external_candidate_ready_inner(
     state: &AppState,
     placement: &str,
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
-) -> Result<()> {
+) -> Result<Option<ExternalStructuredSessionRelayPump>> {
     use ryeos_app::external_placement::ExternalCandidateStartProgress;
     let deadline =
         ryeos_app::external_placement::external_candidate_startup_deadline(state, placement)?;
     let mut guest_inputs = Some(guest_inputs);
+    let mut transport = None;
+    let mut relay = None;
     loop {
         ensure!(
             !deadline.has_elapsed(),
@@ -3495,8 +3506,64 @@ fn await_external_candidate_ready_inner(
         } else {
             progress
         };
+        if !matches!(
+            progress,
+            ExternalCandidateStartProgress::CleanupProved
+                | ExternalCandidateStartProgress::CleanupRequired
+        ) {
+            if transport.is_none() {
+                transport = ryeos_app::external_placement::inspect_external_session_controller_transport(
+                    state, placement,
+                )?;
+                if let Some(
+                    ryeos_app::external_placement::ExternalSessionControllerTransport::Relay {
+                        poll_interval_ms,
+                        poll_deadline_ms,
+                        maximum_frames,
+                    },
+                ) = transport
+                {
+                    relay = Some(ExternalStructuredSessionRelayCursor::new(
+                        poll_interval_ms,
+                        poll_deadline_ms,
+                        maximum_frames,
+                    )?);
+                }
+            }
+            if let Some(relay) = &mut relay {
+                relay.advance_if_due(state, placement)?;
+            }
+        }
         match progress {
-            ExternalCandidateStartProgress::Ready(_) => return Ok(()),
+            ExternalCandidateStartProgress::Ready(binding) => {
+                ensure!(
+                    binding.placement_thread_id == placement
+                        && matches!(
+                            &binding.execution_mode,
+                            ryeos_state::external_execution::ExternalExecutionMode::StructuredSession {}
+                        )
+                        && binding.candidate_export_max_bytes > 0,
+                    "ordinary structured-session readiness changed its placement or export mode"
+                );
+                ensure!(
+                    transport.is_some(),
+                    "ordinary structured-session Ready has no retained controller transport"
+                );
+                let pump = relay
+                    .take()
+                    .map(|cursor| {
+                        ExternalStructuredSessionRelayPump::start(
+                            state,
+                            placement.to_owned(),
+                            cursor,
+                        )
+                    })
+                    .transpose()?;
+                if let Some(pump) = &pump {
+                    pump.ensure_running()?;
+                }
+                return Ok(pump);
+            }
             ExternalCandidateStartProgress::AllocationPending
             | ExternalCandidateStartProgress::OccurrenceBound
             | ExternalCandidateStartProgress::SupervisorPending
@@ -3839,6 +3906,8 @@ fn spawn_capsule_process_held(
     )?;
     let mut inherited_fds = Vec::new();
     let mut external_lifelines: Vec<Box<dyn Send + Sync>> = Vec::new();
+    let mut relay_health = None;
+    let mut relay_owner = None;
     let mut retirement_observer = None;
     if capsule.external_candidate.is_some() {
         let placement = placement_thread_id
@@ -3866,20 +3935,33 @@ fn spawn_capsule_process_held(
             workspace_view,
             &workspace_record.base_snapshot,
         )?;
-        await_external_candidate_ready(state, placement, guest_inputs)?;
-        let state_root =
-            state_root.context("external candidate provider has no protected state root")?;
-        let connector = ryeos_app::external_connector::prepare_external_candidate_connector(
+        let relay_pump = await_external_candidate_ready(state, placement, guest_inputs)?;
+        let state_root = match state_root {
+            Some(state_root) => state_root,
+            None => {
+                drop(relay_pump);
+                return Err(fence_external_candidate_start_failure(
+                    state,
+                    placement,
+                    anyhow!("external candidate provider has no protected state root"),
+                    "prepare external candidate connector",
+                ));
+            }
+        };
+        let connector = match ryeos_app::external_connector::prepare_external_candidate_connector(
             state, placement, state_root,
-        )
-        .map_err(|error| {
-            fence_external_candidate_start_failure(
-                state,
-                placement,
-                error,
-                "prepare external candidate connector",
-            )
-        })?;
+        ) {
+            Ok(connector) => connector,
+            Err(error) => {
+                drop(relay_pump);
+                return Err(fence_external_candidate_start_failure(
+                    state,
+                    placement,
+                    error,
+                    "prepare external candidate connector",
+                ));
+            }
+        };
         let (
             connector_mounts,
             connector_descriptors,
@@ -3890,6 +3972,21 @@ fn spawn_capsule_process_held(
         retirement_observer = Some(settlement);
         mounts.extend(connector_mounts);
         inherited_fds.extend(connector_descriptors);
+        if let Some(relay_pump) = relay_pump {
+            relay_health = Some(relay_pump.health_cell());
+            relay_owner = Some(
+                std::sync::Arc::new(relay_pump)
+                    as std::sync::Arc<
+                        dyn ryeos_app::persistent_session::PersistentSessionRelayOwner,
+                    >,
+            );
+            // This Arc is a custody anchor for the existing pooled precontact
+            // retention slot. Health and stop/join remain on the typed owner
+            // transferred separately into StartedPersistentSession.
+            external_lifelines.push(Box::new(Arc::clone(
+                relay_owner.as_ref().expect("relay owner just installed"),
+            )));
+        }
         external_lifelines.extend(connector_lifelines);
         external_lifelines.push(Box::new(
             ryeos_app::external_placement::ExternalCandidateCleanupLifeline::new(state, placement),
@@ -4054,6 +4151,8 @@ fn spawn_capsule_process_held(
         process,
         socket: daemon_socket,
         lifelines,
+        relay_health,
+        relay_owner,
         retirement_observer,
     })
 }
@@ -4422,6 +4521,8 @@ pub fn start_exclusive_capsule(
         running,
         socket: held.socket,
         lifelines: held.lifelines,
+        relay_health: held.relay_health,
+        relay_owner: held.relay_owner,
         retirement_observer: held.retirement_observer,
         expected_boot_identity: Some(identity.boot_identity_hash.clone()),
         observation_sink: Some(observation_sink),

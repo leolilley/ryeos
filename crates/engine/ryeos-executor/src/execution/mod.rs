@@ -20,6 +20,7 @@ pub(crate) mod external_qualification_local_materials;
 pub(crate) mod external_qualification_local_worker;
 pub(crate) mod external_qualification_relay;
 pub mod external_qualification_start;
+pub(crate) mod external_structured_session_relay;
 pub mod launch;
 pub(crate) mod launch_claim;
 pub mod launch_envelope;

@@ -876,6 +876,8 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
         running,
         socket,
         lifelines,
+        relay_health: None,
+        relay_owner: None,
         expected_boot_identity: Some(boot_identity.clone()),
         observation_sink: Some(observation_sink),
         cleanup_observer: None,

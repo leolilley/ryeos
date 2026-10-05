@@ -105,6 +105,78 @@ impl Drop for LifecycleExitGuard {
     }
 }
 
+enum ShutdownDrainDisposition {
+    Drained,
+    HoldUnproved {
+        drain_error: String,
+        prior_daemon_error: Option<String>,
+    },
+}
+
+fn map_shutdown_drain_join(
+    joined: std::result::Result<bool, tokio::task::JoinError>,
+) -> std::result::Result<bool, String> {
+    joined.map_err(|error| format!("{error}"))
+}
+
+fn shutdown_drain_disposition(
+    drain: std::result::Result<bool, String>,
+    prior_daemon_result: &Result<()>,
+) -> ShutdownDrainDisposition {
+    let prior_daemon_error = prior_daemon_result
+        .as_ref()
+        .err()
+        .map(|error| format!("{error:#}"));
+    match drain {
+        Ok(true) => ShutdownDrainDisposition::Drained,
+        Ok(false) => ShutdownDrainDisposition::HoldUnproved {
+            drain_error: "shutdown coordinator reported unresolved process custody".to_owned(),
+            prior_daemon_error,
+        },
+        Err(error) => ShutdownDrainDisposition::HoldUnproved {
+            drain_error: format!("shutdown coordinator task failed: {error}"),
+            prior_daemon_error,
+        },
+    }
+}
+
+async fn hold_shutdown_owners<T>(owners: T) -> ! {
+    // The awaited future owns this tuple forever. This intentionally has no
+    // retry, timer, or endpoint contact.
+    let _retained_owners = owners;
+    std::future::pending::<()>().await;
+    unreachable!("pending custody hold cannot complete")
+}
+
+async fn complete_shutdown_drain<T>(
+    drain: std::result::Result<bool, String>,
+    prior_daemon_result: &Result<()>,
+    custody: &mut Option<T>,
+) {
+    match shutdown_drain_disposition(drain, prior_daemon_result) {
+        ShutdownDrainDisposition::Drained => {
+            drop(custody.take());
+        }
+        ShutdownDrainDisposition::HoldUnproved {
+            drain_error,
+            prior_daemon_error,
+        } => {
+            tracing::error!(
+                shutdown_outcome = "cleanup_unproved",
+                drain_error = %drain_error,
+                prior_daemon_error = ?prior_daemon_error,
+                "daemon remains alive holding persistent-session cleanup custody"
+            );
+            hold_shutdown_owners(
+                custody
+                    .take()
+                    .expect("shutdown custody owner remains present until drain disposition"),
+            )
+            .await;
+        }
+    }
+}
+
 fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
     static DESCRIPTORS: once_cell::sync::Lazy<Vec<ryeos_app::service_registry::ServiceDescriptor>> =
         once_cell::sync::Lazy::new(|| {
@@ -1832,13 +1904,15 @@ async fn run(
                 .expect("shutdown drain state mutex poisoned");
             guard.take()
         };
-        if let Some(state) = shutdown_state
-            && !drain_running_threads(&state).await
-            && result.is_ok()
-        {
-            result = Err(anyhow::anyhow!(
-                "shutdown could not prove every attached process terminated"
-            ));
+        if let Some(state) = shutdown_state {
+            // The parent retains `state` across this awaited task. A panic or
+            // cancellation drops only the task's clone; it cannot consume the
+            // original pool owner before we select the custody hold.
+            let drain_state = state.clone();
+            let drain_task = tokio::spawn(async move { drain_running_threads(&drain_state).await });
+            let drain_result = map_shutdown_drain_join(drain_task.await);
+            let mut custody = Some((state, &lifecycle_exit, &*process_state_lock));
+            complete_shutdown_drain(drain_result, &result, &mut custody).await;
         }
 
         (result, startup_cancelled, startup_failed)
@@ -4080,5 +4154,72 @@ mod shutdown_mapping_tests {
             resolve_shutdown_action(Some(CancellationMode::Graceful { grace_secs: 0 })),
             ShutdownAction::Graceful(Duration::from_secs(0))
         );
+    }
+}
+
+#[cfg(test)]
+mod shutdown_custody_tests {
+    use super::{complete_shutdown_drain, map_shutdown_drain_join};
+    use std::future::Future as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct DropObserved(Arc<AtomicBool>);
+
+    impl Drop for DropObserved {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    #[test]
+    fn unresolved_drain_keeps_real_owner_pending_despite_prior_listener_error() {
+        let prior = Err(anyhow::anyhow!("listener failed first"));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut custody = Some(DropObserved(Arc::clone(&dropped)));
+        let mut future = Box::pin(complete_shutdown_drain(
+            Ok(false),
+            &prior,
+            &mut custody,
+        ));
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+        assert!(!dropped.load(Ordering::Acquire));
+        drop(future);
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn drain_task_panic_keeps_real_owner_pending() {
+        let task = tokio::spawn(async { panic!("injected shutdown coordinator panic") });
+        let task_result = map_shutdown_drain_join(task.await.map(|()| true));
+        let prior = Ok(());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut custody = Some(DropObserved(Arc::clone(&dropped)));
+        let mut future = Box::pin(complete_shutdown_drain(task_result, &prior, &mut custody));
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+        assert!(!dropped.load(Ordering::Acquire));
+        drop(future);
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn successful_drain_releases_owner_and_preserves_listener_error() {
+        let prior = Err(anyhow::anyhow!("listener failed first"));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut custody = Some(DropObserved(Arc::clone(&dropped)));
+        complete_shutdown_drain(Ok(true), &prior, &mut custody).await;
+        assert!(custody.is_none());
+        assert!(dropped.load(Ordering::Acquire));
     }
 }

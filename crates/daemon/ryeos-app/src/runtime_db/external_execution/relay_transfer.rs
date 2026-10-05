@@ -472,6 +472,159 @@ fn require_live_q_allocation(conn: &Connection, intent: &RelayTransferIntent) ->
     Ok(())
 }
 
+/// Ordinary file relay is a separately admitted dedicated-session route.
+/// This predicate deliberately does not widen the Q predicate above: it
+/// revalidates the retained ordinary binding, session owner, occurrence,
+/// activation and immutable relay commitment in the same transaction.
+fn require_live_ordinary_session_allocation(
+    conn: &Connection,
+    intent: &RelayTransferIntent,
+) -> Result<()> {
+    let allocation = read(conn, &intent.placement_thread_id)?
+        .context("ordinary external relay lost its original allocation")?;
+    let occurrence = allocation
+        .occurrence
+        .as_ref()
+        .context("ordinary external relay has no original occurrence")?;
+    ensure!(
+        allocation.phase == ExternalAllocationPhase::Bound
+            && matches!(
+                &allocation.reservation.owner,
+                ExternalAllocationOwner::DedicatedSession(_)
+            )
+            && allocation.reservation.request_digest == intent.allocation_request_digest
+            && occurrence.occurrence_id == intent.occurrence_id,
+        "ordinary external relay requires its exact live dedicated-session allocation"
+    );
+    channel::require_current_execution_owner(conn, &allocation.reservation)?;
+    let retained = read_retained_binding(conn, &allocation.reservation.binding_hash)?
+        .context("ordinary external relay lost its retained signed binding")?;
+    let contract = retained.backend_contract();
+    ensure!(
+        matches!(
+            &contract.workload,
+            crate::node_config::sections::external_execution::ExternalWorkloadBinding::StructuredSession(_)
+        ) && contract.controller_transport.relay().is_ok(),
+        "ordinary external relay requires a signed ordinary structured-session relay binding"
+    );
+    let activation: ExternalSupervisorActivationIntent = read_canonical_evidence(
+        conn,
+        "external_execution_supervisor_activation_intent",
+        "intent_json",
+        &intent.placement_thread_id,
+    )?
+    .context("ordinary external relay has no original supervisor-start intent")?;
+    activation.validate_contract(&allocation.reservation, occurrence, &contract)?;
+    let relay = contract.controller_transport.relay()?;
+    let expected_deadline = match (intent.kind, intent.direction) {
+        (RelayKind::Attach, _) => activation.attachment_deadline_ms,
+        (RelayKind::Exchange, _) => activation
+            .attachment_deadline_ms
+            .checked_add(i64::from(activation.execution_timeout_seconds) * 1_000)
+            .and_then(|deadline| {
+                deadline.checked_add(i64::from(activation.post_execution_timeout_seconds) * 1_000)
+            })
+            .context("ordinary relay exchange deadline overflow")?,
+    };
+    ensure!(
+        intent.maximum_file_bytes == relay.maximum_file_bytes
+            && intent.retention_budget_bytes == activation.channel_max_bytes.saturating_mul(4)
+            && intent.deadline_ms == expected_deadline,
+        "ordinary relay transfer intent changed its signed bounds or deadline"
+    );
+    let commitment = relay_bootstrap::read_commitment(
+        conn,
+        &allocation.reservation,
+        occurrence,
+        &activation,
+        &contract,
+    )?
+    .context("ordinary external relay has no original bootstrap commitment")?;
+    commitment.validate_for(&allocation.reservation, occurrence, &activation, &contract)?;
+    ensure!(
+        commitment.bootstrap_sha256 == intent.bootstrap_digest,
+        "ordinary relay transfer changed its committed bootstrap identity"
+    );
+    Ok(())
+}
+
+/// Select authorization from the durable owner variant. A caller cannot turn
+/// a Q allocation into an ordinary one (or vice versa) with a mode flag.
+fn require_live_relay_allocation(conn: &Connection, intent: &RelayTransferIntent) -> Result<()> {
+    let allocation = read(conn, &intent.placement_thread_id)?
+        .context("external relay lost its original allocation")?;
+    match allocation.reservation.owner {
+        ExternalAllocationOwner::QualificationCandidate(_) => {
+            require_live_q_allocation(conn, intent)
+        }
+        ExternalAllocationOwner::DedicatedSession(_) => {
+            require_live_ordinary_session_allocation(conn, intent)
+        }
+        ExternalAllocationOwner::DirectThread { .. } => {
+            bail!("external file relay cannot authorize a direct-thread owner")
+        }
+    }
+}
+
+fn require_live_relay_bootstrap(
+    conn: &Connection,
+    intent: &RelayTransferIntent,
+    bootstrap: &ExternalSupervisorBootstrap,
+) -> Result<()> {
+    bootstrap.validate()?;
+    ensure!(
+        bootstrap.digest()? == intent.bootstrap_digest
+            && bootstrap.placement_thread_id == intent.placement_thread_id
+            && bootstrap.occurrence_id == intent.occurrence_id
+            && bootstrap.allocation_request_digest == intent.allocation_request_digest,
+        "external relay bootstrap changed its retained transfer identity"
+    );
+    let allocation = read(conn, &intent.placement_thread_id)?
+        .context("external relay lost its original allocation")?;
+    match (&allocation.reservation.owner, bootstrap.candidate_program.execution_mode()) {
+        (
+            ExternalAllocationOwner::QualificationCandidate(_),
+            ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {},
+        ) => require_live_q_allocation(conn, intent),
+        (
+            ExternalAllocationOwner::DedicatedSession(_),
+            ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {},
+        ) => {
+            require_live_ordinary_session_allocation(conn, intent)?;
+            let allocation = read(conn, &intent.placement_thread_id)?
+                .context("ordinary external relay lost its original allocation")?;
+            let retained = read_retained_binding(conn, &allocation.reservation.binding_hash)?
+                .context("ordinary external relay lost its retained signed binding")?;
+            let contract = retained.backend_contract();
+            let session = contract.workload.structured_session()?;
+            let ryeos_state::external_execution::admission::AdmittedExternalExecutionProgram::StructuredSession(
+                program,
+            ) = &bootstrap.candidate_program
+            else {
+                bail!("ordinary relay bootstrap changed its structured-session program")
+            };
+            let expected_channel_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
+            ensure!(
+                program.runtime_manifest_hash == session.runtime_manifest_hash
+                    && program.selection_identity_digest == session.runtime_selection_identity
+                    && bootstrap.execution_binding_hash == allocation.reservation.binding_hash
+                    && bootstrap.admitted_capsule_hash == allocation.reservation.admitted_capsule_hash
+                    && bootstrap.base_snapshot_hash == allocation.reservation.base_snapshot_hash
+                    && bootstrap.controller == contract.controller_transport
+                    && bootstrap.tls_root_certificates_der_base64.is_empty()
+                    && bootstrap.launcher_artifact_hash == contract.launcher_artifact_hash
+                    && bootstrap.supervisor_runtime_hash == program.runtime_manifest_hash
+                    && bootstrap.channel_max_bytes == expected_channel_bytes
+                    && bootstrap.candidate_export_max_bytes
+                        == contract.max_export_bytes.min(expected_channel_bytes),
+                "ordinary relay bootstrap changed its retained signed program or byte limits"
+            );
+            Ok(())
+        }
+        _ => bail!("external relay bootstrap workload changed its durable allocation owner"),
+    }
+}
+
 fn require_preceding_transfer(conn: &Connection, intent: &RelayTransferIntent) -> Result<()> {
     let predecessor = match (intent.kind, intent.direction, intent.sequence) {
         (RelayKind::Attach, RelayDirection::GuestToController, 0) => return Ok(()),
@@ -760,7 +913,7 @@ impl RuntimeDb {
             None,
         )?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_q_allocation(&tx, &intent)?;
+        require_live_relay_bootstrap(&tx, &intent, bootstrap)?;
         require_placement_bootstrap(&tx, &intent)?;
         let inbound = read_transfer(&tx, &intent)?
             .context("external relay semantic application has no accepted request")?;
@@ -857,7 +1010,7 @@ impl RuntimeDb {
             "external relay semantic response exceeds signed file bound"
         );
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_q_allocation(&tx, &intent)?;
+        require_live_relay_bootstrap(&tx, &intent, bootstrap)?;
         let inbound = read_transfer(&tx, &intent)?
             .context("external relay semantic commit lost accepted request")?;
         ensure!(
@@ -933,7 +1086,7 @@ impl RuntimeDb {
             RelayDirection::ControllerToGuest,
             Some(&bytes),
         )?;
-        require_live_q_allocation(&tx, &intent)?;
+        require_live_relay_bootstrap(&tx, &intent, bootstrap)?;
         require_placement_bootstrap(&tx, &intent)?;
         require_committed_relay_application(&tx, bootstrap, kind, sequence, &bytes)?;
         if let Some(record) = read_transfer(&tx, &intent)? {
@@ -955,7 +1108,7 @@ impl RuntimeDb {
             "external relay predecessor must be a guest request"
         );
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
-        require_live_q_allocation(&tx, intent)?;
+        require_live_relay_allocation(&tx, intent)?;
         let record = read_transfer(&tx, intent)?
             .context("external relay has no exact predecessor request")?;
         ensure!(
@@ -1020,7 +1173,7 @@ impl RuntimeDb {
         );
         intent.validate()?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_q_allocation(&tx, intent)?;
+        require_live_relay_bootstrap(&tx, intent, bootstrap)?;
         require_placement_bootstrap(&tx, intent)?;
         if let Some(bytes) = outbound {
             require_committed_relay_application(
@@ -1068,7 +1221,7 @@ impl RuntimeDb {
         intent: &RelayTransferIntent,
     ) -> Result<RelayTransferRecord> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_q_allocation(&tx, intent)?;
+        require_live_relay_allocation(&tx, intent)?;
         let prior =
             read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
         ensure!(
@@ -1111,7 +1264,7 @@ impl RuntimeDb {
             "external relay upload requires a controller response"
         );
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_q_allocation(&tx, intent)?;
+        require_live_relay_allocation(&tx, intent)?;
         let prior =
             read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
         ensure!(
@@ -1168,7 +1321,7 @@ impl RuntimeDb {
             anyhow::bail!("external relay upload readback differs from precommitted response");
         }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_q_allocation(&tx, intent)?;
+        require_live_relay_allocation(&tx, intent)?;
         let prior =
             read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
         if prior.phase == RelayTransferPhase::Accepted {

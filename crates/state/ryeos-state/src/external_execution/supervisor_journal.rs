@@ -29,8 +29,11 @@ use super::{ExecutionChannelBinding, encode_channel_public_key};
 const DATABASE_NAME: &str = "external-supervisor.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4553; // RYES
 // HTTP epoch 6 retains the exact policy-bound network capture. Relay epoch 7
-// binds the original mailbox inode and exact authenticated attach response.
-// Predecessor stores remain historical evidence; recovery never recaptures.
+// binds the original mailbox inode and exact authenticated attach response and
+// is shared by Q bootstrap schema 8 and ordinary-session schema 9. Relay store
+// identity schema 4 and mailbox capture schema 1 stay unchanged; bootstrap
+// validation, not a journal migration, enforces the workload pair. Predecessor
+// stores remain historical evidence; recovery never recaptures.
 const HTTP_SCHEMA_EPOCH: i64 = 6;
 const RELAY_SCHEMA_EPOCH: i64 = 7;
 
@@ -1797,6 +1800,24 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn relay_bootstrap_versions_do_not_change_the_journal_epoch() {
+        assert_eq!(RELAY_SCHEMA_EPOCH, 7);
+        assert_eq!(
+            super::super::transport::EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA,
+            8
+        );
+        assert_eq!(
+            super::super::transport::EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA,
+            9
+        );
+        let relay_schema = schema_for(RELAY_SCHEMA_EPOCH).unwrap();
+        assert!(relay_schema.contains("CHECK(schema_epoch=7)"));
+        assert!(relay_schema.contains("attach_response_digest TEXT NOT NULL"));
+        assert!(schema_for(8).is_err());
+        assert!(schema_for(9).is_err());
     }
 
     #[test]
