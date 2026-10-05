@@ -948,6 +948,303 @@ pub struct CgroupIdentity {
     pub name: String,
 }
 
+/// Selected allocation attempt owners; never recovered from a child name.
+/// A first-open descriptor is observed custody, not proof of the mkdir-created
+/// incarnation. The original creation obligation remains unresolved.
+/// Each optional descriptor is installed before its validation can fail.
+#[derive(Debug)]
+pub(crate) struct SelectedCgroupPreparation {
+    name: String,
+    name_c: CString,
+    expected_parent: PinnedDirectoryIdentity,
+    original: crate::time::MonotonicDeadline,
+    parent: Option<File>,
+    attempted: bool,
+    created: bool,
+    directory_file: Option<File>,
+    diagnostic_path: Option<std::path::PathBuf>,
+    directory: Option<PinnedDirectory>,
+    domain: Option<File>,
+    members: Option<File>,
+    events: Option<File>,
+    freeze: Option<File>,
+    kill: Option<File>,
+    placement: Option<File>,
+    limits: Option<super::scope::ProcessScopeResourceLimits>,
+    limit_values: Option<[String; 3]>,
+    memory_limit: Option<File>,
+    swap_limit: Option<File>,
+    process_limit: Option<File>,
+    limit_write_attempted: [bool; 3],
+    limit_readback: [Option<String>; 3],
+    limits_started: bool,
+    limits_installed: bool,
+    identity: Option<CgroupIdentity>,
+    completed: bool,
+}
+
+impl SelectedCgroupPreparation {
+    pub(crate) fn planned(
+        name: &str,
+        expected_parent: PinnedDirectoryIdentity,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<Self, String> {
+        Self::planned_with_limits(name, expected_parent, original, None)
+    }
+
+    pub(crate) fn planned_with_limits(
+        name: &str,
+        expected_parent: PinnedDirectoryIdentity,
+        original: crate::time::MonotonicDeadline,
+        limits: Option<super::scope::ProcessScopeResourceLimits>,
+    ) -> Result<Self, String> {
+        if let Some(limits) = limits {
+            limits.validate()?;
+        }
+        let limit_values = limits.map(|limits| [
+            limits.maximum_memory_bytes.to_string(),
+            "0".to_owned(),
+            limits.maximum_processes.to_string(),
+        ]);
+        Ok(Self {
+            name: name.to_owned(),
+            name_c: child_name(name)?,
+            expected_parent,
+            original,
+            parent: None,
+            attempted: false,
+            created: false,
+            directory_file: None,
+            diagnostic_path: None,
+            directory: None,
+            domain: None,
+            members: None,
+            events: None,
+            freeze: None,
+            kill: None,
+            placement: None,
+            limits,
+            limit_values,
+            memory_limit: None,
+            swap_limit: None,
+            process_limit: None,
+            limit_write_attempted: [false; 3],
+            limit_readback: [None, None, None],
+            limits_started: false,
+            limits_installed: false,
+            identity: None,
+            completed: false,
+        })
+    }
+
+    fn live(&self) -> Result<(), String> {
+        selected_allocation_live(self.original)
+    }
+
+    fn begin_attempt(&mut self) -> Result<(), String> {
+        if self.attempted || self.created || self.directory_file.is_some() {
+            return Err("selected allocation already attempted; original owners retained".into());
+        }
+        self.live()?;
+        self.attempted = true;
+        Ok(())
+    }
+
+    fn record_creation(&mut self, status: libc::c_int) -> Result<(), String> {
+        if status == 0 {
+            // First action after successful mkdir; no formatting/IO here.
+            self.created = true;
+            Ok(())
+        } else {
+            Err(format!("selected cgroup create: {}", io::Error::last_os_error()))
+        }
+    }
+
+    pub(crate) fn complete(&self) -> Option<&Self> {
+        (self.completed && self.require_created_incarnation().is_ok()).then_some(self)
+    }
+
+    fn require_created_incarnation(&self) -> Result<(), String> {
+        // mkdirat returns no inode/handle. Neither the parent pin nor the
+        // delegated UID excludes child-name mutation before the first open.
+        // No exclusion issuer exists in this selected frame. Do not promote
+        // an observed object, even when all of its local checks pass.
+        Err("selected created incarnation unjoined; original creation obligation retained".into())
+    }
+
+    pub(crate) fn identity(&self) -> Result<&CgroupIdentity, String> {
+        self.require_created_incarnation()?;
+        if !self.completed {
+            return Err("selected native scope incomplete".into());
+        }
+        self.identity.as_ref().ok_or("selected native identity absent".into())
+    }
+
+    pub(crate) fn is_empty(&self) -> Result<bool, String> {
+        self.identity()?;
+        let events = self.events.as_ref().ok_or("selected native events absent")?;
+        // Fixed-capacity one-read observation; no wait or new deadline.
+        Ok(!parse_events(&read_control(events)?)?.populated)
+    }
+
+    pub(crate) fn launch_ready(&self) -> bool {
+        self.require_created_incarnation().is_ok()
+            && self.completed && (self.limits.is_none() || self.limits_installed)
+    }
+
+    fn install_selected_limits(&mut self) -> Result<(), String> {
+        if self.limits.is_none() {
+            return Ok(());
+        }
+        if self.limits_started || self.limit_write_attempted.iter().any(|attempted| *attempted) {
+            return Err("selected limits already attempted".into());
+        }
+        self.limits_started = true;
+        self.live()?;
+        if !self.is_empty()? {
+            return Err("selected resource configuration requires actual empty scope".into());
+        }
+        // All handles go straight into this SAME preallocated frame. Reuse the
+        // pinned original child; no namespace reopen or replacement.
+        let directory = self.directory.as_ref().ok_or("selected limits directory absent")?;
+        // The descriptor is already held in PinnedDirectory. Its accessor
+        // clones, so retain that acquired alias before any controller open.
+        // This clone's slot is the original raw-file slot now empty after pin.
+        self.directory_file = Some(directory.try_clone_descriptor().map_err(display)?);
+        let fd = self.directory_file.as_ref().ok_or("selected limits descriptor absent")?;
+        open_selected_control_into(fd, c"memory.max", libc::O_RDWR, &mut self.memory_limit, self.original)?;
+        open_selected_control_into(fd, c"memory.swap.max", libc::O_RDWR, &mut self.swap_limit, self.original)?;
+        open_selected_control_into(fd, c"pids.max", libc::O_RDWR, &mut self.process_limit, self.original)?;
+        let values = self.limit_values.as_ref().ok_or("selected limit values absent")?;
+        for (index, control) in [
+            self.memory_limit.as_ref().ok_or("selected memory control absent")?,
+            self.swap_limit.as_ref().ok_or("selected swap control absent")?,
+            self.process_limit.as_ref().ok_or("selected process control absent")?,
+        ].into_iter().enumerate() {
+            write_selected_limit_once(
+                control, &values[index], &mut self.limit_write_attempted[index],
+                &mut self.limit_readback[index], self.original,
+            )?;
+        }
+        if !self.is_empty()? {
+            return Err("selected scope became populated during resource configuration".into());
+        }
+        self.live()?;
+        self.limits_installed = true;
+        Ok(())
+    }
+
+    pub(crate) fn require_member_until(
+        &self,
+        pid: u32,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        self.identity()?;
+        let members = self.members.as_ref().ok_or("selected native members absent")?;
+        if membership_contains_with_expiry(
+            |buffer, offset| members.read_at(buffer, offset), pid,
+            || original.has_elapsed(),
+        )? {
+            Ok(())
+        } else {
+            Err("held target outside retained selected scope".into())
+        }
+    }
+
+    pub(crate) fn request_termination_until(
+        &self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        self.identity()?;
+        selected_allocation_live(original)?;
+        let kill = self.kill.as_ref().ok_or("selected native kill absent")?;
+        let size = unsafe { libc::write(kill.as_raw_fd(), b"1".as_ptr().cast(), 1) };
+        if size != 1 {
+            return Err("selected pinned termination write uncertain".into());
+        }
+        selected_allocation_live(original)
+    }
+}
+
+fn selected_allocation_live(original: crate::time::MonotonicDeadline) -> Result<(), String> {
+    if original.has_elapsed() {
+        Err("selected allocation original bound expired".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// SAME one-shot ordering for native operations and injected component stages.
+/// The operation callbacks are private implementation seams, never authority.
+/// Successful first open retains the observed File before validation, but
+/// cannot discharge the original creation obligation without an actual issuer.
+fn selected_create_open_stages(
+    frame: &mut SelectedCgroupPreparation,
+    mkdir: impl FnOnce(&SelectedCgroupPreparation) -> libc::c_int,
+    open: impl FnOnce(&SelectedCgroupPreparation) -> Result<File, String>,
+    validate: impl FnOnce(&mut SelectedCgroupPreparation) -> Result<(), String>,
+) -> Result<(), String> {
+    frame.begin_attempt()?;
+    let status = mkdir(frame);
+    frame.record_creation(status)?;
+    frame.live()?;
+    frame.directory_file = Some(open(frame)?);
+    frame.live()?;
+    validate(frame)?;
+    frame.live()?;
+    frame.require_created_incarnation()
+}
+
+fn write_selected_limit_once(
+    control: &File,
+    value: &str,
+    attempted: &mut bool,
+    readback: &mut Option<String>,
+    original: crate::time::MonotonicDeadline,
+) -> Result<(), String> {
+    if *attempted {
+        return Err("selected resource write already attempted".into());
+    }
+    selected_allocation_live(original)?;
+    *attempted = true;
+    write_control(control, value.as_bytes())?;
+    selected_allocation_live(original)?;
+    *readback = Some(read_control(control)?);
+    selected_allocation_live(original)?;
+    if readback.as_ref().ok_or("selected limit readback absent")?.trim() != value {
+        return Err("selected resource ceiling did not retain exact value".into());
+    }
+    Ok(())
+}
+
+/// Unlike ordinary open_control, install the raw File BEFORE cgroup validation.
+fn open_selected_control_into(
+    directory: &File,
+    name: &CStr,
+    access: i32,
+    destination: &mut Option<File>,
+    original: crate::time::MonotonicDeadline,
+) -> Result<(), String> {
+    if destination.is_some() {
+        return Err("selected control slot occupied".into());
+    }
+    selected_allocation_live(original)?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            access | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        return Err(format!("selected control open: {}", io::Error::last_os_error()));
+    }
+    *destination = Some(unsafe { File::from_raw_fd(fd) });
+    let retained = destination.as_ref().ok_or("selected control installation absent")?;
+    require_cgroup2(retained)?;
+    selected_allocation_live(original)
+}
+
 #[derive(Debug)]
 pub struct DelegatedCgroup {
     directory: PinnedDirectory,
@@ -1034,6 +1331,114 @@ impl DelegatedCgroup {
                 }
             }
         }
+    }
+
+    /// Selected one-shot path. All native owners remain inside this frame on
+    /// error/unwind. Never call ordinary create/remove/reopen from this path.
+    pub(crate) fn create_into_selected_slot(
+        &self,
+        frame: &mut SelectedCgroupPreparation,
+    ) -> Result<(), String> {
+        if frame.attempted || frame.parent.is_some() || frame.completed {
+            return Err("selected allocation cannot replace a retained frame".into());
+        }
+        frame.live()?;
+        frame.diagnostic_path = Some(self.directory.path().join(&frame.name));
+        frame.parent = Some(self.directory.try_clone_descriptor().map_err(display)?);
+        frame.live()?;
+        if self.directory.identity().map_err(display)? != frame.expected_parent {
+            return Err("selected parent incarnation changed".into());
+        }
+        let parent = frame.parent.as_ref().ok_or("selected parent descriptor absent")?;
+        require_cgroup2(parent)?;
+        selected_create_open_stages(
+            frame,
+            |retained| unsafe {
+                // Parent presence was established before entering the stages.
+                libc::mkdirat(
+                    retained.parent.as_ref().expect("retained selected parent").as_raw_fd(),
+                    retained.name_c.as_ptr(),
+                    0o700,
+                )
+            },
+            |retained| {
+                let fd = unsafe {
+                    libc::openat(
+                        retained.parent.as_ref().ok_or("selected parent descriptor absent")?.as_raw_fd(),
+                        retained.name_c.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW
+                            | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                    )
+                };
+                if fd < 0 {
+                    // Created-but-unpinned remains unresolved; no second lookup.
+                    return Err(format!("selected directory open: {}", io::Error::last_os_error()));
+                }
+                Ok(unsafe { File::from_raw_fd(fd) })
+            },
+            |retained| {
+                let directory = retained.directory_file.as_ref().ok_or("selected raw directory absent")?;
+                require_cgroup2(directory)?;
+                open_selected_control_into(directory, c"cgroup.type", libc::O_RDONLY, &mut retained.domain, retained.original)?;
+                if read_control(retained.domain.as_ref().ok_or("selected domain control absent")?)?.trim() != "domain" {
+                    return Err("selected scope is not a domain".into());
+                }
+                retained.live()?;
+                open_selected_control_into(directory, c"cgroup.procs", libc::O_RDONLY, &mut retained.members, retained.original)?;
+                let members = retained.members.as_ref().ok_or("selected member control absent")?;
+                if membership_contains_with_expiry(
+                    |buffer, offset| members.read_at(buffer, offset),
+                    std::process::id(),
+                    || retained.original.has_elapsed(),
+                )? {
+                    return Err("selected new scope contains controller".into());
+                }
+                Ok(())
+            },
+        )?;
+        // Currently unreachable: no concrete creation-exclusion issuer exists.
+        // Do not open writable controls, install limits or complete an observed
+        // replacement. Existing downstream owners remain for a reviewed issuer.
+        let directory = frame.directory_file.as_ref().ok_or("selected raw directory absent")?;
+        open_selected_control_into(directory, c"cgroup.events", libc::O_RDONLY, &mut frame.events, frame.original)?;
+        open_selected_control_into(directory, c"cgroup.freeze", libc::O_RDWR, &mut frame.freeze, frame.original)?;
+        open_selected_control_into(directory, c"cgroup.kill", libc::O_WRONLY, &mut frame.kill, frame.original)?;
+        open_selected_control_into(directory, c"cgroup.procs", libc::O_WRONLY, &mut frame.placement, frame.original)?;
+        let events = parse_events(&read_control(frame.events.as_ref().ok_or("selected events absent")?)?)?;
+        if events.populated || events.frozen {
+            return Err("selected new scope is populated or frozen".into());
+        }
+        frame.live()?;
+        let path = frame.diagnostic_path.take().ok_or("selected diagnostic path absent")?;
+        PinnedDirectory::adopt_retained_directory_into(
+            path,
+            &mut frame.directory_file,
+            &mut frame.directory,
+        ).map_err(display)?;
+        frame.live()?;
+        let retained = frame.directory.as_ref().ok_or("selected exact directory absent")?;
+        let entries = retained.entries_no_follow_bounded(1024).map_err(display)?;
+        if entries.iter().any(|entry| entry.entry_type == crate::PinnedEntryType::Directory) {
+            return Err("selected scope must be an exact leaf".into());
+        }
+        let identity = CgroupIdentity {
+            parent: frame.expected_parent,
+            directory: retained.identity().map_err(display)?,
+            name: frame.name.clone(),
+        };
+        frame.live()?;
+        if frame.members.is_none() || frame.events.is_none() || frame.freeze.is_none()
+            || frame.kill.is_none() || frame.placement.is_none()
+        {
+            return Err("selected native control frame incomplete".into());
+        }
+        // The Arc wrapper was allocated before descriptor acquisition. Owners
+        // never leave these optional fields; completion only records facts.
+        frame.identity = Some(identity);
+        frame.completed = true;
+        frame.live()?;
+        frame.install_selected_limits()?;
+        frame.live()
     }
 
     pub fn reopen(
@@ -1936,6 +2341,349 @@ fn display(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    // Test-only injection entry. Uses the SAME production stage sequence and
+    // actual temporary directory/File owners, without cgroup/native positives.
+    fn selected_stage_fixture(parent: &Path) -> SelectedCgroupPreparation {
+        let pin = PinnedDirectory::open(parent).unwrap().unwrap();
+        let mut frame = SelectedCgroupPreparation::planned(
+            "created", pin.identity().unwrap(),
+            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+        ).unwrap();
+        frame.parent = Some(File::open(parent).unwrap());
+        frame
+    }
+
+    #[test]
+    fn selected_sequence_created_then_first_open_failure_keeps_original_obligation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut frame = selected_stage_fixture(fixture.path());
+        let parent_fd = frame.parent.as_ref().unwrap().as_raw_fd();
+        let mkdirs = std::cell::Cell::new(0);
+        let opens = std::cell::Cell::new(0);
+        let outcome = selected_create_open_stages(
+            &mut frame,
+            |_| {
+                mkdirs.set(mkdirs.get() + 1);
+                std::fs::create_dir(fixture.path().join("created")).unwrap();
+                0
+            },
+            |_| {
+                opens.set(opens.get() + 1);
+                // Actual first-open failure after successful creation.
+                File::open(fixture.path().join("absent")).map_err(display)
+            },
+            |_| panic!("validation must not follow failed open"),
+        );
+        assert!(outcome.is_err());
+        assert!(frame.created && frame.directory_file.is_none());
+        assert_eq!(frame.parent.as_ref().unwrap().as_raw_fd(), parent_fd);
+        assert!(selected_create_open_stages(
+            &mut frame,
+            |_| { mkdirs.set(mkdirs.get() + 1); 0 },
+            |_| { opens.set(opens.get() + 1); Err("second open".into()) },
+            |_| Ok(()),
+        ).is_err());
+        assert_eq!((mkdirs.get(), opens.get()), (1, 1));
+        assert!(frame.complete().is_none() && !frame.launch_ready());
+        assert!(frame.is_empty().is_err());
+    }
+
+    #[test]
+    fn selected_sequence_successful_substitution_never_promotes_observed_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut frame = selected_stage_fixture(fixture.path());
+        let created_inode = std::cell::Cell::new(0);
+        let opened_fd = std::cell::Cell::new(-1);
+        let outcome = selected_create_open_stages(
+            &mut frame,
+            |_| {
+                let path = fixture.path().join("created");
+                std::fs::create_dir(&path).unwrap();
+                created_inode.set(std::fs::metadata(&path).unwrap().ino());
+                0
+            },
+            |_| {
+                // Keep original inode alive so replacement cannot reuse it.
+                std::fs::rename(fixture.path().join("created"), fixture.path().join("displaced")).unwrap();
+                std::fs::create_dir(fixture.path().join("created")).unwrap();
+                let observed = File::open(fixture.path().join("created")).unwrap();
+                opened_fd.set(observed.as_raw_fd());
+                Ok(observed)
+            },
+            |retained| {
+                let observed = retained.directory_file.as_ref().unwrap();
+                assert_ne!(observed.metadata().unwrap().ino(), created_inode.get());
+                // Even successful local checks cannot constitute exclusion.
+                Ok(())
+            },
+        );
+        assert!(outcome.unwrap_err().contains("created incarnation unjoined"));
+        assert!(frame.created && frame.attempted);
+        assert_eq!(frame.directory_file.as_ref().unwrap().as_raw_fd(), opened_fd.get());
+        assert!(fixture.path().join("displaced").is_dir());
+        assert!(fixture.path().join("created").is_dir());
+        assert!(frame.complete().is_none() && !frame.launch_ready());
+        assert!(frame.identity().is_err() && frame.is_empty().is_err());
+        assert!(!frame.limits_started && frame.kill.is_none() && frame.placement.is_none());
+    }
+
+    #[test]
+    fn selected_sequence_identity_and_member_failure_keep_acquired_owners() {
+        for fail_member in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let mut frame = selected_stage_fixture(fixture.path());
+            let opened_fd = std::cell::Cell::new(-1);
+            let member_fd = std::cell::Cell::new(-1);
+            let outcome = selected_create_open_stages(
+                &mut frame,
+                |_| {
+                    std::fs::create_dir(fixture.path().join("created")).unwrap();
+                    0
+                },
+                |_| File::open(fixture.path().join("created")).map_err(display),
+                |retained| {
+                    opened_fd.set(retained.directory_file.as_ref().unwrap().as_raw_fd());
+                    if !fail_member {
+                        // Actual pinned-parent identity mismatch after acquisition.
+                        let child = PinnedDirectory::open(&fixture.path().join("created")).unwrap().unwrap();
+                        if child.identity().unwrap() != retained.expected_parent {
+                            return Err("injected identity mismatch".into());
+                        }
+                        panic!("distinct directories must not share identity");
+                    }
+                    let path = fixture.path().join("members");
+                    std::fs::write(&path, format!("{}\n", std::process::id())).unwrap();
+                    retained.members = Some(File::open(path).unwrap());
+                    let members = retained.members.as_ref().unwrap();
+                    member_fd.set(members.as_raw_fd());
+                    if membership_contains_with_expiry(
+                        |buffer, offset| members.read_at(buffer, offset),
+                        std::process::id(),
+                        || retained.original.has_elapsed(),
+                    )? {
+                        return Err("injected controller membership refusal".into());
+                    }
+                    panic!("fixture contains controller");
+                },
+            );
+            assert!(outcome.is_err());
+            assert!(frame.created && frame.attempted);
+            assert_eq!(frame.directory_file.as_ref().unwrap().as_raw_fd(), opened_fd.get());
+            if fail_member {
+                assert_eq!(frame.members.as_ref().unwrap().as_raw_fd(), member_fd.get());
+            }
+            assert!(frame.complete().is_none() && !frame.launch_ready());
+            assert!(frame.is_empty().is_err());
+        }
+    }
+
+    #[test]
+    fn selected_sequence_generation_refusal_and_expiry_prevent_second_syscall() {
+        for expire in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let mut frame = selected_stage_fixture(fixture.path());
+            let calls = std::cell::Cell::new(0);
+            let outcome = selected_create_open_stages(
+                &mut frame,
+                |_| {
+                    calls.set(calls.get() + 1);
+                    std::fs::create_dir(fixture.path().join("created")).unwrap();
+                    0
+                },
+                |_| {
+                    calls.set(calls.get() + 1);
+                    File::open(fixture.path().join("created")).map_err(display)
+                },
+                |retained| {
+                    if expire {
+                        retained.original = crate::time::MonotonicDeadline::after(Duration::ZERO);
+                        Ok(())
+                    } else {
+                        // Injected upstream generation validator refusal, not
+                        // testimony that a production issuer was implemented.
+                        Err("injected generation changed".into())
+                    }
+                },
+            );
+            assert!(outcome.is_err());
+            let fd = frame.directory_file.as_ref().unwrap().as_raw_fd();
+            assert!(selected_create_open_stages(
+                &mut frame,
+                |_| { calls.set(calls.get() + 1); 0 },
+                |_| { calls.set(calls.get() + 1); Err("second open".into()) },
+                |_| Ok(()),
+            ).is_err());
+            assert_eq!(calls.get(), 2);
+            assert_eq!(frame.directory_file.as_ref().unwrap().as_raw_fd(), fd);
+            assert!(frame.created && frame.complete().is_none() && !frame.launch_ready());
+        }
+    }
+
+    #[test]
+    fn selected_uncertain_limit_write_retains_fd_and_poisoned_one_attempt() {
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        let retained = File::open(fixture.path()).unwrap();
+        let fd = retained.as_raw_fd();
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let mut attempted = false;
+        let mut readback = None;
+        // Actual read-only temporary descriptor causes the shared writer to
+        // fail; no kernel cgroup/controller or resource positive is supplied.
+        assert!(write_selected_limit_once(&retained, "42", &mut attempted, &mut readback, original).is_err());
+        assert!(attempted && readback.is_none());
+        assert_eq!(retained.as_raw_fd(), fd);
+        assert!(write_selected_limit_once(&retained, "84", &mut attempted, &mut readback, original).is_err());
+        assert_eq!(retained.as_raw_fd(), fd);
+        let mut untouched = false;
+        assert!(write_selected_limit_once(
+            &retained, "42", &mut untouched, &mut readback,
+            crate::time::MonotonicDeadline::after(Duration::ZERO),
+        ).is_err());
+        assert!(!untouched && readback.is_none());
+    }
+
+    #[test]
+    fn selected_preallocated_wrapper_unwind_keeps_same_partial_owners() {
+        let fixture = tempfile::tempdir().unwrap();
+        let control = tempfile::NamedTempFile::new().unwrap();
+        let pin = PinnedDirectory::open(fixture.path()).unwrap().unwrap();
+        let mut frame = Arc::new(SelectedCgroupPreparation::planned(
+            "unwind-files-only", pin.identity().unwrap(),
+            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+        ).unwrap());
+        let address = Arc::as_ptr(&frame);
+        let parent_fd = std::cell::Cell::new(-1);
+        let control_fd = std::cell::Cell::new(-1);
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let retained = Arc::get_mut(&mut frame).unwrap();
+            retained.parent = Some(File::open(fixture.path()).unwrap());
+            parent_fd.set(retained.parent.as_ref().unwrap().as_raw_fd());
+            retained.domain = Some(control.reopen().unwrap());
+            control_fd.set(retained.domain.as_ref().unwrap().as_raw_fd());
+            panic!("injected partial allocation stage unwind");
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(Arc::as_ptr(&frame), address);
+        assert_eq!(frame.parent.as_ref().unwrap().as_raw_fd(), parent_fd.get());
+        assert_eq!(frame.domain.as_ref().unwrap().as_raw_fd(), control_fd.get());
+        assert!(frame.complete().is_none());
+        // Temporary file owners only; no cgroup/root final-Drop positive.
+    }
+
+    #[test]
+    fn selected_control_validation_failure_retains_actual_open_descriptor() {
+        // Ordinary temporary files exercise acquisition/refusal ownership only;
+        // they provide no cgroup/native settlement positive.
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("events"), b"fixture").unwrap();
+        let directory = File::open(fixture.path()).unwrap();
+        let mut retained = None;
+        assert!(open_selected_control_into(
+            &directory, c"events", libc::O_RDONLY, &mut retained,
+            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+        ).is_err());
+        let fd = retained.as_ref().unwrap().as_raw_fd();
+        let mut later = None;
+        assert!(open_selected_control_into(
+            &directory, c"absent-later-control", libc::O_RDONLY, &mut later,
+            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+        ).is_err());
+        assert_eq!(retained.as_ref().unwrap().as_raw_fd(), fd);
+        assert!(retained.as_ref().unwrap().metadata().unwrap().is_file());
+        assert!(later.is_none());
+    }
+
+    #[test]
+    fn selected_each_control_stage_keeps_fd_before_validation_refusal() {
+        let fixture = tempfile::tempdir().unwrap();
+        for name in ["cgroup.type", "cgroup.procs", "cgroup.events", "cgroup.freeze", "cgroup.kill"] {
+            std::fs::write(fixture.path().join(name), b"fixture").unwrap();
+        }
+        let pin = PinnedDirectory::open(fixture.path()).unwrap().unwrap();
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let mut frame = SelectedCgroupPreparation::planned(
+            "stage-files-only", pin.identity().unwrap(), original,
+        ).unwrap();
+        frame.directory_file = Some(File::open(fixture.path()).unwrap());
+        let directory = frame.directory_file.as_ref().unwrap();
+        for (name, access, slot) in [
+            (c"cgroup.type", libc::O_RDONLY, &mut frame.domain),
+            (c"cgroup.procs", libc::O_RDONLY, &mut frame.members),
+            (c"cgroup.events", libc::O_RDONLY, &mut frame.events),
+            (c"cgroup.freeze", libc::O_RDWR, &mut frame.freeze),
+            (c"cgroup.kill", libc::O_WRONLY, &mut frame.kill),
+            (c"cgroup.procs", libc::O_WRONLY, &mut frame.placement),
+        ] {
+            // Each ordinary file is rejected by the actual cgroup validation
+            // AFTER its descriptor has entered the corresponding native slot.
+            assert!(open_selected_control_into(directory, name, access, slot, original).is_err());
+            assert!(slot.as_ref().unwrap().metadata().unwrap().is_file());
+        }
+        assert!(frame.domain.is_some() && frame.members.is_some() && frame.events.is_some());
+        assert!(frame.freeze.is_some() && frame.kill.is_some() && frame.placement.is_some());
+        assert!(frame.complete().is_none());
+    }
+
+    #[test]
+    fn selected_control_occupied_and_expired_refusal_preserves_slots() {
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = File::open(fixture.path()).unwrap();
+        let mut retained = Some(File::open(fixture.path()).unwrap());
+        let fd = retained.as_ref().unwrap().as_raw_fd();
+        assert!(open_selected_control_into(
+            &directory, c"absent", libc::O_RDONLY, &mut retained,
+            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+        ).is_err());
+        assert_eq!(retained.as_ref().unwrap().as_raw_fd(), fd);
+        let mut empty = None;
+        assert!(open_selected_control_into(
+            &directory, c"absent", libc::O_RDONLY, &mut empty,
+            crate::time::MonotonicDeadline::after(Duration::ZERO),
+        ).is_err());
+        assert!(empty.is_none());
+    }
+
+    #[test]
+    fn selected_created_unpinned_latch_survives_expiry_and_second_attempt() {
+        let fixture = tempfile::tempdir().unwrap();
+        let parent = PinnedDirectory::open(fixture.path()).unwrap().unwrap();
+        let mut frame = SelectedCgroupPreparation::planned(
+            "stage-fixture", parent.identity().unwrap(),
+            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+        ).unwrap();
+        frame.parent = Some(File::open(fixture.path()).unwrap());
+        let fd = frame.parent.as_ref().unwrap().as_raw_fd();
+        frame.begin_attempt().unwrap();
+        // Inject the successful syscall result through the actual same latch;
+        // this does not create a cgroup or prove no-child emptiness.
+        frame.record_creation(0).unwrap();
+        frame.original = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(frame.live().is_err());
+        assert!(frame.begin_attempt().is_err());
+        assert!(frame.attempted && frame.created && frame.directory_file.is_none());
+        assert_eq!(frame.parent.as_ref().unwrap().as_raw_fd(), fd);
+        assert!(frame.complete().is_none());
+    }
+
+    #[test]
+    fn selected_parent_preflight_failure_keeps_frame_and_prevents_replacement() {
+        let fixture = tempfile::tempdir().unwrap();
+        let parent = DelegatedCgroup {
+            directory: PinnedDirectory::open(fixture.path()).unwrap().unwrap(),
+        };
+        let mut frame = SelectedCgroupPreparation::planned(
+            "no-cgroup-create", parent.identity().unwrap(),
+            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+        ).unwrap();
+        // Ordinary filesystem fails cgroup qualification before mkdir.
+        assert!(parent.create_into_selected_slot(&mut frame).is_err());
+        let fd = frame.parent.as_ref().unwrap().as_raw_fd();
+        assert!(!frame.attempted && !frame.created);
+        assert!(parent.create_into_selected_slot(&mut frame).is_err());
+        assert_eq!(frame.parent.as_ref().unwrap().as_raw_fd(), fd);
+        assert!(!fixture.path().join("no-cgroup-create").exists());
+    }
 
     #[test]
     fn selected_membership_expiry_after_read_refuses_even_matching_record() {

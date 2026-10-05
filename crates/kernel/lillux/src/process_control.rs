@@ -17,6 +17,8 @@ mod oci_lifecycle;
 #[cfg(all(test, target_os = "linux"))]
 mod pid_namespace;
 mod scope;
+#[cfg(target_os = "linux")]
+pub(crate) use scope::SelectedScopePreparation;
 pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration, OciLifecycleIntent};
 pub use scope::{
     ControllerAccount, ProcessHostLifetime, ProcessScope, ProcessScopeAllocation,

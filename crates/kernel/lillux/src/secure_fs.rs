@@ -2257,6 +2257,64 @@ impl PinnedDirectoryLock {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod selected_directory_adoption_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    #[test]
+    fn selected_directory_adoption_preserves_same_fd_and_diagnostic_mode() {
+        let fixture = tempfile::tempdir().unwrap();
+        let expected = PinnedDirectory::open(fixture.path()).unwrap().unwrap().identity().unwrap();
+        let mut source = Some(File::open(fixture.path()).unwrap());
+        let fd = source.as_ref().unwrap().as_raw_fd();
+        let mut destination = None;
+        PinnedDirectory::adopt_retained_directory_into(
+            PathBuf::from("/diagnostic-only-not-opened"),
+            &mut source,
+            &mut destination,
+        ).unwrap();
+        assert!(source.is_none());
+        let retained = destination.as_ref().unwrap();
+        assert_eq!(retained.directory.as_raw_fd(), fd);
+        assert_eq!(retained.identity().unwrap(), expected);
+        assert!(!retained.path_binding_required);
+    }
+
+    #[test]
+    fn selected_directory_type_refusal_keeps_actual_source_fd() {
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        let mut source = Some(fixture.reopen().unwrap());
+        let fd = source.as_ref().unwrap().as_raw_fd();
+        let mut destination = None;
+        assert!(PinnedDirectory::adopt_retained_directory_into(
+            PathBuf::from("/diagnostic-only"), &mut source, &mut destination,
+        ).is_err());
+        assert_eq!(source.as_ref().unwrap().as_raw_fd(), fd);
+        assert!(destination.is_none());
+    }
+
+    #[test]
+    fn selected_directory_occupied_or_absent_refusal_does_not_replace_owners() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut source = Some(File::open(fixture.path()).unwrap());
+        let fd = source.as_ref().unwrap().as_raw_fd();
+        let mut destination = PinnedDirectory::open(fixture.path()).unwrap();
+        let destination_fd = destination.as_ref().unwrap().directory.as_raw_fd();
+        assert!(PinnedDirectory::adopt_retained_directory_into(
+            PathBuf::from("/diagnostic-only"), &mut source, &mut destination,
+        ).is_err());
+        assert_eq!(source.as_ref().unwrap().as_raw_fd(), fd);
+        assert_eq!(destination.as_ref().unwrap().directory.as_raw_fd(), destination_fd);
+        let mut absent = None;
+        let mut empty = None;
+        assert!(PinnedDirectory::adopt_retained_directory_into(
+            PathBuf::from("/diagnostic-only"), &mut absent, &mut empty,
+        ).is_err());
+        assert!(absent.is_none() && empty.is_none());
+    }
+}
+
 impl PinnedDirectory {
     /// Validate a transported flock without unlocking it on return. Identity
     /// alone is insufficient: an independent open must contend and the supplied
@@ -2423,6 +2481,37 @@ impl PinnedDirectory {
             directory,
             path_binding_required: false,
         })
+    }
+
+    /// Selected owner-preserving adoption. Validate the borrowed original
+    /// descriptor while it remains in source; diagnostic path grants nothing.
+    /// No clone/open/IO/allocation follows the move into an empty destination.
+    pub(crate) fn adopt_retained_directory_into(
+        path: PathBuf,
+        source: &mut Option<File>,
+        destination: &mut Option<Self>,
+    ) -> Result<()> {
+        if destination.is_some() {
+            anyhow::bail!("selected directory destination occupied");
+        }
+        let retained = source.as_ref().context("selected directory source absent")?;
+        if !retained.metadata()?.is_dir() {
+            anyhow::bail!("selected retained authority is not a directory");
+        }
+        // Prepare even the impossible missing-source error before the take;
+        // the exclusive source cannot change during these synchronous checks.
+        let absent = anyhow::anyhow!("selected directory source absent");
+        match source.take() {
+            Some(directory) => {
+                *destination = Some(Self {
+                    path,
+                    directory,
+                    path_binding_required: false,
+                });
+                Ok(())
+            }
+            None => Err(absent),
+        }
     }
 
     /// Adopt one exact directory descriptor deliberately mapped into this

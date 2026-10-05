@@ -5326,6 +5326,7 @@ fn selected_scoped_pin_exited(pin: &OwnedFd) -> Result<bool, String> {
 /// A separately reviewed composition must retain storage until ALL duties settle.
 #[cfg(target_os = "linux")]
 struct SelectedScopedCustody {
+    scope_preparation: Option<crate::process_control::SelectedScopePreparation>,
     request: Option<SubprocessRequest>,
     scope: Option<crate::ProcessScope>,
     target: Option<crate::LinuxSandboxAppliedLaunchCommitments>,
@@ -5416,6 +5417,17 @@ impl SelectedScopedStorage {
 
 #[cfg(target_os = "linux")]
 impl SelectedScopedBorrow<'_> {
+    pub(crate) fn allocate_scope_into(
+        &mut self,
+        provider: Arc<crate::ProcessScopeProvider>,
+        allocation: crate::ProcessScopeAllocation,
+        limits: Option<crate::ProcessScopeResourceLimits>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        self.custody.allocate_scope_into(provider, allocation, limits, original_service, original_cleanup)
+    }
+
     pub fn prepare_from_compiled_slots(
         &mut self,
         request: &mut Option<SubprocessRequest>,
@@ -5425,14 +5437,20 @@ impl SelectedScopedBorrow<'_> {
         original_service: crate::time::MonotonicDeadline,
         original_cleanup: crate::time::MonotonicDeadline,
     ) -> Result<(), String> {
-        self.custody.prepare_from_compiled_slots(
+        let result = self.custody.prepare_from_compiled_slots(
             request,
             scope,
             target,
             mounts,
             original_service,
             original_cleanup,
-        )
+        );
+        if result.is_err() && self.custody.scope_preparation.is_some() {
+            // Precompile/bind adapters cannot retry a new service request into
+            // an already allocated original scope after compiler refusal.
+            self.custody.refused = true;
+        }
+        result
     }
 
     pub fn create(&mut self) -> SelectedScopedObservation {
@@ -5445,6 +5463,12 @@ impl SelectedScopedBorrow<'_> {
 
     pub fn release_after_attachment(&mut self) -> SelectedScopedObservation {
         self.custody.release_after_attachment()
+    }
+
+    /// Borrow exact allocation identity for durable binding; no owned scope or
+    /// recovery authority is reconstructed or exported by this lexical view.
+    pub fn retained_scope_recovery(&self) -> Option<&crate::ProcessScopeRecovery> {
+        self.custody.scope.as_ref().map(|scope| scope.recovery())
     }
 
     pub fn retained_applied(&self) -> Option<&crate::LinuxSandboxAppliedLaunchReceipt> {
@@ -5535,6 +5559,7 @@ impl SelectedScopedHeldView<'_> {
 impl SelectedScopedCustody {
     fn empty() -> Self {
         Self {
+            scope_preparation: None,
             request: None,
             scope: None,
             target: None,
@@ -5563,6 +5588,39 @@ impl SelectedScopedCustody {
         }
     }
 
+    fn allocate_scope_into(
+        &mut self,
+        provider: Arc<crate::ProcessScopeProvider>,
+        allocation: crate::ProcessScopeAllocation,
+        limits: Option<crate::ProcessScopeResourceLimits>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        if self.refused || self.scope_preparation.is_some() || self.bounds.is_some()
+            || self.scope.is_some() || self.request.is_some() || self.create_started
+        {
+            return Err("selected scope storage occupied or refused".into());
+        }
+        self.bounds = Some(SelectedSupervisedBounds {
+            service: original_service,
+            cleanup: original_cleanup,
+        });
+        self.scope_preparation = Some(crate::process_control::SelectedScopePreparation::retained(
+            provider,
+            allocation,
+            limits,
+            original_service,
+            original_cleanup,
+        ));
+        let result = self.scope_preparation.as_mut().ok_or("selected preparation frame absent")?
+            .allocate_into(&mut self.scope);
+        if result.is_err() {
+            // Frame is already retained before formatting/error bookkeeping.
+            self.refused = true;
+        }
+        result
+    }
+
     /// Borrow all source slots for validation, then install by infallible moves.
     /// Only an actual compiler owner may provide meaningful commitments; this
     /// component API alone is not an authority issuer or a production caller.
@@ -5575,14 +5633,30 @@ impl SelectedScopedCustody {
         original_service: crate::time::MonotonicDeadline,
         original_cleanup: crate::time::MonotonicDeadline,
     ) -> Result<(), String> {
-        if self.bounds.is_some() || self.scope.is_some() || self.create_started {
+        if self.refused || self.request.is_some() || self.target.is_some()
+            || self.mounts.is_some() || self.create_started
+        {
+            return Err("selected destination already prepared or refused".into());
+        }
+        let adopted = self.scope_preparation.is_some();
+        if adopted {
+            let bounds = self.bounds.ok_or("selected adopted original bounds absent")?;
+            if scope.is_some() || self.scope.is_none()
+                || bounds.service.is_before(&original_service)
+                || original_service.is_before(&bounds.service)
+                || bounds.cleanup.is_before(&original_cleanup)
+                || original_cleanup.is_before(&bounds.cleanup)
+            {
+                return Err("selected compiler cannot replace adopted scope or original pair".into());
+            }
+        } else if self.bounds.is_some() || self.scope.is_some() {
             return Err("selected destination already prepared".into());
         }
         if original_cleanup.is_before(&original_service) || original_service.has_elapsed() {
             return Err("selected original bounds inverted or expired".into());
         }
         let req = request.as_ref().ok_or("compiled request already spent")?;
-        let actual_scope = scope.as_ref().ok_or("selected actual scope absent")?;
+        let actual_scope = self.scope.as_ref().or(scope.as_ref()).ok_or("selected actual scope absent")?;
         actual_scope.require_selected_launch_right()?;
         if target.is_none()
             || mounts.is_none()
@@ -5609,7 +5683,9 @@ impl SelectedScopedCustody {
         }
         // No validation, allocation, callback or destructor below these takes.
         self.request = request.take();
-        self.scope = scope.take();
+        if !adopted {
+            self.scope = scope.take();
+        }
         self.target = target.take();
         self.mounts = mounts.take();
         self.bounds = Some(SelectedSupervisedBounds {
@@ -5965,10 +6041,14 @@ impl SelectedScopedCustody {
         if self.locally_settled {
             return SelectedScopedObservation::LocallySettled;
         }
+        // Entering cleanup closes service irreversibly, including an allocated
+        // precompile/no-child scope whose launch right has not been consumed.
+        self.refused = true;
         let operation = (|| -> Result<bool, String> {
             let cleanup = self.bounds.ok_or("selected cleanup bound absent")?.cleanup;
+            // Partial allocation without an actual scope remains pending.
             // Revocation/control are attempted only while the ORIGINAL is live.
-            if !cleanup.has_elapsed() {
+            if !cleanup.has_elapsed() && self.scope.is_some() {
                 self.revoke_release(cleanup)?;
                 if !self.scope_empty
                     && !self
@@ -6009,6 +6089,11 @@ impl SelectedScopedCustody {
             }
         }
         if !selected_close_inherited_copies(&mut self.setup_fds, original_cleanup)? {
+            return Ok(false);
+        }
+        if self.scope.is_none() && self.scope_preparation.is_some() {
+            // Planned/created-unpinned/partial-control is never no-contact or
+            // local scope settlement. Keep the original frame pending.
             return Ok(false);
         }
         if !self.scope_empty {
@@ -6294,6 +6379,89 @@ mod selected_scoped_component_tests {
             reader,
             InheritedDescriptorAuthority::from_owned_file(writer, &lease).unwrap(),
         )
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly delegated disposable cgroup; never auto-run"]
+    fn selected_expired_allocation_retains_actual_provider_plan_and_pair() {
+        let parent = std::env::var_os("LILLUX_TEST_CGROUP_PARENT")
+            .expect("explicit disposable delegation");
+        let configuration: crate::ProcessScopeConfiguration = serde_json::from_value(
+            serde_json::json!({
+                "version": 3,
+                "backend": {"implementation": "linux_cgroup_v2", "parent": parent}
+            }),
+        ).unwrap();
+        let provider = Arc::new(crate::ProcessScopeProvider::open(&configuration).unwrap());
+        let allocation = provider.plan_allocation(
+            "retained-expired-no-create", Duration::from_secs(5),
+        ).unwrap();
+        let original = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let mut storage = SelectedScopedStorage::for_component_test();
+        assert!(Arc::clone(&provider).allocate_into_selected_slot(
+            allocation.clone(), &mut storage.borrow_for_component_test(), original, original,
+        ).is_err());
+        let preparation = storage.custody.scope_preparation.as_ref().unwrap();
+        assert!(preparation.same_provider_and_plan_for_component_test(&provider, &allocation));
+        let address = preparation as *const _;
+        assert!(Arc::clone(&provider).allocate_into_selected_slot(
+            allocation.clone(), &mut storage.borrow_for_component_test(),
+            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+        ).is_err());
+        assert_eq!(storage.custody.scope_preparation.as_ref().unwrap() as *const _, address);
+        assert!(storage.custody.scope.is_none() && storage.custody.refused);
+        assert_eq!(storage.borrow_for_component_test().observe_cleanup(), SelectedScopedObservation::Pending);
+        assert!(!storage.custody.locally_settled);
+        let bounds = storage.custody.bounds.unwrap();
+        assert!(!bounds.service.is_before(&original) && !original.is_before(&bounds.service));
+        assert!(!bounds.cleanup.is_before(&original) && !original.is_before(&bounds.cleanup));
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly delegated disposable cgroup; never auto-run"]
+    fn selected_created_incarnation_ambiguity_refuses_local_settlement_and_service() {
+        let parent = std::env::var_os("LILLUX_TEST_CGROUP_PARENT")
+            .expect("explicit disposable delegation");
+        let configuration: crate::ProcessScopeConfiguration = serde_json::from_value(
+            serde_json::json!({
+                "version": 3,
+                "backend": {"implementation": "linux_cgroup_v2", "parent": parent}
+            }),
+        ).unwrap();
+        let provider = Arc::new(crate::ProcessScopeProvider::open(&configuration).unwrap());
+        let allocation = provider.plan_allocation(
+            &format!("selected-precompile-{:032x}", rand::random::<u128>()),
+            Duration::from_secs(5),
+        ).unwrap();
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let mut storage = SelectedScopedStorage::for_component_test();
+        Arc::clone(&provider).allocate_into_selected_slot(
+            allocation.clone(), &mut storage.borrow_for_component_test(), original, original,
+        ).unwrap_err();
+        assert!(storage.custody.request.is_none() && storage.custody.setup_child.is_none());
+        assert!(storage.custody.scope_preparation.as_ref().unwrap()
+            .same_provider_and_plan_for_component_test(&provider, &allocation));
+        assert!(storage.borrow_for_component_test().retained_scope_recovery().is_none());
+        assert_eq!(storage.borrow_for_component_test().observe_cleanup(), SelectedScopedObservation::Pending);
+        assert!(!storage.custody.locally_settled && storage.custody.scope.is_none());
+        let address = storage.custody.scope_preparation.as_ref().unwrap() as *const _;
+        assert!(Arc::clone(&provider).allocate_into_selected_slot(
+            allocation.clone(), &mut storage.borrow_for_component_test(), original, original,
+        ).is_err());
+        assert_eq!(storage.custody.scope_preparation.as_ref().unwrap() as *const _, address);
+        let mut source = Some(request("/never-contact", &[]));
+        let mut source_scope = None;
+        let mut target = None;
+        let mut mounts = None;
+        assert!(storage.borrow_for_component_test().prepare_from_compiled_slots(
+            &mut source, &mut source_scope, &mut target, &mut mounts, original, original,
+        ).is_err());
+        assert!(source.is_some() && storage.custody.scope.is_none());
+        assert_eq!(storage.borrow_for_component_test().create(), SelectedScopedObservation::Refused);
+        // No name reopen, foreign kill, fixture retirement or finance credit.
+        // Explicit disposable delegation remains an operator obligation. This
+        // unrun control does not establish the still-missing final-Drop barrier.
     }
 
     #[test]

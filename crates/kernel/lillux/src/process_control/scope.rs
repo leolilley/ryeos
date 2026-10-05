@@ -611,6 +611,116 @@ pub struct ProcessScope {
     launch_available: bool,
 }
 
+/// SAME original provider/plan, retained before any creation or bind check.
+/// The native frame may contain an unpinned created directory or partial FDs;
+/// none of those states is positive local settlement or a new launch right.
+#[cfg(target_os = "linux")]
+pub(crate) struct SelectedScopePreparation {
+    provider: std::sync::Arc<ProcessScopeProvider>,
+    allocation: ProcessScopeAllocation,
+    limits: Option<ProcessScopeResourceLimits>,
+    original_service: crate::time::MonotonicDeadline,
+    original_cleanup: crate::time::MonotonicDeadline,
+    native: Option<std::sync::Arc<super::cgroup::SelectedCgroupPreparation>>,
+    started: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedScopePreparation {
+    pub(crate) fn retained(
+        provider: std::sync::Arc<ProcessScopeProvider>,
+        allocation: ProcessScopeAllocation,
+        limits: Option<ProcessScopeResourceLimits>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Self {
+        Self {
+            provider,
+            allocation,
+            limits,
+            original_service,
+            original_cleanup,
+            native: None,
+            started: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn same_provider_and_plan_for_component_test(
+        &self,
+        provider: &std::sync::Arc<ProcessScopeProvider>,
+        allocation: &ProcessScopeAllocation,
+    ) -> bool {
+        std::sync::Arc::ptr_eq(&self.provider, provider) && &self.allocation == allocation
+    }
+
+    pub(crate) fn allocate_into(
+        &mut self,
+        destination: &mut Option<ProcessScope>,
+    ) -> Result<(), String> {
+        if self.started || self.native.is_some() || destination.is_some() {
+            return Err("selected scope allocation cannot replace original owners".into());
+        }
+        self.started = true;
+        if self.original_cleanup.is_before(&self.original_service) || self.original_service.has_elapsed() {
+            return Err("selected allocation original pair unavailable".into());
+        }
+        self.allocation.validate()?;
+        if self.allocation.configuration != self.provider.configuration || self.allocation.host_lifetime_ended()? {
+            return Err("selected allocation provider or host generation changed".into());
+        }
+        let ProviderBackend::LinuxCgroupV2(parent) = &self.provider.backend;
+        let BackendAllocation::LinuxCgroupV2 { boot_id, parent: expected_parent, name } = &self.allocation.backend;
+        if parent.identity()? != *expected_parent {
+            return Err("selected allocation parent incarnation changed".into());
+        }
+        let bound = self.original_service.min(crate::time::MonotonicDeadline::after(self.allocation.control_timeout));
+        // Allocate the stable wrapper BEFORE acquiring parent/child/control
+        // descriptors. Each owner stays in its same frame field thereafter.
+        self.native = Some(std::sync::Arc::new(
+            super::cgroup::SelectedCgroupPreparation::planned_with_limits(name, *expected_parent, bound, self.limits)?,
+        ));
+        let native = self.native.as_mut().ok_or("selected native allocation frame absent")?;
+        let frame = std::sync::Arc::get_mut(native).ok_or("selected native frame unexpectedly shared")?;
+        let allocation_outcome = parent.create_into_selected_slot(frame);
+        let scope = match frame.complete() {
+            Some(scope) => scope,
+            None => return match allocation_outcome {
+                Err(error) => Err(error),
+                Ok(()) => Err("selected complete native scope absent".into()),
+            },
+        };
+        // The SAME complete controls also remain on the preparation frame.
+        // Construct metadata before adopting; post-bind/compiler checks cannot
+        // run until actual scope is already in the destination storage.
+        let launch_available = scope.launch_ready();
+        let identity = scope.identity()?;
+        let recovery = ProcessScopeRecovery {
+            version: SCOPE_RECOVERY_VERSION,
+            configuration: self.provider.configuration.clone(),
+            control_timeout: self.allocation.control_timeout,
+            backend: BackendRecovery::LinuxCgroupV2 {
+                boot_id: boot_id.clone(),
+                parent: identity.parent,
+                directory: identity.directory,
+                name: identity.name.clone(),
+            },
+        };
+        *destination = Some(ProcessScope {
+            recovery,
+            backend: ScopeBackend::LinuxCgroupV2Selected(std::sync::Arc::clone(native)),
+            launch_available,
+        });
+        // Even late completion installs the SAME scope before propagating the
+        // refusal, permitting original no-child observation without recreation.
+        allocation_outcome?;
+        if self.original_service.has_elapsed() || self.allocation.host_lifetime_ended()? {
+            return Err("selected allocated scope generation/expiry changed; scope retained".into());
+        }
+        Ok(())
+    }
+}
+
 /// A one-shot launch handle whose exact scope-wide memory and task ceilings
 /// were installed and read back before any workload could enter the scope.
 #[derive(Debug)]
@@ -628,6 +738,8 @@ pub struct ProcessScopeLaunchError {
 enum ScopeBackend {
     #[cfg(target_os = "linux")]
     LinuxCgroupV2(std::sync::Arc<super::cgroup::ProcessCgroup>),
+    #[cfg(target_os = "linux")]
+    LinuxCgroupV2Selected(std::sync::Arc<super::cgroup::SelectedCgroupPreparation>),
 }
 
 /// A completed kernel barrier. Exclusive workspace owners must consume it by
@@ -1200,6 +1312,34 @@ impl ProcessScopeProvider {
         }
     }
 
+    /// Selected lexical allocation mechanics only; this does not issue a root
+    /// loan or authenticate App/Executor admission. Retain SAME Arc provider
+    /// and plan in private storage before the first native creation operation.
+    #[cfg(target_os = "linux")]
+    pub fn allocate_into_selected_slot(
+        self: std::sync::Arc<Self>,
+        allocation: ProcessScopeAllocation,
+        destination: &mut crate::exec::SelectedScopedBorrow<'_>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        destination.allocate_scope_into(self, allocation, None, original_service, original_cleanup)
+    }
+
+    /// Owner-preserving resource variant: limits are installed/read back in
+    /// the original retained allocation frame, never a consuming scope API.
+    #[cfg(target_os = "linux")]
+    pub fn allocate_resource_into_selected_slot(
+        self: std::sync::Arc<Self>,
+        allocation: ProcessScopeAllocation,
+        limits: ProcessScopeResourceLimits,
+        destination: &mut crate::exec::SelectedScopedBorrow<'_>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        destination.allocate_scope_into(self, allocation, Some(limits), original_service, original_cleanup)
+    }
+
     /// The caller must already hold its existing placement/recovery fence.
     /// Evidence is local to the selected provider and boot; remote handoff
     /// reserves a fresh scope rather than transferring this authority.
@@ -1256,6 +1396,10 @@ impl ProcessScopeProvider {
             #[cfg(target_os = "linux")]
             (ProviderBackend::LinuxCgroupV2(parent), ScopeBackend::LinuxCgroupV2(scope)) => {
                 parent.retire_empty(scope.identity(), timeout.saturating_sub(started.elapsed()))
+            }
+            #[cfg(target_os = "linux")]
+            (ProviderBackend::LinuxCgroupV2(_), ScopeBackend::LinuxCgroupV2Selected(_)) => {
+                Err("selected frame grants no ordinary retirement".into())
             }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope retirement is unavailable on this OS".to_owned()),
@@ -1611,6 +1755,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.require_member_until(pid, bound),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(scope) => scope.require_member_until(pid, bound),
             #[cfg(not(target_os = "linux"))]
             _ => Err("selected scope membership unavailable".into()),
         }
@@ -1624,6 +1770,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.request_termination_until(bound),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(scope) => scope.request_termination_until(bound),
             #[cfg(not(target_os = "linux"))]
             _ => Err("selected scope termination unavailable".into()),
         }
@@ -1649,6 +1797,8 @@ impl ProcessScope {
         let result = match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.install_resource_limits(limits),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected resource-limit adapter not issued".into()),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope resource limits are unavailable on this OS".to_owned()),
         };
@@ -1668,6 +1818,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.clone_kill_descriptor(),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected watchdog adapter not issued".into()),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process-scope lifetime enforcement is unavailable".to_owned()),
         }
@@ -1678,6 +1830,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.require_member(pid, timeout),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected membership requires original endpoint".into()),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope membership is unavailable on this OS".to_owned()),
         }
@@ -1687,6 +1841,10 @@ impl ProcessScope {
     /// consumes its launch right; recovered/control-only scopes cannot invoke
     /// this shortcut. Contacted scopes require the owner's durable settlement.
     pub fn retire_unlaunched(mut self, timeout: Duration) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        if matches!(&self.backend, ScopeBackend::LinuxCgroupV2Selected(_)) {
+            return Err("selected frame cannot use consuming unlaunched retirement".into());
+        }
         if !self.launch_available {
             return Err("process scope has already authorized contact".to_owned());
         }
@@ -1698,6 +1856,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.is_empty(),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(scope) => scope.is_empty(),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope observation is unavailable on this OS".to_owned()),
         }
@@ -1716,6 +1876,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.probe_lifecycle(timeout),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected allocation grants no probe lifecycle".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -1735,6 +1897,10 @@ impl ProcessScope {
                 #[cfg(target_os = "linux")]
                 ScopeBackend::LinuxCgroupV2(scope) => {
                     ScopeBackend::LinuxCgroupV2(std::sync::Arc::clone(scope))
+                }
+                #[cfg(target_os = "linux")]
+                ScopeBackend::LinuxCgroupV2Selected(scope) => {
+                    ScopeBackend::LinuxCgroupV2Selected(std::sync::Arc::clone(scope))
                 }
                 #[cfg(not(target_os = "linux"))]
                 _ => unreachable!("no process scope is implemented on this OS"),
@@ -1789,6 +1955,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.configure_command(command),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected command adapter not issued".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = command;
@@ -1805,6 +1973,8 @@ impl ProcessScope {
                 control_timeout: self.recovery.control_timeout,
                 backend: QuiescedBackend::LinuxCgroupV2(scope.freeze(timeout)?),
             }),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected allocation grants no generic freeze".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -1818,6 +1988,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.terminate_and_wait(timeout),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected cleanup requires original endpoint".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -1839,6 +2011,8 @@ impl ProcessScope {
                 control_timeout: self.recovery.control_timeout,
                 backend: QuiescedBackend::LinuxCgroupV2(scope.recover_freeze(timeout)?),
             }),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected allocation grants no recovered barrier".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -1852,6 +2026,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.wait_empty(timeout),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected scope permits retained observation only".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
