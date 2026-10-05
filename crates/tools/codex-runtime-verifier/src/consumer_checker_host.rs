@@ -946,7 +946,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[derive(Clone, Copy, Debug)]
-    enum ConformanceCase { Positive, ScriptHash, ChunkSize, HeaderTruncated, DescriptorClosed, Oversized, Nonzero, Trailing, NoEof, WritableMount, SubstituteMount, ExtraFdAlias, ChunkOrder, AmbientEnvironment }
+    enum ConformanceCase { Positive, ScriptHash, ChunkSize, HeaderTruncated, DescriptorClosed, Oversized, Nonzero, Trailing, NoEof, WritableMount, SubstituteMount, ExtraFdAlias, ChunkOrder, AmbientEnvironment, ProcessDenied, RemountDenied, FdVisibility, ExtraVisibleFd }
 
     #[cfg(target_os = "linux")]
     fn run_runtime_conformance(case: ConformanceCase) -> Result<()> {
@@ -1004,6 +1004,132 @@ mod tests {
         pass
     else:
         raise ValueError('ambient Python import succeeded')
+    probe = envelope['enclosure_probe']
+    if probe == 'process':
+        import errno
+        if not hasattr(os, 'fork'):
+            raise RuntimeError('NOT ESTABLISHED: fork probe unavailable')
+        try:
+            child = os.fork()
+        except OSError as error:
+            if error.errno != errno.EPERM:
+                raise RuntimeError('NOT ESTABLISHED: unexpected fork refusal') from error
+        else:
+            if child == 0:
+                os._exit(97)
+            # Only an unexpected actual child reaches this test cleanup. The
+            # namespace owner remains responsible; no successful frame follows.
+            os.waitpid(child, 0)
+            raise ValueError('process creation escaped target limits')
+    elif probe == 'remount':
+        import errno
+        try:
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+            mount = libc.mount
+        except (ImportError, OSError, AttributeError) as error:
+            raise RuntimeError('NOT ESTABLISHED: authentic libc mount probe unavailable') from error
+        mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                          ctypes.c_ulong, ctypes.c_void_p]
+        mount.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        outcome = mount(None, b'/ryeos/realizations/producer-python', None,
+                        4096 | 32, None)  # MS_BIND | MS_REMOUNT, removing RO.
+        if outcome == 0:
+            # Never attempt a write after an unexpectedly permitted remount.
+            raise ValueError('runtime remount escaped target limits')
+        if outcome != -1 or ctypes.get_errno() != errno.EPERM:
+            raise RuntimeError('NOT ESTABLISHED: unexpected remount refusal')
+    elif probe == 'fds':
+        import errno
+        import stat
+        try:
+            names = os.listdir('/proc/self/fd')
+        except OSError as error:
+            raise RuntimeError('NOT ESTABLISHED: PID-local FD snapshot unavailable') from error
+        import fcntl
+        import hashlib
+        import json
+        # Observe without changing the bootstrap's consumed offsets.
+        def exact_pread(fd, size):
+            if size < 0 or size > 32 * 1024 * 1024:
+                raise ValueError('probe read bound exceeded')
+            data = bytearray()
+            while len(data) < size:
+                part = os.pread(fd, min(65536, size - len(data)), len(data))
+                if not part:
+                    raise ValueError('probe descriptor truncated')
+                data.extend(part)
+            if os.pread(fd, 1, size):
+                raise ValueError('probe descriptor has trailing bytes')
+            return bytes(data)
+        header_size = os.fstat(103).st_size
+        if header_size > 2 * 1024 * 1024:
+            raise ValueError('header probe bound exceeded')
+        header = exact_pread(103, header_size)
+        magic = b'RYCKH3V1\n'
+        if not header.startswith(magic):
+            raise ValueError('header probe magic differs')
+        offset = len(magic)
+        def read_length(offset):
+            if offset + 4 > len(header):
+                raise ValueError('header probe length truncated')
+            return int.from_bytes(header[offset:offset + 4], 'big')
+        metadata_size = read_length(offset)
+        offset += 4 + metadata_size
+        table_size = read_length(offset)
+        offset += 4
+        if offset + table_size != header_size:
+            raise ValueError('header probe framing differs')
+        roles = json.loads(header[offset:])
+        if roles['script']['fd'] != 101 or len(roles['chunks']) != 1 or roles['chunks'][0]['fd'] != 102:
+            raise ValueError('header probe roles differ')
+        sizes = {100: 22166488, 101: roles['script']['bytes'],
+                 102: roles['chunks'][0]['bytes'], 103: len(magic) + 8 + metadata_size + table_size}
+        for fd, expected_size in sizes.items():
+            if os.fstat(fd).st_size != expected_size:
+                raise ValueError('descriptor role size differs')
+        required_seals = (fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK |
+                          fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE)
+        for fd in (101, 102, 103):
+            if fcntl.fcntl(fd, fcntl.F_GET_SEALS) != required_seals:
+                raise ValueError('descriptor sealed shape differs')
+        interpreter_stat = os.fstat(100)
+        selected_stat = os.stat('/ryeos/realizations/producer-python/python/bin/python3.14')
+        if (interpreter_stat.st_dev, interpreter_stat.st_ino) != (selected_stat.st_dev, selected_stat.st_ino):
+            raise ValueError('interpreter descriptor is not selected runtime member')
+        if hashlib.sha256(exact_pread(100, sizes[100])).hexdigest() != '2d8886b2bad1105014ce23e2439b20d47a78416281b906e21ac0e37085d19e9d':
+            raise ValueError('interpreter descriptor content differs')
+        allowed = {0, 1, 2, 100, 101, 102, 103}
+        live = set()
+        for name in names:
+            if not name.isdecimal():
+                raise ValueError('non-numeric proc FD entry')
+            fd = int(name)
+            try:
+                observation = os.fstat(fd)
+            except OSError as error:
+                # os.listdir closes its enumeration FD before this loop. Only
+                # actual EBADF proves this listed entry has no live authority.
+                if error.errno == errno.EBADF:
+                    continue
+                raise
+            if fd not in allowed:
+                if fd == 105:
+                    witness = b'ryeos.test.fd_refusal.v1:unexpected LIVE inherited descriptor105\n'
+                    if os.write(2, witness) != len(witness):
+                        raise ValueError('descriptor refusal witness truncated')
+                    os._exit(105)
+                raise ValueError('unexpected LIVE inherited descriptor')
+            if fd < 3 and not stat.S_ISFIFO(observation.st_mode):
+                raise ValueError('stdio role is not an owned pipe')
+            if fd >= 100 and not stat.S_ISREG(observation.st_mode):
+                raise ValueError('transport role is not a regular descriptor')
+            live.add(fd)
+        if live != allowed:
+            raise ValueError('required inherited descriptor absent')
+    elif probe != 'none':
+        raise ValueError('unselected enclosure probe')
     try:
         with open('/ryeos/realizations/producer-python/lib/ld-musl-x86_64.so.1', 'wb'):
             pass
@@ -1029,7 +1155,13 @@ mod tests {
         let mut table = DescriptorTable { schema: TABLE_SCHEMA, script: ScriptDescriptor { fd:101, bytes:script.len() as u64, sha256:&hash },
             chunks:vec![ChunkDescriptor { index:0, fd:102, bytes:if matches!(case, ConformanceCase::ChunkSize) { 12 } else { 11 } }] };
         if matches!(case, ConformanceCase::ChunkOrder) { table.chunks[0].index = 1; }
-        let metadata = lillux::canonical_json(&serde_json::json!({"probe":"runtime-only", "canary":canary_path.to_str().context("canary path UTF8")?, "canary_name":canary_name}))?;
+        let enclosure_probe = match case {
+            ConformanceCase::ProcessDenied => "process",
+            ConformanceCase::RemountDenied => "remount",
+            ConformanceCase::FdVisibility | ConformanceCase::ExtraVisibleFd => "fds",
+            _ => "none",
+        };
+        let metadata = lillux::canonical_json(&serde_json::json!({"probe":"runtime-only", "canary":canary_path.to_str().context("canary path UTF8")?, "canary_name":canary_name, "enclosure_probe":enclosure_probe}))?;
         let size = table_encoded_size(&table)?;
         let total = combined_header_size(metadata.len(), size, MAX_HEADER_BYTES)?;
         let table_bytes = lillux::canonical_json(&serde_json::to_value(&table)?)?;
@@ -1043,6 +1175,11 @@ mod tests {
         if matches!(case, ConformanceCase::DescriptorClosed) { channels.retain(|(_, target)| *target != 102); }
         channels.push((header_fd.inherited_descriptor().map_err(anyhow::Error::msg)?,103));
         let executable = PathBuf::from(format!("{CONFORMANCE_PREFIX}/lib/ld-musl-x86_64.so.1"));
+        let visibility_canary = lillux::exec::sealed_memfd(c"unexpected-inherited-fd", b"must-not-be-visible").map_err(anyhow::Error::msg)?;
+        let visibility_canary = visibility_canary.duplicate_at_or_above(256).map_err(anyhow::Error::msg)?;
+        if matches!(case, ConformanceCase::ExtraVisibleFd) {
+            channels.push((visibility_canary.inherited_descriptor().map_err(anyhow::Error::msg)?,105));
+        }
         if matches!(case, ConformanceCase::ExtraFdAlias) { channels[1].1 = 100; }
         let mut request = lillux::LinuxSandboxRequest {
             executable:executable.clone(), argv0:OsString::from("ryeos-admitted-checker-loader"),
@@ -1087,7 +1224,7 @@ mod tests {
             let mut diagnostics = lillux::exec::DeadlinePipeStream::new(pipes.stderr.as_fd(),deadline)?;
             // Both pipes are serviced in one nonblocking bounded loop: a noisy
             // refusal cannot block stdout behind a full diagnostic pipe.
-            let mut bytes = Vec::new(); let mut out_eof=false; let mut err_eof=false;
+            let mut bytes = Vec::new(); let mut refusal_witness = Vec::new(); let mut out_eof=false; let mut err_eof=false;
             while !out_eof || !err_eof {
                 ensure!(!deadline.has_elapsed(), "runtime pipe original deadline expired");
                 let (out_ready, err_ready) = if !out_eof && !err_eof {
@@ -1099,7 +1236,11 @@ mod tests {
                     let mut buf=[0u8;1024];
                     match stream.read(&mut buf) {
                         Ok(0)=>*eof=true,
-                        Ok(n)=>if is_output {ensure!(bytes.len()+n<=MAX_RESPONSE_BYTES,"runtime response overflow");bytes.extend_from_slice(&buf[..n]);},
+                        Ok(n)=>if is_output {ensure!(bytes.len()+n<=MAX_RESPONSE_BYTES,"runtime response overflow");bytes.extend_from_slice(&buf[..n]);}
+                            else if matches!(case, ConformanceCase::ExtraVisibleFd) {
+                                ensure!(refusal_witness.len()+n<=128,"descriptor refusal witness overflow");
+                                refusal_witness.extend_from_slice(&buf[..n]);
+                            },
                         Err(e) if e.kind()==std::io::ErrorKind::WouldBlock=>{},
                         Err(e)=>return Err(e.into()),
                     }
@@ -1114,6 +1255,14 @@ mod tests {
                 if let Some(exit)=held.try_observe_target_exit().map_err(anyhow::Error::msg)? {break exit.into_termination();}
                 ensure!(!deadline.has_elapsed(),"namespace reap original deadline expired");std::thread::yield_now();
             };
+            if matches!(case, ConformanceCase::ExtraVisibleFd) {
+                ensure!(termination.exit()==lillux::LinuxSandboxExit::Code(105)
+                    && termination.launch_failure().is_none() && held.child_pid()==0
+                    && bytes.is_empty()
+                    && refusal_witness==b"ryeos.test.fd_refusal.v1:unexpected LIVE inherited descriptor105\n",
+                    "extra descriptor refusal witness not established");
+                bail!("guest witnessed unexpected LIVE inherited descriptor105");
+            }
             ensure!(termination.exit()==lillux::LinuxSandboxExit::Code(0) && termination.launch_failure().is_none(),"runtime transport refused");
             ensure!(held.child_pid()==0,"namespace owner not consumed");
             ensure!(bytes==b"{\"ok\":true,\"schema\":\"ryeos.test.checker_transport.v1\"}\n","runtime response not exact single frame");
@@ -1125,7 +1274,7 @@ mod tests {
             // settlement or renews service. All source/pipe owners outlive it.
             drop(held);
         }
-        let _ = (&owners, &header_fd, &runtime_mount, &loader_mount, &root, &loader, &interpreter, &canary, &manifest_source, &manifest_member);
+        let _ = (&owners, &header_fd, &runtime_mount, &loader_mount, &root, &loader, &interpreter, &canary, &manifest_source, &manifest_member, &visibility_canary);
         result.context("actual runtime attempt refused")
     }
 
@@ -1135,6 +1284,9 @@ mod tests {
     fn authentic_python_fd_bootstrap_and_readonly_enclosure() {
         run_runtime_conformance(ConformanceCase::Positive).expect("NOT ESTABLISHED: authentic runtime conformance failed");
         run_runtime_conformance(ConformanceCase::AmbientEnvironment).expect("NOT ESTABLISHED: hostile Python environment affected isolated bootstrap");
+        for case in [ConformanceCase::ProcessDenied,ConformanceCase::RemountDenied,ConformanceCase::FdVisibility] {
+            run_runtime_conformance(case).unwrap_or_else(|error| panic!("NOT ESTABLISHED: enclosure probe {case:?}: {error:#}"));
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -1144,10 +1296,16 @@ mod tests {
         // Establish the same real runtime first, so missing resources/startup
         // cannot make every negative case appear to pass vacuously.
         run_runtime_conformance(ConformanceCase::Positive).expect("NOT ESTABLISHED: positive runtime baseline absent");
+        run_runtime_conformance(ConformanceCase::FdVisibility).expect("NOT ESTABLISHED: positive descriptor visibility baseline absent");
         for case in [ConformanceCase::ScriptHash,ConformanceCase::ChunkSize,ConformanceCase::HeaderTruncated,
             ConformanceCase::DescriptorClosed,ConformanceCase::Oversized,ConformanceCase::Nonzero,ConformanceCase::Trailing,ConformanceCase::NoEof,ConformanceCase::WritableMount,
-            ConformanceCase::SubstituteMount,ConformanceCase::ExtraFdAlias,ConformanceCase::ChunkOrder] {
+            ConformanceCase::SubstituteMount,ConformanceCase::ExtraFdAlias,ConformanceCase::ChunkOrder,ConformanceCase::ExtraVisibleFd] {
             let error = run_runtime_conformance(case).expect_err("runtime refused-control accepted");
+            if matches!(case, ConformanceCase::ExtraVisibleFd) {
+                assert_eq!(error.root_cause().to_string(), "guest witnessed unexpected LIVE inherited descriptor105",
+                    "extra descriptor control lacks exact guest refusal: {error:#}");
+                continue;
+            }
             assert!(error.to_string().contains("actual runtime attempt refused")
                 || (matches!(case, ConformanceCase::SubstituteMount) && error.to_string()=="selected substitute closure refused")
                 || (matches!(case, ConformanceCase::ExtraFdAlias) && error.to_string()=="selected descriptor alias refused"),
