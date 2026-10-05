@@ -27,7 +27,7 @@ lillux.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
 ryeos-engine.workspace = true
 ryeos-handler-protocol.workspace = true
-ryeos-handler-bins = { path = "../handler-bins" }
+ryeos-handler-bins = { path = "../handler-bins", default-features = false, features = ["common-handler"] }
 ryeos-runtime.workspace = true
 ryeos-state.workspace = true
 tokio.workspace = true

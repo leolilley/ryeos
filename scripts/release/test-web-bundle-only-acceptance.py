@@ -42,12 +42,18 @@ class WebBundleOnlyAcceptance(unittest.TestCase):
             text=True, capture_output=True, check=True).stdout)
         self.assertEqual(plan["payloads"], [{"bundle": "web", "binary": "ryeos-web-tools",
             "cargo_package": "ryeos-web-tools", "build_class": "release",
-            "bundle_sets": ["central-host", "full", "release-artifacts", "release-authority"]}])
+            "bundle_sets": ["central-host", "full", "release-artifacts", "release-authority"],
+            "required_features": []}])
+        self.assertEqual(plan["cargo_feature_selections"], [
+            {"cargo_package": "ryeos-web-tools", "features": []}
+        ])
         source = BUILD.read_text()
         self.assertIn('cargo = "/ryeos/realizations/platform/rust/bin/cargo"', source)
         self.assertIn('"build", "--release", "--locked", "--frozen", "--offline"', source)
         self.assertNotIn("--workspace", source)
         self.assertIn('payloads != expected', source)
+        self.assertIn('value["cargo_feature_selections"] != selected_features', source)
+        self.assertIn('command.append("--no-default-features")', source)
         self.assertIn('name == "core"', source)
         self.assertIn('"ambient_target_reuse_allowed": False', INSPECTOR.read_text())
 
@@ -65,6 +71,9 @@ class WebBundleOnlyAcceptance(unittest.TestCase):
         plan = json.loads(result.stdout)
         self.assertEqual(plan["bundle_name"], "web")
         self.assertEqual(plan["cargo_packages"], ["ryeos-web-tools"])
+        self.assertEqual(plan["cargo_feature_selections"], [
+            {"cargo_package": "ryeos-web-tools", "features": []}
+        ])
         self.assertEqual([payload["binary"] for payload in plan["payloads"]], ["ryeos-web-tools"])
         self.assertTrue(plan["clean_output_required"])
         self.assertFalse(plan["ambient_target_reuse_allowed"])

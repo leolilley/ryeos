@@ -46,6 +46,10 @@ class NativeBundleWp0Tests(unittest.TestCase):
             bundle, binary = record["bundle"], record["binary"]
             self.assertIn(bundle, known)
             self.assertTrue(record["cargo_package"])
+            self.assertIsInstance(record["required_features"], list)
+            if record["cargo_package"] == "ryeos-handler-bins":
+                expected = ["basic-parsers"] if binary.startswith("rye-parser-") else ["full-handlers"]
+                self.assertEqual(record["required_features"], expected, (bundle, binary))
             self.assertIn(record["build_class"], {"release", "static"})
             self.assertNotIn((bundle, binary), seen)
             seen.add((bundle, binary))

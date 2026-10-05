@@ -1208,6 +1208,20 @@ impl SchedulerDb {
         let tx = conn.transaction()?;
         require_current_fire_projection_conn(&tx)?;
         if let Some(previous) = get_fire_conn(&tx, &rec.fire_id)? {
+            // The completion hook and repair sweep can observe the same
+            // dispatched fire. Preserve the first terminal snapshot atomically
+            // when a repeated finalizer differs only in completion time.
+            // Identity, authority, status and outcome must still match exactly.
+            if matches!(
+                previous.status.as_str(),
+                "completed" | "failed" | "cancelled"
+            ) {
+                let mut repeated = rec.clone();
+                repeated.completed_at = previous.completed_at;
+                if repeated == previous {
+                    return Ok(());
+                }
+            }
             rec.validate_transition_from(&previous)?;
         }
         upsert_fire_conn(&tx, rec)
@@ -2716,6 +2730,68 @@ mod tests {
         let got = db.get_fire("sched@1000").unwrap().unwrap();
         assert_eq!(got.status, "completed");
         assert_eq!(got.outcome.unwrap(), "success");
+    }
+
+    #[test]
+    fn duplicate_terminal_completion_preserves_first_snapshot() {
+        let db = test_db();
+        for status in ["completed", "failed", "cancelled"] {
+            let first = make_fire(status, 1000, status);
+            db.upsert_fire(&first).unwrap();
+            let outbox_before = db.pending_fire_outbox().unwrap();
+            let mut repeated = first.clone();
+            repeated.completed_at = Some(2000);
+            db.upsert_fire(&repeated).unwrap();
+            assert_eq!(db.get_fire(&first.fire_id).unwrap().unwrap(), first);
+            assert_eq!(db.pending_fire_outbox().unwrap(), outbox_before);
+        }
+    }
+
+    #[test]
+    fn duplicate_terminal_completion_rejects_conflicting_status_and_authority() {
+        let db = test_db();
+        let first = make_fire("sched", 1000, "completed");
+        db.upsert_fire(&first).unwrap();
+        let mut conflict = first.clone();
+        conflict.completed_at = Some(2000);
+        conflict.status = "failed".to_string();
+        conflict.outcome = Some("thread_failed".to_string());
+        assert!(db.upsert_fire(&conflict).is_err());
+        let mut conflict = first.clone();
+        conflict.completed_at = Some(2000);
+        conflict.signer_fingerprint = "22".repeat(32);
+        assert!(db.upsert_fire(&conflict).is_err());
+        assert_eq!(db.get_fire(&first.fire_id).unwrap().unwrap(), first);
+    }
+
+    #[test]
+    fn competing_terminal_finalizers_preserve_winner() {
+        let db = std::sync::Arc::new(test_db());
+        let dispatched = make_fire("sched", 1000, "dispatched");
+        db.upsert_fire(&dispatched).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = [2000, 3000]
+            .into_iter()
+            .map(|completed_at| {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                let mut terminal = dispatched.clone();
+                terminal.status = "completed".to_string();
+                terminal.outcome = Some("success".to_string());
+                terminal.completed_at = Some(completed_at);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    db.upsert_fire(&terminal).unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let winner = db.get_fire(&dispatched.fire_id).unwrap().unwrap();
+        assert_eq!(winner.status, "completed");
+        assert!(matches!(winner.completed_at, Some(2000 | 3000)));
+        assert_eq!(db.pending_fire_outbox().unwrap(), 2);
     }
 
     #[test]

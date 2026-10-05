@@ -4,64 +4,99 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
+[features]
+default = []
+common-handler = ["dep:ryeos-handler-protocol", "dep:serde_json"]
+basic-parsers = [
+    "common-handler",
+    "dep:regex",
+    "dep:serde",
+    "dep:serde_yaml",
+]
+full-handlers = [
+    "basic-parsers",
+    "dep:anyhow",
+    "dep:ryeos-directive-definition",
+    "dep:ryeos-effect-contract",
+    "dep:ryeos-engine",
+    "dep:ryeos-graph-definition",
+    "dep:ryeos-runtime",
+    "dep:ryeos-state",
+]
+
 [dependencies]
-ryeos-handler-protocol = { workspace = true }
-ryeos-effect-contract = { workspace = true }
-ryeos-directive-definition = { workspace = true }
-ryeos-engine = { workspace = true }
-ryeos-graph-definition = { workspace = true }
-ryeos-runtime = { workspace = true }
-ryeos-state = { workspace = true }
-serde_json = { workspace = true }
-serde = { workspace = true }
-serde_yaml = { workspace = true }
-regex = { workspace = true }
-anyhow = { workspace = true }
-base64 = { workspace = true }
+ryeos-handler-protocol = { workspace = true, optional = true }
+ryeos-effect-contract = { workspace = true, optional = true }
+ryeos-directive-definition = { workspace = true, optional = true }
+ryeos-engine = { workspace = true, optional = true }
+ryeos-graph-definition = { workspace = true, optional = true }
+ryeos-runtime = { workspace = true, optional = true }
+ryeos-state = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_yaml = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
 
 [[bin]]
 name = "rye-parser-yaml-document"
 path = "src/bin/parser_yaml_document.rs"
+required-features = ["basic-parsers"]
 
 [[bin]]
 name = "rye-parser-yaml-header-document"
 path = "src/bin/parser_yaml_header_document.rs"
+required-features = ["basic-parsers"]
 
 [[bin]]
 name = "rye-parser-regex-kv"
 path = "src/bin/parser_regex_kv.rs"
+required-features = ["basic-parsers"]
 
 [[bin]]
 name = "rye-composer-extends-chain"
 path = "src/bin/composer_extends_chain.rs"
+required-features = ["full-handlers"]
 
 [[bin]]
 name = "rye-composer-identity"
 path = "src/bin/composer_identity.rs"
+required-features = ["full-handlers"]
 
 [[bin]]
 name = "ryeos-directive-launch-preparer"
 path = "src/bin/directive_launch_preparer.rs"
+required-features = ["full-handlers"]
 
 [[bin]]
 name = "ryeos-graph-effective-validator"
 path = "src/bin/graph_effective_validator.rs"
+required-features = ["full-handlers"]
 
 [[bin]]
 name = "ryeos-graph-launch-preparer"
 path = "src/bin/graph_launch_preparer.rs"
+required-features = ["full-handlers"]
 
 [[bin]]
 name = "ryeos-graph-execution-evidence"
 path = "src/bin/graph_execution_evidence.rs"
+required-features = ["full-handlers"]
 
 [[bin]]
 name = "ryeos-direct-execution-evidence"
 path = "src/bin/direct_execution_evidence.rs"
+required-features = ["full-handlers"]
 
 [[bin]]
 name = "ryeos-scoped-qualification-execution-evidence"
 path = "src/bin/scoped_qualification_execution_evidence.rs"
+required-features = ["full-handlers"]
+
+[[bin]]
+name = "tool-streaming-demo"
+path = "src/bin/tool_streaming_demo.rs"
+required-features = ["full-handlers"]
 
 [lib]
 path = "src/lib.rs"

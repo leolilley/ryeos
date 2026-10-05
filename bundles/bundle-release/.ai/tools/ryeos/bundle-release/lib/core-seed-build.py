@@ -21,6 +21,44 @@ def fail(message):
     raise SystemExit(message)
 
 
+HANDLER_FEATURES_BY_BINARY = {
+    "rye-parser-yaml-document": ["basic-parsers"],
+    "rye-parser-yaml-header-document": ["basic-parsers"],
+    "rye-parser-regex-kv": ["basic-parsers"],
+    "rye-composer-extends-chain": ["full-handlers"],
+    "rye-composer-identity": ["full-handlers"],
+    "ryeos-directive-launch-preparer": ["full-handlers"],
+    "ryeos-graph-effective-validator": ["full-handlers"],
+    "ryeos-graph-launch-preparer": ["full-handlers"],
+    "ryeos-graph-execution-evidence": ["full-handlers"],
+    "ryeos-direct-execution-evidence": ["full-handlers"],
+    "ryeos-scoped-qualification-execution-evidence": ["full-handlers"],
+}
+
+
+def required_features(package, binary):
+    handler_features = HANDLER_FEATURES_BY_BINARY.get(binary)
+    if handler_features is not None:
+        if package != "ryeos-handler-bins":
+            fail(f"handler binary {binary!r} has unexpected Cargo package {package!r}")
+        return handler_features
+    if package != "ryeos-handler-bins":
+        return []
+    fail(f"no explicit Cargo feature composition for owned handler binary {binary!r}")
+
+
+def feature_selections(records):
+    selected = {}
+    for record in records:
+        selected.setdefault(record["cargo_package"], set()).update(record["required_features"])
+    result = []
+    for package, features in sorted(selected.items()):
+        if "full-handlers" in features:
+            features = {"full-handlers"}
+        result.append({"cargo_package": package, "features": sorted(features)})
+    return result
+
+
 def unsigned_source_manifest(signed):
     if not isinstance(signed, bytes) or len(signed) > 1024 * 1024:
         fail("Core source manifest is unsafe or oversized")
@@ -96,7 +134,8 @@ def verified_ownership_projection(resolved):
             previous_binary = binary
             seen_binaries.add(binary)
             records.append({"bundle":bundle_name,"binary":binary,"cargo_package":package,
-                            "build_class":build_class,"bundle_sets":sets})
+                            "build_class":build_class,"bundle_sets":sets,
+                            "required_features":required_features(package,binary)})
             if len(records) > 256:
                 fail("verified owned payloads exceed their bound")
     return records, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -118,13 +157,14 @@ required = {
     "source_snapshot_hash", "predecessor_generation_hash", "target",
     "build_profile", "payload_ownership_item_ref",
     "payload_ownership_content_hash", "payloads", "cargo_packages",
+    "cargo_feature_selections",
     "build_classes", "requires_binary_build", "clean_output_required",
     "ambient_target_reuse_allowed",
 }
 if not isinstance(value, dict) or set(value) != required:
     fail("Core seed release input shape changed")
-if value["schema"] != "ryeos.bundle_release_input_plan.v1":
-    fail("Core seed release input schema changed")
+if value["schema"] != "ryeos.bundle_release_input_plan.v2":
+    fail("unsupported Core seed release input schema")
 if value["bundle_name"] != "core" or value["predecessor_generation_hash"] is not None:
     fail("Core seed must be the initial Core generation")
 manifest_value = value["authored_manifest"]
@@ -155,9 +195,12 @@ expected = sorted(
 if value["payloads"] != expected or not expected:
     fail("Core seed is not the exact nonempty Core ownership selection")
 packages = sorted({payload["cargo_package"] for payload in expected})
+selected_features = feature_selections(expected)
 classes = sorted({payload["build_class"] for payload in expected})
-if value["cargo_packages"] != packages or value["build_classes"] != classes:
-    fail("Core seed package or build-class projection changed")
+if (value["cargo_packages"] != packages
+        or value["cargo_feature_selections"] != selected_features
+        or value["build_classes"] != classes):
+    fail("Core seed package, feature, or build-class projection changed")
 if value["requires_binary_build"] is not True:
     fail("Core seed must build its owned native payloads")
 for payload in expected:
@@ -232,6 +275,13 @@ for build_class in ("release", "static"):
                    "--config", 'source.ryeos-vendored.directory="/ryeos/realizations/cargo-vendor"',
                    "build", "--release", "--locked", "--frozen", "--offline",
                    "--jobs", "2", "--target", triple, "-p", package]
+        package_features = next(
+            (selection["features"] for selection in selected_features
+             if selection["cargo_package"] == package),
+            [],
+        )
+        if package == "ryeos-handler-bins": command.append("--no-default-features")
+        if package_features: command.extend(["--features", ",".join(package_features)])
         for binary in sorted(payload["binary"] for payload in expected
                              if payload["cargo_package"] == package
                              and payload["build_class"] == build_class):

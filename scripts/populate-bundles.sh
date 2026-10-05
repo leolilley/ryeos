@@ -480,23 +480,29 @@ done
 build_args=()
 for p in "${host_pkgs[@]}"; do build_args+=(-p "$p"); done
 feature_args=()
+selected_features=()
 if [[ "$BUILD_PROFILE" == latency-profiling ]]; then
-  profiling_features=()
   for p in "${host_pkgs[@]}"; do
     case "$p" in
-      ryeosd) profiling_features+=("ryeosd/latency-profiling") ;;
+      ryeosd) selected_features+=("ryeosd/latency-profiling") ;;
       ryeos-directive-runtime)
-        profiling_features+=("ryeos-directive-runtime/latency-profiling")
+        selected_features+=("ryeos-directive-runtime/latency-profiling")
         ;;
     esac
   done
-  if (( ${#profiling_features[@]} > 0 )); then
-    feature_list="$(IFS=,; printf '%s' "${profiling_features[*]}")"
-    feature_args=(--features "$feature_list")
-  else
+  if (( ${#selected_features[@]} == 0 )); then
     ryeos_term_fail "latency profiling requires ryeosd and/or ryeos-directive-runtime in --crates"
     exit 2
   fi
+fi
+for p in "${host_pkgs[@]}"; do
+  if [[ "$p" == ryeos-handler-bins ]]; then
+    selected_features+=("ryeos-handler-bins/full-handlers")
+  fi
+done
+if (( ${#selected_features[@]} > 0 )); then
+  feature_list="$(IFS=,; printf '%s' "${selected_features[*]}")"
+  feature_args=(--features "$feature_list")
 fi
 jobs_args=()
 [[ -n "$JOBS" ]] && jobs_args=(-j "$JOBS")

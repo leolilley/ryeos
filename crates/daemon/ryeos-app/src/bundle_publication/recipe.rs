@@ -651,14 +651,14 @@ mod tests {
             bundle_publication_policy_section_digest: "a".repeat(64),
             trust_epoch: 1,
             release_input: json!({
-                "schema":"ryeos.bundle_release_input_plan.v1",
+                "schema":"ryeos.bundle_release_input_plan.v2",
                 "project_path":"/release/source", "bundle_name":"central-auth",
                 "authored_manifest":{"name":"central-auth","version":"0.1.0","provides_kinds":[]},
                 "source_snapshot_hash":"b".repeat(64), "predecessor_generation_hash":null,
                 "target":{"kind":"portable"}, "build_profile":"release",
                 "payload_ownership_item_ref":"config:bundle-release/payload-ownership",
                 "payload_ownership_content_hash":"c".repeat(64),
-                "payloads":[], "cargo_packages":[], "build_classes":[],
+                "payloads":[], "cargo_packages":[], "cargo_feature_selections":[], "build_classes":[],
                 "requires_binary_build":false,"clean_output_required":true,"ambient_target_reuse_allowed":false
             }),
             child_product_selections: vec![],
@@ -874,9 +874,12 @@ mod tests {
             "binary":"ryeos-web-tools",
             "cargo_package":"ryeos-web-tools",
             "build_class":"release",
-            "bundle_sets":["release-authority"]
+            "bundle_sets":["release-authority"],
+            "required_features":[]
         }]);
         request.release_input["cargo_packages"] = json!(["ryeos-web-tools"]);
+        request.release_input["cargo_feature_selections"] =
+            json!([{"cargo_package":"ryeos-web-tools","features":[]}]);
         request.release_input["build_classes"] = json!(["release"]);
         request.release_input["requires_binary_build"] = json!(true);
 

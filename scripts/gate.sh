@@ -144,6 +144,7 @@ test_threads_args=()
 if [[ "$crash_qualification_only" != "1" ]]; then
     gate_info "cargo nextest run --workspace --no-fail-fast (build_jobs=${build_jobs}, test_threads=${test_threads}) ${nextest_args[*]:-}"
     "$CARGO" nextest run --workspace --no-fail-fast \
+        --features ryeos-handler-bins/full-handlers \
         "${cargo_jobs_args[@]}" "${test_threads_args[@]}" "${nextest_args[@]:-}"
 fi
 

@@ -409,7 +409,7 @@ mod policy_invariant_tests {
             json!({"kind":"portable"})
         };
         json!({
-            "schema": "ryeos.bundle_release_input_plan.v1",
+            "schema": "ryeos.bundle_release_input_plan.v2",
             "project_path": "/source",
             "bundle_name": "example",
             "authored_manifest": {
@@ -424,9 +424,10 @@ mod policy_invariant_tests {
             "payload_ownership_content_hash": "b".repeat(64),
             "payloads": if native { json!([{
                 "bundle":"example", "binary":"example-bin", "cargo_package":"example-bin",
-                "build_class":"release", "bundle_sets":["example"]
+                "build_class":"release", "bundle_sets":["example"], "required_features":[]
             }]) } else { json!([]) },
             "cargo_packages": if native { json!(["example-bin"]) } else { json!([]) },
+            "cargo_feature_selections": if native { json!([{"cargo_package":"example-bin","features":[]}]) } else { json!([]) },
             "build_classes": if native { json!(["release"]) } else { json!([]) },
             "requires_binary_build": native,
             "clean_output_required": true,

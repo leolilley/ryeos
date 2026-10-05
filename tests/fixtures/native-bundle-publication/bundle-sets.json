@@ -2,11 +2,11 @@
   "sets": {
     "bundle-source": ["core", "central-auth", "bundle-source"],
     "central-host": ["core", "central-auth", "standard", "web", "tv-tracker-authoring"],
-    "full": ["core", "central-auth", "standard", "web", "browser", "ryeos-ui", "hosted-node", "codex", "opencode", "local-inference"],
+    "full": ["core", "central-auth", "standard", "web", "browser", "ryeos-ui", "hosted-node", "codex", "render-sandbox", "opencode", "local-inference"],
     "hosted-node": ["core", "central-auth", "hosted-node"],
-    "hosted-workflow": ["core", "central-auth", "standard", "hosted-node", "codex", "opencode"],
+    "hosted-workflow": ["core", "central-auth", "standard", "hosted-node", "codex", "render-sandbox", "opencode"],
     "local-inference": ["core", "central-auth", "standard", "local-inference"],
-    "release-authority": ["core", "central-auth", "standard", "web", "browser", "ryeos-ui", "hosted-node", "codex", "opencode", "local-inference", "bundle-release"],
+    "release-authority": ["core", "central-auth", "standard", "web", "browser", "ryeos-ui", "hosted-node", "codex", "render-sandbox", "opencode", "local-inference", "bundle-release"],
     "standard": ["core", "central-auth", "standard"]
   },
   "profiles": {
