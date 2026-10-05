@@ -5,6 +5,7 @@
 //! 2. After execution, diff working dir and fold back changes
 
 pub(crate) mod admitted_trust;
+mod admitted_callback_authority;
 pub mod arch_check;
 pub mod cache;
 mod direct_output;

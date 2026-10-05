@@ -11,15 +11,39 @@ pub(super) enum ManagedProtocolRoute {
     FramedStreaming,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectProtocolRoute {
+    Ordinary,
+    QualificationOpaqueCallback,
+}
+
+pub(crate) fn direct_protocol_route(
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+) -> Option<DirectProtocolRoute> {
+    use ryeos_engine::protocol_vocabulary::{CallbackChannel, LifecycleMode, StdinShape, StdoutMode, StdoutShape};
+    if protocol.descriptor.lifecycle.mode == LifecycleMode::Managed
+        && protocol.descriptor.stdin.shape == StdinShape::Opaque
+        && protocol.descriptor.stdout.shape == StdoutShape::OpaqueBytes
+        && protocol.descriptor.stdout.mode == StdoutMode::Terminal
+        && protocol.descriptor.callback_channel == CallbackChannel::Http
+        && !protocol.descriptor.capabilities.allows_detached
+        && protocol.descriptor.qualification_callback
+            == Some(ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer)
+    {
+        return Some(DirectProtocolRoute::QualificationOpaqueCallback);
+    }
+    (protocol.descriptor.lifecycle.mode == LifecycleMode::DetachedOk
+        || protocol.descriptor.callback_channel == CallbackChannel::None)
+        .then_some(DirectProtocolRoute::Ordinary)
+}
+
 /// Select the existing executor-plan surface from wire mechanics, never a
 /// kind or protocol name. Managed callback runtimes own launch envelopes;
 /// callback-free streams consume the ordinary signed subprocess plan.
 pub(super) fn uses_direct_subprocess_plan(
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> bool {
-    use ryeos_engine::protocol_vocabulary::{CallbackChannel, LifecycleMode};
-    protocol.descriptor.lifecycle.mode == LifecycleMode::DetachedOk
-        || protocol.descriptor.callback_channel == CallbackChannel::None
+    direct_protocol_route(protocol).is_some()
 }
 
 /// Enforce the one ordinary-subprocess wire contract everywhere admission can
@@ -30,6 +54,13 @@ pub(crate) fn validate_ordinary_protocol_contract(
     kind: &str,
 ) -> Result<(), DispatchError> {
     use ryeos_engine::protocol_vocabulary::{LifecycleMode, StdinShape, StdoutMode, StdoutShape};
+
+    if direct_protocol_route(protocol) == Some(DirectProtocolRoute::QualificationOpaqueCallback) {
+        return Err(DispatchError::SchemaMisconfigured {
+            kind: kind.to_owned(),
+            detail: "qualification opaque callback requires original bound provenance and composition-retained native custody; selected route remains refused".into(),
+        });
+    }
 
     let terminal = protocol.descriptor.lifecycle.mode == LifecycleMode::DetachedOk
         && protocol.descriptor.stdout.shape == StdoutShape::OpaqueBytes
@@ -1138,6 +1169,48 @@ mod direct_protocol_tests {
         validate_ordinary_protocol_contract(&protocol, "fixture").unwrap();
         protocol.descriptor.stdin.shape = StdinShape::ParametersJson;
         assert!(validate_ordinary_protocol_contract(&protocol, "fixture").is_err());
+    }
+
+    #[test]
+    fn exact_qualification_wire_is_direct_but_unconditionally_refused() {
+        let mut protocol = streaming();
+        protocol.descriptor = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/protocols/ryeos/core/qualification_consumer_callback.yaml"
+        ))).unwrap();
+        // Canonical label cannot determine the mechanics or grant readiness.
+        protocol.canonical_ref = "protocol:fixture/unrelated-label".into();
+        assert_eq!(direct_protocol_route(&protocol), Some(DirectProtocolRoute::QualificationOpaqueCallback));
+        assert!(uses_direct_subprocess_plan(&protocol));
+        let error = validate_ordinary_protocol_contract(&protocol, "tool").unwrap_err();
+        assert!(error.to_string().contains("selected route remains refused"));
+        assert!(classify_managed_protocol(&protocol, "tool").is_err());
+        protocol.descriptor.qualification_callback = None;
+        assert_eq!(direct_protocol_route(&protocol), None);
+        protocol.descriptor.qualification_callback = Some(ryeos_engine::protocols::QualificationCallbackAuthority::ScopedProducer);
+        assert_eq!(direct_protocol_route(&protocol), None);
+    }
+
+    #[test]
+    fn qualification_near_miss_wire_cannot_select_the_typed_route() {
+        let mut original = streaming();
+        original.descriptor = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/protocols/ryeos/core/qualification_consumer_callback.yaml"
+        ))).unwrap();
+        let mut changed = original.clone();
+        changed.descriptor.capabilities.allows_detached = true;
+        assert_eq!(direct_protocol_route(&changed), None);
+        let mut changed = original.clone();
+        changed.descriptor.stdin.shape = StdinShape::LaunchEnvelope;
+        assert_eq!(direct_protocol_route(&changed), None);
+        let mut changed = original.clone();
+        changed.descriptor.stdout.shape = ryeos_engine::protocol_vocabulary::StdoutShape::RuntimeResult;
+        assert_eq!(direct_protocol_route(&changed), None);
+        let mut changed = original;
+        changed.descriptor.callback_channel = ryeos_engine::protocol_vocabulary::CallbackChannel::None;
+        assert_eq!(direct_protocol_route(&changed), Some(DirectProtocolRoute::Ordinary));
+        assert!(validate_ordinary_protocol_contract(&changed, "tool").is_err());
     }
 
     #[test]

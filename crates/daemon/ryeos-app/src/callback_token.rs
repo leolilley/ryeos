@@ -1073,6 +1073,138 @@ pub struct ThreadAuthStore {
     states: Mutex<HashMap<String, ThreadAuthState>>,
 }
 
+/// Observation of the actual paired stores and admitted born root. This is
+/// not an original bound issuer, reservation or native contact permission.
+/// No public fields, serde, Clone or caller-data constructor.
+pub struct PairedRemoteConsumerCustody {
+    callback_token: String,
+    callback_invocation_id: String,
+    thread_auth_token: String,
+    grant: AdmittedRemoteConsumerGrant,
+    callback_expiry: MonotonicDeadline,
+    thread_auth_expiry: MonotonicDeadline,
+    handler_context: Option<crate::handler_context::HandlerContext>,
+    project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    current_site_id: String,
+    origin_site_id: String,
+}
+
+impl PairedRemoteConsumerCustody {
+    pub fn matches_guarded_issuer(
+        &self, callback: &str, thread_auth: &str, thread_id: &str, launch_owner: &str,
+    ) -> bool {
+        self.callback_token == callback && self.thread_auth_token == thread_auth
+            && self.grant.root_thread_id == thread_id && self.grant.launch_owner == launch_owner
+            && !self.callback_invocation_id.is_empty()
+            && self.grant.validate().is_ok()
+            && !self.credential_expiry().has_elapsed()
+    }
+
+    /// Only a narrowing input to a separately issued original service bound.
+    pub fn credential_expiry(&self) -> MonotonicDeadline {
+        self.callback_expiry.min(self.thread_auth_expiry)
+    }
+}
+
+impl CallbackCapabilityStore {
+    /// Revalidate actual paired records. CAS/capsule decode is completed before
+    /// locking credentials. Nested lock order: callback -> TAT -> StateStore.
+    /// No closure, native contact or token reentrant operation runs under locks.
+    pub fn paired_remote_consumer_custody(
+        &self,
+        thread_auth: &ThreadAuthStore,
+        store: &crate::state_store::StateStore,
+        callback_token: &str,
+        thread_auth_token: &str,
+        grant: &AdmittedRemoteConsumerGrant,
+    ) -> Result<PairedRemoteConsumerCustody> {
+        grant.validate()?;
+        let capsule = store.admitted_launch_capsule(&grant.root_thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("paired consumer has no admitted capsule"))?;
+        let capsule_hash = capsule.content_hash()?;
+        let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(&capsule)?;
+        let subject = sealed.admitted_program_subject()?;
+        let expected_handler = sealed.handler_context().map(|handler| {
+            handler.narrowed_for_execution(
+                capsule.effective_caps.clone(), sealed.handoff_current_site_id(), sealed.origin_site_id(),
+            )
+        }).transpose()?;
+        if capsule.launch_driver != ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor
+            || capsule_hash != grant.admitted_capsule_hash
+            || sealed.qualification_purpose() != Some(&grant.purpose)
+            || subject.canonical_ref != grant.purpose.verifier_ref
+            || subject.raw_content_digest != grant.root_raw_content_digest
+        {
+            bail!("paired consumer differs from actual admitted direct root");
+        }
+        let callbacks = self.capabilities.lock().map_err(|_| anyhow::anyhow!("callback store poisoned"))?;
+        let auths = thread_auth.states.lock().map_err(|_| anyhow::anyhow!("thread auth store poisoned"))?;
+        let cap = callbacks.get(callback_token).ok_or_else(|| anyhow::anyhow!("paired callback revoked"))?;
+        let auth = auths.get(thread_auth_token).ok_or_else(|| anyhow::anyhow!("paired thread auth revoked"))?;
+        require_remote_consumer_pair(cap, auth, grant)?;
+        if sealed.requested_by() != Some(auth.acting_principal.as_str())
+            || auth.caller_scopes != capsule.effective_caps
+            || auth.handler_context != expected_handler
+            || cap.provenance.project_authority() != &capsule.project_authority
+        {
+            bail!("paired thread auth differs from admitted principal");
+        }
+        let planning = store.launch_planning_record_for_owner(&grant.purpose.launch_id, &grant.purpose.owner_fingerprint)?
+            .ok_or_else(|| anyhow::anyhow!("paired consumer planning row absent"))?;
+        let root = store.get_authoritative_root_thread_snapshot(&grant.root_thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("paired consumer born root absent"))?;
+        if planning.state != "bound" || planning.reserved_thread_id != grant.root_thread_id
+            || planning.bound_thread_id.as_deref() != Some(grant.root_thread_id.as_str())
+            || root.chain_root_id != grant.root_thread_id
+            || root.admitted_launch_capsule_hash.as_deref() != Some(capsule_hash.as_str())
+        {
+            bail!("paired consumer lost actual planning/root/capsule binding");
+        }
+        store.assert_launch_owner(&grant.root_thread_id, &grant.launch_owner)?;
+        // Existing grant validation checks actual current daemon generation;
+        // the DB owner assertion alone does not. Neither is a root-slot fence.
+        grant.validate()?;
+        require_remote_consumer_pair(cap, auth, grant)?;
+        // No atomic StateStore reservation or contact claim is made here.
+        Ok(PairedRemoteConsumerCustody {
+            callback_token: cap.token.clone(), callback_invocation_id: cap.invocation_id.clone(),
+            thread_auth_token: auth.token.clone(), grant: grant.clone(),
+            callback_expiry: cap.expires_at, thread_auth_expiry: auth.expires_at,
+            handler_context: auth.handler_context.clone(),
+            project_authority: cap.provenance.project_authority().clone(),
+            current_site_id: sealed.handoff_current_site_id().to_owned(),
+            origin_site_id: sealed.origin_site_id().to_owned(),
+        })
+    }
+}
+
+fn require_remote_consumer_pair(
+    cap: &CallbackCapability, auth: &ThreadAuthState, grant: &AdmittedRemoteConsumerGrant,
+) -> Result<()> {
+    require_actual_pair_roles(cap, auth)?;
+    if cap.invocation_id.is_empty() || cap.thread_id != grant.root_thread_id
+        || cap.chain_root_id != grant.root_thread_id
+        || cap.launch_owner.as_deref() != Some(grant.launch_owner.as_str())
+        || cap.remote_consumer_grant.as_ref() != Some(grant)
+        || cap.scoped_producer_grant.is_some() || cap.workload_client_grant.is_some()
+        || cap.runtime_method_surface != CallbackRuntimeMethodSurface::qualification_remote_consumer()
+        || cap.item_ref.as_deref() != Some(grant.purpose.verifier_ref.as_str())
+        || cap.root_raw_content_digest != grant.root_raw_content_digest
+        || cap.effective_definition_digest.as_deref() != Some(grant.purpose.verifier_realized_definition_digest.as_str())
+    {
+        bail!("remote consumer credential pair expired or contradicts actual issuer");
+    }
+    Ok(())
+}
+
+fn require_actual_pair_roles(cap: &CallbackCapability, auth: &ThreadAuthState) -> Result<()> {
+    if cap.expires_at.has_elapsed() || auth.expires_at.has_elapsed()
+        || cap.thread_id != auth.thread_id || cap.effective_caps != auth.caller_scopes {
+        bail!("actual credential records are expired or unpaired");
+    }
+    Ok(())
+}
+
 impl Default for ThreadAuthStore {
     fn default() -> Self {
         Self::new()
@@ -1166,6 +1298,23 @@ mod tests {
     use ryeos_engine::engine::Engine;
 
     type TestProvenance = ExecutionProvenance;
+
+    #[test]
+    fn paired_record_roles_refuse_wrong_thread_and_expired_auth_before_any_grant() {
+        let callbacks = CallbackCapabilityStore::new();
+        let auths = ThreadAuthStore::new();
+        let callback = callbacks.generate("T-pair", PathBuf::from("/p"), Duration::from_secs(60), vec![], provenance(PathBuf::from("/p")), "0".repeat(64));
+        let wrong = mint_test(&auths, "T-other", "fp:u", vec![], Duration::from_secs(60));
+        let expired = mint_test(&auths, "T-pair", "fp:u", vec![], Duration::ZERO);
+        assert!(require_actual_pair_roles(&callback, &wrong).is_err());
+        assert!(require_actual_pair_roles(&callback, &expired).is_err());
+        let good = mint_test(&auths, "T-pair", "fp:u", vec![], Duration::from_secs(60));
+        require_actual_pair_roles(&callback, &good).unwrap();
+        // Neither record can manufacture a remote grant or admitted root.
+        assert!(callback.remote_consumer_grant.is_none());
+        auths.invalidate(&wrong.token);
+        assert!(auths.validate(&wrong.token, "T-other").is_err());
+    }
 
     fn minimal_engine() -> Arc<Engine> {
         Arc::new(Engine::new(

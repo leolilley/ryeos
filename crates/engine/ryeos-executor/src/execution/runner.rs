@@ -48,6 +48,7 @@ use ryeos_app::thread_lifecycle::{
 };
 
 use super::launch::RecoveryLaunchOutcome;
+use super::admitted_callback_authority::{admitted_qualification_root, admitted_remote_consumer_grant};
 use super::launch_claim::{ThreadLaunchClaim, ThreadLaunchClaimOutcome};
 
 mod external_direct;
@@ -135,6 +136,77 @@ struct ExecutionGuard {
     callback_token: Option<String>,
     thread_auth_token: Option<String>,
     launch_owner: Option<String>,
+}
+
+/// Inert precontact owner shape. No constructor exposes it to native launch;
+/// activation requires the separately reviewed composition root and bounds.
+struct SelectedQualificationInvocation<
+    G = ExecutionGuard,
+    C = ThreadLaunchClaim,
+    P = ryeos_app::callback_token::PairedRemoteConsumerCustody,
+> {
+    // Guard drops before claim, preserving exact claim through cleanup.
+    guard: G,
+    claim: C,
+    paired: P,
+}
+
+impl<G, C, P> SelectedQualificationInvocation<G, C, P> {
+    /// Private validation mechanism keeps the complete owner alive on every
+    /// rejection/unwind. Generic parameters serve only mechanical controls;
+    /// production admission uses the concrete default owner types below.
+    fn checked(self, validate: impl FnOnce(&Self) -> Result<()>) -> Result<Self> {
+        validate(&self)?;
+        Ok(self)
+    }
+}
+
+impl SelectedQualificationInvocation {
+    /// Only the complete precontact owners may be moved here. This constructor
+    /// grants no selected spawn; no postcontact caller uses this inert shape.
+    fn from_precontact(
+        guard: ExecutionGuard,
+        claim: ThreadLaunchClaim,
+        paired: ryeos_app::callback_token::PairedRemoteConsumerCustody,
+    ) -> Result<Self> {
+        // Construct BEFORE any fallible check: parameter drop ordering must
+        // never release the claim before the guard finishes its cleanup.
+        let invocation = Self { guard, claim, paired };
+        invocation.checked(|invocation| {
+            let owner = invocation.claim.canonical_owner()?;
+            let guard = &invocation.guard;
+            let thread = guard.thread_id.as_deref().context("selected precontact guard has no born thread")?;
+            if guard.launch_owner.as_deref() != Some(owner.as_str())
+                || !invocation.paired.matches_guarded_issuer(
+                    guard.callback_token.as_deref().context("selected guard has no callback")?,
+                    guard.thread_auth_token.as_deref().context("selected guard has no TAT")?,
+                    thread, &owner,
+                )
+            {
+                bail!("selected paired witness differs from actual guarded claim");
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Every minted credential is owned immediately, before any later fallible
+/// input/context conversion. Successful env construction transfers custody.
+struct ProtocolCredentialMintGuard<'a> {
+    state: &'a AppState,
+    callback: Option<String>,
+    thread_auth: Option<String>,
+}
+
+impl Drop for ProtocolCredentialMintGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.callback.take() {
+            self.state.callback_tokens.invalidate(&token);
+        }
+        if let Some(token) = self.thread_auth.take() {
+            self.state.thread_auth.invalidate(&token);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3009,72 +3081,6 @@ fn resolved_terminator_protocol<'a>(
 /// thread-auth authority are minted lazily from typed descriptor requirements;
 /// callback-free tools therefore receive neither credentials nor daemon-socket
 /// isolation access.
-fn admitted_qualification_root(
-    state: &AppState,
-    metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
-    thread_id: &str,
-    launch_owner: &str,
-    protocol: &ryeos_engine::protocols::VerifiedProtocol,
-) -> Result<
-    Option<(
-        ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
-        ryeos_state::objects::AdmittedLaunchCapsule,
-    )>,
-> {
-    let Some(sealed) = metadata.sealed_root_request.as_ref() else {
-        return Ok(None);
-    };
-    let Some(purpose) = sealed.qualification_purpose() else {
-        return Ok(None);
-    };
-    purpose.validate()?;
-    if metadata.launch_driver
-        != Some(ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor)
-        || protocol.descriptor.callback_channel != CallbackChannel::Http
-    {
-        bail!("qualification verifier requires a direct callback-capable Tool");
-    }
-    let capsule = metadata
-        .admitted_launch_capsule()?
-        .context("qualification root has no admitted capsule")?;
-    let realized = capsule
-        .exact_program
-        .get("effective_definition_digest")
-        .and_then(Value::as_str)
-        .context("qualification capsule has no realized definition")?;
-    // Both the capsule and sealed invocation are finalized definitions. The
-    // admitted pre-realization digest was checked at root admission instead.
-    if realized != purpose.verifier_realized_definition_digest
-        || sealed.effective_definition_digest().as_str()
-            != purpose.verifier_realized_definition_digest
-    {
-        bail!("qualification verifier definition changed before callback grant");
-    }
-    let planning = state
-        .state_store
-        .launch_planning_record_for_owner(&purpose.launch_id, &purpose.owner_fingerprint)?
-        .context("qualification launch has no owner-bound planning row")?;
-    if planning.state != "bound"
-        || planning.reserved_thread_id != thread_id
-        || planning.bound_thread_id.as_deref() != Some(thread_id)
-    {
-        bail!("qualification launch planning row does not bind this root");
-    }
-    state
-        .state_store
-        .assert_launch_owner(thread_id, launch_owner)?;
-    let root = state
-        .state_store
-        .get_authoritative_root_thread_snapshot(thread_id)?
-        .context("qualification callback root is absent")?;
-    if root.chain_root_id != thread_id
-        || root.admitted_launch_capsule_hash.as_deref() != Some(capsule.content_hash()?.as_str())
-    {
-        bail!("qualification callback capsule differs from its born root");
-    }
-    Ok(Some((purpose.clone(), capsule)))
-}
-
 fn admitted_scoped_producer_grant(
     state: &AppState,
     metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
@@ -3108,43 +3114,6 @@ fn admitted_scoped_producer_grant(
         root_thread_id: thread_id.to_owned(),
         launch_owner: launch_owner.to_owned(),
         isolation_class: state.isolation.admission_class_provenance()?,
-    };
-    grant.validate()?;
-    Ok(Some(grant))
-}
-
-fn admitted_remote_consumer_grant(
-    state: &AppState,
-    metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
-    thread_id: &str,
-    launch_owner: &str,
-    protocol: &ryeos_engine::protocols::VerifiedProtocol,
-    root_raw_content_digest: &str,
-) -> Result<Option<AdmittedRemoteConsumerGrant>> {
-    if protocol.descriptor.qualification_callback
-        != Some(ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer)
-    {
-        return Ok(None);
-    }
-    let (purpose, capsule) =
-        admitted_qualification_root(state, metadata, thread_id, launch_owner, protocol)?
-            .context("remote consumer callback has no admitted qualification root")?;
-    let subject = metadata
-        .sealed_root_request
-        .as_ref()
-        .context("remote consumer root has no sealed subject")?
-        .admitted_program_subject()?;
-    if subject.canonical_ref != purpose.verifier_ref
-        || subject.raw_content_digest != root_raw_content_digest
-    {
-        bail!("remote consumer source differs from its admitted verifier executable closure");
-    }
-    let grant = AdmittedRemoteConsumerGrant {
-        purpose,
-        root_thread_id: thread_id.to_owned(),
-        launch_owner: launch_owner.to_owned(),
-        admitted_capsule_hash: capsule.content_hash()?,
-        root_raw_content_digest: root_raw_content_digest.into(),
     };
     grant.validate()?;
     Ok(Some(grant))
@@ -3320,9 +3289,14 @@ fn build_protocol_launch_env(
 
     // Run-scoped credentials cover the run's full duration plus finalization.
     let ttl = launch_token_ttl(duration_seconds);
+    let mut mint_guard = ProtocolCredentialMintGuard {
+        state,
+        callback: None,
+        thread_auth: None,
+    };
     let callback_token = callback_token_requested
         .then(|| {
-            state
+            let token = state
                 .callback_tokens
                 .generate_with_context(
                     thread_id,
@@ -3337,7 +3311,9 @@ fn build_protocol_launch_env(
                     serde_json::Value::Null,
                     0,
                 )
-                .token
+                .token;
+            mint_guard.callback = Some(token.clone());
+            token
         })
         .map(|token| {
             if !state
@@ -3412,7 +3388,10 @@ fn build_protocol_launch_env(
             )
         })
         .transpose()?
-        .map(|authority| authority.token);
+        .map(|authority| {
+            mint_guard.thread_auth = Some(authority.token.clone());
+            authority.token
+        });
 
     let isolation_daemon_socket_path =
         callback_ipc_requested.then(|| state.config.uds_path.clone());
@@ -3476,6 +3455,10 @@ fn build_protocol_launch_env(
         ));
     }
 
+    // No fallible work remains: the returned env owns the exact identities,
+    // which its caller immediately transfers to the actual ExecutionGuard.
+    mint_guard.callback = None;
+    mint_guard.thread_auth = None;
     Ok(ProtocolLaunchEnv {
         bindings,
         callback_token,
@@ -9263,6 +9246,88 @@ mod tests {
     use super::*;
     use ryeos_app::launch_metadata::OriginalPushedHeadRef;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal};
+
+    #[test]
+    fn precontact_validation_error_and_unwind_keep_claim_through_guard_drop() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        struct Probe {
+            guard: bool,
+            claim_live: Rc<Cell<bool>>,
+            observed: Rc<RefCell<Vec<bool>>>,
+        }
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                if self.guard {
+                    self.observed.borrow_mut().push(self.claim_live.get());
+                } else {
+                    self.claim_live.set(false);
+                }
+            }
+        }
+        for panic_in_validation in [false, true] {
+            let claim_live = Rc::new(Cell::new(true));
+            let observed = Rc::new(RefCell::new(Vec::new()));
+            let invocation = SelectedQualificationInvocation {
+                guard: Probe { guard: true, claim_live: claim_live.clone(), observed: observed.clone() },
+                claim: Probe { guard: false, claim_live: claim_live.clone(), observed: observed.clone() },
+                paired: (),
+            };
+            // This is the SAME private checked owner mechanism used by the
+            // concrete constructor, with no fake admission or native caller.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                invocation.checked(|_| {
+                    if panic_in_validation { panic!("validation unwind control"); }
+                    bail!("constructor rejected")
+                }).map(|_| ())
+            }));
+            if panic_in_validation {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap().unwrap_err().to_string(), "constructor rejected");
+            }
+            assert_eq!(&*observed.borrow(), &[true]);
+            assert!(!claim_live.get());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn partial_credential_mint_unwind_revokes_exact_pair_and_preserves_error() {
+        let (temp, state) = crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture();
+        let path = temp.path().to_path_buf();
+        let authority = ryeos_app::execution_policy::resolve_offline_local_live_project_authority(&path, state.isolation.as_ref()).unwrap();
+        let provenance = ExecutionProvenance::root_live_fs(path.clone(), state.engine.clone(), authority).unwrap();
+        let callback = state.callback_tokens.generate(
+            "T-mint-control", path, lillux::time::Duration::from_secs(60), vec![], provenance, "0".repeat(64),
+        );
+        let tat = state.thread_auth.mint("T-mint-control", "fp:control".into(), vec![], None, "site:control", "site:control", lillux::time::Duration::from_secs(60)).unwrap();
+        let other = state.thread_auth.mint("T-other-control", "fp:control".into(), vec![], None, "site:control", "site:control", lillux::time::Duration::from_secs(60)).unwrap();
+        let failure: Result<()> = (|| {
+            let _guard = ProtocolCredentialMintGuard {
+                state: &state, callback: Some(callback.token.clone()), thread_auth: Some(tat.token.clone()),
+            };
+            bail!("initiating context failure")
+        })();
+        assert_eq!(failure.unwrap_err().to_string(), "initiating context failure");
+        assert!(state.callback_tokens.validate_token_and_thread(&callback.token, "T-mint-control").is_err());
+        assert!(state.thread_auth.validate(&tat.token, "T-mint-control").is_err());
+        assert!(state.thread_auth.validate(&other.token, "T-other-control").is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn callback_only_mint_failure_cannot_leave_first_credential_live() {
+        let (temp, state) = crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture();
+        let path = temp.path().to_path_buf();
+        let authority = ryeos_app::execution_policy::resolve_offline_local_live_project_authority(&path, state.isolation.as_ref()).unwrap();
+        let provenance = ExecutionProvenance::root_live_fs(path.clone(), state.engine.clone(), authority).unwrap();
+        let callback = state.callback_tokens.generate("T-first-mint", path, lillux::time::Duration::from_secs(60), vec![], provenance, "0".repeat(64));
+        {
+            let _guard = ProtocolCredentialMintGuard { state: &state, callback: Some(callback.token.clone()), thread_auth: None };
+        }
+        assert!(state.callback_tokens.validate_token_and_thread(&callback.token, "T-first-mint").is_err());
+    }
 
     #[test]
     fn release_diagnostics_never_substitute_for_kernel_cleanup_testimony() {
