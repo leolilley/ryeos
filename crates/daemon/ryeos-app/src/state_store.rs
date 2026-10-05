@@ -19720,9 +19720,22 @@ impl StateStore {
             .active_launch_owners
             .lock()
             .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
-        active.remove(launch_owner);
-        g.runtime_db
-            .release_thread_launch_claim(thread_id, claim_id)
+        let Some(claim) = g.runtime_db.get_launch_claim(thread_id)? else {
+            return Ok(false);
+        };
+        if claim.thread_id != thread_id
+            || claim.claim_id != claim_id
+            || claim.claimed_by != launch_owner
+        {
+            return Ok(false);
+        }
+        let deleted = g.runtime_db.release_thread_launch_claim(thread_id, claim_id)?;
+        if deleted {
+            // Durable deletion has succeeded. No fallible work may separate
+            // that acknowledgment from retiring this exact in-process owner.
+            active.remove(launch_owner);
+        }
+        Ok(deleted)
     }
 
     /// Consume a completed runtime recovery attempt and replace the current
@@ -22975,6 +22988,47 @@ mod tests {
             Arc::new(head_trust),
         )
         .expect("state store")
+    }
+
+    #[test]
+    fn active_claim_release_refuses_stale_claim_or_wrong_owner_without_mutation() {
+        let store = test_store();
+        let thread = "T-release-order";
+        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
+        let claim = store.claim_thread_launch_active(thread, "claim-current", "daemon:test")
+            .unwrap().unwrap();
+        assert!(!store.release_active_thread_launch_claim(thread, "claim-stale", &claim.claimed_by).unwrap());
+        assert!(store.is_launch_owner_active(&claim.claimed_by));
+        let retained = store.get_launch_claim(thread).unwrap().unwrap();
+        assert_eq!(retained.claim_id, claim.claim_id);
+        assert_eq!(retained.claimed_by, claim.claimed_by);
+        assert!(!store.release_active_thread_launch_claim(thread, &claim.claim_id, "wrong-owner").unwrap());
+        assert!(store.is_launch_owner_active(&claim.claimed_by));
+        assert_eq!(store.get_launch_claim(thread).unwrap().unwrap().claimed_by, claim.claimed_by);
+        // Model an already-absent durable row while the actual active registry
+        // still retains this owner. A missing-row refusal must not erase it.
+        assert!(store.release_thread_launch_claim(thread, &claim.claim_id).unwrap());
+        assert!(!store.release_active_thread_launch_claim(thread, &claim.claim_id, &claim.claimed_by).unwrap());
+        assert!(store.is_launch_owner_active(&claim.claimed_by));
+    }
+
+    #[test]
+    fn exact_active_claim_release_acknowledges_both_domains_and_preserves_replacement() {
+        let store = test_store();
+        let thread = "T-release-replaced";
+        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
+        let first = store.claim_thread_launch_active(thread, "claim-first", "daemon:test")
+            .unwrap().unwrap();
+        assert!(store.release_active_thread_launch_claim(thread, &first.claim_id, &first.claimed_by).unwrap());
+        assert!(store.get_launch_claim(thread).unwrap().is_none());
+        assert!(!store.is_launch_owner_active(&first.claimed_by));
+        let replacement = store.claim_thread_launch_active(thread, "claim-replacement", "daemon:test")
+            .unwrap().unwrap();
+        assert!(!store.release_active_thread_launch_claim(thread, &first.claim_id, &first.claimed_by).unwrap());
+        assert!(store.is_launch_owner_active(&replacement.claimed_by));
+        let retained = store.get_launch_claim(thread).unwrap().unwrap();
+        assert_eq!(retained.claim_id, replacement.claim_id);
+        assert_eq!(retained.claimed_by, replacement.claimed_by);
     }
 
     // Signed persistence fixture only: no RootAdmission, compiler token, or
