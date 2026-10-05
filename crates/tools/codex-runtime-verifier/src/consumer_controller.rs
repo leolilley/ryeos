@@ -29,8 +29,7 @@ pub struct SettledConsumerObservation {
     pub evidence_sha256: String,
     pub evidence: ConsumerRetainedEvidence,
     pub provider_terminal: crate::consumer_termination::ConsumerProviderTerminalReference,
-    pub qualification_worker: crate::consumer_worker_transcript::VerifiedConsumerWorkerTranscript,
-    pub checked_q: crate::consumer_worker_semantics::VerifiedQConversation,
+    pub checker: crate::consumer_checker_host::CheckerHostSuccess,
 }
 
 pub enum ConsumerControllerOutcome {
@@ -50,6 +49,7 @@ pub async fn run_controller_beat(
     product_contract: &FiniteProductContract,
     invocation: ConsumerControllerInvocation,
     deadline: MonotonicDeadline,
+    checker_owner: &mut crate::consumer_checker_host::CheckerInvocationOwner,
 ) -> Result<ConsumerControllerOutcome> {
     use crate::consumer_record::RetainedControllerConsumerRecord;
     use anyhow::Context as _;
@@ -184,29 +184,11 @@ pub async fn run_controller_beat(
     } else {
         None
     };
-    let qualification_worker = match &response {
+    let qualification_reference = match &response {
         ObservationResponse::Retained {
-            attempt:
-                AttemptRecord {
-                    phase: AttemptPhase::Observed,
-                    ..
-                },
             qualification_worker,
             ..
-        } => Some(match qualification_worker {
-            Some(reference) => {
-                crate::consumer_worker_transcript::read_consumer_worker_transcript(
-                    client,
-                    retained.record(),
-                    reference.clone(),
-                    deadline,
-                )
-                .await
-            }
-            None => Err(anyhow::anyhow!(
-                "observed consumer omitted the actual Q transcript"
-            )),
-        }),
+        } => qualification_worker.clone(),
         _ => None,
     };
     retained.bytes_for_contact()?;
@@ -234,23 +216,30 @@ pub async fn run_controller_beat(
                 !deadline.has_elapsed(),
                 "consumer settlement join exceeded caller deadline"
             );
-            let qualification_worker =
-                qualification_worker.context("observed consumer has no Q transcript read")??;
-            let checked_q = crate::consumer_worker_semantics::check_q_conversation(
-                retained.record(),
-                &qualification_worker,
-            )?;
+            let reference = qualification_reference
+                .context("observed consumer has no protected Q transcript")?;
+            let acquired =
+                crate::consumer_worker_transcript::read_consumer_worker_transcript_chunks(
+                    client,
+                    retained.record(),
+                    reference,
+                    deadline,
+                )
+                .await?;
+            let checker = checker_owner
+                .invoke(retained.record().clone(), acquired)
+                .await?;
             ensure!(
                 !deadline.has_elapsed(),
                 "Q semantic join exceeded caller deadline"
             );
             let result = crate::consumer_result::checked_result(
-                retained.record(),
+                checker.original_record(),
                 &challenge,
                 &evidence_sha256,
                 &provider_terminal,
-                &qualification_worker,
-                &checked_q,
+                checker.transcript(),
+                checker.checked_q(),
             )?;
             ensure!(
                 !deadline.has_elapsed(),
@@ -263,8 +252,7 @@ pub async fn run_controller_beat(
                     evidence,
                     evidence_sha256,
                     provider_terminal,
-                    qualification_worker,
-                    checked_q,
+                    checker,
                 },
             ))
         }
@@ -1025,6 +1013,7 @@ pub(crate) mod tests {
             "fixture-callback".into(),
             "fixture-thread".into(),
         );
+        let mut checker_owner = crate::consumer_checker_host::CheckerInvocationOwner::default();
         let outcome = run_controller_beat(
             &client,
             directory,
@@ -1033,6 +1022,7 @@ pub(crate) mod tests {
             product_contract,
             invocation,
             MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+            &mut checker_owner,
         )
         .await;
         stop.send(()).unwrap();

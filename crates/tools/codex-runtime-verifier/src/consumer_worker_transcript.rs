@@ -35,14 +35,28 @@ fn require_original_handoff(
     expected_record_sha256: &str,
     deadline: MonotonicDeadline,
 ) -> Result<()> {
-    ensure!(!deadline.has_elapsed(), "protected chunk handoff original deadline expired");
-    ensure!(lillux::sha256_hex(&original.canonical_bytes()?) == expected_record_sha256,
-        "protected chunk handoff changed its original record");
-    ensure!(!deadline.has_elapsed(), "protected chunk record join exceeded original deadline");
+    ensure!(
+        !deadline.has_elapsed(),
+        "protected chunk handoff original deadline expired"
+    );
+    ensure!(
+        lillux::sha256_hex(&original.canonical_bytes()?) == expected_record_sha256,
+        "protected chunk handoff changed its original record"
+    );
+    ensure!(
+        !deadline.has_elapsed(),
+        "protected chunk record join exceeded original deadline"
+    );
     Ok(())
 }
 
 impl ProtectedConsumerWorkerChunks {
+    /// The host uses this SAME acquisition deadline, never an independently
+    /// supplied or renewed child budget.
+    pub(crate) fn original_deadline(&self) -> MonotonicDeadline {
+        self.deadline
+    }
+
     /// Consume the SAME raw vectors and reference; P performs ONE baseline
     /// parse. H3 must supply checker identity from its admitted program owner
     /// and execute synchronous preparation in its retained host transaction.
@@ -55,10 +69,15 @@ impl ProtectedConsumerWorkerChunks {
         let prepared = crate::consumer_checker_projection::prepare_checker_projection(
             original,
             self.reference,
-            crate::consumer_checker_projection::OriginalTranscriptChunks::from_original_bytes(self.chunks),
+            crate::consumer_checker_projection::OriginalTranscriptChunks::from_original_bytes(
+                self.chunks,
+            ),
             checker_identity_digest,
         )?;
-        ensure!(!self.deadline.has_elapsed(), "protected chunk preparation exceeded original deadline");
+        ensure!(
+            !self.deadline.has_elapsed(),
+            "protected chunk preparation exceeded original deadline"
+        );
         Ok(prepared)
     }
 }
@@ -123,43 +142,12 @@ pub(crate) async fn read_consumer_worker_transcript_chunks(
         !deadline.has_elapsed(),
         "Q transcript verification exceeded caller deadline"
     );
-    Ok(ProtectedConsumerWorkerChunks { reference, chunks, original_record_sha256, deadline })
-}
-
-/// Staged OLD parsed route only. This delegates protected acquisition, then
-/// parses once for its existing Rust caller. Never call this before P; H3's
-/// mandatory migration retires this route and its expected-final meaning check.
-pub async fn read_consumer_worker_transcript(
-    client: &UdsRuntimeClient,
-    original: &ConsumerInputRecord,
-    reference: QualificationWorkerTranscriptReference,
-    deadline: MonotonicDeadline,
-) -> Result<VerifiedConsumerWorkerTranscript> {
-    let acquired = read_consumer_worker_transcript_chunks(client, original, reference, deadline).await?;
-    require_original_handoff(original, &acquired.original_record_sha256, acquired.deadline)?;
-    let reference = acquired.reference;
-    let stream = reference.manifest.verify_chunks(&acquired.chunks)?;
-    let configuration = original.scripted_configuration()?;
-    let request = original
-        .purpose
-        .policy_source
-        .policy
-        .producer_scenarios
-        .get(&original.coordinate.scenario_id)
-        .and_then(|scenario| scenario.consumer_worker_request.as_ref())
-        .context("Q transcript has no original signed Worker request")?;
-    crate::consumer_worker_semantics::check_fixture_capture(
-        &configuration.qualification_worker,
-        request.fixture.as_ref(),
-        reference.manifest.fixture_capture.as_ref(),
-        stream.fixture_content.as_ref(),
-        &reference.manifest.channel_binding_digest,
-    )?;
-    ensure!(
-        !deadline.has_elapsed(),
-        "Q transcript verification exceeded caller deadline"
-    );
-    Ok(VerifiedConsumerWorkerTranscript { reference, stream })
+    Ok(ProtectedConsumerWorkerChunks {
+        reference,
+        chunks,
+        original_record_sha256,
+        deadline,
+    })
 }
 
 pub(crate) fn validate_reference_for_record(
@@ -243,45 +231,84 @@ mod tests {
     use serde_json::json;
 
     fn synthetic_reference(bytes: &[u8]) -> QualificationWorkerTranscriptReference {
-        use ryeos_external_execution_contract::{ProviderConfigurationLaunchInput,
-            ProviderCommandEnvironmentProjection, ProviderCommandEnvironmentTransport};
-        use ryeos_state::objects::{QualificationWorkerTranscriptManifest, QualificationWorkerTranscriptChunk,
-            QUALIFICATION_WORKER_TRANSCRIPT_KIND, QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA};
+        use ryeos_external_execution_contract::{
+            ProviderCommandEnvironmentProjection, ProviderCommandEnvironmentTransport,
+            ProviderConfigurationLaunchInput,
+        };
+        use ryeos_state::objects::{
+            QUALIFICATION_WORKER_TRANSCRIPT_KIND, QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
+            QualificationWorkerTranscriptChunk, QualificationWorkerTranscriptManifest,
+        };
         // Raw chunk response controls only. These bytes are not a parsed stream
         // or authenticated native testimony, and never qualify a real caller.
         let manifest = QualificationWorkerTranscriptManifest {
-            kind: QUALIFICATION_WORKER_TRANSCRIPT_KIND.to_owned(), schema: QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
-            owner_principal: format!("fp:{}", "a".repeat(64)), accepted_root_id: "T-synthetic".to_owned(),
-            accepted_capsule_hash: "b".repeat(64), placement_thread_id: format!("Q-{}", "c".repeat(64)),
-            qualification_operation_id: "d".repeat(64), qualification_occurrence_id: "synthetic".to_owned(),
-            channel_binding_digest: "e".repeat(64), process_incarnation_digest: "f".repeat(64),
+            kind: QUALIFICATION_WORKER_TRANSCRIPT_KIND.to_owned(),
+            schema: QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            accepted_root_id: "T-synthetic".to_owned(),
+            accepted_capsule_hash: "b".repeat(64),
+            placement_thread_id: format!("Q-{}", "c".repeat(64)),
+            qualification_operation_id: "d".repeat(64),
+            qualification_occurrence_id: "synthetic".to_owned(),
+            channel_binding_digest: "e".repeat(64),
+            process_incarnation_digest: "f".repeat(64),
             provider_configuration: ProviderConfigurationLaunchInput {
-                schema: 1, configuration_sha256: "5".repeat(64), configuration_bytes: 100,
+                schema: 1,
+                configuration_sha256: "5".repeat(64),
+                configuration_bytes: 100,
                 command_environment: ProviderCommandEnvironmentProjection {
-                    environment_id: "ryeos-external-candidate".to_owned(), default_environment_id: "ryeos-external-candidate".to_owned(),
-                    include_local: false, transport: ProviderCommandEnvironmentTransport::CommandConnector,
+                    environment_id: "ryeos-external-candidate".to_owned(),
+                    default_environment_id: "ryeos-external-candidate".to_owned(),
+                    include_local: false,
+                    transport: ProviderCommandEnvironmentTransport::CommandConnector,
                 },
-                provider_declaration_id: "synthetic".to_owned(), configuration_destination: "environments.toml".to_owned(),
-                configuration_adapter_artifact_hash: "6".repeat(64), configuration_adapter_artifact_bytes: 100,
+                provider_declaration_id: "synthetic".to_owned(),
+                configuration_destination: "environments.toml".to_owned(),
+                configuration_adapter_artifact_hash: "6".repeat(64),
+                configuration_adapter_artifact_bytes: 100,
             },
-            controller_canary: None, fixture_capture: None, setup_request_digest: "4".repeat(64),
-            setup_final_response_digest: "7".repeat(64), setup_owner_send_settled_at_ms: 1,
-            request_digest: "1".repeat(64), wire_max_bytes: 1024, turn_id: "turn".to_owned(),
-            turn_start_digest: "2".repeat(64), turn_completion_digest: "3".repeat(64), owner_send_settled_at_ms: 1,
-            delta_digest: None, delta_response_bytes: None, delta_wire_max_bytes: None,
-            final_response_digest: "8".repeat(64), final_response_bytes: 2,
-            batch_count: 0, through_sequence: 0, last_batch_digest: None, batch_canonical_bytes: 0,
-            stream_sha256: lillux::sha256_hex(bytes), stream_bytes: bytes.len() as u64,
-            chunks: vec![QualificationWorkerTranscriptChunk { blob_hash: lillux::sha256_hex(bytes), size_bytes: bytes.len() as u64 }],
+            controller_canary: None,
+            fixture_capture: None,
+            setup_request_digest: "4".repeat(64),
+            setup_final_response_digest: "7".repeat(64),
+            setup_owner_send_settled_at_ms: 1,
+            request_digest: "1".repeat(64),
+            wire_max_bytes: 1024,
+            turn_id: "turn".to_owned(),
+            turn_start_digest: "2".repeat(64),
+            turn_completion_digest: "3".repeat(64),
+            owner_send_settled_at_ms: 1,
+            delta_digest: None,
+            delta_response_bytes: None,
+            delta_wire_max_bytes: None,
+            final_response_digest: "8".repeat(64),
+            final_response_bytes: 2,
+            batch_count: 0,
+            through_sequence: 0,
+            last_batch_digest: None,
+            batch_canonical_bytes: 0,
+            stream_sha256: lillux::sha256_hex(bytes),
+            stream_bytes: bytes.len() as u64,
+            chunks: vec![QualificationWorkerTranscriptChunk {
+                blob_hash: lillux::sha256_hex(bytes),
+                size_bytes: bytes.len() as u64,
+            }],
         };
-        let manifest_hash = canonical_value_digest(&serde_json::to_value(&manifest).unwrap()).unwrap();
-        let reference = QualificationWorkerTranscriptReference { manifest_hash, manifest };
+        let manifest_hash =
+            canonical_value_digest(&serde_json::to_value(&manifest).unwrap()).unwrap();
+        let reference = QualificationWorkerTranscriptReference {
+            manifest_hash,
+            manifest,
+        };
         reference.validate().unwrap();
         reference
     }
 
     fn original_fixture() -> ConsumerInputRecord {
-        serde_json::from_value(serde_json::to_value(crate::consumer_controller::tests::callback_record()).unwrap()).unwrap()
+        serde_json::from_value(
+            serde_json::to_value(crate::consumer_controller::tests::callback_record()).unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -293,10 +320,19 @@ mod tests {
         let mut changed = serde_json::to_value(&original).unwrap();
         changed["scenario_input"]["canary_value"] = json!("e".repeat(64));
         let changed: ConsumerInputRecord = serde_json::from_value(changed).unwrap();
-        assert_ne!(lillux::sha256_hex(&changed.canonical_bytes().unwrap()), digest);
+        assert_ne!(
+            lillux::sha256_hex(&changed.canonical_bytes().unwrap()),
+            digest
+        );
         assert!(require_original_handoff(&changed, &digest, deadline).is_err());
-        assert!(require_original_handoff(&original, &digest,
-            MonotonicDeadline::after(lillux::time::Duration::ZERO)).is_err());
+        assert!(
+            require_original_handoff(
+                &original,
+                &digest,
+                MonotonicDeadline::after(lillux::time::Duration::ZERO)
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -306,23 +342,34 @@ mod tests {
         let reference = synthetic_reference(&bytes);
         let allocation = bytes.as_ptr();
         let owner = ProtectedConsumerWorkerChunks {
-            reference, chunks: vec![bytes], original_record_sha256: lillux::sha256_hex(&original.canonical_bytes().unwrap()),
+            reference,
+            chunks: vec![bytes],
+            original_record_sha256: lillux::sha256_hex(&original.canonical_bytes().unwrap()),
             deadline: MonotonicDeadline::after(lillux::time::Duration::ZERO),
         };
         assert_eq!(owner.chunks[0].as_ptr(), allocation);
         // Synthetic owner is test-only and not authenticated. Expiry must
         // refuse before P can parse these deliberately non-stream bytes.
-        assert!(owner.prepare_checker_input(original, "a".repeat(64)).is_err());
+        assert!(
+            owner
+                .prepare_checker_input(original, "a".repeat(64))
+                .is_err()
+        );
     }
 
     #[test]
     fn chunk_response_cannot_change_selected_manifest_index_blob_size_or_bytes() {
         let bytes = vec![b'x'; 256];
         let reference = synthetic_reference(&bytes);
-        let selection = QualificationWorkerTranscriptChunkSelection { manifest_hash: reference.manifest_hash.clone(), chunk_index: 0 };
+        let selection = QualificationWorkerTranscriptChunkSelection {
+            manifest_hash: reference.manifest_hash.clone(),
+            chunk_index: 0,
+        };
         let response = QualificationWorkerTranscriptChunkResponse {
-            manifest_hash: reference.manifest_hash.clone(), chunk_index: 0,
-            blob_hash: lillux::sha256_hex(&bytes), size_bytes: bytes.len() as u64,
+            manifest_hash: reference.manifest_hash.clone(),
+            chunk_index: 0,
+            blob_hash: lillux::sha256_hex(&bytes),
+            size_bytes: bytes.len() as u64,
             bytes_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
         };
         assert_eq!(response.verify_for(&reference, &selection).unwrap(), bytes);
@@ -333,9 +380,15 @@ mod tests {
                 "index" => changed.chunk_index = 1,
                 "blob" => changed.blob_hash = "0".repeat(64),
                 "size" => changed.size_bytes += 1,
-                _ => changed.bytes_b64 = base64::engine::general_purpose::STANDARD.encode(vec![b'y'; 256]),
+                _ => {
+                    changed.bytes_b64 =
+                        base64::engine::general_purpose::STANDARD.encode(vec![b'y'; 256])
+                }
             }
-            assert!(changed.verify_for(&reference, &selection).is_err(), "{mutation}");
+            assert!(
+                changed.verify_for(&reference, &selection).is_err(),
+                "{mutation}"
+            );
         }
     }
 

@@ -34,6 +34,7 @@ use std::{
 enum VerifierExit {
     Refused(anyhow::Error),
     ConsumerUncertain(ryeos_codex_runtime_verifier::consumer_observer::ConsumerObservationFailure),
+    CheckerUncertain(ryeos_codex_runtime_verifier::consumer_checker_host::CheckerTerminalFailure),
 }
 
 impl From<anyhow::Error> for VerifierExit {
@@ -49,6 +50,9 @@ impl std::fmt::Debug for VerifierExit {
             Self::ConsumerUncertain(failure) => {
                 f.debug_tuple("ConsumerUncertain").field(failure).finish()
             }
+            Self::CheckerUncertain(failure) => {
+                f.debug_tuple("CheckerUncertain").field(failure).finish()
+            }
         }
     }
 }
@@ -58,7 +62,26 @@ fn main() -> std::result::Result<(), VerifierExit> {
         CONSUMER_STARTUP_FLAG, decode_startup_arguments, prepare_startup,
     };
     if std::env::args_os().nth(1).as_deref() != Some(OsStr::new(CONSUMER_STARTUP_FLAG)) {
-        return ordinary_main().map_err(VerifierExit::Refused);
+        // Retain checker custody outside runtime/future/worker unwind. No
+        // unresolved child/task/IO owner can be flattened into anyhow here.
+        let mut checker_owner =
+            ryeos_codex_runtime_verifier::consumer_checker_host::CheckerInvocationOwner::default();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ordinary_main(&mut checker_owner)
+        }));
+        let result = match outcome {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "admitted verifier root panicked; no qualification"
+            )),
+        };
+        if result.is_err() {
+            checker_owner.request_cancellation();
+        }
+        if let Some(failure) = checker_owner.into_terminal_failure() {
+            return Err(VerifierExit::CheckerUncertain(failure));
+        }
+        return result.map_err(VerifierExit::Refused);
     }
     if std::env::var_os(
         ryeos_codex_runtime_verifier::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV,
@@ -104,7 +127,9 @@ fn main() -> std::result::Result<(), VerifierExit> {
     Ok(())
 }
 
-fn ordinary_main() -> Result<()> {
+fn ordinary_main(
+    checker_owner: &mut ryeos_codex_runtime_verifier::consumer_checker_host::CheckerInvocationOwner,
+) -> Result<()> {
     let native_challenge = std::env::var_os(
         ryeos_codex_runtime_verifier::consumer_record::CONSUMER_NATIVE_CHALLENGE_ENV,
     );
@@ -139,7 +164,7 @@ fn ordinary_main() -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(admitted_main())
+        .block_on(admitted_main(checker_owner))
 }
 
 /// The immutable signed Tool literal is separate from policy stdin. No environment
@@ -179,7 +204,9 @@ fn decode_admitted_arguments(
     Ok((mode, contract))
 }
 
-async fn admitted_main() -> Result<()> {
+async fn admitted_main(
+    checker_owner: &mut ryeos_codex_runtime_verifier::consumer_checker_host::CheckerInvocationOwner,
+) -> Result<()> {
     let (mode, product_contract) = decode_admitted_arguments(std::env::args_os().skip(1))?;
     let mut input = Vec::new();
     std::io::stdin()
@@ -192,6 +219,7 @@ async fn admitted_main() -> Result<()> {
             product_contract
                 .as_ref()
                 .context("consumer product contract absent")?,
+            checker_owner,
         )
         .await;
     }
@@ -845,6 +873,7 @@ async fn admitted_main() -> Result<()> {
 async fn run_consumer_controller(
     input: &[u8],
     product_contract: &ryeos_codex_runtime_verifier::finite_product_contract::FiniteProductContract,
+    checker_owner: &mut ryeos_codex_runtime_verifier::consumer_checker_host::CheckerInvocationOwner,
 ) -> Result<()> {
     use ryeos_codex_runtime_verifier::consumer_controller::{
         ConsumerControllerInvocation, ConsumerControllerOutcome, run_controller_beat,
@@ -877,6 +906,7 @@ async fn run_consumer_controller(
         product_contract,
         invocation,
         deadline,
+        checker_owner,
     )
     .await?
     {
