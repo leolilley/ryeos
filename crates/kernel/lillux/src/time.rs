@@ -5,7 +5,309 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
+/// Transport of already-issued local endpoints. This is neither admission nor
+/// funded occupancy authority. The caller must authenticate the original pair
+/// and independently enforce single-use invocation and companion-role exclusion.
+#[cfg(target_os = "linux")]
+pub struct OriginalLocalDeadlineHandoff {
+    service: MonotonicDeadline,
+    cleanup: MonotonicDeadline,
+    bound: crate::InheritedDescriptorAuthority,
+    clock: crate::InheritedDescriptorAuthority,
+}
+
+#[cfg(target_os = "linux")]
+impl OriginalLocalDeadlineHandoff {
+    pub fn from_original(service: MonotonicDeadline, cleanup: MonotonicDeadline) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt as _;
+        if cleanup.is_before(&service) || service.has_elapsed() {
+            return Err("original local deadline pair is inverted or expired".into());
+        }
+        let lease = crate::exec::retain_fork_sensitive_descriptors_until(service)
+            .map_err(|error| error.to_string())?;
+        let clock = original_window::pin_current_clock_namespace(&lease)?;
+        // BOOTTIME precedes both remaining observations: export can only narrow.
+        let before = occupancy_now()?;
+        let service_tick = local_deadline_wire::expiry(before.tick_ns, service.remaining())?;
+        let cleanup_tick = if service.deadline == cleanup.deadline {
+            service_tick
+        } else {
+            local_deadline_wire::expiry(before.tick_ns, cleanup.remaining())?
+        };
+        let identity = clock.file().metadata().map_err(|error| error.to_string())?;
+        let wire = local_deadline_wire::Wire {
+            version: 1,
+            contract_digest: before.contract_digest.clone(),
+            incarnation_digest: before.incarnation_digest.clone(),
+            clock_dev: identity.dev(),
+            clock_ino: identity.ino(),
+            service_tick,
+            cleanup_tick,
+        };
+        wire.validate(&before)?;
+        let bytes = serde_json::to_vec(&wire).map_err(|error| error.to_string())?;
+        if bytes.is_empty() || bytes.len() > original_window::MAX_BYTES {
+            return Err("local deadline packet exceeds fixed bound".into());
+        }
+        let bound = crate::sealed_memfd(c"original-local-deadlines", &bytes)?;
+        let handoff = Self { service, cleanup, bound, clock };
+        handoff.require_live_pair()?;
+        Ok(handoff)
+    }
+
+    fn require_live_pair(&self) -> Result<(), String> {
+        if self.service.has_elapsed() || self.cleanup.is_before(&self.service) {
+            return Err("original local deadline pair expired or inverted".into());
+        }
+        local_deadline_wire::read(&self.bound, &self.clock)?.validate(&occupancy_now()?)
+    }
+
+    /// Duplicate the exact sealed object and pinned clock, never re-export time.
+    pub fn duplicate_retained_pair(&self) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt as _;
+        let _lease = crate::exec::retain_fork_sensitive_descriptors_until(self.service)
+            .map_err(|error| error.to_string())?;
+        self.require_live_pair()?;
+        let copy = Self {
+            service: self.service,
+            cleanup: self.cleanup,
+            bound: self.bound.duplicate_at_or_above(3)?,
+            clock: self.clock.duplicate_at_or_above(3)?,
+        };
+        let originals = [self.bound.inherited_descriptor()?, self.clock.inherited_descriptor()?];
+        for (source, target) in [(&self.bound, &copy.bound), (&self.clock, &copy.clock)] {
+            if originals.contains(&target.inherited_descriptor()?) {
+                return Err("local deadline duplicate overlaps original role".into());
+            }
+            let a = source.file().metadata().map_err(|error| error.to_string())?;
+            let b = target.file().metadata().map_err(|error| error.to_string())?;
+            if (a.dev(), a.ino()) != (b.dev(), b.ino()) {
+                return Err("local deadline duplicate changed object identity".into());
+            }
+        }
+        copy.require_live_pair()?;
+        self.require_live_pair()?;
+        Ok(copy)
+    }
+
+    pub fn original_service(&self) -> MonotonicDeadline { self.service }
+    pub fn original_cleanup(&self) -> MonotonicDeadline { self.cleanup }
+    pub fn into_authorities(self) -> (crate::InheritedDescriptorAuthority, crate::InheritedDescriptorAuthority) {
+        (self.bound, self.clock)
+    }
+}
+
+/// Conservative local endpoints adopted once, with the original clock pinned.
+/// No descriptor from this owner may be forwarded to the semantic target.
+#[cfg(target_os = "linux")]
+pub struct AdoptedOriginalLocalDeadlines {
+    service: MonotonicDeadline,
+    cleanup: MonotonicDeadline,
+    _clock: crate::InheritedDescriptorAuthority,
+}
+
+#[cfg(target_os = "linux")]
+impl AdoptedOriginalLocalDeadlines {
+    /// # Safety
+    /// Both roles must be uniquely owned deliberate inherited descriptors with
+    /// no Rust owner, distinct from every companion role. Admission and the
+    /// independent single-use invocation guard belong to the enclosing owner.
+    pub unsafe fn take_inherited(bound_fd: u32, clock_fd: u32) -> Result<Self, String> {
+        local_deadline_wire::require_roles(bound_fd, clock_fd)?;
+        let bound = unsafe { crate::take_inherited_descriptor_authority(bound_fd) }?;
+        let clock = unsafe { crate::take_inherited_descriptor_authority(clock_fd) }?;
+        Self::from_owned_roles(bound, clock)
+    }
+
+    fn from_owned_roles(
+        bound: crate::InheritedDescriptorAuthority,
+        clock: crate::InheritedDescriptorAuthority,
+    ) -> Result<Self, String> {
+        let wire = local_deadline_wire::read(&bound, &clock)?;
+        // Instant precedes BOOTTIME: parsing/adoption delay cannot renew time.
+        let anchor = Instant::now();
+        let now = occupancy_now()?;
+        wire.validate(&now)?;
+        let service = MonotonicDeadline {
+            deadline: anchor.checked_add(Duration::from_nanos(wire.service_tick - now.tick_ns))
+                .ok_or("adopted service deadline overflow")?,
+        };
+        let cleanup = MonotonicDeadline {
+            deadline: anchor.checked_add(Duration::from_nanos(wire.cleanup_tick - now.tick_ns))
+                .ok_or("adopted cleanup deadline overflow")?,
+        };
+        original_window::require_same_clock_namespace(clock.file())?;
+        wire.validate(&occupancy_now()?)?;
+        if service.has_elapsed() {
+            return Err("local deadline expired during adoption".into());
+        }
+        drop(bound);
+        Ok(Self { service, cleanup, _clock: clock })
+    }
+
+    pub fn service_deadline(&self) -> MonotonicDeadline { self.service }
+    pub fn cleanup_deadline(&self) -> MonotonicDeadline { self.cleanup }
+}
+
+#[cfg(target_os = "linux")]
+mod local_deadline_wire {
+    use super::*;
+    use std::os::unix::fs::MetadataExt as _;
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Wire {
+        pub(super) version: u32,
+        pub(super) contract_digest: String,
+        pub(super) incarnation_digest: String,
+        pub(super) clock_dev: u64,
+        pub(super) clock_ino: u64,
+        pub(super) service_tick: u64,
+        pub(super) cleanup_tick: u64,
+    }
+
+    impl Wire {
+        pub(super) fn validate(&self, now: &OccupancyCoordinate) -> Result<(), String> {
+            now.validate()?;
+            if self.version != 1 || self.contract_digest != now.contract_digest
+                || self.incarnation_digest != now.incarnation_digest
+                || self.service_tick <= now.tick_ns || self.cleanup_tick < self.service_tick {
+                return Err("local deadline packet expired, inverted or wrong clock domain".into());
+            }
+            Ok(())
+        }
+    }
+
+    pub(super) fn expiry(tick: u64, remaining: Duration) -> Result<u64, String> {
+        if remaining.is_zero() { return Err("original local deadline expired".into()); }
+        tick.checked_add(u64::try_from(remaining.as_nanos()).map_err(|_| "local deadline duration overflow")?)
+            .ok_or_else(|| "local deadline tick overflow".into())
+    }
+
+    pub(super) fn require_roles(bound: u32, clock: u32) -> Result<(), String> {
+        if bound <= 2 || clock <= 2 || bound == clock {
+            return Err("local deadline roles must be distinct and above stdio".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn read(bound: &crate::InheritedDescriptorAuthority, clock: &crate::InheritedDescriptorAuthority) -> Result<Wire, String> {
+        let bound_fd = bound.inherited_descriptor()?;
+        require_roles(bound_fd, clock.inherited_descriptor()?)?;
+        original_window::require_same_clock_namespace(clock.file())?;
+        let bytes = crate::sandbox::read_sealed_inherited_descriptor(bound_fd, original_window::MAX_BYTES)?;
+        let wire: Wire = serde_json::from_slice(&bytes).map_err(|error| format!("decode strict local deadlines: {error}"))?;
+        let identity = clock.file().metadata().map_err(|error| error.to_string())?;
+        if (wire.clock_dev, wire.clock_ino) != (identity.dev(), identity.ino()) {
+            return Err("local deadline packet disagrees with pinned clock identity".into());
+        }
+        Ok(wire)
+    }
+}
+
 pub const OCCUPANCY_CLOCK_CONTRACT_VERSION: u32 = 1;
+
+// Authored component controls; execution is deferred to the coherent gate.
+#[cfg(all(test, target_os = "linux"))]
+mod local_deadline_handoff_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt as _;
+
+    fn pair() -> OriginalLocalDeadlineHandoff {
+        let service = MonotonicDeadline::after(Duration::from_secs(60));
+        OriginalLocalDeadlineHandoff::from_original(service, service).unwrap()
+    }
+
+    #[test]
+    fn equal_endpoints_share_one_tick_and_delayed_adoption_does_not_extend() {
+        let handoff = pair();
+        let original = handoff.original_service();
+        let wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
+        assert_eq!(wire.service_tick, wire.cleanup_tick);
+        thread::sleep(Duration::from_millis(10));
+        let (bound, clock) = handoff.into_authorities();
+        // Consume both registered owners; this same-process fixture must not
+        // impersonate raw inheritance or register an already-owned FD again.
+        let adopted = AdoptedOriginalLocalDeadlines::from_owned_roles(bound, clock).unwrap();
+        assert!(adopted.service.deadline <= original.deadline);
+        assert_eq!(adopted.service.deadline, adopted.cleanup.deadline);
+        assert_eq!(adopted.service_deadline().deadline, adopted.service_deadline().deadline);
+    }
+
+    #[test]
+    fn duplicates_preserve_objects_and_original_endpoints() {
+        let original = pair();
+        let copy = original.duplicate_retained_pair().unwrap();
+        for (a, b) in [(&original.bound, &copy.bound), (&original.clock, &copy.clock)] {
+            assert_ne!(a.inherited_descriptor().unwrap(), b.inherited_descriptor().unwrap());
+            let a = a.file().metadata().unwrap();
+            let b = b.file().metadata().unwrap();
+            assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+        }
+        assert_eq!(original.service.deadline, copy.service.deadline);
+        assert_eq!(original.cleanup.deadline, copy.cleanup.deadline);
+    }
+
+    #[test]
+    fn construction_refuses_inverted_and_expired_originals() {
+        let earlier = MonotonicDeadline::after(Duration::from_secs(30));
+        let later = MonotonicDeadline::after(Duration::from_secs(60));
+        assert!(OriginalLocalDeadlineHandoff::from_original(later, earlier).is_err());
+        assert!(OriginalLocalDeadlineHandoff::from_original(MonotonicDeadline::after(Duration::ZERO), later).is_err());
+    }
+
+    #[test]
+    fn decoding_refuses_unknown_fields_domain_version_order_and_expiry() {
+        let handoff = pair();
+        let mut wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
+        let now = occupancy_now().unwrap();
+        let mut json = serde_json::to_value(&wire).unwrap();
+        json["funded_occupancy"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<local_deadline_wire::Wire>(json).is_err());
+        wire.version = 2;
+        assert!(wire.validate(&now).is_err());
+        wire.version = 1;
+        wire.incarnation_digest = crate::sha256_hex(b"other incarnation");
+        assert!(wire.validate(&now).is_err());
+        wire.incarnation_digest = now.incarnation_digest.clone();
+        wire.contract_digest = crate::sha256_hex(b"other contract");
+        assert!(wire.validate(&now).is_err());
+        wire.contract_digest = now.contract_digest.clone();
+        wire.cleanup_tick = wire.service_tick - 1;
+        assert!(wire.validate(&now).is_err());
+        wire.cleanup_tick = wire.service_tick;
+        wire.service_tick = now.tick_ns;
+        assert!(wire.validate(&now).is_err());
+    }
+
+    #[test]
+    fn descriptor_reader_refuses_wrong_clock_identity_and_oversized_packet() {
+        let handoff = pair();
+        let mut wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
+        wire.clock_ino ^= 1;
+        let wrong = crate::sealed_memfd(c"wrong-clock-identity", &serde_json::to_vec(&wire).unwrap()).unwrap();
+        assert!(local_deadline_wire::read(&wrong, &handoff.clock).is_err());
+        let oversized = crate::sealed_memfd(c"oversized-deadline", &vec![b' '; original_window::MAX_BYTES + 1]).unwrap();
+        assert!(local_deadline_wire::read(&oversized, &handoff.clock).is_err());
+        let foreign = crate::sealed_memfd(c"foreign-clock", b"not a namespace").unwrap();
+        assert!(local_deadline_wire::read(&handoff.bound, &foreign).is_err());
+        let lease = crate::exec::retain_fork_sensitive_descriptors_until(handoff.service).unwrap();
+        let unsealed = crate::exec::InheritedDescriptorAuthority::from_owned_file(
+            std::fs::File::open("/dev/null").unwrap(), &lease,
+        ).unwrap();
+        assert!(local_deadline_wire::read(&unsealed, &handoff.clock).is_err());
+    }
+
+    #[test]
+    fn role_validation_precedes_ownership_and_arithmetic_refuses_overflow() {
+        for (bound, clock) in [(0, 9), (9, 1), (2, 9), (9, 9)] {
+            assert!(unsafe { AdoptedOriginalLocalDeadlines::take_inherited(bound, clock) }.is_err());
+        }
+        assert!(local_deadline_wire::expiry(u64::MAX, Duration::from_nanos(1)).is_err());
+        assert!(local_deadline_wire::expiry(0, Duration::from_secs(u64::MAX)).is_err());
+        assert!(local_deadline_wire::expiry(0, Duration::ZERO).is_err());
+    }
+}
 
 /// Platform-neutral behavior promised by Lillux's durable occupancy clock.
 /// The host-specific clock identifier and syscall never cross this boundary.
