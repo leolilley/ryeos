@@ -1,10 +1,10 @@
-# ryeos:signed:2026-10-01T13:09:46Z:b370cb602d19821f19e7a80a167ec4c96c32fbe0401087a5a8937bd13f37330f:bTaNcQcd2boaL8LGih+9vzW6Z82TgBl99C0vtfPsNeNVX4rH6Y/Uyr/CtidPgMT1I0A12iHsoE78WrLr7grOAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
 description: Check the actual Q command and independent diagnostic through restricted daemon callbacks; propose finite claims for issuer corroboration.
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/qualification_consumer_callback
 effects: live
+filesystem_authority: captured_execution
 required_caps: []
 external_product_slots:
   # The verifier inspects the unqualified witness through its own existing
