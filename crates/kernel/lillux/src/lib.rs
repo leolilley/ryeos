@@ -92,7 +92,8 @@ pub use process_control::{
 };
 pub use secure_fs::{EmptyMountTargetReservation, EphemeralDescriptorFileLink};
 pub use subordinate_process::{
-    PinnedSubordinateProcessRequest, SubordinateDiagnosticDrain, SubordinateDiagnosticDrainEnd,
+    PinnedSubordinateProcessRequest, RootTerminalSubordinateFailure, SubordinateDiagnosticDrain,
+    SubordinateDiagnosticDrainEnd,
     SubordinateProcess, SubordinateProcessDiagnostics, SubordinateProcessError,
     SubordinateProcessExit, SubordinateProcessInput, SubordinateProcessOutput,
     SubordinateProcessRequest,

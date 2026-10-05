@@ -46,11 +46,46 @@ pub struct PinnedSubordinateProcessRequest {
 
 /// One exact subordinate child. This never attests descendant settlement.
 pub struct SubordinateProcess {
-    child: Child,
+    child: Option<Child>,
     stdin: Option<SubordinateProcessInput>,
     stdout: Option<SubordinateProcessOutput>,
     stderr: Option<SubordinateProcessError>,
     reaped: bool,
+}
+
+/// Unresolved exact-child ownership retained until enclosing root termination.
+///
+/// This opaque, non-Clone owner grants no success or settlement evidence and
+/// exposes no child PID or signaling capability. Its destructor requests
+/// best-effort exact-child termination but NEVER waits or reaps. The enclosing
+/// process-scope authority must terminate and settle the root and descendants.
+/// Keep this owner in the invocation's typed terminal failure state until root
+/// exit. Dropping it early abandons observation; it is never successful cleanup.
+///
+/// Streams still held by SubordinateProcess transfer here. Streams already taken
+/// and diagnostic tasks remain separately owned by the invocation and must also
+/// be retained through unresolved failure. This does not capture those owners.
+#[must_use = "retain unresolved child ownership through terminal root failure"]
+pub struct RootTerminalSubordinateFailure {
+    child: Option<Child>,
+    _stdin: Option<SubordinateProcessInput>,
+    _stdout: Option<SubordinateProcessOutput>,
+    _stderr: Option<SubordinateProcessError>,
+    reaped: bool,
+}
+
+impl Drop for RootTerminalSubordinateFailure {
+    fn drop(&mut self) {
+        if !self.reaped {
+            if let Some(child) = self.child.as_mut() {
+                // Child::kill requests exact-child termination. No wait,
+                // try_wait, task join or descendant settlement occurs here.
+                let _ = child.kill();
+            }
+        }
+        // std::process::Child destruction does not wait. Pipe destruction
+        // closes retained descriptors; it does not produce EOF/reap evidence.
+    }
 }
 
 pub struct SubordinateProcessInput {
@@ -242,7 +277,7 @@ impl SubordinateProcess {
             .take()
             .map(|output| SubordinateProcessError { output });
         Ok(Self {
-            child,
+            child: Some(child),
             stdin,
             stdout,
             stderr,
@@ -275,6 +310,8 @@ impl SubordinateProcess {
 
     pub fn try_exit(&mut self) -> Result<Option<SubordinateProcessExit>, String> {
         self.child
+            .as_mut()
+            .expect("ordinary subordinate owns exact child")
             .try_wait()
             .map(|status| {
                 status.map(|status| {
@@ -289,7 +326,9 @@ impl SubordinateProcess {
     }
 
     pub fn cooperative_termination(&self) -> Result<CooperativeChildTermination, String> {
-        CooperativeChildTermination::for_child(&self.child)
+        CooperativeChildTermination::for_child(
+            self.child.as_ref().expect("ordinary subordinate owns exact child"),
+        )
     }
 
     /// Observe/reap only this child under one absolute deadline. Timeout does
@@ -322,6 +361,8 @@ impl SubordinateProcess {
             return Ok(Some(exit));
         }
         self.child
+            .as_mut()
+            .expect("ordinary subordinate owns exact child")
             .kill()
             .map_err(|error| format!("kill exact subordinate child: {error}"))?;
         self.wait_exact_child_until(deadline)
@@ -330,6 +371,8 @@ impl SubordinateProcess {
     pub fn wait_exact_child(&mut self) -> Result<SubordinateProcessExit, String> {
         let status = self
             .child
+            .as_mut()
+            .expect("ordinary subordinate owns exact child")
             .wait()
             .map_err(|error| format!("wait for subordinate process: {error}"))?;
         self.reaped = true;
@@ -339,12 +382,34 @@ impl SubordinateProcess {
         })
     }
 
+    /// Consume this exact child into unresolved terminal root-failure custody.
+    ///
+    /// This infallible transfer neither signals nor waits. Ordinary Drop loses
+    /// its child before running, so it cannot enter unbounded kill/wait. Use only
+    /// when bounded local cleanup could not complete and the enclosing retained
+    /// root owner will refuse and exit under its process-scope supervisor.
+    /// Already-taken IO/drain/task owners must remain in that same invocation.
+    /// This creates no cleanup budget and no evidence of child/descendant death.
+    pub fn into_root_terminal_failure(mut self) -> RootTerminalSubordinateFailure {
+        RootTerminalSubordinateFailure {
+            child: self.child.take(),
+            _stdin: self.stdin.take(),
+            _stdout: self.stdout.take(),
+            _stderr: self.stderr.take(),
+            reaped: self.reaped,
+        }
+    }
+
     fn terminate_and_reap(&mut self) {
         if self.reaped {
             return;
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let Some(child) = self.child.as_mut() else {
+            // Only consuming terminal handoff removes the exact child.
+            return;
+        };
+        let _ = child.kill();
+        let _ = child.wait();
         self.reaped = true;
     }
 }
@@ -352,6 +417,62 @@ impl SubordinateProcess {
 impl Drop for SubordinateProcess {
     fn drop(&mut self) {
         self.terminate_and_reap();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod terminal_failure_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    // Authored ownership regression cases. They do not attest enclosing scope
+    // settlement or prove a deadline bound; execution is separately authorized.
+    fn child_with_pipes() -> SubordinateProcess {
+        SubordinateProcess::spawn(SubordinateProcessRequest {
+            cmd: "/bin/sh".to_owned(),
+            argv0: None,
+            args: vec!["-c".to_owned(), "exit 0".to_owned()],
+            cwd: "/".to_owned(),
+            envs: Vec::new(),
+            limits: None,
+            inherited_fds: Vec::new(),
+        })
+        .expect("spawn test child")
+    }
+
+    #[test]
+    fn terminal_handoff_preserves_exact_child_and_retained_pipe_descriptors() {
+        let process = child_with_pipes();
+        let pid = process.child.as_ref().unwrap().id();
+        let input = process.stdin.as_ref().unwrap().input.as_raw_fd();
+        let output = process.stdout.as_ref().unwrap().output.as_raw_fd();
+        let error = process.stderr.as_ref().unwrap().output.as_raw_fd();
+        let mut terminal = process.into_root_terminal_failure();
+        // Settle test-only child explicitly before assertions. Production
+        // terminal owner intentionally exposes no observe/wait/recovery API.
+        let child = terminal.child.as_mut().unwrap();
+        let transferred_pid = child.id();
+        child.wait().expect("reap test child");
+        terminal.reaped = true;
+        assert_eq!(transferred_pid, pid);
+        assert_eq!(terminal._stdin.as_ref().unwrap().input.as_raw_fd(), input);
+        assert_eq!(terminal._stdout.as_ref().unwrap().output.as_raw_fd(), output);
+        assert_eq!(terminal._stderr.as_ref().unwrap().output.as_raw_fd(), error);
+    }
+
+    #[test]
+    fn terminal_handoff_does_not_reacquire_previously_taken_output() {
+        let mut process = child_with_pipes();
+        let output = process.take_output().expect("take exact output owner");
+        let descriptor = output.output.as_raw_fd();
+        let mut terminal = process.into_root_terminal_failure();
+        terminal.child.as_mut().unwrap().wait().expect("reap test child");
+        terminal.reaped = true;
+        assert!(terminal._stdout.is_none());
+        assert_eq!(output.output.as_raw_fd(), descriptor);
+        // The invocation, not terminal child ownership, retains taken IO.
+        drop(output);
+        drop(terminal);
     }
 }
 
