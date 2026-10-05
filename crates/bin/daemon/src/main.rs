@@ -105,22 +105,74 @@ impl Drop for LifecycleExitGuard {
     }
 }
 
-/// Main owns the original exclusion/lifecycle guards outside the run future.
-/// This envelope currently contains only the structurally empty selected root.
+/// Main owns the original exclusion/lifecycle guards and Render custody outside
+/// the run future. The selected root remains structurally empty in this cut.
 struct DaemonSelectedComposition {
     root: ryeos_executor::SelectedInvocationCompositionBarrier,
     process_state_lock: Option<state_lock::StateLock>,
     lifecycle_exit: Option<LifecycleExitGuard>,
+    persistent_pool_custody: Option<Arc<ryeos_app::persistent_session::PersistentSessionPool>>,
+    app_state_custody: Option<AppState>,
 }
 
 impl DaemonSelectedComposition {
     fn bootstrap() -> Self {
         let (root, _unpublished_attachment) =
             ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
-        Self { root, process_state_lock: None, lifecycle_exit: None }
+        Self {
+            root,
+            process_state_lock: None,
+            lifecycle_exit: None,
+            persistent_pool_custody: None,
+            app_state_custody: None,
+        }
     }
 
-    fn arm_from_app_generation(&mut self, app: &AppState) -> Result<()> {
+    fn retain_persistent_pool(
+        &mut self,
+        pool: Arc<ryeos_app::persistent_session::PersistentSessionPool>,
+    ) {
+        self.persistent_pool_custody = Some(pool);
+    }
+
+    fn adopt_app_state(&mut self, app: AppState) {
+        self.app_state_custody = Some(app);
+        self.persistent_pool_custody.take();
+    }
+
+    fn app_state(&self) -> Option<&AppState> {
+        self.app_state_custody.as_ref()
+    }
+
+    fn app_state_mut(&mut self) -> Option<&mut AppState> {
+        self.app_state_custody.as_mut()
+    }
+
+    fn release_app_state_after_drain(&mut self) {
+        self.app_state_custody.take();
+    }
+
+    fn has_unresolved_render_custody(&self) -> bool {
+        self.persistent_pool_custody.is_some() || self.app_state_custody.is_some()
+    }
+
+    async fn hold_unresolved_render_custody(&self) -> ! {
+        let _retained_composition = self;
+        std::future::pending::<()>().await;
+        unreachable!("unresolved Render custody hold cannot complete")
+    }
+
+    fn hold_unresolved_render_custody_sync(&self) -> ! {
+        loop {
+            std::thread::park();
+        }
+    }
+
+    fn arm_retained_app_generation(&mut self) -> Result<()> {
+        let app = self
+            .app_state_custody
+            .as_ref()
+            .context("actual AppState custody is absent")?;
         self.process_state_lock.as_ref().context("daemon state lock is absent")?
             .ensure_protects_app_root(&app.config.app_root)?;
         let lifecycle = self.lifecycle_exit.as_ref().context("daemon lifecycle owner is absent")?;
@@ -132,6 +184,9 @@ impl DaemonSelectedComposition {
     }
 
     fn close_after_run(&self) {
+        if self.has_unresolved_render_custody() {
+            self.hold_unresolved_render_custody_sync();
+        }
         self.root.close_empty_bootstrap();
     }
 
@@ -147,6 +202,12 @@ impl DaemonSelectedComposition {
 
 impl Drop for DaemonSelectedComposition {
     fn drop(&mut self) {
+        if self.has_unresolved_render_custody() {
+            // Drop cannot await. Parking in place keeps every field, including
+            // the exact pool/AppState and original exclusion/lifecycle guards,
+            // alive without making a cleanup or lifecycle claim.
+            self.hold_unresolved_render_custody_sync();
+        }
         self.close_after_run();
         // Record the fallback while the exact exclusion owner is still held.
         if let Some(lifecycle) = self.lifecycle_exit.as_mut()
@@ -592,6 +653,11 @@ fn main() -> Result<()> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         runtime.block_on(run(cli, &mut composition, external_host_runtime))
     }));
+    if composition.has_unresolved_render_custody() {
+        // Do not close the composition, stop the runtime, or resume an unwind
+        // while the exact Render pool/AppState owner remains unproved.
+        runtime.block_on(composition.hold_unresolved_render_custody());
+    }
     composition.close_after_run();
 
     // Tokio cannot cancel work already admitted to spawn_blocking. Never let
@@ -939,7 +1005,6 @@ async fn run(
             .await
     });
     let progress_task = tokio::spawn(startup::progress_ticker(startup.clone()));
-    let shutdown_drain_state = Arc::new(Mutex::new(None::<AppState>));
     // Give both spawned servers a scheduling turn before any synchronous
     // bootstrap work resumes; listener bind alone is not the accept-loop
     // publication boundary.
@@ -1374,7 +1439,7 @@ async fn run(
             let persistent_session_policy = node_policy_snapshot.require::<
                 ryeos_app::node_policy::sections::persistent_sessions::PersistentSessionPolicy,
             >()?;
-            let persistent_sessions = if persistent_session_policy.enabled {
+            let persistent_sessions = Arc::new(if persistent_session_policy.enabled {
                 ryeos_app::persistent_session::PersistentSessionPool::with_limits(
                     persistent_session_policy
                         .limits
@@ -1383,7 +1448,10 @@ async fn run(
                 )?
             } else {
                 ryeos_app::persistent_session::PersistentSessionPool::disabled()
-            };
+            });
+            // Retain this exact pool Arc before any later fallible preparation
+            // or AppState field construction can return or unwind.
+            composition.retain_persistent_pool(Arc::clone(&persistent_sessions));
             let execution_policy = node_policy_snapshot.require::<
                 ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
             >()?;
@@ -1405,7 +1473,7 @@ async fn run(
                     .retain(),
             );
 
-            let mut app_state = AppState {
+            let app_state = AppState {
                 config: Arc::new(config.clone()),
                 daemon_build: build.clone(),
                 isolation,
@@ -1506,14 +1574,21 @@ async fn run(
                     }
                 },
                 accounting,
-                persistent_sessions: Arc::new(persistent_sessions),
+                persistent_sessions,
                 execution_resources: Arc::new(execution_resources),
                 scoped_producer_authorities: Arc::new(Default::default()),
                 scoped_producer_processes: Arc::new(Default::default()),
                 qualification_workspace_custody: Arc::new(Default::default()),
             };
-            composition.arm_from_app_generation(&app_state)
+            // Move the completed AppState under outer custody before the
+            // fallible generation arm and recovery sequence. This preserves
+            // the exact pool allocation installed above.
+            composition.adopt_app_state(app_state);
+            composition.arm_retained_app_generation()
                 .context("register actual App generation in empty selected composition")?;
+            let app_state = composition
+                .app_state_mut()
+                .context("actual AppState custody disappeared after generation arm")?;
             // No selected attachment is published: generation bookkeeping is
             // not native owner installation or permission to contact.
             // This is a generation cut, not a periodic repair. Settle every
@@ -1564,10 +1639,6 @@ async fn run(
                     ryeosd::accounting_outbox::run_publisher(ledger, outbox_store).await;
                 });
             }
-            *shutdown_drain_state
-                .lock()
-                .expect("shutdown drain state mutex poisoned") = Some(app_state.clone());
-
             // A durable Remove journal record may survive after its signed head was
             // already unlinked. Finish its runtime/projection cleanup before any
             // execution reconciliation can recreate operational pins, and never
@@ -1877,7 +1948,7 @@ async fn run(
             tracing::info!("scheduler: timer loop started after readiness publication");
 
             let result =
-                supervise_background_tasks(app_state, ui_state_for_hints, scheduler_task).await;
+                supervise_background_tasks((*app_state).clone(), ui_state_for_hints, scheduler_task).await;
             result
         };
         let mut daemon_work = Box::pin(daemon_work);
@@ -1971,26 +2042,26 @@ async fn run(
             }
         }
 
-        let shutdown_state = {
-            let mut guard = shutdown_drain_state
-                .lock()
-                .expect("shutdown drain state mutex poisoned");
-            guard.take()
-        };
-        if let Some(state) = shutdown_state {
-            // The parent retains `state` across this awaited task. A panic or
-            // cancellation drops only the task's clone; it cannot consume the
-            // original pool owner before we select the custody hold.
+        if let Some(state) = composition.app_state() {
+            // The outer composition retains the original AppState across this
+            // awaited task. A panic/cancellation drops only task clones.
             let drain_state = state.clone();
+            let held_state = drain_state.clone();
             let drain_task = tokio::spawn(async move { drain_running_threads(&drain_state).await });
             let drain_result = map_shutdown_drain_join(drain_task.await);
-            let mut custody = Some((state, &*composition));
+            let mut custody = Some((held_state, &*composition));
             complete_shutdown_drain(drain_result, &result, &mut custody).await;
+            drop(custody);
+            composition.release_app_state_after_drain();
         }
 
         (result, startup_cancelled, startup_failed)
     };
     let (daemon_result, startup_cancelled, startup_failed) = daemon_result;
+
+    if composition.has_unresolved_render_custody() {
+        composition.hold_unresolved_render_custody().await;
+    }
 
     let exit_reason = if daemon_result.is_ok() || startup_cancelled {
         "signal"
@@ -4178,6 +4249,8 @@ mod selected_composition_tests {
             root: barrier,
             process_state_lock: Some(lock),
             lifecycle_exit: Some(LifecycleExitGuard::new(state_dir, started)),
+            persistent_pool_custody: None,
+            app_state_custody: None,
         }, attachment)
     }
 
@@ -4372,5 +4445,29 @@ mod shutdown_custody_tests {
         complete_shutdown_drain(Ok(true), &prior, &mut custody).await;
         assert!(custody.is_none());
         assert!(dropped.load(Ordering::Acquire));
+    }
+}
+
+#[cfg(test)]
+mod render_composition_custody_tests {
+    use super::DaemonSelectedComposition;
+    use std::sync::Arc;
+
+    #[test]
+    fn outer_composition_retains_the_same_pool_arc_as_unresolved_custody() {
+        let mut composition = DaemonSelectedComposition::bootstrap();
+        let pool = Arc::new(ryeos_app::persistent_session::PersistentSessionPool::disabled());
+        composition.retain_persistent_pool(Arc::clone(&pool));
+
+        assert!(composition.has_unresolved_render_custody());
+        assert!(Arc::ptr_eq(
+            composition.persistent_pool_custody.as_ref().unwrap(),
+            &pool,
+        ));
+
+        // Clear fixture custody so this test can return without entering the
+        // production Drop hold. AppState adoption is not exercised here.
+        composition.persistent_pool_custody.take();
+        assert!(!composition.has_unresolved_render_custody());
     }
 }
