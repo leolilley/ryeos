@@ -17,6 +17,7 @@ SOURCE = Path(__file__).resolve().parents[2] / '.ai/workers/local-inference/lib/
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(SOURCE))
 import runtime
+import cuda_lifecycle
 
 
 class RuntimeTests(unittest.TestCase):
@@ -153,7 +154,15 @@ class RuntimeTests(unittest.TestCase):
                 status='closed', observation_delivered=True,
             ),
         )
-        lifecycle_module = SimpleNamespace(install=lambda **kwargs: calls.append(('install', kwargs)) or lifecycle)
+        def install(**kwargs):
+            calls.append(('install', kwargs))
+            kwargs['publish_owner'](lifecycle)
+            return lifecycle
+        lifecycle_module = SimpleNamespace(
+            install=install,
+            _fence_installation_owners=cuda_lifecycle._fence_installation_owners,
+            _InstallationFailureEvidence=cuda_lifecycle._InstallationFailureEvidence,
+        )
         product_modules = {
             'compiler': SimpleNamespace(install_admitted_compiler=lambda _: calls.append(('compiler', None))),
             'cpu_support': SimpleNamespace(install_cpu_support=lambda *_: calls.append(('cpu', None))),
@@ -189,7 +198,16 @@ class RuntimeTests(unittest.TestCase):
             cuInit=lambda *_: (_ for _ in ()).throw(AssertionError('raw CUDA init')),
             cuDeviceGetCount=lambda *_: (_ for _ in ()).throw(AssertionError('raw device count')),
         )
-        lifecycle_module = SimpleNamespace(install=lambda **kwargs: calls.append(('install', kwargs)))
+        lifecycle = SimpleNamespace()
+        def install(**kwargs):
+            calls.append(('install', kwargs))
+            kwargs['publish_owner'](lifecycle)
+            return lifecycle
+        lifecycle_module = SimpleNamespace(
+            install=install,
+            _fence_installation_owners=cuda_lifecycle._fence_installation_owners,
+            _InstallationFailureEvidence=cuda_lifecycle._InstallationFailureEvidence,
+        )
         with patch.object(runtime, 'prepare_environment', return_value=(self.root, self.root, self.root, self.root)):
             with patch.object(runtime, 'verify_origins'):
                 with patch.dict(sys.modules, {
@@ -204,6 +222,138 @@ class RuntimeTests(unittest.TestCase):
                             )
         self.assertEqual([name for name, _ in calls], ['install'])
         self.assertIs(calls[0][1]['require_single_visible_device'], True)
+
+    def failed_install_join(self, install):
+        selected = runtime.TreeBounds(100, 10, 1024, 4096)
+        with patch.object(runtime, 'prepare_environment', return_value=(self.root,) * 4), \
+                patch.object(runtime, 'verify_origins'), \
+                patch.object(cuda_lifecycle, 'install', side_effect=install), \
+                patch.object(runtime, 'run_with_lifecycle') as enter_session:
+            try:
+                runtime.run_product(
+                    observe=lambda _: None, bindings=object(),
+                    gnu_bounds=selected, driver_bounds=selected,
+                    expected_uuid_v2_hex='1' * 32,
+                )
+            except BaseException as error:
+                traceback = error.__traceback__
+                while traceback and traceback.tb_frame.f_code.co_name != 'run_product':
+                    traceback = traceback.tb_next
+                self.assertIsNotNone(traceback)
+                evidence = traceback.tb_frame.f_locals['failure_evidence']
+                enter_session.assert_not_called()
+                return error, evidence
+        self.fail('invalid installation entered the session')
+
+    def test_missing_and_substituted_returned_owner_are_fenced_before_session(self):
+        for mode in ('missing', 'substituted'):
+            calls = []
+            first = SimpleNamespace(abort_installation=lambda error: calls.append(('first', error)))
+            returned = SimpleNamespace(abort_installation=lambda error: calls.append(('returned', error)))
+            def install(**kwargs):
+                if mode == 'substituted':
+                    kwargs['publish_owner'](first)
+                return returned
+            with self.subTest(mode=mode):
+                error, evidence = self.failed_install_join(install)
+                self.assertIsInstance(error, RuntimeError)
+                self.assertIn('unpublished owner', str(error))
+                self.assertEqual([name for name, _ in calls],
+                                 ['returned'] if mode == 'missing' else ['first', 'returned'])
+                self.assertTrue(all(primary is error for _, primary in calls))
+                self.assertIs(evidence.owners[-1], returned)
+                self.assertFalse(evidence.fence_failures)
+
+    def test_duplicate_publication_retains_first_and_attempts_distinct_incoming(self):
+        for distinct in (False, True):
+            calls = []
+            first = SimpleNamespace(abort_installation=lambda error: calls.append(('first', error)))
+            incoming = SimpleNamespace(abort_installation=lambda error: calls.append(('incoming', error))) if distinct else first
+            def install(**kwargs):
+                kwargs['publish_owner'](first)
+                kwargs['publish_owner'](incoming)
+                self.fail('duplicate publication was accepted')
+            with self.subTest(distinct=distinct):
+                error, evidence = self.failed_install_join(install)
+                self.assertIn('duplicated', str(error))
+                self.assertIs(evidence.owners[0], first)
+                self.assertIs(evidence.owners[1], incoming)
+                self.assertEqual([name for name, _ in calls], ['first', 'incoming'] if distinct else ['first'])
+                self.assertTrue(all(primary is error for _, primary in calls))
+
+    def test_runtime_preserves_primary_and_second_owner_after_first_fence_failure(self):
+        primary = RuntimeError('installation failed after two publications')
+        secondary = ValueError('first owner fence failed')
+        calls = []
+        def first_fence(error):
+            calls.append(('first', error))
+            raise secondary
+        first = SimpleNamespace(abort_installation=first_fence)
+        second = SimpleNamespace(abort_installation=lambda error: calls.append(('second', error)))
+        def install(**kwargs):
+            kwargs['publish_owner'](first)
+            # The duplicate callback error is the initiating production failure.
+            try:
+                kwargs['publish_owner'](second)
+            except RuntimeError:
+                raise primary
+        error, evidence = self.failed_install_join(install)
+        self.assertIs(error, primary)
+        self.assertEqual([name for name, _ in calls], ['first', 'second'])
+        self.assertTrue(all(observed is primary for _, observed in calls))
+        self.assertIs(evidence.fence_failures[0], secondary)
+
+    def test_runtime_helper_error_is_secondary_and_primary_traceback_retains_custody(self):
+        primary = RuntimeError('install failure')
+        helper_error = ValueError('evidence helper failure')
+        calls = []
+        owner = SimpleNamespace(abort_installation=lambda error: calls.append(error))
+        def install(**kwargs):
+            kwargs['publish_owner'](owner)
+            raise primary
+        actual_fence = cuda_lifecycle._fence_installation_owners
+        def fence(error, evidence):
+            actual_fence(error, evidence)
+            raise helper_error
+        with patch.object(cuda_lifecycle, '_fence_installation_owners', side_effect=fence):
+            error, evidence = self.failed_install_join(install)
+        self.assertIs(error, primary)
+        self.assertEqual(calls, [primary])
+        self.assertIs(evidence.owners[0], owner)
+        self.assertIs(evidence.evidence_failures[0], helper_error)
+
+    def test_runtime_hostile_metadata_preserves_primary_and_all_owner_attempts(self):
+        class HostileError(RuntimeError):
+            def __getattribute__(self, name):
+                if name.startswith('_installation_') or name == '__notes__':
+                    raise ValueError('metadata read refused')
+                return super().__getattribute__(name)
+            def __setattr__(self, name, value):
+                if name.startswith('_installation_') or name == '__notes__':
+                    raise ValueError('metadata write refused')
+                return super().__setattr__(name, value)
+        primary = HostileError('original install error')
+        secondary = ValueError('first fence failure')
+        calls = []
+        def first_fence(error):
+            calls.append(('first', error))
+            raise secondary
+        first = SimpleNamespace(abort_installation=first_fence)
+        second = SimpleNamespace(abort_installation=lambda error: calls.append(('second', error)))
+        def install(**kwargs):
+            kwargs['publish_owner'](first)
+            try:
+                kwargs['publish_owner'](second)
+            except RuntimeError:
+                raise primary
+        error, evidence = self.failed_install_join(install)
+        self.assertIs(error, primary)
+        self.assertEqual([name for name, _ in calls], ['first', 'second'])
+        self.assertTrue(all(observed is primary for _, observed in calls))
+        self.assertIs(evidence.owners[0], first)
+        self.assertIs(evidence.owners[1], second)
+        self.assertIs(evidence.fence_failures[0], secondary)
+        self.assertTrue(evidence.evidence_failures)
 
     def test_lifecycle_wraps_import_session_and_constructor_failure(self):
         for fail in ('import', 'constructor', None):
