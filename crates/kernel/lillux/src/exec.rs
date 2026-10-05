@@ -2058,6 +2058,156 @@ pub fn inherited_executable_path(descriptor: u32) -> Result<std::path::PathBuf, 
 }
 
 #[cfg(all(test, unix))]
+mod pinned_duplex_forwarding_tests {
+    use super::*;
+    use crate::subordinate_process::PinnedSubordinateProcessRequest;
+
+    fn request(fixture: &tempfile::TempDir) -> PinnedSubordinateProcessRequest {
+        std::fs::write(fixture.path().join("target"), b"fixture; never executed").unwrap();
+        let cwd = crate::PinnedDirectory::open(fixture.path()).unwrap().unwrap();
+        let executable = cwd
+            .open_pinned_regular_descendant(std::path::Path::new("target"), false)
+            .unwrap()
+            .unwrap();
+        PinnedSubordinateProcessRequest {
+            executable,
+            cwd,
+            argv0: Some("selected-target".to_owned()),
+            args: vec!["fixed-argument".to_owned()],
+            envs: vec![("FIXTURE".to_owned(), "preserved".to_owned())],
+            limits: None,
+            inherited_fds: Vec::new(),
+        }
+    }
+
+    fn inventory(request: &PinnedSubordinateProcessRequest) -> (Vec<(String, String)>, Vec<u32>) {
+        (
+            request.envs.clone(),
+            request
+                .inherited_fds
+                .iter()
+                .map(|authority| authority.inherited_descriptor().unwrap())
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn forwarding_binds_registered_cloexec_duplicate_and_preserves_original() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut request = request(&fixture);
+        let (channel, peer) = inherited_duplex_channel_pair().unwrap();
+        let original = channel.stream.inherited_descriptor().unwrap();
+        channel
+            .forward_to_pinned_subordinate(&mut request, "SESSION_ROLE")
+            .unwrap();
+        let forwarded = &request.inherited_fds[0];
+        let coordinate = forwarded.inherited_descriptor().unwrap();
+        assert!(coordinate >= 3);
+        assert_ne!(coordinate, original);
+        assert!(forwarded.same_file_identity(&channel.stream).unwrap());
+        assert_eq!(
+            request.envs.last(),
+            Some(&("SESSION_ROLE".to_owned(), coordinate.to_string()))
+        );
+        let flags = unsafe { libc::fcntl(coordinate as i32, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        assert_eq!(channel.stream.inherited_descriptor().unwrap(), original);
+        assert_eq!(request.argv0.as_deref(), Some("selected-target"));
+        assert_eq!(request.args, ["fixed-argument"]);
+        // Exercise the actual connected endpoint, not just copied coordinates.
+        let mut peer_file = peer.channel.file();
+        peer_file.write_all(b"same").unwrap();
+        let mut forwarded_file = forwarded.file();
+        let mut bytes = [0; 4];
+        forwarded_file.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"same");
+        drop(request);
+        peer_file.write_all(b"live").unwrap();
+        let mut original_file = channel.stream.file();
+        original_file.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"live");
+    }
+
+    #[test]
+    fn invalid_roles_and_existing_role_collision_leave_request_unchanged() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut request = request(&fixture);
+        let (channel, _peer) = inherited_duplex_channel_pair().unwrap();
+        let oversized_role = "R".repeat(257);
+        for role in [
+            "", "1ROLE", "BAD=ROLE", "BAD\0ROLE", "HAS SPACE", "éROLE", &oversized_role,
+        ] {
+            let before = inventory(&request);
+            assert!(channel.forward_to_pinned_subordinate(&mut request, role).is_err());
+            assert_eq!(inventory(&request), before);
+        }
+        let before = inventory(&request);
+        assert!(channel.forward_to_pinned_subordinate(&mut request, "FIXTURE").is_err());
+        assert_eq!(inventory(&request), before);
+        assert!(channel.stream.inherited_descriptor().unwrap() >= 3);
+    }
+
+    #[test]
+    fn repeat_and_distinct_descriptor_alias_forwarding_refuse_atomically() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut request = request(&fixture);
+        let (channel, _peer) = inherited_duplex_channel_pair().unwrap();
+        channel
+            .forward_to_pinned_subordinate(&mut request, "FIRST_ROLE")
+            .unwrap();
+        let before = inventory(&request);
+        assert!(channel.forward_to_pinned_subordinate(&mut request, "SECOND_ROLE").is_err());
+        assert_eq!(inventory(&request), before);
+        let alias = InheritedDuplexChannel {
+            stream: channel.stream.duplicate_at_or_above(59).unwrap(),
+        };
+        assert_ne!(
+            alias.stream.inherited_descriptor().unwrap(),
+            channel.stream.inherited_descriptor().unwrap()
+        );
+        assert!(alias.forward_to_pinned_subordinate(&mut request, "ALIAS_ROLE").is_err());
+        assert_eq!(inventory(&request), before);
+    }
+
+    #[test]
+    fn preexisting_descriptor_collision_refuses_without_mutation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut request = request(&fixture);
+        let (channel, _peer) = inherited_duplex_channel_pair().unwrap();
+        let (unrelated, _unrelated_peer) = inherited_duplex_channel_pair().unwrap();
+        request
+            .inherited_fds
+            .extend([unrelated.stream.clone(), unrelated.stream.clone()]);
+        let before = inventory(&request);
+        assert!(channel.forward_to_pinned_subordinate(&mut request, "NEW_ROLE").is_err());
+        assert_eq!(inventory(&request), before);
+        assert!(channel.stream.inherited_descriptor().unwrap() >= 3);
+    }
+
+    #[test]
+    fn distinct_channels_keep_distinct_role_and_authority_bindings() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut request = request(&fixture);
+        let (session, _session_peer) = inherited_duplex_channel_pair().unwrap();
+        let (cleanup, _cleanup_peer) = inherited_duplex_channel_pair().unwrap();
+        session
+            .forward_to_pinned_subordinate(&mut request, "SESSION_ROLE")
+            .unwrap();
+        cleanup
+            .forward_to_pinned_subordinate(&mut request, "CLEANUP_ROLE")
+            .unwrap();
+        let (envs, coordinates) = inventory(&request);
+        assert_eq!(coordinates.len(), 2);
+        assert_ne!(coordinates[0], coordinates[1]);
+        assert!(request.inherited_fds[0].same_file_identity(&session.stream).unwrap());
+        assert!(request.inherited_fds[1].same_file_identity(&cleanup.stream).unwrap());
+        assert!(envs.contains(&("SESSION_ROLE".to_owned(), coordinates[0].to_string())));
+        assert!(envs.contains(&("CLEANUP_ROLE".to_owned(), coordinates[1].to_string())));
+    }
+}
+
+#[cfg(all(test, unix))]
 mod inherited_directory_traversal_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
@@ -2810,6 +2960,77 @@ pub fn inherited_duplex_channel_pair()
 }
 
 impl InheritedDuplexChannel {
+    /// Forward this already-owned channel into one pinned subordinate request.
+    ///
+    /// The registered duplicate remains CLOEXEC in the parent and is bound to
+    /// its exact child environment role together with launch custody. No raw
+    /// descriptor or new protocol authority is returned. All validation and
+    /// duplication precede request mutation; errors preserve the request and
+    /// original channel. Pinned subordinate stdio remains separately piped.
+    ///
+    /// The caller retains the original through spawn failure and cleanup. After
+    /// successful launch it must deliberately close any originals/other copies
+    /// it no longer needs so they cannot keep peer EOF alive. This method does
+    /// not assert launch, peer retirement or process/resource settlement.
+    pub fn forward_to_pinned_subordinate(
+        &self,
+        request: &mut crate::subordinate_process::PinnedSubordinateProcessRequest,
+        environment_role: &str,
+    ) -> Result<(), String> {
+        #[cfg(not(unix))]
+        {
+            let _ = (request, environment_role);
+            Err("inherited duplex forwarding is unavailable on this platform".to_owned())
+        }
+        #[cfg(unix)]
+        {
+            let mut name = environment_role.bytes();
+            let valid_first = name
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+            if environment_role.len() > 256
+                || !valid_first
+                || !name.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                return Err("inherited duplex environment role is invalid".to_owned());
+            }
+            if request.envs.iter().any(|(role, _)| role == environment_role) {
+                return Err("pinned subordinate already contains this environment role".to_owned());
+            }
+            let source = self.stream.inherited_descriptor()?;
+            let mut coordinates = BTreeSet::new();
+            for authority in &request.inherited_fds {
+                let coordinate = authority.inherited_descriptor()?;
+                if !coordinates.insert(coordinate) {
+                    return Err("pinned subordinate contains duplicate descriptor coordinates".to_owned());
+                }
+                if coordinate == source
+                    || authority
+                        .same_file_identity(&self.stream)
+                        .map_err(|error| error.to_string())?
+                {
+                    return Err("pinned subordinate already retains this channel or an alias".to_owned());
+                }
+            }
+            // The existing authority API duplicates under the fork-sensitive
+            // lease, registers the owned handle and preserves parent CLOEXEC.
+            let duplicate = self.stream.duplicate_at_or_above(3)?;
+            let coordinate = duplicate.inherited_descriptor()?;
+            if coordinate < 3 || coordinates.contains(&coordinate) {
+                return Err("forwarded duplex descriptor collides with child inventory".to_owned());
+            }
+            // Build both replacements before publishing either part of the
+            // role/authority binding. A refused duplicate is dropped locally.
+            let mut envs = request.envs.clone();
+            envs.push((environment_role.to_owned(), coordinate.to_string()));
+            let mut inherited_fds = request.inherited_fds.clone();
+            inherited_fds.push(duplicate);
+            request.envs = envs;
+            request.inherited_fds = inherited_fds;
+            Ok(())
+        }
+    }
+
     /// Prove that the connected peer has not closed and has not sent bytes
     /// outside the caller's finished handshake. This is a point observation,
     /// not a process-lifetime or identity proof; the launch owner supplies
