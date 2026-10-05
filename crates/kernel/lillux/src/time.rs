@@ -265,11 +265,49 @@ impl MonotonicDeadline {
         }
     }
 
+    /// Compare process-local expiries without sampling, exporting or renewing time.
+    pub(crate) fn is_before(&self, other: &Self) -> bool {
+        self.deadline < other.deadline
+    }
+
     /// Remaining duration in this process-local monotonic clock domain.
     /// Returning zero is the only expiry representation exposed to callers;
     /// the host `Instant` never escapes Lillux.
     pub fn remaining(&self) -> Duration {
         self.deadline.saturating_duration_since(Instant::now())
+    }
+}
+
+#[cfg(test)]
+mod monotonic_deadline_ordering_tests {
+    use super::*;
+
+    #[test]
+    fn deadline_order_uses_exact_endpoints_and_accepts_equal_copies() {
+        let anchor = Instant::now();
+        let early = MonotonicDeadline { deadline: anchor };
+        let equal = early;
+        let late = MonotonicDeadline {
+            deadline: anchor + Duration::from_secs(1),
+        };
+        assert!(!early.is_before(&equal));
+        assert!(!equal.is_before(&early));
+        assert!(early.is_before(&late));
+        assert!(!late.is_before(&early));
+    }
+
+    #[test]
+    fn expired_endpoint_order_does_not_depend_on_remaining_samples() {
+        let anchor = Instant::now();
+        let earlier = anchor.checked_sub(Duration::from_secs(2));
+        let early = MonotonicDeadline {
+            deadline: earlier.unwrap_or(anchor),
+        };
+        let late = MonotonicDeadline { deadline: anchor };
+        assert!(early.has_elapsed());
+        assert!(late.has_elapsed());
+        assert_eq!(early.is_before(&late), earlier.is_some());
+        assert!(!late.is_before(&early));
     }
 }
 

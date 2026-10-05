@@ -2064,7 +2064,9 @@ mod pinned_duplex_forwarding_tests {
 
     fn request(fixture: &tempfile::TempDir) -> PinnedSubordinateProcessRequest {
         std::fs::write(fixture.path().join("target"), b"fixture; never executed").unwrap();
-        let cwd = crate::PinnedDirectory::open(fixture.path()).unwrap().unwrap();
+        let cwd = crate::PinnedDirectory::open(fixture.path())
+            .unwrap()
+            .unwrap();
         let executable = cwd
             .open_pinned_regular_descendant(std::path::Path::new("target"), false)
             .unwrap()
@@ -2136,14 +2138,28 @@ mod pinned_duplex_forwarding_tests {
         let (channel, _peer) = inherited_duplex_channel_pair().unwrap();
         let oversized_role = "R".repeat(257);
         for role in [
-            "", "1ROLE", "BAD=ROLE", "BAD\0ROLE", "HAS SPACE", "éROLE", &oversized_role,
+            "",
+            "1ROLE",
+            "BAD=ROLE",
+            "BAD\0ROLE",
+            "HAS SPACE",
+            "éROLE",
+            &oversized_role,
         ] {
             let before = inventory(&request);
-            assert!(channel.forward_to_pinned_subordinate(&mut request, role).is_err());
+            assert!(
+                channel
+                    .forward_to_pinned_subordinate(&mut request, role)
+                    .is_err()
+            );
             assert_eq!(inventory(&request), before);
         }
         let before = inventory(&request);
-        assert!(channel.forward_to_pinned_subordinate(&mut request, "FIXTURE").is_err());
+        assert!(
+            channel
+                .forward_to_pinned_subordinate(&mut request, "FIXTURE")
+                .is_err()
+        );
         assert_eq!(inventory(&request), before);
         assert!(channel.stream.inherited_descriptor().unwrap() >= 3);
     }
@@ -2157,7 +2173,11 @@ mod pinned_duplex_forwarding_tests {
             .forward_to_pinned_subordinate(&mut request, "FIRST_ROLE")
             .unwrap();
         let before = inventory(&request);
-        assert!(channel.forward_to_pinned_subordinate(&mut request, "SECOND_ROLE").is_err());
+        assert!(
+            channel
+                .forward_to_pinned_subordinate(&mut request, "SECOND_ROLE")
+                .is_err()
+        );
         assert_eq!(inventory(&request), before);
         let alias = InheritedDuplexChannel {
             stream: channel.stream.duplicate_at_or_above(59).unwrap(),
@@ -2166,7 +2186,11 @@ mod pinned_duplex_forwarding_tests {
             alias.stream.inherited_descriptor().unwrap(),
             channel.stream.inherited_descriptor().unwrap()
         );
-        assert!(alias.forward_to_pinned_subordinate(&mut request, "ALIAS_ROLE").is_err());
+        assert!(
+            alias
+                .forward_to_pinned_subordinate(&mut request, "ALIAS_ROLE")
+                .is_err()
+        );
         assert_eq!(inventory(&request), before);
     }
 
@@ -2180,7 +2204,11 @@ mod pinned_duplex_forwarding_tests {
             .inherited_fds
             .extend([unrelated.stream.clone(), unrelated.stream.clone()]);
         let before = inventory(&request);
-        assert!(channel.forward_to_pinned_subordinate(&mut request, "NEW_ROLE").is_err());
+        assert!(
+            channel
+                .forward_to_pinned_subordinate(&mut request, "NEW_ROLE")
+                .is_err()
+        );
         assert_eq!(inventory(&request), before);
         assert!(channel.stream.inherited_descriptor().unwrap() >= 3);
     }
@@ -2200,8 +2228,16 @@ mod pinned_duplex_forwarding_tests {
         let (envs, coordinates) = inventory(&request);
         assert_eq!(coordinates.len(), 2);
         assert_ne!(coordinates[0], coordinates[1]);
-        assert!(request.inherited_fds[0].same_file_identity(&session.stream).unwrap());
-        assert!(request.inherited_fds[1].same_file_identity(&cleanup.stream).unwrap());
+        assert!(
+            request.inherited_fds[0]
+                .same_file_identity(&session.stream)
+                .unwrap()
+        );
+        assert!(
+            request.inherited_fds[1]
+                .same_file_identity(&cleanup.stream)
+                .unwrap()
+        );
         assert!(envs.contains(&("SESSION_ROLE".to_owned(), coordinates[0].to_string())));
         assert!(envs.contains(&("CLEANUP_ROLE".to_owned(), coordinates[1].to_string())));
     }
@@ -2994,7 +3030,11 @@ impl InheritedDuplexChannel {
             {
                 return Err("inherited duplex environment role is invalid".to_owned());
             }
-            if request.envs.iter().any(|(role, _)| role == environment_role) {
+            if request
+                .envs
+                .iter()
+                .any(|(role, _)| role == environment_role)
+            {
                 return Err("pinned subordinate already contains this environment role".to_owned());
             }
             let source = self.stream.inherited_descriptor()?;
@@ -3002,14 +3042,18 @@ impl InheritedDuplexChannel {
             for authority in &request.inherited_fds {
                 let coordinate = authority.inherited_descriptor()?;
                 if !coordinates.insert(coordinate) {
-                    return Err("pinned subordinate contains duplicate descriptor coordinates".to_owned());
+                    return Err(
+                        "pinned subordinate contains duplicate descriptor coordinates".to_owned(),
+                    );
                 }
                 if coordinate == source
                     || authority
                         .same_file_identity(&self.stream)
                         .map_err(|error| error.to_string())?
                 {
-                    return Err("pinned subordinate already retains this channel or an alias".to_owned());
+                    return Err(
+                        "pinned subordinate already retains this channel or an alias".to_owned(),
+                    );
                 }
             }
             // The existing authority API duplicates under the fork-sensitive
@@ -4741,6 +4785,56 @@ struct PendingForkControlDescriptor {
 }
 
 impl PendingForkControlDescriptor {
+    #[cfg(target_os = "linux")]
+    fn close_selected_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+    ) -> Result<(), String> {
+        self.close_selected_with_request_until(deadline, mode, None)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn close_selected_with_request_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+        request_expiry: Option<Instant>,
+    ) -> Result<(), String> {
+        if self.writer.is_none() {
+            return Ok(());
+        }
+        loop {
+            mode.check(deadline)?;
+            if matches!(mode, SelectedCleanupMode::BoundedOriginal)
+                && request_expiry.is_some_and(|expiry| Instant::now() >= expiry)
+            {
+                return Err("selected request expired before release writer closure".into());
+            }
+            let barrier = direct_attachment_fork_barrier();
+            let locked = barrier.state.try_lock();
+            let mut state = match locked {
+                Ok(state) => state,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    mode.pause(deadline);
+                    continue;
+                }
+            };
+            if state.fork_quiesced {
+                drop(state);
+                mode.pause(deadline);
+                continue;
+            }
+            if !state.pending_fork_control_fds.remove(&self.fd) {
+                return Err("selected release descriptor registration lost".into());
+            }
+            self.writer.take();
+            barrier.changed.notify_all();
+            return Ok(());
+        }
+    }
+
     fn write_release(&mut self) -> std::io::Result<()> {
         self.writer
             .as_mut()
@@ -4751,6 +4845,11 @@ impl PendingForkControlDescriptor {
 
 impl Drop for PendingForkControlDescriptor {
     fn drop(&mut self) {
+        // Selected bounded closure already unregistered and closed under the
+        // same barrier. Ordinary descriptors keep their existing Drop path.
+        if self.writer.is_none() {
+            return;
+        }
         let barrier = direct_attachment_fork_barrier();
         barrier
             .waiting_descriptor_closers
@@ -4951,6 +5050,18 @@ pub struct RunningProcess {
     stdout_thread: Option<thread::JoinHandle<()>>,
     stderr_thread: Option<thread::JoinHandle<()>>,
     status_thread: Option<thread::JoinHandle<()>>,
+    /// Selected setup retains the same registered status reader until its
+    /// real worker starts. Failed worker/configuration cannot lose the channel.
+    #[cfg(target_os = "linux")]
+    selected_setup_status: Option<InheritedDescriptorAuthority>,
+    /// Only the selected stage machine can suppress legacy cleanup after
+    /// proving every local obligation. Raw native/output custody stays here.
+    #[cfg(target_os = "linux")]
+    selected_cleanup_complete: bool,
+    /// Fixed diagnostic facts in stdin/stdout/stderr/status order. A panicked
+    /// join ends that worker lifetime; it is not process or native testimony.
+    #[cfg(target_os = "linux")]
+    selected_worker_panics: [bool; 4],
     applied_receipt_rx:
         Option<std::sync::mpsc::Receiver<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>>,
     /// Exact selected-channel receive outcome retained before later PID or
@@ -5042,6 +5153,609 @@ enum AttachmentPendingOwner {
     Supervised {
         running: Box<RunningProcess>,
     },
+}
+
+/// Selected supervised custody, never a selector issuer or financial proof.
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedSpawnOutcome {
+    Held(SelectedSupervisedAttachmentOwner),
+    RefusedWithoutRunningOwner {
+        phase: SelectedSupervisedCreatePhase,
+        result: SubprocessResult,
+    },
+    Refused(SelectedSupervisedFailureOutcome),
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedCreatePhase {
+    Preflight,
+    ProcessCreateAttempt,
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedFailurePhase {
+    WrapperSetup,
+    HeldValidation,
+    ReleaseValidation,
+    ReleaseWrite,
+    ReleaseCompletion,
+}
+
+#[cfg(target_os = "linux")]
+pub struct SelectedSupervisedFailure {
+    pub phase: SelectedSupervisedFailurePhase,
+    pub result: SubprocessResult,
+    pub cleanup_error: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedFailureOutcome {
+    Settled {
+        error: SelectedSupervisedFailure,
+        aborted_before_attachment: Option<AbortedProcess>,
+        custody: SelectedSupervisedFailureOwner,
+    },
+    Unsettled {
+        error: SelectedSupervisedFailure,
+        owner: SelectedSupervisedFailureOwner,
+    },
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedAbortOutcome {
+    Settled {
+        aborted: AbortedProcess,
+        custody: SelectedSupervisedFailureOwner,
+    },
+    Unsettled {
+        error: AttachmentAbortError,
+        owner: SelectedSupervisedFailureOwner,
+    },
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedReleaseOutcome {
+    Running(RunningProcess),
+    Refused(SelectedSupervisedFailureOutcome),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SelectedSupervisedCleanupStage {
+    GroupAndWrapper,
+    TargetPin,
+    Watchdog,
+    Drains,
+    Complete,
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedCleanupObservation {
+    Settled,
+    Unsettled {
+        stage: SelectedSupervisedCleanupStage,
+        detail: String,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct SelectedSupervisedBounds {
+    service: crate::time::MonotonicDeadline,
+    cleanup: crate::time::MonotonicDeadline,
+}
+
+#[cfg(target_os = "linux")]
+enum SelectedSupervisedCustody {
+    Running(RunningProcess),
+    Pending(ProcessAwaitingAttachment),
+}
+
+/// Opaque actual custody. Both settled and unsettled outcomes retain raw
+/// native/receipt observations; neither grants another launch or a refund.
+#[cfg(target_os = "linux")]
+pub struct SelectedSupervisedFailureOwner {
+    custody: Option<SelectedSupervisedCustody>,
+    bounds: SelectedSupervisedBounds,
+    stage: SelectedSupervisedCleanupStage,
+    release_attempted: bool,
+    held_boundary_revoked: bool,
+}
+
+#[cfg(target_os = "linux")]
+pub struct SelectedSupervisedAttachmentOwner {
+    // This guard also owns terminal cleanup if the held owner is abandoned.
+    retained: SelectedSupervisedFailureOwner,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum SelectedCleanupMode {
+    BoundedOriginal,
+    TerminalDestruction,
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedCleanupMode {
+    fn check(self, deadline: crate::time::MonotonicDeadline) -> Result<(), String> {
+        if matches!(self, Self::BoundedOriginal) && deadline.has_elapsed() {
+            Err("selected original cleanup deadline elapsed".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn pause(self, deadline: crate::time::MonotonicDeadline) {
+        let delay = match self {
+            Self::BoundedOriginal => PROCESS_POLL_INTERVAL.min(deadline.remaining()),
+            Self::TerminalDestruction => PROCESS_POLL_INTERVAL,
+        };
+        thread::sleep(delay);
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedSupervisedFailureOwner {
+    fn running(running: RunningProcess, bounds: SelectedSupervisedBounds) -> Self {
+        Self {
+            custody: Some(SelectedSupervisedCustody::Running(running)),
+            bounds,
+            stage: SelectedSupervisedCleanupStage::GroupAndWrapper,
+            release_attempted: false,
+            held_boundary_revoked: false,
+        }
+    }
+
+    fn running_mut(&mut self) -> Result<&mut RunningProcess, String> {
+        match self.custody.as_mut() {
+            Some(SelectedSupervisedCustody::Running(running)) => Ok(running),
+            Some(SelectedSupervisedCustody::Pending(pending)) => match pending.owner.as_mut() {
+                Some(AttachmentPendingOwner::Supervised { running }) => Ok(running),
+                _ => Err("selected custody lost its supervised owner".into()),
+            },
+            None => Err("selected custody has already been transferred".into()),
+        }
+    }
+
+    fn identity(&self) -> (u32, i64) {
+        match self.custody.as_ref() {
+            Some(SelectedSupervisedCustody::Running(running)) => (running.pid, running.pgid),
+            Some(SelectedSupervisedCustody::Pending(pending)) => (pending.pid, pending.pgid),
+            None => (0, 0),
+        }
+    }
+
+    pub fn settle_until_original_expiry(&mut self) -> SelectedSupervisedCleanupObservation {
+        self.advance_selected_cleanup(SelectedCleanupMode::BoundedOriginal)
+    }
+
+    fn advance_selected_cleanup(
+        &mut self,
+        mode: SelectedCleanupMode,
+    ) -> SelectedSupervisedCleanupObservation {
+        if self.stage == SelectedSupervisedCleanupStage::Complete {
+            return SelectedSupervisedCleanupObservation::Settled;
+        }
+        let deadline = self.bounds.cleanup;
+        let result = (|| -> Result<(), String> {
+            mode.check(deadline)?;
+            if !self.held_boundary_revoked {
+                let running = self.running_mut()?;
+                // EOF revokes this one-shot boundary; it does not authorize exec.
+                if let Some(boundary) = running.attachment_release.as_mut() {
+                    if let Some(writer) = boundary.writer.as_mut() {
+                        writer.close_selected_until(deadline, mode)?;
+                    }
+                }
+                running.attachment_release.take();
+                self.held_boundary_revoked = true;
+            }
+            if self.stage == SelectedSupervisedCleanupStage::GroupAndWrapper {
+                self.running_mut()?
+                    .settle_selected_group_and_wrapper_until(deadline, mode)?;
+                // Never revisit numeric group authority after its fence is reaped.
+                self.stage = SelectedSupervisedCleanupStage::TargetPin;
+            }
+            if self.stage == SelectedSupervisedCleanupStage::TargetPin {
+                if let Some(pin) = self.running_mut()?.attachment_target_lifetime.as_ref() {
+                    loop {
+                        mode.check(deadline)?;
+                        match native_terminal_pin_has_exited(pin) {
+                            NativeTerminalPinObservation::Exited => break,
+                            NativeTerminalPinObservation::NotExited
+                            | NativeTerminalPinObservation::Interrupted => mode.pause(deadline),
+                            _ => return Err("selected target pin exit remains unproved".into()),
+                        }
+                    }
+                }
+                self.stage = SelectedSupervisedCleanupStage::Watchdog;
+            }
+            if self.stage == SelectedSupervisedCleanupStage::Watchdog {
+                self.running_mut()?
+                    .settle_selected_watchdog_until(deadline, mode)?;
+                self.stage = SelectedSupervisedCleanupStage::Drains;
+            }
+            if self.stage == SelectedSupervisedCleanupStage::Drains {
+                self.running_mut()?
+                    .finish_selected_drains_until(deadline, mode)?;
+                self.running_mut()?.selected_cleanup_complete = true;
+                self.stage = SelectedSupervisedCleanupStage::Complete;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => SelectedSupervisedCleanupObservation::Settled,
+            Err(detail) => SelectedSupervisedCleanupObservation::Unsettled {
+                stage: self.stage,
+                detail,
+            },
+        }
+    }
+
+    fn refused(
+        mut self,
+        phase: SelectedSupervisedFailurePhase,
+        mut result: SubprocessResult,
+    ) -> SelectedSupervisedFailureOutcome {
+        let (pid, pgid) = self.identity();
+        let was_held = self
+            .running_mut()
+            .is_ok_and(|running| running.attachment_release.is_some());
+        let observation = self.settle_until_original_expiry();
+        if let Ok(running) = self.running_mut() {
+            for (panicked, diagnostic) in running.selected_worker_panics.iter().zip([
+                "selected stdin worker panicked",
+                "selected stdout worker panicked",
+                "selected stderr worker panicked",
+                "selected status worker panicked",
+            ]) {
+                if *panicked {
+                    result.stderr = append_diagnostic(&result.stderr, diagnostic);
+                }
+            }
+        }
+        match observation {
+            SelectedSupervisedCleanupObservation::Settled => {
+                let aborted =
+                    (was_held && !self.release_attempted).then_some(AbortedProcess { pid, pgid });
+                result.aborted_before_attachment = aborted;
+                SelectedSupervisedFailureOutcome::Settled {
+                    error: SelectedSupervisedFailure {
+                        phase,
+                        result,
+                        cleanup_error: None,
+                    },
+                    aborted_before_attachment: aborted,
+                    custody: self,
+                }
+            }
+            SelectedSupervisedCleanupObservation::Unsettled { detail, .. } => {
+                result.aborted_before_attachment = None;
+                SelectedSupervisedFailureOutcome::Unsettled {
+                    error: SelectedSupervisedFailure {
+                        phase,
+                        result,
+                        cleanup_error: Some(detail),
+                    },
+                    owner: self,
+                }
+            }
+        }
+    }
+
+    fn complete_selected_terminal_cleanup(&mut self) {
+        if self.custody.is_none() {
+            return;
+        }
+        while !matches!(
+            self.advance_selected_cleanup(SelectedCleanupMode::TerminalDestruction),
+            SelectedSupervisedCleanupObservation::Settled
+        ) {
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SelectedSupervisedFailureOwner {
+    fn drop(&mut self) {
+        // Last-resort actual destruction only; ordinary Err returns this owner.
+        self.complete_selected_terminal_cleanup();
+        // Pending's legacy abort must not repeat numeric cleanup after the
+        // selected stages consumed its wrapper fence. With owner absent its
+        // Drop is inert; the already-settled nested running owner drops here.
+        if let Some(SelectedSupervisedCustody::Pending(pending)) = self.custody.as_mut() {
+            drop(pending.owner.take());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedSupervisedAttachmentOwner {
+    pub fn held(&self) -> &ProcessAwaitingAttachment {
+        match self.retained.custody.as_ref() {
+            Some(SelectedSupervisedCustody::Pending(pending)) => pending,
+            _ => unreachable!("private selected held construction invariant"),
+        }
+    }
+
+    pub fn abort_and_reap(mut self) -> SelectedSupervisedAbortOutcome {
+        let (pid, pgid) = self.retained.identity();
+        match self.retained.settle_until_original_expiry() {
+            SelectedSupervisedCleanupObservation::Settled => {
+                SelectedSupervisedAbortOutcome::Settled {
+                    aborted: AbortedProcess { pid, pgid },
+                    custody: self.retained,
+                }
+            }
+            SelectedSupervisedCleanupObservation::Unsettled { detail, .. } => {
+                SelectedSupervisedAbortOutcome::Unsettled {
+                    error: AttachmentAbortError { pid, detail },
+                    owner: self.retained,
+                }
+            }
+        }
+    }
+
+    pub fn release_after_attachment(mut self) -> SelectedSupervisedReleaseOutcome {
+        let start = Instant::now();
+        let deadline = self.retained.bounds.service;
+        let request_expiry = self.held().request_deadline;
+        let check_release_window = || -> Result<(), String> {
+            if deadline.has_elapsed()
+                || request_expiry.is_some_and(|expiry| Instant::now() >= expiry)
+            {
+                Err("selected original service/request release deadline elapsed".into())
+            } else {
+                Ok(())
+            }
+        };
+        let validation = (|| -> Result<(), String> {
+            check_release_window()?;
+            self.held().check_exact_process_alive()?;
+            let running = self.retained.running_mut()?;
+            for capture in [&running.stdout_capture, &running.stderr_capture] {
+                let state = capture
+                    .state
+                    .try_lock()
+                    .map_err(|_| "selected output observation unavailable".to_owned())?;
+                if state.truncated {
+                    return Err("selected launcher output truncated".into());
+                }
+            }
+            if running.output_overflow_rx.try_recv().is_ok() {
+                return Err("selected launcher output exceeded limit".into());
+            }
+            match poll_wrapper(&mut running.child) {
+                Ok(WrapperPoll::Running) => Ok(()),
+                _ => Err("selected wrapper is not releasable".into()),
+            }
+        })();
+        if let Err(detail) = validation {
+            return SelectedSupervisedReleaseOutcome::Refused(self.retained.refused(
+                SelectedSupervisedFailurePhase::ReleaseValidation,
+                spawn_failure(start, detail),
+            ));
+        }
+        self.retained.release_attempted = true;
+        let release = self.retained.running_mut().and_then(|running| {
+            let boundary = running
+                .attachment_release
+                .as_mut()
+                .ok_or("selected release boundary missing")?;
+            let writer = boundary
+                .writer
+                .as_mut()
+                .ok_or("selected release writer missing")?;
+            let fd = writer.fd;
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return Err("selected release nonblocking setup failed".into());
+            }
+            check_release_window()?;
+            let file = writer
+                .writer
+                .as_mut()
+                .ok_or("selected release file missing")?;
+            match file.write(&[ATTACHMENT_RELEASE_TOKEN]) {
+                Ok(1) => {}
+                Ok(_) => return Err("selected release write incomplete".into()),
+                Err(error) => return Err(error.to_string()),
+            }
+            // The byte is irreversible. A late observation retains actual
+            // refused custody rather than claiming the target never ran.
+            check_release_window()?;
+            // A close may be refused by fork quiescence; retain the SAME
+            // consumed writer in a refused owner rather than blocking Drop.
+            writer.close_selected_with_request_until(
+                deadline,
+                SelectedCleanupMode::BoundedOriginal,
+                request_expiry,
+            )?;
+            boundary.writer.take();
+            running.attachment_release.take();
+            Ok(())
+        });
+        if let Err(detail) = release {
+            return SelectedSupervisedReleaseOutcome::Refused(self.retained.refused(
+                SelectedSupervisedFailurePhase::ReleaseWrite,
+                spawn_failure(start, detail),
+            ));
+        }
+        if check_release_window().is_err() {
+            return SelectedSupervisedReleaseOutcome::Refused(self.retained.refused(
+                SelectedSupervisedFailurePhase::ReleaseCompletion,
+                spawn_failure(start, "selected release completed after original expiry"),
+            ));
+        }
+        // No fallible work between taking actual custody and the success move.
+        match self.retained.custody.take() {
+            Some(SelectedSupervisedCustody::Pending(mut pending)) => match pending.owner.take() {
+                Some(AttachmentPendingOwner::Supervised { running }) => {
+                    SelectedSupervisedReleaseOutcome::Running(*running)
+                }
+                _ => unreachable!("private selected supervised construction invariant"),
+            },
+            _ => unreachable!("private selected pending construction invariant"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl RunningProcess {
+    fn settle_selected_group_and_wrapper_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+    ) -> Result<(), String> {
+        if self.wrapper_reaped {
+            return Ok(());
+        }
+        if self.process_scope.is_some() {
+            return Err("selected unscoped custody unexpectedly has scope".into());
+        }
+        mode.check(deadline)?;
+        kill_owned_process_group(self.wrapper_pid, self.wrapper_pgid, true);
+        let _ = self.child.kill();
+        loop {
+            mode.check(deadline)?;
+            match poll_wrapper(&mut self.child).map_err(|error| error.to_string())? {
+                WrapperPoll::ExitedUnreaped => break,
+                WrapperPoll::Running => mode.pause(deadline),
+            }
+        }
+        loop {
+            mode.check(deadline)?;
+            let bound = matches!(mode, SelectedCleanupMode::BoundedOriginal).then_some(deadline);
+            if selected_group_quiescent(self.wrapper_pgid, self.wrapper_pid, bound)? {
+                break;
+            }
+            mode.pause(deadline);
+        }
+        mode.check(deadline)?;
+        match self.child.try_wait().map_err(|error| error.to_string())? {
+            Some(_) => {
+                self.wrapper_reaped = true;
+                self.groups_terminated = true;
+                Ok(())
+            }
+            None => Err("selected wrapper reap remains pending".into()),
+        }
+    }
+
+    fn settle_selected_watchdog_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+    ) -> Result<(), String> {
+        if let Some(watchdog) = self.occupancy_watchdog.as_mut() {
+            loop {
+                mode.check(deadline)?;
+                if watchdog.pid <= 0 {
+                    break;
+                }
+                let mut status = 0;
+                let result = unsafe { libc::waitpid(watchdog.pid, &mut status, libc::WNOHANG) };
+                if result == watchdog.pid && (libc::WIFEXITED(status) || libc::WIFSIGNALED(status))
+                {
+                    watchdog.pid = -1;
+                    break;
+                }
+                if result < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::EINTR) {
+                        return Err(error.to_string());
+                    }
+                } else if result != 0 {
+                    return Err("selected watchdog terminal status unsupported".into());
+                }
+                mode.pause(deadline);
+            }
+        }
+        self.occupancy_watchdog.take();
+        Ok(())
+    }
+
+    fn finish_selected_drains_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+    ) -> Result<(), String> {
+        mode.check(deadline)?;
+        self.drain_stop.store(true, Ordering::Release);
+        for (index, slot) in [
+            &mut self.stdin_thread,
+            &mut self.stdout_thread,
+            &mut self.stderr_thread,
+            &mut self.status_thread,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            while slot.as_ref().is_some_and(|handle| !handle.is_finished()) {
+                mode.check(deadline)?;
+                mode.pause(deadline);
+            }
+            mode.check(deadline)?;
+            if let Some(handle) = slot.take() {
+                if handle.join().is_err() {
+                    self.selected_worker_panics[index] = true;
+                }
+            }
+        }
+        mode.check(deadline)?;
+        let out = self
+            .stdout_capture
+            .state
+            .try_lock()
+            .map_err(|_| "selected stdout capture unavailable".to_owned())?;
+        let err = self
+            .stderr_capture
+            .state
+            .try_lock()
+            .map_err(|_| "selected stderr capture unavailable".to_owned())?;
+        if let Some(channel) = self.native_settlement.as_mut() {
+            if channel.retained_drains.is_none() {
+                channel.retained_drains = Some((out.clone(), err.clone()));
+            }
+        }
+        mode.check(deadline)?;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn selected_group_quiescent(
+    pgid: i64,
+    retained_leader_pid: u32,
+    original_deadline: Option<crate::time::MonotonicDeadline>,
+) -> Result<bool, String> {
+    for entry in std::fs::read_dir("/proc").map_err(|error| error.to_string())? {
+        if original_deadline.is_some_and(|deadline| deadline.has_elapsed()) {
+            return Err("selected original group observation expired".into());
+        }
+        let entry = entry.map_err(|error| error.to_string())?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == retained_leader_pid {
+            continue;
+        }
+        match read_linux_process_birth(pid) {
+            Ok(stat) if stat.process_group == pgid && !matches!(stat.state, 'Z' | 'X') => {
+                return Ok(false);
+            }
+            Ok(_) => {}
+            Err(error) if error.contains("No such file or directory") => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
 }
 
 /// Proof that an attachment-pending process (or its pre-identity supervisor)
@@ -7251,6 +7965,12 @@ impl RunningProcess {
 
 impl Drop for RunningProcess {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.selected_cleanup_complete {
+            // Already-settled selected custody must never re-poll/signall a
+            // numeric wrapper identity after its exact Child fence was reaped.
+            return;
+        }
         let _ = self.abort_and_reap_inner();
     }
 }
@@ -7432,6 +8152,174 @@ pub fn lib_spawn_awaiting_attachment_until(
     deadline: crate::time::MonotonicDeadline,
 ) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
     lib_spawn_awaiting_attachment_in_scope_with_deadline(request, None, Some(deadline))
+}
+
+/// Selected supervised/unscoped launch. Deadlines narrow caller bounds;
+/// arguments themselves authenticate neither selection nor original funding.
+/// No-owner refusal is custody information, never NeverBorn/refund proof.
+#[cfg(target_os = "linux")]
+pub fn lib_spawn_selected_supervised_awaiting_attachment_until(
+    request: SubprocessRequest,
+    original_service_deadline: crate::time::MonotonicDeadline,
+    original_cleanup_deadline: crate::time::MonotonicDeadline,
+) -> SelectedSupervisedSpawnOutcome {
+    let start = Instant::now();
+    if original_cleanup_deadline.is_before(&original_service_deadline) {
+        return SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+            phase: SelectedSupervisedCreatePhase::Preflight,
+            result: spawn_failure(start, "selected original cleanup precedes service deadline"),
+        };
+    }
+    let bounds = SelectedSupervisedBounds {
+        service: original_service_deadline,
+        cleanup: original_cleanup_deadline,
+    };
+    // Anchor BEFORE sampling remaining, so this cached Instant only narrows
+    // the same service bound and never creates now-plus-original-duration.
+    let service_expiry = start.checked_add(bounds.service.remaining());
+    let timeout_expiry =
+        request_timeout_duration(request.timeout).and_then(|duration| start.checked_add(duration));
+    let request_expiry = match (timeout_expiry, service_expiry) {
+        (Some(timeout), Some(service)) => Some(timeout.min(service)),
+        (timeout, service) => timeout.or(service),
+    };
+    if bounds.service.has_elapsed()
+        || request_expiry.is_none()
+        || !request.supervised_status.as_ref().is_some_and(|status| {
+            matches!(
+                status.state,
+                SupervisedProcessStatusState::AwaitingAttachment { .. }
+            )
+        })
+    {
+        return SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+            phase: SelectedSupervisedCreatePhase::Preflight,
+            result: spawn_failure(
+                start,
+                "selected launch requires unexpired supervised attachment bounds",
+            ),
+        };
+    }
+    let running = match lib_spawn_with_stdio_custody(
+        request,
+        false,
+        None,
+        None,
+        None,
+        Some(bounds.service),
+        false,
+        SpawnFailureCustodyMode::Selected(bounds),
+    ) {
+        Ok(running) => running,
+        Err(SpawnWithStdioError::Selected(outcome)) => {
+            return SelectedSupervisedSpawnOutcome::Refused(outcome);
+        }
+        Err(SpawnWithStdioError::WithoutRunningOwner {
+            result,
+            create_attempted,
+        }) => {
+            return SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+                phase: if create_attempted {
+                    SelectedSupervisedCreatePhase::ProcessCreateAttempt
+                } else {
+                    SelectedSupervisedCreatePhase::Preflight
+                },
+                result,
+            };
+        }
+    };
+    // Immediately root the same running owner before held validation can fail.
+    let mut retained = SelectedSupervisedFailureOwner::running(running, bounds);
+    let validation = (|| -> Result<(), String> {
+        let running = retained.running_mut()?;
+        if bounds.service.has_elapsed()
+            || request_expiry.is_some_and(|expiry| Instant::now() >= expiry)
+        {
+            return Err("selected held validation expired".into());
+        }
+        if running.attachment_release.is_none() {
+            return Err("selected held boundary disappeared".into());
+        }
+        let observed_birth = read_linux_process_birth(running.pid)?;
+        let pin = Arc::new(open_pidfd(running.pid)?);
+        // Retain pin before subsequent validation or native identity capture.
+        running.attachment_target_lifetime = Some(pin);
+        let pin = running
+            .attachment_target_lifetime
+            .as_ref()
+            .ok_or("selected pin absent")?;
+        validate_pinned_process_birth(
+            running.pid,
+            running.pgid,
+            None,
+            &observed_birth,
+            pin.as_raw_fd(),
+        )?;
+        validate_supervised_attachment_target(running.pid, running.pgid, pin.as_raw_fd())?;
+        if let Some(channel) = running.native_settlement.as_mut() {
+            if channel.original_deadline.has_elapsed() {
+                return Err("selected native held identity expired".into());
+            }
+            let group = u32::try_from(running.pgid).map_err(|_| "selected group outside range")?;
+            let identity = crate::process_control::capture_exact_process_identity_from_pidfd(
+                running.pid,
+                Some(group),
+                pin.as_fd(),
+            )?;
+            channel.held_target_identity = Some(identity);
+            if channel.original_deadline.has_elapsed() {
+                return Err("selected native held identity completed late".into());
+            }
+        }
+        if bounds.service.has_elapsed()
+            || request_expiry.is_some_and(|expiry| Instant::now() >= expiry)
+        {
+            return Err("selected held validation completed late".into());
+        }
+        Ok(())
+    })();
+    if let Err(detail) = validation {
+        return SelectedSupervisedSpawnOutcome::Refused(retained.refused(
+            SelectedSupervisedFailurePhase::HeldValidation,
+            spawn_failure(start, detail),
+        ));
+    }
+    let (pid, pgid, mount_preparation, pidfd) = {
+        let running = retained
+            .running_mut()
+            .expect("selected validated running custody");
+        (
+            running.pid,
+            running.pgid,
+            running.mount_preparation.clone(),
+            Arc::clone(
+                running
+                    .attachment_target_lifetime
+                    .as_ref()
+                    .expect("selected validated pin"),
+            ),
+        )
+    };
+    // All observation/allocation above occurs while the actual owner is guarded.
+    let running = match retained.custody.take() {
+        Some(SelectedSupervisedCustody::Running(running)) => running,
+        _ => unreachable!("selected private running constructor"),
+    };
+    retained.custody = Some(SelectedSupervisedCustody::Pending(
+        ProcessAwaitingAttachment {
+            process_scope: None,
+            pid,
+            pgid,
+            mount_preparation,
+            owner: Some(AttachmentPendingOwner::Supervised {
+                running: Box::new(running),
+            }),
+            pidfd,
+            // Cached expiry only narrows the SAME opaque service deadline.
+            request_deadline: request_expiry,
+        },
+    ));
+    SelectedSupervisedSpawnOutcome::Held(SelectedSupervisedAttachmentOwner { retained })
 }
 
 #[cfg(target_os = "linux")]
@@ -8048,7 +8936,173 @@ pub fn lib_spawn_awaiting_attachment_until(
     lib_spawn_awaiting_attachment(request)
 }
 
+enum SpawnWithStdioError {
+    WithoutRunningOwner {
+        result: SubprocessResult,
+        create_attempted: bool,
+    },
+    #[cfg(target_os = "linux")]
+    Selected(SelectedSupervisedFailureOutcome),
+}
+
+impl From<SubprocessResult> for SpawnWithStdioError {
+    fn from(result: SubprocessResult) -> Self {
+        Self::WithoutRunningOwner {
+            result,
+            create_attempted: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SpawnFailureCustodyMode {
+    Ordinary,
+    #[cfg(target_os = "linux")]
+    Selected(SelectedSupervisedBounds),
+}
+
+struct SpawnRunningGuard {
+    running: Option<RunningProcess>,
+    mode: SpawnFailureCustodyMode,
+}
+
+impl std::ops::Deref for SpawnRunningGuard {
+    type Target = RunningProcess;
+    fn deref(&self) -> &RunningProcess {
+        self.running.as_ref().expect("spawn guard owns running")
+    }
+}
+impl std::ops::DerefMut for SpawnRunningGuard {
+    fn deref_mut(&mut self) -> &mut RunningProcess {
+        self.running.as_mut().expect("spawn guard owns running")
+    }
+}
+impl SpawnRunningGuard {
+    fn into_spawn_failure(mut self, result: SubprocessResult) -> SpawnWithStdioError {
+        let running = self.running.take().expect("spawn guard owns running");
+        match self.mode {
+            SpawnFailureCustodyMode::Ordinary => {
+                SpawnWithStdioError::from(running.into_spawn_failure(result))
+            }
+            #[cfg(target_os = "linux")]
+            SpawnFailureCustodyMode::Selected(bounds) => SpawnWithStdioError::Selected(
+                SelectedSupervisedFailureOwner::running(running, bounds)
+                    .refused(SelectedSupervisedFailurePhase::WrapperSetup, result),
+            ),
+        }
+    }
+}
+impl Drop for SpawnRunningGuard {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let SpawnFailureCustodyMode::Selected(bounds) = self.mode {
+            if let Some(running) = self.running.take() {
+                // Selected terminal Drop, including arbitrary setup unwind.
+                drop(SelectedSupervisedFailureOwner::running(running, bounds));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct SelectedSupervisedSetupGuard {
+    child: Option<process::Child>,
+    supervised_status: Option<SupervisedProcessStatus>,
+    inherited_fds: Vec<InheritedDescriptorAuthority>,
+    inherited_fd_mappings: Vec<InheritedDescriptorMapping>,
+    mapping_lifelines: Vec<InheritedDescriptorAuthority>,
+    mode: SpawnFailureCustodyMode,
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedSupervisedSetupGuard {
+    fn revoke_held_boundary(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+    ) -> Result<(), String> {
+        if let Some(status) = self.supervised_status.as_mut() {
+            if let SupervisedProcessStatusState::AwaitingAttachment {
+                attachment_release, ..
+            } = &mut status.state
+            {
+                if let Some(writer) = attachment_release.writer.as_mut() {
+                    writer.close_selected_until(deadline, mode)?;
+                }
+                attachment_release.writer.take();
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SelectedSupervisedSetupGuard {
+    fn drop(&mut self) {
+        let bounds = match self.mode {
+            SpawnFailureCustodyMode::Selected(bounds) => bounds,
+            SpawnFailureCustodyMode::Ordinary => return,
+        };
+        if self.child.is_none() {
+            return;
+        }
+        // Revoke the SAME held boundary BEFORE any group signal. A refused
+        // close retains child/status/writer and makes no termination claim.
+        while self
+            .revoke_held_boundary(bounds.cleanup, SelectedCleanupMode::TerminalDestruction)
+            .is_err()
+        {
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        // Child-only construction unwind: retain channels/fence while polling.
+        // Terminal destruction never mints an attempt deadline or native proof.
+        loop {
+            let pid = child.id();
+            kill_owned_process_group(pid, i64::from(pid), true);
+            let _ = child.kill();
+            let quiescent = matches!(poll_wrapper(child), Ok(WrapperPoll::ExitedUnreaped))
+                && selected_group_quiescent(i64::from(pid), pid, None).unwrap_or(false);
+            if quiescent && matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+    }
+}
+
 fn lib_spawn_with_stdio(
+    request: SubprocessRequest,
+    inherit_stdio: bool,
+    #[cfg(target_os = "linux")] attachment_gate: Option<AttachmentWorkerGate>,
+    #[cfg(not(target_os = "linux"))] attachment_gate: Option<()>,
+    process_scope: Option<crate::ProcessScope>,
+    account: Option<&crate::ControllerAccount>,
+    absolute_deadline: Option<crate::time::MonotonicDeadline>,
+    exact_inheritance: bool,
+) -> Result<RunningProcess, SubprocessResult> {
+    match lib_spawn_with_stdio_custody(
+        request,
+        inherit_stdio,
+        attachment_gate,
+        process_scope,
+        account,
+        absolute_deadline,
+        exact_inheritance,
+        SpawnFailureCustodyMode::Ordinary,
+    ) {
+        Ok(running) => Ok(running),
+        Err(SpawnWithStdioError::WithoutRunningOwner { result, .. }) => Err(result),
+        #[cfg(target_os = "linux")]
+        Err(SpawnWithStdioError::Selected(_)) => {
+            unreachable!("ordinary mode never constructs selected custody")
+        }
+    }
+}
+
+fn lib_spawn_with_stdio_custody(
     request: SubprocessRequest,
     inherit_stdio: bool,
     #[cfg(target_os = "linux")] mut attachment_gate: Option<AttachmentWorkerGate>,
@@ -8057,7 +9111,8 @@ fn lib_spawn_with_stdio(
     account: Option<&crate::ControllerAccount>,
     absolute_deadline: Option<crate::time::MonotonicDeadline>,
     exact_inheritance: bool,
-) -> Result<RunningProcess, SubprocessResult> {
+    failure_mode: SpawnFailureCustodyMode,
+) -> Result<RunningProcess, SpawnWithStdioError> {
     let start = Instant::now();
     #[cfg(not(target_os = "linux"))]
     let _ = exact_inheritance;
@@ -8082,7 +9137,8 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             "Failed to spawn: buffered stdin conflicts with an inherited fd-0 mapping",
-        ));
+        )
+        .into());
     }
     if inherit_stdio
         && limits.as_ref().is_some_and(|limits| {
@@ -8092,7 +9148,8 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             "Failed to spawn: inherited stdio cannot enforce captured-output byte limits",
-        ));
+        )
+        .into());
     }
 
     #[cfg(unix)]
@@ -8103,14 +9160,16 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             "Failed to spawn: inherited descriptors are unsupported on this platform",
-        ));
+        )
+        .into());
     }
     #[cfg(not(target_os = "linux"))]
     if supervised_status.is_some() {
         return Err(spawn_failure(
             start,
             "Failed to spawn: supervised launcher status is supported only on Linux",
-        ));
+        )
+        .into());
     }
 
     #[cfg(target_os = "linux")]
@@ -8145,7 +9204,8 @@ fn lib_spawn_with_stdio(
             return Err(spawn_failure(
                 start,
                 format!("mapped target {target} aliases process-control authority"),
-            ));
+            )
+            .into());
         }
     }
     #[cfg(unix)]
@@ -8183,7 +9243,8 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             "Failed to spawn: custom argv[0] is unsupported on this platform",
-        ));
+        )
+        .into());
     }
     command.args(&args);
     command.env_clear();
@@ -8195,7 +9256,8 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             "Failed to spawn: inherited stdio cannot also carry buffered stdin data",
-        ));
+        )
+        .into());
     }
     command.stdin(if inherit_stdio {
         Stdio::inherit()
@@ -8246,7 +9308,8 @@ fn lib_spawn_with_stdio(
                 return Err(spawn_failure(
                     start,
                     "Failed to spawn awaiting attachment: parent PID is not positive",
-                ));
+                )
+                .into());
             }
             Some(pid)
         } else {
@@ -8356,7 +9419,8 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             format!("Failed to spawn: invalid resource limits: {reason}"),
-        ));
+        )
+        .into());
     }
 
     // This hook is deliberately registered last. The child has already
@@ -8397,16 +9461,43 @@ fn lib_spawn_with_stdio(
         }
     }
     if absolute_deadline.is_some_and(|deadline| deadline.has_elapsed()) {
-        return Err(spawn_deadline_failure(start));
+        return Err(spawn_deadline_failure(start).into());
     }
+    // Allocate captures before process creation. No returned Child exists
+    // outside selected setup custody at an allocation or panic boundary.
+    let stdout_capture = Arc::new(OutputCapture::default());
+    let stderr_capture = Arc::new(OutputCapture::default());
+    let drain_stop = Arc::new(AtomicBool::new(false));
+    let (output_overflow_tx, output_overflow_rx) = std::sync::mpsc::channel();
+    #[cfg(target_os = "linux")]
+    let mut setup = SelectedSupervisedSetupGuard {
+        child: None,
+        supervised_status,
+        inherited_fds,
+        inherited_fd_mappings,
+        mapping_lifelines: inherited_fd_mapping_lifelines,
+        mode: failure_mode,
+    };
     let child = match command.spawn() {
         Ok(c) => c,
         Err(_) if absolute_deadline.is_some_and(|deadline| deadline.has_elapsed()) => {
-            return Err(spawn_deadline_failure(start));
+            return Err(SpawnWithStdioError::WithoutRunningOwner {
+                result: spawn_deadline_failure(start),
+                create_attempted: true,
+            });
         }
-        Err(e) => return Err(spawn_failure(start, format!("Failed to spawn: {e}"))),
+        Err(e) => {
+            return Err(SpawnWithStdioError::WithoutRunningOwner {
+                result: spawn_failure(start, format!("Failed to spawn: {e}")),
+                create_attempted: true,
+            });
+        }
     };
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    {
+        setup.child = Some(child);
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     drop(inherited_fd_mapping_lifelines);
     #[cfg(target_os = "linux")]
     drop(attachment_gate);
@@ -8414,8 +9505,24 @@ fn lib_spawn_with_stdio(
     // request-owned parent copies promptly: in particular, keeping the status
     // writer open here would hide a launcher's pre-target EOF and force every
     // failed setup to wait for the full supervision timeout.
-    drop(inherited_fds);
-    drop(inherited_fd_mappings);
+    #[cfg(target_os = "linux")]
+    {
+        setup.mapping_lifelines.clear();
+        setup.inherited_fds.clear();
+        setup.inherited_fd_mappings.clear();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        drop(inherited_fds);
+        drop(inherited_fd_mappings);
+    }
+    #[cfg(target_os = "linux")]
+    let wrapper_pid = setup
+        .child
+        .as_ref()
+        .expect("setup owns returned Child")
+        .id();
+    #[cfg(not(target_os = "linux"))]
     let wrapper_pid = child.id();
 
     // On Unix with setsid, pid == pgid since the child is its own process group leader.
@@ -8424,10 +9531,8 @@ fn lib_spawn_with_stdio(
     #[cfg(not(unix))]
     let wrapper_pgid = -1i64;
 
-    let stdout_capture = Arc::new(OutputCapture::default());
-    let stderr_capture = Arc::new(OutputCapture::default());
-    let drain_stop = Arc::new(AtomicBool::new(false));
-    let (output_overflow_tx, output_overflow_rx) = std::sync::mpsc::channel();
+    #[cfg(target_os = "linux")]
+    let supervised_status = setup.supervised_status.take();
     let (
         status_reader,
         attachment_release,
@@ -8468,7 +9573,7 @@ fn lib_spawn_with_stdio(
     // The wrapper is already an owned process, even before its target report.
     // Reuse that owner for every subsequent setup failure instead of reaping
     // the wrapper first and losing the exact process-group cleanup fence.
-    let mut running = RunningProcess {
+    let running = RunningProcess {
         process_scope,
         scope_cleanup_error: None,
         pid: wrapper_pid,
@@ -8479,11 +9584,20 @@ fn lib_spawn_with_stdio(
         native_settlement,
         wrapper_pid,
         wrapper_pgid,
+        #[cfg(target_os = "linux")]
+        child: setup.child.take().expect("setup owns returned Child"),
+        #[cfg(not(target_os = "linux"))]
         child,
         stdin_thread: None,
         stdout_thread: None,
         stderr_thread: None,
         status_thread: None,
+        #[cfg(target_os = "linux")]
+        selected_setup_status: None,
+        #[cfg(target_os = "linux")]
+        selected_cleanup_complete: false,
+        #[cfg(target_os = "linux")]
+        selected_worker_panics: [false; 4],
         applied_receipt_rx: None,
         applied_receipt_observation: None,
         applied_receipt_failure: None,
@@ -8502,60 +9616,77 @@ fn lib_spawn_with_stdio(
         groups_terminated: false,
         wrapper_reaped: false,
     };
-    let (stdout_thread, stderr_thread) = if inherit_stdio {
+    let mut running = SpawnRunningGuard {
+        running: Some(running),
+        mode: failure_mode,
+    };
+    let mut status_reader = status_reader;
+    #[cfg(target_os = "linux")]
+    if matches!(failure_mode, SpawnFailureCustodyMode::Selected(_)) {
+        running.selected_setup_status = status_reader.take();
+    }
+    if inherit_stdio {
         running.stdout_capture.state.lock().unwrap().closed = true;
         running.stderr_capture.state.lock().unwrap().closed = true;
-        (thread::spawn(|| {}), thread::spawn(|| {}))
+        running.stdout_thread = Some(thread::spawn(|| {}));
+        running.stderr_thread = Some(thread::spawn(|| {}));
     } else {
-        let mut stdout_handle = running
+        let stdout_handle = running
             .child
             .stdout
-            .take()
+            .as_ref()
             .expect("stdout configured as piped");
-        let mut stderr_handle = running
+        let stderr_handle = running
             .child
             .stderr
-            .take()
+            .as_ref()
             .expect("stderr configured as piped");
-        if let Err(error) = configure_nonblocking_fd(&mut stdout_handle)
-            .and_then(|_| configure_nonblocking_fd(&mut stderr_handle))
+        if let Err(error) = configure_nonblocking_fd(stdout_handle)
+            .and_then(|_| configure_nonblocking_fd(stderr_handle))
         {
             return Err(running.into_spawn_failure(spawn_failure(
                 start,
                 format!("Failed to spawn: configure bounded output capture: {error}"),
             )));
         }
-        (
-            spawn_bounded_drain(
-                stdout_handle,
-                Some(
-                    limits
-                        .as_ref()
-                        .and_then(|limits| limits.max_stdout_bytes)
-                        .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
-                ),
-                CapturedStream::Stdout,
-                Arc::clone(&running.stdout_capture),
-                Arc::clone(&running.drain_stop),
-                output_overflow_tx.clone(),
+        let stdout_handle = running
+            .child
+            .stdout
+            .take()
+            .expect("configured stdout retained");
+        let stderr_handle = running
+            .child
+            .stderr
+            .take()
+            .expect("configured stderr retained");
+        running.stdout_thread = Some(spawn_bounded_drain(
+            stdout_handle,
+            Some(
+                limits
+                    .as_ref()
+                    .and_then(|limits| limits.max_stdout_bytes)
+                    .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
             ),
-            spawn_bounded_drain(
-                stderr_handle,
-                Some(
-                    limits
-                        .as_ref()
-                        .and_then(|limits| limits.max_stderr_bytes)
-                        .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
-                ),
-                CapturedStream::Stderr,
-                Arc::clone(&running.stderr_capture),
-                Arc::clone(&running.drain_stop),
-                output_overflow_tx,
+            CapturedStream::Stdout,
+            Arc::clone(&running.stdout_capture),
+            Arc::clone(&running.drain_stop),
+            output_overflow_tx.clone(),
+        ));
+        // Install each actual JoinHandle before the next thread can panic.
+        running.stderr_thread = Some(spawn_bounded_drain(
+            stderr_handle,
+            Some(
+                limits
+                    .as_ref()
+                    .and_then(|limits| limits.max_stderr_bytes)
+                    .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
             ),
-        )
-    };
-    running.stdout_thread = Some(stdout_thread);
-    running.stderr_thread = Some(stderr_thread);
+            CapturedStream::Stderr,
+            Arc::clone(&running.stderr_capture),
+            Arc::clone(&running.drain_stop),
+            output_overflow_tx,
+        ));
+    }
 
     // Never write request input on the spawning thread. A child can stop
     // reading before the pipe buffer is empty; the dedicated writer may then
@@ -8576,6 +9707,11 @@ fn lib_spawn_with_stdio(
         }
     };
 
+    #[cfg(target_os = "linux")]
+    if matches!(failure_mode, SpawnFailureCustodyMode::Selected(_)) {
+        // SAME registered descriptor Arc, not a new FD or inherited peer.
+        status_reader = running.selected_setup_status.clone();
+    }
     if let Some(reader) = status_reader {
         let (status_tx, status_rx) = std::sync::mpsc::channel();
         let (applied_tx, applied_rx) = if applied_receipt_schema.is_some() {
@@ -8602,6 +9738,8 @@ fn lib_spawn_with_stdio(
             }
         };
         running.status_thread = Some(status_thread);
+        #[cfg(target_os = "linux")]
+        running.selected_setup_status.take();
         running.applied_receipt_rx = applied_rx;
         let relative_setup = supervised_setup_deadline(start, timeout);
         let setup_deadline = absolute_deadline.map_or(relative_setup, |original| {
@@ -8667,7 +9805,7 @@ fn lib_spawn_with_stdio(
     if absolute_deadline.is_some_and(|deadline| deadline.has_elapsed()) {
         return Err(running.into_spawn_failure(spawn_deadline_failure(start)));
     }
-    Ok(running)
+    Ok(running.running.take().expect("spawn guard owns running"))
 }
 
 fn spawn_stdin_writer(
@@ -10717,6 +11855,494 @@ mod absolute_spawn_deadline_tests {
         assert!(result.aborted_before_attachment.is_none());
         assert!(!result.stderr.contains("cleanup remains unproved"));
         assert!(!is_alive(pid));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod selected_supervised_custody_tests {
+    use super::*;
+
+    // Real same-group child blocked on the actual one-byte release pipe.
+    // A local IPC fixture, not an authenticated GPU/native/financial positive.
+    fn held_fixture() -> (
+        SelectedSupervisedAttachmentOwner,
+        crate::time::MonotonicDeadline,
+    ) {
+        held_fixture_with_timeout(2.0)
+    }
+
+    fn held_fixture_with_timeout(
+        timeout: f64,
+    ) -> (
+        SelectedSupervisedAttachmentOwner,
+        crate::time::MonotonicDeadline,
+    ) {
+        let status = supervised_launcher_attachment_status_pipe().unwrap();
+        let forbidden = inherited_mapping_control_descriptors(None, Some(&status.reader));
+        let roles: Vec<_> = (3..=9)
+            .filter(|fd| !forbidden.contains(fd))
+            .take(3)
+            .collect();
+        assert_eq!(roles.len(), 3, "fixture needs three shell descriptor roles");
+        let script = format!(
+            r#"(/bin/dd bs=1 count=1 <&{} >/dev/null 2>&1; exec /bin/sleep 30) & child=$!; printf '{{"child-pid":%s}}\n' "$child" >&{}; wait"#,
+            roles[1], roles[0]
+        );
+        let mut req = request("/bin/sh", &["-c", &script]);
+        req.timeout = timeout;
+        req.inherited_fd_mappings = vec![
+            InheritedDescriptorMapping {
+                source: status.writer,
+                target_fd: roles[0] as u32,
+            },
+            InheritedDescriptorMapping {
+                source: status.attachment_release_reader,
+                target_fd: roles[1] as u32,
+            },
+            InheritedDescriptorMapping {
+                source: status.attachment_release_keepalive_writer,
+                target_fd: roles[2] as u32,
+            },
+        ];
+        req.supervised_status = Some(status.reader);
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        match lib_spawn_selected_supervised_awaiting_attachment_until(req, bound, bound) {
+            SelectedSupervisedSpawnOutcome::Held(held) => (held, bound),
+            _ => panic!("real local held fixture must acquire its actual owner"),
+        }
+    }
+
+    fn request(cmd: &str, args: &[&str]) -> SubprocessRequest {
+        SubprocessRequest {
+            cmd: cmd.into(),
+            argv0: None,
+            args: args.iter().map(|arg| (*arg).into()).collect(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 2.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        }
+    }
+
+    fn live_owner(cleanup: crate::time::MonotonicDeadline) -> SelectedSupervisedFailureOwner {
+        let mut running = lib_spawn(request("/bin/sleep", &["30"])).unwrap();
+        running.attachment_target_lifetime = Some(Arc::new(open_pidfd(running.pid).unwrap()));
+        SelectedSupervisedFailureOwner::running(
+            running,
+            SelectedSupervisedBounds {
+                service: cleanup,
+                cleanup,
+            },
+        )
+    }
+
+    #[test]
+    fn selected_direct_request_is_preflight_refusal_without_owner() {
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        assert!(matches!(
+            lib_spawn_selected_supervised_awaiting_attachment_until(
+                request("/bin/sleep", &["30"]),
+                bound,
+                bound
+            ),
+            SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+                phase: SelectedSupervisedCreatePhase::Preflight,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn selected_reversed_bounds_refuse_before_creation_without_substituting_cleanup() {
+        let status = supervised_launcher_attachment_status_pipe().unwrap();
+        let mut req = request("/ryeos-selected-test-no-such-executable", &[]);
+        req.supervised_status = Some(status.reader);
+        let cleanup = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let service = crate::time::MonotonicDeadline::after(Duration::from_secs(4));
+        match lib_spawn_selected_supervised_awaiting_attachment_until(req, service, cleanup) {
+            SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+                phase: SelectedSupervisedCreatePhase::Preflight,
+                result,
+            } => assert!(result.stderr.contains("cleanup precedes service")),
+            _ => panic!("reversed bounds must refuse before process creation attempt"),
+        }
+    }
+
+    #[test]
+    fn selected_missing_executable_reports_create_attempt_without_running_owner() {
+        let status = supervised_launcher_attachment_status_pipe().unwrap();
+        let mut req = request("/ryeos-selected-test-no-such-executable", &[]);
+        req.supervised_status = Some(status.reader);
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        assert!(matches!(
+            lib_spawn_selected_supervised_awaiting_attachment_until(req, bound, bound),
+            SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+                phase: SelectedSupervisedCreatePhase::ProcessCreateAttempt,
+                ..
+            }
+        ));
+        // This is custody/phase coverage only, never accounting NeverBorn proof.
+    }
+
+    #[test]
+    fn selected_expired_cleanup_retains_same_child_pin_and_unjoined_drains() {
+        let expired = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let mut owner = live_owner(expired);
+        let child = owner.identity();
+        let (pin, capture) = {
+            let running = owner.running_mut().unwrap();
+            (
+                Arc::clone(running.attachment_target_lifetime.as_ref().unwrap()),
+                Arc::clone(&running.stdout_capture),
+            )
+        };
+        assert!(matches!(
+            owner.settle_until_original_expiry(),
+            SelectedSupervisedCleanupObservation::Unsettled {
+                stage: SelectedSupervisedCleanupStage::GroupAndWrapper,
+                ..
+            }
+        ));
+        assert_eq!(owner.identity(), child);
+        let running = owner.running_mut().unwrap();
+        assert_eq!(running.child.id(), child.0);
+        assert!(!running.wrapper_reaped);
+        assert!(running.stdout_thread.is_some());
+        assert!(Arc::ptr_eq(&capture, &running.stdout_capture));
+        assert!(Arc::ptr_eq(
+            &pin,
+            running.attachment_target_lifetime.as_ref().unwrap()
+        ));
+        // Terminal destruction makes progress despite the already-expired bound.
+        drop(owner);
+        assert!(matches!(
+            native_terminal_pin_has_exited(&pin),
+            NativeTerminalPinObservation::Exited
+        ));
+    }
+
+    #[test]
+    fn selected_setup_unwind_runs_terminal_cleanup_for_same_running_owner() {
+        let expired = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let running = lib_spawn(request("/bin/sleep", &["30"])).unwrap();
+        let pin = open_pidfd(running.pid).unwrap();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = SpawnRunningGuard {
+                running: Some(running),
+                mode: SpawnFailureCustodyMode::Selected(SelectedSupervisedBounds {
+                    service: expired,
+                    cleanup: expired,
+                }),
+            };
+            panic!("injected actual post-child setup unwind");
+        }));
+        assert!(unwind.is_err());
+        assert!(matches!(
+            native_terminal_pin_has_exited(&pin),
+            NativeTerminalPinObservation::Exited
+        ));
+    }
+
+    #[test]
+    fn selected_drain_timeout_retains_actual_worker_after_wrapper_reap() {
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let mut owner = live_owner(bound);
+        assert!(matches!(
+            owner.settle_until_original_expiry(),
+            SelectedSupervisedCleanupObservation::Settled
+        ));
+        let (sent, received) = std::sync::mpsc::channel();
+        owner.running_mut().unwrap().stdout_thread = Some(thread::spawn(move || {
+            let _ = received.recv();
+        }));
+        // Actual unfinished local worker; no fabricated process/scope testimony.
+        owner.stage = SelectedSupervisedCleanupStage::Drains;
+        owner.running_mut().unwrap().selected_cleanup_complete = false;
+        owner.bounds.cleanup = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(matches!(
+            owner.settle_until_original_expiry(),
+            SelectedSupervisedCleanupObservation::Unsettled {
+                stage: SelectedSupervisedCleanupStage::Drains,
+                ..
+            }
+        ));
+        assert!(owner.running_mut().unwrap().wrapper_reaped);
+        assert!(owner.running_mut().unwrap().stdout_thread.is_some());
+        sent.send(()).unwrap();
+        drop(owner);
+    }
+
+    #[test]
+    fn selected_finished_worker_panic_is_retained_without_native_settlement_claim() {
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let mut owner = live_owner(bound);
+        assert!(matches!(
+            owner.settle_until_original_expiry(),
+            SelectedSupervisedCleanupObservation::Settled
+        ));
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            sent.send(()).unwrap();
+            panic!("injected real drainer panic");
+        });
+        received.recv().unwrap();
+        let running = owner.running_mut().unwrap();
+        running.stdout_thread = Some(worker);
+        running.selected_cleanup_complete = false;
+        owner.stage = SelectedSupervisedCleanupStage::Drains;
+        let outcome = owner.refused(
+            SelectedSupervisedFailurePhase::WrapperSetup,
+            spawn_failure(Instant::now(), "fixture setup refused"),
+        );
+        match outcome {
+            SelectedSupervisedFailureOutcome::Settled {
+                error, mut custody, ..
+            } => {
+                assert!(
+                    error
+                        .result
+                        .stderr
+                        .contains("selected stdout worker panicked")
+                );
+                let running = custody.running_mut().unwrap();
+                assert!(running.selected_worker_panics[1]);
+                assert!(running.stdout_thread.is_none());
+                assert!(running.wrapper_reaped);
+                assert!(running.selected_cleanup_complete);
+                assert!(running.native_settlement.is_none());
+            }
+            _ => panic!("finished panic is a retained worker diagnostic, not a live worker"),
+        }
+    }
+
+    #[test]
+    fn selected_post_child_setup_refusal_returns_actual_running_custody() {
+        let status = supervised_launcher_attachment_status_pipe().unwrap();
+        let mut req = request("/bin/sh", &["-c", "exit 0"]);
+        req.supervised_status = Some(status.reader);
+        let service = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let bounds = SelectedSupervisedBounds {
+            service,
+            cleanup: crate::time::MonotonicDeadline::after(Duration::ZERO),
+        };
+        // Exercise the real shared producer with already-expired cleanup; no
+        // native acceptance/held-positive or refreshed public bound is claimed.
+        let error = match lib_spawn_with_stdio_custody(
+            req,
+            false,
+            None,
+            None,
+            None,
+            Some(service),
+            false,
+            SpawnFailureCustodyMode::Selected(bounds),
+        ) {
+            Err(error) => error,
+            Ok(running) => {
+                running.abort();
+                panic!("closed status must refuse");
+            }
+        };
+        match error {
+            SpawnWithStdioError::Selected(SelectedSupervisedFailureOutcome::Unsettled {
+                mut owner,
+                ..
+            }) => {
+                let running = owner.running_mut().unwrap();
+                assert_ne!(running.child.id(), 0);
+                assert!(!running.wrapper_reaped);
+                assert!(running.stdout_thread.is_some());
+            }
+            _ => panic!("post-child failure must return actual unsettled custody"),
+        }
+    }
+
+    #[test]
+    fn selected_pending_abort_expiry_returns_same_pending_pin_and_child() {
+        let (held, bound) = held_fixture();
+        let child = held.held().pid;
+        let pin = Arc::clone(&held.held().pidfd);
+        thread::sleep(bound.remaining() + Duration::from_millis(1));
+        match held.abort_and_reap() {
+            SelectedSupervisedAbortOutcome::Unsettled { error, mut owner } => {
+                assert_eq!(error.pid, child);
+                let Some(SelectedSupervisedCustody::Pending(pending)) = owner.custody.as_ref()
+                else {
+                    panic!("abort must retain same pending custody");
+                };
+                assert_eq!(pending.pid, child);
+                assert!(Arc::ptr_eq(&pin, &pending.pidfd));
+                assert!(pending.owner.is_some());
+                assert!(!owner.running_mut().unwrap().wrapper_reaped);
+                drop(owner);
+                assert!(matches!(
+                    native_terminal_pin_has_exited(&pin),
+                    NativeTerminalPinObservation::Exited
+                ));
+            }
+            _ => panic!("expired bounded abort must return its actual owner"),
+        }
+    }
+
+    #[test]
+    fn selected_pending_release_expiry_preserves_same_custody_without_retry() {
+        let (held, bound) = held_fixture();
+        let child = held.held().pid;
+        let pin = Arc::clone(&held.held().pidfd);
+        thread::sleep(bound.remaining() + Duration::from_millis(1));
+        match held.release_after_attachment() {
+            SelectedSupervisedReleaseOutcome::Refused(
+                SelectedSupervisedFailureOutcome::Unsettled { error, mut owner },
+            ) => {
+                assert!(matches!(
+                    error.phase,
+                    SelectedSupervisedFailurePhase::ReleaseValidation
+                ));
+                assert_eq!(owner.identity().0, child);
+                let Some(SelectedSupervisedCustody::Pending(pending)) = owner.custody.as_ref()
+                else {
+                    panic!("release must retain same pending custody");
+                };
+                assert!(Arc::ptr_eq(&pin, &pending.pidfd));
+                assert!(pending.owner.is_some());
+                assert!(owner.running_mut().unwrap().attachment_release.is_some());
+                // Failure owner exposes cleanup only, never another release.
+                drop(owner);
+                assert!(matches!(
+                    native_terminal_pin_has_exited(&pin),
+                    NativeTerminalPinObservation::Exited
+                ));
+            }
+            _ => panic!("expired release must retain actual refused owner"),
+        }
+    }
+
+    #[test]
+    fn selected_request_timeout_refuses_release_before_longer_service_expiry() {
+        let (held, service) = held_fixture_with_timeout(0.5);
+        let request_expiry = held.held().request_deadline.unwrap();
+        thread::sleep(
+            request_expiry.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+        );
+        assert!(
+            !service.has_elapsed(),
+            "fixture request must precede service"
+        );
+        let outcome = held.release_after_attachment();
+        let (error, custody) = match outcome {
+            SelectedSupervisedReleaseOutcome::Refused(
+                SelectedSupervisedFailureOutcome::Settled { error, custody, .. },
+            ) => (error, custody),
+            SelectedSupervisedReleaseOutcome::Refused(
+                SelectedSupervisedFailureOutcome::Unsettled { error, owner },
+            ) => (error, owner),
+            _ => panic!("shorter original request timeout must prevent release"),
+        };
+        assert!(matches!(
+            error.phase,
+            SelectedSupervisedFailurePhase::ReleaseValidation
+        ));
+        assert!(!custody.release_attempted);
+    }
+
+    #[test]
+    fn selected_request_expiry_after_write_retains_same_consumed_boundary() {
+        let (held, _) = held_fixture_with_timeout(0.5);
+        let pin = Arc::clone(&held.held().pidfd);
+        let barrier =
+            quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5)).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            sent.send(held.release_after_attachment())
+                .unwrap_or_else(|_| panic!("test result receiver lost"));
+        });
+        let outcome = received.recv_timeout(Duration::from_secs(4));
+        drop(barrier);
+        worker.join().unwrap();
+        match outcome.unwrap() {
+            SelectedSupervisedReleaseOutcome::Refused(
+                SelectedSupervisedFailureOutcome::Unsettled { error, mut owner },
+            ) => {
+                assert!(matches!(
+                    error.phase,
+                    SelectedSupervisedFailurePhase::ReleaseWrite
+                ));
+                assert!(owner.release_attempted);
+                assert!(error.result.aborted_before_attachment.is_none());
+                let running = owner.running_mut().unwrap();
+                assert!(Arc::ptr_eq(
+                    &pin,
+                    running.attachment_target_lifetime.as_ref().unwrap()
+                ));
+                assert!(
+                    running
+                        .attachment_release
+                        .as_ref()
+                        .unwrap()
+                        .writer
+                        .is_some()
+                );
+                drop(owner);
+            }
+            _ => panic!("uncertain post-write close must retain actual owner"),
+        }
+    }
+
+    #[test]
+    fn selected_child_only_guard_revokes_actual_pipe_before_any_signal() {
+        let status = supervised_launcher_attachment_status_pipe().unwrap();
+        let reader = status.attachment_release_reader;
+        drop(status.attachment_release_keepalive_writer);
+        drop(status.writer);
+        let mut command = process::Command::new("/bin/sleep");
+        command.arg("30");
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let bound = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let mut guard = SelectedSupervisedSetupGuard {
+            child: None,
+            supervised_status: Some(status.reader),
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            mapping_lifelines: Vec::new(),
+            mode: SpawnFailureCustodyMode::Selected(SelectedSupervisedBounds {
+                service: bound,
+                cleanup: bound,
+            }),
+        };
+        guard.child = Some(command.spawn().unwrap());
+        let pin = open_pidfd(guard.child.as_ref().unwrap().id()).unwrap();
+        configure_nonblocking_fd(reader.file()).unwrap();
+        guard
+            .revoke_held_boundary(bound, SelectedCleanupMode::TerminalDestruction)
+            .unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            reader.file().read(&mut byte).unwrap(),
+            0,
+            "actual boundary must have EOF"
+        );
+        assert!(matches!(
+            native_terminal_pin_has_exited(&pin),
+            NativeTerminalPinObservation::NotExited
+        ));
+        drop(guard);
+        assert!(matches!(
+            native_terminal_pin_has_exited(&pin),
+            NativeTerminalPinObservation::Exited
+        ));
     }
 }
 
