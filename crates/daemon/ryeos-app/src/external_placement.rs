@@ -9260,7 +9260,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            db.claim_thread_launch("T-one", "claim-one", "daemon:external-placement-test")
+            db.fixture_claim_thread_launch("T-one", "claim-one", "daemon:external-placement-test")
                 .unwrap(),
             crate::runtime_db::LaunchClaimOutcome::Claimed,
         );

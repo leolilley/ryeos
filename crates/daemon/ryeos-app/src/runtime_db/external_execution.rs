@@ -3047,7 +3047,7 @@ pub(crate) mod tests {
     pub(crate) fn direct_owner_reservation(db: &RuntimeDb) -> ExternalAllocationReservation {
         let placement = "T-direct-owner";
         db.insert_thread_runtime(placement, placement).unwrap();
-        db.claim_thread_launch(placement, "direct-claim", "daemon:direct-owner")
+        db.fixture_claim_thread_launch(placement, "direct-claim", "daemon:direct-owner")
             .unwrap();
         let launch_owner = db.get_launch_claim(placement).unwrap().unwrap().owner;
         let binding = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
@@ -3239,9 +3239,9 @@ pub(crate) mod tests {
         let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
         let reservation = direct_owner_reservation(&db);
         retain_direct_owner_fixture(&db, &reservation, "contact_pending");
-        db.release_thread_launch_claim(&reservation.placement_thread_id, "direct-claim")
+        db.fixture_release_thread_launch_claim(&reservation.placement_thread_id, "direct-claim")
             .unwrap();
-        db.claim_thread_launch(&reservation.placement_thread_id, "new-claim", "daemon:new")
+        db.fixture_claim_thread_launch(&reservation.placement_thread_id, "new-claim", "daemon:new")
             .unwrap();
         db.request_thread_stop(&reservation.placement_thread_id, StopIntent::Cancel)
             .unwrap();
@@ -3257,7 +3257,7 @@ pub(crate) mod tests {
             panic!("retained contact was not reconcile-only")
         };
         assert_eq!(retained.reservation, reservation);
-        db.release_thread_launch_claim(&reservation.placement_thread_id, "new-claim")
+        db.fixture_release_thread_launch_claim(&reservation.placement_thread_id, "new-claim")
             .unwrap();
         let pins = db
             .inspect_chain_recovery_pins(
@@ -3376,7 +3376,7 @@ pub(crate) mod tests {
         })
         .unwrap();
         assert_eq!(
-            db.claim_thread_launch(
+            db.fixture_claim_thread_launch(
                 &placement,
                 &format!("claim-{suffix}"),
                 "daemon:external-execution-test",
@@ -3918,7 +3918,7 @@ pub(crate) mod tests {
                 ..
             }) if current == &occurrence
         ));
-        assert!(db.discard_all_thread_history(true).is_err());
+        assert!(db.inspect_thread_history_discard().is_err());
         drop(db);
         let db = RuntimeDb::open(&path).unwrap();
         let retained_json: String = db.conn.query_row(

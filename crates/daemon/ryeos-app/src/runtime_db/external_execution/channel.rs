@@ -3237,9 +3237,9 @@ pub(super) mod tests {
         encoded["projection"]["endpoint_binding_digest"] = "7".repeat(64).into();
         *program = serde_json::from_value(encoded).unwrap();
         assert!(require_retained_channel_allocation(&db.conn, &binding, &changed).is_err());
-        db.release_thread_launch_claim(&binding.placement_thread_id, "direct-claim")
+        db.fixture_release_thread_launch_claim(&binding.placement_thread_id, "direct-claim")
             .unwrap();
-        db.claim_thread_launch(
+        db.fixture_claim_thread_launch(
             &binding.placement_thread_id,
             "replacement-claim",
             "daemon:replacement",
@@ -3442,9 +3442,9 @@ pub(super) mod tests {
                 .len(),
             1
         );
-        db.release_thread_launch_claim(placement, "direct-claim")
+        db.fixture_release_thread_launch_claim(placement, "direct-claim")
             .unwrap();
-        db.claim_thread_launch(placement, "replacement", "daemon:replacement")
+        db.fixture_claim_thread_launch(placement, "replacement", "daemon:replacement")
             .unwrap();
         assert!(
             db.admit_external_ready_and_author_release(placement, &owner, test_startup_deadline())
@@ -3815,9 +3815,9 @@ pub(super) mod tests {
                 exit == ExternalTargetExit::Code(0)
             );
             tx.commit().unwrap();
-            db.release_thread_launch_claim(placement, "direct-claim")
+            db.fixture_release_thread_launch_claim(placement, "direct-claim")
                 .unwrap();
-            db.claim_thread_launch(placement, "recovery-claim", daemon_generation_id())
+            db.fixture_claim_thread_launch(placement, "recovery-claim", daemon_generation_id())
                 .unwrap();
             let recovery = db.get_launch_claim(placement).unwrap().unwrap().claimed_by;
             let exchange = db
@@ -3980,9 +3980,9 @@ pub(super) mod tests {
                 continue;
             }
             if cancellation == "stale" {
-                db.release_thread_launch_claim(placement, "direct-claim")
+                db.fixture_release_thread_launch_claim(placement, "direct-claim")
                     .unwrap();
-                db.claim_thread_launch(placement, "replacement", daemon_generation_id())
+                db.fixture_claim_thread_launch(placement, "replacement", daemon_generation_id())
                     .unwrap();
                 assert!(
                     db.begin_external_termination(placement, &intent)
@@ -4004,9 +4004,9 @@ pub(super) mod tests {
                         .unwrap()
                         .is_some()
                 );
-                db.release_thread_launch_claim(placement, "direct-claim")
+                db.fixture_release_thread_launch_claim(placement, "direct-claim")
                     .unwrap();
-                db.claim_thread_launch(placement, "recovery", daemon_generation_id())
+                db.fixture_claim_thread_launch(placement, "recovery", daemon_generation_id())
                     .unwrap();
             }
             let cancel = db
@@ -4334,9 +4334,9 @@ pub(super) mod tests {
             .admit_external_ready_and_author_release(placement, &owner, test_startup_deadline())
             .unwrap()
             .unwrap();
-        db.release_thread_launch_claim(placement, "direct-claim")
+        db.fixture_release_thread_launch_claim(placement, "direct-claim")
             .unwrap();
-        db.claim_thread_launch(placement, "replacement", "daemon:replacement")
+        db.fixture_claim_thread_launch(placement, "replacement", "daemon:replacement")
             .unwrap();
         let empty = || ExternalCommandOutputCommitment {
             bytes: 0,

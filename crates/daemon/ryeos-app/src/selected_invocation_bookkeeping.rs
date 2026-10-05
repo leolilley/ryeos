@@ -119,6 +119,10 @@ pub enum SelectedBorrowReturn {
     AlreadyReturned,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum SelectedFixturePhase { Pending, Occupied, Borrowed, RestoredAwaitingBorrowAck, Retiring }
+
 pub(crate) struct SelectedInvocationBookkeeping {
     identity: Arc<StoreIdentity>,
     generation: Option<String>,
@@ -138,6 +142,15 @@ impl SelectedInvocationBookkeeping {
             next_borrower: 1,
             closed: false,
         }
+    }
+
+    /// Every retained phase, including refused records, remains occupied.
+    pub(crate) fn has_thread(&self, thread_id: &str) -> bool {
+        self.slots.iter().flatten().any(|record| record.ticket.thread == thread_id)
+    }
+
+    pub(crate) fn has_any(&self) -> bool {
+        self.slots.iter().any(Option::is_some)
     }
 
     // Registration names only this metadata domain, never an installed owner.
@@ -273,6 +286,19 @@ impl SelectedInvocationBookkeeping {
         let borrower = self.borrow(&ticket).unwrap();
         self.restored(&borrower).unwrap();
         borrower
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_retained_phase(&mut self, ticket: &SelectedTicket, phase: SelectedFixturePhase, refused: bool) {
+        let record = self.record(ticket).unwrap();
+        record.phase = match phase {
+            SelectedFixturePhase::Pending => Phase::Pending,
+            SelectedFixturePhase::Occupied => Phase::Occupied,
+            SelectedFixturePhase::Borrowed => Phase::Borrowed(1),
+            SelectedFixturePhase::RestoredAwaitingBorrowAck => Phase::RestoredAwaitingBorrowAck(1),
+            SelectedFixturePhase::Retiring => Phase::Retiring,
+        };
+        record.refused = refused;
     }
 
     #[cfg(test)]

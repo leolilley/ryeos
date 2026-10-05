@@ -571,15 +571,18 @@ mod tests {
     }
 
     #[test]
-    fn actual_adapter_missing_durable_claim_retains_box_and_pending_borrower() {
+    fn actual_adapter_selected_release_veto_keeps_claim_box_and_exact_return() {
         let (_root, store, slot, drops) = actual_metadata_probe();
         let before = match &slot.lock().unwrap().phase {
             RootPhase::RestoredAwaitingBorrowAck(borrower) => borrower.clone(),
             _ => panic!("fixture pending return"),
         };
-        store.release_thread_launch_claim("T-adapter", "fixture-claim").unwrap();
-        assert!(acknowledge_pending_return(&slot, &store).is_err());
+        assert!(store.release_thread_launch_claim("T-adapter", "fixture-claim").is_err());
+        assert_eq!(store.get_launch_claim("T-adapter").unwrap().unwrap().claim_id, "fixture-claim");
         assert_eq!(slot.lock().unwrap().phase, RootPhase::RestoredAwaitingBorrowAck(before));
+        assert!(slot.lock().unwrap().owner.is_some());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(acknowledge_pending_return(&slot, &store).is_ok());
         assert!(slot.lock().unwrap().owner.is_some());
         assert_eq!(drops.load(Ordering::SeqCst), 0);
     }

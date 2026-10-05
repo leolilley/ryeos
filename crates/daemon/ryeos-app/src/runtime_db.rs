@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rusqlite::{
@@ -7291,8 +7291,16 @@ fn reset_owned_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
     Ok(())
 }
 
+struct PrivateRuntimeDbIncarnation;
+
+/// Opaque identity of one retained connection owner, never a reset issuer.
+#[derive(Clone)]
+pub(crate) struct RuntimeDbIncarnation(std::sync::Arc<PrivateRuntimeDbIncarnation>);
+
 pub struct RuntimeDb {
     conn: Connection,
+    incarnation: RuntimeDbIncarnation,
+    reset_target: Option<PathBuf>,
     // One scoped progress/busy owner on this SAME private connection.
     original_deadline_active: std::cell::Cell<bool>,
     reset_required: bool,
@@ -8550,6 +8558,39 @@ fn require_bounded_route_idle(
 }
 
 impl RuntimeDb {
+    #[cfg(test)]
+    pub(crate) fn fixture_launch_epoch(&self, thread_id: &str) -> Result<Option<i64>> {
+        Ok(self.conn.query_row("SELECT last_epoch FROM thread_launch_epoch WHERE thread_id=?1", params![thread_id], |row| row.get(0)).optional()?)
+    }
+
+    pub(crate) fn capture_reset_incarnation(&self, path: &Path) -> Result<RuntimeDbIncarnation> {
+        if !self.open_mode.explicit_history_reset()
+            || self.reset_target.as_deref() != Some(path)
+            || self._directory.is_none() || self._directory_lock.is_none()
+            || self._database_file.is_none()
+        {
+            bail!("offline reset requires the exact pinned reset database owner");
+        }
+        Ok(self.incarnation.clone())
+    }
+
+    pub(crate) fn require_reset_incarnation(&self, token: &RuntimeDbIncarnation, path: &Path) -> Result<()> {
+        if !std::sync::Arc::ptr_eq(&self.incarnation.0, &token.0)
+            || self.reset_target.as_deref() != Some(path)
+            || self.open_mode != RuntimeDbOpenMode::ExplicitHistoryReset
+        {
+            bail!("offline reset database incarnation, target or mode changed");
+        }
+        let directory = self._directory.as_ref().context("offline pinned database directory absent")?;
+        let namespace = self._directory_lock.as_ref().context("offline database namespace lock absent")?;
+        let database = self._database_file.as_ref().context("offline pinned database file absent")?;
+        namespace.ensure_protects(directory)?;
+        ensure_runtime_directory_binding(directory)?;
+        let name = path.file_name().context("offline database target has no file name")?;
+        ensure_runtime_file_binding(directory, name, database, "runtime database")?;
+        Ok(())
+    }
+
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory runtime db")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")
@@ -8557,6 +8598,8 @@ impl RuntimeDb {
         initialize_current_runtime_schema(&conn, Path::new(":memory:"))?;
         Ok(Self {
             conn,
+            incarnation: RuntimeDbIncarnation(std::sync::Arc::new(PrivateRuntimeDbIncarnation)),
+            reset_target: None,
             original_deadline_active: std::cell::Cell::new(false),
             reset_required: false,
             open_mode: RuntimeDbOpenMode::Current,
@@ -15017,7 +15060,24 @@ impl RuntimeDb {
     /// explicitly authorized offline all-thread-history discard. The database
     /// and its exact current schema remain in place; node configuration and
     /// every non-thread store live elsewhere.
-    pub fn discard_all_thread_history(
+    pub fn inspect_thread_history_discard(&self) -> Result<RuntimeThreadHistoryDiscardReport> {
+        self.discard_all_thread_history_unchecked(true)
+    }
+
+    pub(crate) fn discard_all_thread_history(
+        &self,
+        authority: &crate::execution_history_reset::OfflineResetAuthority<'_>,
+    ) -> Result<RuntimeThreadHistoryDiscardReport> {
+        authority.authorize_mutation(self)?;
+        self.discard_all_thread_history_unchecked(false)
+    }
+
+    #[cfg(test)]
+    fn fixture_discard_all_thread_history(&self, dry_run: bool) -> Result<RuntimeThreadHistoryDiscardReport> {
+        self.discard_all_thread_history_unchecked(dry_run)
+    }
+
+    fn discard_all_thread_history_unchecked(
         &self,
         dry_run: bool,
     ) -> Result<RuntimeThreadHistoryDiscardReport> {
@@ -16361,6 +16421,8 @@ impl RuntimeDb {
             }
             return Ok(Self {
                 conn,
+                incarnation: RuntimeDbIncarnation(std::sync::Arc::new(PrivateRuntimeDbIncarnation)),
+                reset_target: Some(path.to_path_buf()),
                 original_deadline_active: std::cell::Cell::new(false),
                 reset_required: true,
                 open_mode: mode,
@@ -16439,6 +16501,8 @@ impl RuntimeDb {
 
         Ok(Self {
             conn,
+            incarnation: RuntimeDbIncarnation(std::sync::Arc::new(PrivateRuntimeDbIncarnation)),
+            reset_target: Some(path.to_path_buf()),
             original_deadline_active: std::cell::Cell::new(false),
             reset_required: false,
             open_mode: mode,
@@ -16469,7 +16533,24 @@ impl RuntimeDb {
     /// Apply the already-confirmed destructive schema cutover. Callers must
     /// publish their authoritative cross-store discard intent before invoking
     /// this method; opening the pinned handle never performs this mutation.
-    pub fn apply_explicit_history_reset(&mut self, path: &Path) -> Result<()> {
+    pub(crate) fn apply_explicit_history_reset(
+        &mut self,
+        authority: &crate::execution_history_reset::OfflineResetAuthority<'_>,
+        path: &Path,
+    ) -> Result<()> {
+        authority.authorize_mutation(self)?;
+        if self.reset_target.as_deref() != Some(path) {
+            bail!("offline reset configured database target changed");
+        }
+        self.apply_explicit_history_reset_unchecked(path)
+    }
+
+    #[cfg(test)]
+    fn fixture_apply_explicit_history_reset(&mut self, path: &Path) -> Result<()> {
+        self.apply_explicit_history_reset_unchecked(path)
+    }
+
+    fn apply_explicit_history_reset_unchecked(&mut self, path: &Path) -> Result<()> {
         if self.open_mode == RuntimeDbOpenMode::ExplicitHistoryResetInspection {
             bail!("runtime inspection authority cannot apply an explicit history reset");
         }
@@ -17029,7 +17110,22 @@ impl RuntimeDb {
     /// Remove a birth which never acquired an authoritative CAS root. Both
     /// rows are deleted in one SQLite transaction, and only a pending
     /// reservation may authorize this cleanup.
-    pub fn discard_pending_in_process_handler_birth(&self, thread_id: &str) -> Result<bool> {
+    pub(crate) fn discard_pending_in_process_handler_birth(
+        &self,
+        permit: &crate::state_store::SelectedMutationPermit<'_, '_>,
+        thread_id: &str,
+    ) -> Result<bool> {
+        permit.authorize_discard_birth(self, thread_id)?;
+        self.discard_pending_in_process_handler_birth_unchecked(thread_id)
+    }
+
+    // Ordinary SQL fixture only; never an App/native selected capability.
+    #[cfg(test)]
+    pub(crate) fn fixture_discard_pending_in_process_handler_birth(&self, thread_id: &str) -> Result<bool> {
+        self.discard_pending_in_process_handler_birth_unchecked(thread_id)
+    }
+
+    fn discard_pending_in_process_handler_birth_unchecked(&self, thread_id: &str) -> Result<bool> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let phase = tx
             .query_row(
@@ -17346,7 +17442,22 @@ impl RuntimeDb {
         )? > 0)
     }
 
-    pub fn delete_thread_runtime(&self, thread_id: &str) -> Result<usize> {
+    pub(crate) fn delete_thread_runtime(
+        &self,
+        permit: &crate::state_store::SelectedMutationPermit<'_, '_>,
+        thread_id: &str,
+    ) -> Result<usize> {
+        permit.authorize_delete_thread(self, thread_id)?;
+        self.delete_thread_runtime_unchecked(thread_id)
+    }
+
+    // Ordinary SQL fixture only; never an App/native selected capability.
+    #[cfg(test)]
+    pub(crate) fn fixture_delete_thread_runtime(&self, thread_id: &str) -> Result<usize> {
+        self.delete_thread_runtime_unchecked(thread_id)
+    }
+
+    fn delete_thread_runtime_unchecked(&self, thread_id: &str) -> Result<usize> {
         Ok(self.conn.execute(
             "DELETE FROM thread_runtime
               WHERE thread_id = ?1
@@ -17847,6 +17958,21 @@ impl RuntimeDb {
     /// crate-private prevents offline/runtime callers from treating the ledger
     /// as a disposable response cache.
     pub(crate) fn delete_chain_runtime(
+        &self,
+        permit: &crate::state_store::SelectedMutationPermit<'_, '_>,
+        chain_root_id: &str, thread_ids: &[String],
+    ) -> Result<usize> {
+        permit.authorize_delete_chain(self, chain_root_id, thread_ids)?;
+        self.delete_chain_runtime_unchecked(chain_root_id, thread_ids)
+    }
+
+    // Ordinary SQL fixture only; never an App/native selected capability.
+    #[cfg(test)]
+    pub(crate) fn fixture_delete_chain_runtime(&self, chain_root_id: &str, thread_ids: &[String]) -> Result<usize> {
+        self.delete_chain_runtime_unchecked(chain_root_id, thread_ids)
+    }
+
+    fn delete_chain_runtime_unchecked(
         &self,
         chain_root_id: &str,
         thread_ids: &[String],
@@ -19152,7 +19278,22 @@ impl RuntimeDb {
     /// unbounded, so a wall-clock lease cannot be the sole spawn authorization.
     /// Owned guards release on every task exit, and startup clears all surviving
     /// rows after the state lock proves the previous daemon is gone.
-    pub fn claim_thread_launch(
+    pub(crate) fn claim_thread_launch(
+        &self,
+        permit: &crate::state_store::SelectedMutationPermit<'_, '_>,
+        thread_id: &str, claim_id: &str, daemon_generation_id: &str,
+    ) -> Result<LaunchClaimOutcome> {
+        permit.authorize_claim(self, thread_id, claim_id, daemon_generation_id)?;
+        self.claim_thread_launch_unchecked(thread_id, claim_id, daemon_generation_id)
+    }
+
+    // Ordinary SQL fixture only; never an App/native selected capability.
+    #[cfg(test)]
+    pub(crate) fn fixture_claim_thread_launch(&self, thread_id: &str, claim_id: &str, daemon_generation_id: &str) -> Result<LaunchClaimOutcome> {
+        self.claim_thread_launch_unchecked(thread_id, claim_id, daemon_generation_id)
+    }
+
+    fn claim_thread_launch_unchecked(
         &self,
         thread_id: &str,
         claim_id: &str,
@@ -19210,7 +19351,22 @@ impl RuntimeDb {
     /// bug. A row whose stored owner does not parse is equally dead (this
     /// generation only writes valid owners) and is cleared fail-closed.
     /// Deletes are exact `(thread_id, claim_id)` matches, never cross-owner.
-    pub fn clear_stale_launch_claims(
+    pub(crate) fn clear_stale_launch_claims(
+        &self,
+        permit: &crate::state_store::SelectedMutationPermit<'_, '_>,
+        current_daemon_generation_id: &str,
+    ) -> Result<Vec<StaleLaunchClaimCleared>> {
+        permit.authorize_sweep(self, current_daemon_generation_id)?;
+        self.clear_stale_launch_claims_unchecked(current_daemon_generation_id)
+    }
+
+    // Ordinary SQL fixture only; never an App/native selected capability.
+    #[cfg(test)]
+    pub(crate) fn fixture_clear_stale_launch_claims(&self, current_daemon_generation_id: &str) -> Result<Vec<StaleLaunchClaimCleared>> {
+        self.clear_stale_launch_claims_unchecked(current_daemon_generation_id)
+    }
+
+    fn clear_stale_launch_claims_unchecked(
         &self,
         current_daemon_generation_id: &str,
     ) -> Result<Vec<StaleLaunchClaimCleared>> {
@@ -19293,7 +19449,22 @@ impl RuntimeDb {
     /// the launch failed and the thread should become reclaimable immediately
     /// rather than waiting for restart recovery. Returns true if a row was
     /// removed. A mismatched `claim_id` is a no-op, never a cross-owner delete.
-    pub fn release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
+    pub(crate) fn release_thread_launch_claim(
+        &self,
+        permit: &crate::state_store::SelectedMutationPermit<'_, '_>,
+        thread_id: &str, claim_id: &str,
+    ) -> Result<bool> {
+        permit.authorize_release(self, thread_id, claim_id)?;
+        self.release_thread_launch_claim_unchecked(thread_id, claim_id)
+    }
+
+    // Ordinary SQL fixture only; never an App/native selected capability.
+    #[cfg(test)]
+    pub(crate) fn fixture_release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
+        self.release_thread_launch_claim_unchecked(thread_id, claim_id)
+    }
+
+    fn release_thread_launch_claim_unchecked(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
         let removed = self.conn.execute(
             "DELETE FROM thread_launch_claim WHERE thread_id = ?1 AND claim_id = ?2",
             params![thread_id, claim_id],
@@ -19306,13 +19477,30 @@ impl RuntimeDb {
     /// owner fencing, and the startup rearm posture are one transaction: a
     /// daemon death after this commit must retain the attempt consumed by the
     /// process that already returned an unknown outcome.
-    pub fn rotate_thread_launch_claim_after_runtime_recovery(
+    pub(crate) fn rotate_thread_launch_claim_after_runtime_recovery(
+        &self,
+        permit: &crate::state_store::SelectedMutationPermit<'_, '_>,
+        thread_id: &str, expected_claimed_by: &str, next_claim_id: &str, daemon_generation_id: &str, max_attempts: u32,
+        expected_next_owner: &LaunchOwner,
+    ) -> Result<RuntimeRecoveryClaimRotation> {
+        permit.authorize_rotate(self, thread_id, expected_claimed_by, next_claim_id, daemon_generation_id, max_attempts)?;
+        self.rotate_thread_launch_claim_after_runtime_recovery_unchecked(thread_id, expected_claimed_by, next_claim_id, daemon_generation_id, max_attempts, Some(expected_next_owner))
+    }
+
+    // Ordinary SQL fixture only; never an App/native selected capability.
+    #[cfg(test)]
+    pub(crate) fn fixture_rotate_thread_launch_claim_after_runtime_recovery(&self, thread_id: &str, expected_claimed_by: &str, next_claim_id: &str, daemon_generation_id: &str, max_attempts: u32) -> Result<RuntimeRecoveryClaimRotation> {
+        self.rotate_thread_launch_claim_after_runtime_recovery_unchecked(thread_id, expected_claimed_by, next_claim_id, daemon_generation_id, max_attempts, None)
+    }
+
+    fn rotate_thread_launch_claim_after_runtime_recovery_unchecked(
         &self,
         thread_id: &str,
         expected_claimed_by: &str,
         next_claim_id: &str,
         daemon_generation_id: &str,
         max_attempts: u32,
+        expected_next_owner: Option<&LaunchOwner>,
     ) -> Result<RuntimeRecoveryClaimRotation> {
         let now_ms = lillux::time::timestamp_millis();
         let tx = self.conn.unchecked_transaction()?;
@@ -19368,6 +19556,9 @@ impl RuntimeDb {
             unpredictable_nonce: next_claim_id.to_string(),
             daemon_generation_id: daemon_generation_id.to_string(),
         };
+        if expected_next_owner.is_some_and(|expected| expected != &owner) {
+            bail!("prepared replacement owner contradicts transactional launch epoch");
+        }
         let claimed_by = lillux::canonical_json(&serde_json::to_value(&owner)?)?;
         let changed = tx.execute(
             "UPDATE thread_launch_claim
@@ -19387,8 +19578,9 @@ impl RuntimeDb {
             tx.rollback()?;
             return Ok(RuntimeRecoveryClaimRotation::LostOwner);
         }
-        tx.commit()?;
-        Ok(RuntimeRecoveryClaimRotation::Rotated {
+        // Allocate the returned owner/claim before durable success. The Store
+        // already reserved its replacement key and set capacity.
+        let outcome = RuntimeRecoveryClaimRotation::Rotated {
             claim: LaunchClaim {
                 thread_id: thread_id.to_string(),
                 claim_id: next_claim_id.to_string(),
@@ -19398,7 +19590,9 @@ impl RuntimeDb {
                 owner,
             },
             next_attempt,
-        })
+        };
+        tx.commit()?;
+        Ok(outcome)
     }
 
     /// Read the current launch claim for a thread, if any. The reconciler uses
@@ -21869,6 +22063,15 @@ fn parse_json_blob(blob: Option<Vec<u8>>) -> rusqlite::Result<Option<Value>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_db_incarnation_is_unique_and_in_memory_never_mints_offline_capture() {
+        let first = RuntimeDb::new_in_memory().unwrap();
+        let second = RuntimeDb::new_in_memory().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first.incarnation.0, &second.incarnation.0));
+        assert!(first.capture_reset_incarnation(Path::new(":memory:")).is_err());
+        assert!(first.require_reset_incarnation(&second.incarnation, Path::new(":memory:")).is_err());
+    }
+
     use super::*;
     use crate::launch_metadata::RuntimeLaunchMetadata;
     use ryeos_engine::contracts::CancellationMode;
@@ -23359,7 +23562,7 @@ mod tests {
             );
             for dry_run in [true, false] {
                 assert!(
-                    db.discard_all_thread_history(dry_run)
+                    db.fixture_discard_all_thread_history(dry_run)
                         .unwrap_err()
                         .to_string()
                         .contains("completed process-scope retirement")
@@ -23405,7 +23608,7 @@ mod tests {
         assert_eq!(reserved.scopes.len(), expected_scopes);
         if expected_pins != 0 {
             assert!(
-                db.discard_all_thread_history(true).is_err(),
+                db.fixture_discard_all_thread_history(true).is_err(),
                 "reserved retirement is not completed retirement"
             );
         }
@@ -23446,7 +23649,7 @@ mod tests {
             .unwrap();
         assert_eq!(completed.state, ScopeRetirementState::Retired);
         assert!(read_scope_lifetime_fence(&db.conn).unwrap().is_none());
-        db.discard_all_thread_history(true).unwrap();
+        db.fixture_discard_all_thread_history(true).unwrap();
         assert_eq!(
             db.inspect_chain_recovery_pins("T-one", &[])
                 .unwrap()
@@ -23782,7 +23985,7 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            db.claim_thread_launch("T-retained", "claim-retained", "daemon-new")
+            db.fixture_claim_thread_launch("T-retained", "claim-retained", "daemon-new")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         ));
@@ -23869,7 +24072,7 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            db.claim_thread_launch("T-frozen", "claim-frozen", "daemon-new")
+            db.fixture_claim_thread_launch("T-frozen", "claim-frozen", "daemon-new")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         ));
@@ -24018,7 +24221,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        db.claim_thread_launch("T-live-retry", "new-claim", "daemon-test")
+        db.fixture_claim_thread_launch("T-live-retry", "new-claim", "daemon-test")
             .unwrap();
         let owner = db
             .get_launch_claim("T-live-retry")
@@ -24108,7 +24311,7 @@ mod tests {
                     params![phase.as_str(), frozen],
                 )
                 .unwrap();
-            db.claim_thread_launch("T-phase", "next-claim", "daemon-test")
+            db.fixture_claim_thread_launch("T-phase", "next-claim", "daemon-test")
                 .unwrap();
             let owner = db.get_launch_claim("T-phase").unwrap().unwrap().claimed_by;
             let result = db.handoff_workspace_for_live_retry(
@@ -26062,7 +26265,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            db.discard_pending_in_process_handler_birth("T-pending")
+            db.fixture_discard_pending_in_process_handler_birth("T-pending")
                 .unwrap()
         );
         assert!(db.get_runtime_info("T-pending").unwrap().is_none());
@@ -26081,7 +26284,7 @@ mod tests {
         db.mark_in_process_handler_birth_running("T-running")
             .unwrap();
         let error = db
-            .discard_pending_in_process_handler_birth("T-running")
+            .fixture_discard_pending_in_process_handler_birth("T-running")
             .unwrap_err();
         assert!(error.to_string().contains("refusing to discard"));
         assert!(db.get_runtime_info("T-running").unwrap().is_some());
@@ -26367,9 +26570,9 @@ mod tests {
 
         let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
         assert!(reset.requires_explicit_history_reset());
-        reset.apply_explicit_history_reset(&path).unwrap();
+        reset.fixture_apply_explicit_history_reset(&path).unwrap();
         assert_eq!(
-            reset.discard_all_thread_history(true).unwrap().total_rows(),
+            reset.fixture_discard_all_thread_history(true).unwrap().total_rows(),
             0
         );
     }
@@ -26468,7 +26671,7 @@ mod tests {
         assert!(inspection.requires_explicit_history_reset());
         assert!(
             inspection
-                .apply_explicit_history_reset(&path)
+                .fixture_apply_explicit_history_reset(&path)
                 .unwrap_err()
                 .to_string()
                 .contains("inspection authority")
@@ -27631,7 +27834,7 @@ mod tests {
         db.reserve_hook_dispatch(&seed).unwrap();
         assert!(!db.chain_has_live_state(&seed.chain_root_id).unwrap());
         assert_eq!(
-            db.delete_chain_runtime(&seed.chain_root_id, &[]).unwrap(),
+            db.fixture_delete_chain_runtime(&seed.chain_root_id, &[]).unwrap(),
             1
         );
         let count: i64 = db
@@ -27667,7 +27870,7 @@ mod tests {
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("T-settlement", "T-settlement")
             .unwrap();
-        db.claim_thread_launch("T-settlement", "claim-1", "daemon-1")
+        db.fixture_claim_thread_launch("T-settlement", "claim-1", "daemon-1")
             .unwrap();
         let owner = db.get_launch_claim("T-settlement").unwrap().unwrap().owner;
         let first = fake_process_identity(401, 401);
@@ -28411,7 +28614,7 @@ mod tests {
     fn scope_only_thread_intent_is_owner_fenced_and_consumed_at_held_attach() {
         let (tmp, db) = fresh_db();
         db.insert_thread_runtime("scope-t", "scope-c").unwrap();
-        db.claim_thread_launch("scope-t", "scope-claim", daemon_generation_id())
+        db.fixture_claim_thread_launch("scope-t", "scope-claim", daemon_generation_id())
             .unwrap();
         let owner = db.get_launch_claim("scope-t").unwrap().unwrap().claimed_by;
         let host =
@@ -28523,7 +28726,7 @@ mod tests {
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("scope-recovery", "scope-chain")
             .unwrap();
-        db.claim_thread_launch("scope-recovery", "crashed-owner", daemon_generation_id())
+        db.fixture_claim_thread_launch("scope-recovery", "crashed-owner", daemon_generation_id())
             .unwrap();
         let owner = db
             .get_launch_claim("scope-recovery")
@@ -29921,11 +30124,11 @@ mod tests {
         .unwrap();
 
         assert!(reset.requires_explicit_history_reset());
-        reset.apply_explicit_history_reset(&path).unwrap();
+        reset.fixture_apply_explicit_history_reset(&path).unwrap();
         assert!(!reset.requires_explicit_history_reset());
         assert_current_runtime_schema(&reset.conn, &path).unwrap();
         assert_eq!(
-            reset.discard_all_thread_history(true).unwrap().total_rows(),
+            reset.fixture_discard_all_thread_history(true).unwrap().total_rows(),
             0
         );
         assert!(reset.open_workspaces().unwrap().is_empty());
@@ -29934,7 +30137,7 @@ mod tests {
         let reopened = RuntimeDb::open_existing_current(&path).unwrap();
         assert_eq!(
             reopened
-                .discard_all_thread_history(true)
+                .fixture_discard_all_thread_history(true)
                 .unwrap()
                 .total_rows(),
             0
@@ -29980,7 +30183,7 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 2,
         };
-        reset.apply_explicit_history_reset(&path).unwrap();
+        reset.fixture_apply_explicit_history_reset(&path).unwrap();
         assert!(reset.credential_profile_projections().unwrap().is_empty());
         reset
             .reconcile_credential_profile_projection(&stable)
@@ -30063,22 +30266,22 @@ mod tests {
             .unwrap();
         db.mark_in_process_handler_birth_running("T-root").unwrap();
 
-        let preview = db.discard_all_thread_history(true).unwrap();
+        let preview = db.fixture_discard_all_thread_history(true).unwrap();
         assert_eq!(preview.in_process_handler_reservations, 1);
         assert_eq!(preview.scoped_child_attempts, 1);
         assert_eq!(preview.scoped_child_input_operations, 1);
         assert_eq!(preview.total_rows(), 14);
         assert_eq!(
-            db.discard_all_thread_history(true).unwrap().total_rows(),
+            db.fixture_discard_all_thread_history(true).unwrap().total_rows(),
             14
         );
 
-        let removed = db.discard_all_thread_history(false).unwrap();
+        let removed = db.fixture_discard_all_thread_history(false).unwrap();
         assert_eq!(removed.in_process_handler_reservations, 1);
         assert_eq!(removed.scoped_child_attempts, 1);
         assert_eq!(removed.scoped_child_input_operations, 1);
         assert_eq!(removed.total_rows(), 14);
-        assert_eq!(db.discard_all_thread_history(true).unwrap().total_rows(), 0);
+        assert_eq!(db.fixture_discard_all_thread_history(true).unwrap().total_rows(), 0);
         drop(db);
 
         let path = tmp.path().join("runtime.db");
@@ -30260,7 +30463,7 @@ mod tests {
         assert_eq!(pins.runtime_membership_conflicts, 1);
         assert!(!pins.is_empty());
 
-        db.delete_chain_runtime("chain", &["root".to_string()])
+        db.fixture_delete_chain_runtime("chain", &["root".to_string()])
             .unwrap();
         assert!(db.get_runtime_info("root").unwrap().is_none());
         assert!(
@@ -30284,7 +30487,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            db.claim_thread_launch("t1", "claim-1", "daemon:test")
+            db.fixture_claim_thread_launch("t1", "claim-1", "daemon:test")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         );
@@ -30297,7 +30500,7 @@ mod tests {
         assert_eq!(pins.required_checkpoint_consumers, 1);
         assert!(!pins.is_empty());
 
-        assert!(db.release_thread_launch_claim("t1", "claim-1").unwrap());
+        assert!(db.fixture_release_thread_launch_claim("t1", "claim-1").unwrap());
         assert!(
             db.inspect_chain_recovery_pins("c1", &["t1".to_string()])
                 .unwrap()
@@ -30391,12 +30594,12 @@ mod tests {
         let (_tmp, db) = fresh_db();
         // Fresh thread: first owner wins.
         assert_eq!(
-            db.claim_thread_launch("t1", "c1", "daemon-a").unwrap(),
+            db.fixture_claim_thread_launch("t1", "c1", "daemon-a").unwrap(),
             LaunchClaimOutcome::Claimed
         );
         // A second launcher cannot time-reclaim active daemon ownership.
         assert_eq!(
-            db.claim_thread_launch("t1", "c2", "daemon-b").unwrap(),
+            db.fixture_claim_thread_launch("t1", "c2", "daemon-b").unwrap(),
             LaunchClaimOutcome::AlreadyClaimed
         );
         // The live claim still belongs to the first caller.
@@ -30415,11 +30618,11 @@ mod tests {
     fn launch_claim_does_not_expire_within_daemon_lifetime() {
         let (_tmp, db) = fresh_db();
         assert_eq!(
-            db.claim_thread_launch("t1", "c1", "daemon-a").unwrap(),
+            db.fixture_claim_thread_launch("t1", "c1", "daemon-a").unwrap(),
             LaunchClaimOutcome::Claimed
         );
         assert_eq!(
-            db.claim_thread_launch("t1", "c2", "daemon-b").unwrap(),
+            db.fixture_claim_thread_launch("t1", "c2", "daemon-b").unwrap(),
             LaunchClaimOutcome::AlreadyClaimed,
             "wall-clock time must never authorize a duplicate spawn"
         );
@@ -30439,17 +30642,17 @@ mod tests {
     fn startup_sweep_clears_only_dead_generation_claims() {
         let (_tmp, db) = fresh_db();
         assert_eq!(
-            db.claim_thread_launch("t-dead", "c-dead", "daemon-old")
+            db.fixture_claim_thread_launch("t-dead", "c-dead", "daemon-old")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         );
         assert_eq!(
-            db.claim_thread_launch("t-live", "c-live", "daemon-current")
+            db.fixture_claim_thread_launch("t-live", "c-live", "daemon-current")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         );
 
-        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        let cleared = db.fixture_clear_stale_launch_claims("daemon-current").unwrap();
         assert_eq!(cleared.len(), 1);
         assert_eq!(cleared[0].thread_id, "t-dead");
         assert_eq!(cleared[0].dead_generation, "daemon-old");
@@ -30460,7 +30663,7 @@ mod tests {
         assert!(db.get_launch_claim("t-live").unwrap().is_some());
         assert!(db.get_launch_claim("t-dead").unwrap().is_none());
         assert_eq!(
-            db.claim_thread_launch("t-dead", "c-new", "daemon-current")
+            db.fixture_claim_thread_launch("t-dead", "c-new", "daemon-current")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         );
@@ -30469,7 +30672,7 @@ mod tests {
 
         // Idempotent: a second sweep finds nothing.
         assert!(
-            db.clear_stale_launch_claims("daemon-current")
+            db.fixture_clear_stale_launch_claims("daemon-current")
                 .unwrap()
                 .is_empty()
         );
@@ -30487,12 +30690,12 @@ mod tests {
                 [],
             )
             .unwrap();
-        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        let cleared = db.fixture_clear_stale_launch_claims("daemon-current").unwrap();
         assert_eq!(cleared.len(), 1);
         assert_eq!(cleared[0].dead_generation, "<malformed owner>");
         assert!(!cleared[0].resume_budget_rearmed);
         assert_eq!(
-            db.claim_thread_launch("t-junk", "c-new", "daemon-current")
+            db.fixture_claim_thread_launch("t-junk", "c-new", "daemon-current")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         );
@@ -30503,7 +30706,7 @@ mod tests {
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("T-borrower", "T-borrower")
             .unwrap();
-        db.claim_thread_launch("T-borrower", "claim-old", "daemon-old")
+        db.fixture_claim_thread_launch("T-borrower", "claim-old", "daemon-old")
             .unwrap();
         let claim = db.get_launch_claim("T-borrower").unwrap().unwrap();
         assert!(db.conn.execute(
@@ -30516,7 +30719,7 @@ mod tests {
         ).unwrap();
         let before = db.thread_workspace_binding("T-borrower").unwrap().unwrap();
         db.bump_resume_attempts("T-borrower").unwrap();
-        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        let cleared = db.fixture_clear_stale_launch_claims("daemon-current").unwrap();
         assert_eq!(cleared.len(), 1);
         assert!(!cleared[0].resume_budget_rearmed);
         assert_eq!(db.get_resume_attempts("T-borrower").unwrap(), 1);
@@ -30536,7 +30739,7 @@ mod tests {
     fn workspace_binding_creator_uses_constructing_journal_until_ready() {
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("T-creator", "T-creator").unwrap();
-        db.claim_thread_launch("T-creator", "claim-creator", "daemon-old")
+        db.fixture_claim_thread_launch("T-creator", "claim-creator", "daemon-old")
             .unwrap();
         let claim = db.get_launch_claim("T-creator").unwrap().unwrap();
         db.reserve_workspace("workspace", &"a".repeat(64), "/fixture-workspace")
@@ -30626,7 +30829,7 @@ mod tests {
     fn workspace_binding_persists_exact_output_generation_coordinates() {
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("T-output", "T-output").unwrap();
-        db.claim_thread_launch("T-output", "claim-output", "daemon-old")
+        db.fixture_claim_thread_launch("T-output", "claim-output", "daemon-old")
             .unwrap();
         let claim = db.get_launch_claim("T-output").unwrap().unwrap();
         db.reserve_workspace("workspace-output", &"a".repeat(64), "/fixture-output")
@@ -30691,7 +30894,7 @@ mod tests {
     fn workspace_binding_unsettled_creator_does_not_rearm_unattached_target_budget() {
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("T-creator", "T-creator").unwrap();
-        db.claim_thread_launch("T-creator", "claim-creator", "daemon-old")
+        db.fixture_claim_thread_launch("T-creator", "claim-creator", "daemon-old")
             .unwrap();
         let claim = db.get_launch_claim("T-creator").unwrap().unwrap();
         db.reserve_workspace("workspace", &"a".repeat(64), "/fixture-workspace")
@@ -30728,7 +30931,7 @@ mod tests {
         )
         .unwrap();
         db.bump_resume_attempts("T-creator").unwrap();
-        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        let cleared = db.fixture_clear_stale_launch_claims("daemon-current").unwrap();
         assert_eq!(cleared.len(), 1);
         assert!(!cleared[0].resume_budget_rearmed);
         assert!(
@@ -30746,12 +30949,12 @@ mod tests {
         db.insert_thread_runtime("t1", "c1").unwrap();
         assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
         assert_eq!(
-            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+            db.fixture_claim_thread_launch("t1", "claim-old", "daemon-old")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         );
 
-        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        let cleared = db.fixture_clear_stale_launch_claims("daemon-current").unwrap();
         assert_eq!(cleared.len(), 1);
         assert!(cleared[0].resume_budget_rearmed);
         assert_eq!(db.get_resume_attempts("t1").unwrap(), 0);
@@ -30763,7 +30966,7 @@ mod tests {
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("t1", "c1").unwrap();
         assert_eq!(
-            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+            db.fixture_claim_thread_launch("t1", "claim-old", "daemon-old")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         );
@@ -30774,7 +30977,7 @@ mod tests {
             .claimed_by;
 
         let rotated = db
-            .rotate_thread_launch_claim_after_runtime_recovery(
+            .fixture_rotate_thread_launch_claim_after_runtime_recovery(
                 "t1",
                 &old_owner,
                 "claim-recovery",
@@ -30793,7 +30996,7 @@ mod tests {
         assert_eq!(claim.owner.monotonic_launch_epoch, 2);
         assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
 
-        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        let cleared = db.fixture_clear_stale_launch_claims("daemon-current").unwrap();
         assert_eq!(cleared.len(), 1);
         assert!(!cleared[0].resume_budget_rearmed);
         assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
@@ -30805,14 +31008,14 @@ mod tests {
         db.insert_thread_runtime("t1", "c1").unwrap();
         assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
         assert_eq!(
-            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+            db.fixture_claim_thread_launch("t1", "claim-old", "daemon-old")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         );
         let old = db.get_launch_claim("t1").unwrap().expect("claim");
 
         assert!(matches!(
-            db.rotate_thread_launch_claim_after_runtime_recovery(
+            db.fixture_rotate_thread_launch_claim_after_runtime_recovery(
                 "t1",
                 "wrong-owner",
                 "claim-lost",
@@ -30829,7 +31032,7 @@ mod tests {
         );
 
         assert!(matches!(
-            db.rotate_thread_launch_claim_after_runtime_recovery(
+            db.fixture_rotate_thread_launch_claim_after_runtime_recovery(
                 "t1",
                 &old.claimed_by,
                 "claim-exhausted",
@@ -30873,7 +31076,7 @@ mod tests {
         db.insert_thread_runtime("t1", "c1").unwrap();
         assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
         assert_eq!(
-            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+            db.fixture_claim_thread_launch("t1", "claim-old", "daemon-old")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         );
@@ -30886,7 +31089,7 @@ mod tests {
         )
         .unwrap();
 
-        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        let cleared = db.fixture_clear_stale_launch_claims("daemon-current").unwrap();
         assert_eq!(cleared.len(), 1);
         assert!(!cleared[0].resume_budget_rearmed);
         assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
@@ -30897,17 +31100,17 @@ mod tests {
     fn launch_claim_release_frees_for_reclaim() {
         let (_tmp, db) = fresh_db();
         assert_eq!(
-            db.claim_thread_launch("t1", "c1", "daemon-a").unwrap(),
+            db.fixture_claim_thread_launch("t1", "c1", "daemon-a").unwrap(),
             LaunchClaimOutcome::Claimed
         );
         // A mismatched claim_id must not delete another owner's claim.
-        assert!(!db.release_thread_launch_claim("t1", "other").unwrap());
+        assert!(!db.fixture_release_thread_launch_claim("t1", "other").unwrap());
         assert!(db.get_launch_claim("t1").unwrap().is_some());
         // The owner releases; the thread becomes immediately reclaimable.
-        assert!(db.release_thread_launch_claim("t1", "c1").unwrap());
+        assert!(db.fixture_release_thread_launch_claim("t1", "c1").unwrap());
         assert!(db.get_launch_claim("t1").unwrap().is_none());
         assert_eq!(
-            db.claim_thread_launch("t1", "c2", "daemon-b").unwrap(),
+            db.fixture_claim_thread_launch("t1", "c2", "daemon-b").unwrap(),
             LaunchClaimOutcome::Claimed
         );
     }
@@ -31217,7 +31420,7 @@ mod tests {
 
         let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
         assert!(reset.requires_explicit_history_reset());
-        reset.apply_explicit_history_reset(&path).unwrap();
+        reset.fixture_apply_explicit_history_reset(&path).unwrap();
         assert!(!reset.requires_explicit_history_reset());
     }
 
@@ -31505,7 +31708,7 @@ mod tests {
         prune_launch_planning(&db.conn, 24 * 60 * 60 * 1_000 + 2).unwrap();
         assert!(db.launch_planning_by_id("L-bound").unwrap().is_some());
 
-        db.delete_chain_runtime("T-bound", &["T-bound".to_string()])
+        db.fixture_delete_chain_runtime("T-bound", &["T-bound".to_string()])
             .unwrap();
         assert!(db.launch_planning_by_id("L-bound").unwrap().is_none());
     }

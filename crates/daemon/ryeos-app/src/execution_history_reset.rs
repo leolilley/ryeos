@@ -16,6 +16,56 @@ use crate::config::{Config, ConfigSources};
 use crate::runtime_db::{RuntimeDb, RuntimeThreadHistoryDiscardReport};
 use crate::state_lock::{StateLock, default_lock_path};
 
+/// Only this module captures actual offline exclusion and publishes intent.
+/// The token owns connection identity without borrowing the mutable RuntimeDb.
+pub(crate) struct OfflineResetAuthority<'locks> {
+    state_lock: &'locks StateLock,
+    runtime_directory: &'locks lillux::PinnedDirectory,
+    namespace_lock: &'locks lillux::PinnedDirectoryLock,
+    incarnation: crate::runtime_db::RuntimeDbIncarnation,
+    app_root: &'locks Path,
+    db_target: &'locks Path,
+    phase: OfflineResetAuthorityPhase,
+}
+
+#[derive(PartialEq, Eq)]
+enum OfflineResetAuthorityPhase { Captured, IntentPublished, Finished }
+
+impl<'locks> OfflineResetAuthority<'locks> {
+    fn capture(
+        state_lock: &'locks StateLock,
+        runtime_directory: &'locks lillux::PinnedDirectory,
+        namespace_lock: &'locks lillux::PinnedDirectoryLock,
+        config: &'locks Config,
+        db: &RuntimeDb,
+    ) -> Result<Self> {
+        state_lock.ensure_protects_app_root(&config.app_root)?;
+        namespace_lock.ensure_protects(runtime_directory)?;
+        let incarnation = db.capture_reset_incarnation(&config.db_path)?;
+        // Capture only a mutating offline database; inspection obtains no issuer.
+        db.require_reset_incarnation(&incarnation, &config.db_path)?;
+        Ok(Self {
+            state_lock, runtime_directory, namespace_lock, incarnation,
+            app_root: &config.app_root, db_target: &config.db_path,
+            phase: OfflineResetAuthorityPhase::Captured,
+        })
+    }
+
+    fn require_held(&self, db: &RuntimeDb) -> Result<()> {
+        self.state_lock.ensure_protects_app_root(self.app_root)?;
+        self.namespace_lock.ensure_protects(self.runtime_directory)?;
+        db.require_reset_incarnation(&self.incarnation, self.db_target)
+    }
+
+    pub(crate) fn authorize_mutation(&self, db: &RuntimeDb) -> Result<()> {
+        self.require_held(db)?;
+        if self.phase != OfflineResetAuthorityPhase::IntentPublished {
+            anyhow::bail!("offline runtime mutation requires actual published discard intent");
+        }
+        Ok(())
+    }
+}
+
 pub const EXECUTION_SCHEMA_CUTOVER_COMMAND: &str =
     "ryeos node reset execution-history --include-project-heads --confirm --confirm-project-heads";
 
@@ -193,7 +243,7 @@ fn run_execution_history_reset_inner(
     // This is the outer ownership proof. A running daemon and every
     // cooperating standalone state service hold the same lock.
     let state_lock_path = default_lock_path(&config.app_root);
-    let _state_lock = if options.dry_run {
+    let state_lock = if options.dry_run {
         StateLock::acquire_existing_read_only(&state_lock_path)
     } else {
         StateLock::acquire(&state_lock_path)
@@ -300,7 +350,7 @@ fn run_execution_history_reset_inner(
     } else {
         RuntimeThreadHistoryAccounting::Exact {
             counts: runtime_db
-                .discard_all_thread_history(true)
+                .inspect_thread_history_discard()
                 .context("inspect daemon runtime thread rows")?,
         }
     };
@@ -393,6 +443,10 @@ fn run_execution_history_reset_inner(
         });
     }
 
+    let mut reset_authority = OfflineResetAuthority::capture(
+        &state_lock, &runtime_directory, &runtime_directory_lock, &config, &runtime_db,
+    )?;
+    reset_authority.require_held(&runtime_db)?;
     publish_progress(
         &mut observer,
         ExecutionHistoryResetPhase::PublishingIntent,
@@ -401,6 +455,9 @@ fn run_execution_history_reset_inner(
     state_db
         .begin_thread_history_discard_admitted(&cas_guard)
         .context("publish offline thread-history discard intent")?;
+    // Only actual durable publication can advance this private capability.
+    reset_authority.phase = OfflineResetAuthorityPhase::IntentPublished;
+    reset_authority.authorize_mutation(&runtime_db)?;
     // Only after durable intent may any replay rows or enrolling ceremonies
     // be retired. A crash leaves the existing discard marker for safe retry.
     let (operational_db, replay_indexes) = prepared_replay
@@ -412,7 +469,7 @@ fn run_execution_history_reset_inner(
             .context("preserve stable credential authority and invalidate retired enrollment")?;
     }
     runtime_db
-        .apply_explicit_history_reset(&config.db_path)
+        .apply_explicit_history_reset(&reset_authority, &config.db_path)
         .context("apply runtime schema cutover after durable discard intent")?;
     for profile in stable_profiles {
         runtime_db
@@ -420,6 +477,7 @@ fn run_execution_history_reset_inner(
             .context("restore credential-profile runtime projection")?;
     }
 
+    reset_authority.authorize_mutation(&runtime_db)?;
     let authoritative = {
         let mut authoritative_progress = |progress| match progress {
             ryeos_state::AuthoritativeThreadHistoryDiscardProgress::RetiringChainHeads {
@@ -447,6 +505,7 @@ fn run_execution_history_reset_inner(
             .context("discard authoritative thread history")?
     };
 
+    reset_authority.authorize_mutation(&runtime_db)?;
     let project_heads = if options.discard_project_heads {
         publish_progress(
             &mut observer,
@@ -466,8 +525,9 @@ fn run_execution_history_reset_inner(
         None,
     );
     let runtime_rows = runtime_db
-        .discard_all_thread_history(false)
+        .discard_all_thread_history(&reset_authority)
         .context("discard daemon runtime thread rows")?;
+    reset_authority.authorize_mutation(&runtime_db)?;
     let thread_runtime_artifacts = crate::state_store::discard_all_thread_runtime_files(
         &config.app_root,
         &runtime_directory,
@@ -480,6 +540,7 @@ fn run_execution_history_reset_inner(
         ExecutionHistoryResetPhase::ClearingScheduler,
         None,
     );
+    reset_authority.authorize_mutation(&runtime_db)?;
     let scheduler_journal_artifacts = discard_scheduler_fire_journals(&runtime_directory, false)
         .context("discard scheduler fire journals")?;
     // Rebuild a recognized stale projection only after durable discard intent
@@ -490,9 +551,12 @@ fn run_execution_history_reset_inner(
         .context("discard scheduler fire projection")?;
 
     publish_progress(&mut observer, ExecutionHistoryResetPhase::Finalizing, None);
+    reset_authority.authorize_mutation(&runtime_db)?;
     state_db
         .finish_thread_history_discard_admitted(&cas_guard)
         .context("acknowledge completed offline thread-history discard")?;
+    reset_authority.phase = OfflineResetAuthorityPhase::Finished;
+    drop(reset_authority);
 
     let rebuilt = authoritative.rebuilt_projection.unwrap_or_default();
     publish_progress(&mut observer, ExecutionHistoryResetPhase::Complete, None);
@@ -852,6 +916,64 @@ mod tests {
             missing,
             std::collections::BTreeSet::from(["6".repeat(64), "7".repeat(64), "a".repeat(64),])
         );
+    }
+
+    #[test]
+    fn offline_capability_requires_actual_locks_exact_opened_db_and_published_intent() {
+        let tmp = TempDir::new().unwrap();
+        let config = Config::load(&ConfigSources { app_root: Some(tmp.path().to_owned()), ..Default::default() }).unwrap();
+        let identity = crate::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+        let trust = Arc::new(trust);
+        drop(ryeos_state::StateDb::open(&config.runtime_state_dir(), Arc::clone(&trust)).unwrap());
+        drop(RuntimeDb::open(&config.db_path).unwrap());
+        let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
+        let directory = lillux::PinnedDirectory::open(&config.runtime_state_dir()).unwrap().unwrap();
+        let namespace = directory.lock_exclusive().unwrap();
+        let mut state = ryeos_state::StateDb::open_for_projection_rebuild(&config.runtime_state_dir(), trust).unwrap();
+        let pinned = state.pinned_authority().unwrap();
+        let cas_guard = pinned.acquire_exclusive_guard(true).unwrap();
+        let mut db = open_runtime_db(&config, &directory, &namespace, false).unwrap();
+        let mut authority = OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &config, &db).unwrap();
+        assert!(db.apply_explicit_history_reset(&authority, &config.db_path).is_err());
+        assert!(db.discard_all_thread_history(&authority).is_err());
+        let other = open_runtime_db(&config, &directory, &namespace, false).unwrap();
+        assert!(authority.require_held(&other).is_err());
+        drop(other);
+        let wrong_directory_fixture = TempDir::new().unwrap();
+        let wrong_directory = lillux::PinnedDirectory::open(wrong_directory_fixture.path()).unwrap().unwrap();
+        let wrong_namespace = wrong_directory.lock_exclusive().unwrap();
+        assert!(OfflineResetAuthority::capture(&state_lock, &directory, &wrong_namespace, &config, &db).is_err());
+        let inspection = open_runtime_db(&config, &directory, &namespace, true).unwrap();
+        assert!(OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &config, &inspection).is_err());
+        drop(inspection);
+        state.begin_thread_history_discard_admitted(&cas_guard).unwrap();
+        authority.phase = OfflineResetAuthorityPhase::IntentPublished;
+        assert!(db.apply_explicit_history_reset(&authority, Path::new("wrong-target")).is_err());
+        db.apply_explicit_history_reset(&authority, &config.db_path).unwrap();
+        assert!(authority.require_held(&db).is_ok());
+        db.discard_all_thread_history(&authority).unwrap();
+        // Authority still borrows original locks; later opener has a new marker.
+        drop(db);
+        let reopened = open_runtime_db(&config, &directory, &namespace, false).unwrap();
+        assert!(authority.authorize_mutation(&reopened).is_err());
+        assert!(StateLock::acquire(&default_lock_path(tmp.path())).is_err());
+    }
+
+    #[test]
+    fn offline_capability_wrong_root_refuses_before_intent() {
+        let tmp = TempDir::new().unwrap();
+        let config = Config::load(&ConfigSources { app_root: Some(tmp.path().to_owned()), ..Default::default() }).unwrap();
+        drop(RuntimeDb::open(&config.db_path).unwrap());
+        let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
+        let directory = lillux::PinnedDirectory::open(&config.runtime_state_dir()).unwrap().unwrap();
+        let namespace = directory.lock_exclusive().unwrap();
+        let db = open_runtime_db(&config, &directory, &namespace, false).unwrap();
+        let other_root = TempDir::new().unwrap();
+        let other_config = Config::load(&ConfigSources { app_root: Some(other_root.path().to_owned()), ..Default::default() }).unwrap();
+        assert!(OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &other_config, &db).is_err());
+        assert!(db.inspect_thread_history_discard().is_ok());
     }
 
     #[test]
