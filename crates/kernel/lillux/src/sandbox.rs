@@ -874,12 +874,19 @@ impl LinuxSandboxPipes {
     }
 }
 
+// Piped launches exclusively own stdin/stdout/stderr. The common native
+// validator still enforces sorted unique channels and all source-role aliases.
+fn require_piped_target_channels(request: &LinuxSandboxRequest) -> Result<(), String> {
+    if request.target_channels.iter().any(|(_, target)| *target < 3) {
+        return Err("piped sandbox target channels cannot replace stdin/stdout/stderr".into());
+    }
+    Ok(())
+}
+
 pub fn prepare_linux_sandbox_piped(
     request: LinuxSandboxRequest,
 ) -> Result<(HeldLinuxSandboxProcess, LinuxSandboxPipes), String> {
-    if !request.target_channels.is_empty() {
-        return Err("piped candidate cannot inherit extra target channels".into());
-    }
+    require_piped_target_channels(&request)?;
     #[cfg(target_os = "linux")]
     {
         prepare_linux_sandbox_piped_linux(request, None)
@@ -893,11 +900,16 @@ fn prepare_linux_sandbox_piped_linux(
     request: LinuxSandboxRequest,
     occupancy: Option<crate::exec::PendingNamespaceWatchdog>,
 ) -> Result<(HeldLinuxSandboxProcess, LinuxSandboxPipes), String> {
-    if !request.target_channels.is_empty() {
-        return Err("piped candidate cannot inherit extra target channels".into());
-    }
+    require_piped_target_channels(&request)?;
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
-    fn pipe() -> Result<(std::fs::File, std::fs::File), String> {
+    // Reserve both mapped targets and source coordinates before allocating
+    // stdio. A closed source must never be revived by an internally owned pipe.
+    let mut reserved = std::collections::BTreeSet::from([0, 1, 2]);
+    for (source, target) in &request.target_channels {
+        reserved.insert(i32::try_from(*source).map_err(|error| error.to_string())?);
+        reserved.insert(i32::try_from(*target).map_err(|error| error.to_string())?);
+    }
+    fn pipe(reserved: &std::collections::BTreeSet<i32>) -> Result<(std::fs::File, std::fs::File), String> {
         let mut fds = [-1; 2];
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
             return Err(format!(
@@ -907,7 +919,7 @@ fn prepare_linux_sandbox_piped_linux(
         }
         if let Err(error) = imp::relocate_internal_descriptors(
             &mut fds,
-            &std::collections::BTreeSet::from([0, 1, 2]),
+            reserved,
             "candidate protocol pipe",
         ) {
             unsafe {
@@ -923,9 +935,9 @@ fn prepare_linux_sandbox_piped_linux(
             )
         })
     }
-    let (input, stdin) = pipe()?;
-    let (stdout, output) = pipe()?;
-    let (stderr, error) = pipe()?;
+    let (input, stdin) = pipe(&reserved)?;
+    let (stdout, output) = pipe(&reserved)?;
+    let (stderr, error) = pipe(&reserved)?;
     for file in [&stdin, &stdout, &stderr] {
         let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
         if flags < 0
@@ -958,6 +970,7 @@ pub fn prepare_linux_sandbox_piped_with_original_namespace_occupancy(
     cleanup_allowance: crate::time::Duration,
     original_deadline: crate::time::MonotonicDeadline,
 ) -> Result<(HeldLinuxSandboxProcess, LinuxSandboxPipes), String> {
+    require_piped_target_channels(&request)?;
     let pending = crate::exec::PendingNamespaceWatchdog::prepare(
         limit,
         cleanup_allowance,
@@ -6737,6 +6750,139 @@ mod imp {
     #[cfg(test)]
     mod namespace_source_tests {
         use super::*;
+
+        #[test]
+        fn piped_channels_keep_stdio_and_existing_authority_refusals() {
+            let first = crate::sealed_memfd(c"piped-first", b"first").unwrap();
+            let second = crate::sealed_memfd(c"piped-second", b"second").unwrap();
+            let a = first.inherited_descriptor().unwrap();
+            let b = second.inherited_descriptor().unwrap();
+            let mut request = super::super::tests::minimal_request();
+            for target in 0..3 {
+                request.target_channels = vec![(a, target)];
+                assert!(super::super::require_piped_target_channels(&request).is_err());
+                assert!(super::super::prepare_linux_sandbox_piped(request.clone()).is_err());
+            }
+            request.target_channels = vec![(a, 200), (b, 201)];
+            super::super::require_piped_target_channels(&request).unwrap();
+            validate_request(&request).unwrap();
+            for channels in [vec![(a, 200), (b, 200)], vec![(a, 201), (b, 200)],
+                             vec![(a, 200), (a, 201)], vec![(a, b), (b, 201)]] {
+                request.target_channels = channels;
+                assert!(validate_request(&request).is_err());
+            }
+            request.target_channels = vec![(a, 200)];
+            request.mounts.push(LinuxSandboxMount {
+                source_fd: a, destination: "/source".into(),
+                access: LinuxSandboxMountAccess::ReadOnly, layer: 0,
+            });
+            assert!(validate_request(&request).unwrap_err().contains("aliases"));
+            request.mounts.clear();
+            request.lifecycle = LinuxSandboxLifecycle::AwaitRelease {
+                release_fd: a, release_keepalive_fd: b,
+            };
+            assert!(validate_request(&request).unwrap_err().contains("alias"));
+        }
+
+        #[test]
+        fn piped_internal_coordinates_move_away_from_extra_targets_and_preserve_eof() {
+            use std::io::{Read as _, Write as _};
+            use std::os::fd::{AsRawFd as _, FromRawFd as _};
+            let mut descriptors = [-1; 2];
+            assert_eq!(unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+            let reserved = BTreeSet::from([0, 1, 2, descriptors[0], descriptors[1]]);
+            relocate_internal_descriptors(&mut descriptors, &reserved, "piped-test").unwrap();
+            assert!(descriptors.iter().all(|fd| !reserved.contains(fd)));
+            let mut reader = unsafe { File::from_raw_fd(descriptors[0]) };
+            let mut writer = unsafe { File::from_raw_fd(descriptors[1]) };
+            writer.write_all(b"exact-channel").unwrap();
+            drop(writer);
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"exact-channel");
+            assert!(unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC != 0);
+        }
+
+        #[test]
+        #[ignore = "native namespace component control; explicitly opt in on a supported host"]
+        fn piped_extra_descriptor_survives_with_three_owned_streams() {
+            use std::io::{Read as _, Write as _};
+            // Mechanical shell fixture only, not admitted Python/Tool evidence.
+            let channel = crate::sealed_memfd(c"piped-extra", b"extra-value\n").unwrap();
+            let sources = ["/bin", "/usr", "/lib", "/lib64"].into_iter()
+                .filter(|path| Path::new(path).exists())
+                .map(|path| (PathBuf::from(path), crate::secure_fs::pin_canonical_mount_source(
+                    &std::fs::canonicalize(path).unwrap()).unwrap().duplicate_at_or_above(64).unwrap()))
+                .collect::<Vec<_>>();
+            let mut request = super::super::tests::minimal_request();
+            request.executable = "/bin/sh".into();
+            request.argv0 = "sh".into();
+            request.cwd = "/".into();
+            request.arguments = vec!["-c".into(),
+                "read extra <&8; read input; printf '%s:%s\\n' \"$extra\" \"$input\"; printf 'diagnostic\\n' >&2".into()];
+            request.target_channels = vec![(channel.inherited_descriptor().unwrap(), 8)];
+            request.mounts = sources.iter().map(|(destination, source)| LinuxSandboxMount {
+                source_fd: source.inherited_descriptor().unwrap(), destination: destination.clone(),
+                access: LinuxSandboxMountAccess::ReadOnly, layer: 0,
+            }).collect();
+            let expected = LinuxSandboxMountPreparationCommitments::from_admitted_mounts(
+                &request.mounts, &[]).unwrap();
+            let deadline = crate::time::MonotonicDeadline::after(std::time::Duration::from_secs(5));
+            let (mut held, mut pipes) = super::super::prepare_linux_sandbox_piped(request).unwrap();
+            let result = (|| -> Result<(), String> {
+                let observed = held.mount_preparation_receipt()?;
+                if observed.owned_child_pid != held.child_pid() || !observed.matches_commitments(&expected) {
+                    return Err("piped-extra held mount identity changed".into());
+                }
+                held.release_once()?;
+                let mut streams = pipes.protocol_streams_until(deadline).map_err(|e| e.to_string())?;
+                streams.input.write_all(b"stdin-value\n").map_err(|e| e.to_string())?;
+                let mut output = Vec::new();
+                (&mut streams.output).take(257).read_to_end(&mut output).map_err(|e| e.to_string())?;
+                let mut diagnostics = Vec::new();
+                (&mut streams.diagnostics).take(257).read_to_end(&mut diagnostics).map_err(|e| e.to_string())?;
+                if output.len() > 256 || diagnostics.len() > 256 {
+                    return Err("piped-extra output overflow".into());
+                }
+                let mut eof = [0; 1];
+                if streams.output.read(&mut eof).map_err(|e| e.to_string())? != 0
+                    || streams.diagnostics.read(&mut eof).map_err(|e| e.to_string())? != 0 {
+                    return Err("piped-extra streams did not reach clean EOF".into());
+                }
+                if output != b"extra-value:stdin-value\n" || diagnostics != b"diagnostic\n" {
+                    return Err("piped-extra output/frame/EOF mismatch".into());
+                }
+                loop {
+                    if let Some(exit) = held.try_observe_target_exit()? {
+                        if exit.exit() != LinuxSandboxExit::Code(0) || exit.launch_failure().is_some() {
+                            return Err("piped-extra target refused".into());
+                        }
+                        // PID-1 exit readiness is not merely a numeric exit:
+                        // into_termination transfers the exact namespace-death
+                        // witness after exclusive owned reap. EOF was separate.
+                        let termination = exit.into_termination();
+                        if held.child_pid() != 0 || termination.exit() != LinuxSandboxExit::Code(0) {
+                            return Err("piped-extra namespace settlement missing".into());
+                        }
+                        break;
+                    }
+                    if deadline.has_elapsed() { return Err("piped-extra original deadline expired".into()); }
+                    std::thread::yield_now();
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                let cleanup = held.terminate_namespace_for_export_until(deadline);
+                // Best-effort TEST terminal cleanup only: native owner Drop
+                // attempts signal/wait but may block or fail without proving
+                // reap/settlement. It is NOT a renewed service window or any
+                // conformance evidence; this test always fails afterward.
+                // Keep source/pipe owners alive through that actual Drop.
+                drop(held);
+                drop((pipes, sources, channel));
+                panic!("piped-extra component control failed: {error}; bounded cleanup: {cleanup:?}");
+            }
+        }
 
         #[test]
         fn target_ready_receipt_is_fixed_size_and_versioned() {
