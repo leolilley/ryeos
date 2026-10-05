@@ -7,7 +7,7 @@ const CAPACITY: usize = 32;
 struct StoreIdentity;
 
 #[derive(Clone, Debug)]
-pub(crate) struct SelectedGeneration {
+pub struct SelectedGeneration {
     store: Arc<StoreIdentity>,
     generation: String,
 }

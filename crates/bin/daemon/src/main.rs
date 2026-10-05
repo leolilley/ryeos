@@ -105,6 +105,60 @@ impl Drop for LifecycleExitGuard {
     }
 }
 
+/// Main owns the original exclusion/lifecycle guards outside the run future.
+/// This envelope currently contains only the structurally empty selected root.
+struct DaemonSelectedComposition {
+    root: ryeos_executor::SelectedInvocationCompositionBarrier,
+    process_state_lock: Option<state_lock::StateLock>,
+    lifecycle_exit: Option<LifecycleExitGuard>,
+}
+
+impl DaemonSelectedComposition {
+    fn bootstrap() -> Self {
+        let (root, _unpublished_attachment) =
+            ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
+        Self { root, process_state_lock: None, lifecycle_exit: None }
+    }
+
+    fn arm_from_app_generation(&mut self, app: &AppState) -> Result<()> {
+        self.process_state_lock.as_ref().context("daemon state lock is absent")?
+            .ensure_protects_app_root(&app.config.app_root)?;
+        let lifecycle = self.lifecycle_exit.as_ref().context("daemon lifecycle owner is absent")?;
+        anyhow::ensure!(
+            lifecycle.state_dir == ryeos_engine::roots::RuntimeRoot::new(app.config.app_root.clone()).state(),
+            "daemon lifecycle owner belongs to a different App root"
+        );
+        self.root.arm_from_app_generation(app)
+    }
+
+    fn close_after_run(&self) {
+        self.root.close_empty_bootstrap();
+    }
+
+    fn record_exit(&mut self, reason: &str, error: Option<&str>) {
+        // Root closure and Render drain are distinct: callers reach the normal
+        // exit only after complete_shutdown_drain has returned, never on HOLD.
+        self.close_after_run();
+        if let Some(lifecycle) = self.lifecycle_exit.as_mut() {
+            lifecycle.record(reason, error);
+        }
+    }
+}
+
+impl Drop for DaemonSelectedComposition {
+    fn drop(&mut self) {
+        self.close_after_run();
+        // Record the fallback while the exact exclusion owner is still held.
+        if let Some(lifecycle) = self.lifecycle_exit.as_mut()
+            && !lifecycle.recorded
+        {
+            lifecycle.record("startup_failed", None);
+        }
+        // Fields then drop root -> same exclusion -> lifecycle. No replacement
+        // lock, native owner, or successful selected settlement is constructed.
+    }
+}
+
 enum ShutdownDrainDisposition {
     Drained,
     HoldUnproved {
@@ -525,13 +579,20 @@ fn main() -> Result<()> {
     // daemon's actual runtime contract explicit so direct debug and local
     // qualification installs have the same safe floor as the harness.
     const DAEMON_WORKER_STACK_BYTES: usize = 4 * 1024 * 1024;
+    let mut composition = DaemonSelectedComposition::bootstrap();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(DAEMON_WORKER_STACK_BYTES)
         .enable_all()
         .build()
         .context("build daemon async runtime")?;
-    let mut process_state_lock = None;
-    let result = runtime.block_on(run(cli, &mut process_state_lock, external_host_runtime));
+    // Catch only the run boundary so the external envelope closes before
+    // runtime shutdown on both return and unwind. No selected native owner can
+    // be installed in this cut; this is an empty-root close, not panic recovery
+    // or native restitution proof.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(run(cli, &mut composition, external_host_runtime))
+    }));
+    composition.close_after_run();
 
     // Tokio cannot cancel work already admitted to spawn_blocking. Never let
     // abandoned request work keep a lifecycle-complete daemon alive holding
@@ -541,8 +602,10 @@ fn main() -> Result<()> {
     // Any admitted blocking placement mutator retains a lease on this exact
     // lock and continues excluding replacement controllers until it actually
     // stops; shutdown_timeout is not treated as proof of cancellation.
-    drop(process_state_lock);
-    result
+    match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 #[cfg(feature = "handoff-test-support")]
@@ -601,7 +664,7 @@ fn build_scoped_reserved_attempt_gate(
 
 async fn run(
     cli: Cli,
-    process_state_lock: &mut Option<state_lock::StateLock>,
+    composition: &mut DaemonSelectedComposition,
     external_host_runtime: Option<ryeos_node::host_runtime::ExternalHostRuntime>,
 ) -> Result<()> {
     // Capture process start before any configuration, verification, or state
@@ -707,8 +770,9 @@ async fn run(
     .context(
         "failed to acquire state lock — is another ryeosd instance or standalone service running?",
     )?;
-    state_lock.ensure_protects_app_root(&selected_app_root)?;
-    *process_state_lock = Some(state_lock);
+    composition.process_state_lock = Some(state_lock);
+    composition.process_state_lock.as_ref().context("daemon state lock is absent")?
+        .ensure_protects_app_root(&selected_app_root)?;
 
     // Mark the attempt before complete config decoding. The explicit app root
     // is already fenced by StateLock, so a malformed bootstrap document now
@@ -718,13 +782,13 @@ async fn run(
     lifecycle_marker::report_previous_exit(&state_dir);
     lifecycle_marker::check_disk_space(&state_dir);
     let lifecycle_started_at = lifecycle_marker::record_running(&state_dir);
-    let mut lifecycle_exit = LifecycleExitGuard::new(state_dir, lifecycle_started_at);
+    composition.lifecycle_exit = Some(LifecycleExitGuard::new(state_dir, lifecycle_started_at));
 
     let mut config = match Config::load(&config_sources) {
         Ok(config) => config,
         Err(error) => {
             let detail = format!("load node bootstrap configuration: {error:#}");
-            lifecycle_exit.record("startup_failed", Some(&detail));
+            composition.record_exit("startup_failed", Some(&detail));
             return Err(error).context("load node bootstrap configuration");
         }
     };
@@ -734,10 +798,10 @@ async fn run(
             config.app_root.display(),
             selected_app_root.display()
         );
-        lifecycle_exit.record("startup_failed", Some(&detail));
+        composition.record_exit("startup_failed", Some(&detail));
         anyhow::bail!(detail);
     }
-    process_state_lock
+    composition.process_state_lock
         .as_ref()
         .context("daemon state lock is absent")?
         .ensure_protects_app_root(&config.app_root)?;
@@ -811,7 +875,7 @@ async fn run(
         Ok(value) => value,
         Err(error) => {
             let detail = format!("{error:#}");
-            lifecycle_exit.record("startup_failed", Some(&detail));
+            composition.record_exit("startup_failed", Some(&detail));
             return Err(error);
         }
     };
@@ -892,7 +956,7 @@ async fn run(
             // Resolve every interrupted bundle tree/registration transaction before
             // the bootstrap loader consumes installed bundle registrations.
             let identity = NodeIdentity::load(&config.node_signing_key_path)?;
-            process_state_lock
+            composition.process_state_lock
                 .as_ref()
                 .context("daemon state lock is absent")?
                 .ensure_protects_app_root(&config.app_root)?;
@@ -1335,7 +1399,7 @@ async fn run(
                     .clone(),
             );
             let operator_state_lease = Arc::new(
-                process_state_lock
+                composition.process_state_lock
                     .as_ref()
                     .context("daemon state lock is absent")?
                     .retain(),
@@ -1448,6 +1512,10 @@ async fn run(
                 scoped_producer_processes: Arc::new(Default::default()),
                 qualification_workspace_custody: Arc::new(Default::default()),
             };
+            composition.arm_from_app_generation(&app_state)
+                .context("register actual App generation in empty selected composition")?;
+            // No selected attachment is published: generation bookkeeping is
+            // not native owner installation or permission to contact.
             // This is a generation cut, not a periodic repair. Settle every
             // attempt owned by the dead predecessor before any startup
             // recovery can terminalize its job and before application
@@ -1812,7 +1880,7 @@ async fn run(
                 supervise_background_tasks(app_state, ui_state_for_hints, scheduler_task).await;
             result
         };
-        tokio::pin!(daemon_work);
+        let mut daemon_work = Box::pin(daemon_work);
         #[derive(Clone, Copy, PartialEq, Eq)]
         enum FirstExit {
             DaemonWork,
@@ -1841,6 +1909,11 @@ async fn run(
                 tracing::error!(%error, "daemon work also failed while handling listener loss");
             }
         }
+
+        // Both select paths have awaited daemon_work to its boundary. Drop
+        // the owning future now, ending its mutable envelope borrow before
+        // shutdown custody borrows the same original composition owners.
+        drop(daemon_work);
 
         // No startup-owned task may remain parked behind a gate that can no
         // longer reach Ready. Waking it with cancellation drops transient
@@ -1911,7 +1984,7 @@ async fn run(
             let drain_state = state.clone();
             let drain_task = tokio::spawn(async move { drain_running_threads(&drain_state).await });
             let drain_result = map_shutdown_drain_join(drain_task.await);
-            let mut custody = Some((state, &lifecycle_exit, &*process_state_lock));
+            let mut custody = Some((state, &*composition));
             complete_shutdown_drain(drain_result, &result, &mut custody).await;
         }
 
@@ -1930,7 +2003,7 @@ async fn run(
         .as_ref()
         .err()
         .map(|error| format!("{error:#}"));
-    lifecycle_exit.record(exit_reason, exit_detail.as_deref());
+    composition.record_exit(exit_reason, exit_detail.as_deref());
     match daemon_result.as_ref() {
         Ok(()) => tracing::info!(reason = exit_reason, "daemon exiting"),
         Err(error) => tracing::error!(reason = exit_reason, error = %error, "daemon exiting"),
@@ -4088,6 +4161,84 @@ async fn run_service_standalone(
 
 #[cfg(test)]
 mod recovery_tests;
+
+#[cfg(test)]
+mod selected_composition_tests {
+    use super::*;
+    use ryeos_executor::{SelectedInstallationRefusal, SelectedInvocationAttachment};
+
+    fn fixture(root: &std::path::Path) -> (DaemonSelectedComposition, SelectedInvocationAttachment) {
+        let (barrier, attachment) = ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
+        let lock_path = state_lock::default_lock_path(root);
+        let lock = state_lock::StateLock::acquire(&lock_path).unwrap();
+        let state_dir = ryeos_engine::roots::RuntimeRoot::new(root.to_owned()).state();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let started = lifecycle_marker::record_running(&state_dir);
+        (DaemonSelectedComposition {
+            root: barrier,
+            process_state_lock: Some(lock),
+            lifecycle_exit: Some(LifecycleExitGuard::new(state_dir, started)),
+        }, attachment)
+    }
+
+    #[test]
+    fn normal_exit_closes_empty_root_before_marker_and_keeps_same_exclusion() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut composition, attachment) = fixture(root.path());
+        let lock_path = state_lock::default_lock_path(root.path());
+        let state_dir = composition.lifecycle_exit.as_ref().unwrap().state_dir.clone();
+        assert!(matches!(lifecycle_marker::read(&state_dir), Some(lifecycle_marker::LifecycleMarker::Running { .. })));
+        composition.close_after_run();
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
+        assert!(state_lock::StateLock::acquire(&lock_path).is_err());
+        assert!(matches!(lifecycle_marker::read(&state_dir), Some(lifecycle_marker::LifecycleMarker::Running { .. })));
+        composition.record_exit("signal", None);
+        assert!(matches!(lifecycle_marker::read(&state_dir), Some(lifecycle_marker::LifecycleMarker::Exited { reason, .. }) if reason == "signal"));
+        assert!(state_lock::StateLock::acquire(&lock_path).is_err());
+        drop(composition);
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Detached);
+        let _replacement = state_lock::StateLock::acquire(&lock_path).unwrap();
+    }
+
+    #[test]
+    fn startup_error_drops_external_envelope_with_failed_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let (composition, attachment) = fixture(root.path());
+        let state_dir = composition.lifecycle_exit.as_ref().unwrap().state_dir.clone();
+        let result = (|| -> Result<()> {
+            let _composition = composition;
+            anyhow::bail!("fixture startup error");
+        })();
+        assert!(result.is_err());
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Detached);
+        assert!(matches!(lifecycle_marker::read(&state_dir), Some(lifecycle_marker::LifecycleMarker::Exited { reason, .. }) if reason == "startup_failed"));
+        let _replacement = state_lock::StateLock::acquire(&state_lock::default_lock_path(root.path())).unwrap();
+    }
+
+    #[test]
+    fn run_unwind_keeps_envelope_and_original_lease_until_explicit_close() {
+        let root = tempfile::tempdir().unwrap();
+        let (composition, attachment) = fixture(root.path());
+        let state_dir = composition.lifecycle_exit.as_ref().unwrap().state_dir.clone();
+        let lease = composition.process_state_lock.as_ref().unwrap().retain();
+        let lock_path = state_lock::default_lock_path(root.path());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _borrowed_composition = &composition;
+            panic!("fixture run panic");
+        }));
+        assert!(result.is_err());
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Unarmed);
+        assert!(matches!(lifecycle_marker::read(&state_dir), Some(lifecycle_marker::LifecycleMarker::Running { .. })));
+        composition.close_after_run();
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
+        drop(composition);
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Detached);
+        assert!(matches!(lifecycle_marker::read(&state_dir), Some(lifecycle_marker::LifecycleMarker::Exited { reason, .. }) if reason == "startup_failed"));
+        assert!(state_lock::StateLock::acquire(&lock_path).is_err());
+        drop(lease);
+        let _replacement = state_lock::StateLock::acquire(&lock_path).unwrap();
+    }
+}
 
 #[cfg(test)]
 mod shutdown_mapping_tests {

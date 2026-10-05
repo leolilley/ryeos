@@ -19706,9 +19706,9 @@ impl StateStore {
 
     /// Register the actual process generation in the shared metadata domain.
     /// This does not admit a selected invocation or install any native owner.
-    pub(crate) fn register_selected_bookkeeping_generation(
+    pub fn register_selected_bookkeeping_generation(
         &self,
-    ) -> Result<crate::selected_invocation_bookkeeping::SelectedGeneration> {
+    ) -> Result<crate::SelectedGeneration> {
         if self.read_only {
             bail!("selected bookkeeping is unavailable on a read-only store");
         }

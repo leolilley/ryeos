@@ -38,6 +38,10 @@ pub(crate) mod retained_consumer_archive;
 pub mod runner;
 pub mod runtime_dispatch;
 mod selected_invocation_root;
+pub use selected_invocation_root::{
+    SelectedInstallationRefusal, SelectedInvocationAttachment,
+    SelectedInvocationCompositionBarrier,
+};
 pub(crate) mod source_closure;
 pub mod spawn_detached_child;
 pub mod spawn_follow_child;
