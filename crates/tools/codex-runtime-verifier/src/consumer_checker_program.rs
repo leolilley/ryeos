@@ -1,0 +1,270 @@
+//! Inert same-root selected-program preparation, never admission or execution.
+//!
+//! The future caller MUST source the realization set from the retained admitted
+//! root's PerSpawnDaemon handoff. Typed DTO validation does not authenticate that
+//! origin. Namespace-read-only checks do not seal mounts or exclude all writers.
+use anyhow::{Context as _, Result, ensure};
+use lillux::{PinnedDirectory, PinnedRegularFile};
+use ryeos_state::objects::{
+    ExternalContentKind, ExternalContentMode, ExternalContentMountRoot,
+    ExternalContentRealization, ExternalContentRealizationSet, MAX_EXTERNAL_CONTENT_FILE_BYTES,
+    canonical_value_digest,
+};
+use std::io::Read as _;
+use std::path::Path;
+
+use crate::finite_product_contract::{
+    CheckerMemberSelection, CheckerProgramSelector, FiniteProductContract,
+};
+
+/// Opaque retained data/capabilities selected inside an already admitted root.
+/// This owner does not prove applied scope, namespace custody or a child launch.
+/// H3 must retain the complete value through child/reader/terminal settlement.
+pub(crate) struct PreparedCheckerProgram {
+    selector: CheckerProgramSelector,
+    runtime_identity: ExternalContentRealization,
+    code_identity: ExternalContentRealization,
+    runtime_root: PinnedDirectory,
+    code_root: PinnedDirectory,
+    library_directory: PinnedDirectory,
+    prefix_directory: PinnedDirectory,
+    loader: PinnedRegularFile,
+    interpreter: PinnedRegularFile,
+    script: PinnedRegularFile,
+    script_bytes: Vec<u8>,
+    checker_identity_digest: String,
+}
+
+impl PreparedCheckerProgram {
+    pub(crate) fn checker_identity_digest(&self) -> &str { &self.checker_identity_digest }
+    pub(crate) fn selector(&self) -> &CheckerProgramSelector { &self.selector }
+    pub(crate) fn loader(&self) -> &PinnedRegularFile { &self.loader }
+    pub(crate) fn interpreter(&self) -> &PinnedRegularFile { &self.interpreter }
+    pub(crate) fn script(&self) -> &PinnedRegularFile { &self.script }
+    pub(crate) fn script_bytes(&self) -> &[u8] { &self.script_bytes }
+    pub(crate) fn library_directory(&self) -> &PinnedDirectory { &self.library_directory }
+    pub(crate) fn prefix_directory(&self) -> &PinnedDirectory { &self.prefix_directory }
+}
+
+/// Match metadata, never create a purported sealed-set authority wrapper.
+fn select_realizations<'a>(
+    selector: &CheckerProgramSelector,
+    root_set: &'a ExternalContentRealizationSet,
+) -> Result<(&'a ExternalContentRealization, &'a ExternalContentRealization)> {
+    selector.validate()?;
+    root_set.validate()?;
+    let select = |id: &str, hash: &str| -> Result<&'a ExternalContentRealization> {
+        let selected = root_set.iter().find(|entry| entry.id == id)
+            .context("selected checker dependency absent from root realization set")?;
+        ensure!(selected.kind == ExternalContentKind::Tree
+            && selected.mode == ExternalContentMode::Pinned
+            && selected.mount_root == ExternalContentMountRoot::ExecutionRuntime
+            && selected.manifest_hash == hash,
+            "selected checker dependency kind/mode/root/manifest mismatch");
+        // Set validation already guarantees unique IDs/nonoverlapping mounts;
+        // destination uses the SAME canonical logical mount selected here.
+        selected.mount_root.destination(None, &selected.mount)?;
+        Ok(selected)
+    };
+    let runtime = select(&selector.runtime.id, &selector.runtime.manifest_hash)?;
+    let code = select(&selector.code.id, &selector.code.manifest_hash)?;
+    let runtime_bytes = selector.runtime.loader.bytes.checked_add(selector.runtime.interpreter.bytes)
+        .context("checker runtime member byte aggregate overflow")?;
+    ensure!(runtime.total_bytes >= runtime_bytes && code.total_bytes >= selector.code.script.bytes,
+        "selected members exceed their retained realization byte totals");
+    Ok((runtime, code))
+}
+
+fn open_root(identity: &ExternalContentRealization) -> Result<PinnedDirectory> {
+    let destination = identity.mount_root.destination(None, &identity.mount)?;
+    let root = PinnedDirectory::open(&destination)?.context("selected checker tree mount absent")?;
+    ensure!(root.verified_read_only_namespace_path()? == destination,
+        "checker root read-only namespace observation changed");
+    Ok(root)
+}
+
+fn open_directory(root: &PinnedDirectory, relative: &str) -> Result<PinnedDirectory> {
+    ryeos_state::objects::validate_canonical_project_relative_path(relative)?;
+    let mut current = root.try_clone()?;
+    for component in Path::new(relative).components() {
+        let std::path::Component::Normal(name) = component else {
+            anyhow::bail!("checker directory path is not canonical");
+        };
+        current = current.open_child_directory(name)?.context("checker runtime directory absent")?;
+    }
+    let selected = root.path().join(relative);
+    ensure!(current.verified_read_only_namespace_path()? == selected,
+        "checker runtime directory escaped read-only namespace observation");
+    Ok(current)
+}
+
+fn open_member(root: &PinnedDirectory, selected: &CheckerMemberSelection) -> Result<PinnedRegularFile> {
+    ryeos_state::objects::validate_canonical_project_relative_path(&selected.path)?;
+    let member = root.open_pinned_regular_descendant(Path::new(&selected.path), false)?
+        .context("selected checker member absent")?;
+    ensure!(member.verified_read_only_namespace_path()? == root.path().join(&selected.path),
+        "checker member escaped read-only namespace observation");
+    Ok(member)
+}
+
+fn verify_executable(member: &PinnedRegularFile, selected: &CheckerMemberSelection) -> Result<()> {
+    ensure!((1..=MAX_EXTERNAL_CONTENT_FILE_BYTES).contains(&selected.bytes), "checker executable exceeds cap");
+    member.require_executable()?;
+    let (actual, _) = lillux::secure_fs::digest_open_regular_file_stable_exact(
+        &member.try_clone_descriptor()?, selected.bytes,
+    )?;
+    ensure!(actual == selected.sha256, "checker executable descriptor digest mismatch");
+    Ok(())
+}
+
+fn verify_script_snapshot(bytes: &[u8], selected: &CheckerMemberSelection) -> Result<()> {
+    ensure!((1..=MAX_EXTERNAL_CONTENT_FILE_BYTES).contains(&selected.bytes)
+        && u64::try_from(bytes.len())? == selected.bytes
+        && lillux::sha256_hex(bytes) == selected.sha256,
+        "retained checker script snapshot differs from selected exact bytes/hash");
+    Ok(())
+}
+
+fn read_script(member: &PinnedRegularFile, selected: &CheckerMemberSelection) -> Result<Vec<u8>> {
+    // One stable descriptor read binds the actual retained Vec; no earlier
+    // digest followed by an unrelated/unconstrained reread is accepted.
+    let mut reader = member.stable_reader_exact(selected.bytes, &selected.sha256, MAX_EXTERNAL_CONTENT_FILE_BYTES)?;
+    let mut bytes = Vec::with_capacity(usize::try_from(selected.bytes)?);
+    reader.read_to_end(&mut bytes)?;
+    reader.finish()?;
+    verify_script_snapshot(&bytes, selected)?;
+    Ok(bytes)
+}
+
+fn program_identity(
+    selector: &CheckerProgramSelector,
+    runtime: &ExternalContentRealization,
+    code: &ExternalContentRealization,
+) -> Result<String> {
+    canonical_value_digest(&serde_json::json!({
+        "domain":"ryeos.codex.selected-checker-program.v1",
+        "selector":selector, "runtime_realization":runtime, "code_realization":code,
+    }))
+}
+
+/// Inert preparation only. Contract/set provenance and immutable namespace
+/// custody MUST come from the future admitted root caller; DTO shape is not
+/// authentication. Missing actual dependencies refuses; no ambient fallback.
+pub(crate) fn prepare_checker_program(
+    contract: &FiniteProductContract,
+    root_realizations: &ExternalContentRealizationSet,
+) -> Result<PreparedCheckerProgram> {
+    contract.validate()?;
+    let selector = contract.semantic_checker();
+    let (runtime, code) = select_realizations(selector, root_realizations)?;
+    let runtime_root = open_root(runtime)?;
+    let code_root = open_root(code)?;
+    let library_directory = open_directory(&runtime_root, &selector.runtime.library_path)?;
+    let prefix_directory = open_directory(&runtime_root, &selector.runtime.prefix_path)?;
+    let loader = open_member(&runtime_root, &selector.runtime.loader)?;
+    let interpreter = open_member(&runtime_root, &selector.runtime.interpreter)?;
+    let script = open_member(&code_root, &selector.code.script)?;
+    verify_executable(&loader, &selector.runtime.loader)?;
+    verify_executable(&interpreter, &selector.runtime.interpreter)?;
+    let script_bytes = read_script(&script, &selector.code.script)?;
+    let checker_identity_digest = program_identity(selector, runtime, code)?;
+    Ok(PreparedCheckerProgram {
+        selector: selector.clone(), runtime_identity: runtime.clone(), code_identity: code.clone(),
+        runtime_root, code_root, library_directory, prefix_directory,
+        loader, interpreter, script, script_bytes, checker_identity_digest,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Synthetic metadata is deliberately unauthenticated: these tests cannot
+    // grant runtime admission or bypass actual pinned readonly member checks.
+    fn set(selector: &CheckerProgramSelector) -> ExternalContentRealizationSet {
+        ExternalContentRealizationSet::new(vec![
+            ExternalContentRealization {
+                id: selector.runtime.id.clone(), kind: ExternalContentKind::Tree, mode: ExternalContentMode::Pinned,
+                manifest_hash: selector.runtime.manifest_hash.clone(), entry_count: 2, total_bytes: 2,
+                mount_root: ExternalContentMountRoot::ExecutionRuntime, mount: "test-checker-runtime".to_owned(),
+            },
+            ExternalContentRealization {
+                id: selector.code.id.clone(), kind: ExternalContentKind::Tree, mode: ExternalContentMode::Pinned,
+                manifest_hash: selector.code.manifest_hash.clone(), entry_count: 1, total_bytes: 1,
+                mount_root: ExternalContentMountRoot::ExecutionRuntime, mount: "test-checker-code".to_owned(),
+            },
+        ]).unwrap()
+    }
+
+    #[test]
+    fn dependency_match_uses_complete_same_root_identity_and_refuses_absence() {
+        let selector = crate::finite_product_contract::checker_selector_fixture();
+        let root = set(&selector);
+        let (runtime, code) = select_realizations(&selector, &root).unwrap();
+        assert_eq!(runtime.id, selector.runtime.id);
+        assert_eq!(code.id, selector.code.id);
+        assert!(select_realizations(&selector, &ExternalContentRealizationSet::default()).is_err());
+        for mutation in ["hash", "kind", "mode", "root", "size"] {
+            let mut entries = root.iter().cloned().collect::<Vec<_>>();
+            let runtime = entries.iter_mut().find(|e| e.id == selector.runtime.id).unwrap();
+            match mutation {
+                "hash" => runtime.manifest_hash = "0".repeat(64),
+                "kind" => runtime.kind = ExternalContentKind::File,
+                "mode" => runtime.mode = ExternalContentMode::Captured,
+                "root" => runtime.mount_root = ExternalContentMountRoot::Project,
+                _ => runtime.total_bytes = 1,
+            }
+            let changed = ExternalContentRealizationSet::new(entries).unwrap();
+            assert!(select_realizations(&selector, &changed).is_err(), "{mutation}");
+        }
+    }
+
+    #[test]
+    fn retained_script_bytes_not_a_prior_digest_determine_snapshot_acceptance() {
+        let mut selected = crate::finite_product_contract::checker_selector_fixture().code.script;
+        selected.bytes = 3;
+        selected.sha256 = lillux::sha256_hex(b"abc");
+        assert!(verify_script_snapshot(b"abc", &selected).is_ok());
+        assert!(verify_script_snapshot(b"abd", &selected).is_err());
+        assert!(verify_script_snapshot(b"abcd", &selected).is_err());
+        selected.bytes = MAX_EXTERNAL_CONTENT_FILE_BYTES + 1;
+        assert!(verify_script_snapshot(b"abc", &selected).is_err());
+    }
+
+    #[test]
+    fn selected_program_identity_commits_selector_and_exact_mount_inventory() {
+        let selector = crate::finite_product_contract::checker_selector_fixture();
+        let root = set(&selector);
+        let (runtime, code) = select_realizations(&selector, &root).unwrap();
+        let identity = program_identity(&selector, runtime, code).unwrap();
+        let mut changed = selector.clone(); changed.runtime.prefix_path = "different-prefix".to_owned();
+        assert_ne!(identity, program_identity(&changed, runtime, code).unwrap());
+        let mut code = code.clone(); code.mount = "different-code-mount".to_owned();
+        assert_ne!(identity, program_identity(&selector, runtime, &code).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_member_descriptor_refuses_nonexecutability_size_and_hash_changes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("member");
+        std::fs::write(&path, b"opaque test bytes; never executed").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let member = directory.open_pinned_regular(std::ffi::OsStr::new("member"), false).unwrap().unwrap();
+        let mut selected = CheckerMemberSelection {
+            path: "member".to_owned(), bytes: b"opaque test bytes; never executed".len() as u64,
+            sha256: lillux::sha256_hex(b"opaque test bytes; never executed"),
+        };
+        assert!(verify_executable(&member, &selected).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(verify_executable(&member, &selected).is_ok());
+        selected.sha256 = "0".repeat(64);
+        assert!(verify_executable(&member, &selected).is_err());
+        selected.bytes += 1;
+        assert!(verify_executable(&member, &selected).is_err());
+        // This lower-level descriptor control is NOT readonly root admission,
+        // an ELF check, a process launch, or a qualification claim.
+    }
+}

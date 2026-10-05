@@ -28,6 +28,82 @@ pub struct FiniteProductContract {
     setup: FiniteSetupPredicates,
     families: FiniteEffectFamilies,
     permitted_controller_services: Vec<String>,
+    semantic_checker: CheckerProgramSelector,
+}
+
+/// Signed selected program data only; this never authenticates a root set,
+/// attests child execution, or proves the requested enclosing scope settled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CheckerProgramSelector {
+    pub(crate) schema: String,
+    pub(crate) wire_schema: String,
+    pub(crate) runtime: CheckerRuntimeSelection,
+    pub(crate) code: CheckerCodeSelection,
+    pub(crate) max_header_bytes: u64,
+    pub(crate) max_response_bytes: u64,
+    pub(crate) required_root_settlement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CheckerRuntimeSelection {
+    pub(crate) id: String,
+    pub(crate) manifest_hash: String,
+    pub(crate) loader: CheckerMemberSelection,
+    pub(crate) interpreter: CheckerMemberSelection,
+    pub(crate) library_path: String,
+    pub(crate) prefix_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CheckerCodeSelection {
+    pub(crate) id: String,
+    pub(crate) manifest_hash: String,
+    pub(crate) script: CheckerMemberSelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CheckerMemberSelection {
+    pub(crate) path: String,
+    pub(crate) sha256: String,
+    pub(crate) bytes: u64,
+}
+
+impl CheckerProgramSelector {
+    pub(crate) fn validate(&self) -> Result<()> {
+        use ryeos_state::objects::{MAX_EXTERNAL_CONTENT_FILE_BYTES, validate_canonical_project_relative_path};
+        ensure!(self.schema == "ryeos.codex.semantic_checker_program.v1"
+            && self.wire_schema == "ryeos.codex.semantic_input.v2", "unsupported checker program/wire");
+        ensure!(self.max_header_bytes == 2 * 1024 * 1024 && self.max_response_bytes == 64 * 1024
+            && self.required_root_settlement == "scope_empty", "checker safety bounds or required scope changed");
+        for id in [&self.runtime.id, &self.code.id] {
+            ensure!(!id.is_empty() && id.len() <= 64
+                && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b)),
+                "invalid checker realization ID");
+        }
+        ensure!(self.runtime.id != self.code.id, "checker runtime/code IDs alias");
+        for hash in [&self.runtime.manifest_hash, &self.code.manifest_hash] {
+            validate_canonical_hash("checker realization manifest", hash)?;
+        }
+        let mut total = 0u64;
+        for member in [&self.runtime.loader, &self.runtime.interpreter, &self.code.script] {
+            validate_canonical_project_relative_path(&member.path)?;
+            ensure!(member.path.len() <= 1024 && (1..=MAX_EXTERNAL_CONTENT_FILE_BYTES).contains(&member.bytes),
+                "checker member exceeds fixed native file bound");
+            validate_canonical_hash("checker member digest", &member.sha256)?;
+            total = total.checked_add(member.bytes).ok_or_else(|| anyhow::anyhow!("checker selected bytes overflow"))?;
+        }
+        ensure!(total <= 3 * MAX_EXTERNAL_CONTENT_FILE_BYTES, "checker selected file aggregate exceeds bound");
+        ensure!(self.runtime.loader.path != self.runtime.interpreter.path, "checker executable roles alias");
+        for path in [&self.runtime.library_path, &self.runtime.prefix_path] {
+            validate_canonical_project_relative_path(path)?;
+            ensure!(path.len() <= 1024, "checker runtime directory path exceeds bound");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +174,10 @@ impl FiniteProductContract {
         Ok(lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes())
     }
 
+    pub(crate) fn semantic_checker(&self) -> &CheckerProgramSelector {
+        &self.semantic_checker
+    }
+
     pub fn inputs(&self) -> &FiniteInputRestrictions {
         &self.inputs
     }
@@ -106,12 +186,13 @@ impl FiniteProductContract {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.semantic_checker.validate()?;
         ensure!(
-            self.schema == "ryeos.codex.finite_product_contract.v1",
+            self.schema == "ryeos.codex.finite_product_contract.v2",
             "unsupported finite product schema"
         );
         ensure!(
-            self.audit_edition == "codex-0.147.0-closed-remote-environment-v2",
+            self.audit_edition == "codex-0.147.0-interpreted-remote-environment-v3",
             "unsupported finite product audit_edition"
         );
         ensure!(
@@ -298,6 +379,11 @@ impl FiniteProductContract {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn checker_selector_fixture() -> CheckerProgramSelector {
+    serde_json::from_value(tests::value()["semantic_checker"].clone()).unwrap()
+}
+
 /// Unit fixtures still have to supply the exact admitted five-role set.
 #[cfg(test)]
 pub(crate) fn fixture_for_content(
@@ -334,8 +420,19 @@ mod tests {
     pub(super) fn value() -> Value {
         json!(
         {
-          "schema": "ryeos.codex.finite_product_contract.v1",
-          "audit_edition": "codex-0.147.0-closed-remote-environment-v2",
+          "schema": "ryeos.codex.finite_product_contract.v2",
+          "audit_edition": "codex-0.147.0-interpreted-remote-environment-v3",
+          // Synthetic source-test pins ONLY, never enabled Tool content.
+          "semantic_checker": {
+            "schema":"ryeos.codex.semantic_checker_program.v1", "wire_schema":"ryeos.codex.semantic_input.v2",
+            "runtime": {"id":"checker-python", "manifest_hash":"a".repeat(64),
+              "loader":{"path":"lib/loader", "sha256":"b".repeat(64), "bytes":1},
+              "interpreter":{"path":"python/bin/python", "sha256":"c".repeat(64), "bytes":1},
+              "library_path":"lib", "prefix_path":"python"},
+            "code":{"id":"checker-code", "manifest_hash":"d".repeat(64),
+              "script":{"path":"checker.py", "sha256":"e".repeat(64), "bytes":1}},
+            "max_header_bytes":2097152, "max_response_bytes":65536, "required_root_settlement":"scope_empty"
+          },
           "permitted_controller_services": [
             "auth-model-config",
             "git-attribution-provider-metadata",
@@ -411,6 +508,26 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn required_checker_selection_refuses_old_missing_or_unsafe_values() {
+        let original = value();
+        assert!(FiniteProductContract::parse(&bytes(&original)).is_ok());
+        for mutation in ["old", "missing", "alias", "oversize", "escape", "weaken", "unknown", "bool_size"] {
+            let mut changed = original.clone();
+            match mutation {
+                "old" => { changed["schema"] = json!("ryeos.codex.finite_product_contract.v1"); },
+                "missing" => { changed.as_object_mut().unwrap().remove("semantic_checker"); },
+                "alias" => { changed["semantic_checker"]["code"]["id"] = json!("checker-python"); },
+                "oversize" => { changed["semantic_checker"]["code"]["script"]["bytes"] = json!(ryeos_state::objects::MAX_EXTERNAL_CONTENT_FILE_BYTES + 1); },
+                "escape" => { changed["semantic_checker"]["runtime"]["loader"]["path"] = json!("../loader"); },
+                "weaken" => { changed["semantic_checker"]["required_root_settlement"] = json!("group_absent"); },
+                "unknown" => { changed["semantic_checker"]["trusted"] = json!(true); },
+                _ => { changed["semantic_checker"]["code"]["script"]["bytes"] = json!(true); },
+            }
+            assert!(FiniteProductContract::parse(&bytes(&changed)).is_err(), "{mutation}");
+        }
+    }
+
+    #[test]
     fn finite_product_data_requires_canonical_closed_complete_rules() {
         let original = value();
         let canonical = bytes(&original);
@@ -483,7 +600,7 @@ mod tests {
         whitespace.push(b'\n');
         assert!(FiniteProductContract::parse(&whitespace).is_err());
         let duplicate = format!(
-            "{{\"schema\":\"ryeos.codex.finite_product_contract.v1\",{}",
+            "{{\"schema\":\"ryeos.codex.finite_product_contract.v2\",{}",
             std::str::from_utf8(&canonical[1..]).unwrap()
         );
         assert!(FiniteProductContract::parse(duplicate.as_bytes()).is_err());
