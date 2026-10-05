@@ -161,6 +161,36 @@ class RequestInbox:
         self.requests: queue.Queue[tuple[str, dict[str, Any], threading.Event] | BaseException] = queue.Queue(maxsize=1)
         self._current_lock = threading.Lock()
         self._current: tuple[str, threading.Event] | None = None
+        self._failure_lock = threading.Lock()
+        self._first_failure: BaseException | None = None
+
+    def _record_failure(self, error: BaseException) -> None:
+        # Terminal publication can hold _current_lock across socket IO. Keep
+        # failure custody independent, and never wait for a full request slot.
+        with self._failure_lock:
+            if self._first_failure is None:
+                self._first_failure = error
+            first_failure = self._first_failure
+        try:
+            self.requests.put_nowait(first_failure)
+        except queue.Full:
+            # The queued item already wakes the consumer. next_request checks
+            # retained failure before dispatching it; do not discard its owner.
+            pass
+
+    def _raise_failure(self) -> None:
+        with self._failure_lock:
+            error = self._first_failure
+        if error is not None:
+            raise error
+
+    def next_request(self) -> tuple[str, dict[str, Any], threading.Event]:
+        self._raise_failure()
+        item = self.requests.get()
+        self._raise_failure()
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
     def complete(self, request_id: str, publish: Any) -> None:
         # I01: a peer may send its next request as soon as it reads terminal
@@ -197,7 +227,7 @@ class RequestInbox:
                 else:
                     raise ValueError("persistent-session worker received an invalid frame kind")
         except BaseException as error:
-            self.requests.put(error)
+            self._record_failure(error)
 
 
 class OutputRouter:
@@ -522,9 +552,7 @@ def main(lifecycle) -> int:
     reader.start()
     _write_frame(channel, write_lock, "ready", None, None)
     while True:
-        item = inbox.requests.get()
-        if isinstance(item, BaseException):
-            raise item
+        item = inbox.next_request()
         request_id, body, cancelled = item
         try:
             with lifecycle.submission():
