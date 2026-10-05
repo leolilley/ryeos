@@ -454,6 +454,75 @@ impl OriginalNamespaceOccupancyHandoff {
         self.original_deadline
     }
 
+    /// Duplicate the same sealed window and pinned clock as one opaque owner.
+    /// This preserves the original deadline and grants no contact or target
+    /// permission. A selected caller must separately authorize any forwarding.
+    #[cfg(target_os = "linux")]
+    pub fn duplicate_retained_pair(&self) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt as _;
+        let _lease = crate::exec::retain_fork_sensitive_descriptors_until(self.original_deadline)
+            .map_err(|error| format!("retain original window duplication: {error}"))?;
+        self.require_live_pair()?;
+        // The outer deadline-bound lease makes these nested registered leases
+        // reentrant, even when a fork is waiting. No second barrier wait.
+        let duplicate = Self {
+            original_deadline: self.original_deadline,
+            window: self.window.duplicate_at_or_above(3)?,
+            clock_namespace: self.clock_namespace.duplicate_at_or_above(3)?,
+        };
+        let original_fds = [
+            self.window.inherited_descriptor()?,
+            self.clock_namespace.inherited_descriptor()?,
+        ];
+        for (original, copy) in [
+            (&self.window, &duplicate.window),
+            (&self.clock_namespace, &duplicate.clock_namespace),
+        ] {
+            if original_fds.contains(&copy.inherited_descriptor()?) {
+                return Err("original window duplicate overlaps retained roles".into());
+            }
+            let source = original
+                .file()
+                .metadata()
+                .map_err(|error| error.to_string())?;
+            let target = copy.file().metadata().map_err(|error| error.to_string())?;
+            if (source.dev(), source.ino()) != (target.dev(), target.ino()) {
+                return Err("original window duplicate changed object identity".into());
+            }
+        }
+        duplicate.require_live_pair()?;
+        self.require_live_pair()?;
+        Ok(duplicate)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn require_live_pair(&self) -> Result<(), String> {
+        let window_fd = self.window.inherited_descriptor()?;
+        let clock_fd = self.clock_namespace.inherited_descriptor()?;
+        if window_fd <= 2 || clock_fd <= 2 || window_fd == clock_fd {
+            return Err("original-window roles must be distinct and above stdio".into());
+        }
+        original_window::require_same_clock_namespace(self.clock_namespace.file())?;
+        let bytes = crate::sandbox::read_sealed_inherited_descriptor(
+            window_fd,
+            original_window::MAX_BYTES,
+        )?;
+        let wire: original_window::Wire = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode strict original occupancy handoff: {error}"))?;
+        wire.require_clock_namespace(self.clock_namespace.file())?;
+        wire.validate(&occupancy_now()?)?;
+        original_window::require_window(
+            &wire.limit,
+            Duration::from_nanos(wire.cleanup_ns),
+            self.original_deadline,
+        )
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn duplicate_retained_pair(&self) -> Result<Self, String> {
+        Err("original native occupancy handoff is unavailable on this platform".into())
+    }
+
     #[cfg(target_os = "linux")]
     pub fn pin_original_clock_namespace(
         original_deadline: MonotonicDeadline,
@@ -948,6 +1017,82 @@ mod original_window_tests {
         assert_eq!(actual_limit, limit);
         assert_eq!(actual_cleanup, cleanup);
         assert!(actual_deadline.deadline <= deadline.deadline);
+    }
+
+    #[test]
+    fn retained_pair_duplicate_preserves_objects_deadline_and_original_owners() {
+        use std::os::unix::fs::MetadataExt as _;
+        let (limit, cleanup, deadline) = window();
+        let original =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
+        let copy = original.duplicate_retained_pair().unwrap();
+        assert_eq!(
+            copy.original_deadline.deadline,
+            original.original_deadline.deadline
+        );
+        let mut coordinates = Vec::new();
+        for authority in [
+            &original.window,
+            &original.clock_namespace,
+            &copy.window,
+            &copy.clock_namespace,
+        ] {
+            let fd = authority.inherited_descriptor().unwrap();
+            assert!(fd > 2);
+            assert!(!coordinates.contains(&fd));
+            coordinates.push(fd);
+            let flags = unsafe { libc::fcntl(authority.file().as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0);
+            assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        }
+        for (source, duplicate) in [
+            (&original.window, &copy.window),
+            (&original.clock_namespace, &copy.clock_namespace),
+        ] {
+            let source = source.file().metadata().unwrap();
+            let duplicate = duplicate.file().metadata().unwrap();
+            assert_eq!(
+                (source.dev(), source.ino()),
+                (duplicate.dev(), duplicate.ino())
+            );
+        }
+        drop(copy);
+        original.require_live_pair().unwrap();
+        let copy = original.duplicate_retained_pair().unwrap();
+        drop(original);
+        copy.require_live_pair().unwrap();
+    }
+
+    #[test]
+    fn retained_pair_duplicate_refuses_expiry_without_consuming_originals() {
+        let (limit, cleanup, deadline) = window();
+        let mut original =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
+        let fds = [
+            original.window.inherited_descriptor().unwrap(),
+            original.clock_namespace.inherited_descriptor().unwrap(),
+        ];
+        original.original_deadline = MonotonicDeadline {
+            deadline: Instant::now(),
+        };
+        assert!(original.duplicate_retained_pair().is_err());
+        assert_eq!(original.window.inherited_descriptor().unwrap(), fds[0]);
+        assert_eq!(original.clock_namespace.inherited_descriptor().unwrap(), fds[1]);
+        for fd in fds {
+            assert_ne!(unsafe { libc::fcntl(fd as i32, libc::F_GETFD) }, -1);
+        }
+    }
+
+    #[test]
+    fn retained_pair_duplicate_refuses_aliased_roles_without_consuming_originals() {
+        let (limit, cleanup, deadline) = window();
+        let mut original =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
+        original.clock_namespace = original.window.clone();
+        let fd = original.window.inherited_descriptor().unwrap();
+        assert!(original.duplicate_retained_pair().is_err());
+        assert_eq!(original.clock_namespace.inherited_descriptor().unwrap(), fd);
+        assert_ne!(unsafe { libc::fcntl(fd as i32, libc::F_GETFD) }, -1);
     }
 
     #[test]
